@@ -17,4 +17,6 @@ test {
     _ = runtime;
     _ = @import("reconnecting/proxy_tests.zig");
     _ = @import("reconnecting/tests.zig");
+    _ = @import("reconnecting/admission_tests.zig");
+    _ = @import("reconnecting/admission_lifetime_tests.zig");
 }

@@ -1,0 +1,84 @@
+{
+  "schema": 1,
+  "date": "2026-11-02",
+  "feature": "WebTransport HTTP/2 reconnecting State lock admission",
+  "decision": "accepted",
+  "base_head": "a3141b7a",
+  "behavior": {
+    "deadline": "initial State admission and current/handle lookups use the original awake-clock deadline via the shared timed_mutex helper",
+    "activity": "callers register activity before State admission; Timeout/Canceled and ordinary exit release it without reacquiring the mutex",
+    "shutdown": "exit notification precedes the final count drop; State destruction waits for registered calls, including contended admission, and cannot race an in-progress notifier",
+    "idle_wait": "only shutdown uses a bounded one-millisecond Event wait to resolve a notification preceding the final count drop; normal operation admission and activity release do not poll"
+  },
+  "verification": {
+    "webtransport_http2_debug": {
+      "passed": 185,
+      "total": 185,
+      "exit_code": 0
+    },
+    "package_debug": {
+      "passed": 26,
+      "total": 26,
+      "exit_code": 0
+    },
+    "python_interop_debug": {
+      "build_steps_passed": 8,
+      "build_steps_total": 8,
+      "directions": 2,
+      "protocol": "draft-ietf-webtrans-http2-15",
+      "tls": "certificate-verified TLSv1.3",
+      "alpn": "h2",
+      "scope": "direct Session wire compatibility with independent Python peer; reconnecting facade integration is covered by the module TLS tests",
+      "exit_code": 0
+    },
+    "regressions": [
+      "17 public entry points under a held State mutex return Timeout or Canceled without connector calls, generation mutation, connecting changes or retained activity",
+      "expired and wrong-clock calls across those entry points return Timeout without even waiting for the State mutex",
+      "after successful activity registration, contended current and handle lookups honor deadlines; leave returns activity to zero while the State mutex remains held",
+      "shutdown parks while one call remains active; a blocked exit notifier preserves that activity and prevents State destruction; after notification completes shutdown releases State"
+    ],
+    "public_entry_points": [
+      "connect",
+      "connect_attempt",
+      "send_datagram",
+      "receive",
+      "close",
+      "remove",
+      "open_stream",
+      "send_stream",
+      "consume",
+      "retire_stream",
+      "reset_stream",
+      "stop_sending",
+      "grant_data",
+      "grant_streams",
+      "grant_stream_data",
+      "drain",
+      "export_keying_material"
+    ]
+  },
+  "verification_commands": [
+    "zig build test-lib -Dtest-filter='WebTransport HTTP2' --summary all",
+    "zig build test-package --summary all",
+    "zig build interop-webtransport-h2-python --summary all"
+  ],
+  "source_sha256": {
+    "src/webtransport/h2/endpoint_client/reconnecting.zig": "e3fd1051847021e33705812df53cc598c4fb730c1db9f2e5a8345b73c5043478",
+    "src/webtransport/h2/endpoint_client/reconnecting/core.zig": "54bd9a45b350745fddb9450e0dfc10c73c8050f411a80d513f3d181f30c16dcd",
+    "src/webtransport/h2/endpoint_client/reconnecting/runtime.zig": "91480af298b123ebebcd3398818cdb9d10199544c24b10dbba0f8ac40bbea66f",
+    "src/webtransport/h2/endpoint_client/reconnecting/admission.zig": "33b1de14491cdbb42f97f39017c051f66cd5adfa0fa82be05a0ae23afeed59ed",
+    "src/webtransport/h2/endpoint_client/reconnecting/admission_tests.zig": "26f9a52fbbf0174db7e8a0a28cbb3d3b5b0fd2ab9b981116cb182afd3d014f96",
+    "src/webtransport/h2/endpoint_client/reconnecting/admission_lifetime_tests.zig": "b39c219a6a965703280a7b0b3571ee14fdc3435b16123a4af4586b8eb19da57d",
+    "src/internal/timed_mutex.zig": "908d48ea79cff9b96da1ddb502efe80bc995878a0591b5ff07715332d1297318",
+    "src/webtransport/h2/endpoint_client/reconnecting/tests.zig": "5e2f989b037540c265c664bf83b1a1e1c8162018f0523fb9046b76fe75f6f131"
+  },
+  "artifact_sha256": {
+    "docs/evidence/webtransport_h2_reconnecting_admission/2026-11-02/webtransport-http2.Debug.log": "75348a6c90f8b3b7ea5d598332141f9b378ad81fb062d4b7d22262065689b077",
+    "docs/evidence/webtransport_h2_reconnecting_admission/2026-11-02/package.Debug.log": "02cc47c3bf5b1ae92193c261da1ebddeecf2e88e99b6043155e560f98fb2ec03",
+    "docs/evidence/webtransport_h2_reconnecting_admission/2026-11-02/interop-python.Debug.log": "447c1a4a4c6358ae456a2f7d88bd0af46766a9670563ec3ec7608622adb5b340"
+  },
+  "limitations": [
+    "this capture proves facade State admission/lookups and activity release; connector callbacks, endpoint worker admission and connect-result/retirement publication have separate lifecycle boundaries",
+    "the full protocol-library goal still needs broader integration and long-duration/high-concurrency evidence"
+  ]
+}

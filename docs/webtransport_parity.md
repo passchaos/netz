@@ -2044,6 +2044,36 @@ and sweep allocation failure during wrapper construction.
 Machine-readable reconnect evidence is recorded in
 `docs/evidence/webtransport_h2_reconnecting_client/2026-10-31.json`.
 
+The HTTP/2 reconnecting facade now applies each operation's original deadline
+to initial State mutex admission and to current/handle-generation lookups.
+CONNECT, receive, DATAGRAM, stream lifecycle and credit, drain/close, removal
+and exporter operations register activity before waiting for the mutex, then
+release that activity without reacquiring it after Timeout or Canceled.
+Expired or wrong-clock operations return Timeout before lookup or connector
+work. The closing owner waits for every registered caller, including callers
+still waiting for admission.
+
+Activity exit notifies before its final atomic count drop, so State cannot be
+destroyed while an exiting caller still accesses the wake event. Shutdown's
+bounded event wait resolves a notification that precedes the final count drop;
+ordinary operation admission and exit introduce no polling loop. A race
+regression blocks the exit notifier while shutdown is waiting and requires
+State to remain owned until that notification and count drop finish.
+
+The locked-state regression covers 17 public deadline entry points across
+Timeout, Canceled, expired and wrong-clock inputs. It requires zero connector
+calls, no generation/connecting changes, activity returning to zero, and no
+uncancellable State acquisition. Separate contended current and handle lookups
+return under their original budgets, and activity exit completes while the
+same mutex remains held. These checks audit facade State admission and lookup;
+connector callbacks, endpoint command ownership and connect-result/retirement
+publication retain their separate lifecycle verification boundaries.
+
+The WebTransport HTTP2 gate passed 185/185 tests, the public package gate
+passed 26/26, and the independent Python TLS/h2 gate passed 8/8 build steps
+in both endpoint directions. Source hashes and logs are recorded in
+`docs/evidence/webtransport_h2_reconnecting_admission/2026-11-02.json`.
+
 HTTP/2 endpoint clients can now establish their origin connection through an
 HTTP/1.1 CONNECT proxy. `HttpConnectProxy` keeps URI, proxy-only headers and
 HTTP/1 limits separate from origin HTTP/2 limits. One absolute deadline spans

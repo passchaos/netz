@@ -2,6 +2,8 @@
 const std = @import("std");
 const http2 = @import("../../../../http2/mod.zig");
 const endpoint = @import("../../endpoint_client.zig");
+const timed_mutex = @import("../../../../internal/timed_mutex.zig");
+const admission = @import("admission.zig");
 
 pub const Error = endpoint.Error || error{
     ClientClosed,
@@ -225,7 +227,7 @@ pub const State = struct {
     failures: usize = 0,
     next_attempt_ns: ?i96 = null,
     connecting: bool = false,
-    active: usize = 0,
+    active: std.atomic.Value(usize) = .init(0),
     closed: bool = false,
 
     pub fn create(
@@ -254,18 +256,12 @@ pub const State = struct {
         self.mutex.unlock(self.io);
     }
 
-    pub fn enter(self: *State) Error!void {
-        self.lock();
-        defer self.unlock();
-        if (self.closed) return error.ClientClosed;
-        self.active += 1;
+    pub fn enter(self: *State, deadline: std.Io.Clock.Timestamp) Error!void {
+        return admission.enter(self, deadline);
     }
 
     pub fn leave(self: *State) void {
-        self.lock();
-        defer self.unlock();
-        self.active -= 1;
-        if (self.active == 0) self.idle.set(self.io);
+        admission.leave(self);
     }
 
     pub fn acquireCurrent(
@@ -274,7 +270,7 @@ pub const State = struct {
     ) Error!*Generation {
         if (deadline.clock != .awake) return error.Timeout;
         while (true) {
-            self.lock();
+            try timed_mutex.lock(&self.mutex, self.io, deadline);
             if (self.closed) {
                 self.unlock();
                 return error.ClientClosed;
@@ -368,8 +364,8 @@ pub const State = struct {
         }
     }
 
-    pub fn acquireHandle(self: *State, generation_id: u64) Error!*Generation {
-        self.lock();
+    pub fn acquireHandle(self: *State, generation_id: u64, deadline: std.Io.Clock.Timestamp) Error!*Generation {
+        try timed_mutex.lock(&self.mutex, self.io, deadline);
         defer self.unlock();
         if (self.closed) return error.ClientClosed;
         const generation = self.current orelse return error.StaleConnection;
@@ -471,20 +467,12 @@ pub const State = struct {
         const generation = self.current;
         self.current = null;
         self.wake.set(self.io);
-        if (self.active == 0) self.idle.set(self.io);
         self.unlock();
         if (generation) |value| {
             value.client.requestShutdown();
             value.release();
         }
-        while (true) {
-            self.lock();
-            const done = self.active == 0;
-            if (!done) self.idle.reset();
-            self.unlock();
-            if (done) break;
-            self.idle.wait(self.io) catch {};
-        }
+        admission.waitForIdle(self);
         self.allocator.destroy(self);
     }
 };

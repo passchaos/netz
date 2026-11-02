@@ -94,7 +94,7 @@ pub const ReconnectingEndpointClient = struct {
         options: h2_runtime.ClientOptions,
         deadline: std.Io.Clock.Timestamp,
     ) Error!ConnectAttempt {
-        try self.state.enter();
+        try self.state.enter(deadline);
         defer self.state.leave();
         while (true) {
             const generation_value = try self.state.acquireCurrent(deadline);
@@ -157,8 +157,9 @@ pub const ReconnectingEndpointClient = struct {
     fn generation(
         self: ReconnectingEndpointClient,
         handle: Handle,
+        deadline: std.Io.Clock.Timestamp,
     ) Error!*core.Generation {
-        return self.state.acquireHandle(handle.connection_generation);
+        return self.state.acquireHandle(handle.connection_generation, deadline);
     }
 
     fn failed(
@@ -171,9 +172,9 @@ pub const ReconnectingEndpointClient = struct {
     }
 
     pub fn sendDatagramWithDeadline(self: ReconnectingEndpointClient, handle: Handle, data: []const u8, deadline: std.Io.Clock.Timestamp) Error!void {
-        try self.state.enter();
+        try self.state.enter(deadline);
         defer self.state.leave();
-        const value = try self.generation(handle);
+        const value = try self.generation(handle, deadline);
         defer value.release();
         return value.client.sendDatagramWithDeadline(handle.session, data, deadline) catch |err| return @errorCast(self.failed(value, err));
     }
@@ -182,9 +183,9 @@ pub const ReconnectingEndpointClient = struct {
         return self.sendDatagramWithDeadline(handle, data, .fromNow(self.state.io, .{ .raw = timeout, .clock = .awake }));
     }
     pub fn receiveWithDeadline(self: ReconnectingEndpointClient, handle: Handle, deadline: std.Io.Clock.Timestamp) Error!Event {
-        try self.state.enter();
+        try self.state.enter(deadline);
         defer self.state.leave();
-        const value = try self.generation(handle);
+        const value = try self.generation(handle, deadline);
         defer value.release();
         return value.client.receiveWithDeadline(handle.session, deadline) catch |err| return @errorCast(self.failed(value, err));
     }
@@ -193,9 +194,9 @@ pub const ReconnectingEndpointClient = struct {
         return self.receiveWithDeadline(handle, .fromNow(self.state.io, .{ .raw = timeout, .clock = .awake }));
     }
     pub fn closeWithDeadline(self: ReconnectingEndpointClient, handle: Handle, code: u32, reason: []const u8, deadline: std.Io.Clock.Timestamp) Error!void {
-        try self.state.enter();
+        try self.state.enter(deadline);
         defer self.state.leave();
-        const value = try self.generation(handle);
+        const value = try self.generation(handle, deadline);
         defer value.release();
         return value.client.closeWithDeadline(handle.session, code, reason, deadline) catch |err| return @errorCast(self.failed(value, err));
     }
@@ -204,9 +205,9 @@ pub const ReconnectingEndpointClient = struct {
         return self.closeWithDeadline(handle, code, reason, .fromNow(self.state.io, .{ .raw = timeout, .clock = .awake }));
     }
     pub fn removeWithDeadline(self: ReconnectingEndpointClient, handle: Handle, deadline: std.Io.Clock.Timestamp) Error!bool {
-        try self.state.enter();
+        try self.state.enter(deadline);
         defer self.state.leave();
-        const value = try self.generation(handle);
+        const value = try self.generation(handle, deadline);
         defer value.release();
         return value.client.removeWithDeadline(handle.session, deadline) catch |err| return @errorCast(self.failed(value, err));
     }
@@ -215,9 +216,9 @@ pub const ReconnectingEndpointClient = struct {
         return self.removeWithDeadline(handle, .fromNow(self.state.io, .{ .raw = timeout, .clock = .awake }));
     }
     pub fn openStreamWithDeadline(self: ReconnectingEndpointClient, handle: Handle, direction: h2_state.Direction, deadline: std.Io.Clock.Timestamp) Error!u62 {
-        try self.state.enter();
+        try self.state.enter(deadline);
         defer self.state.leave();
-        const value = try self.generation(handle);
+        const value = try self.generation(handle, deadline);
         defer value.release();
         return value.client.openStreamWithDeadline(handle.session, direction, deadline) catch |err| return @errorCast(self.failed(value, err));
     }
@@ -226,9 +227,9 @@ pub const ReconnectingEndpointClient = struct {
         return self.openStreamWithDeadline(handle, direction, .fromNow(self.state.io, .{ .raw = timeout, .clock = .awake }));
     }
     pub fn sendStreamWithDeadline(self: ReconnectingEndpointClient, handle: Handle, id: u62, data: []const u8, fin: bool, deadline: std.Io.Clock.Timestamp) Error!void {
-        try self.state.enter();
+        try self.state.enter(deadline);
         defer self.state.leave();
-        const value = try self.generation(handle);
+        const value = try self.generation(handle, deadline);
         defer value.release();
         return value.client.sendStreamWithDeadline(handle.session, id, data, fin, deadline) catch |err| return @errorCast(self.failed(value, err));
     }
@@ -237,9 +238,9 @@ pub const ReconnectingEndpointClient = struct {
         return self.sendStreamWithDeadline(handle, id, data, fin, .fromNow(self.state.io, .{ .raw = timeout, .clock = .awake }));
     }
     pub fn consumeWithDeadline(self: ReconnectingEndpointClient, handle: Handle, id: u62, bytes: u64, deadline: std.Io.Clock.Timestamp) Error!void {
-        try self.state.enter();
+        try self.state.enter(deadline);
         defer self.state.leave();
-        const value = try self.generation(handle);
+        const value = try self.generation(handle, deadline);
         defer value.release();
         return value.client.consumeWithDeadline(handle.session, id, bytes, deadline) catch |err| return @errorCast(self.failed(value, err));
     }
@@ -248,9 +249,9 @@ pub const ReconnectingEndpointClient = struct {
         return self.consumeWithDeadline(handle, id, bytes, .fromNow(self.state.io, .{ .raw = timeout, .clock = .awake }));
     }
     pub fn retireStreamWithDeadline(self: ReconnectingEndpointClient, handle: Handle, id: u62, deadline: std.Io.Clock.Timestamp) Error!void {
-        try self.state.enter();
+        try self.state.enter(deadline);
         defer self.state.leave();
-        const value = try self.generation(handle);
+        const value = try self.generation(handle, deadline);
         defer value.release();
         return value.client.retireStreamWithDeadline(handle.session, id, deadline) catch |err| return @errorCast(self.failed(value, err));
     }
@@ -259,9 +260,9 @@ pub const ReconnectingEndpointClient = struct {
         return self.retireStreamWithDeadline(handle, id, .fromNow(self.state.io, .{ .raw = timeout, .clock = .awake }));
     }
     pub fn resetStreamWithDeadline(self: ReconnectingEndpointClient, handle: Handle, id: u62, code: u32, deadline: std.Io.Clock.Timestamp) Error!void {
-        try self.state.enter();
+        try self.state.enter(deadline);
         defer self.state.leave();
-        const value = try self.generation(handle);
+        const value = try self.generation(handle, deadline);
         defer value.release();
         return value.client.resetStreamWithDeadline(handle.session, id, code, deadline) catch |err| return @errorCast(self.failed(value, err));
     }
@@ -270,9 +271,9 @@ pub const ReconnectingEndpointClient = struct {
         return self.resetStreamWithDeadline(handle, id, code, .fromNow(self.state.io, .{ .raw = timeout, .clock = .awake }));
     }
     pub fn stopSendingWithDeadline(self: ReconnectingEndpointClient, handle: Handle, id: u62, code: u32, deadline: std.Io.Clock.Timestamp) Error!void {
-        try self.state.enter();
+        try self.state.enter(deadline);
         defer self.state.leave();
-        const value = try self.generation(handle);
+        const value = try self.generation(handle, deadline);
         defer value.release();
         return value.client.stopSendingWithDeadline(handle.session, id, code, deadline) catch |err| return @errorCast(self.failed(value, err));
     }
@@ -281,9 +282,9 @@ pub const ReconnectingEndpointClient = struct {
         return self.stopSendingWithDeadline(handle, id, code, .fromNow(self.state.io, .{ .raw = timeout, .clock = .awake }));
     }
     pub fn grantDataWithDeadline(self: ReconnectingEndpointClient, handle: Handle, limit: u64, deadline: std.Io.Clock.Timestamp) Error!void {
-        try self.state.enter();
+        try self.state.enter(deadline);
         defer self.state.leave();
-        const value = try self.generation(handle);
+        const value = try self.generation(handle, deadline);
         defer value.release();
         return value.client.grantDataWithDeadline(handle.session, limit, deadline) catch |err| return @errorCast(self.failed(value, err));
     }
@@ -292,9 +293,9 @@ pub const ReconnectingEndpointClient = struct {
         return self.grantDataWithDeadline(handle, limit, .fromNow(self.state.io, .{ .raw = timeout, .clock = .awake }));
     }
     pub fn grantStreamsWithDeadline(self: ReconnectingEndpointClient, handle: Handle, direction: h2_state.Direction, limit: u64, deadline: std.Io.Clock.Timestamp) Error!void {
-        try self.state.enter();
+        try self.state.enter(deadline);
         defer self.state.leave();
-        const value = try self.generation(handle);
+        const value = try self.generation(handle, deadline);
         defer value.release();
         return value.client.grantStreamsWithDeadline(handle.session, direction, limit, deadline) catch |err| return @errorCast(self.failed(value, err));
     }
@@ -303,9 +304,9 @@ pub const ReconnectingEndpointClient = struct {
         return self.grantStreamsWithDeadline(handle, direction, limit, .fromNow(self.state.io, .{ .raw = timeout, .clock = .awake }));
     }
     pub fn grantStreamDataWithDeadline(self: ReconnectingEndpointClient, handle: Handle, id: u62, limit: u64, deadline: std.Io.Clock.Timestamp) Error!void {
-        try self.state.enter();
+        try self.state.enter(deadline);
         defer self.state.leave();
-        const value = try self.generation(handle);
+        const value = try self.generation(handle, deadline);
         defer value.release();
         return value.client.grantStreamDataWithDeadline(handle.session, id, limit, deadline) catch |err| return @errorCast(self.failed(value, err));
     }
@@ -314,9 +315,9 @@ pub const ReconnectingEndpointClient = struct {
         return self.grantStreamDataWithDeadline(handle, id, limit, .fromNow(self.state.io, .{ .raw = timeout, .clock = .awake }));
     }
     pub fn drainWithDeadline(self: ReconnectingEndpointClient, handle: Handle, deadline: std.Io.Clock.Timestamp) Error!void {
-        try self.state.enter();
+        try self.state.enter(deadline);
         defer self.state.leave();
-        const value = try self.generation(handle);
+        const value = try self.generation(handle, deadline);
         defer value.release();
         return value.client.drainWithDeadline(handle.session, deadline) catch |err| return @errorCast(self.failed(value, err));
     }
@@ -325,9 +326,9 @@ pub const ReconnectingEndpointClient = struct {
         return self.drainWithDeadline(handle, .fromNow(self.state.io, .{ .raw = timeout, .clock = .awake }));
     }
     pub fn exportKeyingMaterialWithDeadline(self: ReconnectingEndpointClient, handle: Handle, label: []const u8, context: []const u8, length: usize, deadline: std.Io.Clock.Timestamp) Error!KeyingMaterial {
-        try self.state.enter();
+        try self.state.enter(deadline);
         defer self.state.leave();
-        const value = try self.generation(handle);
+        const value = try self.generation(handle, deadline);
         defer value.release();
         return value.client.exportKeyingMaterialWithDeadline(handle.session, label, context, length, deadline) catch |err| return @errorCast(self.failed(value, err));
     }
