@@ -259,3 +259,29 @@ test "ordinary Channel health gate covers streaming and duplex starts" {
     );
     if (peer.err) |err| return err;
 }
+
+test "ordinary Channel health gate validates service names before allocation" {
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var too_long: [grpc.health.max_service_name_len + 1]u8 = @splat('x');
+    try std.testing.expectError(
+        error.InvalidChannelOptions,
+        grpc.Channel.init(
+            allocator,
+            io,
+            .{ .cleartext_ip = .{ .address = .{ .ip4 = .loopback(0) } } },
+            .{ .health_check_service = &too_long },
+        ),
+    );
+    var invalid_utf8 = [_]u8{0xff};
+    try std.testing.expectError(
+        error.InvalidChannelOptions,
+        grpc.Channel.init(
+            allocator,
+            io,
+            .{ .cleartext_ip = .{ .address = .{ .ip4 = .loopback(0) } } },
+            .{ .health_check_service = &invalid_utf8 },
+        ),
+    );
+}

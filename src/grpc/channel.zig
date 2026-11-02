@@ -12,6 +12,7 @@ const wire = @import("wire.zig");
 const backoff = @import("channel/backoff.zig");
 const connectivity = @import("channel/connectivity.zig");
 const health_gate = @import("channel/health_gate.zig");
+const health = @import("health.zig");
 const resolver = @import("channel/resolver.zig");
 const endpoint_host = @import("../internal/endpoint_host.zig");
 const connect_race = @import("channel/connect_race.zig");
@@ -430,6 +431,13 @@ pub const Options = struct {
         if (self.connection_attempt_delay) |delay| if (delay.nanoseconds <= 0) return error.InvalidChannelOptions;
         if (self.priority_failover_timeout) |timeout| if (timeout.nanoseconds < 0) return error.InvalidChannelOptions;
         if (self.priority_deactivation_timeout) |timeout| if (timeout.nanoseconds < 0) return error.InvalidChannelOptions;
+        if (self.health_check_service) |name| {
+            if (name.len > health.max_service_name_len or
+                !std.unicode.utf8ValidateSlice(name))
+            {
+                return error.InvalidChannelOptions;
+            }
+        }
     }
 };
 

@@ -3086,3 +3086,7 @@ application Channel and the health Channel.
 A second focused test starts a NOT_SERVING registry with only a Health Watch
 server and requires both `startStreaming` and `startDuplex` to return
 `ConnectionUnavailable` before any business connection is opened.
+
+`Channel.Options.health_check_service` is validated before any allocation:
+names above `grpc.health.max_service_name_len` or invalid UTF-8 return
+`InvalidChannelOptions` from `Channel.init`.

@@ -8,7 +8,8 @@
     "option": "Channel.Options.health_check_service",
     "empty_name": "overall server health",
     "null": "checking disabled",
-    "call_shapes": ["unary", "streaming", "duplex"]
+    "call_shapes": ["unary", "streaming", "duplex"],
+    "validation": "service names longer than grpc.health.max_service_name_len or invalid UTF-8 are rejected at Channel.init with InvalidChannelOptions"
   },
   "design": {
     "watch_transport": "dedicated connection owned by channel/health_gate.zig; never competes with the application RPC reader",
