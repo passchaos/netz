@@ -493,3 +493,91 @@ fn waitHealthStatus(
         try std.Io.sleep(io, .fromMilliseconds(5), .awake);
     }
 }
+
+test "ordinary Channel health gate follows hostname resolver endpoints" {
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var registry = try grpc.health.Registry.init(allocator, io);
+    defer registry.deinit();
+    _ = try registry.setStatus("demo.Echo", .serving);
+
+    var server = try grpc.runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+        4096,
+    );
+    defer server.deinit();
+    var peer = HealthPeer{
+        .server = &server,
+        .registry = &registry,
+        .io = io,
+    };
+    defer peer.deinit();
+    var peer_task = io.async(HealthPeer.run, .{&peer});
+    defer peer_task.cancel(io);
+
+    const Resolver = struct {
+        address: std.Io.net.IpAddress,
+        calls: std.atomic.Value(usize) = .init(0),
+
+        fn resolve(
+            context: *anyopaque,
+            gpa: std.mem.Allocator,
+            _: std.Io,
+            host: []const u8,
+            _: u16,
+            _: ?std.Io.Clock.Timestamp,
+        ) grpc.ChannelAddressResolver.ResolveError![]std.Io.net.IpAddress {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (!std.mem.eql(u8, "demo.local", host)) return error.InvalidHostName;
+            _ = self.calls.fetchAdd(1, .monotonic);
+            return gpa.dupe(std.Io.net.IpAddress, &.{self.address});
+        }
+    };
+
+    var resolver = Resolver{ .address = server.address() };
+    const port = server.address().getPort();
+    var channel = try grpc.Channel.init(
+        allocator,
+        io,
+        .{ .cleartext_host = .{ .host = "demo.local", .port = port } },
+        .{
+            .address_resolver = .{
+                .context = &resolver,
+                .resolve = Resolver.resolve,
+            },
+            .health_check_service = "demo.Echo",
+        },
+    );
+    defer channel.deinit();
+
+    var response = try channel.unary(.{
+        .path = "/demo.Echo/Unary",
+        .message = "ping",
+        .wait_for_ready = true,
+        .timeout = .{ .value = 5, .unit = .second },
+    });
+    defer response.deinit();
+    try std.testing.expectEqualStrings("pong", response.message.?.payload);
+    try std.testing.expectEqual(@as(?bool, true), channel.healthServingAt(0));
+    try std.testing.expectEqual(@as(?bool, true), channel.healthServing());
+    try std.testing.expect(resolver.calls.load(.acquire) >= 1);
+
+    _ = try registry.setStatus("demo.Echo", .not_serving);
+    try waitHealthStatus(&channel, io, .{ .index = .{ .index = 0, .expected = false } });
+    try std.testing.expectEqual(@as(?bool, false), channel.healthServing());
+    try std.testing.expectError(
+        error.ConnectionUnavailable,
+        channel.unary(.{
+            .path = "/demo.Echo/Unary",
+            .message = "ping",
+            .timeout = .{ .value = 1, .unit = .second },
+        }),
+    );
+
+    if (peer.err) |err| return err;
+}

@@ -3081,12 +3081,16 @@ initial unary call selects the serving endpoint and that
 `healthServingAt(0)`/`healthServingAt(1)` report independent states. Switching
 the serving endpoint to NOT_SERVING makes the aggregate gate false and rejects
 a fail-fast call; switching the first endpoint to SERVING restores an aggregate
-true and completes the next unary call. The earlier single-endpoint recovery
-test still covers `wait_for_ready` recovery on a reused connection.
+true and completes the next unary call. A hostname test injects a custom
+`address_resolver` for `demo.local`, proves the published address set creates a
+serving endpoint gate, and then observes the same NOT_SERVING rejection after
+the registry changes. The earlier single-endpoint recovery test still covers
+`wait_for_ready` recovery on a reused connection.
 
-A custom `address_resolver` or custom connector is shared with every dedicated
-Watch Channel, so such callbacks must support concurrent use by the
-application Channel and each health Channel.
+Per-endpoint Watch Channels inherit health-disabled channel options with the
+resolver callback and multi-endpoint selection policy cleared because their
+target is already concrete. A custom connector is still shared and must
+support concurrent use by the application Channel and each health Channel.
 
 A second focused test starts a NOT_SERVING registry with only a Health Watch
 server and requires both `startStreaming` and `startDuplex` to return

@@ -26,10 +26,11 @@
     "src/grpc/channel/weighted_target.zig"
   ],
   "verification": {
-    "focused": "151/151 passed with -Dtest-filter=\"health gate\"",
-    "full_library": "6184/6184 passed, exit 0",
+    "focused": "152/152 passed with -Dtest-filter=\"health gate\"",
+    "full_library": "6185/6185 passed, exit 0",
     "package": "26/26 passed",
     "integration_test": "two real loopback registries and unary responders: a NOT_SERVING endpoint plus a SERVING endpoint select the serving one, healthServingAt reports independent states, switching the serving endpoint to NOT_SERVING makes the aggregate false and rejects a fail-fast call, and switching the first endpoint to SERVING restores a successful call",
+    "hostname_test": "a custom address resolver publishes one loopback address for demo.local; the resolved endpoint creates a Watch gate, reports SERVING, and rejects a subsequent fail-fast call after the registry changes to NOT_SERVING",
     "recovery_test": "the earlier single-endpoint test still completes a wait_for_ready call after a background task restores SERVING on the reused connection",
     "call_shape_test": "NOT_SERVING still returns ConnectionUnavailable for startStreaming and startDuplex before any business connection is opened"
   },
