@@ -1,0 +1,39 @@
+{
+  "schema": 1,
+  "date": "2026-11-02",
+  "feature": "opt-in ordinary Channel client Health Watch gate",
+  "decision": "accepted",
+  "head": "9adba618",
+  "api": {
+    "option": "Channel.Options.health_check_service",
+    "empty_name": "overall server health",
+    "null": "checking disabled",
+    "call_shapes": ["unary", "streaming", "duplex"]
+  },
+  "design": {
+    "watch_transport": "dedicated connection owned by channel/health_gate.zig; never competes with the application RPC reader",
+    "first_status": "the first gated call waits for a known status, bounded by the call deadline or five seconds when unbounded",
+    "serving": "SERVING and UNIMPLEMENTED allow calls",
+    "not_serving": "NOT_SERVING, UNKNOWN, and SERVICE_UNKNOWN reject fail-fast calls with ConnectionUnavailable",
+    "wait_for_ready": "waits until serving or the call deadline",
+    "watch_failure": "a Watch transport retry returns to unknown and fails open so a transient Watch failure does not block the application connection",
+    "shared_channel_boundary": "SharedChannel keeps its same-connection health owner; this gate is a server-level compatibility path for ordinary Channel"
+  },
+  "implementation_files": [
+    "src/grpc/channel.zig",
+    "src/grpc/channel/health_gate.zig",
+    "src/grpc/channel/health_gate_tests.zig",
+    "src/grpc/mod.zig"
+  ],
+  "verification": {
+    "focused": "147/147 passed",
+    "grpc_filter": "564/564 passed",
+    "full_library": "6178/6178 passed, exit 0",
+    "integration_test": "real loopback health registry and unary responder: SERVING allows a call, NOT_SERVING returns ConnectionUnavailable, restored SERVING completes another call on the reused connection"
+  },
+  "limitations": [
+    "the dedicated Watch is server-level, not same-subconnection health",
+    "unknown and retrying Watch states fail open",
+    "the first gated call pays one health-status roundtrip"
+  ]
+}
