@@ -530,6 +530,7 @@ test "gRPC request and response message streams cross HTTP2 DATA frames" {
         .max_frame_payload = 24,
         .max_body_bytes = 64 * 1024,
         .initial_window_size = 1024,
+        .max_frame_size = 16 * 1024,
     };
     var server = try http2.runtime.Server.listen(
         allocator,

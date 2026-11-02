@@ -23,6 +23,8 @@ const Options = struct {
     stats: bool = false,
     cancel: bool = false,
     cancel_after: usize = 0,
+    max_frame_size: usize = 16 * 1024,
+    chunk_size: usize = application_chunk_size,
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -31,6 +33,9 @@ pub fn main(init: std.process.Init) !void {
         options.stream_window == 0 or
         options.connection_window < 65_535 or
         options.iterations == 0 or
+        options.max_frame_size < 16 * 1024 or
+        options.max_frame_size > 16 * 1024 * 1024 - 1 or
+        options.chunk_size == 0 or
         (options.cancel and options.cancel_after == 0))
     {
         return error.InvalidArguments;
@@ -62,6 +67,7 @@ pub fn main(init: std.process.Init) !void {
         .initial_connection_window_size = effective_connection_window,
         .adaptive_window = options.adaptive,
         .no_rfc7540_priorities = options.priority,
+        .max_frame_size = options.max_frame_size,
     };
     var backend = try netz.runtime.Backend.init(std.heap.smp_allocator);
     defer backend.deinit();
@@ -136,14 +142,14 @@ pub fn main(init: std.process.Init) !void {
                         connection.writeResponseBodyBatch(
                             stream_ids,
                             responses,
-                            application_chunk_size,
+                            shared.options.chunk_size,
                         ),
                     );
                 } else {
                     try connection.writeResponseBodyBatch(
                         stream_ids,
                         responses,
-                        application_chunk_size,
+                        shared.options.chunk_size,
                     );
                 }
             }
@@ -445,6 +451,18 @@ fn parseOptions(init: std.process.Init) !Options {
         } else if (std.mem.eql(u8, argument, "--cancel")) {
             options.cancel = true;
             options.cancel_after = 1;
+        } else if (std.mem.startsWith(u8, argument, "--max-frame-size=")) {
+            options.max_frame_size = try std.fmt.parseInt(
+                usize,
+                argument["--max-frame-size=".len..],
+                10,
+            );
+        } else if (std.mem.startsWith(u8, argument, "--chunk-size=")) {
+            options.chunk_size = try std.fmt.parseInt(
+                usize,
+                argument["--chunk-size=".len..],
+                10,
+            );
         } else if (std.mem.startsWith(u8, argument, "--cancel-after=")) {
             options.cancel = true;
             options.cancel_after = try std.fmt.parseInt(

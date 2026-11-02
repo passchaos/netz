@@ -292,11 +292,11 @@ const flag_end_headers: u8 = 0x4;
 const default_flow_window = flow_window.default_value;
 const max_flow_window = flow_window.max_value;
 const default_max_frame_size: usize = 16 * 1024;
-/// Recommended SETTINGS_MAX_FRAME_SIZE for large single-stream payloads
-/// (for example a 256-KiB message that then fits one DATA frame). Small
-/// messages stay neutral, but larger frames can increase multiplexing
-/// latency, so the library keeps the 16-KiB spec default unless the
-/// application opts in on both endpoints.
+/// Default SETTINGS_MAX_FRAME_SIZE advertised by netz endpoints. A 256-KiB
+/// message fits one DATA frame and takes the direct decoder path; small
+/// messages and a 10-stream 1-MiB multiplexing control stayed neutral or
+/// slightly faster. Peers still start with the RFC 16-KiB default until
+/// SETTINGS exchange, and applications can select 16 KiB explicitly.
 pub const recommended_large_frame_size: usize = 256 * 1024;
 const max_max_frame_size: usize = 16_777_215;
 const default_max_header_list_size: usize = 16 * 1024;
@@ -633,7 +633,10 @@ pub const Limits = struct {
     adaptive_window: bool = false,
     adaptive_window_max: u32 = bdp.default_max_window,
     max_concurrent_streams: ?u32 = null,
-    max_frame_size: usize = default_max_frame_size,
+    /// Local SETTINGS_MAX_FRAME_SIZE advertised to peers. The 256-KiB default
+    /// lets a large single-stream message fit one DATA frame; peers remain on
+    /// the RFC 16-KiB initial value until SETTINGS is exchanged.
+    max_frame_size: usize = recommended_large_frame_size,
     /// Local decoded header-list limit advertised as
     /// SETTINGS_MAX_HEADER_LIST_SIZE. Values above u32 are rejected because
     /// they cannot be represented without changing the advertised policy.
@@ -18522,7 +18525,7 @@ pub const Connection = struct {
 
     fn maxContinuationFrames(self: Connection) usize {
         if (self.limits.max_continuation_frames) |limit| return limit;
-        return calcMaxContinuationFrames(self.limits.max_header_list_size, self.limits.max_frame_size);
+        return calcMaxContinuationFrames(self.limits.max_header_list_size, advertisedMaxFrameSize(self.limits));
     }
 
     fn writeData(self: *Connection, stream_id: u31, data: []const u8, end_stream: bool) Error!void {
@@ -23984,6 +23987,16 @@ const SettingsForLimits = struct {
     count: usize,
 };
 
+fn advertisedMaxFrameSize(limits: Limits) usize {
+    // Never advertise a frame larger than the local allocation ceiling; a
+    // peer would be entitled to send it and the local decoder would reject it
+    // with MessageTooLarge. RFC 9113 still requires at least 16 KiB.
+    return @max(
+        default_max_frame_size,
+        @min(limits.max_frame_size, limits.max_frame_payload),
+    );
+}
+
 fn settingsForLimits(limits: Limits, role: Role) Error!SettingsForLimits {
     try validateLocalLimits(limits);
     var settings_buf: [15]http2.Setting = undefined;
@@ -23996,8 +24009,9 @@ fn settingsForLimits(limits: Limits, role: Role) Error!SettingsForLimits {
         settings_buf[count] = .{ .id = .max_concurrent_streams, .value = max_streams };
         count += 1;
     }
-    if (limits.max_frame_size != default_max_frame_size) {
-        settings_buf[count] = .{ .id = .max_frame_size, .value = @intCast(limits.max_frame_size) };
+    const advertised_frame_size = advertisedMaxFrameSize(limits);
+    if (advertised_frame_size != default_max_frame_size) {
+        settings_buf[count] = .{ .id = .max_frame_size, .value = @intCast(advertised_frame_size) };
         count += 1;
     }
     settings_buf[count] = .{ .id = .max_header_list_size, .value = @intCast(limits.max_header_list_size) };
@@ -28195,7 +28209,7 @@ test "HTTP/2 runtime reads and writes CONTINUATION header blocks" {
         allocator,
         io,
         .{ .ip4 = .loopback(0) },
-        .{ .max_frame_payload = 24, .max_body_bytes = 4096 },
+        .{ .max_frame_payload = 24, .max_body_bytes = 4096, .max_frame_size = 16 * 1024 },
     );
     defer server.deinit();
 
@@ -28263,6 +28277,7 @@ test "HTTP/2 runtime reads and writes CONTINUATION header blocks" {
     var client = try Client.connect(allocator, io, server.address(), .{
         .max_frame_payload = 24,
         .max_body_bytes = 4096,
+        .max_frame_size = 16 * 1024,
     });
     defer client.close();
 

@@ -2,7 +2,13 @@
   "schema": 1,
   "date": "2026-11-02",
   "feature": "256-KiB HTTP/2 SETTINGS_MAX_FRAME_SIZE for large single-stream messages",
-  "decision": "accepted tuning evidence; default unchanged",
+  "decision": "accepted as the netz default",
+  "default_change": {
+    "previous_bytes": 16384,
+    "new_bytes": 262144,
+    "explicit_old_value": "Limits.max_frame_size = 16 * 1024",
+    "advertised_clamp": "The SETTINGS value is min(max_frame_size, max_frame_payload), never below 16 KiB. This prevents advertising a frame the local allocation ceiling cannot receive."
+  },
   "baseline": {
     "commit": "4c7f1f5a",
     "max_frame_size": 16384,
@@ -44,5 +50,5 @@
     "payload_4096_calls_ratio": 0.9975,
     "conclusion": "0/512/4-KiB persistent and per-call workloads stayed within about 0.7% of the 16-KiB default."
   },
-  "conclusion": "A 256-KiB frame size makes a 256-KiB message fit one DATA frame and improves the persistent large-message workload by about 14.4% with no small-message regression. The library keeps the 16-KiB default because larger frames can increase multiplexing latency; large single-stream applications should opt in on both endpoints through Limits.max_frame_size."
+  "conclusion": "A 256-KiB frame size makes a 256-KiB message fit one DATA frame and improves the persistent large-message workload by about 14.4% with no small-message regression. A 10-stream 1-MiB flow-control control was neutral-to-slightly faster, so the library now advertises 256 KiB by default; peers still start at the RFC 16-KiB value until SETTINGS exchange, and applications can explicitly select 16 KiB."
 }

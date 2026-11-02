@@ -836,19 +836,22 @@ Three ABBA rounds of the persistent 256-KiB workload moved the median from
 persistent and per-call workloads stayed within about 0.7% of the 16-KiB
 default.
 
-The library keeps the 16-KiB spec default because a 256-KiB frame can increase
-multiplexing latency and buffering for concurrent streams. Large single-stream
-applications should opt in on both endpoints; the official grpc-cpp
-comparison remains on fixed 16-KiB defaults. Rows are in
+The library now advertises 256 KiB by default through
+`Limits.max_frame_size` (`http2.runtime.recommended_large_frame_size`). A
+10-stream 1-MiB flow-control control was neutral-to-slightly faster (paired
+median 0.99x, 3/3 rounds), and the full 6,180-test library suite passed.
+Peers still start at the RFC 16-KiB value until SETTINGS exchange, and
+applications that prefer the old behavior can set `Limits.max_frame_size =
+16 * 1024` explicitly. Rows are in
 `docs/evidence/grpc_shared_large_frame/2026-11-02.json`.
 
-## Official comparison with recommended large frames (2026-11-02)
+## Official comparison with the 256-KiB default frames (2026-11-02)
 
-The official harness was rerun at `bb00a721` with the cached allocator and a
-256-KiB frame size on both netz endpoints. grpc-cpp remained at
-`03d65cc67c` with its default frames. Five alternating samples pinned CPU 12,
-used 100 warmups and 2,000 measured roundtrips, and validated every netz
-payload byte. Ratios are netz / grpc-cpp.
+The official harness was rerun at `bb00a721` with the cached allocator and the
+256-KiB frame size that is now the netz default on both endpoints. grpc-cpp
+remained at `03d65cc67c` with its default frames. Five alternating samples
+pinned CPU 12, used 100 warmups and 2,000 measured roundtrips, and validated
+every netz payload byte. Ratios are netz / grpc-cpp.
 
 | Mode | Payload | netz median ns | grpc-cpp median ns | Ratio |
 | --- | ---: | ---: | ---: | ---: |
@@ -863,8 +866,14 @@ payload byte. Ratios are netz / grpc-cpp.
 
 Netz wins every measured shape in this configuration, including persistent
 256-KiB streaming ping-pong (5.4% faster) and 256-KiB per-call RPCs (17.5%
-faster). This is a recommended single-stream configuration result, not an
-equal-wire claim: netz uses 256-KiB frames while grpc-cpp keeps its default
-frames. The library default remains 16 KiB for multiplexing latency; see
-`http2.runtime.recommended_large_frame_size`. Rows and identities are in
+faster). This is a netz-default versus grpc-cpp-default result, not an
+equal-wire claim: netz now advertises 256-KiB frames while grpc-cpp keeps its
+default frames. Applications can explicitly select 16 KiB through
+`Limits.max_frame_size`; peers still start at the RFC 16-KiB value until
+SETTINGS exchange. Rows and identities are in
 `docs/evidence/grpc_cpp_official_large_frame/2026-11-02.json`.
+
+The advertised SETTINGS value is `min(max_frame_size, max_frame_payload)`
+(never below the RFC 16-KiB minimum). This keeps a caller with a smaller local
+allocation ceiling, such as the interop clients' 64-KiB
+`max_frame_payload`, from advertising a frame it cannot receive.

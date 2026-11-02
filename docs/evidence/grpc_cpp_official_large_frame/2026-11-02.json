@@ -1,8 +1,9 @@
 {
   "schema": 1,
   "date": "2026-11-02",
-  "feature": "official grpc-cpp comparison with recommended 256-KiB frames",
-  "decision": "accepted tuning evidence; default unchanged",
+  "feature": "official grpc-cpp comparison with the 256-KiB default netz frame size",
+  "decision": "accepted evidence; 256 KiB is now the netz default",
+  "default_now": true,
   "netz_revision": "bb00a721",
   "grpc_revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
   "cpu": 12,
@@ -25,5 +26,5 @@
     {"mode": "calls", "payload_bytes": 4096, "netz_median_ns": 59239, "grpc_cpp_median_ns": 131306, "netz_over_grpc_cpp": 0.451},
     {"mode": "calls", "payload_bytes": 262144, "netz_median_ns": 421370, "grpc_cpp_median_ns": 510460, "netz_over_grpc_cpp": 0.825}
   ],
-  "conclusion": "With cached allocation and the recommended 256-KiB frame size on both netz endpoints, netz beats grpc-cpp in every measured shape: 0.396-0.451 for small messages, 0.946 for persistent 256-KiB streaming ping-pong, and 0.825 for 256-KiB per-call RPCs. The comparison uses netz large frames against grpc-cpp's default frames, so it is a recommended single-stream configuration result rather than an equal-wire result."
+  "conclusion": "With cached allocation and the 256-KiB netz frame default, netz beats grpc-cpp in every measured shape: 0.396-0.451 for small messages, 0.946 for persistent 256-KiB streaming ping-pong, and 0.825 for 256-KiB per-call RPCs. grpc-cpp keeps its default 16-KiB frames, so this is a netz-default versus grpc-cpp-default result rather than an equal-wire result."
 }
