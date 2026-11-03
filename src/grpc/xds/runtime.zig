@@ -8,4 +8,5 @@ test {
     _ = @import("runtime/rollback_tests.zig");
     _ = @import("runtime/constructor_tests.zig");
     _ = @import("runtime/delta_tests.zig");
+    _ = @import("runtime/delta_ttl_tests.zig");
 }

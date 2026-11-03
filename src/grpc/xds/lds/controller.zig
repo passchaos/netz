@@ -5,6 +5,7 @@ const ads = @import("../ads.zig");
 const delta = @import("../ads/delta.zig");
 const rds = @import("../rds.zig");
 const shared = @import("../../channel/shared.zig");
+const Projection = @import("projection.zig").Projection;
 pub const Error = model.Error || ads.Error || delta.Error || rds.Error || shared.Error || @import("../runtime/errors.zig").PublishError || error{ InvalidLdsOptions, WrongLdsResource, DuplicateLdsResource };
 pub const Publisher = struct {
     context: *anyopaque,
@@ -23,6 +24,9 @@ pub const Controller = struct {
     routes: ?*rds.Snapshot = null,
     /// A real route payload has been accepted; an empty placeholder has not.
     routes_accepted: bool = false,
+    /// Delta TTL deadlines; null means no timer.
+    listener_deadline: ?std.Io.Clock.Timestamp = null,
+    routes_deadline: ?std.Io.Clock.Timestamp = null,
     pub fn init(gpa: std.mem.Allocator, options: Options) Error!Controller {
         if (options.listener_name.len == 0 or options.listener_name.len > options.limits.max_text_bytes or !std.unicode.utf8ValidateSlice(options.listener_name) or options.authority.len == 0 or options.authority.len > options.limits.rds.max_text_bytes or !std.unicode.utf8ValidateSlice(options.authority) or options.max_header_bytes == 0) return error.InvalidLdsOptions;
         var self = Controller{ .allocator = gpa, .arena = .init(gpa), .options = options };
@@ -98,6 +102,66 @@ pub const Controller = struct {
             return error.WrongLdsResource;
         try client.acceptAppliedUpdate(update);
         _ = try client.flushWithDeadline(deadline);
+        return revision;
+    }
+    pub fn nextDeadline(self: *const Controller) ?std.Io.Clock.Timestamp {
+        var result: ?std.Io.Clock.Timestamp = null;
+        if (self.listener_deadline) |value| result = value;
+        if (self.routes_deadline) |value| {
+            if (result == null or value.raw.nanoseconds < result.?.raw.nanoseconds) result = value;
+        }
+        return result;
+    }
+    /// Remove an expired listener. The resource remains desired; only the
+    /// accepted version is forgotten so a reconnect asks for it again.
+    pub fn expireListenerWithDeadline(self: *Controller, client: *delta.Client, destination: shared.SharedChannel, deadline: std.Io.Clock.Timestamp) Error!u64 {
+        if (self.listener == null) return @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
+        if (client.subscriptions.find(model.type_url) != null) try client.subscriptions.forget(model.type_url, self.options.listener_name);
+        var subscription: ?delta.subscriptions.Prepared = null;
+        defer if (subscription) |*prepared| prepared.deinit();
+        if (self.listener.?.value.hcm.route_source == .rds) {
+            const name = self.listener.?.value.hcm.route_source.rds;
+            if (client.subscriptions.find(rds.type_url) != null) try client.subscriptions.forget(rds.type_url, name);
+            subscription = try client.subscriptions.prepare(rds.type_url, &.{});
+        }
+        const rejecting = try self.empty("_");
+        defer rejecting.release();
+        const projection = try Projection.create(self.allocator, rejecting, null);
+        defer projection.release();
+        const revision = try self.publishDelta(client, projection, destination, deadline);
+        if (subscription) |*prepared| prepared.commit();
+        if (self.listener) |*previous| previous.deinit();
+        self.listener = null;
+        if (self.routes) |previous| previous.release();
+        self.routes = null;
+        self.routes_accepted = false;
+        self.listener_deadline = null;
+        self.routes_deadline = null;
+        return revision;
+    }
+    /// Remove an expired route configuration. The listener stays accepted and
+    /// the RDS name stays subscribed.
+    pub fn expireRoutesWithDeadline(self: *Controller, client: *delta.Client, destination: shared.SharedChannel, deadline: std.Io.Clock.Timestamp) Error!u64 {
+        const listener = self.listener orelse {
+            self.routes_deadline = null;
+            return @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
+        };
+        if (listener.value.hcm.route_source != .rds or !self.routes_accepted or self.routes == null) {
+            self.routes_deadline = null;
+            return @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
+        }
+        const name = listener.value.hcm.route_source.rds;
+        if (client.subscriptions.find(rds.type_url) != null) try client.subscriptions.forget(rds.type_url, name);
+        const rejecting = try self.empty(name);
+        defer rejecting.release();
+        const projection = try Projection.create(self.allocator, rejecting, listener.value.hcm.max_stream_duration);
+        defer projection.release();
+        const revision = try self.publishDelta(client, projection, destination, deadline);
+        rejecting.retain();
+        if (self.routes) |previous| previous.release();
+        self.routes = rejecting;
+        self.routes_accepted = false;
+        self.routes_deadline = null;
         return revision;
     }
 };

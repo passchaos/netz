@@ -84,8 +84,9 @@ CDS transport_socket, transport_socket_matches, outlier_detection, lrs_server
 and upstream_config are explicitly rejected. LOGICAL_DNS and aggregate/custom
 cluster discovery are also unsupported. This slice handles an explicitly
 selected EDS-backed cluster. Typed delta CDS/EDS publication is available
-through the automatic runtime; LDS/RDS routing, bootstrap, control-plane
-failover, resource expiry, LRS and full security integration remain open.
+through the automatic runtime; delta CDS/EDS TTL expiry is covered. LDS/RDS
+routing, bootstrap, control-plane failover, LRS and full security integration
+remain open.
 
 `zig build interop-grpc-cds --summary all` compares valid fixture policies and
 limits with the actual grpc-js-xds CDS parser and uses official Envoy schemas

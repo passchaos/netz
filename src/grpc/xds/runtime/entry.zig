@@ -50,6 +50,9 @@ pub const Entry = struct {
     snapshot: ?*eds.Snapshot = null,
     cds_seen: bool = false,
     eds_seen: bool = false,
+    /// Delta TTL deadlines; null means no timer.
+    cds_deadline: ?std.Io.Clock.Timestamp = null,
+    eds_deadline: ?std.Io.Clock.Timestamp = null,
     pub fn clone(self: Entry) Entry {
         self.identity.retain();
         if (self.cluster) |value| value.retain();
@@ -66,3 +69,9 @@ pub const Entry = struct {
         return !self.cds_seen or (self.cluster != null and !self.eds_seen);
     }
 };
+
+pub fn sameDeadline(a: ?std.Io.Clock.Timestamp, b: ?std.Io.Clock.Timestamp) bool {
+    if (a == null and b == null) return true;
+    if (a == null or b == null) return false;
+    return a.?.raw.nanoseconds == b.?.raw.nanoseconds;
+}

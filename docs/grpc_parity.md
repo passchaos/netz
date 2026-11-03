@@ -3450,8 +3450,11 @@ accepted images, and explicit removals resolve resources as deleted or empty.
 `zig build interop-grpc-delta-runtime` validates this typed chain with official
 Envoy schemas and a real grpc-js backend across EDS removal/restore and listener
 deletion; results are in
-`docs/evidence/grpc_delta_runtime/interop-2026-11-03.json`. TTL expiry
-enforcement remains open.
+`docs/evidence/grpc_delta_runtime/interop-2026-11-03.json`.
+`nextDeltaExpiry` and `expireDeltaWithDeadline` enforce `Resource.ttl` for all
+four types, refresh timers from payload-free heartbeats, publish the removal and
+forget the accepted version so a reconnect does not advertise a stale payload.
+Bootstrap and automatic control-plane failover remain open.
 
 
 ## Typed EDS to reference-owned channel targets

@@ -174,10 +174,38 @@ UNAVAILABLE after the removal and after explicit listener deletion. Results and
 source/proto hashes are in
 `docs/evidence/grpc_delta_runtime/interop-2026-11-03.json`.
 
+## TTL expiry
+
+Every typed delta resource records its `Resource.ttl` as an awake-clock
+deadline. A resource without a TTL clears the timer; a heartbeat with a TTL
+refreshes it without republishing the payload. `Controller.nextDeltaExpiry`
+returns the earliest outstanding deadline, and
+`Controller.expireDeltaWithDeadline` removes every due resource:
+
+- an expired listener publishes the rejecting empty projection and clears its
+  RDS name;
+- an expired route configuration publishes an empty route image while the
+  listener stays accepted;
+- an expired CDS cluster clears its endpoint image and resolves as not found;
+- an expired EDS assignment publishes an empty assignment, leaving sibling
+  assignments untouched.
+
+Expired resources are also removed from the accepted `name -> version` map, so
+a reconnect does not advertise a payload the application no longer has. The
+desired subscription name remains registered; a later full resource (or a
+reconnect) can restore it. A payload-free heartbeat for an expired resource is
+rejected rather than accepted with a missing image. Heartbeat-only refreshes do
+not publish a new target revision.
+
+Native tests use short TTLs to cover EDS/CDS/RDS/LDS expiry, EDS restore,
+heartbeat refresh and timer clearing, version forgetting, and the absence of a
+new revision for a heartbeat-only refresh. See
+`src/grpc/xds/runtime/delta_ttl_tests.zig` and
+`docs/evidence/grpc_delta_ttl/2026-11-03.json`.
+
 ## Remaining integration
 
 This slice supplies the transport, envelope codec, subscription/version state,
-stream client and typed automatic LDS/RDS/CDS/EDS publication. TTL expiry
-enforcement (including the timer that removes an expired resource), bootstrap
-parsing and automatic control-plane failover remain follow-up work. Typed SotW
-publication is unchanged.
+stream client, typed automatic LDS/RDS/CDS/EDS publication and TTL expiry.
+Bootstrap parsing and automatic control-plane failover remain follow-up work.
+Typed SotW publication is unchanged.

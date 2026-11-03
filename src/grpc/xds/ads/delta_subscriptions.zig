@@ -367,6 +367,44 @@ pub const State = struct {
         entry.dirty = true;
         return entry;
     }
+
+    /// Drop an accepted resource version after the application expires a TTL
+    /// resource. The desired name remains subscribed; a reconnect must not
+    /// advertise the expired version as present.
+    pub fn forget(self: *State, type_url: []const u8, name: []const u8) Error!void {
+        const entry = self.find(type_url) orelse return error.UnknownDiscoveryType;
+        try sotw.validText(name);
+        if (findVersion(entry.versions, name) == null) return;
+        var count: usize = 0;
+        var bytes: usize = 0;
+        for (entry.versions) |version| {
+            if (std.mem.eql(u8, version.name, name)) continue;
+            count += 1;
+            bytes = std.math.add(usize, bytes, version.name.len + version.version.len) catch return error.DiscoveryLimitExceeded;
+        }
+        const versions = try self.allocator.alloc(Version, count);
+        errdefer self.allocator.free(versions);
+        const storage = try self.allocator.alloc(u8, bytes);
+        errdefer self.allocator.free(storage);
+        var index: usize = 0;
+        var used: usize = 0;
+        for (entry.versions) |version| {
+            if (std.mem.eql(u8, version.name, name)) continue;
+            const name_copy = storage[used..][0..version.name.len];
+            used += version.name.len;
+            @memcpy(name_copy, version.name);
+            const value_copy = storage[used..][0..version.version.len];
+            used += version.version.len;
+            @memcpy(value_copy, version.version);
+            versions[index] = .{ .name = name_copy, .version = value_copy };
+            index += 1;
+        }
+        std.debug.assert(index == count and used == bytes);
+        self.allocator.free(entry.versions);
+        self.allocator.free(entry.versions_storage);
+        entry.versions = versions;
+        entry.versions_storage = storage;
+    }
 };
 
 pub const Prepared = struct {

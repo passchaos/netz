@@ -264,6 +264,79 @@ pub const Controller = struct {
         _ = try client.flushWithDeadline(deadline);
         return revision;
     }
+    pub fn nextDeltaExpiry(self: *Controller) ?std.Io.Clock.Timestamp {
+        var earliest: ?std.Io.Clock.Timestamp = null;
+        if (self.listener) |*listener| {
+            if (listener.nextDeadline()) |value| earliest = value;
+        }
+        for (self.entries.items) |entry| {
+            if (entry.cds_deadline) |value| {
+                if (earliest == null or value.raw.nanoseconds < earliest.?.raw.nanoseconds) earliest = value;
+            }
+            if (entry.eds_deadline) |value| {
+                if (earliest == null or value.raw.nanoseconds < earliest.?.raw.nanoseconds) earliest = value;
+            }
+        }
+        return earliest;
+    }
+    /// Expire due TTL resources, republish their removal, and forget their
+    /// accepted versions. The caller drives this between delta updates.
+    pub fn expireDeltaWithDeadline(self: *Controller, client: *delta.Client, destination: shared.SharedChannel, deadline: std.Io.Clock.Timestamp) Error!u64 {
+        if (self.latest == null) return error.XdsNotStarted;
+        _ = try @import("../../../internal/deadline.zig").usableAwake(client.sender.state.io, deadline);
+        const now = std.Io.Clock.Timestamp.now(client.sender.state.io, .awake);
+        var revision = try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
+        if (self.listener) |*listener| {
+            const listener_expired = if (listener.listener_deadline) |value| value.raw.nanoseconds <= now.raw.nanoseconds else false;
+            if (listener_expired) {
+                revision = try listener.expireListenerWithDeadline(client, destination, deadline);
+            } else if (listener.routes_deadline) |value| {
+                if (value.raw.nanoseconds <= now.raw.nanoseconds) {
+                    revision = try listener.expireRoutesWithDeadline(client, destination, deadline);
+                }
+            }
+        }
+        var plan = try Plan.create(self, null);
+        defer plan.deinit();
+        var changed = false;
+        for (plan.entries.items) |*item| {
+            if (item.cds_deadline) |value| {
+                if (value.raw.nanoseconds <= now.raw.nanoseconds) {
+                    if (item.cluster == null) {
+                        item.cds_deadline = null;
+                    } else {
+                        if (client.subscriptions.find(cds.type_url) != null) try client.subscriptions.forget(cds.type_url, item.identity.name);
+                        if (item.cluster) |old| old.release();
+                        if (item.snapshot) |old| old.release();
+                        item.cluster = null;
+                        item.snapshot = null;
+                        item.cds_seen = true;
+                        item.eds_seen = false;
+                        item.cds_deadline = null;
+                        changed = true;
+                    }
+                }
+            }
+            if (item.eds_deadline) |value| {
+                if (value.raw.nanoseconds <= now.raw.nanoseconds) {
+                    const cluster = item.cluster orelse {
+                        item.eds_deadline = null;
+                        continue;
+                    };
+                    if (client.subscriptions.find(eds.type_url) != null) try client.subscriptions.forget(eds.type_url, cluster.resource.value.edsName());
+                    const empty = try self.emptyEds(cluster);
+                    if (item.snapshot) |old| old.release();
+                    item.snapshot = empty;
+                    item.eds_seen = true;
+                    item.eds_deadline = null;
+                    changed = true;
+                }
+            }
+        }
+        if (changed) revision = try self.publishDelta(client, &plan, self.latest.?, false, destination, deadline);
+        _ = try client.flushWithDeadline(deadline);
+        return revision;
+    }
     pub fn project(self: *Controller, cluster: *entries.Cluster, bytes: []const u8) Error!*eds.Snapshot {
         const config = cluster.resource.value;
         var options = self.options.target;

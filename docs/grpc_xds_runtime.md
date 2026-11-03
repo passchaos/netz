@@ -98,7 +98,9 @@ provides per-resource versions, subscribe/unsubscribe diffs, explicit removals
 and `initial_resource_versions` replay, and this controller has matching
 `startDeltaWithDeadline`, `synchronizeDeltaWithDeadline` and
 `applyDeltaWithDeadline` entry points for typed incremental LDS/RDS/CDS/EDS
-publication. TTL expiry enforcement, bootstrap, automatic control-plane
+publication. `nextDeltaExpiry` and `expireDeltaWithDeadline` enforce
+`Resource.ttl` for all four types, refresh timers from payload-free heartbeats
+and forget expired accepted versions. Bootstrap, automatic control-plane
 retry/failover, aggregate/DNS CDS and full security, LRS, non-router filters and
 capture/rewriting remain open. Unsupported resource features continue to fail
 typed validation rather than claim deployment support.

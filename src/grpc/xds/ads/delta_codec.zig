@@ -23,6 +23,14 @@ pub const Duration = struct {
     }
 };
 
+/// Convert an optional response TTL into an awake-clock deadline. No TTL
+/// clears the resource timer rather than extending it.
+pub fn ttlDeadline(io: std.Io, ttl: ?Duration) Error!?std.Io.Clock.Timestamp {
+    const value = ttl orelse return null;
+    const nanoseconds = try value.nanoseconds();
+    return .fromNow(io, .{ .clock = .awake, .raw = .fromNanoseconds(@intCast(nanoseconds)) });
+}
+
 pub const Resource = struct {
     name: []const u8,
     version: []const u8 = "",

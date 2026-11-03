@@ -213,3 +213,31 @@ test "delta xDS response tokens cannot acknowledge another client" {
     _ = try second.decide(cds, token_b, null, .{ .type_url = cds, .resources = &.{cluster("a", "v2", "two")} });
     try std.testing.expectEqualStrings("v2", second.find(cds).?.versions[0].version);
 }
+
+test "delta xDS forget drops one version without changing the desired set" {
+    var state = subscriptions.State{ .allocator = allocator, .options = .{} };
+    defer state.deinit();
+    try state.set(cds, &.{ "a", "b" });
+    const token = try state.received(.{ .type_url = cds, .nonce = "n1" });
+    _ = try state.decide(cds, token, null, .{ .type_url = cds, .resources = &.{ cluster("a", "v1", "one"), cluster("b", "v2", "two") } });
+    try std.testing.expectEqual(@as(usize, 2), state.find(cds).?.versions.len);
+    try state.forget(cds, "a");
+    const entry = state.find(cds).?;
+    try std.testing.expectEqual(@as(usize, 1), entry.versions.len);
+    try std.testing.expectEqualStrings("b", entry.versions[0].name);
+    try std.testing.expectEqual(@as(usize, 2), entry.names.len);
+    try std.testing.expectEqualStrings("a", entry.names[0]);
+    state.forget(cds, "missing") catch unreachable;
+    try std.testing.expectError(error.UnknownDiscoveryType, state.forget(eds, "x"));
+}
+
+test "delta xDS TTL converts to an awake deadline or clears it" {
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    try std.testing.expect((try codec.ttlDeadline(io, null)) == null);
+    const before = std.Io.Clock.Timestamp.now(io, .awake);
+    const deadline = (try codec.ttlDeadline(io, .{ .seconds = 1 })).?;
+    try std.testing.expect(deadline.raw.nanoseconds >= before.raw.nanoseconds);
+    try std.testing.expectError(error.InvalidResourceTtl, codec.ttlDeadline(io, .{ .nanos = std.time.ns_per_s }));
+}

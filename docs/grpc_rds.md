@@ -118,8 +118,8 @@ This integrates client RDS selection with existing cluster managers.
 [Client LDS/HCM orchestration](grpc_lds.md) now selects inline/dynamic RDS and
 reprojects cached routes under HCM defaults. Typed delta route publication is
 available through the automatic runtime. Bootstrap and automatic multi-cluster
-CDS/EDS orchestration, resource expiry, control-plane failover, LRS,
-capture/hash rewriting, HTTP filter overrides and host/path rewriting remain
-open. Unsupported recognized filter, rewrite, timeout-offset and plugin
+CDS/EDS orchestration, control-plane failover, LRS, capture/hash rewriting,
+HTTP filter overrides and host/path rewriting remain open. Delta route TTL
+expiry is covered. Unsupported recognized filter, rewrite, timeout-offset and plugin
 features fail validation; this module does
 not silently claim their deployment behavior.
