@@ -32,8 +32,9 @@ children wrap their endpoint policy in xds_cluster_impl admission, so circuit
 or category policy belongs to the selected cluster.
 
 Referenced children without CDS/EDS answers report CONNECTING and queue
-fail-fast RPCs under their original deadline. A validated omission removes the
-resource and changes new admission to endpoint failure/rejection. CDS EDS-name
+fail-fast RPCs under their original deadline. SotW omission removes LDS/CDS
+resources; omitted RDS/EDS resources retain their cache and unanswered EDS
+children remain pending. Present empty routes/assignments remove new admission. CDS EDS-name
 changes immediately clear previous endpoints and create a pending child until
 matching service data arrives. Same-name CDS policy updates reproject cached
 EDS bytes; identical configuration and unchanged EDS responses retain their
@@ -81,13 +82,15 @@ Options.target, with actual child LB/circuit identities supplied by CDS.
 `zig build interop-grpc-xds-runtime --summary all` starts with an empty
 application data plane and receives official LDS → RDS → CDS → EDS resources
 from an independent grpc-js ADS server. Two grpc-js backends verify pending
-discovery delivery, quota/category isolation, EDS service-name replacement,
+discovery delivery, empty RDS/EDS response retention, partial EDS sibling
+retention, quota/category isolation, EDS service-name replacement,
 CDS duplicate NACK rollback, route changes, old RPC completion and listener
 deletion. The peer counts ten actual RPCs and requires one HTTP/2 session for
 each application backend. Native tests cover full chain/cache transitions,
 constructor/start allocation rollback, batched subscription commit, local
 configuration preservation and resource/entry budget priority. Evidence is in
-`docs/evidence/grpc_xds_runtime/2026-11-03.json`.
+`docs/evidence/grpc_xds_runtime/2026-11-03.json`; corrected SotW semantics
+are recorded in `docs/evidence/grpc_xds_sotw/2026-11-03/runtime.Debug.json`.
 
 The controller requires one serialized application caller and an ADS transport
 provided by the application. Bootstrap, automatic control-plane retry/failover,

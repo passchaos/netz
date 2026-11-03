@@ -56,8 +56,9 @@ The controller owns the accepted CDS configuration and matching EDS image.
 Changing policy or limit with the same EDS name reprojects that image without
 waiting for another EDS response. Changing EDS name immediately clears old
 endpoints and drops, changes the circuit identity and subscribes to the new
-name. A matching EDS response then supplies its endpoints. An omitted matching
-assignment publishes an empty target. An omitted selected CDS cluster removes
+name. A matching EDS response then supplies its endpoints. Omitted EDS
+assignments preserve the cached image and target; a present empty assignment
+clears endpoints. An omitted selected CDS cluster removes
 the target, drops and circuit policy, discards the cache and keeps the last
 named EDS subscription to avoid accidentally requesting a wildcard. Late EDS
 responses are validated and ACKed but cannot recreate the deleted cluster.

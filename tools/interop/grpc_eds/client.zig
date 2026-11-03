@@ -75,16 +75,29 @@ pub fn main(init: std.process.Init) !void {
     _ = try eds.publishUpdateWithDeadline(&discovery, restored.update, "backend", destination, options, .{}, until(io));
     const after = try count(sender, 400);
     try std.testing.expect(after[0] + after[1] > 240 and after[0] + after[1] < 360 and after[3] == 0);
-    try discovery.setSubscription(eds.type_url, &.{ "backend", "phase-delete" });
+    var retained = [_]usize{ 0, 0, 0, 0 };
+    const accepted_revision = destination.configurationRevision();
+    for ([_][]const u8{ "phase-omit", "phase-unrelated" }, 0..) |phase_name, index| {
+        try discovery.setSubscription(eds.type_url, &.{ "backend", phase_name });
+        _ = try discovery.flushWithDeadline(until(io));
+        var omitted = try discovery.nextWithDeadline(until(io));
+        defer omitted.deinit();
+        _ = try eds.publishUpdateWithDeadline(&discovery, omitted.update, "backend", destination, options, .{}, until(io));
+        try std.testing.expectEqual(accepted_revision, destination.configurationRevision());
+        try std.testing.expectEqualStrings(if (index == 0) "v4" else "v5", discovery.acceptedVersion(eds.type_url).?);
+        const batch = try count(sender, 20);
+        for (&retained, batch) |*total, amount| total.* += amount;
+    }
+    try discovery.setSubscription(eds.type_url, &.{ "backend", "phase-empty" });
     _ = try discovery.flushWithDeadline(until(io));
-    var deleted = try discovery.nextWithDeadline(until(io));
-    defer deleted.deinit();
-    _ = try eds.publishUpdateWithDeadline(&discovery, deleted.update, "backend", destination, options, .{}, until(io));
+    var empty = try discovery.nextWithDeadline(until(io));
+    defer empty.deinit();
+    _ = try eds.publishUpdateWithDeadline(&discovery, empty.update, "backend", destination, options, .{}, until(io));
     try std.testing.expectEqual(@as(usize, 0), destination.configuredEndpointCount());
     try std.testing.expectError(error.ConnectionUnavailable, sender.unary(.{ .path = "/fixture.Eds/Unary", .message = "request", .wait_for_ready = false }));
-    try std.testing.expectEqualStrings("v4", discovery.acceptedVersion(eds.type_url).?);
+    try std.testing.expectEqualStrings("v6", discovery.acceptedVersion(eds.type_url).?);
     var terminal = try discovery.nextWithDeadline(until(io));
     defer terminal.deinit();
     try std.testing.expectEqual(netz.grpc.Status.ok, terminal.terminal.status);
-    std.debug.print("EDS_RESULT {{\"status\":\"passed\",\"before\":[{d},{d},{d},{d}],\"fallback\":[{d},{d},{d},{d}],\"after\":[{d},{d},{d},{d}],\"nack_preserved\":true,\"deleted\":true}}\n", .{ before[0], before[1], before[2], before[3], failed_over[0], failed_over[1], failed_over[2], failed_over[3], after[0], after[1], after[2], after[3] });
+    std.debug.print("EDS_RESULT {{\"status\":\"passed\",\"before\":[{d},{d},{d},{d}],\"fallback\":[{d},{d},{d},{d}],\"after\":[{d},{d},{d},{d}],\"nack_preserved\":true,\"omission_retained\":true,\"unrelated_retained\":true,\"explicit_empty\":true,\"retained\":[{d},{d},{d},{d}]}}\n", .{ before[0], before[1], before[2], before[3], failed_over[0], failed_over[1], failed_over[2], failed_over[3], after[0], after[1], after[2], after[3], retained[0], retained[1], retained[2], retained[3] });
 }

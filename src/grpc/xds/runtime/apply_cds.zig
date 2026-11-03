@@ -32,11 +32,13 @@ pub fn apply(self: *ctl.Controller, client: *ads.Client, update: ads.Update, des
     if (resources.items.len > 1) for (resources.items[1..], 0..) |resource, i| if (std.mem.eql(u8, resource.resource.value.name, resources.items[i].resource.value.name)) return error.DuplicateCdsResource;
     var plan = try Plan.create(self, null);
     defer plan.deinit();
+    var changed = false;
     for (plan.entries.items) |*item| {
         const selected = for (resources.items) |resource| {
             if (std.mem.eql(u8, resource.resource.value.name, item.identity.name)) break resource;
         } else null;
         if (selected) |resource| {
+            changed = true;
             const same = if (item.cluster) |old| std.mem.eql(u8, old.resource.value.edsName(), resource.resource.value.edsName()) else false;
             const snapshot = if (same and item.snapshot != null) blk: {
                 const before = item.cluster.?.resource.value;
@@ -54,6 +56,11 @@ pub fn apply(self: *ctl.Controller, client: *ads.Client, update: ads.Update, des
             item.snapshot = snapshot;
             if (!same) item.eds_seen = false;
         } else {
+            // Missing newly requested CDS is not a resource-not-found answer.
+            // Delete only a previously received cluster, preserving pending
+            // siblings when a full-type response predates their subscription.
+            if (item.cluster == null) continue;
+            changed = true;
             if (item.cluster) |old| old.release();
             if (item.snapshot) |old| old.release();
             item.cluster = null;
@@ -62,5 +69,6 @@ pub fn apply(self: *ctl.Controller, client: *ads.Client, update: ads.Update, des
         }
         item.cds_seen = true;
     }
+    if (!changed) return try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
     return self.publish(client, &plan, self.latest.?, false, destination, deadline);
 }

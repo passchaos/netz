@@ -23,6 +23,8 @@ def main():
         raise RuntimeError(result.stdout + result.stderr)
     report = json.loads(result.stdout)
     assert report["status"] == "passed"
+    for contract in ('initial_cds_omission_pending', 'rds_omission_retained', 'eds_omission_retained', 'partial_eds_preserved_sibling'):
+        assert report[contract] is True
     repo = directory.parents[2]
     files = ["src/grpc/channel.zig", "src/grpc/channel/tree_query.zig", "src/grpc/channel/shared/layout.zig", "build.zig", "src/grpc/channel/ring_hash.zig", "src/grpc/channel/shared/source.zig", "src/grpc/channel/shared/state.zig", "src/grpc/channel/shared/target_lifetime.zig", "src/grpc/channel/shared/update.zig", "src/grpc/channel/shared/update/prepare.zig", "src/grpc/channel/shared/update/publish.zig", "src/grpc/channel/shared/weighted_target.zig", "src/grpc/channel/shared/cluster_dispatch.zig", "src/grpc/channel/shared/weighted_target/selection_tests.zig"]
     files += [str(path.relative_to(repo)) for path in sorted((repo / "src/grpc/xds").rglob("*.zig")) ]

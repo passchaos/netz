@@ -27,26 +27,21 @@ pub fn apply(self: *ctl.Controller, client: *ads.Client, update: ads.Update, des
         }
     }.less);
     if (names.len > 1) for (names[1..], 0..) |value, i| if (std.mem.eql(u8, value.resource.value.name, names[i].resource.value.name)) return error.DuplicateRdsResource;
-    const listener = self.listener orelse return destination.configurationRevision();
-    if (listener.value.hcm.route_source != .rds) return destination.configurationRevision();
+    const listener = self.listener orelse return try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
+    if (listener.value.hcm.route_source != .rds) return try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
     const name = listener.value.hcm.route_source.rds;
     var selected: ?*rds.Snapshot = null;
     for (candidates.items) |snapshot| if (std.mem.eql(u8, name, snapshot.resource.value.name)) {
         selected = snapshot;
     };
-    if (selected == null) {
-        const empty = try self.empty(name);
-        errdefer empty.release();
-        storage = std.math.add(usize, storage, empty.resource.arena.queryCapacity()) catch return error.LdsLimitExceeded;
-        if (storage > self.options.limits.max_storage_bytes) return error.LdsLimitExceeded;
-        try candidates.append(self.allocator, empty);
-        selected = empty;
-    }
-    const projection = try Projection.create(self.allocator, selected.?, listener.value.hcm.max_stream_duration);
+    // RDS omission is not deletion. Keep the immutable cached projection and
+    // do not turn an unanswered new subscription into an empty accepted image.
+    const snapshot = selected orelse return try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
+    const projection = try Projection.create(self.allocator, snapshot, listener.value.hcm.max_stream_duration);
     defer projection.release();
     const revision = try self.publish(client, projection, destination, deadline);
-    selected.?.retain();
+    snapshot.retain();
     if (self.routes) |previous| previous.release();
-    self.routes = selected.?;
+    self.routes = snapshot;
     return revision;
 }

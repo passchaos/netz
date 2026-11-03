@@ -32,6 +32,7 @@ function routes(after=false){
     ]},
   ]};
 }
+assert.equal(RouteConfigurationResourceType.get().allResourcesRequiredInSotW(),false);
 const initial=encode(routes()),updated=encode(routes(true));
 for(const resource of [initial,updated])assert.equal(RouteConfigurationResourceType.get().decode({server:{},bootstrap:{}},resource).error,undefined);
 const counts={};const sessions=[new Set(),new Set()];const transcript=[];const servers=[];
@@ -84,8 +85,12 @@ function record(index,name,call){
       case 4:{nack('duplicate','DuplicateRdsResource');const bad=routes();bad.virtual_hosts[2].typed_per_filter_config={router:{type_url:'type.googleapis.com/custom.Filter',value:Buffer.alloc(0)}};send('filter',[encode(bad)]);break;}
       case 5:nack('filter','UnsupportedRdsFeature');break;
       case 6:ack('v2');break;
-      case 7:assert(request.resource_names.includes('phase-delete'));send('v3',[]);break;
-      case 8:ack('v3');call.end();break;
+      case 7:assert(request.resource_names.includes('phase-omit'));send('v3',[]);break;
+      case 8:ack('v3');break;
+      case 9:assert(request.resource_names.includes('phase-unrelated'));send('v4',[encode({...routes(true),name:'other'})]);break;
+      case 10:ack('v4');break;
+      case 11:assert(request.resource_names.includes('phase-empty'));send('v5',[encode({name:'routes'})]);break;
+      case 12:ack('v5');call.end();break;
       default:assert.fail('unexpected RDS request');
     }
   });}});
@@ -95,8 +100,8 @@ function record(index,name,call){
     child.stdout.on('data',b=>output+=b);child.stderr.on('data',b=>output+=b);child.on('error',e=>{clearTimeout(timer);reject(e);});
     child.on('exit',code=>{clearTimeout(timer);if(code!==0)return reject(new Error(output));const line=output.split('\n').find(x=>x.startsWith('RDS_RESULT '));if(!line)return reject(new Error(output));resolve(JSON.parse(line.slice(11)));});
   });
-  assert.equal(step,9);assert.equal(retryAttempts,2);assert.equal(result.throttle_tokens,3100);assert(slowCanceled);assert(held&&!holdCallback);
-  assert.deepEqual(counts,{Unary:20,Weighted:400,Stream:1,Retry:2,Slow:1,Hold:1,After:20,Release:1});
+  assert.equal(step,13);assert.equal(retryAttempts,2);assert.equal(result.throttle_tokens,3100);assert(slowCanceled);assert(held&&!holdCallback);
+  assert.deepEqual(counts,{Unary:20,Weighted:400,Stream:1,Retry:2,Slow:1,Hold:1,After:22,Release:1});
   assert.deepEqual(sessions.map(x=>x.size),[1,1]);
-  console.log(JSON.stringify({...result,wire_counts:counts,sessions:sessions.map(x=>x.size),transcript,retry_attempts:retryAttempts,slow_canceled:slowCanceled,old_route_completed:true,grpc_js:require('../grpc_locality/node_modules/@grpc/grpc-js/package.json').version,grpc_js_xds:require('../grpc_locality/node_modules/@grpc/grpc-js-xds/package.json').version}));
+  console.log(JSON.stringify({...result,sotw_omission_is_deletion:false,wire_counts:counts,sessions:sessions.map(x=>x.size),transcript,retry_attempts:retryAttempts,slow_canceled:slowCanceled,old_route_completed:true,grpc_js:require('../grpc_locality/node_modules/@grpc/grpc-js/package.json').version,grpc_js_xds:require('../grpc_locality/node_modules/@grpc/grpc-js-xds/package.json').version}));
 })().catch(error=>{console.error(error);process.exitCode=1;}).finally(()=>servers.forEach(server=>server.forceShutdown()));

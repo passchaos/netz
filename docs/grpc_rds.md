@@ -91,8 +91,9 @@ selectors must be immutable/thread-safe and supply no-allocation retain/release
 callbacks; callback context and service-config views are borrowed for the call.
 
 For ADS updates use `rds.publishUpdateWithDeadline`: it validates every resource
-and checks unique names before publishing the requested selector. SotW
-omission installs a rejecting empty selector. Invalid resources, topology,
+and checks unique names before publishing the requested selector. RDS SotW
+omission preserves the accepted selector and ACKs without changing its epoch.
+A present resource with no routes installs a rejecting selector. Invalid resources, topology,
 old/cross-client tokens, expired budgets or transaction allocation failure
 leave the old selector/configuration and ADS version intact. Publication then
 advances the accepted ADS version before ACK output. As with CDS/EDS, callers
@@ -103,13 +104,15 @@ flush/reconnect to replay the committed version.
 the actual grpc-js-xds RDS validator with two independent grpc-js backends.
 It checks exact-host precedence, header/safe-regex and weighted dispatch,
 streaming, actual retry attempts and throttle accounting, the route deadline,
-NACK rollback, route deletion and an old in-flight RPC completing after a new
-route becomes active. All 446 permitted RPCs are counted and each backend must
+NACK rollback, omitted/unrelated-resource retention, explicit empty routes and
+an old in-flight RPC completing after a new route becomes active. All 448
+permitted RPCs are counted and each backend must
 reuse one HTTP/2 session. Native tests cover allocation/topology rollback,
 constructor ownership, bounded selector epochs, decoder limits, skipped
 non-GRPC paths, inherited retry disable and admission priority. Existing ADS,
 CDS and official RE2 gates provide regression evidence in
-`docs/evidence/grpc_rds/2026-11-03.json`.
+`docs/evidence/grpc_rds/2026-11-03.json`; the corrected SotW gate is in
+`docs/evidence/grpc_xds_sotw/2026-11-03/rds.Debug.json`.
 
 This integrates client RDS selection with existing cluster managers.
 [Client LDS/HCM orchestration](grpc_lds.md) now selects inline/dynamic RDS and

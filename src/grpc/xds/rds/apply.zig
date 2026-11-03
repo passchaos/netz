@@ -32,22 +32,12 @@ pub fn publishWithDeadline(client: *ads.Client, update: ads.Update, name: []cons
         }
     }.less);
     if (names.len > 1) for (names[1..], 0..) |value, index| if (std.mem.eql(u8, value.resource.value.name, names[index].resource.value.name)) return error.DuplicateRdsResource;
-    if (selected == null) {
-        var writer: std.Io.Writer.Allocating = .init(client.allocator);
-        defer writer.deinit();
-        writer.writer.writeByte(10) catch return error.OutOfMemory;
-        var length = name.len;
-        while (length >= 128) : (length >>= 7) writer.writer.writeByte(@as(u8, @truncate(length)) | 0x80) catch return error.OutOfMemory;
-        writer.writer.writeByte(@intCast(length)) catch return error.OutOfMemory;
-        writer.writer.writeAll(name) catch return error.OutOfMemory;
-        const empty = try target.Snapshot.create(client.allocator, writer.written(), limits, options);
-        errdefer empty.release();
-        storage_bytes = std.math.add(usize, storage_bytes, empty.resource.arena.queryCapacity()) catch return error.RdsLimitExceeded;
-        if (storage_bytes > limits.max_storage_bytes) return error.RdsLimitExceeded;
-        try candidates.append(client.allocator, empty);
-        selected = empty;
-    }
-    const revision = try selected.?.publishWithDeadline(destination, deadline);
+    // RDS/EDS SotW responses may contain only changed resources. Omission
+    // leaves the accepted target/selector intact, including initial discovery.
+    const revision = if (selected) |snapshot|
+        try snapshot.publishWithDeadline(destination, deadline)
+    else
+        try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
     try client.acceptAppliedUpdate(update);
     _ = try client.flushWithDeadline(deadline);
     return revision;

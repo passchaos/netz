@@ -3446,8 +3446,8 @@ The ADS publication helper checks response ownership/type/token and decodes all
 resources before updating the selected assignment. Channel failure leaves the
 old topology and accepted version intact. Successful publication advances its
 ADS accepted version before ACK output, so an ACK timeout/allocation failure
-cannot erase the configuration actually applied. Omission in a valid SotW
-response publishes an empty target. Caller-owned resources can be released after
+cannot erase the configuration actually applied. EDS SotW omission preserves
+the accepted target; only a present empty assignment clears endpoints. Caller-owned resources can be released after
 publication because Update's optional target-lifetime descriptor is retained
 by canonical inventory and source/worker owners, including removed-child
 retention. Distinct snapshots compare endpoint identity by path/key/host string
@@ -3461,7 +3461,8 @@ config-only owner retention and healthy alternate-address connection success.
 The independent `interop-grpc-eds` control plane emits official Envoy resource
 protobufs over ADS, while four grpc-js backends count initial/restored weighting,
 primary-priority health failover and complete call counts. It also checks an
-invalid-resource NACK with unchanged topology/version and valid SotW deletion,
+invalid-resource NACK with unchanged topology/version, omitted-resource
+retention and explicit empty-assignment publication,
 requiring one backend HTTP/2 session per endpoint across updates.
 See [EDS usage and boundaries](grpc_eds.md) and
 `docs/evidence/grpc_eds/2026-11-03.json`. LDS/RDS/CDS route integration, EDS drop
@@ -3633,12 +3634,13 @@ Constructor and transaction failure release provisional selector references
 without changing the prior topology, epoch or ADS version.
 
 The ADS adapter validates the complete resource set and publishes the selected
-RDS snapshot before accepting its version and flushing ACK. Omission installs
-a rejecting selector; rejected configuration and old tokens preserve state.
-The independent official RDS/ADS plus grpc-js-xds validator gate counts 446 RPCs
+RDS snapshot before accepting its version and flushing ACK. Omission retains
+the accepted selector; present empty routes reject new admission. Rejected
+configuration and old tokens preserve state. The corrected independent official
+RDS/ADS plus grpc-js-xds validator gate counts 448 RPCs
 against grpc-js backends, including weighted/header/regex routing, duplex,
-retry/throttle, route timeout, NACKs and deletion. A held old RPC completes on
-its original cluster after a new route serves new calls, and both backend
+retry/throttle, route timeout, NACKs, omission retention and explicit empty
+routes. A held old RPC completes on its original cluster after a new route serves new calls, and both backend
 HTTP/2 sessions must remain reused. Native tests cover constructor/allocator
 rollback, missing topology, bounded generation storage, decoder limits and
 admission priority. Existing ADS/CDS and RE2 gates remain regression evidence.
@@ -3723,8 +3725,9 @@ to CDS/EDS publication and broader bootstrap/failover/expiry/LRS remain open.
 The typed discovery controller now derives LDS/RDS referenced clusters, watches
 EDS-backed CDS and service assignments and publishes a complete manager target
 with selected-cluster admission. Start rejects application calls until valid
-routes exist; pending CDS/EDS children keep fail-fast calls queued, while
-validated omissions remove resource admission. Cache staging uses immutable
+routes exist; pending CDS/EDS children keep fail-fast calls queued. SotW
+omissions delete LDS/CDS resources, while RDS/EDS omissions preserve accepted
+state and unanswered endpoint discovery remains pending. Cache staging uses immutable
 identity/CDS/EDS references and an independently retained target inventory with
 cluster-prefixed priority/locality paths. Same-name policy/data updates reuse
 cached/projected snapshots; service-name changes remove prior endpoints.
@@ -3749,3 +3752,15 @@ local method/retry defaults and resource-budget precedence. See
 `docs/evidence/grpc_xds_runtime/2026-11-03.json`. Bootstrap, retry/failover,
 expiry/Delta/LRS, aggregate/DNS/security/filter and full rewrite integration
 remain open for the full library/control-plane objective.
+
+## SotW resource omission and initial discovery
+
+RDS/EDS responses now retain omitted resources across every typed publication
+path. LDS/CDS omission deletes only previously accepted resources; newly
+subscribed resources remain unanswered. Partial EDS updates preserve sibling
+snapshots and transport reuse, and explicit empty route/endpoint resources still
+remove new application admission. Native and independent ADS/SDK gates cover
+this distinction, version/epoch stability, pending discovery and rejected
+resource rollback. See [SotW semantics](grpc_xds_sotw.md) and
+`docs/evidence/grpc_xds_sotw/2026-11-03.json` for current evidence. Historical
+EDS/RDS reports that treated omission as deletion are superseded by this gate.

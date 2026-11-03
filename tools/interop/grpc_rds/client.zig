@@ -140,13 +140,24 @@ pub fn main(init: std.process.Init) !void {
     var previous = try old.await(io);
     defer previous.deinit();
     try std.testing.expectEqualStrings("a", previous.message.?.payload);
-    try discovery.setSubscription(rds.type_url, &.{ "routes", "phase-delete" });
+    const accepted_revision = destination.configurationRevision();
+    for ([_][]const u8{ "phase-omit", "phase-unrelated" }, 0..) |phase_name, index| {
+        try discovery.setSubscription(rds.type_url, &.{ "routes", phase_name });
+        _ = try discovery.flushWithDeadline(until(io));
+        try apply(&discovery, destination, io);
+        try std.testing.expectEqual(accepted_revision, destination.configurationRevision());
+        try std.testing.expectEqualStrings(if (index == 0) "v3" else "v4", discovery.acceptedVersion(rds.type_url).?);
+        var response = try call(sender, "/fixture.Rds/After", &.{});
+        defer response.deinit();
+        try std.testing.expectEqualStrings("b", response.message.?.payload);
+    }
+    try discovery.setSubscription(rds.type_url, &.{ "routes", "phase-empty" });
     _ = try discovery.flushWithDeadline(until(io));
     try apply(&discovery, destination, io);
-    try std.testing.expectEqualStrings("v3", discovery.acceptedVersion(rds.type_url).?);
+    try std.testing.expectEqualStrings("v5", discovery.acceptedVersion(rds.type_url).?);
     try noRoute(sender);
     var terminal = try discovery.nextWithDeadline(until(io));
     defer terminal.deinit();
     try std.testing.expectEqual(grpc.Status.ok, terminal.terminal.status);
-    std.debug.print("RDS_RESULT {{\"status\":\"passed\",\"weighted\":[{d},{d}],\"nacks\":3,\"timeout\":true,\"local_timeout\":{},\"throttle_tokens\":{d},\"stream\":true,\"storage_reused\":true,\"old_route_completed\":true,\"deleted\":true}}\n", .{ weights[0], weights[1], timed_out, throttle_tokens });
+    std.debug.print("RDS_RESULT {{\"status\":\"passed\",\"weighted\":[{d},{d}],\"nacks\":3,\"timeout\":true,\"local_timeout\":{},\"throttle_tokens\":{d},\"stream\":true,\"storage_reused\":true,\"old_route_completed\":true,\"omission_retained\":true,\"unrelated_retained\":true,\"explicit_empty\":true}}\n", .{ weights[0], weights[1], timed_out, throttle_tokens });
 }

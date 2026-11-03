@@ -24,24 +24,12 @@ pub fn publishWithDeadline(client: *ads.Client, update: ads.Update, resource_nam
         try candidates.append(client.allocator, snapshot);
         if (std.mem.eql(u8, name, resource_name)) selected = snapshot;
     }
-    if (selected == null) {
-        // SotW omission removes the requested assignment. Create an empty
-        // typed resource using only its cluster_name protobuf field.
-        var writer: std.Io.Writer.Allocating = .init(client.allocator);
-        defer writer.deinit();
-        writer.writer.writeByte(10) catch return error.OutOfMemory;
-        var len = resource_name.len;
-        while (len >= 128) : (len >>= 7) writer.writer.writeByte(@as(u8, @truncate(len)) | 0x80) catch return error.OutOfMemory;
-        writer.writer.writeByte(@intCast(len)) catch return error.OutOfMemory;
-        writer.writer.writeAll(resource_name) catch return error.OutOfMemory;
-        const empty = try target.Snapshot.create(client.allocator, writer.written(), limits, options);
-        errdefer empty.release();
-        try candidates.append(client.allocator, empty);
-        selected = empty;
-    }
-    const revision = try selected.?.publishWithDeadline(destination, deadline);
-    // Publication is authoritative even if the remaining ACK budget expires.
-    // This mutation allocates nothing after prior validation under one caller.
+    // RDS/EDS SotW responses may contain only changed resources. Omission
+    // leaves the accepted target/selector intact, including initial discovery.
+    const revision = if (selected) |snapshot|
+        try snapshot.publishWithDeadline(destination, deadline)
+    else
+        try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
     try client.acceptAppliedUpdate(update);
     _ = try client.flushWithDeadline(deadline);
     return revision;

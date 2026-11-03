@@ -13,8 +13,9 @@ The sequence requires 400 primary-priority calls using locality weights 1:3
 and exact round-robin inside a two-endpoint locality; a duplicate-locality
 NACK retaining the old version and configuration; 20 calls to the second
 priority after primary endpoints become unhealthy; 400 primary calls after
-restoration with reversed 3:1 weights; and an empty SotW response removing
-new backend admission. Exactly nine ADS requests and one application HTTP/2
+restoration with reversed 3:1 weights; 40 calls after empty and unrelated SotW
+responses retain the accepted assignment; and a present empty assignment
+removing new backend admission. Exactly thirteen ADS requests and one application HTTP/2
 session per backend are required. Payloads and native/server counts must match.
 
 Every subprocess has a bounded wait. Reports bind the native executable,

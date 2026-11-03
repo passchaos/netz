@@ -103,6 +103,9 @@ pub const Controller = struct {
             candidates.items[index] = null;
             return revision;
         }
+        // Only omission of a cached CDS resource is deletion. Initial absence
+        // may be an answer to an earlier subscription and stays unanswered.
+        if (self.cluster == null) return try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
         const revision = try destination.updateWithDeadline(.{ .target = .{ .resolved = .{ .endpoints = &.{} } }, .service_config = .{ .replace = "{\"loadBalancingConfig\":[{\"round_robin\":{}}]}" }, .drop_categories = .{ .replace = &.{} }, .circuit_breaker = .{ .replace = null } }, deadline);
         if (self.cluster) |*previous| previous.deinit();
         self.cluster = null;
@@ -128,8 +131,11 @@ pub const Controller = struct {
             };
             try candidates.append(self.allocator, candidate);
         }
-        const cluster = self.cluster orelse return destination.configurationRevision();
-        const image = if (selected) |bytes| try self.allocator.dupe(u8, bytes) else try self.empty(cluster.value.edsName());
+        const cluster = self.cluster orelse return try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
+        // EDS may update another named assignment on the same ADS stream.
+        // Preserve the last accepted image until this assignment is present.
+        const bytes = selected orelse return try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
+        const image = try self.allocator.dupe(u8, bytes);
         var image_owned = true;
         defer if (image_owned) self.allocator.free(image);
         const snapshot = try eds.Snapshot.create(self.allocator, image, self.options.eds_limits, self.targetOptions(cluster.value));

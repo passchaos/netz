@@ -64,6 +64,9 @@ pub fn main(init: std.process.Init) !void {
     try apply(controller, &discovery, destination, io); // RDS -> two CDS names
     var waiting = try io.concurrent(first, .{sender});
     defer _ = waiting.cancel(io) catch {};
+    const pending_revision = destination.configurationRevision();
+    try apply(controller, &discovery, destination, io); // Initial CDS omission
+    try std.testing.expectEqual(pending_revision, destination.configurationRevision());
     try apply(controller, &discovery, destination, io); // CDS -> EDS names
     try apply(controller, &discovery, destination, io); // EDS -> endpoints
     var ready = try waiting.await(io);
@@ -72,6 +75,16 @@ pub fn main(init: std.process.Init) !void {
     var b = try beta(sender);
     defer b.deinit();
     try std.testing.expectEqualStrings("b", b.message.?.payload);
+    const route_revision = destination.configurationRevision();
+    try phase(&discovery, io, xds.rds.type_url, "phase-omit-rds");
+    try apply(controller, &discovery, destination, io);
+    try std.testing.expectEqual(route_revision, destination.configurationRevision());
+    try std.testing.expectEqualStrings("r-omitted", discovery.acceptedVersion(xds.rds.type_url).?);
+    const endpoint_revision = destination.configurationRevision();
+    try phase(&discovery, io, xds.eds.type_url, "phase-omit-eds");
+    try apply(controller, &discovery, destination, io);
+    try std.testing.expectEqual(endpoint_revision, destination.configurationRevision());
+    try std.testing.expectEqualStrings("e-omitted", discovery.acceptedVersion(xds.eds.type_url).?);
     var active = try io.concurrent(held, .{sender});
     defer _ = active.cancel(io) catch {};
     const active_until = until(io);
@@ -136,5 +149,5 @@ pub fn main(init: std.process.Init) !void {
     var terminal = try discovery.nextWithDeadline(until(io));
     defer terminal.deinit();
     try std.testing.expectEqual(grpc.Status.ok, terminal.terminal.status);
-    std.debug.print("RUNTIME_RESULT {{\"status\":\"passed\",\"automatic_chain\":true,\"pending_discovery\":true,\"cluster_isolation\":true,\"drop_isolation\":true,\"service_name_switch\":true,\"nack_preserved\":true,\"listener_deleted\":true}}\n", .{});
+    std.debug.print("RUNTIME_RESULT {{\"status\":\"passed\",\"automatic_chain\":true,\"pending_discovery\":true,\"cluster_isolation\":true,\"drop_isolation\":true,\"service_name_switch\":true,\"nack_preserved\":true,\"listener_deleted\":true,\"initial_cds_omission_pending\":true,\"rds_omission_retained\":true,\"eds_omission_retained\":true,\"partial_eds_preserved_sibling\":true}}\n", .{});
 }

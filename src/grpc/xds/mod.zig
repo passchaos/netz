@@ -16,4 +16,5 @@ test {
     _ = lds;
     _ = config_source;
     _ = runtime;
+    _ = @import("sotw_tests.zig");
 }

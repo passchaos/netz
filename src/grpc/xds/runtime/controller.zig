@@ -138,7 +138,7 @@ pub const Controller = struct {
         if (same) for (plan.entries.items, self.entries.items) |a, b| {
             if (a.identity != b.identity or a.cluster != b.cluster or a.snapshot != b.snapshot or a.cds_seen != b.cds_seen or a.eds_seen != b.eds_seen) same = false;
         };
-        const revision = if (same) destination.configurationRevision() else try self.publish(client, &plan, projection, false, destination, deadline);
+        const revision = if (same) try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline) else try self.publish(client, &plan, projection, false, destination, deadline);
         _ = try client.flushWithDeadline(deadline);
         return revision;
     }

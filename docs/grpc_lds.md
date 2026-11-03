@@ -70,7 +70,8 @@ route admission. A new dynamic name gets a rejecting snapshot until matching
 RDS arrives, with subscription allocation prepared before publication and
 desired names committed without allocation afterwards. SotW omission of the
 listener removes its cache and installs a rejecting selector. Omission of the
-requested RDS assignment similarly publishes empty routes. Late RDS data in
+requested RDS assignment preserves its cached routes, while a present empty
+route resource publishes empty routes. Late RDS data in
 inline or deleted-listener mode is validated and ACKed without publishing or
 restoring earlier routing. The last named RDS subscription remains registered
 to avoid an empty-name wildcard subscription.

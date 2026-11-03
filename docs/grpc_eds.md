@@ -29,8 +29,10 @@ projection or channel-update failure leaves the old topology and ADS version
 intact. Once publication succeeds, its version is authoritative even if the
 remaining ACK budget expires or output fails; a later flush or reconnect sends
 the accepted version. Old or cross-client ADS tokens are checked before
-publication. A requested assignment omitted from a valid SotW response publishes
-an empty target and ACKs its version, removing new RPC admission.
+publication. RDS/EDS SotW permits partial responses: omission keeps the last
+accepted assignment (or leaves initial discovery unanswered) and ACKs the new
+ADS version without republishing. A present assignment with no endpoints
+explicitly removes new RPC admission. See [SotW update semantics](grpc_xds_sotw.md).
 
 Localities retain region/zone/sub-zone identity, priority and weight. Locality
 weights omitted or zero assign no load. Per-endpoint omitted weight defaults
@@ -84,12 +86,13 @@ work. The decoder and projection do not claim those deployment behaviors.
 using the official Envoy EDS schema to encode resources and four official
 grpc-js application backends. It checks initial locality weighting, a bad
 resource NACK preserving version/topology, priority failover when primary
-endpoints become unhealthy, restored weighting and SotW deletion. Each backend
-must observe one HTTP/2 session across changes. Native adjacent tests cover
+endpoints become unhealthy, restored weighting, omission retention and explicit
+empty-assignment publication. Each backend must observe one HTTP/2 session across changes. Native adjacent tests cover
 allocator rollback, resource limits, path identity, caller snapshot release,
 config-only target retention, equal-snapshot connection reuse and alternate
 address connection competition. Evidence is in
-`docs/evidence/grpc_eds/2026-11-03.json`.
+`docs/evidence/grpc_eds/2026-11-03.json`; corrected SotW evidence is in
+`docs/evidence/grpc_xds_sotw/2026-11-03/eds.Debug.json`.
 
 The EDS matrix exposed a nested priority/weighted pick handoff problem. Pending
 requests now retain one provisional selected worker and wake it when another

@@ -57,6 +57,9 @@ pub fn apply(self: *ctl.Controller, client: *ads.Client, update: ads.Update, des
         source_owned = false;
         return revision;
     }
+    // A response may precede a newly added subscription. Only a previously
+    // accepted LDS resource can be deleted by omission.
+    if (self.listener == null) return try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
     const empty = try self.empty("_");
     defer empty.release();
     const projection = try Projection.create(self.allocator, empty, null);

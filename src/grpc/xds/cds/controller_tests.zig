@@ -26,6 +26,12 @@ test "gRPC CDS controller commits versions despite absent ACK stream and repolic
     var controller = try cds.Controller.init(gpa, .{ .cluster_name = "backend", .target = .{ .authority = "localhost" } });
     defer controller.deinit();
     try controller.subscribe(&client);
+    const initial_revision = destination.configurationRevision();
+    var initial_omission = try update(&client, cds.type_url, "initial-omission", &.{});
+    defer initial_omission.deinit();
+    try std.testing.expectError(error.AdsNotConnected, controller.applyWithDeadline(&client, initial_omission, destination, .fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(3) })));
+    try std.testing.expectEqual(initial_revision, destination.configurationRevision());
+    try std.testing.expect(controller.cluster == null);
     const first = try fixture.cluster(gpa, "backend", "service-a", "");
     defer gpa.free(first);
     var event = try update(&client, cds.type_url, "c1", &.{.{ .type_url = cds.type_url, .value = first }});
@@ -39,6 +45,27 @@ test "gRPC CDS controller commits versions despite absent ACK stream and repolic
     defer endpoints.deinit();
     try std.testing.expectError(error.AdsNotConnected, controller.applyWithDeadline(&client, endpoints, destination, .fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(3) })));
     try std.testing.expectEqual(@as(usize, 1), destination.configuredEndpointCount());
+    const accepted_revision = destination.configurationRevision();
+    const accepted_image = controller.eds_image.?;
+    const other = try eds_fixture.encode(gpa, "other", &.{.{ .region = "r", .endpoints = &.{.{ .port = 1002 }} }}, null);
+    defer gpa.free(other);
+    for (0..2) |index| {
+        var omitted = try update(&client, eds.type_url, if (index == 0) "omitted" else "unrelated", if (index == 0) &.{} else &.{.{ .type_url = eds.type_url, .value = other }});
+        defer omitted.deinit();
+        try std.testing.expectError(error.AdsNotConnected, controller.applyWithDeadline(&client, omitted, destination, .fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(3) })));
+        try std.testing.expectEqual(accepted_revision, destination.configurationRevision());
+        try std.testing.expect(controller.eds_image.?.ptr == accepted_image.ptr);
+        try std.testing.expectEqual(@as(usize, 1), destination.configuredEndpointCount());
+    }
+    const empty_assignment = try eds_fixture.encode(gpa, "service-a", &.{}, null);
+    defer gpa.free(empty_assignment);
+    var empty_event = try update(&client, eds.type_url, "explicit-empty", &.{.{ .type_url = eds.type_url, .value = empty_assignment }});
+    defer empty_event.deinit();
+    try std.testing.expectError(error.AdsNotConnected, controller.applyWithDeadline(&client, empty_event, destination, .fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(3) })));
+    try std.testing.expectEqual(@as(usize, 0), destination.configuredEndpointCount());
+    var restored = try update(&client, eds.type_url, "restored", &.{.{ .type_url = eds.type_url, .value = assignment }});
+    defer restored.deinit();
+    try std.testing.expectError(error.AdsNotConnected, controller.applyWithDeadline(&client, restored, destination, .fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(3) })));
     const changed = try fixture.cluster(gpa, "backend", "service-a", "\x30\x02\x52\x06\x0a\x04\x22\x02\x08\x05");
     defer gpa.free(changed);
     var policy = try update(&client, cds.type_url, "c2", &.{.{ .type_url = cds.type_url, .value = changed }});

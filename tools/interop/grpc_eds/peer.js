@@ -17,6 +17,8 @@ root.resolvePath = (_origin, target) => {
 root.loadSync('envoy/config/endpoint/v3/endpoint.proto', {keepCase: true}); root.resolveAll();
 const assignmentType = root.lookupType('envoy.config.endpoint.v3.ClusterLoadAssignment');
 const typeUrl = 'type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment';
+const {EndpointResourceType} = require('../grpc_locality/node_modules/@grpc/grpc-js-xds/build/src/xds-resource-type/endpoint-resource-type');
+assert.equal(EndpointResourceType.get().allResourcesRequiredInSotW(), false);
 const counts = [0,0,0,0]; const sessions = Array.from({length: 4}, () => new Set());
 const servers = []; const transcript = [];
 const unary = {path: '/fixture.Eds/Unary', requestStream: false, responseStream: false, requestSerialize: x=>x, requestDeserialize: x=>x, responseSerialize: x=>x, responseDeserialize: x=>x};
@@ -48,8 +50,12 @@ function resource(ports, reversed = false, unhealthy = false, duplicate = false)
       else if (step===4) { assert.equal(request.version_info,'v2'); assert.equal(request.response_nonce,'n2'); }
       else if (step===5) { assert(request.resource_names.includes('phase-restore')); send('v3','n3',resource(ports,true)); }
       else if (step===6) { assert.equal(request.version_info,'v3'); assert.equal(request.response_nonce,'n3'); }
-      else if (step===7) { assert(request.resource_names.includes('phase-delete')); send('v4','n4',null); }
-      else if (step===8) { assert.equal(request.version_info,'v4'); assert.equal(request.response_nonce,'n4'); call.end(); }
+      else if (step===7) { assert(request.resource_names.includes('phase-omit')); send('v4','n4',null); }
+      else if (step===8) { assert.equal(request.version_info,'v4'); assert.equal(request.response_nonce,'n4'); }
+      else if (step===9) { assert(request.resource_names.includes('phase-unrelated')); send('v5','n5',{cluster_name:'other',endpoints:[]}); }
+      else if (step===10) { assert.equal(request.version_info,'v5'); assert.equal(request.response_nonce,'n5'); }
+      else if (step===11) { assert(request.resource_names.includes('phase-empty')); send('v6','n6',{cluster_name:'backend',endpoints:[]}); }
+      else if (step===12) { assert.equal(request.version_info,'v6'); assert.equal(request.response_nonce,'n6'); call.end(); }
       else assert.fail('unexpected ADS request');
       step++;
     });
@@ -60,7 +66,7 @@ function resource(ports, reversed = false, unhealthy = false, duplicate = false)
     child.stdout.on('data',b=>output+=b);child.stderr.on('data',b=>output+=b);child.on('error',e=>{clearTimeout(timer);reject(e);});
     child.on('exit',code=>{clearTimeout(timer);if(code!==0)return reject(new Error(output));const line=output.split('\n').find(x=>x.startsWith('EDS_RESULT '));if(!line)return reject(new Error(output));resolve(JSON.parse(line.slice(11)));});
   });
-  assert.equal(step,9); const nativeCounts=result.before.map((value,index)=>value+result.fallback[index]+result.after[index]); assert.deepEqual(counts,nativeCounts);
+  assert.equal(step,13); const nativeCounts=result.before.map((value,index)=>value+result.fallback[index]+result.after[index]+result.retained[index]); assert.deepEqual(counts,nativeCounts);
   assert.deepEqual(sessions.map(value=>value.size),[1,1,1,1]);
-  console.log(JSON.stringify({...result,wire_counts:counts,sessions:sessions.map(value=>value.size),transcript,grpc_js:require('../grpc_locality/node_modules/@grpc/grpc-js/package.json').version}));
+  console.log(JSON.stringify({...result,sotw_omission_is_deletion:false,wire_counts:counts,sessions:sessions.map(value=>value.size),transcript,grpc_js:require('../grpc_locality/node_modules/@grpc/grpc-js/package.json').version}));
 })().catch(error=>{console.error(error);process.exitCode=1;}).finally(()=>servers.forEach(server=>server.forceShutdown()));

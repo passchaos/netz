@@ -30,21 +30,25 @@ pub fn apply(self: *ctl.Controller, client: *ads.Client, update: ads.Update, des
     if (names.len > 1) for (names[1..], 0..) |name, i| if (std.mem.eql(u8, name, names[i])) return error.DuplicateEdsResource;
     var plan = try Plan.create(self, null);
     defer plan.deinit();
+    var changed = false;
     for (plan.entries.items) |*item| {
         const cluster = item.cluster orelse continue;
         const selected = for (resources.items) |resource| {
             if (std.mem.eql(u8, resource.value.cluster_name, cluster.resource.value.edsName())) break resource.wire;
-        } else null;
-        const snapshot = if (selected) |bytes| blk: {
-            if (item.snapshot) |old| if (std.mem.eql(u8, old.resource.wire, bytes)) {
-                old.retain();
-                break :blk old;
-            };
-            break :blk try self.project(cluster, bytes);
-        } else try self.emptyEds(cluster);
+        } else continue;
+        // EDS SotW can carry a subset. Missing children retain their exact
+        // snapshot and discovery state; a new assignment stays pending.
+        if (item.snapshot) |old| if (std.mem.eql(u8, old.resource.wire, selected)) {
+            changed = changed or !item.eds_seen;
+            item.eds_seen = true;
+            continue;
+        };
+        const snapshot = try self.project(cluster, selected);
+        changed = true;
         if (item.snapshot) |old| old.release();
         item.snapshot = snapshot;
         item.eds_seen = true;
     }
+    if (!changed) return try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
     return self.publish(client, &plan, self.latest.?, false, destination, deadline);
 }
