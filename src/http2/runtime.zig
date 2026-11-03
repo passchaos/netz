@@ -22332,6 +22332,11 @@ pub const ServerDuplexStream = struct {
         return self.request_trailers;
     }
 
+    /// Content-decoding chain for the encoded DATA returned by `nextBody`.
+    pub fn streamContentDecoder(self: ServerDuplexStream, allocator: std.mem.Allocator, options: content_coding.StreamOptions) content_coding.Error!content_coding.StreamDecoder {
+        return (try content_coding.parseHeaders(self.headers)).streamDecoder(allocator, options);
+    }
+
     pub fn readRequestEvent(
         self: *ServerDuplexStream,
     ) Error!DuplexRequestEvent {
