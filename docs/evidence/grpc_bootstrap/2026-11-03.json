@@ -33,7 +33,7 @@
       "total": 6382,
       "failed": 5,
       "exit_code": 1,
-      "note": "Unrelated host/dependency failures under heavy sibling-repo load: http3 DATAGRAM pacing, internal.deflate error precedence from the sibling vort backend, WebSocket rejection deadline, MQTT outbound bridge expiry, and QUIC endpoint two-connection routing. Both new refresh tests passed."
+      "note": "The last completed full run predates the LRS reconnect change (same five unrelated failures: http3 DATAGRAM pacing, sibling vort deflate error precedence, WebSocket rejection deadline, MQTT outbound bridge expiry, QUIC endpoint routing). The post-change rerun was terminated by the harness under extreme host load; targeted xds, delta and package gates passed."
     }
   },
   "source_sha256": {
