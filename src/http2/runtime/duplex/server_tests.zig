@@ -135,6 +135,28 @@ test "HTTP/2 server duplex handles coexist under one frame reader" {
     try std.testing.expect(!fixture.connection.duplex_reader_active);
 }
 
+test "HTTP/2 server duplex nextBody pulls DATA and trailers" {
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var fixture = try Fixture.init(threaded.io());
+    defer fixture.deinit();
+    var encoder: http2.Hpack.Encoder = .{};
+    defer encoder.deinit(allocator);
+    try fixture.requestHeaders(&encoder, 1, "/body");
+    var stream = try fixture.connection.acceptDuplexRequest();
+    defer stream.deinit();
+    try fixture.frame(.data, 0, 1, "a");
+    try fixture.frame(.data, 0, 1, "b");
+    try std.testing.expectEqualStrings("a", (try stream.nextBody()).?);
+    try std.testing.expectEqualStrings("b", (try stream.nextBody()).?);
+    const trailers = try encoder.encodeBlockRetained(allocator, &.{.{ .name = "x-trailer", .value = "1" }});
+    try fixture.frame(.headers, 5, 1, trailers);
+    try std.testing.expect((try stream.nextBody()) == null);
+    try std.testing.expectEqual(@as(usize, 1), stream.requestTrailers().?.len);
+    try std.testing.expectEqualStrings("x-trailer", stream.requestTrailers().?[0].name);
+    try stream.finishResponseHeaders(.{ .status = 200 });
+}
+
 test "HTTP/2 server duplex pump races command wake and routes streams" {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();

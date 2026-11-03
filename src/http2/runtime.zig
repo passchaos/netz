@@ -21845,6 +21845,8 @@ pub const ServerDuplexStream = struct {
     response_expected_length: ?usize = null,
     response_written: usize = 0,
     pending_header: DuplexHeaderBlockSlot = .{},
+    current_body: ?DuplexData = null,
+    request_trailers: ?[]http2.Hpack.HeaderField = null,
     released: bool = false,
 
     pub fn deinit(self: *ServerDuplexStream) void {
@@ -21856,6 +21858,8 @@ pub const ServerDuplexStream = struct {
             }
         }
         self.pending_header.deinit(self.connection.allocator);
+        if (self.current_body) |*data| data.deinit(self.connection.allocator);
+        if (self.request_trailers) |trailers| freeHeaders(self.connection.allocator, trailers);
         self.releaseOwnership();
         freeHeaders(self.connection.allocator, self.headers);
         self.* = undefined;
@@ -22296,6 +22300,36 @@ pub const ServerDuplexStream = struct {
             self.maybeRelease();
         }
         return .{ .written = sent, .response_available = false };
+    }
+
+    /// Pull the next request-body DATA slice. The returned slice is borrowed
+    /// until the following `nextBody` call or `deinit`; trailers are retained
+    /// in `requestTrailers`. Returns null after END_STREAM and surfaces a peer
+    /// reset as `error.StreamReset`.
+    pub fn nextBody(self: *ServerDuplexStream) !?[]const u8 {
+        if (self.current_body) |*data| {
+            data.deinit(self.connection.allocator);
+            self.current_body = null;
+        }
+        while (true) {
+            const event = try self.readRequestEvent();
+            switch (event) {
+                .data => |value| {
+                    self.current_body = value;
+                    return self.current_body.?.data;
+                },
+                .trailers => |trailers| {
+                    if (self.request_trailers) |old| freeHeaders(self.connection.allocator, old);
+                    self.request_trailers = trailers;
+                },
+                .finished => return null,
+                .reset => return error.StreamReset,
+            }
+        }
+    }
+
+    pub fn requestTrailers(self: ServerDuplexStream) ?[]const http2.Hpack.HeaderField {
+        return self.request_trailers;
     }
 
     pub fn readRequestEvent(

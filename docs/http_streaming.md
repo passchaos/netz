@@ -83,7 +83,10 @@ Two stable shapes are available:
 For step-driven ownership use `Connection.acceptDuplexRequest*`; it returns a
 `netz.streaming.http2.Stream`. The handle exposes `readRequestEvent*` (`data`,
 `trailers`, `finished`, `reset`), `pollRequestEvent*`, response writes,
-`finishResponse*`, `reset`, and bounded request draining.
+`finishResponse*`, `reset`, and bounded request draining. `nextBody()` is a
+pull convenience: it returns the next DATA slice (borrowed until the following
+call), retains trailers for `requestTrailers()`, returns null at END_STREAM and
+surfaces a peer reset as `error.StreamReset`.
 
 `Connection.serveRequestBatchConcurrent` is the built-in concurrent batch
 surface. It reads `request_count` complete requests, runs each handler in its
