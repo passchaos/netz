@@ -17,6 +17,11 @@ pub const http1 = struct {
     /// after it returns.
     pub const Request = @import("../http1/runtime.zig").StreamingRequest;
     pub const RequestHead = @import("../http1/runtime.zig").StreamingRequestHead;
+    /// Pull-style body reader from `Connection.readRequestBody*`. `next`
+    /// returns the next chunk (borrowed until the following call); `takeRequest`
+    /// returns the completed metadata and trailers.
+    pub const BodyReader = @import("../http1/runtime.zig").RequestBodyReader;
+    pub const BodyHead = @import("../http1/runtime.zig").RequestBodyHead;
     pub const Connection = @import("../http1/runtime.zig").Connection;
 };
 
@@ -46,6 +51,8 @@ pub const http3 = struct {
 test "streaming aliases resolve to public runtime types" {
     _ = http1.Request;
     _ = http1.RequestHead;
+    _ = http1.BodyReader;
+    _ = http1.BodyHead;
     _ = http2.Request;
     _ = http2.RequestHead;
     _ = http2.Stream;

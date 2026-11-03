@@ -9,6 +9,7 @@ const uri_redirect = @import("runtime/redirect.zig");
 const wire = @import("../internal/wire.zig");
 const body_writer = @import("runtime/body_writer.zig");
 const body_reader = @import("runtime/body_reader.zig");
+const body_pull = @import("runtime/body_pull.zig");
 const message_framing = @import("runtime/message/framing.zig");
 const message_reuse = @import("runtime/message/reuse.zig");
 const message_head = @import("runtime/message/head.zig");
@@ -1718,6 +1719,7 @@ fn mapHttpTimedReadError(err: stream_io.TimedReadError) Error {
 const WriteScratch = runtime_write.Scratch;
 const StreamingBodyWriter = body_writer.Writer(Error);
 const StreamingBodyReader = body_reader.Reader(Error);
+const PullBodyReader = body_pull.Reader(Connection, Error);
 
 fn flattenWriteParts(
     allocator: std.mem.Allocator,
@@ -5989,6 +5991,19 @@ pub const Connection = struct {
         );
     }
 
+    /// Start a pull-style request body reader. The returned reader owns a
+    /// background producer that drives the existing push parser; callers use
+    /// `head`, `next`, and `takeRequest`. Consume each `next` slice before the
+    /// following call. `deinit` before completion cancels the producer and
+    /// closes the connection because an unread body cannot preserve keep-alive.
+    pub fn readRequestBody(self: *Connection, options: http1.ParseOptions) !*RequestBodyReader {
+        return self.readRequestBodyWithBuffer(options, 64 * 1024);
+    }
+
+    pub fn readRequestBodyWithBuffer(self: *Connection, options: http1.ParseOptions, max_buffered_bytes: usize) !*RequestBodyReader {
+        return RequestBodyReader.init(self.allocator, self, options, max_buffered_bytes);
+    }
+
     /// Read a request while delivering body bytes without aggregation.
     pub fn readRequestStreaming(
         self: *Connection,
@@ -6990,6 +7005,9 @@ pub const StreamingRequest = StreamingBodyReader.Request;
 pub const StreamingRequestHead = StreamingBodyReader.RequestHead;
 pub const StreamingResponse = StreamingBodyReader.Response;
 pub const StreamingResponseHead = StreamingBodyReader.ResponseHead;
+/// Pull-style request-body reader; see `Connection.readRequestBody`.
+pub const RequestBodyReader = PullBodyReader;
+pub const RequestBodyHead = PullBodyReader.Head;
 
 fn ignoreStreamingRequestHead(
     context: anytype,
@@ -14462,6 +14480,7 @@ test {
     _ = @import("runtime/unix_tests.zig");
     _ = @import("runtime/http09_tests.zig");
     _ = @import("runtime/body_reader_tests.zig");
+    _ = @import("runtime/body_pull_tests.zig");
     _ = @import("runtime/close_delimited_limit_tests.zig");
     _ = @import("runtime/body_writer_tests.zig");
     _ = @import("runtime/header_timeout_tests.zig");

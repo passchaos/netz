@@ -12,7 +12,37 @@ const h3 = streaming.http3;
 Every body path is bounded by the protocol `Limits.max_body_bytes`; body slices
 are borrowed only for the callback or event lifetime.
 
-## HTTP/1 push contract
+## HTTP/1
+
+Two stable shapes are available.
+
+### Pull body reader
+
+`Connection.readRequestBody*` returns `netz.streaming.http1.BodyReader`. It
+starts a background producer that drives the existing push parser and exposes:
+
+```zig
+var reader = try connection.readRequestBody(.{});
+defer reader.deinit();
+const head = try reader.head();       // method/target/headers/content-length
+while (try reader.next()) |chunk| {   // borrowed until the next call
+    try consume(chunk);
+}
+var request = try reader.takeRequest();
+defer request.deinit(allocator);      // headers, trailers and body framing
+try connection.writeResponse(.{ .body = "ok", .request_method = request.method });
+```
+
+Chunks are FIFO and the queue is bounded by `readRequestBodyWithBuffer`'s
+`max_buffered_bytes` (default 64 KiB); the producer blocks while the queue is
+full. The total body remains bounded by `Limits.max_body_bytes`. After the body
+completes, keep-alive and pipelining remain usable. `Expect: 100-continue` is
+handled by the underlying parser, and trailers are in `takeRequest`.
+`deinit` before completion cancels the producer and closes the connection
+because an unread body cannot preserve keep-alive. The returned chunk slice
+must be consumed before the next `next` call.
+
+### Push contract
 
 `Connection.readRequestStreaming*` parses the head and delivers body chunks to a
 caller callback before returning the owned request metadata:
@@ -32,9 +62,8 @@ The callback must consume the slice before returning. The connection remains
 usable for keep-alive and pipelining after the request completes; the next
 `readRequest*` call may observe a request that was already buffered. Chunk order,
 `Expect: 100-continue`, trailers, `Limits.max_body_bytes`, and cancellation at
-read boundaries are covered by `src/http1/runtime/body_reader_tests.zig` and the
-message/chunk tests. The response is written after the consume callback returns,
-so a handler can inspect the full body, trailers and request head first.
+read boundaries are covered by `src/http1/runtime/body_reader_tests.zig`,
+`src/http1/runtime/body_pull_tests.zig`, and the message/chunk tests.
 
 ## HTTP/2
 
