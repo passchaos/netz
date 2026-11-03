@@ -89,7 +89,7 @@ test "gRPC LRS integration converts channel counters into cluster reports" {
     const entries = try allocator.alloc(lrs_stats.Entry, 2);
     const categories = try allocator.alloc(lrs_stats.CategoryCount, 1);
     categories[0] = .{ .category = storage[2..10], .count = 1 };
-    entries[0] = .{ .cluster = storage[0..1], .issued = 2, .successful = 1, .error_requests = 1, .dropped = 1, .categories = categories[0..1] };
+    entries[0] = .{ .cluster = storage[0..1], .issued = 2, .successful = 1, .error_requests = 1, .dropped = 1, .in_progress = 1, .categories = categories[0..1] };
     entries[1] = .{ .cluster = storage[1..2], .issued = 1, .successful = 1, .error_requests = 0 };
     @memcpy(storage[0..1], "a");
     @memcpy(storage[1..2], "b");
@@ -107,6 +107,7 @@ test "gRPC LRS integration converts channel counters into cluster reports" {
             try std.testing.expectEqual(@as(u64, 2), cluster.localities[0].issued);
             try std.testing.expectEqual(@as(u64, 1), cluster.localities[0].successful);
             try std.testing.expectEqual(@as(u64, 1), cluster.localities[0].error_requests);
+            try std.testing.expectEqual(@as(u64, 1), cluster.localities[0].in_progress);
             try std.testing.expectEqual(@as(u64, 1), cluster.total_dropped);
             try std.testing.expectEqual(@as(usize, 1), cluster.dropped.len);
             try std.testing.expectEqualStrings("throttle", cluster.dropped[0].category);

@@ -11,6 +11,7 @@ pub const Entry = struct {
     successful: u64 = 0,
     error_requests: u64 = 0,
     dropped: u64 = 0,
+    in_progress: u64 = 0,
     categories: []CategoryCount = &.{},
 };
 
@@ -43,6 +44,7 @@ const Counter = struct {
     successful: u64 = 0,
     error_requests: u64 = 0,
     dropped: u64 = 0,
+    in_progress: u64 = 0,
     dropped_categories: std.StringHashMapUnmanaged(u64) = .empty,
 
     fn deinit(self: *Counter, gpa: std.mem.Allocator) void {
@@ -58,7 +60,7 @@ pub const Stats = struct {
     mutex: std.Io.Mutex = .init,
     map: std.StringHashMapUnmanaged(Counter) = .empty,
 
-    const Update = enum { issued_success, issued_error, issued, success, error_request, dropped };
+    const Update = enum { issued_success, issued_error, started, aborted, issued, success, error_request, dropped };
 
     fn entryLocked(self: *Stats, cluster: []const u8) ?*Counter {
         const gpa = self.allocator orelse return null;
@@ -91,9 +93,23 @@ pub const Stats = struct {
                 value.issued +%= 1;
                 value.error_requests +%= 1;
             },
+            .started => {
+                value.issued +%= 1;
+                value.in_progress +%= 1;
+            },
+            .aborted => {
+                value.issued -|= 1;
+                value.in_progress -|= 1;
+            },
             .issued => value.issued +%= 1,
-            .success => value.successful +%= 1,
-            .error_request => value.error_requests +%= 1,
+            .success => {
+                value.successful +%= 1;
+                value.in_progress -|= 1;
+            },
+            .error_request => {
+                value.error_requests +%= 1;
+                value.in_progress -|= 1;
+            },
             .dropped => value.dropped +%= 1,
         }
     }
@@ -103,6 +119,12 @@ pub const Stats = struct {
     }
     pub fn recordIssued(self: *Stats, io: std.Io, cluster: []const u8) void {
         self.update(io, cluster, .issued);
+    }
+    pub fn recordStarted(self: *Stats, io: std.Io, cluster: []const u8) void {
+        self.update(io, cluster, .started);
+    }
+    pub fn recordAborted(self: *Stats, io: std.Io, cluster: []const u8) void {
+        self.update(io, cluster, .aborted);
     }
     pub fn recordCompletion(self: *Stats, io: std.Io, cluster: []const u8, success: bool) void {
         self.update(io, cluster, if (success) .success else .error_request);
@@ -172,6 +194,7 @@ pub const Stats = struct {
                 .successful = entry.value_ptr.successful,
                 .error_requests = entry.value_ptr.error_requests,
                 .dropped = entry.value_ptr.dropped,
+                .in_progress = entry.value_ptr.in_progress,
                 .categories = categories[category_start..][0 .. category_index - category_start],
             };
             index += 1;

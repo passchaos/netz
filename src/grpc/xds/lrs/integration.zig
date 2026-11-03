@@ -38,6 +38,7 @@ pub fn build(
             .locality = locality,
             .successful = entry.successful,
             .error_requests = entry.error_requests,
+            .in_progress = entry.in_progress,
             .issued = entry.issued,
         };
         const start = dropped_index;

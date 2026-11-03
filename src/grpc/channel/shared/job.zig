@@ -30,6 +30,8 @@ pub const Job = struct {
     result: ?call.UnaryResponse = null,
     err: ?anyerror = null,
     done: std.Io.Event = .unset,
+    /// Set by the worker after the unary stream opens; completion then reports LRS stats.
+    lrs_started: bool = false,
 
     pub fn create(
         parent: *State,

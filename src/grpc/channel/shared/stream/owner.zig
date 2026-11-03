@@ -43,7 +43,7 @@ pub fn Owner(comptime State: type) type {
             call.circuit_permit = job.circuit_permit;
             job.circuit_permit = null;
             state.finish(job, null, null);
-            if (lrsCluster(worker)) |cluster| state.lrs_stats.recordIssued(state.io, cluster);
+            if (lrsCluster(worker)) |cluster| state.lrs_stats.recordStarted(state.io, cluster);
         }
         pub fn fail(worker: anytype, index: usize, err: anyerror) void {
             const state = worker.parent;

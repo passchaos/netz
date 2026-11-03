@@ -15,6 +15,7 @@ const keepalive = @import("keepalive.zig");
 const weighted_round_robin = @import("../weighted_round_robin.zig");
 const outlier_detection = @import("../outlier_detection.zig");
 const Settings = @import("worker_settings.zig").Settings;
+const lrs_stats = @import("lrs_stats.zig");
 
 pub fn Worker(comptime State: type) type {
     return struct {
@@ -474,6 +475,8 @@ pub fn Worker(comptime State: type) type {
                     if (connection.aggregate_timeout_unusable) return err;
                     continue;
                 };
+                job.lrs_started = true;
+                if (lrs_stats.clusterName(self.source.endpoint)) |cluster| self.parent.lrs_stats.recordStarted(self.parent.io, cluster);
                 const storage = job.owned_message orelse {
                     stream.deinit();
                     self.parent.finishAttempt(self, job, null, error.InvalidStreamState);

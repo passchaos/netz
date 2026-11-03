@@ -378,9 +378,9 @@ pub const State = struct {
             response.status == .ok
         else
             err == null);
-        if (lrsCluster(worker)) |cluster| {
-            self.lrs_stats.record(self.io, cluster, if (result) |response| response.status == .ok else err == null);
-        }
+        if (job.lrs_started) if (lrsCluster(worker)) |cluster| {
+            self.lrs_stats.recordCompletion(self.io, cluster, if (result) |response| response.status == .ok else err == null);
+        };
         self.finishLocked(job, result, err);
         self.wakeAllLocked();
     }
