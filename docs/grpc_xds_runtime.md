@@ -95,8 +95,10 @@ are recorded in `docs/evidence/grpc_xds_sotw/2026-11-03/runtime.Debug.json`.
 The controller requires one serialized application caller and an ADS transport
 provided by the application. The [delta ADS transport](grpc_delta_xds.md) now
 provides per-resource versions, subscribe/unsubscribe diffs, explicit removals
-and `initial_resource_versions` replay. Typed delta application into this
-controller, bootstrap, automatic control-plane retry/failover, resource expiry,
-aggregate/DNS CDS and full security, LRS, non-router filters and
+and `initial_resource_versions` replay, and this controller has matching
+`startDeltaWithDeadline`, `synchronizeDeltaWithDeadline` and
+`applyDeltaWithDeadline` entry points for typed incremental LDS/RDS/CDS/EDS
+publication. TTL expiry enforcement, bootstrap, automatic control-plane
+retry/failover, aggregate/DNS CDS and full security, LRS, non-router filters and
 capture/rewriting remain open. Unsupported resource features continue to fail
 typed validation rather than claim deployment support.

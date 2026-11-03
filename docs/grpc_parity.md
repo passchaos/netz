@@ -3441,8 +3441,13 @@ variants, `removed_resource_names` and `resource_errors` are rejected instead
 of being silently applied. See [delta xDS transport](grpc_delta_xds.md).
 `zig build interop-grpc-delta-ads` validates the envelopes and request
 transcript against the pinned official Envoy protobuf schemas; results are in
-`docs/evidence/grpc_delta_ads/2026-11-03.json`. Typed delta publication into
-the automatic controller and TTL expiry enforcement remain open.
+`docs/evidence/grpc_delta_ads/2026-11-03.json`. The automatic runtime controller
+now accepts delta updates through `startDeltaWithDeadline`,
+`synchronizeDeltaWithDeadline` and `applyDeltaWithDeadline`: typed LDS/RDS
+resources select or replace listeners and routes, CDS updates only referenced
+clusters, EDS updates only the named assignment, payload-free heartbeats reuse
+accepted images, and explicit removals resolve resources as deleted or empty.
+TTL expiry enforcement remains open.
 
 
 ## Typed EDS to reference-owned channel targets

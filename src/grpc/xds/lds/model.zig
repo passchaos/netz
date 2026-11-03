@@ -20,6 +20,7 @@ pub const Hcm = struct {
 };
 pub const Listener = struct { name: []const u8, hcm: Hcm };
 pub const Owned = struct {
+    wire: []const u8 = "",
     arena: std.heap.ArenaAllocator,
     value: Listener,
     inline_rds: ?rds.resource.Owned = null,

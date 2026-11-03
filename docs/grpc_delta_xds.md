@@ -121,9 +121,53 @@ heartbeat ACK. It requires two streams and seven requests. Results and
 source/proto hashes are in
 `docs/evidence/grpc_delta_ads/2026-11-03.json`.
 
+## Typed automatic runtime
+
+`grpc.xds.runtime.Controller` now has delta entry points alongside the SotW
+methods:
+
+```zig
+_ = try controller.startDeltaWithDeadline(&client, destination, deadline);
+try client.connectWithDeadline(deadline);
+var event = try client.nextWithDeadline(deadline);
+defer event.deinit();
+if (event == .update) {
+    _ = try controller.applyDeltaWithDeadline(
+        &client, event.update, destination, deadline,
+    );
+}
+```
+
+Start prepares the LDS listener subscription and publishes a rejecting
+selector. A listener delta selects inline or dynamic RDS and prepares the exact
+RDS name. RDS deltas create or replace the route projection. CDS deltas update
+only the clusters referenced by the current route plan; an explicit removal
+resolves the cluster as not found and clears its endpoint image. EDS deltas
+replace only the assignment named by the present resource, so sibling
+assignments and their connections are untouched; an explicit removal publishes
+an empty assignment. Payload-free heartbeats reuse the accepted listener,
+route, cluster or endpoint image and only advance the per-resource version.
+`initial_resource_versions` plus full desired-set replay after reconnect let
+the controller resume without resending every accepted payload.
+
+Every publication still goes through the existing transactional plan: typed
+resources are validated before publication, the target, target lifetime,
+service config and call selector change atomically, and the delta version is
+accepted only after the application actually published the update. A failed
+publication leaves the previous topology, caches and accepted version intact.
+The old projection can remain referenced by an in-flight selector, so its
+clusters and endpoints stay usable until the channel retires that generation.
+
+Native tests cover inline and dynamic listeners, partial EDS replacement,
+payload-free CDS/EDS/RDS heartbeats, explicit EDS/CDS/RDS/LDS removal, dynamic
+RDS restoration and the exact accepted-version map. See
+`src/grpc/xds/runtime/delta_tests.zig` and
+`docs/evidence/grpc_delta_runtime/2026-11-03.json`.
+
 ## Remaining integration
 
-This slice supplies the transport, envelope codec, subscription/version state
-and stream client. Typed delta publication into the automatic LDS/RDS/CDS/EDS
-controller and TTL expiry enforcement remain follow-up work. Typed SotW
+This slice supplies the transport, envelope codec, subscription/version state,
+stream client and typed automatic LDS/RDS/CDS/EDS publication. TTL expiry
+enforcement (including the timer that removes an expired resource), bootstrap
+parsing and automatic control-plane failover remain follow-up work. Typed SotW
 publication is unchanged.

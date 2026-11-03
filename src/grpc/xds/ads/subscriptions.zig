@@ -31,6 +31,8 @@ pub const State = struct {
     allocator: std.mem.Allocator,
     options: Options,
     entries: std.ArrayList(Entry) = .empty,
+    /// Capacity reserved by prepared entries that have not committed yet.
+    pending_new: usize = 0,
     owner_id: u64 = 0,
     epoch: u64 = 0,
     sequence: u64 = 0,
@@ -49,7 +51,7 @@ pub const State = struct {
         try codec.typeUrl(type_url);
         if (type_url.len > self.options.max_name_bytes or names.len > self.options.max_names_per_type) return error.DiscoveryLimitExceeded;
         const existing = self.find(type_url);
-        if (existing == null and self.entries.items.len >= self.options.max_types) return error.DiscoveryTypeLimit;
+        if (existing == null and self.entries.items.len + self.pending_new >= self.options.max_types) return error.DiscoveryTypeLimit;
         var total: usize = 0;
         for (names) |name| {
             try codec.validText(name);
@@ -75,8 +77,11 @@ pub const State = struct {
         if (owned_names.len > 1) for (owned_names[1..], 0..) |name, index| if (std.mem.eql(u8, name, owned_names[index])) return error.InvalidDiscoveryMessage;
         const key = try self.allocator.dupe(u8, type_url);
         errdefer self.allocator.free(key);
-        if (existing == null) try self.entries.ensureUnusedCapacity(self.allocator, 1);
-        return .{ .state = self, .value = .{ .type_url = key, .names = owned_names, .names_storage = storage, .version = &.{}, .nonce = &.{} } };
+        if (existing == null) {
+            try self.entries.ensureUnusedCapacity(self.allocator, self.pending_new + 1);
+            self.pending_new += 1;
+        }
+        return .{ .state = self, .value = .{ .type_url = key, .names = owned_names, .names_storage = storage, .version = &.{}, .nonce = &.{} }, .new_entry = existing == null };
     }
     pub fn set(self: *State, type_url: []const u8, names: []const []const u8) Error!void {
         var prepared = try self.prepare(type_url, names);
@@ -152,9 +157,13 @@ pub const State = struct {
 pub const Prepared = struct {
     state: *State,
     value: ?Entry,
+    new_entry: bool = false,
     pub fn deinit(self: *Prepared) void {
+        const owned = self.value != null;
         if (self.value) |*entry| entry.deinit(self.state.allocator);
         self.value = null;
+        if (owned and self.new_entry) self.state.pending_new -= 1;
+        self.new_entry = false;
     }
     pub fn commit(self: *Prepared) void {
         const staged = &self.value.?;
@@ -175,5 +184,7 @@ pub const Prepared = struct {
             self.state.entries.appendAssumeCapacity(staged.*);
             self.value = null;
         }
+        if (self.new_entry) self.state.pending_new -= 1;
+        self.new_entry = false;
     }
 };

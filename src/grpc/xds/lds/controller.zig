@@ -2,20 +2,27 @@
 const std = @import("std");
 const model = @import("model.zig");
 const ads = @import("../ads.zig");
+const delta = @import("../ads/delta.zig");
 const rds = @import("../rds.zig");
 const shared = @import("../../channel/shared.zig");
-pub const Error = model.Error || ads.Error || rds.Error || shared.Error || @import("../runtime/errors.zig").PublishError || error{ InvalidLdsOptions, WrongLdsResource, DuplicateLdsResource };
+pub const Error = model.Error || ads.Error || delta.Error || rds.Error || shared.Error || @import("../runtime/errors.zig").PublishError || error{ InvalidLdsOptions, WrongLdsResource, DuplicateLdsResource };
 pub const Publisher = struct {
     context: *anyopaque,
     publish_fn: *const fn (*anyopaque, *ads.Client, *@import("projection.zig").Projection, shared.SharedChannel, std.Io.Clock.Timestamp) @import("../runtime/errors.zig").PublishError!u64,
 };
-pub const Options = struct { listener_name: []const u8, authority: []const u8, max_header_bytes: usize = 65536, limits: model.Limits = .{}, publisher: ?Publisher = null };
+pub const DeltaPublisher = struct {
+    context: *anyopaque,
+    publish_fn: *const fn (*anyopaque, *delta.Client, *@import("projection.zig").Projection, shared.SharedChannel, std.Io.Clock.Timestamp) @import("../runtime/errors.zig").PublishError!u64,
+};
+pub const Options = struct { listener_name: []const u8, authority: []const u8, max_header_bytes: usize = 65536, limits: model.Limits = .{}, publisher: ?Publisher = null, delta_publisher: ?DeltaPublisher = null };
 pub const Controller = struct {
     allocator: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
     options: Options,
     listener: ?model.Owned = null,
     routes: ?*rds.Snapshot = null,
+    /// A real route payload has been accepted; an empty placeholder has not.
+    routes_accepted: bool = false,
     pub fn init(gpa: std.mem.Allocator, options: Options) Error!Controller {
         if (options.listener_name.len == 0 or options.listener_name.len > options.limits.max_text_bytes or !std.unicode.utf8ValidateSlice(options.listener_name) or options.authority.len == 0 or options.authority.len > options.limits.rds.max_text_bytes or !std.unicode.utf8ValidateSlice(options.authority) or options.max_header_bytes == 0) return error.InvalidLdsOptions;
         var self = Controller{ .allocator = gpa, .arena = .init(gpa), .options = options };
@@ -33,11 +40,18 @@ pub const Controller = struct {
     pub fn subscribe(self: *Controller, client: *ads.Client) Error!void {
         try client.setSubscription(model.type_url, &.{self.options.listener_name});
     }
+    pub fn subscribeDelta(self: *Controller, client: *delta.Client) Error!void {
+        try client.setSubscription(model.type_url, &.{self.options.listener_name});
+    }
     pub fn routeOptions(self: *const Controller) rds.Options {
         return .{ .authority = self.options.authority, .max_header_bytes = self.options.max_header_bytes };
     }
     pub fn publish(self: *Controller, client: *ads.Client, projection: *@import("projection.zig").Projection, destination: shared.SharedChannel, deadline: std.Io.Clock.Timestamp) Error!u64 {
         if (self.options.publisher) |publisher| return publisher.publish_fn(publisher.context, client, projection, destination, deadline);
+        return projection.publishWithDeadline(destination, deadline);
+    }
+    pub fn publishDelta(self: *Controller, client: *delta.Client, projection: *@import("projection.zig").Projection, destination: shared.SharedChannel, deadline: std.Io.Clock.Timestamp) Error!u64 {
+        if (self.options.delta_publisher) |publisher| return publisher.publish_fn(publisher.context, client, projection, destination, deadline);
         return projection.publishWithDeadline(destination, deadline);
     }
     pub fn empty(self: *Controller, name: []const u8) Error!*rds.Snapshot {
@@ -66,6 +80,20 @@ pub const Controller = struct {
             try @import("apply_listener.zig").apply(self, client, update, destination, deadline)
         else if (std.mem.eql(u8, url, rds.type_url))
             try @import("apply_routes.zig").apply(self, client, update, destination, deadline)
+        else
+            return error.WrongLdsResource;
+        try client.acceptAppliedUpdate(update);
+        _ = try client.flushWithDeadline(deadline);
+        return revision;
+    }
+    pub fn applyDeltaWithDeadline(self: *Controller, client: *delta.Client, update: delta.Update, destination: shared.SharedChannel, deadline: std.Io.Clock.Timestamp) Error!u64 {
+        _ = try @import("../../../internal/deadline.zig").usableAwake(client.sender.state.io, deadline);
+        try client.validateUpdate(update);
+        const url = update.response.value.type_url;
+        const revision = if (std.mem.eql(u8, url, model.type_url))
+            try @import("apply_delta.zig").applyListener(self, client, update, destination, deadline)
+        else if (std.mem.eql(u8, url, rds.type_url))
+            try @import("apply_delta.zig").applyRoutes(self, client, update, destination, deadline)
         else
             return error.WrongLdsResource;
         try client.acceptAppliedUpdate(update);

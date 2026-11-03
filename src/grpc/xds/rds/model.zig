@@ -37,6 +37,7 @@ pub const Route = struct {
 pub const VirtualHost = struct { domains: []const []const u8, routes: []const Route };
 pub const Config = struct { name: []const u8, virtual_hosts: []const VirtualHost };
 pub const Owned = struct {
+    wire: []const u8 = "",
     arena: std.heap.ArenaAllocator,
     value: Config,
     pub fn deinit(self: *Owned) void {

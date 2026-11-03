@@ -1,0 +1,50 @@
+{
+  "schema": 1,
+  "date": "2026-11-03",
+  "head": "f0e61015",
+  "gate": "typed delta LDS/RDS/CDS/EDS automatic runtime",
+  "commands": {
+    "focused": "zig build test-lib -Dtest-filter=delta runtime --summary all",
+    "delta": "zig build test-lib -Dtest-filter=delta --summary all",
+    "xds": "zig build test-lib -Dtest-filter=xds --summary all"
+  },
+  "result": {
+    "focused": {
+      "passed": 164,
+      "total": 164,
+      "failed": 0,
+      "exit_code": 0
+    },
+    "delta": {
+      "passed": 178,
+      "total": 178,
+      "failed": 0,
+      "exit_code": 0
+    },
+    "xds": {
+      "passed": 223,
+      "total": 223,
+      "failed": 0,
+      "exit_code": 0
+    }
+  },
+  "source_sha256": {
+    "src/grpc/xds/ads/delta_codec.zig": "e4b63da9ae1b956568775f93eaa494bf1931fc9d45141ab3c62a5c1aac75ad53",
+    "src/grpc/xds/ads/delta_subscriptions.zig": "29241a3916fff57033f22e5795e0f29493e6fa87453493efcddf9bf45637c5a9",
+    "src/grpc/xds/ads/delta_client.zig": "9f9367eb31c44d08aada608cb8cff5a7c305f6cb060c4acaaaeab1010b8e72c4",
+    "src/grpc/xds/ads/subscriptions.zig": "96579dcd4c0280a60140f85ab0a57be02ec7555c1d13fa67e18b5fe91d17842d",
+    "src/grpc/xds/ads/prepared_batch.zig": "61a6cd4ae3f626b2110bd709b749b4d92aefe5172c2ff04e761c9961c703f2a3",
+    "src/grpc/xds/lds/apply_delta.zig": "2edf24ad2db7e2153fd3bf79fca93fd125536c40dbcedeeb4e59e7219168614a",
+    "src/grpc/xds/lds/controller.zig": "f6a31b1dab2946a62603e319adff60bf6e322755b9c20444ab5ce3513ed5861b",
+    "src/grpc/xds/runtime/apply_delta_cds.zig": "0e061d86b5f9af5959cc2dbce6b94ef31ca597796ad6f4bb1afcc21490dc3f4a",
+    "src/grpc/xds/runtime/apply_delta_eds.zig": "cb9ba557037b2a79fe7a0009071e4292b8b91b2dc3bd15ce7afdcf5f93411de8",
+    "src/grpc/xds/runtime/controller.zig": "115f83f49e613c650ee1fafceb0a1c4f2743e4703b94088e703521f1aa065c27",
+    "src/grpc/xds/runtime/delta_tests.zig": "3d87adce8a80ea4b403d696a45b15833a4a237cdcf5aaa107c9ba45bedc11d28",
+    "src/grpc/xds/cds/decode.zig": "42f3570ccb2ccd525812479c418aae74d637818bf277a11dab129135cfbfea87",
+    "src/grpc/xds/lds/decode.zig": "3ab761ed59835577f8be2b3889e0542e69e3b6e9fe3dd612441a2d7c08a38140",
+    "src/grpc/xds/lds/model.zig": "c3931b5d1e2ac04529d8c64c43203d2937c8ac795de0071fd5d76d1fbc80fcb0",
+    "src/grpc/xds/rds/decode.zig": "965779a12917c802e8446aba2a6d3d5877ce88537de2a0e43a875713197cd1ae",
+    "src/grpc/xds/rds/model.zig": "4f1874a0a2423e3ca8b4fc1ebc57548c227386948d9d75386379160ec5bded65"
+  },
+  "notes": "Covers inline/dynamic listeners, partial EDS replacement, payload-free heartbeats, explicit EDS/CDS/RDS/LDS removal, dynamic RDS restoration, Resource/payload name mismatch rejection and per-resource accepted versions. Delta transport wire compatibility is recorded in docs/evidence/grpc_delta_ads/2026-11-03.json."
+}

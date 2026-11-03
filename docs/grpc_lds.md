@@ -99,7 +99,7 @@ expired decisions. Evidence is in
 
 [Automatic typed discovery](grpc_xds_runtime.md) now derives cluster/service
 subscriptions and publishes CDS/EDS children from these listener/RDS snapshots.
-Bootstrap,
-control-plane failover/retry, resource expiry, Delta xDS, LRS, non-router HTTP
+Typed delta listener/RDS publication is available through the same runtime.
+Bootstrap, control-plane failover/retry, resource expiry, LRS, non-router HTTP
 filters, server listener/filter-chain interpretation and full security/rewriting
 configuration remain open.

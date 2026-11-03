@@ -1,6 +1,7 @@
 //! Automatic listener/router/cluster/endpoint dependency staging for one caller.
 const std = @import("std");
 const ads = @import("../ads.zig");
+const delta = @import("../ads/delta.zig");
 const lds = @import("../lds.zig");
 const rds = @import("../rds.zig");
 const cds = @import("../cds.zig");
@@ -33,7 +34,7 @@ pub const Controller = struct {
             self.local_json = try self.arena.allocator().dupe(u8, json);
             self.local_captured = true;
         }
-        self.listener = try lds.Controller.init(gpa, .{ .listener_name = options.listener_name, .authority = self.options.target.authority, .max_header_bytes = options.max_header_bytes, .limits = options.limits.lds, .publisher = .{ .context = self, .publish_fn = publishHook } });
+        self.listener = try lds.Controller.init(gpa, .{ .listener_name = options.listener_name, .authority = self.options.target.authority, .max_header_bytes = options.max_header_bytes, .limits = options.limits.lds, .publisher = .{ .context = self, .publish_fn = publishHook }, .delta_publisher = .{ .context = self, .publish_fn = publishDeltaHook } });
         return self;
     }
     pub fn deinit(self: *Controller) void {
@@ -55,28 +56,12 @@ pub const Controller = struct {
             } else i += 1;
         }
     }
-    pub fn publish(self: *Controller, client: *ads.Client, plan: *Plan, projection: *@import("../lds/projection.zig").Projection, new_projection: bool, destination: shared.SharedChannel, deadline: std.Io.Clock.Timestamp) @import("errors.zig").PublishError!u64 {
+    fn publishPlan(self: *Controller, plan: *Plan, projection: *@import("../lds/projection.zig").Projection, new_projection: bool, destination: shared.SharedChannel, deadline: std.Io.Clock.Timestamp) @import("errors.zig").PublishError!u64 {
         self.cleanProjections();
         if (new_projection) {
             if (self.projections.items.len >= self.options.limits.max_projections) return error.XdsLimitExceeded;
             try self.projections.ensureUnusedCapacity(self.allocator, 1);
         }
-        const cds_names = try plan.cdsNames();
-        defer self.allocator.free(cds_names);
-        const eds_names = try plan.edsNames();
-        defer self.allocator.free(eds_names);
-        var requested: [2]ads.subscriptions.Subscription = undefined;
-        var count: usize = 0;
-        if (cds_names.len != 0) {
-            requested[count] = .{ .type_url = cds.type_url, .names = cds_names };
-            count += 1;
-        }
-        if (eds_names.len != 0) {
-            requested[count] = .{ .type_url = eds.type_url, .names = eds_names };
-            count += 1;
-        }
-        var subscriptions = try client.subscriptions.prepareMany(requested[0..count]);
-        defer subscriptions.deinit();
         const target = try Target.create(self.allocator, plan.entries.items, self.local_json);
         defer target.release();
         var storage = std.math.add(usize, plan.route_storage, target.arena.queryCapacity()) catch return error.XdsLimitExceeded;
@@ -86,7 +71,6 @@ pub const Controller = struct {
         }
         if (storage > self.options.limits.max_storage_bytes) return error.XdsLimitExceeded;
         const revision = try target.publish(destination, projection.descriptor(), deadline);
-        subscriptions.commit();
         const old = self.entries;
         self.entries = plan.entries;
         plan.entries = old;
@@ -98,11 +82,79 @@ pub const Controller = struct {
         self.cleanProjections();
         return revision;
     }
+    fn planNames(plan: *Plan) @import("errors.zig").PublishError![2]?[]const []const u8 {
+        const cds_names = try plan.cdsNames();
+        const eds_names = plan.edsNames() catch |err| {
+            plan.allocator.free(cds_names);
+            return err;
+        };
+        return .{ cds_names, eds_names };
+    }
+    pub fn publish(self: *Controller, client: *ads.Client, plan: *Plan, projection: *@import("../lds/projection.zig").Projection, new_projection: bool, destination: shared.SharedChannel, deadline: std.Io.Clock.Timestamp) @import("errors.zig").PublishError!u64 {
+        const names = try planNames(plan);
+        defer {
+            if (names[0]) |value| self.allocator.free(value);
+            if (names[1]) |value| self.allocator.free(value);
+        }
+        var requested: [2]ads.subscriptions.Subscription = undefined;
+        var count: usize = 0;
+        if (names[0]) |value| {
+            if (value.len != 0) {
+                requested[count] = .{ .type_url = cds.type_url, .names = value };
+                count += 1;
+            }
+        }
+        if (names[1]) |value| {
+            if (value.len != 0) {
+                requested[count] = .{ .type_url = eds.type_url, .names = value };
+                count += 1;
+            }
+        }
+        var subscriptions = try client.subscriptions.prepareMany(requested[0..count]);
+        defer subscriptions.deinit();
+        const revision = try self.publishPlan(plan, projection, new_projection, destination, deadline);
+        subscriptions.commit();
+        return revision;
+    }
+    pub fn publishDelta(self: *Controller, client: *delta.Client, plan: *Plan, projection: *@import("../lds/projection.zig").Projection, new_projection: bool, destination: shared.SharedChannel, deadline: std.Io.Clock.Timestamp) @import("errors.zig").PublishError!u64 {
+        const names = try planNames(plan);
+        defer {
+            if (names[0]) |value| self.allocator.free(value);
+            if (names[1]) |value| self.allocator.free(value);
+        }
+        var requested: [2]delta.subscriptions.Subscription = undefined;
+        var count: usize = 0;
+        if (names[0]) |value| {
+            // Delta has no wildcard: an empty desired set is a real unsubscribe
+            // and must be sent for a type that still has an active subscription.
+            if (value.len != 0 or client.subscriptions.find(cds.type_url) != null) {
+                requested[count] = .{ .type_url = cds.type_url, .names = value };
+                count += 1;
+            }
+        }
+        if (names[1]) |value| {
+            if (value.len != 0 or client.subscriptions.find(eds.type_url) != null) {
+                requested[count] = .{ .type_url = eds.type_url, .names = value };
+                count += 1;
+            }
+        }
+        var subscriptions = try client.subscriptions.prepareMany(requested[0..count]);
+        defer subscriptions.deinit();
+        const revision = try self.publishPlan(plan, projection, new_projection, destination, deadline);
+        subscriptions.commit();
+        return revision;
+    }
     fn publishHook(pointer: *anyopaque, client: *ads.Client, projection: *@import("../lds/projection.zig").Projection, destination: shared.SharedChannel, deadline: std.Io.Clock.Timestamp) @import("errors.zig").PublishError!u64 {
         const self: *Controller = @ptrCast(@alignCast(pointer));
         var plan = try Plan.create(self, projection);
         defer plan.deinit();
         return self.publish(client, &plan, projection, true, destination, deadline);
+    }
+    fn publishDeltaHook(pointer: *anyopaque, client: *delta.Client, projection: *@import("../lds/projection.zig").Projection, destination: shared.SharedChannel, deadline: std.Io.Clock.Timestamp) @import("errors.zig").PublishError!u64 {
+        const self: *Controller = @ptrCast(@alignCast(pointer));
+        var plan = try Plan.create(self, projection);
+        defer plan.deinit();
+        return self.publishDelta(client, &plan, projection, true, destination, deadline);
     }
     pub fn startWithDeadline(self: *Controller, client: *ads.Client, destination: shared.SharedChannel, deadline: std.Io.Clock.Timestamp) Error!u64 {
         _ = try @import("../../../internal/deadline.zig").usableAwake(client.sender.state.io, deadline);
@@ -152,6 +204,60 @@ pub const Controller = struct {
             try @import("apply_cds.zig").apply(self, client, update, destination, deadline)
         else if (std.mem.eql(u8, url, eds.type_url))
             try @import("apply_eds.zig").apply(self, client, update, destination, deadline)
+        else
+            return error.InvalidDiscoveryMessage;
+        try client.acceptAppliedUpdate(update);
+        _ = try client.flushWithDeadline(deadline);
+        return revision;
+    }
+    pub fn startDeltaWithDeadline(self: *Controller, client: *delta.Client, destination: shared.SharedChannel, deadline: std.Io.Clock.Timestamp) Error!u64 {
+        _ = try @import("../../../internal/deadline.zig").usableAwake(client.sender.state.io, deadline);
+        if (self.latest != null) return self.synchronizeDeltaWithDeadline(client, destination, deadline);
+        if (!self.local_captured) {
+            const config = destination.state.retainConfig();
+            defer if (config) |value| value.release();
+            if (config) |value| if (value.json) |json| {
+                if (json.len > self.options.limits.max_storage_bytes) return error.XdsLimitExceeded;
+                self.local_json = try self.arena.allocator().dupe(u8, json);
+            };
+            self.local_captured = true;
+        }
+        var subscription = try client.subscriptions.prepare(lds.type_url, &.{self.listener.?.options.listener_name});
+        defer subscription.deinit();
+        const empty = try self.listener.?.empty("_");
+        defer empty.release();
+        const projection = try @import("../lds/projection.zig").Projection.create(self.allocator, empty, null);
+        defer projection.release();
+        var plan = try Plan.create(self, projection);
+        defer plan.deinit();
+        const revision = try self.publishDelta(client, &plan, projection, true, destination, deadline);
+        subscription.commit();
+        return revision;
+    }
+    pub fn synchronizeDeltaWithDeadline(self: *Controller, client: *delta.Client, destination: shared.SharedChannel, deadline: std.Io.Clock.Timestamp) Error!u64 {
+        _ = try @import("../../../internal/deadline.zig").usableAwake(client.sender.state.io, deadline);
+        const projection = self.latest orelse return error.XdsNotStarted;
+        self.cleanProjections();
+        var plan = try Plan.create(self, null);
+        defer plan.deinit();
+        var same = plan.entries.items.len == self.entries.items.len;
+        if (same) for (plan.entries.items, self.entries.items) |a, b| {
+            if (a.identity != b.identity or a.cluster != b.cluster or a.snapshot != b.snapshot or a.cds_seen != b.cds_seen or a.eds_seen != b.eds_seen) same = false;
+        };
+        const revision = if (same) try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline) else try self.publishDelta(client, &plan, projection, false, destination, deadline);
+        _ = try client.flushWithDeadline(deadline);
+        return revision;
+    }
+    pub fn applyDeltaWithDeadline(self: *Controller, client: *delta.Client, update: delta.Update, destination: shared.SharedChannel, deadline: std.Io.Clock.Timestamp) Error!u64 {
+        if (self.latest == null) return error.XdsNotStarted;
+        _ = try @import("../../../internal/deadline.zig").usableAwake(client.sender.state.io, deadline);
+        try client.validateUpdate(update);
+        const url = update.response.value.type_url;
+        if (std.mem.eql(u8, url, lds.type_url) or std.mem.eql(u8, url, rds.type_url)) return self.listener.?.applyDeltaWithDeadline(client, update, destination, deadline);
+        const revision = if (std.mem.eql(u8, url, cds.type_url))
+            try @import("apply_delta_cds.zig").apply(self, client, update, destination, deadline)
+        else if (std.mem.eql(u8, url, eds.type_url))
+            try @import("apply_delta_eds.zig").apply(self, client, update, destination, deadline)
         else
             return error.InvalidDiscoveryMessage;
         try client.acceptAppliedUpdate(update);

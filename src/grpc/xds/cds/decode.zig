@@ -15,6 +15,7 @@ pub const Cluster = struct {
     }
 };
 pub const Owned = struct {
+    wire: []const u8 = "",
     arena: std.heap.ArenaAllocator,
     value: Cluster,
     pub fn deinit(self: *Owned) void {
@@ -68,6 +69,7 @@ pub fn decode(gpa: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!O
     errdefer result.deinit();
     const arena = result.arena.allocator();
     const image = try arena.dupe(u8, bytes);
+    result.wire = image;
     var reader: pb.Reader = .{ .bytes = image };
     var name: []const u8 = "";
     var kind: u32 = 0;

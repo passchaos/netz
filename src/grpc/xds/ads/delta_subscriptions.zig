@@ -86,6 +86,8 @@ pub const State = struct {
     allocator: std.mem.Allocator,
     options: Options,
     entries: std.ArrayList(Entry) = .empty,
+    /// Capacity reserved by prepared entries that have not committed yet.
+    pending_new: usize = 0,
     owner_id: u64 = 0,
     epoch: u64 = 0,
     sequence: u64 = 0,
@@ -205,9 +207,12 @@ pub const State = struct {
         } else {
             for (owned_names) |name| try appendPending(&staged.subscribe, self.allocator, name);
         }
-        if (existing == null) try self.entries.ensureUnusedCapacity(self.allocator, 1);
+        if (existing == null) {
+            try self.entries.ensureUnusedCapacity(self.allocator, self.pending_new + 1);
+            self.pending_new += 1;
+        }
         staged_owned = false;
-        return .{ .state = self, .value = staged };
+        return .{ .state = self, .value = staged, .new_entry = existing == null };
     }
 
     pub fn set(self: *State, type_url: []const u8, names: []const []const u8) Error!void {
@@ -223,8 +228,7 @@ pub const State = struct {
             for (requested[0..index]) |previous| if (std.mem.eql(u8, previous.type_url, item.type_url)) return error.InvalidDiscoveryMessage;
             if (self.find(item.type_url) == null) missing += 1;
         }
-        if (missing > self.options.max_types -| self.entries.items.len) return error.DiscoveryTypeLimit;
-        try self.entries.ensureUnusedCapacity(self.allocator, missing);
+        if (missing > self.options.max_types -| (self.entries.items.len + self.pending_new)) return error.DiscoveryTypeLimit;
         const items = try self.allocator.alloc(Prepared, requested.len);
         var count: usize = 0;
         errdefer {
@@ -368,9 +372,13 @@ pub const State = struct {
 pub const Prepared = struct {
     state: *State,
     value: ?Entry,
+    new_entry: bool = false,
     pub fn deinit(self: *Prepared) void {
+        const owned = self.value != null;
         if (self.value) |*entry| entry.deinit(self.state.allocator);
         self.value = null;
+        if (owned and self.new_entry) self.state.pending_new -= 1;
+        self.new_entry = false;
     }
     pub fn commit(self: *Prepared) void {
         const staged = &self.value.?;
@@ -382,6 +390,8 @@ pub const Prepared = struct {
             self.state.entries.appendAssumeCapacity(staged.*);
             self.value = null;
         }
+        if (self.new_entry) self.state.pending_new -= 1;
+        self.new_entry = false;
     }
 };
 

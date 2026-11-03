@@ -87,6 +87,7 @@ pub fn decode(gpa: std.mem.Allocator, bytes: []const u8, limits: model.Limits) m
     errdefer owned.deinit();
     const allocator = owned.arena.allocator();
     const image = try allocator.dupe(u8, bytes);
+    owned.wire = image;
     var parser = Parser{ .allocator = allocator, .arena = &owned.arena, .limits = limits };
     var reader = pb.Reader{ .bytes = image };
     var name: []const u8 = "";

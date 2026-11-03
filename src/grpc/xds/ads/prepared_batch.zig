@@ -21,8 +21,7 @@ pub fn prepare(state: *subscriptions.State, requested: []const Subscription) sub
         for (requested[0..index]) |previous| if (std.mem.eql(u8, previous.type_url, item.type_url)) return error.InvalidDiscoveryMessage;
         if (state.find(item.type_url) == null) missing += 1;
     }
-    if (missing > state.options.max_types -| state.entries.items.len) return error.DiscoveryTypeLimit;
-    try state.entries.ensureUnusedCapacity(state.allocator, missing);
+    if (missing > state.options.max_types -| (state.entries.items.len + state.pending_new)) return error.DiscoveryTypeLimit;
     const items = try state.allocator.alloc(subscriptions.Prepared, requested.len);
     var count: usize = 0;
     errdefer {
