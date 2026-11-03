@@ -251,11 +251,28 @@ fn validationContext(bytes: []const u8, limits: Limits) Error![]const u8 {
     return trusted_ca orelse error.InvalidCdsResource;
 }
 
+fn tlsParameters(bytes: []const u8) Error!tls_material.VersionPolicy {
+    var minimum: ?u32 = null;
+    var maximum: ?u32 = null;
+    var reader: pb.Reader = .{ .bytes = bytes };
+    while (try reader.next()) |field| {
+        if (field.number == 1 and field.wire_type == 0) minimum = try pb.u32Value(&reader) else if (field.number == 2 and field.wire_type == 0) maximum = try pb.u32Value(&reader) else if ((field.number == 3 or field.number == 4) and field.wire_type == 2) return error.UnsupportedCdsFeature else try reader.skip(field);
+    }
+    const min = minimum orelse 0;
+    const max = maximum orelse 3;
+    if (min > max or min > 3 or max > 3) return error.InvalidCdsResource;
+    if (max <= 2) return .tls12_only;
+    if (min >= 3) return .tls13_only;
+    return .tls12_and_tls13;
+}
+
 fn commonTlsContext(bytes: []const u8, limits: Limits) Error!tls_material.Config {
     var result: tls_material.Config = .{};
     var reader: pb.Reader = .{ .bytes = bytes };
     while (try reader.next()) |field| {
-        if (field.number == 1 and field.wire_type == 2) return error.UnsupportedCdsFeature else if (field.number == 2 and field.wire_type == 2) {
+        if (field.number == 1 and field.wire_type == 2) {
+            result.version_policy = try tlsParameters(try reader.bytesValue());
+        } else if (field.number == 2 and field.wire_type == 2) {
             if (result.certificate_chain.len != 0) return error.UnsupportedCdsFeature;
             const certificate = try tlsCertificate(try reader.bytesValue(), limits);
             result.certificate_chain = certificate.chain;
@@ -278,6 +295,7 @@ fn upstreamTlsContext(bytes: []const u8, limits: Limits) Error!tls_material.Conf
             result.trusted_ca = common.trusted_ca;
             result.certificate_chain = common.certificate_chain;
             result.private_key = common.private_key;
+            result.version_policy = common.version_policy;
         } else if (field.number == 2 and field.wire_type == 2) {
             const value = try pb.text(&reader, 255);
             result.server_name = value;

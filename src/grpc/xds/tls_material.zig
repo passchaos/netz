@@ -1,13 +1,17 @@
 //! Inline xDS cluster TLS material shared by EDS, STATIC and DNS projections.
 const std = @import("std");
 const http2 = @import("../../http2/mod.zig");
+const tls_stream = @import("../../tls/mod.zig").stream;
 const server_identity_file = @import("../../tls/server_identity_file.zig");
+
+pub const VersionPolicy = tls_stream.VersionPolicy;
 
 pub const Config = struct {
     server_name: []const u8 = "",
     trusted_ca: []const u8 = "",
     certificate_chain: []const u8 = "",
     private_key: []const u8 = "",
+    version_policy: ?tls_stream.VersionPolicy = null,
 };
 
 pub const Error = std.mem.Allocator.Error || server_identity_file.Error || error{
@@ -23,13 +27,14 @@ pub const Material = struct {
     lock: std.Io.RwLock = .init,
     identity: ?server_identity_file.Identity = null,
     server_name: []const u8 = "",
+    version_policy: ?tls_stream.VersionPolicy = null,
 
     pub fn create(gpa: std.mem.Allocator, io: std.Io, config: Config) Error!*Material {
         if ((config.certificate_chain.len == 0) != (config.private_key.len == 0)) {
             return if (config.certificate_chain.len == 0) error.MissingCertificate else error.MissingPrivateKey;
         }
         const self = try gpa.create(Material);
-        self.* = .{ .allocator = gpa, .server_name = config.server_name };
+        self.* = .{ .allocator = gpa, .server_name = config.server_name, .version_policy = config.version_policy };
         errdefer self.deinit();
         if (config.trusted_ca.len != 0) {
             addCerts(gpa, io, &self.bundle, config.trusted_ca) catch return error.InvalidTlsMaterial;
@@ -54,6 +59,7 @@ pub const Material = struct {
     }
     pub fn options(self: *Material) http2.runtime.TlsConnectOptions {
         var result: http2.runtime.TlsConnectOptions = .{};
+        if (self.version_policy) |policy| result.protocol_policy = policy;
         if (self.bundle_loaded) result.ca_bundle = .{ .bundle = &self.bundle, .lock = &self.lock };
         if (self.identity) |*identity| {
             const value = identity.serverIdentity();

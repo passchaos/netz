@@ -86,6 +86,9 @@ pub fn staticClusterTls(gpa: std.mem.Allocator, name: []const u8, host: []const 
     return builder.data.toOwnedSlice(gpa);
 }
 pub fn upstreamTls(gpa: std.mem.Allocator, trusted_ca: []const u8, sni: []const u8) ![]u8 {
+    return upstreamTlsWithVersions(gpa, trusted_ca, sni, null);
+}
+pub fn upstreamTlsWithVersions(gpa: std.mem.Allocator, trusted_ca: []const u8, sni: []const u8, versions: ?struct { min: u32, max: u32 }) ![]u8 {
     var trusted = Builder{ .allocator = gpa };
     defer trusted.deinit();
     try trusted.bytes(2, trusted_ca);
@@ -94,6 +97,13 @@ pub fn upstreamTls(gpa: std.mem.Allocator, trusted_ca: []const u8, sni: []const 
     try validation.bytes(1, trusted.data.items);
     var common = Builder{ .allocator = gpa };
     defer common.deinit();
+    if (versions) |value| {
+        var params = Builder{ .allocator = gpa };
+        defer params.deinit();
+        try params.number(1, value.min);
+        try params.number(2, value.max);
+        try common.bytes(1, params.data.items);
+    }
     try common.bytes(3, validation.data.items);
     var context = Builder{ .allocator = gpa };
     defer context.deinit();
