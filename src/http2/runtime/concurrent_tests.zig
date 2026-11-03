@@ -4,7 +4,7 @@ const runtime = @import("../runtime.zig");
 
 const net = std.Io.net;
 
-test "HTTP/2 continuous concurrent serving streams bodies and responses" {
+test "HTTP/2 continuous concurrent serving multiplexes streams on one connection" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
     defer threaded.deinit();
@@ -22,6 +22,7 @@ test "HTTP/2 continuous concurrent serving streams bodies and responses" {
         lengths: [2]usize = .{ 0, 0 },
         bodies: [2][64]u8 = undefined,
         io: std.Io,
+        first_written: std.Io.Event = .unset,
     };
     var context = Context{ .io = io };
 
@@ -45,9 +46,13 @@ test "HTTP/2 continuous concurrent serving streams bodies and responses" {
                 if (index == 0) "alpha-request" else "beta-request",
                 ctx.bodies[index][0..ctx.lengths[index]],
             );
+            // Serialize response order so the non-multiplexed test client can
+            // read stream 1 before stream 3; handlers still run concurrently.
+            if (index == 1) try ctx.first_written.wait(ctx.io);
             try stream.startResponse(.{ .status = 200 });
             try stream.writeData("response-", false);
             try stream.writeData(if (index == 0) "first" else "second", true);
+            if (index == 0) ctx.first_written.set(ctx.io);
         }
     };
 
@@ -70,79 +75,66 @@ test "HTTP/2 continuous concurrent serving streams bodies and responses" {
                 Context,
                 self.context,
                 Handler.run,
-                .{ .max_streams = 1, .shutdown = self.shutdown },
+                .{ .max_streams = 2, .shutdown = self.shutdown },
             );
-            try std.testing.expectEqual(@as(usize, 1), summary.accepted);
-            try std.testing.expectEqual(@as(usize, 1), summary.completed);
+            try std.testing.expectEqual(@as(usize, 2), summary.accepted);
+            try std.testing.expectEqual(@as(usize, 2), summary.completed);
             try std.testing.expectEqual(@as(usize, 0), summary.failed);
         }
     };
 
     var shutdown: std.Io.Event = .unset;
-    var first_server = ServerTask{ .server = &server, .context = &context, .shutdown = &shutdown };
-    var second_server = ServerTask{ .server = &server, .context = &context, .shutdown = &shutdown };
-    const first_server_thread = try std.Thread.spawn(.{}, ServerTask.run, .{&first_server});
-    const second_server_thread = try std.Thread.spawn(.{}, ServerTask.run, .{&second_server});
-    var servers_joined = false;
-    defer if (!servers_joined) {
+    var server_task = ServerTask{ .server = &server, .context = &context, .shutdown = &shutdown };
+    const thread = try std.Thread.spawn(.{}, ServerTask.run, .{&server_task});
+    var joined = false;
+    defer if (!joined) {
         shutdown.set(io);
-        first_server_thread.join();
-        second_server_thread.join();
+        thread.join();
     };
 
-    const ClientTask = struct {
-        io: std.Io,
-        server: *runtime.Server,
-        path: []const u8,
-        body: []const u8,
-        err: ?anyerror = null,
-
-        fn run(self: *@This()) void {
-            self.runFallible() catch |err| {
-                self.err = err;
-            };
-        }
-
-        fn runFallible(self: *@This()) !void {
-            var client = try runtime.Client.connectWithTimeout(
-                allocator,
-                self.io,
-                self.server.address(),
-                .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
-                .fromSeconds(3),
-            );
-            defer client.close();
-            var response = try client.requestWithTimeout(.{
-                .method = "POST",
-                .path = self.path,
-                .authority = "localhost",
-                .body = self.body,
-            }, .fromSeconds(3));
-            defer response.deinit(allocator);
-            try std.testing.expectEqual(@as(u16, 200), response.status);
-            const expected = if (std.mem.eql(u8, self.path, "/first"))
-                "response-first"
-            else
-                "response-second";
-            try std.testing.expectEqualStrings(expected, response.body);
-        }
-    };
-
-    var first_client = ClientTask{ .io = io, .server = &server, .path = "/first", .body = "alpha-request" };
-    var second_client = ClientTask{ .io = io, .server = &server, .path = "/second", .body = "beta-request" };
-    const first_client_thread = try std.Thread.spawn(.{}, ClientTask.run, .{&first_client});
-    const second_client_thread = try std.Thread.spawn(.{}, ClientTask.run, .{&second_client});
-    first_client_thread.join();
-    second_client_thread.join();
-    if (first_client.err) |err| return err;
-    if (second_client.err) |err| return err;
+    var client = try runtime.Client.connectWithTimeout(
+        allocator,
+        io,
+        server.address(),
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+        .fromSeconds(3),
+    );
+    defer client.close();
+    const first = try runtime.testing.sendCompleteRequest(&client, .{
+        .method = "POST",
+        .path = "/first",
+        .authority = "localhost",
+        .body = "alpha-request",
+    });
+    const second = try runtime.testing.sendCompleteRequest(&client, .{
+        .method = "POST",
+        .path = "/second",
+        .authority = "localhost",
+        .body = "beta-request",
+    });
+    var first_response = try client.readResponseWithTimeout(
+        first.stream_id,
+        first.request_method,
+        first.extended_connect,
+        .fromSeconds(3),
+    );
+    defer first_response.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 200), first_response.status);
+    try std.testing.expectEqualStrings("response-first", first_response.body);
+    var second_response = try client.readResponseWithTimeout(
+        second.stream_id,
+        second.request_method,
+        second.extended_connect,
+        .fromSeconds(3),
+    );
+    defer second_response.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 200), second_response.status);
+    try std.testing.expectEqualStrings("response-second", second_response.body);
 
     shutdown.set(io);
-    first_server_thread.join();
-    second_server_thread.join();
-    servers_joined = true;
-    if (first_server.err) |err| return err;
-    if (second_server.err) |err| return err;
+    thread.join();
+    joined = true;
+    if (server_task.err) |err| return err;
     try std.testing.expect(context.seen[0] and context.seen[1]);
 }
 
