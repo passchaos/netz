@@ -122,7 +122,9 @@ pub const Controller = struct {
         if (self.listener.?.value.hcm.route_source == .rds) {
             const name = self.listener.?.value.hcm.route_source.rds;
             if (client.subscriptions.find(rds.type_url) != null) try client.subscriptions.forget(rds.type_url, name);
-            subscription = try client.subscriptions.prepare(rds.type_url, &.{});
+            if (client.subscriptions.find(rds.type_url) != null) {
+                subscription = try client.subscriptions.prepare(rds.type_url, &.{});
+            }
         }
         const rejecting = try self.empty("_");
         defer rejecting.release();

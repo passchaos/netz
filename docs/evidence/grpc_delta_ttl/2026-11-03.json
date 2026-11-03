@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "date": "2026-11-03",
-  "head": "fca302c2",
+  "head": "8326d773",
   "gate": "delta Resource TTL expiry, heartbeat refresh and version forgetting",
   "commands": {
     "delta": "zig build test-lib -Dtest-filter=delta --summary all",
@@ -24,7 +24,7 @@
   "source_sha256": {
     "src/grpc/xds/ads/delta_codec.zig": "74b9d77c6f4ff42aa7a9ee8d0d429be8e8a4f553482c0b14d9f89a3deec2116a",
     "src/grpc/xds/ads/delta_subscriptions.zig": "b6fa90beb300987e9c4f9c7443b99d80cd9db65770a9c29282e6150b37210d28",
-    "src/grpc/xds/lds/controller.zig": "5b22536b74009b5ac7a0e9ae609e9134ab7a0074659c5e973435de19750259df",
+    "src/grpc/xds/lds/controller.zig": "3f5a967491fef0136db30f39eae5a185610048382ac9891bd7899ea28171df1d",
     "src/grpc/xds/lds/apply_delta.zig": "d9058244bc27a042d3a2962a88bc518d37c6f219ff03d8002dabb83909d3291b",
     "src/grpc/xds/runtime/controller.zig": "188bc2299d791066776c33776663d087ca48c6d48f91685ef1880ea37e39ba6c",
     "src/grpc/xds/runtime/entry.zig": "a71cbd008510ee9b4b66917eb9293eb2f2548bebeffd2cfa09c9b2da6ea2fe81",

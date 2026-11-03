@@ -190,6 +190,11 @@ returns the earliest outstanding deadline, and
 - an expired EDS assignment publishes an empty assignment, leaving sibling
   assignments untouched.
 
+An expired CDS cluster releases its EDS image with the cluster; restoring the
+cluster therefore requires a fresh EDS answer before admission resumes. The
+EDS subscription name remains registered, so a reconnect or a later full
+assignment can restore the endpoints.
+
 Expired resources are also removed from the accepted `name -> version` map, so
 a reconnect does not advertise a payload the application no longer has. The
 desired subscription name remains registered; a later full resource (or a
