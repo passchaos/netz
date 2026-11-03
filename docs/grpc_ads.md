@@ -96,5 +96,5 @@ subscribe/unsubscribe diffs, explicit removals, TTL/heartbeat resources,
 Typed delta publication and resource-expiry enforcement are implemented.
 [The bootstrap parser and control-plane failover](grpc_bootstrap.md)
 select and retry `http://` xDS servers while preserving accepted versions.
-certificate providers and automatic refresh scheduling, authority-specific control planes and automatic LRS call-stat aggregation remain
+certificate providers and automatic refresh scheduling, authority-specific control planes and streaming LRS call-stat aggregation, periodic reporting remain
 required follow-up work for full xDS integration.

@@ -1,8 +1,8 @@
 {
   "schema": 1,
   "date": "2026-11-03",
-  "head": "5b1cc945",
-  "gate": "Load Reporting Service envelopes and duplex reporting",
+  "head": "cc2d87aa",
+  "gate": "Load Reporting Service envelopes, duplex reporting and channel counters",
   "commands": {
     "xds": "zig build test-lib -Dtest-filter=xds --summary all",
     "delta": "zig build test-lib -Dtest-filter=delta --summary all",
@@ -11,8 +11,8 @@
   },
   "result": {
     "xds": {
-      "passed": 244,
-      "total": 244,
+      "passed": 245,
+      "total": 245,
       "failed": 0,
       "exit_code": 0
     },
@@ -33,11 +33,14 @@
     }
   },
   "source_sha256": {
-    "src/grpc/xds/lrs.zig": "99c03334c9223dfd643155804fafbb6e28d2c49fabd692ec25f8d50e6096984b",
+    "src/grpc/xds/lrs.zig": "b2d4b5745aaa91fa1435a8bf314455c6caa656e49efc4743c31d0ac337efb6c3",
     "src/grpc/xds/lrs/codec.zig": "f405ff4c162793f39138bf6234f6533c9db30d5cd75d4a5356723b70feedec99",
     "src/grpc/xds/lrs/client.zig": "5cefd6b72c73f146442d6138770fa0a85b6528c53ba0bb92cf85570f8b9901f3",
-    "src/grpc/xds/lrs/tests.zig": "1f89b3894b84c35f7793abb69c6d1a24650777856f5668069b88fc6590c32ae7",
-    "src/grpc/xds/lrs/transport_tests.zig": "af4f6ee7e4f1f61cf224d171763f9118a645dbfad9c7fb04d5d6af9f0faf9aae"
+    "src/grpc/xds/lrs/integration.zig": "e726d40a7cf70f488dd0a7115e866df93db0dbabb88589e8513de8842550cc08",
+    "src/grpc/xds/lrs/tests.zig": "af750ba34c5882e8b25b9e7d12d00648280a6a9e760372139550b14de6106571",
+    "src/grpc/xds/lrs/transport_tests.zig": "af4f6ee7e4f1f61cf224d171763f9118a645dbfad9c7fb04d5d6af9f0faf9aae",
+    "src/grpc/channel/shared/lrs_stats.zig": "9c0ec4807594e4c1392595b7bc1501fb12b8d2a15e0d1136feac1ff654133fe7",
+    "src/grpc/channel/shared/lrs_stats_tests.zig": "dd4bfc744fb606feff863e48a5d58e801605610605f5b1482b1d5a8bcf7c8553"
   },
-  "notes": "Native tests cover request/response round trips, locality counters, dropped categories, intervals, malformed/duplicate/over-limit input, UTF-8 rejection, a real loopback duplex report/reconnect stream, and official-schema interop evidence in docs/evidence/grpc_lrs/2026-11-03.json. Automatic SharedChannel call-stat aggregation remains open."
+  "notes": "Native tests cover envelopes, locality/dropped counters, malformed/duplicate/over-limit input, a real loopback report/reconnect stream, opt-in per-cluster unary channel counters derived from cluster hierarchical paths, and conversion into LRS cluster reports. Streaming counters, circuit/drop attribution and a periodic scheduler remain open. Official-schema interop evidence is docs/evidence/grpc_lrs/2026-11-03.json."
 }

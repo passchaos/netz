@@ -15,6 +15,7 @@ pub const Error = state_module.Error;
 pub const Options = state_module.Options;
 pub const KeepAliveOptions = @import("shared/keepalive.zig").Options;
 pub const KeepAliveStats = @import("shared/keepalive.zig").Stats;
+pub const LrsStatsSnapshot = @import("shared/lrs_stats.zig").Snapshot;
 pub const HedgingStats = state_module.State.HedgingStats;
 pub const OrcaOobOptions = @import("shared/orca/config.zig").Options;
 pub const OrcaOobWatch = state_module.orca_tracker.Watch;
@@ -124,6 +125,10 @@ pub const SharedChannel = struct {
     }
     pub fn dropStats(self: SharedChannel) channel.drop_policy.Stats {
         return self.state.drop_counters.snapshot();
+    }
+    /// Per-cluster unary counters for xDS LRS reporting.
+    pub fn lrsStatsSnapshot(self: SharedChannel, allocator: std.mem.Allocator) std.mem.Allocator.Error!LrsStatsSnapshot {
+        return self.state.lrs_stats.snapshot(allocator, self.state.io);
     }
     pub fn clusterCircuitStats(self: SharedChannel, cluster: ?[]const u8) Error!channel.circuit_breaker.Stats {
         self.state.lock();
@@ -276,4 +281,5 @@ test {
     _ = @import("shared/outlier_detection_tests.zig");
     _ = @import("shared/weighted_round_robin_tests.zig");
     _ = @import("shared/hedging_tests.zig");
+    _ = @import("shared/lrs_stats_tests.zig");
 }

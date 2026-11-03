@@ -56,11 +56,29 @@ from the response interval. There is no ACK/NACK protocol in LRS.
 
 ## Verification
 
+## Channel counters
+
+`SharedChannel.Options.enable_lrs_stats = true` opts into per-cluster unary
+counters. Each completed unary attempt derives the cluster from the selected
+endpoint's hierarchical path (`cluster:<name>`) and increments issued plus
+successful or error-request counters under a dedicated mutex. Disabled channels
+skip the lock entirely, so ordinary channels keep their existing hot path.
+
+`SharedChannel.lrsStatsSnapshot(allocator)` returns owned entries;
+`lrs.integration.build` converts them into `ClusterStats` with the caller's
+locality and reporting interval. Cluster names in the report borrow the
+snapshot storage, so keep the snapshot alive until the report is encoded.
+Only unary attempts are counted; streaming completions, circuit/drop
+rejections and endpoint-granularity stats remain follow-up work.
+
+## Verification
+
 Native tests cover request/response round trips, locality counters, dropped
 categories, intervals, malformed/duplicate/over-limit input, UTF-8 rejection,
-and a real loopback duplex session that observes the node, a response, a
-report with exact counters, a second `send_all_clusters` response, a terminal,
-and node replay on a replacement stream. See
+per-cluster unary counter aggregation and integration conversion, and a real
+loopback duplex session that observes the node, a response, a report with exact
+counters, a second `send_all_clusters` response, a terminal, and node replay on
+a replacement stream. See
 `docs/evidence/grpc_lrs/native-2026-11-03.json`.
 
 `zig build interop-grpc-lrs` runs the client against an independent Node peer
@@ -72,7 +90,8 @@ cluster/service names, dropped requests and interval, then a second
 
 ## Remaining integration
 
-Automatic per-cluster call-stat aggregation from SharedChannel completions,
+Streaming call-stat aggregation, circuit/drop rejection attribution,
 endpoint-granularity stats, a periodic report scheduler and ControlPlane
-failover/reload composition remain follow-up work. The transport, envelopes and
+failover/reload composition remain follow-up work. Unary channel counters,
+envelopes and caller-driven reporting are complete.
 caller-driven reporting path are complete.

@@ -17,6 +17,7 @@ const orca = @import("../../orca.zig");
 const orca_oob = @import("../../orca/oob.zig");
 const orca_config = @import("orca/config.zig");
 pub const orca_tracker = @import("orca/tracker.zig");
+const lrs_stats = @import("lrs_stats.zig");
 const Job = @import("job.zig").Job;
 const call_selector = @import("../call_selector.zig");
 var next_channel_id: std.atomic.Value(u64) = .init(1);
@@ -29,6 +30,7 @@ pub const State = struct {
     options: Options,
     refs: std.atomic.Value(usize) = .init(1),
     mutex: std.Io.Mutex = .init,
+    lrs_stats: lrs_stats.Stats = .{},
     group: std.Io.Group = .init,
     workers: std.ArrayList(*Worker) = .empty,
     canonical_endpoints: []channel.Endpoint = &.{},
@@ -150,6 +152,7 @@ pub const State = struct {
         if (self.target_lifetime) |owner| owner.release();
         self.config.deinit();
         self.drop.deinit();
+        self.lrs_stats.deinit();
         if (self.circuit) |*policy| policy.deinit();
         if (self.health_service) |name| self.allocator.free(name);
         if (self.orca_oob) |*config| config.deinit();
@@ -358,6 +361,12 @@ pub const State = struct {
         self.finishLocked(job, result, err);
         self.wakeAllLocked();
     }
+    fn lrsCluster(worker: *Worker) ?[]const u8 {
+        for (worker.source.endpoint.hierarchicalPath()) |part| {
+            if (std.mem.startsWith(u8, part, "cluster:") and part.len > "cluster:".len) return part["cluster:".len..];
+        }
+        return null;
+    }
     pub fn finishAttempt(
         self: *State,
         worker: *Worker,
@@ -372,6 +381,9 @@ pub const State = struct {
             response.status == .ok
         else
             err == null);
+        if (lrsCluster(worker)) |cluster| {
+            self.lrs_stats.record(self.io, cluster, if (result) |response| response.status == .ok else err == null);
+        }
         self.finishLocked(job, result, err);
         self.wakeAllLocked();
     }

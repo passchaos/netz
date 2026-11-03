@@ -115,6 +115,7 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
     state.* = .{
         .allocator = allocator,
         .io = io,
+        .lrs_stats = .{ .allocator = if (options.enable_lrs_stats) allocator else null },
         .drop = drop,
         .circuit = circuit,
         .options = retained,

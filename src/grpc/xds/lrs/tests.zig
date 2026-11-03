@@ -1,5 +1,8 @@
 const std = @import("std");
 const codec = @import("codec.zig");
+const integration = @import("integration.zig");
+const channel = @import("../../channel/shared.zig");
+const lrs_stats = @import("../../channel/shared/lrs_stats.zig");
 const ads = @import("../ads.zig");
 const allocator = std.testing.allocator;
 
@@ -79,4 +82,31 @@ test "gRPC LRS envelopes reject malformed, duplicate and over-limit input" {
 
     // Negative protobuf int64 durations encode as a huge varint.
     try std.testing.expectError(error.InvalidLoadReport, codec.decodeResponse(allocator, "\x12\x0b\x08\xff\xff\xff\xff\xff\xff\xff\xff\xff\x01", .{}));
+}
+
+test "gRPC LRS integration converts channel counters into cluster reports" {
+    const storage = try allocator.alloc(u8, 2);
+    const entries = try allocator.alloc(lrs_stats.Entry, 2);
+    entries[0] = .{ .cluster = storage[0..1], .issued = 2, .successful = 1, .error_requests = 1 };
+    entries[1] = .{ .cluster = storage[1..2], .issued = 1, .successful = 1, .error_requests = 0 };
+    @memcpy(storage[0..1], "a");
+    @memcpy(storage[1..2], "b");
+    var snapshot: channel.LrsStatsSnapshot = .{ .allocator = allocator, .storage = storage, .entries = entries };
+    defer snapshot.deinit();
+    var reports = try integration.build(allocator, &snapshot, .{ .region = "r", .zone = "z" }, 100 * std.time.ns_per_ms);
+    defer reports.deinit();
+    try std.testing.expectEqual(@as(usize, 2), reports.clusters.len);
+    for (reports.clusters) |cluster| {
+        try std.testing.expectEqual(@as(usize, 1), cluster.localities.len);
+        try std.testing.expectEqualStrings("r", cluster.localities[0].locality.region);
+        try std.testing.expectEqual(@as(u64, 100 * std.time.ns_per_ms), cluster.interval_ns);
+        if (std.mem.eql(u8, cluster.name, "a")) {
+            try std.testing.expectEqual(@as(u64, 2), cluster.localities[0].issued);
+            try std.testing.expectEqual(@as(u64, 1), cluster.localities[0].successful);
+            try std.testing.expectEqual(@as(u64, 1), cluster.localities[0].error_requests);
+        } else {
+            try std.testing.expectEqualStrings("b", cluster.name);
+            try std.testing.expectEqual(@as(u64, 1), cluster.localities[0].successful);
+        }
+    }
 }

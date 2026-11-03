@@ -8,6 +8,8 @@ pub const Options = struct {
     channel: channel.Options = .{},
     max_queued_calls: usize = 256,
     max_active_calls_per_endpoint: usize = 32,
+    /// Opt-in per-cluster unary counters for xDS LRS reporting.
+    enable_lrs_stats: bool = false,
     max_write_bytes_per_turn: usize = 64 * 1024,
     operation_timeout: std.Io.Duration = .fromSeconds(20),
     max_buffered_stream_bytes: usize = 16 * 1024 * 1024,
