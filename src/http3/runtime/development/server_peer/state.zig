@@ -240,8 +240,15 @@ pub const Set = struct {
     peers: std.ArrayList(*Peer) = .empty,
     max_stream_buffer: usize,
     max_streams: usize,
+    max_body_bytes: usize = std.math.maxInt(usize),
     last_peer_index: ?usize = null,
     last_error: ?ErrorContext = null,
+
+    /// Apply a cumulative body budget to existing peers and future ones.
+    pub fn setMaxBodyBytes(self: *Set, limit: usize) void {
+        self.max_body_bytes = limit;
+        for (self.peers.items) |peer| peer.streaming_requests.setMaxBodyBytes(limit);
+    }
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -313,6 +320,7 @@ pub const Set = struct {
             self.max_stream_buffer,
             self.max_streams,
         );
+        peer.streaming_requests.setMaxBodyBytes(self.max_body_bytes);
         errdefer peer.deinit(self.allocator);
         try self.peers.append(self.allocator, peer);
         return peer;

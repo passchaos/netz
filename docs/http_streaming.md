@@ -116,9 +116,15 @@ Concurrency contract:
 
 `Server.receiveRequestEvent*` returns a multiplexed `RequestEvent` carrying
 `from` and `stream_id`. Its `message.value` is a DATA/trailers/FIN event; `reset`
-identifies the cancelled stream. Applications poll all streams from one loop and
-send responses with `sendResponseBody*`, `finishRequest`, or the full
-`sendResponse*` forms.
+identifies the cancelled stream. `receiveRequestEventFor*` polls one named
+stream, and `readRequestData`/`skipRequestData` pull its DATA into a caller
+buffer. Applications poll all streams from one loop and send responses with
+`sendResponseBody*`, `finishRequest`, or the full `sendResponse*` forms.
+Cumulative request-body bytes are bounded by `Limits.max_body_bytes` (or
+`HandshakeSessionOptions.max_body_bytes` for protected sessions); a declared
+Content-Length is checked as well, and exceeding the budget surfaces
+`error.PayloadTooLarge` at the next read boundary. Per-stream buffering remains
+bounded by `max_stream_buffer`.
 
 `Server.serveConcurrent` runs a fixed count of handlers concurrently and
 serializes response submission. Its `netz.streaming.http3.ConcurrentResult`

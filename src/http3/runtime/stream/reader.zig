@@ -64,6 +64,10 @@ pub const Reader = struct {
     current_header_consumed: bool = false,
     current_payload_read: usize = 0,
     body_read: usize = 0,
+    /// Cumulative DATA budget for this message stream. The runtime sets this
+    /// from `Limits.max_body_bytes`; the default keeps the standalone reader
+    /// usable without a policy.
+    max_body_bytes: usize = std.math.maxInt(usize),
     content_length: ?usize = null,
     body_allowed: bool = true,
     final_observed: bool = false,
@@ -442,6 +446,7 @@ pub const Reader = struct {
         if (!self.body_allowed and header.payload_length != 0) return error.InvalidContentLength;
         const remaining = header.payload_length - self.current_payload_read;
         const next_body = std.math.add(usize, self.body_read, remaining) catch return error.InvalidContentLength;
+        if (next_body > self.max_body_bytes) return error.PayloadTooLarge;
         if (self.content_length) |expected| {
             if (next_body > expected) return error.InvalidContentLength;
             if (final_frame and next_body != expected) return error.InvalidContentLength;

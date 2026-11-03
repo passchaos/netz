@@ -5,10 +5,10 @@
 //! so applications such as weft do not depend on internal module paths.
 //!
 //! Body bytes are always bounded by the protocol `Limits.max_body_bytes`.
-//! HTTP/1 uses a push callback: the handler consumes slices before returning
-//! and writes its response afterwards. HTTP/2 exposes both push callbacks and
-//! an independent step-driven `Stream` handle. HTTP/3 exposes multiplexed
-//! `RequestEvent` values carrying peer and stream identity.
+//! HTTP/1 exposes a pull `BodyReader` plus a push callback contract. HTTP/2
+//! exposes both push callbacks and an independent step-driven `Stream` handle.
+//! HTTP/3 exposes multiplexed `RequestEvent` values carrying peer and stream
+//! identity plus a per-stream incremental message reader.
 
 pub const http1 = struct {
     /// Returned after `Connection.readRequestStreaming*` has delivered every
@@ -48,6 +48,12 @@ pub const http3 = struct {
     /// DATA, trailers, FIN and reset to independent per-stream state.
     pub const RequestEvent = @import("../http3/runtime.zig").StreamingRequestEvent;
     pub const ResponseEvent = @import("../http3/runtime.zig").StreamingResponseEvent;
+    /// Per-stream incremental reader used behind the event API. `readData`
+    /// consumes the current DATA payload and `availableDataBytes` reports what
+    /// can be read without pumping another packet.
+    pub const MessageReader = @import("../http3/runtime.zig").StreamingMessageReader;
+    pub const Head = @import("../http3/runtime.zig").StreamingHead;
+    pub const Event = @import("../http3/runtime.zig").StreamingEvent;
     /// Result of `Server.serveConcurrent`; requests/errors stay alive until the
     /// batch is deinitialized.
     pub const ConcurrentResult = @import("../http3/runtime.zig").ConcurrentServeResult;
@@ -66,5 +72,8 @@ test "streaming aliases resolve to public runtime types" {
     _ = http2.ConcurrentResult;
     _ = http3.RequestEvent;
     _ = http3.ResponseEvent;
+    _ = http3.MessageReader;
+    _ = http3.Head;
+    _ = http3.Event;
     _ = http3.ConcurrentResult;
 }

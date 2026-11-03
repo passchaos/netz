@@ -830,6 +830,11 @@ pub const Limits = struct {
     /// cleartext path explicit prevents large STREAM offsets from turning the
     /// UDP frame endpoint into an unbounded message buffer.
     max_stream_buffer: usize = 64 * 1024,
+    /// Cumulative request-body budget enforced by streaming request readers,
+    /// matching HTTP/1 and HTTP/2 `max_body_bytes`. A declared Content-Length
+    /// is checked as well; DATA accumulation is bounded for streams without
+    /// one.
+    max_body_bytes: usize = 16 * 1024 * 1024,
     /// Maximum request streams retained concurrently by server runtimes.
     /// This bounds both incomplete interleaved streams and complete streams
     /// waiting for the application or a QPACK Required Insert Count.
@@ -923,7 +928,7 @@ pub const Server = struct {
             limits.quic,
         );
         errdefer quic_server.deinit();
-        return .{
+        var server: Server = .{
             .quic_server = quic_server,
             .limits = limits,
             .request_streams = .init(
@@ -951,6 +956,8 @@ pub const Server = struct {
                 limits.max_queued_runtime_datagram_bytes,
             ),
         };
+        server.streaming_peers.setMaxBodyBytes(limits.max_body_bytes);
+        return server;
     }
 
     pub fn deinit(self: *Server) void {
@@ -3909,6 +3916,8 @@ pub const HandshakeSessionOptions = struct {
     local_settings: http3.Settings = .{},
     max_frames_per_packet: usize = 8,
     max_stream_buffer: usize = 64 * 1024,
+    /// Cumulative request-body budget for streaming request readers.
+    max_body_bytes: usize = 16 * 1024 * 1024,
     /// Maximum absolute 1-RTT CRYPTO offset retained while opportunistically
     /// reassembling post-handshake NewSessionTicket messages.
     max_post_handshake_crypto_bytes: usize = 256 * 1024,
@@ -6501,7 +6510,7 @@ pub const HandshakeServerSession = struct {
             resolved_options.local_settings.qpack_max_table_capacity,
         ) orelse return error.InvalidSetting;
         const allocator = established.connection.endpoint.allocator;
-        return .{
+        var session: HandshakeServerSession = .{
             .established = established,
             .options = resolved_options,
             .control = try .init(.{
@@ -6543,6 +6552,8 @@ pub const HandshakeServerSession = struct {
                 resolved_options.max_concurrent_request_streams,
             ),
         };
+        session.streaming_requests.setMaxBodyBytes(resolved_options.max_body_bytes);
+        return session;
     }
 
     pub fn bindDispatcher(self: *HandshakeServerSession) Error!void {
@@ -20016,7 +20027,7 @@ pub const ProtectedServer = struct {
         errdefer quic_server.deinit();
         const max_capacity = std.math.cast(usize, config.local_settings.qpack_max_table_capacity) orelse
             return error.InvalidSetting;
-        return .{
+        var server: ProtectedServer = .{
             .quic_server = quic_server,
             .config = config,
             .control = try .init(.{
@@ -20050,6 +20061,8 @@ pub const ProtectedServer = struct {
                 limits.max_concurrent_request_streams,
             ),
         };
+        server.streaming_requests.setMaxBodyBytes(limits.max_body_bytes);
+        return server;
     }
 
     pub fn deinit(self: *ProtectedServer) void {

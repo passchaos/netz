@@ -25,6 +25,38 @@ test "HTTP/3 incremental reader rejects unbufferable field section from header" 
     try std.testing.expectEqual(@as(usize, 2), reader.bufferedBytes());
 }
 
+test "HTTP/3 incremental reader enforces cumulative body budget" {
+    const allocator = std.testing.allocator;
+    var reader = Reader.initRequest(allocator, 0, 64, .{});
+    defer reader.deinit();
+    reader.max_body_bytes = 4;
+    reader.phase = .body;
+    reader.current_frame = .{
+        .frame_type = http3.FrameType.data,
+        .payload_length = 8,
+        .header_length = 2,
+    };
+    try std.testing.expectError(error.PayloadTooLarge, reader.availableDataBytes());
+
+    // Already-read bytes count against the same budget, so a later frame
+    // cannot reset it.
+    reader.body_read = 3;
+    reader.current_frame = .{
+        .frame_type = http3.FrameType.data,
+        .payload_length = 2,
+        .header_length = 2,
+    };
+    try std.testing.expectError(error.PayloadTooLarge, reader.availableDataBytes());
+
+    reader.body_read = 2;
+    reader.current_frame = .{
+        .frame_type = http3.FrameType.data,
+        .payload_length = 2,
+        .header_length = 2,
+    };
+    try std.testing.expectEqual(@as(usize, 0), try reader.availableDataBytes());
+}
+
 test "HTTP/3 incremental reader streams DATA through bounded window" {
     const allocator = std.testing.allocator;
     const body_len: usize = 100 * 1024;

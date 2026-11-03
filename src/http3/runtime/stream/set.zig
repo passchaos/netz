@@ -57,8 +57,18 @@ pub const Set = struct {
     max_streams: usize,
     max_stream_buffer: usize,
     max_informational_responses: usize,
+    /// Cumulative DATA budget applied to every message reader. Runtime servers
+    /// set this from `Limits.max_body_bytes`.
+    max_body_bytes: usize = std.math.maxInt(usize),
     settings: http3.Settings,
     kind: Kind,
+
+    /// Apply a cumulative body budget to this set and any readers that were
+    /// already admitted. Safe to call before or after entries are inserted.
+    pub fn setMaxBodyBytes(self: *Set, limit: usize) void {
+        self.max_body_bytes = limit;
+        for (self.entries.items) |*entry| entry.reader.max_body_bytes = limit;
+    }
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -248,23 +258,27 @@ pub const Set = struct {
 
         try self.entries.ensureUnusedCapacity(self.allocator, 1);
         if (buffered.takeReceive(stream_id)) |owned| {
-            return self.appendEntryAssumeCapacity(.{
+            var entry: Entry = .{
                 .reader = .initRequestFromReceive(
                     self.allocator,
                     owned.receive,
                     self.settings,
                 ),
                 .from = owned.from,
-            }, slot.value_ptr);
+            };
+            entry.reader.max_body_bytes = self.max_body_bytes;
+            return self.appendEntryAssumeCapacity(entry, slot.value_ptr);
         }
-        return self.appendEntryAssumeCapacity(.{
+        var entry: Entry = .{
             .reader = .initRequest(
                 self.allocator,
                 stream_id,
                 self.max_stream_buffer,
                 self.settings,
             ),
-        }, slot.value_ptr);
+        };
+        entry.reader.max_body_bytes = self.max_body_bytes;
+        return self.appendEntryAssumeCapacity(entry, slot.value_ptr);
     }
 
     pub fn insert(
