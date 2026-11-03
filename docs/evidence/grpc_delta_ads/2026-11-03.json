@@ -1,0 +1,112 @@
+{
+  "status": "passed",
+  "subscribe_diff": true,
+  "unsubscribe_diff": true,
+  "version_apply": true,
+  "explicit_removal": true,
+  "nack_retained": true,
+  "reconnect_versions": true,
+  "ttl_heartbeat": true,
+  "transcript": [
+    {
+      "stream": 0,
+      "step": 0,
+      "type": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+      "subscribe": [
+        "a",
+        "b"
+      ],
+      "unsubscribe": [],
+      "initial": {},
+      "nonce": "",
+      "nack": ""
+    },
+    {
+      "stream": 0,
+      "step": 1,
+      "type": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+      "subscribe": [],
+      "unsubscribe": [],
+      "initial": {},
+      "nonce": "n1",
+      "nack": ""
+    },
+    {
+      "stream": 0,
+      "step": 2,
+      "type": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+      "subscribe": [
+        "c"
+      ],
+      "unsubscribe": [
+        "b"
+      ],
+      "initial": {},
+      "nonce": "",
+      "nack": ""
+    },
+    {
+      "stream": 0,
+      "step": 3,
+      "type": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+      "subscribe": [],
+      "unsubscribe": [],
+      "initial": {},
+      "nonce": "n2",
+      "nack": ""
+    },
+    {
+      "stream": 0,
+      "step": 4,
+      "type": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+      "subscribe": [],
+      "unsubscribe": [],
+      "initial": {},
+      "nonce": "n3",
+      "nack": "wrong type"
+    },
+    {
+      "stream": 1,
+      "step": 0,
+      "type": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+      "subscribe": [
+        "a",
+        "c"
+      ],
+      "unsubscribe": [],
+      "initial": {
+        "a": "v1",
+        "c": "v3"
+      },
+      "nonce": "",
+      "nack": ""
+    },
+    {
+      "stream": 1,
+      "step": 1,
+      "type": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+      "subscribe": [],
+      "unsubscribe": [],
+      "initial": {},
+      "nonce": "n4",
+      "nack": ""
+    }
+  ],
+  "grpc_js": "1.14.7",
+  "source_sha256": {
+    "src/grpc/xds/ads/delta.zig": "77a0f0c73fc22b5f8adabe664c1463fa574e5e8349dcafd6b4d7f7205a6fc6d9",
+    "src/grpc/xds/ads/delta_codec.zig": "e4b63da9ae1b956568775f93eaa494bf1931fc9d45141ab3c62a5c1aac75ad53",
+    "src/grpc/xds/ads/delta_subscriptions.zig": "cc4e11c8cda8ef2dfc4d3da35b33b5dc4b1dad96a5a93f7ea6d2cedc60bc2938",
+    "src/grpc/xds/ads/delta_client.zig": "9f9367eb31c44d08aada608cb8cff5a7c305f6cb060c4acaaaeab1010b8e72c4",
+    "tools/interop/grpc_delta_ads/client.zig": "e566f0816b7d7850a4c2cfc762a5330fd4365aad16a1d5fd6b938bfeb95b4b9a",
+    "tools/interop/grpc_delta_ads/peer.js": "c59d67ece519706d2c868f197649e0f0bcc4b798daab390e5e1857a365916934",
+    "tools/interop/grpc_delta_ads/run.py": "ce4b34c879d2a360ce0a2897bd7cfe74a149e98c192ecc80ec6cf9bcb0abb0cc",
+    "tools/interop/grpc_locality/package.json": "8db54803ab44c882d2063b5e271764ea3b4901da17c3d065d5036e6a36c7ef53",
+    "tools/interop/grpc_locality/package-lock.json": "9cae21a36a38e30b732bfb139abca82bf77ea326fd9ce981f22867c7c01ccb2b"
+  },
+  "reference_proto_sha256": {
+    "envoy/service/discovery/v3/ads.proto": "b4455efa45f868f04ce11d415d9a712104edbe6ec476ce7df6da57d3997fe0af",
+    "envoy/service/discovery/v3/discovery.proto": "18ade78685cbec0cdf5bdf0304a359124bd0524e598ebd41ffaf87d22cfbfa6b"
+  },
+  "client_sha256": "57a96c56b1e185b99403a9ea5a4b68240e6665ed0bc815c07c0202f8638e4144"
+}

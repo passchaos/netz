@@ -3438,9 +3438,11 @@ application publication, keeps accepted versions across a NACK, and bounds
 Resource payloads, TTLs, aliases and names. Heartbeat resources without a payload
 are represented without inventing a new payload. Dynamic-parameter resource
 variants, `removed_resource_names` and `resource_errors` are rejected instead
-of being silently applied. See [delta xDS transport](grpc_delta_xds.md). Typed
-delta publication into the automatic controller and TTL expiry enforcement
-remain open.
+of being silently applied. See [delta xDS transport](grpc_delta_xds.md).
+`zig build interop-grpc-delta-ads` validates the envelopes and request
+transcript against the pinned official Envoy protobuf schemas; results are in
+`docs/evidence/grpc_delta_ads/2026-11-03.json`. Typed delta publication into
+the automatic controller and TTL expiry enforcement remain open.
 
 
 ## Typed EDS to reference-owned channel targets

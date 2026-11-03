@@ -111,9 +111,19 @@ entries; unlike state-of-the-world ADS it is not a wildcard subscription.
   unsubscribe diffs, ACK nonces, a wrong-type NACK, terminal reconnect with
   `initial_resource_versions`, and a TTL heartbeat.
 
+`zig build interop-grpc-delta-ads --summary all` runs the transport against an
+independent Node peer that loads the pinned official Envoy v3 `ads.proto` and
+`discovery.proto` through grpc-js-xds. The peer implements
+`DeltaAggregatedResources` itself and asserts the exact request transcript:
+initial node/subscriptions, ACK nonce, subscribe/unsubscribe diff, NACK
+`error_detail`, reconnect `initial_resource_versions`, and a payload-free TTL
+heartbeat ACK. It requires two streams and seven requests. Results and
+source/proto hashes are in
+`docs/evidence/grpc_delta_ads/2026-11-03.json`.
+
 ## Remaining integration
 
 This slice supplies the transport, envelope codec, subscription/version state
 and stream client. Typed delta publication into the automatic LDS/RDS/CDS/EDS
-controller, TTL expiry enforcement and an independent official-schema delta
-interop runner remain follow-up work. Typed SotW publication is unchanged.
+controller and TTL expiry enforcement remain follow-up work. Typed SotW
+publication is unchanged.

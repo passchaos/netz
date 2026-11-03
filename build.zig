@@ -2105,6 +2105,21 @@ pub fn build(b: *std.Build) void {
     const grpc_runtime_step = b.step("interop-grpc-xds-runtime", "Verify automatic LDS/RDS/CDS/EDS discovery and isolated cluster RPC admission");
     grpc_runtime_step.dependOn(&grpc_runtime.step);
 
+    const grpc_delta_client = b.addExecutable(.{
+        .name = "netz-grpc-delta-ads-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/interop/grpc_delta_ads/client.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const grpc_delta = b.addSystemCommand(&.{ "python3", "tools/interop/grpc_delta_ads/run.py" });
+    grpc_delta.addArtifactArg(grpc_delta_client);
+    if (b.args) |args| grpc_delta.addArgs(args);
+    const grpc_delta_step = b.step("interop-grpc-delta-ads", "Verify delta ADS envelopes, diffs, NACK and reconnect against official Envoy protobuf schemas");
+    grpc_delta_step.dependOn(&grpc_delta.step);
+
     const grpc_impl_client = b.addExecutable(.{
         .name = "netz-grpc-cluster-impl-client",
         .root_module = b.createModule(.{
