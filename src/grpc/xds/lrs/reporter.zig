@@ -82,7 +82,7 @@ pub const Reporter = struct {
         return std.Io.Clock.Timestamp.now(io, .awake);
     }
     pub fn reportWithDeadline(self: *Reporter, deadline: std.Io.Clock.Timestamp) Error!void {
-        var snapshot = try self.source.lrsStatsSnapshot(self.allocator);
+        var snapshot = try self.source.lrsStatsDeltaSnapshot(self.allocator);
         defer snapshot.deinit();
         var reports = try integration.buildWithOptions(self.allocator, &snapshot, self.locality, self.interval_ns, self.filter, self.endpoint_granularity);
         defer reports.deinit();

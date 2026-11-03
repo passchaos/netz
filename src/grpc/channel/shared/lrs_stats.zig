@@ -70,7 +70,12 @@ const EndpointCounter = struct {
     successful: u64 = 0,
     error_requests: u64 = 0,
     in_progress: u64 = 0,
+    reported_issued: u64 = 0,
+    reported_successful: u64 = 0,
+    reported_error_requests: u64 = 0,
 };
+
+const CategoryCounter = struct { count: u64 = 0, reported: u64 = 0 };
 
 const Counter = struct {
     issued: u64 = 0,
@@ -78,7 +83,11 @@ const Counter = struct {
     error_requests: u64 = 0,
     dropped: u64 = 0,
     in_progress: u64 = 0,
-    dropped_categories: std.StringHashMapUnmanaged(u64) = .empty,
+    reported_issued: u64 = 0,
+    reported_successful: u64 = 0,
+    reported_error_requests: u64 = 0,
+    reported_dropped: u64 = 0,
+    dropped_categories: std.StringHashMapUnmanaged(CategoryCounter) = .empty,
     endpoints: std.StringHashMapUnmanaged(EndpointCounter) = .empty,
 
     fn deinit(self: *Counter, gpa: std.mem.Allocator) void {
@@ -219,12 +228,12 @@ pub const Stats = struct {
                 return;
             };
             gop.key_ptr.* = owned;
-            gop.value_ptr.* = 0;
+            gop.value_ptr.* = .{};
         }
-        gop.value_ptr.* +%= 1;
+        gop.value_ptr.count +%= 1;
     }
 
-    pub fn snapshot(self: *Stats, gpa: std.mem.Allocator, io: std.Io) std.mem.Allocator.Error!Snapshot {
+    fn takeSnapshot(self: *Stats, gpa: std.mem.Allocator, io: std.Io, comptime delta: bool) std.mem.Allocator.Error!Snapshot {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
         var storage_bytes: usize = 0;
@@ -265,7 +274,9 @@ pub const Stats = struct {
                 const category_copy = storage[offset..][0..category_name.len];
                 @memcpy(category_copy, category_name);
                 offset += category_name.len;
-                categories[category_index] = .{ .category = category_copy, .count = category.value_ptr.* };
+                const count = if (delta) category.value_ptr.count -| category.value_ptr.reported else category.value_ptr.count;
+                categories[category_index] = .{ .category = category_copy, .count = count };
+                if (delta) category.value_ptr.reported = category.value_ptr.count;
                 category_index += 1;
             }
             const endpoint_start = endpoint_index;
@@ -275,30 +286,59 @@ pub const Stats = struct {
                 const host_copy = storage[offset..][0..host.len];
                 @memcpy(host_copy, host);
                 offset += host.len;
+                const issued = if (delta) endpoint.value_ptr.issued -| endpoint.value_ptr.reported_issued else endpoint.value_ptr.issued;
+                const successful = if (delta) endpoint.value_ptr.successful -| endpoint.value_ptr.reported_successful else endpoint.value_ptr.successful;
+                const error_requests = if (delta) endpoint.value_ptr.error_requests -| endpoint.value_ptr.reported_error_requests else endpoint.value_ptr.error_requests;
                 endpoints[endpoint_index] = .{
                     .host = host_copy,
                     .port = endpoint.value_ptr.port,
                     .ipv6 = endpoint.value_ptr.ipv6,
-                    .issued = endpoint.value_ptr.issued,
-                    .successful = endpoint.value_ptr.successful,
-                    .error_requests = endpoint.value_ptr.error_requests,
+                    .issued = issued,
+                    .successful = successful,
+                    .error_requests = error_requests,
                     .in_progress = endpoint.value_ptr.in_progress,
                 };
+                if (delta) {
+                    endpoint.value_ptr.reported_issued = endpoint.value_ptr.issued;
+                    endpoint.value_ptr.reported_successful = endpoint.value_ptr.successful;
+                    endpoint.value_ptr.reported_error_requests = endpoint.value_ptr.error_requests;
+                }
                 endpoint_index += 1;
             }
+            const issued = if (delta) entry.value_ptr.issued -| entry.value_ptr.reported_issued else entry.value_ptr.issued;
+            const successful = if (delta) entry.value_ptr.successful -| entry.value_ptr.reported_successful else entry.value_ptr.successful;
+            const error_requests = if (delta) entry.value_ptr.error_requests -| entry.value_ptr.reported_error_requests else entry.value_ptr.error_requests;
+            const dropped = if (delta) entry.value_ptr.dropped -| entry.value_ptr.reported_dropped else entry.value_ptr.dropped;
             entries[index] = .{
                 .cluster = copy,
-                .issued = entry.value_ptr.issued,
-                .successful = entry.value_ptr.successful,
-                .error_requests = entry.value_ptr.error_requests,
-                .dropped = entry.value_ptr.dropped,
+                .issued = issued,
+                .successful = successful,
+                .error_requests = error_requests,
+                .dropped = dropped,
                 .in_progress = entry.value_ptr.in_progress,
                 .categories = categories[category_start..][0 .. category_index - category_start],
                 .endpoints = endpoints[endpoint_start..][0 .. endpoint_index - endpoint_start],
             };
+            if (delta) {
+                entry.value_ptr.reported_issued = entry.value_ptr.issued;
+                entry.value_ptr.reported_successful = entry.value_ptr.successful;
+                entry.value_ptr.reported_error_requests = entry.value_ptr.error_requests;
+                entry.value_ptr.reported_dropped = entry.value_ptr.dropped;
+            }
             index += 1;
         }
         return .{ .allocator = gpa, .storage = storage, .entries = entries, .categories = categories, .endpoints = endpoints };
+    }
+
+    /// Cumulative counters since channel creation.
+    pub fn snapshot(self: *Stats, gpa: std.mem.Allocator, io: std.Io) std.mem.Allocator.Error!Snapshot {
+        return self.takeSnapshot(gpa, io, false);
+    }
+
+    /// Counters since the previous delta snapshot. `in_progress` remains a
+    /// current gauge. This matches the LRS reporting interval contract.
+    pub fn snapshotDelta(self: *Stats, gpa: std.mem.Allocator, io: std.Io) std.mem.Allocator.Error!Snapshot {
+        return self.takeSnapshot(gpa, io, true);
     }
 
     pub fn deinit(self: *Stats) void {

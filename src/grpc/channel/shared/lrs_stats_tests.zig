@@ -53,6 +53,50 @@ test "gRPC LRS counters aggregate per cluster" {
     }
 }
 
+test "gRPC LRS delta snapshots report only new counters" {
+    var stats: lrs_stats.Stats = .{ .allocator = allocator };
+    defer stats.deinit();
+    const io = std.testing.io;
+    const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(1001) };
+    stats.recordStarted(io, "a", address);
+    stats.recordCompletion(io, "a", address, true);
+    stats.recordDropped(io, "a", "throttle");
+    var first = try stats.snapshotDelta(allocator, io);
+    defer first.deinit();
+    try std.testing.expectEqual(@as(usize, 1), first.entries.len);
+    try std.testing.expectEqual(@as(u64, 1), first.entries[0].issued);
+    try std.testing.expectEqual(@as(u64, 1), first.entries[0].successful);
+    try std.testing.expectEqual(@as(u64, 1), first.entries[0].dropped);
+    try std.testing.expectEqual(@as(u64, 1), first.entries[0].categories[0].count);
+    try std.testing.expectEqual(@as(u64, 1), first.entries[0].endpoints[0].issued);
+
+    var idle = try stats.snapshotDelta(allocator, io);
+    defer idle.deinit();
+    try std.testing.expectEqual(@as(u64, 0), idle.entries[0].issued);
+    try std.testing.expectEqual(@as(u64, 0), idle.entries[0].successful);
+    try std.testing.expectEqual(@as(u64, 0), idle.entries[0].dropped);
+    try std.testing.expectEqual(@as(u64, 0), idle.entries[0].categories[0].count);
+    try std.testing.expectEqual(@as(u64, 0), idle.entries[0].endpoints[0].issued);
+
+    stats.recordStarted(io, "a", address);
+    stats.recordCompletion(io, "a", address, false);
+    stats.recordDropped(io, "a", "throttle");
+    var second = try stats.snapshotDelta(allocator, io);
+    defer second.deinit();
+    try std.testing.expectEqual(@as(u64, 1), second.entries[0].issued);
+    try std.testing.expectEqual(@as(u64, 0), second.entries[0].successful);
+    try std.testing.expectEqual(@as(u64, 1), second.entries[0].error_requests);
+    try std.testing.expectEqual(@as(u64, 1), second.entries[0].dropped);
+    try std.testing.expectEqual(@as(u64, 1), second.entries[0].categories[0].count);
+    try std.testing.expectEqual(@as(u64, 1), second.entries[0].endpoints[0].issued);
+    try std.testing.expectEqual(@as(u64, 1), second.entries[0].endpoints[0].error_requests);
+
+    var cumulative = try stats.snapshot(allocator, io);
+    defer cumulative.deinit();
+    try std.testing.expectEqual(@as(u64, 2), cumulative.entries[0].issued);
+    try std.testing.expectEqual(@as(u64, 2), cumulative.entries[0].dropped);
+}
+
 test "gRPC LRS counters attribute unary completions to the endpoint cluster" {
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
     defer threaded.deinit();

@@ -130,6 +130,11 @@ pub const SharedChannel = struct {
     pub fn lrsStatsSnapshot(self: SharedChannel, allocator: std.mem.Allocator) std.mem.Allocator.Error!LrsStatsSnapshot {
         return self.state.lrs_stats.snapshot(allocator, self.state.io);
     }
+    /// Counters since the previous delta snapshot, for one LRS reporting
+    /// interval. `in_progress` remains a current gauge.
+    pub fn lrsStatsDeltaSnapshot(self: SharedChannel, allocator: std.mem.Allocator) std.mem.Allocator.Error!LrsStatsSnapshot {
+        return self.state.lrs_stats.snapshotDelta(allocator, self.state.io);
+    }
     pub fn clusterCircuitStats(self: SharedChannel, cluster: ?[]const u8) Error!channel.circuit_breaker.Stats {
         self.state.lock();
         defer self.state.unlock();

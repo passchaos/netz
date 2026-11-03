@@ -1,8 +1,8 @@
 {
   "schema": 1,
   "date": "2026-11-03",
-  "head": "616819f8",
-  "gate": "Load Reporting Service envelopes, duplex reporting, counters, reporter, endpoint granularity, foreground scheduler, same-server reconnect, backoff and control-plane failover composition",
+  "head": "08575f5b",
+  "gate": "Load Reporting Service envelopes, duplex reporting, interval-delta counters, reporter, endpoint granularity, foreground scheduler, same-server reconnect, backoff and control-plane failover composition",
   "commands": {
     "lrs": "zig build test-lib -Dtest-filter=LRS --summary all",
     "xds": "zig build test-lib -Dtest-filter=xds --summary all",
@@ -13,20 +13,20 @@
   },
   "result": {
     "lrs": {
-      "passed": 177,
-      "total": 177,
+      "passed": 179,
+      "total": 179,
       "failed": 0,
       "exit_code": 0
     },
     "xds": {
-      "passed": 252,
-      "total": 252,
+      "passed": 253,
+      "total": 253,
       "failed": 0,
       "exit_code": 0
     },
     "delta": {
-      "passed": 186,
-      "total": 186,
+      "passed": 188,
+      "total": 188,
       "failed": 0,
       "exit_code": 0
     },
@@ -50,17 +50,18 @@
   "source_sha256": {
     "src/grpc/xds/lrs.zig": "625b1a743c8f80e490789443729fea3bac3de6a6736e79f05971675a6d74cb57",
     "src/grpc/xds/lrs/scheduler.zig": "a4c664bf06236d456176b66b9d8707497cc8c53e9d4047efdbc4172f9cc79858",
-    "src/grpc/xds/lrs/scheduler_tests.zig": "5d908a1ba0a447edbcfcd8315c619e368a55cf4f130eba75e54968c735eb23ef",
+    "src/grpc/xds/lrs/scheduler_tests.zig": "3731f45d69d252346d80a9f035c7eb3a40b71061ec04b31296cb4d90640524e7",
     "src/grpc/xds/lrs/codec.zig": "6c781a79de396bf3402667ae3998367e021b6df67d588f91a4bc9e89c11826e0",
     "src/grpc/xds/lrs/client.zig": "4ddf8bea831d5551473cbd00504a0ff23a9003f840029e55cc6b877d8fec116e",
-    "src/grpc/xds/lrs/reporter.zig": "393b58861a709abc52232a39354b20fcfed66daf2b658008751ba079abe4908b",
+    "src/grpc/xds/lrs/reporter.zig": "ef3249e643b85a0f44ca41d2da24de096cbdd1189c110c5d4b0f9520ec763753",
     "src/grpc/xds/lrs/integration.zig": "62750aef937915969b20e5edb06a08b11784f23d581b1cac8a3651c0ef21e1b4",
     "src/grpc/xds/lrs/tests.zig": "125935ad5f0a4e449842c4fed9374102984f38960bc2f682ef9d4bdfeb6262fb",
     "src/grpc/xds/lrs/transport_tests.zig": "af4f6ee7e4f1f61cf224d171763f9118a645dbfad9c7fb04d5d6af9f0faf9aae",
     "src/grpc/xds/lrs/control_plane_tests.zig": "46b2d685422cca5fc649fc6b8961007eda93911a402477204cd6d61dd59c857c",
     "src/grpc/xds/control_plane.zig": "2332a150bb4673e764cb74c541ed87e76c925467f6eef5934c983e3e493a856a",
-    "src/grpc/channel/shared/lrs_stats.zig": "0fdcb8eeaa137fe1fa8b5d704b3e80906956d7f61cfb9016043ccca6cdda8b2f",
-    "src/grpc/channel/shared/lrs_stats_tests.zig": "ab8dff14d34b076d1b20057cb57a01507d56ef76f2925998188836d4041735ff",
+    "src/grpc/channel/shared/lrs_stats.zig": "1842021e719c35930439a4e9cead8a7628660da9c93cb065d6efe8f56022ac06",
+    "src/grpc/channel/shared/lrs_stats_tests.zig": "abedcbab01af9a10a0df5b72f7885a7da93d021bdffdce0732ad53caec99a044",
+    "src/grpc/channel/shared.zig": "055995984e25bec3c6de178fe061025f46740c4f997d7f58361bc13cf778da86",
     "src/grpc/channel/shared/state.zig": "0b927a463a60da777217ad04a70da660998c11c0eb42dd0d34a8c57b955959a3",
     "src/grpc/channel/shared/job.zig": "2b3fe4e3ae37d143c09eac9afd881b58491263758b4538924c150a8e02e1f58a",
     "src/grpc/channel/shared/worker.zig": "de99c0190e67f111ee0e3a9ab8396ee22edb69dc6b982f580842303225d03a65",
@@ -71,5 +72,5 @@
     "tools/interop/grpc_lrs/peer.js": "9b107638c1b9ed8a4bce1f17a28917c60e54a795aa24d5f9af662c61bab9ac26",
     "tools/interop/grpc_lrs/run.py": "6916605190ae91b93dd2ef48f6ebfd37b410ecb670052d1d0d789fca89ec4f48"
   },
-  "notes": "Native tests cover envelopes, locality/dropped counters, endpoint address/port counters, malformed/duplicate/over-limit input, a real loopback report/reconnect stream, opt-in per-cluster unary and streaming counters with in-progress tracking, channel drop attribution with per-category counts, report conversion, reporter interval/filter/rebind behavior, endpoint granularity, the foreground scheduler interval/terminal loop, same-server reconnect, scheduler failover to a second control-plane server, and a real two-server ControlPlane failover composition. Official-schema interop evidence is docs/evidence/grpc_lrs/2026-11-03.json."
+  "notes": "Native tests cover envelopes, locality/dropped counters, endpoint address/port counters, malformed/duplicate/over-limit input, a real loopback report/reconnect stream, opt-in per-cluster unary and streaming counters with in-progress tracking, channel drop attribution with per-category counts, report conversion, interval-delta snapshots (including an idle interval and an end-to-end two-interval report), reporter interval/filter/rebind behavior, endpoint granularity, the foreground scheduler interval/terminal loop, same-server reconnect, scheduler failover to a second control-plane server, and a real two-server ControlPlane failover composition. Official-schema interop evidence is docs/evidence/grpc_lrs/2026-11-03.json."
 }
