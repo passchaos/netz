@@ -162,6 +162,21 @@ const DnsParser = struct {
     }
 };
 
+fn onePerLocality(arena: std.mem.Allocator, hosts: []const HostEndpoint) Error![]const HostEndpoint {
+    var selected: std.ArrayList(HostEndpoint) = .empty;
+    for (hosts) |host| {
+        var duplicate = false;
+        for (selected.items) |existing| {
+            if (existing.priority == host.priority and std.mem.eql(u8, existing.region, host.region) and std.mem.eql(u8, existing.zone, host.zone) and std.mem.eql(u8, existing.sub_zone, host.sub_zone)) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (!duplicate) try selected.append(arena, host);
+    }
+    return selected.toOwnedSlice(arena);
+}
+
 fn dnsAssignment(arena: std.mem.Allocator, bytes: []const u8, name: []const u8, limits: Limits) Error![]const HostEndpoint {
     var parser = DnsParser{ .arena = arena, .limits = limits };
     var endpoints: std.ArrayList(HostEndpoint) = .empty;
@@ -247,6 +262,7 @@ pub fn decode(gpa: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!O
         .strict_dns, .logical_dns => {
             const raw = assignment orelse return error.InvalidCdsResource;
             host_endpoints = try dnsAssignment(arena, raw, name, limits);
+            if (discovery == .logical_dns) host_endpoints = try onePerLocality(arena, host_endpoints);
             inline_assignment = raw;
         },
         else => return error.UnsupportedCdsFeature,

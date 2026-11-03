@@ -119,6 +119,18 @@ test "gRPC CDS decodes STRICT_DNS and LOGICAL_DNS clusters" {
     const missing = try fixture.dnsCluster(gpa, "backend", "backend.test", 1001, 4);
     defer gpa.free(missing);
     try std.testing.expectError(error.UnsupportedCdsFeature, resource.decode(gpa, missing, .{}));
+    const hosts = [_]fixture.Host{ .{ .host = "a.test", .port = 1001 }, .{ .host = "b.test", .port = 1002 } };
+    const strict = try fixture.dnsClusterHosts(gpa, "backend", 1, &hosts);
+    defer gpa.free(strict);
+    var strict_decoded = try resource.decode(gpa, strict, .{});
+    defer strict_decoded.deinit();
+    try std.testing.expectEqual(@as(usize, 2), strict_decoded.value.host_endpoints.len);
+    const logical = try fixture.dnsClusterHosts(gpa, "backend", 2, &hosts);
+    defer gpa.free(logical);
+    var logical_decoded = try resource.decode(gpa, logical, .{});
+    defer logical_decoded.deinit();
+    try std.testing.expectEqual(@as(usize, 1), logical_decoded.value.host_endpoints.len);
+    try std.testing.expectEqualStrings("a.test", logical_decoded.value.host_endpoints[0].host);
 }
 
 test "gRPC CDS rejects unsupported discovery security invalid identities and ring ranges" {

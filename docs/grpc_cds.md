@@ -8,7 +8,9 @@ its service name. STATIC clusters carry an inline `load_assignment` whose
 `cluster_name` must match the cluster; they publish endpoints through the same
 priority/locality runtime without an EDS subscription. STRICT_DNS and
 LOGICAL_DNS clusters likewise use an inline assignment, publishing host
-endpoints that retain priority and locality identity. The first DEFAULT
+endpoints that retain priority and locality identity; LOGICAL_DNS retains one
+endpoint per locality while STRICT_DNS retains every declared endpoint. The
+first DEFAULT
 circuit threshold supplies `max_requests`, defaulting to 1024 when omitted;
 HIGH thresholds do not supply the application limit. Zero rejects new RPCs.
 

@@ -40,25 +40,31 @@ pub fn cluster(gpa: std.mem.Allocator, name: []const u8, service: []const u8, ex
     try builder.data.appendSlice(gpa, extra);
     return builder.data.toOwnedSlice(gpa);
 }
+pub const Host = struct { host: []const u8, port: u16 };
 pub fn assignment(gpa: std.mem.Allocator, name: []const u8, host: []const u8, port: u16) ![]u8 {
-    var socket = Builder{ .allocator = gpa };
-    defer socket.deinit();
-    try socket.bytes(2, host);
-    try socket.number(3, port);
-    var address = Builder{ .allocator = gpa };
-    defer address.deinit();
-    try address.bytes(1, socket.data.items);
-    var endpoint = Builder{ .allocator = gpa };
-    defer endpoint.deinit();
-    try endpoint.bytes(1, address.data.items);
-    var lb = Builder{ .allocator = gpa };
-    defer lb.deinit();
-    try lb.bytes(1, endpoint.data.items);
+    return assignmentHosts(gpa, name, &.{.{ .host = host, .port = port }});
+}
+pub fn assignmentHosts(gpa: std.mem.Allocator, name: []const u8, hosts: []const Host) ![]u8 {
     var locality = Builder{ .allocator = gpa };
     defer locality.deinit();
     try locality.bytes(1, "");
     try locality.wrapper(3, 1);
-    try locality.bytes(2, lb.data.items);
+    for (hosts) |host| {
+        var socket = Builder{ .allocator = gpa };
+        defer socket.deinit();
+        try socket.bytes(2, host.host);
+        try socket.number(3, host.port);
+        var address = Builder{ .allocator = gpa };
+        defer address.deinit();
+        try address.bytes(1, socket.data.items);
+        var endpoint = Builder{ .allocator = gpa };
+        defer endpoint.deinit();
+        try endpoint.bytes(1, address.data.items);
+        var lb = Builder{ .allocator = gpa };
+        defer lb.deinit();
+        try lb.bytes(1, endpoint.data.items);
+        try locality.bytes(2, lb.data.items);
+    }
     var out = Builder{ .allocator = gpa };
     errdefer out.deinit();
     try out.bytes(1, name);
@@ -71,9 +77,17 @@ pub fn staticCluster(gpa: std.mem.Allocator, name: []const u8, host: []const u8,
 pub fn dnsCluster(gpa: std.mem.Allocator, name: []const u8, host: []const u8, port: u16, kind: u32) ![]u8 {
     return discoveryCluster(gpa, name, host, port, kind);
 }
+pub fn dnsClusterHosts(gpa: std.mem.Allocator, name: []const u8, kind: u32, hosts: []const Host) ![]u8 {
+    const assign = try assignmentHosts(gpa, name, hosts);
+    defer gpa.free(assign);
+    return discoveryClusterBytes(gpa, name, kind, assign);
+}
 fn discoveryCluster(gpa: std.mem.Allocator, name: []const u8, host: []const u8, port: u16, kind: u32) ![]u8 {
     const assign = try assignment(gpa, name, host, port);
     defer gpa.free(assign);
+    return discoveryClusterBytes(gpa, name, kind, assign);
+}
+fn discoveryClusterBytes(gpa: std.mem.Allocator, name: []const u8, kind: u32, assign: []const u8) ![]u8 {
     var builder = Builder{ .allocator = gpa };
     errdefer builder.deinit();
     try builder.bytes(1, name);
