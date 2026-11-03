@@ -200,6 +200,58 @@ test "gRPC LRS scheduler reports interval deltas, not cumulative totals" {
     try destination_task.await(io);
 }
 
+fn zeroReports(listener: *grpc.runtime.Server) !void {
+    var connection = try listener.acceptWithTimeout(.fromSeconds(3));
+    defer connection.deinit();
+    var duplex = try connection.acceptDuplexWithTimeout(.fromSeconds(3));
+    defer duplex.deinit();
+    var initial = try request(&duplex);
+    defer initial.deinit();
+    try duplex.startResponse(.{});
+    try send(&duplex, .{ .clusters = &.{}, .interval_ns = 50 * std.time.ns_per_ms });
+    var first = try request(&duplex);
+    defer first.deinit();
+    try std.testing.expectEqual(@as(usize, 0), first.value.clusters.len);
+    var collector: Collector = .{};
+    const event = duplex.readRequestEventWithTimeout(.fromMilliseconds(150), &collector, Collector.consume) catch |err| switch (err) {
+        error.Timeout => null,
+        else => return err,
+    };
+    if (event) |unexpected| {
+        var owned = unexpected;
+        defer owned.deinit();
+        if (collector.request) |*value| value.deinit();
+        return error.UnexpectedReport;
+    }
+    try duplex.finishOk();
+}
+
+test "gRPC LRS scheduler skips consecutive all-zero reports" {
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var control = try grpc.runtime.Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{}, 4096);
+    defer control.deinit();
+    var lrs_task = io.async(zeroReports, .{&control});
+    defer _ = lrs_task.cancel(io) catch {};
+    var source = try grpc.SharedChannel.init(allocator, io, .{ .cleartext_ip = .{ .address = .{ .ip4 = .loopback(1) } } }, .{ .enable_lrs_stats = true });
+    defer source.deinit();
+    var control_channel = try grpc.SharedChannel.init(allocator, io, .{ .cleartext_ip = .{ .address = control.address() } }, .{});
+    defer control_channel.deinit();
+    var control_sender = control_channel.sender();
+    defer control_sender.deinit();
+    var client = try lrs.Client.init(allocator, control_sender, .{ .node = .{ .id = "node-1" } });
+    defer client.deinit();
+    const until = std.Io.Clock.Timestamp.fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(10) });
+    try client.connectWithDeadline(until);
+    var scheduler = lrs.Scheduler.init(allocator, &client, source, .{ .interval_ns = std.time.ns_per_s });
+    defer scheduler.deinit();
+    var scheduler_task = try io.concurrent(runScheduler, .{ &scheduler, until });
+    defer _ = scheduler_task.cancel(io) catch {};
+    try std.testing.expectError(error.LrsTerminal, scheduler_task.await(io));
+    try lrs_task.await(io);
+}
+
 test "gRPC LRS scheduler reconnects the current server before failing over" {
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
     defer threaded.deinit();

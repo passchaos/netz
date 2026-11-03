@@ -21,6 +21,9 @@ pub const Reporter = struct {
     interval_ns: u64,
     endpoint_granularity: bool = false,
     last_report_ns: ?i96 = null,
+    /// True when the previous report contained only zero counters. A second
+    /// consecutive all-zero interval is skipped, matching grpc-core LRS.
+    last_report_zero: bool = false,
     filter_storage: []u8 = &.{},
     filter_names: [][]const u8 = &.{},
     /// Null reports all clusters; a non-null slice is the server's requested set.
@@ -82,7 +85,7 @@ pub const Reporter = struct {
         }
         return std.Io.Clock.Timestamp.now(io, .awake);
     }
-    pub fn reportWithDeadline(self: *Reporter, deadline: std.Io.Clock.Timestamp) Error!void {
+    fn reportNow(self: *Reporter, deadline: std.Io.Clock.Timestamp) Error!bool {
         const io = self.client.sender.state.io;
         const now = std.Io.Clock.Timestamp.now(io, .awake);
         const elapsed_ns: u64 = if (self.last_report_ns) |last| blk: {
@@ -91,10 +94,20 @@ pub const Reporter = struct {
         } else self.interval_ns;
         var snapshot = try self.source.lrsStatsDeltaSnapshot(self.allocator);
         defer snapshot.deinit();
+        const zero = snapshotIsZero(&snapshot, self.filter);
+        if (zero and self.last_report_zero) {
+            self.last_report_ns = now.raw.nanoseconds;
+            return false;
+        }
         var reports = try integration.buildWithOptions(self.allocator, &snapshot, self.locality, elapsed_ns, self.filter, self.endpoint_granularity);
         defer reports.deinit();
         try self.client.reportWithDeadline(reports.clusters, deadline);
         self.last_report_ns = now.raw.nanoseconds;
+        self.last_report_zero = zero;
+        return true;
+    }
+    pub fn reportWithDeadline(self: *Reporter, deadline: std.Io.Clock.Timestamp) Error!void {
+        _ = try self.reportNow(deadline);
     }
     pub fn reportWithTimeout(self: *Reporter, timeout: std.Io.Duration) Error!void {
         if (timeout.nanoseconds <= 0) return error.Timeout;
@@ -107,11 +120,28 @@ pub const Reporter = struct {
         if (self.last_report_ns) |last| {
             if (now < last + @as(i96, @intCast(self.interval_ns))) return false;
         }
-        try self.reportWithDeadline(deadline);
-        return true;
+        return self.reportNow(deadline);
     }
     pub fn reportIfDueWithTimeout(self: *Reporter, timeout: std.Io.Duration) Error!bool {
         if (timeout.nanoseconds <= 0) return error.Timeout;
         return self.reportIfDueWithDeadline(.fromNow(self.client.sender.state.io, .{ .clock = .awake, .raw = timeout }));
     }
 };
+
+fn selected(entry: anytype, filter: ?[]const []const u8) bool {
+    const names = filter orelse return true;
+    for (names) |name| if (std.mem.eql(u8, name, entry.cluster)) return true;
+    return false;
+}
+
+fn snapshotIsZero(snapshot: *const channel.LrsStatsSnapshot, filter: ?[]const []const u8) bool {
+    for (snapshot.entries) |entry| {
+        if (!selected(entry, filter)) continue;
+        if (entry.issued != 0 or entry.successful != 0 or entry.error_requests != 0 or entry.dropped != 0 or entry.in_progress != 0) return false;
+        for (entry.categories) |category| if (category.count != 0) return false;
+        for (entry.endpoints) |endpoint| {
+            if (endpoint.issued != 0 or endpoint.successful != 0 or endpoint.error_requests != 0 or endpoint.in_progress != 0) return false;
+        }
+    }
+    return true;
+}
