@@ -4,6 +4,7 @@ const entry = @import("entry.zig");
 const channel = @import("../../channel.zig");
 const eds = @import("../eds.zig");
 const cds = @import("../cds.zig");
+const tls_material = @import("../tls_material.zig");
 const shared = @import("../../channel/shared.zig");
 const Json = std.json.Value;
 fn object() Json {
@@ -29,6 +30,7 @@ fn dnsChildPolicy(
     base_policy: Json,
     locality_weighted: bool,
     key: []const u8,
+    material: ?*tls_material.Material,
     endpoints: *std.ArrayList(channel.Endpoint),
 ) !Json {
     var children = object();
@@ -55,7 +57,17 @@ fn dnsChildPolicy(
             path[2] = locality_name;
             const weight = if (locality_weighted) host.endpoint_weight else std.math.mul(u32, host.locality_weight, host.endpoint_weight) catch return error.InvalidServiceConfig;
             const endpoint_key = try std.fmt.allocPrint(arena, "{s}:{d}", .{ host.host, host.port });
-            try endpoints.append(arena, .{ .cleartext_host = .{
+            if (material) |tls| {
+                try endpoints.append(arena, .{ .tls_host = .{
+                    .host = host.host,
+                    .port = host.port,
+                    .tls = tls.options(),
+                    .ring_hash_key = endpoint_key,
+                    .ring_hash_weight = weight,
+                    .hierarchical_path = path,
+                    .locality_weight = host.locality_weight,
+                } });
+            } else try endpoints.append(arena, .{ .cleartext_host = .{
                 .host = host.host,
                 .port = host.port,
                 .ring_hash_key = endpoint_key,
@@ -75,9 +87,10 @@ pub const Target = struct {
     arena: std.heap.ArenaAllocator,
     refs: std.atomic.Value(usize) = .init(1),
     snapshots: std.ArrayList(*eds.Snapshot) = .empty,
+    tls_materials: std.ArrayList(*tls_material.Material) = .empty,
     endpoints: []const channel.Endpoint = &.{},
     json: []const u8 = "",
-    pub fn create(gpa: std.mem.Allocator, entries: []const entry.Entry, local_json: ?[]const u8) (std.mem.Allocator.Error || @import("../../service_config.zig").Error)!*Target {
+    pub fn create(gpa: std.mem.Allocator, io: std.Io, entries: []const entry.Entry, local_json: ?[]const u8) (std.mem.Allocator.Error || @import("../../service_config.zig").Error || tls_material.Error)!*Target {
         const self = try gpa.create(Target);
         self.* = .{ .allocator = gpa, .arena = .init(gpa) };
         errdefer self.release();
@@ -127,7 +140,15 @@ pub const Target = struct {
                     const decoded = std.json.parseFromSliceLeaky(Json, arena, resource.policy.child_json, .{ .allocate = .alloc_always }) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else error.InvalidServiceConfig;
                     if (decoded != .array) return error.InvalidServiceConfig;
                     const key = try arena.dupe(u8, value.identity.key);
-                    child_policy = try dnsChildPolicy(arena, resource.host_endpoints, decoded, resource.policy.locality_weighted, key, &endpoints);
+                    const material: ?*tls_material.Material = if (resource.tls) |config| blk: {
+                        const created = try tls_material.Material.create(gpa, io, config);
+                        self.tls_materials.append(gpa, created) catch |err| {
+                            created.deinit();
+                            return err;
+                        };
+                        break :blk created;
+                    } else null;
+                    child_policy = try dnsChildPolicy(arena, resource.host_endpoints, decoded, resource.policy.locality_weighted, key, material, &endpoints);
                 } else child_policy = try policy(arena, "round_robin", object());
             } else child_policy = try policy(arena, "round_robin", object());
             try field(arena, &implementation, "dropCategories", drops);
@@ -152,6 +173,8 @@ pub const Target = struct {
         if (self.refs.fetchSub(1, .acq_rel) != 1) return;
         for (self.snapshots.items) |snapshot| snapshot.release();
         self.snapshots.deinit(self.allocator);
+        for (self.tls_materials.items) |material| material.deinit();
+        self.tls_materials.deinit(self.allocator);
         self.arena.deinit();
         self.allocator.destroy(self);
     }

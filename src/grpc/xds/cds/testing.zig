@@ -74,6 +74,41 @@ pub fn assignmentHosts(gpa: std.mem.Allocator, name: []const u8, hosts: []const 
 pub fn staticCluster(gpa: std.mem.Allocator, name: []const u8, host: []const u8, port: u16) ![]u8 {
     return discoveryCluster(gpa, name, host, port, 0);
 }
+pub fn staticClusterTls(gpa: std.mem.Allocator, name: []const u8, host: []const u8, port: u16, tls: []const u8) ![]u8 {
+    const assign = try assignment(gpa, name, host, port);
+    defer gpa.free(assign);
+    var builder = Builder{ .allocator = gpa };
+    errdefer builder.deinit();
+    try builder.bytes(1, name);
+    try builder.number(2, 0);
+    try builder.bytes(33, assign);
+    try builder.bytes(24, tls);
+    return builder.data.toOwnedSlice(gpa);
+}
+pub fn upstreamTls(gpa: std.mem.Allocator, trusted_ca: []const u8, sni: []const u8) ![]u8 {
+    var trusted = Builder{ .allocator = gpa };
+    defer trusted.deinit();
+    try trusted.bytes(2, trusted_ca);
+    var validation = Builder{ .allocator = gpa };
+    defer validation.deinit();
+    try validation.bytes(1, trusted.data.items);
+    var common = Builder{ .allocator = gpa };
+    defer common.deinit();
+    try common.bytes(3, validation.data.items);
+    var context = Builder{ .allocator = gpa };
+    defer context.deinit();
+    try context.bytes(1, common.data.items);
+    if (sni.len != 0) try context.bytes(2, sni);
+    var any = Builder{ .allocator = gpa };
+    defer any.deinit();
+    try any.bytes(1, "type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext");
+    try any.bytes(2, context.data.items);
+    var socket = Builder{ .allocator = gpa };
+    errdefer socket.deinit();
+    try socket.bytes(1, "envoy.transport_sockets.tls");
+    try socket.bytes(3, any.data.items);
+    return socket.data.toOwnedSlice(gpa);
+}
 pub fn dnsCluster(gpa: std.mem.Allocator, name: []const u8, host: []const u8, port: u16, kind: u32) ![]u8 {
     return discoveryCluster(gpa, name, host, port, kind);
 }

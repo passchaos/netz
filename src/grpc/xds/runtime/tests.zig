@@ -10,6 +10,7 @@ const lds_fixture = @import("../lds/testing.zig");
 const rds_fixture = @import("../rds/testing.zig");
 const cds_fixture = @import("../cds/testing.zig");
 const eds_fixture = @import("../eds/testing.zig");
+const tls_testing = @import("../../../tls/testing.zig");
 const gpa = std.testing.allocator;
 fn update(client: *ads.Client, url: []const u8, version: []const u8, resources: []const ads.codec.Any) !ads.Update {
     const encoded = try ads.codec.encodeResponse(gpa, .{ .type_url = url, .version = version, .nonce = version, .resources = resources }, 65536);
@@ -151,6 +152,60 @@ test "gRPC xDS runtime publishes STATIC clusters without an EDS subscription" {
     defer gpa.free(moved);
     try accept(controller, &client, channel, io, cds.type_url, "c2", &.{.{ .type_url = cds.type_url, .value = moved }});
     try std.testing.expectEqual(@as(usize, 1), channel.configuredEndpointCount());
+}
+
+test "gRPC xDS runtime connects to a STATIC cluster over inline TLS" {
+    var threaded = std.Io.Threaded.init(gpa, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(&certificate_der, tls_testing.certificate_base64);
+    const key_pair = try tls_testing.serverKeyPair();
+    var server = try grpc.runtime.TlsServer.listen(gpa, io, .{ .ip4 = .loopback(0) }, .{
+        .transport = .{
+            .identity = .{ .certificate_chain = &.{&certificate_der}, .signer = .{ .ecdsa_p256_sha256 = .{ .key_pair = key_pair } } },
+        },
+    });
+    defer server.deinit();
+    const Peer = struct {
+        fn run(listener: *grpc.runtime.TlsServer) !void {
+            var connection = try listener.acceptWithTimeout(.fromSeconds(3));
+            defer connection.deinit();
+            var unary = try connection.readUnaryWithTimeout(.fromSeconds(3));
+            defer unary.deinit();
+            try connection.writeUnary(unary.transport.stream_id, .{ .message = "ok" });
+        }
+    };
+    var task = io.async(Peer.run, .{&server});
+    defer _ = task.cancel(io) catch {};
+    var channel = try grpc.SharedChannel.init(gpa, io, .{ .cleartext_ip = .{ .address = .{ .ip4 = .loopback(1) } } }, .{});
+    defer channel.deinit();
+    var sender = channel.sender();
+    defer sender.deinit();
+    var client = try ads.Client.init(gpa, sender, .{ .node = .{ .id = "test" } });
+    defer client.deinit();
+    const controller = try runtime.Controller.create(gpa, .{ .listener_name = "frontend", .target = .{ .authority = "backend.test" } });
+    defer controller.deinit();
+    _ = try controller.startWithDeadline(&client, channel, .fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(3) }));
+    const routes = try rds_fixture.encode(gpa, "inline", &.{"backend.test"}, &.{.{ .prefix = "/", .cluster = "a" }}, null);
+    defer gpa.free(routes);
+    const listener = try lds_fixture.encode(gpa, .{ .inline_rds = routes });
+    defer gpa.free(listener);
+    try accept(controller, &client, channel, io, lds.type_url, "l1", &.{.{ .type_url = lds.type_url, .value = listener }});
+    const pem = try std.fmt.allocPrint(gpa, "-----BEGIN CERTIFICATE-----\n{s}\n-----END CERTIFICATE-----\n", .{tls_testing.certificate_base64});
+    defer gpa.free(pem);
+    const tls = try cds_fixture.upstreamTls(gpa, pem, "localhost");
+    defer gpa.free(tls);
+    const a = try cds_fixture.staticClusterTls(gpa, "a", "127.0.0.1", server.address().getPort(), tls);
+    defer gpa.free(a);
+    try accept(controller, &client, channel, io, cds.type_url, "c1", &.{.{ .type_url = cds.type_url, .value = a }});
+    try std.testing.expectEqual(@as(usize, 1), channel.configuredEndpointCount());
+    var call_sender = channel.sender();
+    defer call_sender.deinit();
+    var response = try call_sender.unary(.{ .path = "/demo.Lrs/Call", .message = "ok", .wait_for_ready = true });
+    defer response.deinit();
+    try std.testing.expectEqual(grpc.Status.ok, response.status);
+    try task.await(io);
 }
 
 test "gRPC xDS runtime publishes DNS clusters without an EDS subscription" {

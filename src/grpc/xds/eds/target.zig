@@ -4,7 +4,8 @@ const decode = @import("decode.zig");
 const channel = @import("../../channel.zig");
 const shared = @import("../../channel/shared.zig");
 const http2 = @import("../../../http2/mod.zig");
-pub const Error = decode.Error || shared.Error || error{ UnsupportedEdsPolicy, InvalidEdsTarget };
+const tls_material = @import("../tls_material.zig");
+pub const Error = decode.Error || shared.Error || tls_material.Error || error{ UnsupportedEdsPolicy, InvalidEdsTarget };
 pub const Options = struct {
     authority: []const u8,
     /// CDS circuit limit and logical cluster identity; EDS service is resource name.
@@ -12,6 +13,8 @@ pub const Options = struct {
     cluster: ?[]const u8 = null,
     limits: http2.runtime.Limits = .{},
     tls: ?struct { host: []const u8, options: http2.runtime.TlsConnectOptions = .{} } = null,
+    /// Owned inline TLS material for this projection, when the cluster declares it.
+    tls_material: ?*tls_material.Material = null,
     /// Endpoint-level child policy shared by every locality.
     child_policy_json: []const u8 = "[{\"round_robin\":{}}]",
     /// Wrap each priority in locality weighting; direct CDS policies flatten it.
@@ -71,8 +74,11 @@ pub const Snapshot = struct {
     endpoints: []const channel.Endpoint,
     service_config_json: []const u8,
     circuit: channel.circuit_breaker.Options,
+    tls_material: ?*tls_material.Material = null,
     pub fn create(gpa: std.mem.Allocator, bytes: []const u8, bounds: decode.Limits, options: Options) Error!*Snapshot {
         if (options.authority.len == 0 or options.attempt_delay.nanoseconds <= 0) return error.InvalidEdsTarget;
+        const material = options.tls_material;
+        errdefer if (material) |value| value.deinit();
         var resource = try decode.decode(gpa, bytes, bounds);
         errdefer resource.deinit();
         const arena = resource.arena.allocator();
@@ -131,7 +137,7 @@ pub const Snapshot = struct {
         const values = try endpoints.toOwnedSlice(arena);
         const cluster = try arena.dupe(u8, options.cluster orelse resource.value.cluster_name);
         const self = try gpa.create(Snapshot);
-        self.* = .{ .allocator = gpa, .resource = resource, .endpoints = values, .service_config_json = json, .circuit = .{ .cluster = cluster, .eds_service_name = resource.value.cluster_name, .max_concurrent_requests = options.max_concurrent_requests } };
+        self.* = .{ .allocator = gpa, .resource = resource, .endpoints = values, .service_config_json = json, .circuit = .{ .cluster = cluster, .eds_service_name = resource.value.cluster_name, .max_concurrent_requests = options.max_concurrent_requests }, .tls_material = material };
         return self;
     }
     pub fn retain(self: *Snapshot) void {
@@ -139,6 +145,7 @@ pub const Snapshot = struct {
     }
     pub fn release(self: *Snapshot) void {
         if (self.refs.fetchSub(1, .acq_rel) != 1) return;
+        if (self.tls_material) |value| value.deinit();
         self.resource.deinit();
         self.allocator.destroy(self);
     }

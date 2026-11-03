@@ -43,7 +43,7 @@ pub fn apply(self: *ctl.Controller, client: *ads.Client, update: ads.Update, des
             item.eds_seen = true;
             continue;
         };
-        const snapshot = try self.project(cluster, selected);
+        const snapshot = try self.project(client.sender.state.io, cluster, selected);
         changed = true;
         if (item.snapshot) |old| old.release();
         item.snapshot = snapshot;

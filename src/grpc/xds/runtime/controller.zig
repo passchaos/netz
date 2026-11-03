@@ -7,11 +7,12 @@ const rds = @import("../rds.zig");
 const cds = @import("../cds.zig");
 const eds = @import("../eds.zig");
 const shared = @import("../../channel/shared.zig");
+const tls_material = @import("../tls_material.zig");
 const entries = @import("entry.zig");
 const Plan = @import("plan.zig").Plan;
 const Target = @import("target.zig").Target;
 pub const Options = @import("options.zig").Options;
-pub const Error = @import("errors.zig").PublishError || lds.Error || cds.Error || eds.Error || error{ InvalidXdsOptions, XdsNotStarted };
+pub const Error = @import("errors.zig").PublishError || lds.Error || cds.Error || eds.Error || tls_material.Error || error{ InvalidXdsOptions, XdsNotStarted };
 pub const Controller = struct {
     allocator: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
@@ -62,7 +63,7 @@ pub const Controller = struct {
             if (self.projections.items.len >= self.options.limits.max_projections) return error.XdsLimitExceeded;
             try self.projections.ensureUnusedCapacity(self.allocator, 1);
         }
-        const target = try Target.create(self.allocator, plan.entries.items, self.local_json);
+        const target = try Target.create(self.allocator, destination.state.io, plan.entries.items, self.local_json);
         defer target.release();
         var storage = std.math.add(usize, plan.route_storage, target.arena.queryCapacity()) catch return error.XdsLimitExceeded;
         for (plan.entries.items) |entry| {
@@ -324,7 +325,7 @@ pub const Controller = struct {
                         continue;
                     };
                     if (client.subscriptions.find(eds.type_url) != null) try client.subscriptions.forget(eds.type_url, cluster.resource.value.edsName());
-                    const empty = try self.emptyEds(cluster);
+                    const empty = try self.emptyEds(client.sender.state.io, cluster);
                     if (item.snapshot) |old| old.release();
                     item.snapshot = empty;
                     item.eds_seen = true;
@@ -337,16 +338,22 @@ pub const Controller = struct {
         _ = try client.flushWithDeadline(deadline);
         return revision;
     }
-    pub fn project(self: *Controller, cluster: *entries.Cluster, bytes: []const u8) Error!*eds.Snapshot {
+    pub fn project(self: *Controller, io: std.Io, cluster: *entries.Cluster, bytes: []const u8) Error!*eds.Snapshot {
         const config = cluster.resource.value;
         var options = self.options.target;
         options.cluster = config.name;
         options.max_concurrent_requests = config.max_concurrent_requests;
         options.child_policy_json = config.policy.child_json;
         options.locality_weighted = config.policy.locality_weighted;
+        if (config.tls) |tls_config| {
+            const material = try tls_material.Material.create(self.allocator, io, tls_config);
+            const host = material.serverName(config.name);
+            options.tls = .{ .host = host, .options = material.options() };
+            options.tls_material = material;
+        }
         return eds.Snapshot.create(self.allocator, bytes, self.options.limits.eds, options);
     }
-    pub fn emptyEds(self: *Controller, cluster: *entries.Cluster) Error!*eds.Snapshot {
+    pub fn emptyEds(self: *Controller, io: std.Io, cluster: *entries.Cluster) Error!*eds.Snapshot {
         const name = cluster.resource.value.edsName();
         var writer: std.Io.Writer.Allocating = .init(self.allocator);
         defer writer.deinit();
@@ -355,6 +362,6 @@ pub const Controller = struct {
         while (length >= 128) : (length >>= 7) writer.writer.writeByte(@as(u8, @truncate(length)) | 0x80) catch return error.OutOfMemory;
         writer.writer.writeByte(@intCast(length)) catch return error.OutOfMemory;
         writer.writer.writeAll(name) catch return error.OutOfMemory;
-        return self.project(cluster, writer.written());
+        return self.project(io, cluster, writer.written());
     }
 };

@@ -73,13 +73,13 @@ pub fn apply(self: *ctl.Controller, client: *delta.Client, update: delta.Update,
                 item.snapshot.?.retain();
                 break :blk item.snapshot.?;
             } else if (same_identity and item.snapshot != null)
-                try self.project(resource, if (after.isEds()) item.snapshot.?.resource.wire else after.inline_assignment)
+                try self.project(client.sender.state.io, resource, if (after.isEds()) item.snapshot.?.resource.wire else after.inline_assignment)
             else if (after.isEds())
-                try self.emptyEds(resource)
+                try self.emptyEds(client.sender.state.io, resource)
             else if (after.isDns())
                 null
             else
-                try self.project(resource, after.inline_assignment);
+                try self.project(client.sender.state.io, resource, after.inline_assignment);
             resource.retain();
             if (item.cluster) |old| old.release();
             if (item.snapshot) |old| old.release();

@@ -2,6 +2,7 @@ const std = @import("std");
 const resource = @import("decode.zig");
 const policy = @import("policy.zig");
 const fixture = @import("testing.zig");
+const tls_testing = @import("../../../tls/testing.zig");
 const gpa = std.testing.allocator;
 const prefix = "type.googleapis.com/envoy.extensions.load_balancing_policies.";
 
@@ -131,6 +132,20 @@ test "gRPC CDS decodes STRICT_DNS and LOGICAL_DNS clusters" {
     defer logical_decoded.deinit();
     try std.testing.expectEqual(@as(usize, 1), logical_decoded.value.host_endpoints.len);
     try std.testing.expectEqualStrings("a.test", logical_decoded.value.host_endpoints[0].host);
+}
+
+test "gRPC CDS decodes inline upstream TLS transport sockets" {
+    const pem = try std.fmt.allocPrint(gpa, "-----BEGIN CERTIFICATE-----\n{s}\n-----END CERTIFICATE-----\n", .{tls_testing.certificate_base64});
+    defer gpa.free(pem);
+    const tls = try fixture.upstreamTls(gpa, pem, "localhost");
+    defer gpa.free(tls);
+    const encoded = try fixture.staticClusterTls(gpa, "backend", "127.0.0.1", 1001, tls);
+    defer gpa.free(encoded);
+    var decoded = try resource.decode(gpa, encoded, .{});
+    defer decoded.deinit();
+    try std.testing.expect(decoded.value.tls != null);
+    try std.testing.expectEqualStrings("localhost", decoded.value.tls.?.server_name);
+    try std.testing.expect(std.mem.indexOf(u8, decoded.value.tls.?.trusted_ca, "BEGIN CERTIFICATE") != null);
 }
 
 test "gRPC CDS rejects unsupported discovery security invalid identities and ring ranges" {

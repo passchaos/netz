@@ -91,11 +91,17 @@ reconnect replays the accepted version and desired names. Callers must avoid
 NACKing a version that has already committed. Pre-publication validation and
 publication errors leave the response undecided and available for NACK.
 
-CDS transport_socket, transport_socket_matches, outlier_detection, lrs_server
-and upstream_config are explicitly rejected. Aggregate/custom cluster discovery
-is also unsupported. This slice handles EDS-backed, STATIC, STRICT_DNS and
-LOGICAL_DNS clusters; DNS endpoints are cleartext because CDS transport
-security remains unsupported. Typed delta CDS/EDS publication is available
+`transport_socket` accepts one inline
+`envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext`: an optional SNI
+name, inline `trusted_ca`, and one inline certificate chain/private-key pair.
+EDS, STATIC and DNS endpoints become TLS targets; without `trusted_ca` the
+platform roots are used. SDS secret configs, certificate providers, `tls_params`,
+subject-alt-name matching, file/environment data sources and other transport
+sockets are explicitly rejected. `transport_socket_matches`,
+outlier_detection, lrs_server and upstream_config are also rejected.
+Aggregate/custom cluster discovery is unsupported. This slice handles
+EDS-backed, STATIC, STRICT_DNS and LOGICAL_DNS clusters. Typed delta CDS/EDS
+publication is available
 through the automatic runtime; delta CDS/EDS TTL expiry is covered. Bootstrap
 parsing and control-plane failover are available. LDS/RDS routing,
 certificate providers and automatic refresh scheduling, authority-specific control planes, LRS automatic background scheduling and full
@@ -108,6 +114,7 @@ routing, same-EDS policy/circuit changes, zero-limit pre-wire rejection, changed
 EDS name, invalid CDS/EDS NACKs and CDS deletion with late EDS delivery. The
 backends must retain one HTTP/2 session each across updates. Native tests also
 cover STATIC and DNS inline-assignment decoding, cluster-name matching, SotW
-and delta publication, endpoint reprojection and the absence of an EDS
-subscription. Evidence is stored in
-`docs/evidence/grpc_cds/dns-2026-11-03.json`.
+and delta publication, endpoint reprojection, the absence of an EDS
+subscription, inline upstream TLS decoding and a real certificate-verified
+STATIC cluster RPC. Evidence is stored in
+`docs/evidence/grpc_cds/tls-2026-11-03.json`.

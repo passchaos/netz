@@ -2,6 +2,7 @@
 const std = @import("std");
 const pb = @import("protobuf.zig");
 const policy = @import("policy.zig");
+const tls_material = @import("../tls_material.zig");
 pub const type_url = "type.googleapis.com/envoy.config.cluster.v3.Cluster";
 pub const Error = pb.Error;
 pub const Limits = struct { max_bytes: usize = 8 * 1024 * 1024, max_text_bytes: usize = 4096, max_thresholds: usize = 256, max_policies: usize = 32, max_endpoints: usize = 65536 };
@@ -24,6 +25,7 @@ pub const Cluster = struct {
     inline_assignment: []const u8 = "",
     /// Flattened DNS endpoints, retaining priority/locality identity.
     host_endpoints: []const HostEndpoint = &.{},
+    tls: ?tls_material.Config = null,
     max_concurrent_requests: u32 = 1024,
     policy: policy.Result,
     pub fn isEds(self: Cluster) bool {
@@ -217,6 +219,93 @@ fn circuit(bytes: []const u8, limit: usize) Error!u32 {
     }
     return selected orelse 1024;
 }
+fn dataSource(bytes: []const u8, limits: Limits) Error![]const u8 {
+    var inline_bytes: ?[]const u8 = null;
+    var inline_string: ?[]const u8 = null;
+    var reader: pb.Reader = .{ .bytes = bytes };
+    while (try reader.next()) |field| {
+        if (field.number == 1 and field.wire_type == 2) inline_bytes = try reader.bytesValue() else if (field.number == 2 and field.wire_type == 2) {
+            const value = try pb.text(&reader, limits.max_text_bytes);
+            inline_string = value;
+        } else if ((field.number == 3 or field.number == 4) and field.wire_type == 2) return error.UnsupportedCdsFeature else try reader.skip(field);
+    }
+    return inline_bytes orelse inline_string orelse error.InvalidCdsResource;
+}
+
+fn tlsCertificate(bytes: []const u8, limits: Limits) Error!struct { chain: []const u8, key: []const u8 } {
+    var chain: ?[]const u8 = null;
+    var key: ?[]const u8 = null;
+    var reader: pb.Reader = .{ .bytes = bytes };
+    while (try reader.next()) |field| {
+        if (field.number == 1 and field.wire_type == 2) chain = try dataSource(try reader.bytesValue(), limits) else if (field.number == 2 and field.wire_type == 2) key = try dataSource(try reader.bytesValue(), limits) else if ((field.number == 3 or field.number == 4) and field.wire_type == 2) return error.UnsupportedCdsFeature else try reader.skip(field);
+    }
+    return .{ .chain = chain orelse return error.InvalidCdsResource, .key = key orelse return error.InvalidCdsResource };
+}
+
+fn validationContext(bytes: []const u8, limits: Limits) Error![]const u8 {
+    var trusted_ca: ?[]const u8 = null;
+    var reader: pb.Reader = .{ .bytes = bytes };
+    while (try reader.next()) |field| {
+        if (field.number == 1 and field.wire_type == 2) trusted_ca = try dataSource(try reader.bytesValue(), limits) else if (field.number >= 2 and field.number <= 10) return error.UnsupportedCdsFeature else try reader.skip(field);
+    }
+    return trusted_ca orelse error.InvalidCdsResource;
+}
+
+fn commonTlsContext(bytes: []const u8, limits: Limits) Error!tls_material.Config {
+    var result: tls_material.Config = .{};
+    var reader: pb.Reader = .{ .bytes = bytes };
+    while (try reader.next()) |field| {
+        if (field.number == 1 and field.wire_type == 2) return error.UnsupportedCdsFeature else if (field.number == 2 and field.wire_type == 2) {
+            if (result.certificate_chain.len != 0) return error.UnsupportedCdsFeature;
+            const certificate = try tlsCertificate(try reader.bytesValue(), limits);
+            result.certificate_chain = certificate.chain;
+            result.private_key = certificate.key;
+        } else if (field.number == 3 and field.wire_type == 2) {
+            result.trusted_ca = try validationContext(try reader.bytesValue(), limits);
+        } else if (field.number == 4 and field.wire_type == 2) {
+            _ = try reader.bytesValue();
+        } else if (field.number >= 6 and field.number <= 15 and field.wire_type == 2) return error.UnsupportedCdsFeature else try reader.skip(field);
+    }
+    return result;
+}
+
+fn upstreamTlsContext(bytes: []const u8, limits: Limits) Error!tls_material.Config {
+    var result: tls_material.Config = .{};
+    var reader: pb.Reader = .{ .bytes = bytes };
+    while (try reader.next()) |field| {
+        if (field.number == 1 and field.wire_type == 2) {
+            const common = try commonTlsContext(try reader.bytesValue(), limits);
+            result.trusted_ca = common.trusted_ca;
+            result.certificate_chain = common.certificate_chain;
+            result.private_key = common.private_key;
+        } else if (field.number == 2 and field.wire_type == 2) {
+            const value = try pb.text(&reader, 255);
+            result.server_name = value;
+        } else if (field.number == 3 and field.wire_type == 0) {
+            if (try pb.u32Value(&reader) != 0) return error.UnsupportedCdsFeature;
+        } else try reader.skip(field);
+    }
+    return result;
+}
+
+fn transportSocket(bytes: []const u8, limits: Limits) Error!tls_material.Config {
+    var name: []const u8 = "";
+    var typed: ?[]const u8 = null;
+    var reader: pb.Reader = .{ .bytes = bytes };
+    while (try reader.next()) |field| {
+        if (field.number == 1 and field.wire_type == 2) name = try pb.text(&reader, limits.max_text_bytes) else if (field.number == 3 and field.wire_type == 2) typed = try reader.bytesValue() else try reader.skip(field);
+    }
+    if (!std.mem.eql(u8, name, "envoy.transport_sockets.tls")) return error.UnsupportedCdsFeature;
+    var any_type_url: []const u8 = "";
+    var value: ?[]const u8 = null;
+    var any: pb.Reader = .{ .bytes = typed orelse return error.InvalidCdsResource };
+    while (try any.next()) |field| {
+        if (field.number == 1 and field.wire_type == 2) any_type_url = try any.string() else if (field.number == 2 and field.wire_type == 2) value = try any.bytesValue() else try any.skip(field);
+    }
+    if (!std.mem.eql(u8, any_type_url, "type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext")) return error.UnsupportedCdsFeature;
+    return upstreamTlsContext(value orelse return error.InvalidCdsResource, limits);
+}
+
 pub fn decode(gpa: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!Owned {
     if (bytes.len > limits.max_bytes) return error.CdsLimitExceeded;
     var result = Owned{ .arena = .init(gpa), .value = undefined };
@@ -229,6 +318,7 @@ pub fn decode(gpa: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!O
     var kind: u32 = 0;
     var config: ?[]const u8 = null;
     var assignment: ?[]const u8 = null;
+    var transport: ?[]const u8 = null;
     var lb: u32 = 0;
     var ring_config: ?[]const u8 = null;
     var typed_policy: ?[]const u8 = null;
@@ -237,7 +327,7 @@ pub fn decode(gpa: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!O
         if (field.number == 1 and field.wire_type == 2) name = try pb.text(&reader, limits.max_text_bytes) else if (field.number == 2 and field.wire_type == 0) kind = try pb.u32Value(&reader) else if (field.number == 38 and field.wire_type == 2) {
             _ = try reader.bytesValue();
             kind = std.math.maxInt(u32);
-        } else if (field.number == 3 and field.wire_type == 2) config = try reader.bytesValue() else if (field.number == 33 and field.wire_type == 2) assignment = try reader.bytesValue() else if (field.number == 6 and field.wire_type == 0) lb = try pb.u32Value(&reader) else if (field.number == 23 and field.wire_type == 2) ring_config = try reader.bytesValue() else if (field.number == 41 and field.wire_type == 2) typed_policy = try reader.bytesValue() else if (field.number == 10 and field.wire_type == 2) breaker = try reader.bytesValue() else if ((field.number == 24 or field.number == 43 or field.number == 19 or field.number == 42 or field.number == 48) and field.wire_type == 2) return error.UnsupportedCdsFeature else try reader.skip(field);
+        } else if (field.number == 3 and field.wire_type == 2) config = try reader.bytesValue() else if (field.number == 24 and field.wire_type == 2) transport = try reader.bytesValue() else if (field.number == 33 and field.wire_type == 2) assignment = try reader.bytesValue() else if (field.number == 6 and field.wire_type == 0) lb = try pb.u32Value(&reader) else if (field.number == 23 and field.wire_type == 2) ring_config = try reader.bytesValue() else if (field.number == 41 and field.wire_type == 2) typed_policy = try reader.bytesValue() else if (field.number == 10 and field.wire_type == 2) breaker = try reader.bytesValue() else if ((field.number == 43 or field.number == 19 or field.number == 42 or field.number == 48) and field.wire_type == 2) return error.UnsupportedCdsFeature else try reader.skip(field);
     }
     if (name.len == 0) return error.InvalidCdsResource;
     const discovery: Discovery = @enumFromInt(kind);
@@ -267,7 +357,8 @@ pub fn decode(gpa: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!O
         },
         else => return error.UnsupportedCdsFeature,
     }
-    result.value = .{ .name = name, .eds_service_name = service, .discovery = discovery, .inline_assignment = inline_assignment, .host_endpoints = host_endpoints, .max_concurrent_requests = if (breaker) |raw| try circuit(raw, limits.max_thresholds) else 1024, .policy = if (typed_policy) |raw| try policy.typed(arena, raw, limits.max_policies, limits.max_text_bytes, 0) else try policy.legacy(arena, lb, ring_config) };
+    const tls: ?tls_material.Config = if (transport) |raw| try transportSocket(raw, limits) else null;
+    result.value = .{ .name = name, .eds_service_name = service, .discovery = discovery, .inline_assignment = inline_assignment, .host_endpoints = host_endpoints, .tls = tls, .max_concurrent_requests = if (breaker) |raw| try circuit(raw, limits.max_thresholds) else 1024, .policy = if (typed_policy) |raw| try policy.typed(arena, raw, limits.max_policies, limits.max_text_bytes, 0) else try policy.legacy(arena, lb, ring_config) };
     // Converted policies must satisfy the same configuration parser/runtime
     // contract as direct callers, including complete range validation.
     const json = try std.fmt.allocPrint(arena, "{{\"loadBalancingConfig\":{s}}}", .{result.value.policy.child_json});

@@ -61,7 +61,7 @@ pub fn apply(self: *ctl.Controller, client: *delta.Client, update: delta.Update,
                 changed = changed or seen_changed or deadline_changed;
                 continue;
             };
-            const snapshot = try self.project(cluster, wire);
+            const snapshot = try self.project(client.sender.state.io, cluster, wire);
             changed = true;
             if (item.snapshot) |old| old.release();
             item.snapshot = snapshot;
@@ -70,7 +70,7 @@ pub fn apply(self: *ctl.Controller, client: *delta.Client, update: delta.Update,
         } else if (removedName(response.removed, name)) {
             // An explicit removal resolves the assignment to an empty one;
             // it is not the same as an initial omission.
-            const empty = try self.emptyEds(cluster);
+            const empty = try self.emptyEds(client.sender.state.io, cluster);
             item.eds_deadline = null;
             if (item.snapshot) |old| if (std.mem.eql(u8, old.resource.wire, empty.resource.wire) and item.eds_seen) {
                 empty.release();
