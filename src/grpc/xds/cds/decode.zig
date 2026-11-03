@@ -4,18 +4,33 @@ const pb = @import("protobuf.zig");
 const policy = @import("policy.zig");
 pub const type_url = "type.googleapis.com/envoy.config.cluster.v3.Cluster";
 pub const Error = pb.Error;
-pub const Limits = struct { max_bytes: usize = 8 * 1024 * 1024, max_text_bytes: usize = 4096, max_thresholds: usize = 256, max_policies: usize = 32 };
+pub const Limits = struct { max_bytes: usize = 8 * 1024 * 1024, max_text_bytes: usize = 4096, max_thresholds: usize = 256, max_policies: usize = 32, max_endpoints: usize = 65536 };
 pub const Discovery = enum(u32) { static = 0, strict_dns = 1, logical_dns = 2, eds = 3, _ };
+pub const HostEndpoint = struct {
+    host: []const u8,
+    port: u16,
+    priority: u32 = 0,
+    endpoint_weight: u32 = 1,
+    locality_weight: u32 = 1,
+    region: []const u8 = "",
+    zone: []const u8 = "",
+    sub_zone: []const u8 = "",
+};
 pub const Cluster = struct {
     name: []const u8,
     eds_service_name: []const u8,
     discovery: Discovery = .eds,
-    /// Raw inline `ClusterLoadAssignment` for STATIC clusters.
-    static_assignment: []const u8 = "",
+    /// Raw inline `ClusterLoadAssignment` for STATIC/DNS clusters.
+    inline_assignment: []const u8 = "",
+    /// Flattened DNS endpoints, retaining priority/locality identity.
+    host_endpoints: []const HostEndpoint = &.{},
     max_concurrent_requests: u32 = 1024,
     policy: policy.Result,
     pub fn isEds(self: Cluster) bool {
         return self.discovery == .eds;
+    }
+    pub fn isDns(self: Cluster) bool {
+        return self.discovery == .strict_dns or self.discovery == .logical_dns;
     }
     pub fn edsName(self: Cluster) []const u8 {
         if (!self.isEds()) return "";
@@ -45,6 +60,122 @@ fn eds(bytes: []const u8, text_limit: usize) Error![]const u8 {
     };
     return service;
 }
+const Socket = struct { host: []const u8, port: u16 };
+
+const DnsParser = struct {
+    arena: std.mem.Allocator,
+    limits: Limits,
+    count: usize = 0,
+
+    fn text(self: DnsParser, reader: *pb.Reader) Error![]const u8 {
+        const value = try reader.string();
+        if (value.len > self.limits.max_text_bytes) return error.CdsLimitExceeded;
+        return value;
+    }
+    fn u32Value(_: DnsParser, reader: *pb.Reader) Error!u32 {
+        const value = try reader.varint();
+        if (value > std.math.maxInt(u32)) return error.InvalidCdsResource;
+        return @intCast(value);
+    }
+    fn wrapper(self: DnsParser, bytes: []const u8) Error!u32 {
+        var value: u32 = 0;
+        var reader: pb.Reader = .{ .bytes = bytes };
+        while (try reader.next()) |field| {
+            if (field.number == 1 and field.wire_type == 0) value = try self.u32Value(&reader) else try reader.skip(field);
+        }
+        return value;
+    }
+    fn socket(self: DnsParser, bytes: []const u8) Error!Socket {
+        var host: []const u8 = "";
+        var port: ?u32 = null;
+        var protocol: u32 = 0;
+        var resolver: []const u8 = "";
+        var reader: pb.Reader = .{ .bytes = bytes };
+        while (try reader.next()) |field| {
+            if (field.number == 1 and field.wire_type == 0) protocol = try self.u32Value(&reader) else if (field.number == 2 and field.wire_type == 2) host = try self.text(&reader) else if (field.number == 3 and field.wire_type == 0) port = try self.u32Value(&reader) else if (field.number == 4 and field.wire_type == 2) resolver = try self.text(&reader) else try reader.skip(field);
+        }
+        if (protocol != 0 or resolver.len != 0) return error.UnsupportedCdsFeature;
+        const value = port orelse return error.InvalidCdsResource;
+        if (value == 0 or value > 65535 or host.len == 0) return error.InvalidCdsResource;
+        return .{ .host = host, .port = @intCast(value) };
+    }
+    fn address(self: DnsParser, bytes: []const u8) Error!Socket {
+        var socket_bytes: ?[]const u8 = null;
+        var reader: pb.Reader = .{ .bytes = bytes };
+        while (try reader.next()) |field| {
+            if (field.number == 1 and field.wire_type == 2) socket_bytes = try reader.bytesValue() else if ((field.number == 2 or field.number == 3) and field.wire_type == 2) return error.UnsupportedCdsFeature else try reader.skip(field);
+        }
+        return self.socket(socket_bytes orelse return error.InvalidCdsResource);
+    }
+    fn endpoint(self: DnsParser, bytes: []const u8) Error!Socket {
+        var address_bytes: ?[]const u8 = null;
+        var reader: pb.Reader = .{ .bytes = bytes };
+        while (try reader.next()) |field| {
+            if (field.number == 1 and field.wire_type == 2) address_bytes = try reader.bytesValue() else if (field.number == 3 and field.wire_type == 2) {
+                _ = try self.text(&reader);
+            } else if (field.number == 4 and field.wire_type == 2) return error.UnsupportedCdsFeature else try reader.skip(field);
+        }
+        return self.address(address_bytes orelse return error.InvalidCdsResource);
+    }
+    fn lbEndpoint(self: *DnsParser, bytes: []const u8) Error!?HostEndpoint {
+        var endpoint_bytes: ?[]const u8 = null;
+        var weight_bytes: ?[]const u8 = null;
+        var health: u32 = 0;
+        var reader: pb.Reader = .{ .bytes = bytes };
+        while (try reader.next()) |field| {
+            if (field.number == 1 and field.wire_type == 2) endpoint_bytes = try reader.bytesValue() else if (field.number == 2 and field.wire_type == 0) health = try self.u32Value(&reader) else if (field.number == 4 and field.wire_type == 2) weight_bytes = try reader.bytesValue() else try reader.skip(field);
+        }
+        if (health != 0 and health != 1 and health != 3) return null;
+        const weight = if (weight_bytes) |raw| try self.wrapper(raw) else 1;
+        if (weight == 0) return error.InvalidCdsResource;
+        if (self.count >= self.limits.max_endpoints) return error.CdsLimitExceeded;
+        self.count += 1;
+        const socket_value = try self.endpoint(endpoint_bytes orelse return error.InvalidCdsResource);
+        return .{ .host = socket_value.host, .port = socket_value.port, .endpoint_weight = weight };
+    }
+    fn locality(self: *DnsParser, bytes: []const u8, out: *std.ArrayList(HostEndpoint)) Error!void {
+        var locality_bytes: ?[]const u8 = null;
+        var weight: u32 = 1;
+        var priority: u32 = 0;
+        var endpoint_bytes: std.ArrayList([]const u8) = .empty;
+        defer endpoint_bytes.deinit(self.arena);
+        var reader: pb.Reader = .{ .bytes = bytes };
+        while (try reader.next()) |field| {
+            if (field.number == 1 and field.wire_type == 2) locality_bytes = try reader.bytesValue() else if (field.number == 3 and field.wire_type == 2) weight = try self.wrapper(try reader.bytesValue()) else if (field.number == 5 and field.wire_type == 0) priority = try self.u32Value(&reader) else if (field.number == 2 and field.wire_type == 2) {
+                try endpoint_bytes.append(self.arena, try reader.bytesValue());
+            } else if ((field.number == 7 or field.number == 8) and field.wire_type == 2) return error.UnsupportedCdsFeature else try reader.skip(field);
+        }
+        if (weight == 0) return error.InvalidCdsResource;
+        var region: []const u8 = "";
+        var zone: []const u8 = "";
+        var sub_zone: []const u8 = "";
+        if (locality_bytes) |raw| {
+            var location: pb.Reader = .{ .bytes = raw };
+            while (try location.next()) |field| {
+                if (field.number == 1 and field.wire_type == 2) region = try self.text(&location) else if (field.number == 2 and field.wire_type == 2) zone = try self.text(&location) else if (field.number == 3 and field.wire_type == 2) sub_zone = try self.text(&location) else try location.skip(field);
+            }
+        }
+        for (endpoint_bytes.items) |raw| {
+            const value = (try self.lbEndpoint(raw)) orelse continue;
+            try out.append(self.arena, .{ .host = value.host, .port = value.port, .priority = priority, .endpoint_weight = value.endpoint_weight, .locality_weight = weight, .region = region, .zone = zone, .sub_zone = sub_zone });
+        }
+    }
+};
+
+fn dnsAssignment(arena: std.mem.Allocator, bytes: []const u8, name: []const u8, limits: Limits) Error![]const HostEndpoint {
+    var parser = DnsParser{ .arena = arena, .limits = limits };
+    var endpoints: std.ArrayList(HostEndpoint) = .empty;
+    var cluster_name: []const u8 = "";
+    var reader: pb.Reader = .{ .bytes = bytes };
+    while (try reader.next()) |field| {
+        if (field.number == 1 and field.wire_type == 2) cluster_name = try parser.text(&reader) else if (field.number == 2 and field.wire_type == 2) {
+            try parser.locality(try reader.bytesValue(), &endpoints);
+        } else try reader.skip(field);
+    }
+    if (!std.mem.eql(u8, cluster_name, name)) return error.InvalidCdsResource;
+    return endpoints.toOwnedSlice(arena);
+}
+
 fn circuit(bytes: []const u8, limit: usize) Error!u32 {
     var reader: pb.Reader = .{ .bytes = bytes };
     var count: usize = 0;
@@ -97,6 +228,7 @@ pub fn decode(gpa: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!O
     const discovery: Discovery = @enumFromInt(kind);
     var service: []const u8 = "";
     var inline_assignment: []const u8 = "";
+    var host_endpoints: []const HostEndpoint = &.{};
     switch (discovery) {
         .eds => {
             service = try eds(config orelse return error.InvalidCdsResource, limits.max_text_bytes);
@@ -112,9 +244,14 @@ pub fn decode(gpa: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!O
             if (!std.mem.eql(u8, checked.value.cluster_name, name)) return error.InvalidCdsResource;
             inline_assignment = raw;
         },
+        .strict_dns, .logical_dns => {
+            const raw = assignment orelse return error.InvalidCdsResource;
+            host_endpoints = try dnsAssignment(arena, raw, name, limits);
+            inline_assignment = raw;
+        },
         else => return error.UnsupportedCdsFeature,
     }
-    result.value = .{ .name = name, .eds_service_name = service, .discovery = discovery, .static_assignment = inline_assignment, .max_concurrent_requests = if (breaker) |raw| try circuit(raw, limits.max_thresholds) else 1024, .policy = if (typed_policy) |raw| try policy.typed(arena, raw, limits.max_policies, limits.max_text_bytes, 0) else try policy.legacy(arena, lb, ring_config) };
+    result.value = .{ .name = name, .eds_service_name = service, .discovery = discovery, .inline_assignment = inline_assignment, .host_endpoints = host_endpoints, .max_concurrent_requests = if (breaker) |raw| try circuit(raw, limits.max_thresholds) else 1024, .policy = if (typed_policy) |raw| try policy.typed(arena, raw, limits.max_policies, limits.max_text_bytes, 0) else try policy.legacy(arena, lb, ring_config) };
     // Converted policies must satisfy the same configuration parser/runtime
     // contract as direct callers, including complete range validation.
     const json = try std.fmt.allocPrint(arena, "{{\"loadBalancingConfig\":{s}}}", .{result.value.policy.child_json});

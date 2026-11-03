@@ -6,7 +6,9 @@ and endpoint LB policy. EDS clusters use an ADS/self `ConfigSource` and the
 service name defaults to the cluster name; an `xdstp:` EDS cluster must specify
 its service name. STATIC clusters carry an inline `load_assignment` whose
 `cluster_name` must match the cluster; they publish endpoints through the same
-priority/locality runtime without an EDS subscription. The first DEFAULT
+priority/locality runtime without an EDS subscription. STRICT_DNS and
+LOGICAL_DNS clusters likewise use an inline assignment, publishing host
+endpoints that retain priority and locality identity. The first DEFAULT
 circuit threshold supplies `max_requests`, defaulting to 1024 when omitted;
 HIGH thresholds do not supply the application limit. Zero rejects new RPCs.
 
@@ -54,9 +56,9 @@ cached resource and accepted version.
 
 A successful CDS update subscribes to its EDS name when the cluster is EDS and
 atomically publishes the policy, circuit identity/limit, endpoints and drops.
-STATIC clusters publish their inline assignment immediately and request no EDS
-subscription; switching a selected cluster between EDS and STATIC updates the
-subscription set in the same transaction.
+STATIC and DNS clusters publish their inline assignment immediately and request
+no EDS subscription; switching a selected cluster between EDS and non-EDS
+updates the subscription set in the same transaction.
 Subscription storage
 is prepared first and committed without allocation after channel publication.
 The controller owns the accepted CDS configuration and matching EDS image.
@@ -88,9 +90,10 @@ NACKing a version that has already committed. Pre-publication validation and
 publication errors leave the response undecided and available for NACK.
 
 CDS transport_socket, transport_socket_matches, outlier_detection, lrs_server
-and upstream_config are explicitly rejected. LOGICAL_DNS/STRICT_DNS and
-aggregate/custom cluster discovery are also unsupported. This slice handles
-EDS-backed and STATIC clusters. Typed delta CDS/EDS publication is available
+and upstream_config are explicitly rejected. Aggregate/custom cluster discovery
+is also unsupported. This slice handles EDS-backed, STATIC, STRICT_DNS and
+LOGICAL_DNS clusters; DNS endpoints are cleartext because CDS transport
+security remains unsupported. Typed delta CDS/EDS publication is available
 through the automatic runtime; delta CDS/EDS TTL expiry is covered. Bootstrap
 parsing and control-plane failover are available. LDS/RDS routing,
 certificate providers and automatic refresh scheduling, authority-specific control planes, LRS automatic background scheduling and full
@@ -102,6 +105,7 @@ over ADS. Two independent grpc-js backends count locality and stable ring
 routing, same-EDS policy/circuit changes, zero-limit pre-wire rejection, changed
 EDS name, invalid CDS/EDS NACKs and CDS deletion with late EDS delivery. The
 backends must retain one HTTP/2 session each across updates. Native tests also
-cover STATIC inline-assignment decoding, cluster-name matching, SotW and delta
-publication, endpoint reprojection and the absence of an EDS subscription.
-Evidence is stored in `docs/evidence/grpc_cds/static-2026-11-03.json`.
+cover STATIC and DNS inline-assignment decoding, cluster-name matching, SotW
+and delta publication, endpoint reprojection and the absence of an EDS
+subscription. Evidence is stored in
+`docs/evidence/grpc_cds/dns-2026-11-03.json`.

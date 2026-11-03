@@ -11,14 +11,14 @@
   },
   "result": {
     "xds": {
-      "passed": 257,
-      "total": 257,
+      "passed": 260,
+      "total": 260,
       "failed": 0,
       "exit_code": 0
     },
     "delta": {
-      "passed": 189,
-      "total": 189,
+      "passed": 190,
+      "total": 190,
       "failed": 0,
       "exit_code": 0
     },

@@ -58,7 +58,7 @@ pub fn apply(self: *ctl.Controller, client: *delta.Client, update: delta.Update,
             const after = resource.resource.value;
             const same_identity = if (item.cluster) |old| blk: {
                 const before = old.resource.value;
-                break :blk before.discovery == after.discovery and std.mem.eql(u8, before.edsName(), after.edsName()) and std.mem.eql(u8, before.static_assignment, after.static_assignment);
+                break :blk before.discovery == after.discovery and std.mem.eql(u8, before.edsName(), after.edsName()) and std.mem.eql(u8, before.inline_assignment, after.inline_assignment);
             } else false;
             const same_config = if (item.cluster) |old| blk: {
                 const before = old.resource.value;
@@ -69,15 +69,17 @@ pub fn apply(self: *ctl.Controller, client: *delta.Client, update: delta.Update,
                 continue;
             }
             changed = true;
-            const snapshot = if (same_config) blk: {
+            const snapshot: ?*@import("../eds.zig").Snapshot = if (same_config) blk: {
                 item.snapshot.?.retain();
                 break :blk item.snapshot.?;
             } else if (same_identity and item.snapshot != null)
-                try self.project(resource, if (after.isEds()) item.snapshot.?.resource.wire else after.static_assignment)
+                try self.project(resource, if (after.isEds()) item.snapshot.?.resource.wire else after.inline_assignment)
             else if (after.isEds())
                 try self.emptyEds(resource)
+            else if (after.isDns())
+                null
             else
-                try self.project(resource, after.static_assignment);
+                try self.project(resource, after.inline_assignment);
             resource.retain();
             if (item.cluster) |old| old.release();
             if (item.snapshot) |old| old.release();

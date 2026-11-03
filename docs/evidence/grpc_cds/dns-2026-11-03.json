@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "date": "2026-11-03",
+  "head": "95d6c24b",
+  "gate": "STRICT_DNS and LOGICAL_DNS CDS cluster decoding and transactional SotW/delta publication",
+  "commands": {
+    "xds": "zig build test-lib -Dtest-filter=xds --summary all",
+    "delta": "zig build test-lib -Dtest-filter=delta --summary all",
+    "package": "zig build test-package --summary all"
+  },
+  "result": {
+    "xds": {
+      "passed": 260,
+      "total": 260,
+      "failed": 0,
+      "exit_code": 0
+    },
+    "delta": {
+      "passed": 190,
+      "total": 190,
+      "failed": 0,
+      "exit_code": 0
+    },
+    "package": {
+      "passed": 26,
+      "total": 26,
+      "failed": 0,
+      "exit_code": 0
+    }
+  },
+  "source_sha256": {
+    "src/grpc/xds/cds/decode.zig": "a1ebf5414e1a2229dc6a5e911b74bce23c7103a7e67c7793a5dc98042cf32891",
+    "src/grpc/xds/cds/testing.zig": "0589349b8c30204d88228801fb9b5edd3bd1250c399d185ba5d28d8fad2506da",
+    "src/grpc/xds/cds/tests.zig": "5fbb8988152ee23612ba0ffec01ef971c755cf467ada93bf28396f08732ceb28",
+    "src/grpc/xds/runtime/apply_cds.zig": "81c4d8c1979e492addd81cac88a958c0ea36d89ed15e24ca3506be9b322b9d5e",
+    "src/grpc/xds/runtime/apply_delta_cds.zig": "7ba79a93c87ab6fd799e796c836a39612e32c7f21653a59ba1c933a0a60abf51",
+    "src/grpc/xds/runtime/target.zig": "d1cfcf5c0e7e57ae59a89b88b937d6dc32b33a6a1f0d674bf2c8fd7eb7b1f3c7",
+    "src/grpc/xds/runtime/delta_tests.zig": "4b13cbddeb7a96239ebf98247fa24fbcf06cf4c5e6a6084057e903680b6471bb",
+    "src/grpc/xds/runtime/tests.zig": "87e81cd59901610247d3e831bd048c62b7a97cd3305f0f579fc4aa2b3846bbd3"
+  },
+  "notes": "STRICT_DNS and LOGICAL_DNS clusters carry an inline ClusterLoadAssignment whose cluster_name must match the cluster. Host endpoints retain priority and locality identity; the target builds priority and locality paths and applies the CDS endpoint policy, including xds_wrr_locality when configured. DNS clusters request no EDS subscription. Native tests cover decode acceptance/rejection, SotW publication, delta publication, endpoint reprojection and absent EDS subscriptions."
+}

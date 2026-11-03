@@ -152,3 +152,33 @@ test "gRPC xDS runtime publishes STATIC clusters without an EDS subscription" {
     try accept(controller, &client, channel, io, cds.type_url, "c2", &.{.{ .type_url = cds.type_url, .value = moved }});
     try std.testing.expectEqual(@as(usize, 1), channel.configuredEndpointCount());
 }
+
+test "gRPC xDS runtime publishes DNS clusters without an EDS subscription" {
+    var threaded = std.Io.Threaded.init(gpa, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var channel = try grpc.SharedChannel.init(gpa, io, .{ .cleartext_ip = .{ .address = .{ .ip4 = .loopback(1) } } }, .{});
+    defer channel.deinit();
+    var sender = channel.sender();
+    defer sender.deinit();
+    var client = try ads.Client.init(gpa, sender, .{ .node = .{ .id = "test" } });
+    defer client.deinit();
+    const controller = try runtime.Controller.create(gpa, .{ .listener_name = "frontend", .target = .{ .authority = "backend.test" } });
+    defer controller.deinit();
+    _ = try controller.startWithDeadline(&client, channel, .fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(3) }));
+    const routes = try rds_fixture.encode(gpa, "inline", &.{"backend.test"}, &.{.{ .prefix = "/", .cluster = "a" }}, null);
+    defer gpa.free(routes);
+    const listener = try lds_fixture.encode(gpa, .{ .inline_rds = routes });
+    defer gpa.free(listener);
+    try accept(controller, &client, channel, io, lds.type_url, "l1", &.{.{ .type_url = lds.type_url, .value = listener }});
+    const a = try cds_fixture.dnsCluster(gpa, "a", "backend.test", 1001, 1);
+    defer gpa.free(a);
+    try accept(controller, &client, channel, io, cds.type_url, "c1", &.{.{ .type_url = cds.type_url, .value = a }});
+    try std.testing.expect(!controller.entries.items[0].pending());
+    try std.testing.expectEqual(@as(usize, 1), channel.configuredEndpointCount());
+    try std.testing.expect(client.subscriptions.find(eds.type_url) == null);
+    const moved = try cds_fixture.dnsCluster(gpa, "a", "other.test", 1002, 2);
+    defer gpa.free(moved);
+    try accept(controller, &client, channel, io, cds.type_url, "c2", &.{.{ .type_url = cds.type_url, .value = moved }});
+    try std.testing.expectEqual(@as(usize, 1), channel.configuredEndpointCount());
+}

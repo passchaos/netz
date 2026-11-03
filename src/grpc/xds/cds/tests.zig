@@ -83,7 +83,7 @@ test "gRPC CDS decodes STATIC clusters with inline assignments" {
     try std.testing.expectEqual(resource.Discovery.static, decoded.value.discovery);
     try std.testing.expect(!decoded.value.isEds());
     try std.testing.expectEqualStrings("", decoded.value.edsName());
-    try std.testing.expect(decoded.value.static_assignment.len != 0);
+    try std.testing.expect(decoded.value.inline_assignment.len != 0);
     const wrong_name = try fixture.assignment(gpa, "other", "127.0.0.1", 1001);
     defer gpa.free(wrong_name);
     var builder = fixture.Builder{ .allocator = gpa };
@@ -95,6 +95,30 @@ test "gRPC CDS decodes STATIC clusters with inline assignments" {
     const missing = try fixture.cluster(gpa, "backend", "", "\x10\x00");
     defer gpa.free(missing);
     try std.testing.expectError(error.InvalidCdsResource, resource.decode(gpa, missing, .{}));
+}
+
+test "gRPC CDS decodes STRICT_DNS and LOGICAL_DNS clusters" {
+    for ([_]struct { kind: u32, discovery: resource.Discovery }{
+        .{ .kind = 1, .discovery = .strict_dns },
+        .{ .kind = 2, .discovery = .logical_dns },
+    }) |case| {
+        const encoded = try fixture.dnsCluster(gpa, "backend", "backend.test", 1001, case.kind);
+        defer gpa.free(encoded);
+        var decoded = try resource.decode(gpa, encoded, .{});
+        defer decoded.deinit();
+        try std.testing.expectEqual(case.discovery, decoded.value.discovery);
+        try std.testing.expect(decoded.value.isDns());
+        try std.testing.expectEqualStrings("", decoded.value.edsName());
+        try std.testing.expectEqual(@as(usize, 1), decoded.value.host_endpoints.len);
+        try std.testing.expectEqualStrings("backend.test", decoded.value.host_endpoints[0].host);
+        try std.testing.expectEqual(@as(u16, 1001), decoded.value.host_endpoints[0].port);
+    }
+    const bad = try fixture.dnsCluster(gpa, "backend", "", 1001, 1);
+    defer gpa.free(bad);
+    try std.testing.expectError(error.InvalidCdsResource, resource.decode(gpa, bad, .{}));
+    const missing = try fixture.dnsCluster(gpa, "backend", "backend.test", 1001, 4);
+    defer gpa.free(missing);
+    try std.testing.expectError(error.UnsupportedCdsFeature, resource.decode(gpa, missing, .{}));
 }
 
 test "gRPC CDS rejects unsupported discovery security invalid identities and ring ranges" {
@@ -109,8 +133,8 @@ test "gRPC CDS rejects unsupported discovery security invalid identities and rin
     try std.testing.expectError(error.InvalidCdsResource, resource.decode(gpa, xdstp, .{}));
     for ([_]struct { extra: []const u8, want: anyerror }{
         .{ .extra = "\x10\x00", .want = error.InvalidCdsResource },
-        .{ .extra = "\x10\x01", .want = error.UnsupportedCdsFeature },
-        .{ .extra = "\x10\x02", .want = error.UnsupportedCdsFeature },
+        .{ .extra = "\x10\x01", .want = error.InvalidCdsResource },
+        .{ .extra = "\x10\x02", .want = error.InvalidCdsResource },
         .{ .extra = "\xc2\x01\x00", .want = error.UnsupportedCdsFeature },
         .{ .extra = "\x30\x01", .want = error.UnsupportedCdsPolicy },
     }) |case| {

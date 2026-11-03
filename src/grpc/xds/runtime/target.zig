@@ -3,6 +3,7 @@ const std = @import("std");
 const entry = @import("entry.zig");
 const channel = @import("../../channel.zig");
 const eds = @import("../eds.zig");
+const cds = @import("../cds.zig");
 const shared = @import("../../channel/shared.zig");
 const Json = std.json.Value;
 fn object() Json {
@@ -20,6 +21,54 @@ fn policy(gpa: std.mem.Allocator, name: []const u8, value: Json) !Json {
     var array = Json{ .array = std.array_list.Managed(Json).init(gpa) };
     try array.array.append(wrapper);
     return array;
+}
+
+fn dnsChildPolicy(
+    arena: std.mem.Allocator,
+    hosts: []const cds.resource.HostEndpoint,
+    base_policy: Json,
+    locality_weighted: bool,
+    key: []const u8,
+    endpoints: *std.ArrayList(channel.Endpoint),
+) !Json {
+    var children = object();
+    var order: Json = .{ .array = std.array_list.Managed(Json).init(arena) };
+    var priorities: usize = 0;
+    for (hosts) |host| priorities = @max(priorities, @as(usize, host.priority) + 1);
+    for (0..priorities) |priority| {
+        const priority_name = try std.fmt.allocPrint(arena, "priority-{d}", .{priority});
+        try order.array.append(string(priority_name));
+        var child = object();
+        if (locality_weighted) {
+            var locality_policy = object();
+            try field(arena, &locality_policy, "childPolicy", base_policy);
+            try field(arena, &child, "config", try policy(arena, "xds_wrr_locality_experimental", locality_policy));
+        } else try field(arena, &child, "config", base_policy);
+        try field(arena, &child, "ignoreReresolutionRequests", .{ .bool = true });
+        try field(arena, &children, priority_name, child);
+        for (hosts) |host| {
+            if (host.priority != priority) continue;
+            const locality_name = try std.fmt.allocPrint(arena, "{d}:{s}{d}:{s}{d}:{s}", .{ host.region.len, host.region, host.zone.len, host.zone, host.sub_zone.len, host.sub_zone });
+            const path = try arena.alloc([]const u8, 3);
+            path[0] = key;
+            path[1] = priority_name;
+            path[2] = locality_name;
+            const weight = if (locality_weighted) host.endpoint_weight else std.math.mul(u32, host.locality_weight, host.endpoint_weight) catch return error.InvalidServiceConfig;
+            const endpoint_key = try std.fmt.allocPrint(arena, "{s}:{d}", .{ host.host, host.port });
+            try endpoints.append(arena, .{ .cleartext_host = .{
+                .host = host.host,
+                .port = host.port,
+                .ring_hash_key = endpoint_key,
+                .ring_hash_weight = weight,
+                .hierarchical_path = path,
+                .locality_weight = host.locality_weight,
+            } });
+        }
+    }
+    var priority_config = object();
+    try field(arena, &priority_config, "children", children);
+    try field(arena, &priority_config, "priorities", order);
+    return policy(arena, "priority_experimental", priority_config);
 }
 pub const Target = struct {
     allocator: std.mem.Allocator,
@@ -73,6 +122,13 @@ pub const Target = struct {
                     };
                     try endpoints.append(arena, projected);
                 }
+            } else if (cluster) |resource| {
+                if (resource.isDns() and resource.host_endpoints.len != 0) {
+                    const decoded = std.json.parseFromSliceLeaky(Json, arena, resource.policy.child_json, .{ .allocate = .alloc_always }) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else error.InvalidServiceConfig;
+                    if (decoded != .array) return error.InvalidServiceConfig;
+                    const key = try arena.dupe(u8, value.identity.key);
+                    child_policy = try dnsChildPolicy(arena, resource.host_endpoints, decoded, resource.policy.locality_weighted, key, &endpoints);
+                } else child_policy = try policy(arena, "round_robin", object());
             } else child_policy = try policy(arena, "round_robin", object());
             try field(arena, &implementation, "dropCategories", drops);
             try field(arena, &implementation, "childPolicy", child_policy);

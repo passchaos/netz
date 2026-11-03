@@ -42,16 +42,16 @@ pub fn apply(self: *ctl.Controller, client: *ads.Client, update: ads.Update, des
             const after = resource.resource.value;
             const same = if (item.cluster) |old| blk: {
                 const before = old.resource.value;
-                break :blk before.discovery == after.discovery and std.mem.eql(u8, before.edsName(), after.edsName()) and std.mem.eql(u8, before.static_assignment, after.static_assignment);
+                break :blk before.discovery == after.discovery and std.mem.eql(u8, before.edsName(), after.edsName()) and std.mem.eql(u8, before.inline_assignment, after.inline_assignment);
             } else false;
-            const snapshot = if (same and item.snapshot != null) blk: {
+            const snapshot: ?*@import("../eds.zig").Snapshot = if (same and item.snapshot != null) blk: {
                 const before = item.cluster.?.resource.value;
                 if (before.max_concurrent_requests == after.max_concurrent_requests and before.policy.locality_weighted == after.policy.locality_weighted and std.mem.eql(u8, before.policy.child_json, after.policy.child_json)) {
                     item.snapshot.?.retain();
                     break :blk item.snapshot.?;
                 }
-                break :blk try self.project(resource, if (after.isEds()) item.snapshot.?.resource.wire else after.static_assignment);
-            } else if (after.isEds()) try self.emptyEds(resource) else try self.project(resource, after.static_assignment);
+                break :blk try self.project(resource, if (after.isEds()) item.snapshot.?.resource.wire else after.inline_assignment);
+            } else if (after.isEds()) try self.emptyEds(resource) else if (after.isDns()) null else try self.project(resource, after.inline_assignment);
             resource.retain();
             if (item.cluster) |old| old.release();
             if (item.snapshot) |old| old.release();

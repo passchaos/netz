@@ -66,12 +66,18 @@ pub fn assignment(gpa: std.mem.Allocator, name: []const u8, host: []const u8, po
     return out.data.toOwnedSlice(gpa);
 }
 pub fn staticCluster(gpa: std.mem.Allocator, name: []const u8, host: []const u8, port: u16) ![]u8 {
+    return discoveryCluster(gpa, name, host, port, 0);
+}
+pub fn dnsCluster(gpa: std.mem.Allocator, name: []const u8, host: []const u8, port: u16, kind: u32) ![]u8 {
+    return discoveryCluster(gpa, name, host, port, kind);
+}
+fn discoveryCluster(gpa: std.mem.Allocator, name: []const u8, host: []const u8, port: u16, kind: u32) ![]u8 {
     const assign = try assignment(gpa, name, host, port);
     defer gpa.free(assign);
     var builder = Builder{ .allocator = gpa };
     errdefer builder.deinit();
     try builder.bytes(1, name);
-    try builder.number(2, 0);
+    try builder.number(2, kind);
     try builder.bytes(33, assign);
     return builder.data.toOwnedSlice(gpa);
 }
