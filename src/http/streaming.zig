@@ -8,7 +8,9 @@
 //! HTTP/1 exposes a pull `BodyReader` plus a push callback contract. HTTP/2
 //! exposes both push callbacks and an independent step-driven `Stream` handle.
 //! HTTP/3 exposes multiplexed `RequestEvent` values carrying peer and stream
-//! identity plus a per-stream incremental message reader.
+//! identity plus a per-stream incremental message reader. Both HTTP/2 and
+//! HTTP/3 also expose `serveConcurrentStreams` for continuous per-connection
+//! concurrent handlers with pull request bodies and streaming responses.
 
 pub const http1 = struct {
     /// Returned after `Connection.readRequestStreaming*` has delivered every
@@ -39,6 +41,11 @@ pub const http2 = struct {
     /// Result of `Connection.serveRequestBatchConcurrent`: per-input handler
     /// errors after responses were serialized in completion order.
     pub const ConcurrentResult = @import("../http2/runtime.zig").ConcurrentHandlerServeResult;
+    /// Per-stream handle for `Connection.serveConcurrentStreams`. The handler
+    /// pulls request DATA and may start a buffered or streaming response.
+    pub const ConcurrentStream = @import("../http2/runtime.zig").Connection.ConcurrentStream;
+    pub const ConcurrentOptions = @import("../http2/runtime/concurrent.zig").Options;
+    pub const ConcurrentSummary = @import("../http2/runtime/concurrent.zig").Summary;
     pub const Connection = @import("../http2/runtime.zig").Connection;
 };
 
@@ -57,6 +64,12 @@ pub const http3 = struct {
     /// Result of `Server.serveConcurrent`; requests/errors stay alive until the
     /// batch is deinitialized.
     pub const ConcurrentResult = @import("../http3/runtime.zig").ConcurrentServeResult;
+    /// Per-stream handle for `HandshakeServerSession.serveConcurrentStreams`.
+    /// The handler pulls request DATA and may start a streaming response with
+    /// DATA chunks and trailers.
+    pub const ConcurrentStream = @import("../http3/runtime.zig").HandshakeServerSession.ConcurrentStream;
+    pub const ConcurrentOptions = @import("../http3/runtime/concurrent.zig").Options;
+    pub const ConcurrentSummary = @import("../http3/runtime/concurrent.zig").Summary;
     pub const Server = @import("../http3/runtime.zig").Server;
 };
 
@@ -70,10 +83,16 @@ test "streaming aliases resolve to public runtime types" {
     _ = http2.Stream;
     _ = http2.Event;
     _ = http2.ConcurrentResult;
+    _ = http2.ConcurrentStream;
+    _ = http2.ConcurrentOptions;
+    _ = http2.ConcurrentSummary;
     _ = http3.RequestEvent;
     _ = http3.ResponseEvent;
     _ = http3.MessageReader;
     _ = http3.Head;
     _ = http3.Event;
     _ = http3.ConcurrentResult;
+    _ = http3.ConcurrentStream;
+    _ = http3.ConcurrentOptions;
+    _ = http3.ConcurrentSummary;
 }

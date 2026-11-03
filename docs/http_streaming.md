@@ -134,6 +134,66 @@ owns the received requests and one error slot per input; handlers must not
 deinitialize the borrowed request or retain its slices after the result is
 deinitialized. The same single-reader/one-writer rules as HTTP/2 apply.
 
+## Continuous concurrent serving
+
+Long-lived HTTP server connections use a per-connection owner loop instead of a
+fixed request batch:
+
+```zig
+const streaming = netz.streaming;
+
+var shutdown: std.Io.Event = .unset;
+var connection = try server.accept();
+defer connection.close();
+_ = try connection.serveConcurrentStreams(
+    HandlerContext, &context, Handler.run,
+    .{ .max_streams = 64, .shutdown = &shutdown },
+);
+
+// HTTP/3 HandshakeServerSession:
+_ = try session.serveConcurrentStreams(
+    HandlerContext, &context, Handler.run,
+    .{ .max_streams = 64, .shutdown = &shutdown },
+);
+```
+
+The handler receives `*streaming.http2.ConcurrentStream` or
+`*streaming.http3.ConcurrentStream` and runs in its own task. Streams are
+accepted continuously in arrival order; at most `max_streams` handlers run at
+once and additional accepted heads wait in arrival order. Both protocols expose
+the same shape:
+
+```zig
+fn run(ctx: *Context, stream: *Stream) !void {
+    while (try stream.nextBody(buf, deadline)) |n| try consume(buf[0..n]);
+    if (stream.trailers()) |fields| try observe(fields);
+    try stream.startResponse(.{ .status = 200 });
+    try stream.writeData(chunk_a, false); // may block on flow control
+    try stream.writeData(chunk_b, true);
+    // or: try stream.finishWithTrailers(fields);
+}
+```
+
+Concurrency contract:
+
+- One task owns the connection frame reader, HPACK/QPACK state and socket
+  writer. Handlers never touch connection state; body reads and response
+  head/DATA/trailers/reset are serialized through the owner.
+- Request DATA is copied into a per-stream buffer by the owner before the
+  protocol can retire the stream, so `nextBody` is a pull API even on HTTP/3
+  where `.finished` removes the session stream.
+- A handler that returns without finishing its response has that stream reset
+  (`INTERNAL_ERROR`/`cancel`) instead of leaking it.
+- `shutdown` stops new acceptance, lets active handlers finish, then sends
+  GOAWAY. An overall `deadline` or `idle_timeout` returns `error.Timeout` and
+  cancels active streams. Peer GOAWAY/close stops acceptance and releases
+  active streams.
+- Response writes remain a single-writer path; a blocked write on one stream
+  can delay sibling writes but never corrupts HPACK/QPACK or stream state.
+- Handler tasks currently use dedicated OS threads so the API is independent of
+  the caller's `std.Io` executor; the owner/command contract is unchanged if
+  the implementation later moves tasks onto `std.Io`.
+
 ## Build status
 
 The earlier `tls_material` relative-import, missing `grpc/http2/mod.zig` and

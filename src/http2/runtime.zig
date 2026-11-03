@@ -24,6 +24,7 @@ pub const ServerDuplexPumpEvent = union(enum) {
 const header_output = @import("runtime/headers/output.zig");
 const webtransport_settings = @import("runtime/settings/webtransport.zig");
 test {
+    _ = @import("runtime/concurrent_tests.zig");
     _ = @import("runtime/settings/webtransport_tests.zig");
     _ = @import("runtime/client/authority_tests.zig");
     _ = @import("runtime/client/authority_deadline_tests.zig");
@@ -72,6 +73,7 @@ const peer_metadata = @import("runtime/peer_metadata.zig");
 const response_scheduler = @import(
     "runtime/response_scheduler.zig",
 );
+const concurrent = @import("runtime/concurrent.zig");
 const bdp = @import("runtime/bdp.zig");
 const ping_policy = @import("runtime/ping_enforcement.zig");
 const data_frame_budget = @import("runtime/data_frame_budget.zig");
@@ -14610,6 +14612,32 @@ pub const Connection = struct {
         return .{ .allocator = self.allocator, .errors = errors };
     }
 
+    pub const ConcurrentStream = Http2ConcurrentEngine.Stream;
+
+    /// Continuously accept request streams, run one handler task per stream,
+    /// and serialize all connection state through this owner. Handlers pull
+    /// request DATA from an owner-filled buffer and may write buffered or
+    /// streaming responses, including trailers.
+    pub fn serveConcurrentStreams(
+        self: *Connection,
+        comptime HandlerContext: type,
+        context: *HandlerContext,
+        comptime handler: *const fn (
+            *HandlerContext,
+            *ConcurrentStream,
+        ) anyerror!void,
+        options: concurrent.Options,
+    ) anyerror!concurrent.Summary {
+        var engine = Http2ConcurrentEngine.init(
+            self,
+            self.allocator,
+            self.io,
+            options,
+        );
+        defer engine.deinit();
+        return engine.serve(HandlerContext, context, handler);
+    }
+
     fn readConcurrentHandlerFrame(
         self: *Connection,
     ) Error!OwnedFrame {
@@ -22640,6 +22668,12 @@ pub const ServerDuplexStream = struct {
         }
     }
 };
+
+const Http2ConcurrentEngine = concurrent.Engine(
+    Connection,
+    ServerDuplexStream,
+    StreamingResponseOptions,
+);
 
 pub const ResponseWriter = struct {
     connection: *Connection,

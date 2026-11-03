@@ -50,6 +50,7 @@ const receive_connection_error =
 const request_routing = @import("runtime/receive/routing/request.zig");
 const response_routing = @import("runtime/receive/routing/response.zig");
 const response_scheduler = @import("runtime/response_scheduler/core.zig");
+const concurrent = @import("runtime/concurrent.zig");
 const control_receive = @import("runtime/control/receive.zig");
 const control_sender = @import("runtime/control/send.zig");
 const stream_lifecycle = @import("runtime/stream/lifecycle.zig");
@@ -242,6 +243,7 @@ const response_failure = @import("runtime/receive/response_failure.zig");
 pub const ResponseFailure = response_failure.Failure;
 pub const ResponseEventResult = response_failure.Result;
 test {
+    _ = @import("runtime/concurrent_tests.zig");
     _ = @import("runtime/request/cancel_deadline_tests.zig");
     _ = @import("runtime/request/finish_rejected_deadline_tests.zig");
     _ = @import("runtime/receive/request_failure_retry_tests.zig");
@@ -1459,6 +1461,22 @@ pub const Server = struct {
         }
     }
 
+    /// DATA bytes currently readable from one development request without
+    /// receiving another packet.
+    pub fn availableRequestData(
+        self: *Server,
+        from: net.IpAddress,
+        stream_id: u62,
+    ) Error!usize {
+        self.peer_state_mutex.lockUncancelable(
+            self.quic_server.endpoint.io,
+        );
+        defer self.peer_state_mutex.unlock(
+            self.quic_server.endpoint.io,
+        );
+        return self.streaming_peers.availableRequestData(from, stream_id);
+    }
+
     pub fn readRequestData(
         self: *Server,
         from: net.IpAddress,
@@ -2540,7 +2558,112 @@ pub const Server = struct {
         }
         self.retireDevelopmentPeerIfInactive(from);
     }
+
+    pub const ConcurrentStream = DevelopmentConcurrentEngine.Stream;
+
+    /// Continuously accept request streams, run one handler task per stream,
+    /// and serialize all session mutations through this owner. The call returns
+    /// on `options.shutdown`, the overall deadline, idle timeout, or a
+    /// connection error. See `runtime/concurrent.zig` for the contract.
+    pub fn serveConcurrentStreams(
+        self: *Server,
+        comptime HandlerContext: type,
+        context: *HandlerContext,
+        comptime handler: *const fn (
+            *HandlerContext,
+            *ConcurrentStream,
+        ) anyerror!void,
+        options: concurrent.Options,
+    ) anyerror!concurrent.Summary {
+        var engine = DevelopmentConcurrentEngine.init(
+            self,
+            self.quic_server.endpoint.allocator,
+            self.quic_server.endpoint.io,
+            options,
+        );
+        defer engine.deinit();
+        return engine.serve(HandlerContext, context, handler);
+    }
 };
+
+const DevelopmentConcurrentAdapter = struct {
+    pub fn maxStreams(session: *Server) usize {
+        return session.limits.max_concurrent_request_streams;
+    }
+    pub fn receive(
+        session: *Server,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!StreamingRequestEvent {
+        return if (deadline) |value|
+            session.receiveRequestEventWithDeadline(value)
+        else
+            session.receiveRequestEvent();
+    }
+    pub fn availableBody(
+        session: *Server,
+        from: net.IpAddress,
+        stream_id: u62,
+    ) Error!usize {
+        return session.availableRequestData(from, stream_id);
+    }
+    pub fn readBody(
+        session: *Server,
+        from: net.IpAddress,
+        stream_id: u62,
+        out: []u8,
+    ) Error!usize {
+        return session.readRequestData(from, stream_id, out);
+    }
+    pub fn startResponse(
+        session: *Server,
+        from: net.IpAddress,
+        stream_id: u62,
+        response: http3.Response,
+        body_length: ?usize,
+    ) Error!void {
+        return session.startResponse(from, stream_id, response, body_length);
+    }
+    pub fn sendBody(
+        session: *Server,
+        from: net.IpAddress,
+        stream_id: u62,
+        data: []const u8,
+        fin: bool,
+    ) Error!void {
+        return session.sendResponseBody(from, stream_id, data, fin);
+    }
+    pub fn finishTrailers(
+        session: *Server,
+        from: net.IpAddress,
+        stream_id: u62,
+        trailers: []const http3.Qpack.HeaderField,
+    ) Error!void {
+        _ = session;
+        _ = from;
+        _ = stream_id;
+        _ = trailers;
+        // The development runtime has no streaming-trailer writer yet; use
+        // the protected session for trailer-producing handlers.
+        return error.UnexpectedFrame;
+    }
+    pub fn cancel(
+        session: *Server,
+        from: net.IpAddress,
+        stream_id: u62,
+        code: u64,
+    ) Error!void {
+        return session.cancelRequest(from, stream_id, code);
+    }
+    pub fn goaway(
+        session: *Server,
+        last_stream_id: u64,
+    ) Error!void {
+        _ = session;
+        _ = last_stream_id;
+    }
+};
+
+const DevelopmentConcurrentEngine = concurrent.Engine(Server, DevelopmentConcurrentAdapter);
 
 const RequestTask = struct {
     server: *Server,
@@ -11652,7 +11775,110 @@ pub const HandshakeServerSession = struct {
             self.options,
         );
     }
+
+    pub const ConcurrentStream = HandshakeConcurrentEngine.Stream;
+
+    /// Continuously accept request streams, run one handler task per stream,
+    /// and serialize every session mutation through this owner. Handlers may
+    /// start a streaming response and emit DATA/trailers with `ConcurrentStream`.
+    pub fn serveConcurrentStreams(
+        self: *HandshakeServerSession,
+        comptime HandlerContext: type,
+        context: *HandlerContext,
+        comptime handler: *const fn (
+            *HandlerContext,
+            *ConcurrentStream,
+        ) anyerror!void,
+        options: concurrent.Options,
+    ) anyerror!concurrent.Summary {
+        var engine = HandshakeConcurrentEngine.init(
+            self,
+            self.established.connection.endpoint.allocator,
+            self.connectionIo(),
+            options,
+        );
+        defer engine.deinit();
+        return engine.serve(HandlerContext, context, handler);
+    }
 };
+
+const HandshakeConcurrentAdapter = struct {
+    pub fn maxStreams(session: *HandshakeServerSession) usize {
+        return session.options.max_concurrent_request_streams;
+    }
+    pub fn receive(
+        session: *HandshakeServerSession,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!StreamingRequestEvent {
+        return if (deadline) |value|
+            session.receiveRequestEventWithDeadline(value)
+        else
+            session.receiveRequestEvent();
+    }
+    pub fn availableBody(
+        session: *HandshakeServerSession,
+        from: net.IpAddress,
+        stream_id: u62,
+    ) Error!usize {
+        _ = from;
+        return session.availableRequestData(stream_id);
+    }
+    pub fn readBody(
+        session: *HandshakeServerSession,
+        from: net.IpAddress,
+        stream_id: u62,
+        out: []u8,
+    ) Error!usize {
+        _ = from;
+        return session.readRequestData(stream_id, out);
+    }
+    pub fn startResponse(
+        session: *HandshakeServerSession,
+        from: net.IpAddress,
+        stream_id: u62,
+        response: http3.Response,
+        body_length: ?usize,
+    ) Error!void {
+        _ = from;
+        return session.startResponse(stream_id, response, body_length);
+    }
+    pub fn sendBody(
+        session: *HandshakeServerSession,
+        from: net.IpAddress,
+        stream_id: u62,
+        data: []const u8,
+        fin: bool,
+    ) Error!void {
+        _ = from;
+        return session.sendResponseBodyPaced(stream_id, data, fin);
+    }
+    pub fn finishTrailers(
+        session: *HandshakeServerSession,
+        from: net.IpAddress,
+        stream_id: u62,
+        trailers: []const http3.Qpack.HeaderField,
+    ) Error!void {
+        _ = from;
+        return session.finishResponseTrailersPaced(stream_id, trailers);
+    }
+    pub fn cancel(
+        session: *HandshakeServerSession,
+        from: net.IpAddress,
+        stream_id: u62,
+        code: u64,
+    ) Error!void {
+        _ = from;
+        return session.cancelRequest(stream_id, code);
+    }
+    pub fn goaway(
+        session: *HandshakeServerSession,
+        last_stream_id: u64,
+    ) Error!void {
+        return session.sendGoAway(last_stream_id);
+    }
+};
+
+const HandshakeConcurrentEngine = concurrent.Engine(HandshakeServerSession, HandshakeConcurrentAdapter);
 
 fn sleepResponseSchedulerDelayUntil(
     io: std.Io,

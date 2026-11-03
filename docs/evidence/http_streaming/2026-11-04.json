@@ -35,6 +35,12 @@
       "failed": 0,
       "exit_code": 0
     },
+    "continuous_concurrent": {
+      "passed": 160,
+      "total": 160,
+      "failed": 0,
+      "exit_code": 0
+    },
     "package": {
       "passed": 26,
       "total": 26,
@@ -46,15 +52,19 @@
     "src/http1/runtime/body_pull.zig": "c574204d2b3bbab85a7c6733fcf0a878dd5a17ea11231f48a6b85fd7c8512281",
     "src/http1/runtime/body_pull_tests.zig": "ec70f35a1a967e29446e300f9cd332aa26f2d9cf170623caa9e30ea9778fed57",
     "src/http1/runtime.zig": "a2197eb2fc04ff49f024f71cf72c758dac6af5f92b3b59f64c4ba7a85c86dfb9",
-    "src/http2/runtime.zig": "968e332c39d05cafeeddbff36e2b920f4ae5ef1245f9745655720e3770703459",
+    "src/http2/runtime.zig": "d0188f7c3768aef3ed02104bc132f7ffaa78cd55e60458c3a96a9725a3d6c2e8",
     "src/http2/runtime/duplex/server_tests.zig": "63ea013836f0456047be6836b1978aa80fe3cf8d38394f37071abb68f1fe55c0",
-    "src/http/streaming.zig": "5d9f8d13d9a6beaca0fa255769d1e392a059790c1d9514bf56ff42244a2a174b",
-    "src/http3/runtime.zig": "7eb490c81e40b7868961be7c78e2101d9d2328443b3cfd0618010fc39cefb548",
+    "src/http2/runtime/concurrent.zig": "bae44947b77e1d10d1210556332f7f277afa9bf5e13da205b42e087ff7d156a8",
+    "src/http2/runtime/concurrent_tests.zig": "7b79cd3de7c5a9de20dec5970491dba33ddb3c57538f9adc725ec7ee7e551314",
+    "src/http/streaming.zig": "3b0b9eed1ebb774fcbc747703d20460f9eed49aea2f4eaacccb3da207f3216cd",
+    "src/http3/runtime.zig": "830b9c6e76dac091fa17551c13a8790d11927c887cd94df0f4fffbdf398bcec4",
+    "src/http3/runtime/concurrent.zig": "878b5a4d65a6beff19036ff0b94a8a572e37d4c0a6b48e68891182f0c05557e5",
+    "src/http3/runtime/concurrent_tests.zig": "6186da50a52a43b4adbddb3119a39312735d0dcd99ab0d62cf5019d4a9cf06ce",
     "src/http3/runtime/stream/reader.zig": "985c22d936fb168bbb25913b59b948e8bcbcbed77913e299d0afccebcbecc157",
     "src/http3/runtime/stream/reader_tests.zig": "bec1f75ac3ccb5f5ca47be23866c11bb57e7d7470f7904de45f1307c3e13b7f4",
     "src/http3/runtime/stream/set.zig": "07ca9f1d4c1a09dce67158b63b9526a3aa6d2957cea65b9c0bfddfff1c318290",
     "src/http3/runtime/stream/push/state.zig": "c31e8f594e897a76a1093477560960fa3da72d697a2b13c280f0e6b5d2cd2bc0",
-    "src/http3/runtime/development/server_peer/state.zig": "ce5bd6f4b4574e3e89f153b8e53401a8e209df049a670a11acdf97d62c34a677"
+    "src/http3/runtime/development/server_peer/state.zig": "5ffb50c351efefd715ff417abbc9e91118d3ca8450553c5966c0bbe80a9e2aa1"
   },
-  "notes": "The HTTP/1 pull BodyReader drives the existing push parser through a bounded FIFO producer. Tests cover a 200 KiB body with 100-continue and keep-alive, chunked trailers, cancellation closing an unread connection, max_body_bytes rejection, non-blocking takeRequest, and Head.streamContentDecoder identity decoding. HTTP/2 ServerDuplexStream.nextBody pulls DATA, retains trailers for requestTrailers, returns null at END_STREAM, surfaces peer resets as StreamReset and exposes streamContentDecoder. HTTP/2 and HTTP/3 concurrent batch aliases are exposed through netz.streaming. HTTP/3 streaming readers enforce a cumulative Limits.max_body_bytes budget for server requests and for client response/push bodies, counting already-read DATA so a later frame cannot reset it; exceeding the budget surfaces error.PayloadTooLarge at the next read boundary."
+  "notes": "The HTTP/1 pull BodyReader drives the existing push parser through a bounded FIFO producer. Tests cover a 200 KiB body with 100-continue and keep-alive, chunked trailers, cancellation closing an unread connection, max_body_bytes rejection, non-blocking takeRequest, and Head.streamContentDecoder identity decoding. HTTP/2 ServerDuplexStream.nextBody pulls DATA, retains trailers for requestTrailers, returns null at END_STREAM, surfaces peer resets as StreamReset and exposes streamContentDecoder. HTTP/2 and HTTP/3 concurrent batch aliases are exposed through netz.streaming. HTTP/3 streaming readers enforce a cumulative Limits.max_body_bytes budget for server requests and for client response/push bodies, counting already-read DATA so a later frame cannot reset it; exceeding the budget surfaces error.PayloadTooLarge at the next read boundary. `serveConcurrentStreams` on HTTP/2 Connection and HTTP/3 HandshakeServerSession accepts streams continuously, runs one handler task per stream up to max_streams, serializes body reads and response head/DATA/trailers/reset through the connection owner, supports streaming responses and response trailers, and stops on shutdown/deadline/idle timeout with GOAWAY."
 }
