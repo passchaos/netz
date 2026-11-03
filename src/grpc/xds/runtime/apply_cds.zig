@@ -30,7 +30,7 @@ pub fn apply(self: *ctl.Controller, client: *ads.Client, update: ads.Update, des
         }
     }.less);
     if (resources.items.len > 1) for (resources.items[1..], 0..) |resource, i| if (std.mem.eql(u8, resource.resource.value.name, resources.items[i].resource.value.name)) return error.DuplicateCdsResource;
-    var plan = try Plan.create(self, null);
+    var plan = try Plan.createWithClusters(self, null, resources.items);
     defer plan.deinit();
     var changed = false;
     for (plan.entries.items) |*item| {

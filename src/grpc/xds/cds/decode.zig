@@ -5,8 +5,11 @@ const policy = @import("policy.zig");
 const tls_material = @import("../tls_material.zig");
 pub const type_url = "type.googleapis.com/envoy.config.cluster.v3.Cluster";
 pub const Error = pb.Error;
-pub const Limits = struct { max_bytes: usize = 8 * 1024 * 1024, max_text_bytes: usize = 4096, max_thresholds: usize = 256, max_policies: usize = 32, max_endpoints: usize = 65536 };
-pub const Discovery = enum(u32) { static = 0, strict_dns = 1, logical_dns = 2, eds = 3, _ };
+pub const Limits = struct { max_bytes: usize = 8 * 1024 * 1024, max_text_bytes: usize = 4096, max_thresholds: usize = 256, max_policies: usize = 32, max_endpoints: usize = 65536, max_aggregate_clusters: usize = 256 };
+/// `aggregate` is a netz-internal discovery kind selected by the CDS
+/// `envoy.clusters.aggregate` custom cluster extension; it has no Envoy enum
+/// wire value of its own.
+pub const Discovery = enum(u32) { static = 0, strict_dns = 1, logical_dns = 2, eds = 3, aggregate = 4, _ };
 pub const HostEndpoint = struct {
     host: []const u8,
     port: u16,
@@ -38,12 +41,17 @@ pub const Cluster = struct {
     tls: ?tls_material.Config = null,
     max_concurrent_requests: u32 = 1024,
     lrs_propagation: LrsPropagation = .{},
+    /// Ordered leaf cluster names for an `envoy.clusters.aggregate` cluster.
+    aggregate_clusters: []const []const u8 = &.{},
     policy: policy.Result,
     pub fn isEds(self: Cluster) bool {
         return self.discovery == .eds;
     }
     pub fn isDns(self: Cluster) bool {
         return self.discovery == .strict_dns or self.discovery == .logical_dns;
+    }
+    pub fn isAggregate(self: Cluster) bool {
+        return self.discovery == .aggregate;
     }
     pub fn edsName(self: Cluster) []const u8 {
         if (!self.isEds()) return "";
@@ -401,6 +409,61 @@ fn transportSocket(arena: std.mem.Allocator, bytes: []const u8, limits: Limits) 
     return upstreamTlsContext(arena, value orelse return error.InvalidCdsResource, limits);
 }
 
+/// Parse `Cluster.CustomClusterType` (CDS field 38) for the aggregate cluster
+/// extension. Any other custom cluster type remains unsupported.
+fn aggregateCluster(
+    arena: std.mem.Allocator,
+    raw: []const u8,
+    limits: Limits,
+) Error![]const []const u8 {
+    var custom: pb.Reader = .{ .bytes = raw };
+    var extension_name: []const u8 = "";
+    var typed_config: ?[]const u8 = null;
+    while (try custom.next()) |field| {
+        if (field.number == 1 and field.wire_type == 2) {
+            extension_name = try pb.text(&custom, limits.max_text_bytes);
+        } else if (field.number == 2 and field.wire_type == 2) {
+            typed_config = try custom.bytesValue();
+        } else try custom.skip(field);
+    }
+    if (!std.mem.eql(u8, extension_name, "envoy.clusters.aggregate")) {
+        return error.UnsupportedCdsFeature;
+    }
+    const any = typed_config orelse return error.InvalidCdsResource;
+    var any_reader: pb.Reader = .{ .bytes = any };
+    var any_type_url: []const u8 = "";
+    var value: ?[]const u8 = null;
+    while (try any_reader.next()) |field| {
+        if (field.number == 1 and field.wire_type == 2) {
+            any_type_url = try pb.text(&any_reader, limits.max_text_bytes);
+        } else if (field.number == 2 and field.wire_type == 2) {
+            value = try any_reader.bytesValue();
+        } else try any_reader.skip(field);
+    }
+    if (!std.mem.eql(
+        u8,
+        any_type_url,
+        "type.googleapis.com/envoy.extensions.clusters.aggregate.v3.ClusterConfig",
+    )) return error.UnsupportedCdsFeature;
+
+    var config_reader: pb.Reader = .{
+        .bytes = value orelse return error.InvalidCdsResource,
+    };
+    var clusters: std.ArrayList([]const u8) = .empty;
+    while (try config_reader.next()) |field| {
+        if (field.number == 1 and field.wire_type == 2) {
+            const leaf = try pb.text(&config_reader, limits.max_text_bytes);
+            if (leaf.len == 0) return error.InvalidCdsResource;
+            if (clusters.items.len >= limits.max_aggregate_clusters) {
+                return error.CdsLimitExceeded;
+            }
+            try clusters.append(arena, leaf);
+        } else try config_reader.skip(field);
+    }
+    if (clusters.items.len == 0) return error.InvalidCdsResource;
+    return clusters.toOwnedSlice(arena);
+}
+
 pub fn decode(gpa: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!Owned {
     if (bytes.len > limits.max_bytes) return error.CdsLimitExceeded;
     var result = Owned{ .arena = .init(gpa), .value = undefined };
@@ -423,10 +486,15 @@ pub fn decode(gpa: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!O
     var lrs_application: bool = false;
     var lrs_named_all: bool = false;
     var lrs_named: std.ArrayList([]const u8) = .empty;
+    var aggregate_clusters: []const []const u8 = &.{};
     while (try reader.next()) |field| {
         if (field.number == 1 and field.wire_type == 2) name = try pb.text(&reader, limits.max_text_bytes) else if (field.number == 2 and field.wire_type == 0) kind = try pb.u32Value(&reader) else if (field.number == 38 and field.wire_type == 2) {
-            _ = try reader.bytesValue();
-            kind = std.math.maxInt(u32);
+            aggregate_clusters = try aggregateCluster(
+                arena,
+                try reader.bytesValue(),
+                limits,
+            );
+            kind = @intFromEnum(Discovery.aggregate);
         } else if (field.number == 3 and field.wire_type == 2) config = try reader.bytesValue() else if (field.number == 24 and field.wire_type == 2) transport = try reader.bytesValue() else if (field.number == 33 and field.wire_type == 2) assignment = try reader.bytesValue() else if (field.number == 6 and field.wire_type == 0) lb = try pb.u32Value(&reader) else if (field.number == 23 and field.wire_type == 2) ring_config = try reader.bytesValue() else if (field.number == 41 and field.wire_type == 2) typed_policy = try reader.bytesValue() else if (field.number == 10 and field.wire_type == 2) breaker = try reader.bytesValue() else if (field.number == 57 and field.wire_type == 2) {
             // Repeated string selecting ORCA metric propagation. Unknown
             // entries are ignored so forward-compatible control planes can add
@@ -448,6 +516,11 @@ pub fn decode(gpa: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!O
     }
     if (name.len == 0) return error.InvalidCdsResource;
     const discovery: Discovery = @enumFromInt(kind);
+    // `aggregate` has no Envoy wire enum value; it is selected only by the
+    // custom cluster extension above. A raw kind 4 is still unsupported.
+    if (discovery == .aggregate and aggregate_clusters.len == 0) {
+        return error.UnsupportedCdsFeature;
+    }
     var service: []const u8 = "";
     var inline_assignment: []const u8 = "";
     var host_endpoints: []const HostEndpoint = &.{};
@@ -472,6 +545,7 @@ pub fn decode(gpa: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!O
             if (discovery == .logical_dns) host_endpoints = try onePerLocality(arena, host_endpoints);
             inline_assignment = raw;
         },
+        .aggregate => {},
         else => return error.UnsupportedCdsFeature,
     }
     const tls: ?tls_material.Config = if (transport) |raw| try transportSocket(arena, raw, limits) else null;
@@ -482,7 +556,7 @@ pub fn decode(gpa: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!O
         .named_metrics_all = lrs_named_all,
         .named_metrics = try lrs_named.toOwnedSlice(arena),
     };
-    result.value = .{ .name = name, .eds_service_name = service, .discovery = discovery, .inline_assignment = inline_assignment, .host_endpoints = host_endpoints, .tls = tls, .max_concurrent_requests = if (breaker) |raw| try circuit(raw, limits.max_thresholds) else 1024, .lrs_propagation = lrs_propagation, .policy = if (typed_policy) |raw| try policy.typed(arena, raw, limits.max_policies, limits.max_text_bytes, 0) else try policy.legacy(arena, lb, ring_config) };
+    result.value = .{ .name = name, .eds_service_name = service, .discovery = discovery, .inline_assignment = inline_assignment, .host_endpoints = host_endpoints, .tls = tls, .max_concurrent_requests = if (breaker) |raw| try circuit(raw, limits.max_thresholds) else 1024, .lrs_propagation = lrs_propagation, .aggregate_clusters = aggregate_clusters, .policy = if (typed_policy) |raw| try policy.typed(arena, raw, limits.max_policies, limits.max_text_bytes, 0) else try policy.legacy(arena, lb, ring_config) };
     // Converted policies must satisfy the same configuration parser/runtime
     // contract as direct callers, including complete range validation.
     const json = try std.fmt.allocPrint(arena, "{{\"loadBalancingConfig\":{s}}}", .{result.value.policy.child_json});

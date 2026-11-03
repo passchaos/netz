@@ -9,7 +9,12 @@ its service name. STATIC clusters carry an inline `load_assignment` whose
 priority/locality runtime without an EDS subscription. STRICT_DNS and
 LOGICAL_DNS clusters likewise use an inline assignment, publishing host
 endpoints that retain priority and locality identity; LOGICAL_DNS retains one
-endpoint per locality while STRICT_DNS retains every declared endpoint. The
+endpoint per locality while STRICT_DNS retains every declared endpoint. An
+`envoy.clusters.aggregate` custom cluster (CDS field 38) carries an ordered list
+of leaf cluster names; the runtime subscribes to every leaf and publishes an
+ordered `priority_experimental` child policy over the live leaf policies. The
+aggregate entry itself has no endpoints, EDS subscription or TLS transport.
+Other custom cluster extensions remain unsupported. The
 first DEFAULT
 circuit threshold supplies `max_requests`, defaulting to 1024 when omitted;
 HIGH thresholds do not supply the application limit. Zero rejects new RPCs.

@@ -14,10 +14,25 @@ pub const Plan = struct {
         self.* = undefined;
     }
     pub fn create(controller: *Controller, projection: ?*Projection) Error!Plan {
+        return createWithClusters(controller, projection, &.{});
+    }
+
+    /// Same as `create`, but also expands aggregate leaf clusters from CDS
+    /// resources that are being applied in this transaction.
+    pub fn createWithClusters(
+        controller: *Controller,
+        projection: ?*Projection,
+        extra_clusters: []const *identity.Cluster,
+    ) Error!Plan {
         var self = Plan{ .allocator = controller.allocator };
         errdefer self.deinit();
         var keys: std.ArrayList([]const u8) = .empty;
         defer keys.deinit(controller.allocator);
+        var owned_keys: std.ArrayList([]const u8) = .empty;
+        defer {
+            for (owned_keys.items) |key| controller.allocator.free(key);
+            owned_keys.deinit(controller.allocator);
+        }
         var sources: std.ArrayList(*@import("../rds.zig").Snapshot) = .empty;
         defer sources.deinit(controller.allocator);
         for (controller.projections.items) |view| {
@@ -28,6 +43,42 @@ pub const Plan = struct {
         if (projection) |view| {
             try keys.appendSlice(controller.allocator, view.source.required_clusters);
             try sources.append(controller.allocator, view.source);
+        }
+        // A required aggregate cluster also subscribes to every ordered leaf.
+        // Look in the retained inventory first, then in the CDS resources that
+        // are about to be applied so the first aggregate response subscribes to
+        // its leaves without waiting for another control-plane round trip.
+        var key_index: usize = 0;
+        while (key_index < keys.items.len) : (key_index += 1) {
+            const key = keys.items[key_index];
+            if (!std.mem.startsWith(u8, key, "cluster:") or key.len == 8) continue;
+            const name = key[8..];
+            var leaves: ?[]const []const u8 = null;
+            for (controller.entries.items) |old| {
+                const cluster = old.cluster orelse continue;
+                if (!std.mem.eql(u8, cluster.resource.value.name, name)) continue;
+                if (cluster.resource.value.isAggregate()) {
+                    leaves = cluster.resource.value.aggregate_clusters;
+                }
+                break;
+            }
+            if (leaves == null) for (extra_clusters) |cluster| {
+                if (!std.mem.eql(u8, cluster.resource.value.name, name)) continue;
+                if (cluster.resource.value.isAggregate()) {
+                    leaves = cluster.resource.value.aggregate_clusters;
+                }
+                break;
+            };
+            if (leaves) |list| for (list) |leaf| {
+                const leaf_key = try std.fmt.allocPrint(
+                    controller.allocator,
+                    "cluster:{s}",
+                    .{leaf},
+                );
+                errdefer controller.allocator.free(leaf_key);
+                try owned_keys.append(controller.allocator, leaf_key);
+                try keys.append(controller.allocator, leaf_key);
+            };
         }
         std.mem.sort(*@import("../rds.zig").Snapshot, sources.items, {}, struct {
             fn less(_: void, a: *@import("../rds.zig").Snapshot, b: *@import("../rds.zig").Snapshot) bool {

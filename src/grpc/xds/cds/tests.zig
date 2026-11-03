@@ -223,6 +223,45 @@ test "gRPC CDS rejects unsupported discovery security invalid identities and rin
     try std.testing.expectError(error.InvalidCdsResource, policy.legacy(arena.allocator(), 2, "\x08\x00\x0a\x00"));
 }
 
+test "gRPC CDS decodes aggregate cluster extensions" {
+    var config = fixture.Builder{ .allocator = gpa };
+    defer config.deinit();
+    try config.bytes(1, "cluster-a");
+    try config.bytes(1, "cluster-b");
+    var any = fixture.Builder{ .allocator = gpa };
+    defer any.deinit();
+    try any.bytes(1, "type.googleapis.com/envoy.extensions.clusters.aggregate.v3.ClusterConfig");
+    try any.bytes(2, config.data.items);
+    var custom = fixture.Builder{ .allocator = gpa };
+    defer custom.deinit();
+    try custom.bytes(1, "envoy.clusters.aggregate");
+    try custom.bytes(2, any.data.items);
+    var extra = fixture.Builder{ .allocator = gpa };
+    defer extra.deinit();
+    try extra.bytes(38, custom.data.items);
+    const encoded = try fixture.cluster(gpa, "aggregate", "", extra.data.items);
+    defer gpa.free(encoded);
+    var decoded = try resource.decode(gpa, encoded, .{});
+    defer decoded.deinit();
+    try std.testing.expectEqual(resource.Discovery.aggregate, decoded.value.discovery);
+    try std.testing.expect(decoded.value.isAggregate());
+    try std.testing.expectEqualStrings("", decoded.value.edsName());
+    try std.testing.expectEqual(@as(usize, 2), decoded.value.aggregate_clusters.len);
+    try std.testing.expectEqualStrings("cluster-a", decoded.value.aggregate_clusters[0]);
+    try std.testing.expectEqualStrings("cluster-b", decoded.value.aggregate_clusters[1]);
+
+    var unknown = fixture.Builder{ .allocator = gpa };
+    defer unknown.deinit();
+    try unknown.bytes(1, "envoy.clusters.unknown");
+    try unknown.bytes(2, any.data.items);
+    var unknown_extra = fixture.Builder{ .allocator = gpa };
+    defer unknown_extra.deinit();
+    try unknown_extra.bytes(38, unknown.data.items);
+    const unknown_encoded = try fixture.cluster(gpa, "unknown", "", unknown_extra.data.items);
+    defer gpa.free(unknown_encoded);
+    try std.testing.expectError(error.UnsupportedCdsFeature, resource.decode(gpa, unknown_encoded, .{}));
+}
+
 test "gRPC CDS decodes LRS ORCA propagation selectors" {
     var extra = fixture.Builder{ .allocator = gpa };
     defer extra.deinit();

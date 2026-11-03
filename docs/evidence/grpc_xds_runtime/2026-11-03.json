@@ -10,9 +10,16 @@
     "staging": "immutable identity/CDS/projected EDS references cloned into plans; all name sets allocated and type capacity reserved in a batch before one target/config/selector transaction; commit names/caches before version and ACK output",
     "lifetime": "retained target inventory owns prefixed paths and EDS references; projection epochs retain dependencies while old config/call references remain; synchronize/later updates prune unused cache",
     "budgets": "cluster/projection and unique route+CDS+EDS+target storage bounds, start/admission deadline priority, local non-LB configuration preserved and channel/cluster admission composed",
-    "open": "application drives serialized ADS/reconnect/synchronization; bootstrap, automatic retry/failover/expiry/Delta/LRS and aggregate/DNS/security/filter/rewrite features remain open"
+    "aggregate": "CDS field 38 envoy.clusters.aggregate expands to ordered leaf subscriptions; target publication emits a priority_experimental policy over the live leaf child policies, with missing leaves falling back to round_robin",
+    "open": "application drives serialized ADS/reconnect/synchronization; non-router filters and full rewrite integration remain open"
   },
   "verification": {
+    "aggregate.Debug": {
+      "command": "zig build test-lib -Dtest-filter='aggregate clusters' -Dtest-filter=CDS -Dtest-filter=xds --summary all",
+      "exit_code": 0,
+      "passed": 268,
+      "total": 268
+    },
     "targeted.Debug": {
       "command": "zig build test-lib -Dtest-filter='gRPC xDS runtime' -Dtest-filter='gRPC ADS batched' -Dtest-filter='gRPC LDS' -Dtest-filter='gRPC cluster impl' --summary all",
       "exit_code": 0,

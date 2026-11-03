@@ -104,7 +104,13 @@ pub const Target = struct {
         self.* = .{ .allocator = gpa, .arena = .init(gpa) };
         errdefer self.release();
         const arena = self.arena.allocator();
-        var children = object();
+        var child_keys: std.ArrayList([]const u8) = .empty;
+        var child_values: std.ArrayList(Json) = .empty;
+        var child_policies: std.StringHashMapUnmanaged(Json) = .empty;
+        var aggregates: std.ArrayList(struct {
+            index: usize,
+            leaves: []const []const u8,
+        }) = .empty;
         var endpoints: std.ArrayList(channel.Endpoint) = .empty;
         var propagations: std.ArrayList(PropagationEntry) = .empty;
         for (entries) |value| {
@@ -177,7 +183,40 @@ pub const Target = struct {
             try field(arena, &implementation, "childPolicy", child_policy);
             var child = object();
             try field(arena, &child, "childPolicy", try policy(arena, "xds_cluster_impl_experimental", implementation));
-            try field(arena, &children, value.identity.key, child);
+            try child_keys.append(arena, value.identity.key);
+            try child_values.append(arena, child);
+            try child_policies.put(arena, value.identity.name, child_policy);
+            if (cluster) |resource| if (resource.isAggregate()) {
+                try aggregates.append(arena, .{
+                    .index = child_values.items.len - 1,
+                    .leaves = resource.aggregate_clusters,
+                });
+            };
+        }
+        // Aggregate clusters expand into an ordered priority policy over their
+        // leaf clusters. Leaf child policies are already built above, so this
+        // works regardless of entry order and reuses live leaf transports.
+        for (aggregates.items) |aggregate| {
+            var priority_children = object();
+            var priorities = Json{ .array = std.array_list.Managed(Json).init(arena) };
+            for (aggregate.leaves) |leaf| {
+                const leaf_policy = child_policies.get(leaf) orelse
+                    try policy(arena, "round_robin", object());
+                var child = object();
+                try field(arena, &child, "config", leaf_policy);
+                try field(arena, &priority_children, leaf, child);
+                try priorities.array.append(string(leaf));
+            }
+            var priority = object();
+            try field(arena, &priority, "children", priority_children);
+            try field(arena, &priority, "priorities", priorities);
+            var child = child_values.items[aggregate.index];
+            try field(arena, &child, "childPolicy", try policy(arena, "priority_experimental", priority));
+            child_values.items[aggregate.index] = child;
+        }
+        var children = object();
+        for (child_keys.items, child_values.items) |key, child| {
+            try field(arena, &children, key, child);
         }
         var manager = object();
         try field(arena, &manager, "children", children);

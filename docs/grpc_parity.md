@@ -3781,8 +3781,9 @@ constructor/start and publication allocation rollback, batch subscriptions,
 local method/retry defaults and resource-budget precedence. See
 [automatic typed discovery](grpc_xds_runtime.md) and
 `docs/evidence/grpc_xds_runtime/2026-11-03.json`. Bootstrap, retry/failover,
-expiry/Delta/LRS, aggregate/DNS/security/filter and full rewrite integration
-remain open for the full library/control-plane objective.
+expiry/Delta/LRS, security and aggregate/DNS discovery are covered; non-router
+filters and full rewrite integration remain open for the full
+library/control-plane objective.
 
 ## SotW resource omission and initial discovery
 
@@ -3793,5 +3794,8 @@ snapshots and transport reuse, and explicit empty route/endpoint resources still
 remove new application admission. Native and independent ADS/SDK gates cover
 this distinction, version/epoch stability, pending discovery and rejected
 resource rollback. See [SotW semantics](grpc_xds_sotw.md) and
+`docs/evidence/grpc_xds_sotw/2026-11-03.json` for current evidence. Historical
+EDS/RDS reports that treated omission as deletion are superseded by this gate.
+
 `docs/evidence/grpc_xds_sotw/2026-11-03.json` for current evidence. Historical
 EDS/RDS reports that treated omission as deletion are superseded by this gate.

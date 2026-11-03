@@ -5,6 +5,7 @@ pub const Limits = @import("runtime/options.zig").Limits;
 pub const Error = @import("runtime/controller.zig").Error;
 test {
     _ = @import("runtime/tests.zig");
+    _ = @import("runtime/target_tests.zig");
     _ = @import("runtime/rollback_tests.zig");
     _ = @import("runtime/constructor_tests.zig");
     _ = @import("runtime/delta_tests.zig");

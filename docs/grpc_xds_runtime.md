@@ -105,8 +105,10 @@ and forget expired accepted versions. The
 select `http://` servers, retry refused servers and rebind the same delta client
 with `initial_resource_versions` replay. Bootstrap `refresh_interval` exposes a
 TLS reload schedule checked by `reloadIfDue`; certificate providers and
-authority-specific control planes, aggregate/custom CDS (STATIC and DNS
-clusters are supported), full security (inline upstream TLS is supported),
-non-router filters and capture/rewriting remain open. Unsupported resource
-features continue to fail typed validation rather than claim deployment
-support.
+authority-specific control planes, other custom CDS extensions (STATIC, DNS and
+`envoy.clusters.aggregate` clusters are supported), full security (inline
+upstream TLS is supported), non-router filters and capture/rewriting remain open.
+Aggregate clusters subscribe to their ordered leaf clusters and publish an
+ordered `priority_experimental` child policy over the live leaf policies.
+Unsupported resource features continue to fail typed validation rather than
+claim deployment support.
