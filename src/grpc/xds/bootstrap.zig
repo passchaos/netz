@@ -14,6 +14,7 @@ pub const Limits = struct {
     max_bytes: usize = 1024 * 1024,
     max_servers: usize = 16,
     max_authorities: usize = 64,
+    max_providers: usize = 256,
     max_creds: usize = 8,
     max_features: usize = 16,
     max_text_bytes: usize = 4096,
@@ -28,8 +29,19 @@ pub const TlsConfig = struct {
     ca_certificate_file: []const u8 = "",
     certificate_file: []const u8 = "",
     private_key_file: []const u8 = "",
+    /// Optional file_watcher provider names.
+    root_certificate_provider: []const u8 = "",
+    identity_certificate_provider: []const u8 = "",
     /// File refresh period. Zero disables scheduled refresh; the gRPC default
     /// is ten minutes.
+    refresh_interval: std.Io.Duration = .fromSeconds(600),
+};
+pub const CertificateProvider = struct {
+    name: []const u8,
+    plugin_name: []const u8,
+    certificate_file: []const u8 = "",
+    private_key_file: []const u8 = "",
+    ca_certificate_file: []const u8 = "",
     refresh_interval: std.Io.Duration = .fromSeconds(600),
 };
 pub const Creds = struct { type: []const u8, config_json: ?[]const u8 = null, tls: ?TlsConfig = null };
@@ -82,6 +94,7 @@ pub const Bootstrap = struct {
     servers: []Server,
     node: ?Node = null,
     authorities: []Authority = &.{},
+    certificate_providers: []CertificateProvider = &.{},
     client_default_listener_resource_name_template: []const u8 = "",
     server_listener_resource_name_template: []const u8 = "",
 
@@ -109,6 +122,11 @@ pub const Bootstrap = struct {
 
     pub fn authority(self: *const Bootstrap, name: []const u8) ?*const Authority {
         for (self.authorities) |*value| if (std.mem.eql(u8, value.name, name)) return value;
+        return null;
+    }
+
+    pub fn certificateProvider(self: *const Bootstrap, name: []const u8) ?*const CertificateProvider {
+        for (self.certificate_providers) |*value| if (std.mem.eql(u8, value.name, name)) return value;
         return null;
     }
 };
@@ -204,16 +222,17 @@ fn parseDuration(value: std.json.Value, limits: Limits) Error!std.Io.Duration {
 }
 
 fn parseTlsConfig(object: std.json.ObjectMap, limits: Limits) Error!TlsConfig {
-    inline for (.{ "root_certificate_provider", "identity_certificate_provider" }) |field| {
-        if (object.get(field) != null) return error.UnsupportedBootstrapFeature;
-    }
     const config: TlsConfig = .{
         .ca_certificate_file = try optionalText(object, "ca_certificate_file", limits),
         .certificate_file = try optionalText(object, "certificate_file", limits),
         .private_key_file = try optionalText(object, "private_key_file", limits),
+        .root_certificate_provider = try optionalText(object, "root_certificate_provider", limits),
+        .identity_certificate_provider = try optionalText(object, "identity_certificate_provider", limits),
         .refresh_interval = if (object.get("refresh_interval")) |value| try parseDuration(value, limits) else .fromSeconds(600),
     };
     if ((config.certificate_file.len == 0) != (config.private_key_file.len == 0)) return error.InvalidBootstrap;
+    if (config.root_certificate_provider.len != 0 and config.ca_certificate_file.len != 0) return error.InvalidBootstrap;
+    if (config.identity_certificate_provider.len != 0 and (config.certificate_file.len != 0 or config.private_key_file.len != 0)) return error.InvalidBootstrap;
     return config;
 }
 
@@ -404,6 +423,52 @@ fn parseAuthorities(arena: std.mem.Allocator, value: std.json.Value, limits: Lim
     return result;
 }
 
+fn parseCertificateProviders(arena: std.mem.Allocator, value: std.json.Value, limits: Limits) Error![]CertificateProvider {
+    const object = try jsonObject(value);
+    if (object.count() > limits.max_providers) return error.BootstrapLimitExceeded;
+    const result = try arena.alloc(CertificateProvider, object.count());
+    var iterator = object.iterator();
+    var index: usize = 0;
+    while (iterator.next()) |entry| : (index += 1) {
+        const name = entry.key_ptr.*;
+        if (name.len == 0 or name.len > limits.max_text_bytes or !std.unicode.utf8ValidateSlice(name)) return error.InvalidBootstrap;
+        const body = try jsonObject(entry.value_ptr.*);
+        const plugin = try optionalText(body, "plugin_name", limits);
+        if (plugin.len == 0) return error.InvalidBootstrap;
+        if (!std.mem.eql(u8, plugin, "file_watcher")) return error.UnsupportedBootstrapFeature;
+        var config: CertificateProvider = .{ .name = name, .plugin_name = plugin };
+        if (body.get("config")) |raw| {
+            const config_object = try jsonObject(raw);
+            config.certificate_file = try optionalText(config_object, "certificate_file", limits);
+            config.private_key_file = try optionalText(config_object, "private_key_file", limits);
+            config.ca_certificate_file = try optionalText(config_object, "ca_certificate_file", limits);
+            config.refresh_interval = if (config_object.get("refresh_interval")) |duration| try parseDuration(duration, limits) else .fromSeconds(600);
+            if ((config.certificate_file.len == 0) != (config.private_key_file.len == 0)) return error.InvalidBootstrap;
+            if (config.certificate_file.len == 0 and config.ca_certificate_file.len == 0) return error.InvalidBootstrap;
+        } else return error.InvalidBootstrap;
+        result[index] = config;
+    }
+    return result;
+}
+
+fn validateProviderReferences(servers: []const Server, providers: []const CertificateProvider) Error!void {
+    for (servers) |server| {
+        const tls = server.tlsConfig() orelse continue;
+        if (tls.root_certificate_provider.len != 0) {
+            const found = for (providers) |provider| {
+                if (std.mem.eql(u8, provider.name, tls.root_certificate_provider)) break provider;
+            } else return error.InvalidBootstrap;
+            if (found.ca_certificate_file.len == 0) return error.InvalidBootstrap;
+        }
+        if (tls.identity_certificate_provider.len != 0) {
+            const found = for (providers) |provider| {
+                if (std.mem.eql(u8, provider.name, tls.identity_certificate_provider)) break provider;
+            } else return error.InvalidBootstrap;
+            if (found.certificate_file.len == 0 or found.private_key_file.len == 0) return error.InvalidBootstrap;
+        }
+    }
+}
+
 pub fn parse(gpa: std.mem.Allocator, json_text: []const u8, limits: Limits) Error!*Bootstrap {
     if (json_text.len > limits.max_bytes) return error.BootstrapLimitExceeded;
     const self = try gpa.create(Bootstrap);
@@ -424,13 +489,14 @@ pub fn parse(gpa: std.mem.Allocator, json_text: []const u8, limits: Limits) Erro
     self.servers = try parseServers(arena, servers_value, limits);
     if (object.get("node")) |value| self.node = try parseNode(arena, value, limits);
     if (object.get("authorities")) |value| self.authorities = try parseAuthorities(arena, value, limits);
+    if (object.get("certificate_providers")) |value| self.certificate_providers = try parseCertificateProviders(arena, value, limits);
     self.client_default_listener_resource_name_template = try optionalText(object, "client_default_listener_resource_name_template", limits);
     self.server_listener_resource_name_template = try optionalText(object, "server_listener_resource_name_template", limits);
-    inline for (.{ "certificate_providers", "allowed_grpc_services" }) |field| {
-        if (object.get(field)) |value| {
-            if (value != .object) return error.InvalidBootstrap;
-            if (value.object.count() != 0) return error.UnsupportedBootstrapFeature;
-        }
+    try validateProviderReferences(self.servers, self.certificate_providers);
+    for (self.authorities) |authority| try validateProviderReferences(authority.servers, self.certificate_providers);
+    if (object.get("allowed_grpc_services")) |value| {
+        if (value != .object) return error.InvalidBootstrap;
+        if (value.object.count() != 0) return error.UnsupportedBootstrapFeature;
     }
     return self;
 }

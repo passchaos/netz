@@ -34,6 +34,27 @@ fn earlier(a: std.Io.Clock.Timestamp, b: std.Io.Clock.Timestamp) std.Io.Clock.Ti
     return if (a.raw.nanoseconds <= b.raw.nanoseconds) a else b;
 }
 
+fn resolveTls(config: ?bootstrap.TlsConfig, configuration: *bootstrap.Bootstrap) Error!?bootstrap.TlsConfig {
+    var tls = config orelse return null;
+    var root_interval: ?std.Io.Duration = null;
+    var identity_interval: ?std.Io.Duration = null;
+    if (tls.root_certificate_provider.len != 0) {
+        const provider = configuration.certificateProvider(tls.root_certificate_provider) orelse return error.InvalidBootstrapTls;
+        tls.ca_certificate_file = provider.ca_certificate_file;
+        root_interval = provider.refresh_interval;
+    }
+    if (tls.identity_certificate_provider.len != 0) {
+        const provider = configuration.certificateProvider(tls.identity_certificate_provider) orelse return error.InvalidBootstrapTls;
+        tls.certificate_file = provider.certificate_file;
+        tls.private_key_file = provider.private_key_file;
+        identity_interval = provider.refresh_interval;
+    }
+    if (root_interval) |root| {
+        tls.refresh_interval = if (identity_interval) |identity| if (identity.nanoseconds > 0 and identity.nanoseconds < root.nanoseconds) identity else root else root;
+    } else if (identity_interval) |identity| tls.refresh_interval = identity;
+    return tls;
+}
+
 const TlsMaterial = struct {
     allocator: std.mem.Allocator,
     bundle: std.crypto.Certificate.Bundle = .empty,
@@ -41,11 +62,11 @@ const TlsMaterial = struct {
     lock: std.Io.RwLock = .init,
     identity: ?server_identity_file.Identity = null,
 
-    fn load(gpa: std.mem.Allocator, io: std.Io, config: ?bootstrap.TlsConfig) Error!*TlsMaterial {
+    fn load(gpa: std.mem.Allocator, io: std.Io, config: ?bootstrap.TlsConfig, configuration: *bootstrap.Bootstrap) Error!*TlsMaterial {
         const self = try gpa.create(TlsMaterial);
         self.* = .{ .allocator = gpa };
         errdefer self.deinit();
-        const tls = config orelse return self;
+        const tls = try resolveTls(config, configuration) orelse return self;
         if (tls.ca_certificate_file.len != 0) {
             self.bundle.addCertsFromFilePath(gpa, io, std.Io.Timestamp.now(io, .real), std.Io.Dir.cwd(), tls.ca_certificate_file) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
@@ -116,7 +137,7 @@ pub const ControlPlane = struct {
         var index: usize = 0;
         while (index < servers.len) : (index += 1) if (usable(servers[index])) break;
         if (index == servers.len) return error.NoUsableXdsServer;
-        var material = try TlsMaterial.load(gpa, io, servers[index].tlsConfig());
+        var material = try TlsMaterial.load(gpa, io, servers[index].tlsConfig(), configuration);
         errdefer material.deinit();
         var channel = try createChannel(gpa, io, servers[index], options.channel, material);
         errdefer channel.deinit();
@@ -225,7 +246,7 @@ pub const ControlPlane = struct {
     }
     fn rebindServer(self: *ControlPlane, selected: usize) Error!void {
         const target_server = self.servers[selected];
-        var material = try TlsMaterial.load(self.allocator, self.io, target_server.tlsConfig());
+        var material = try TlsMaterial.load(self.allocator, self.io, target_server.tlsConfig(), self.bootstrap);
         errdefer material.deinit();
         var channel = try createChannel(self.allocator, self.io, target_server, self.options.channel, material);
         errdefer channel.deinit();
@@ -327,7 +348,7 @@ pub const ControlPlane = struct {
     /// The current server's TLS file refresh period. Returns null when the
     /// server has no file-based TLS material or the parsed interval is zero.
     pub fn refreshInterval(self: *const ControlPlane) ?std.Io.Duration {
-        const tls = self.server().tlsConfig() orelse return null;
+        const tls = (resolveTls(self.server().tlsConfig(), self.bootstrap) catch return null) orelse return null;
         if (tls.ca_certificate_file.len == 0 and tls.certificate_file.len == 0) return null;
         if (tls.refresh_interval.nanoseconds <= 0) return null;
         return tls.refresh_interval;

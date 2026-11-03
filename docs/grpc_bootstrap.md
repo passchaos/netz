@@ -30,7 +30,8 @@ try plane.failoverWithDeadline(deadline);
 | `xds_servers` | Required, non-empty array of server objects |
 | `server_uri` | Required `http://` or `https://` authority; default ports 80/443; IPv6 brackets accepted |
 | `channel_creds` | Required array of `{type, config}`; at least one known type (`insecure`, `tls`, `google_default`, `xds`) |
-| `tls` config | `ca_certificate_file`, `certificate_file`, `private_key_file`, `refresh_interval`; certificate/key must be paired; certificate providers are rejected |
+| `tls` config | `ca_certificate_file`, `certificate_file`, `private_key_file`, `refresh_interval`, `root_certificate_provider`, `identity_certificate_provider`; certificate/key must be paired; direct files and provider references are mutually exclusive |
+| `certificate_providers` | Optional map of provider name to `{plugin_name, config}`; `file_watcher` config supports `certificate_file`, `private_key_file`, `ca_certificate_file`, `refresh_interval` |
 | `server_features` | Optional string array; the four grpc-core feature names set booleans, unknown entries are retained but inert |
 | `node` | Optional `{id, cluster, locality, metadata}`; `id` is required when present |
 | `authorities` | Optional map of authority name to `{xds_servers, client_listener_resource_name_template, fallback_on_reachability_only}` |
@@ -38,10 +39,11 @@ try plane.failoverWithDeadline(deadline);
 | `server_listener_resource_name_template` | Optional string |
 
 Authority templates must begin with `xdstp://<authority>/`. Duplicate JSON
-fields, malformed JSON, empty server lists, non-object nodes, invalid URIs and
-unknown-only channel credentials fail parsing. Non-empty
-`certificate_providers` or `allowed_grpc_services` are rejected as unsupported
-features rather than silently ignored.
+fields, malformed JSON, empty server lists, non-object nodes, invalid URIs,
+unknown provider references and unknown-only channel credentials fail parsing.
+`file_watcher` is the only supported certificate-provider plugin; non-empty
+`allowed_grpc_services` remains rejected as unsupported rather than silently
+ignored.
 
 `node.metadata` is encoded into a bounded `google.protobuf.Struct` image
 (`Struct` map entries, `Value` oneofs, nested structs/lists, booleans, numbers,
@@ -60,9 +62,11 @@ creation or failover. `refresh_interval` accepts the gRPC duration form
 `refreshInterval` returns the current server's period and `nextRefreshDeadline`
 returns its next boundary. `reloadIfDueWithDeadline` reloads and reconnects only
 when that boundary has passed, so discovery can call it between stream
-operations. Certificate-provider rotation remains unimplemented, and a
-non-empty `root_certificate_provider` or `identity_certificate_provider` is
-rejected during bootstrap parsing.
+operations. `root_certificate_provider` and `identity_certificate_provider`
+reference `file_watcher` providers; their file paths and the shorter of the
+referenced refresh intervals are used for the control-plane TLS material.
+Provider rotation still reloads through the same caller-driven reconnect
+schedule rather than updating live transports in place.
 `Options.authority` selects an authority's `xds_servers` (falling back to the
 top-level list when the authority has none); an unknown authority fails with
 `InvalidControlPlaneOptions`. The bootstrap node is used unless `Options.node`
@@ -113,10 +117,9 @@ server or node-less configurations. See
 
 ## Remaining integration
 
-Certificate-provider plugins and a self-driving refresh task remain follow-up
-work; `reloadIfDue` exposes the bootstrap-derived schedule, but reload
-reconnects the delta client, so the discovery-owning task must call it. A
-background retry schedule and DNS/aggregate control-plane targets also remain
-follow-up work. The
+Certificate-provider plugins other than `file_watcher`, a self-driving refresh
+task, a background retry schedule and DNS/aggregate control-plane targets remain
+follow-up work; `reloadIfDue` exposes the bootstrap-derived schedule, but reload
+reconnects the delta client, so the discovery-owning task must call it. The
 parser retains authority server lists and per-server feature flags, and
 `Options.authority` already selects those servers.

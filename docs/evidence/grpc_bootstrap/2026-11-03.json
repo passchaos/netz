@@ -1,8 +1,8 @@
 {
   "schema": 1,
   "date": "2026-11-03",
-  "head": "6715ed09",
-  "gate": "xDS bootstrap parsing, TLS refresh scheduling, TLS material and control-plane failover",
+  "head": "df7fbe81",
+  "gate": "xDS bootstrap parsing, file_watcher certificate providers, TLS refresh scheduling, TLS material and control-plane failover",
   "commands": {
     "xds": "zig build test-lib -Dtest-filter=xds --summary all",
     "delta": "zig build test-lib -Dtest-filter=delta --summary all",
@@ -11,8 +11,8 @@
   },
   "result": {
     "xds": {
-      "passed": 263,
-      "total": 263,
+      "passed": 264,
+      "total": 264,
       "failed": 0,
       "exit_code": 0
     },
@@ -37,12 +37,12 @@
     }
   },
   "source_sha256": {
-    "src/grpc/xds/bootstrap.zig": "6b0b94b602fb2d5b2aaa6b75b9dcb15664d907d0837959b9e728c1bb5d0f3eb3",
-    "src/grpc/xds/bootstrap_tests.zig": "480cfb1a110c66283b0ebaff5bdb32a4687f6a903c5a42f7b82d707aba1cc137",
-    "src/grpc/xds/control_plane.zig": "2332a150bb4673e764cb74c541ed87e76c925467f6eef5934c983e3e493a856a",
-    "src/grpc/xds/control_plane_tests.zig": "06c03b75d0e6f9dbaf39a3bc948137c306d75fd1d30da07d782c5d2866bbfb49",
+    "src/grpc/xds/bootstrap.zig": "3cdc13e31fc10e05bc7624f47eda08a9bfc9bdefc34c9822500d1ddfba381e98",
+    "src/grpc/xds/bootstrap_tests.zig": "9e21b69098aefc585c0b76f6d98f4779ef99d8cb4cc77fbb2c8e4d2cf5beb07f",
+    "src/grpc/xds/control_plane.zig": "7bea6d7fe3d60a184c5ae6178d71a291ed3cd4ffec10afa713a6066e483b2a5a",
+    "src/grpc/xds/control_plane_tests.zig": "eac0d4cd4f8d9cdae41f8b818ab05cb4294a411eb4c43663ae11d5d203554e4c",
     "src/grpc/xds/ads/delta_client.zig": "a45092e8c2cd638ae5261206bb3a92f55c748e412c6896eb0ba892583c3b2a48",
     "src/grpc/xds/ads/delta_transport_tests.zig": "65f95011c3369f88bbbfb33e72f9466d273671283b54dc1c34320e076b73c7b8"
   },
-  "notes": "Covers bootstrap servers/node/authorities/features, authority server selection, TLS CA and client-identity config parsing, gRPC refresh_interval durations including fractional seconds, bounds and malformed forms, URI defaults and IPv6, bounded metadata Struct encoding through ads.codec.encodeNode, invalid and unsupported shapes, duplicate fields, bounds, allocation failures, refused-server failover, two-server failover with initial_resource_versions replay, a real TLS handshake using a bootstrap CA file, TLS material reload with version replay and failed-load rollback, refresh deadline due/not-due transitions, and unusable server/node configurations. Certificate-provider plugins remain open."
+  "notes": "Covers bootstrap servers/node/authorities/features, authority server selection, file_watcher certificate providers and root/identity provider references, TLS CA and client-identity config parsing, gRPC refresh_interval durations including fractional seconds, bounds and malformed forms, URI defaults and IPv6, bounded metadata Struct encoding through ads.codec.encodeNode, invalid and unsupported shapes, duplicate fields, bounds, allocation failures, refused-server failover, two-server failover with initial_resource_versions replay, a real TLS handshake through a provider-resolved CA file, TLS material reload with version replay and failed-load rollback, refresh deadline due/not-due transitions, and unusable server/node configurations. Non-file_watcher certificate-provider plugins remain open."
 }
