@@ -123,8 +123,10 @@ buffer. Applications poll all streams from one loop and send responses with
 Cumulative request-body bytes are bounded by `Limits.max_body_bytes` (or
 `HandshakeSessionOptions.max_body_bytes` for protected sessions); a declared
 Content-Length is checked as well, and exceeding the budget surfaces
-`error.PayloadTooLarge` at the next read boundary. Per-stream buffering remains
-bounded by `max_stream_buffer`.
+`error.PayloadTooLarge` at the next read boundary. The same limit applies to
+client response and push bodies (`Client`, `HandshakeClient`,
+`ProtectedClient`). Per-stream buffering remains bounded by
+`max_stream_buffer`.
 
 `Server.serveConcurrent` runs a fixed count of handlers concurrently and
 serializes response submission. Its `netz.streaming.http3.ConcurrentResult`

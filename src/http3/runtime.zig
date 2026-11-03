@@ -2629,7 +2629,7 @@ pub const Client = struct {
             limits.quic,
         );
         errdefer quic_client.deinit();
-        return .{
+        var client: Client = .{
             .quic_client = quic_client,
             .limits = limits,
             .response_streams = .init(
@@ -2670,6 +2670,8 @@ pub const Client = struct {
                 limits.max_queued_runtime_datagram_bytes,
             ),
         };
+        client.streaming_responses.setMaxBodyBytes(limits.max_body_bytes);
+        return client;
     }
 
     pub fn deinit(self: *Client) void {
@@ -12850,6 +12852,8 @@ pub const HandshakeClient = struct {
                 transport_next_stream_id - 4,
             );
         }
+        client.streaming_responses.setMaxBodyBytes(resolved_options.max_body_bytes);
+        client.push_streams.setMaxBodyBytes(resolved_options.max_body_bytes);
         return client;
     }
 
@@ -22931,7 +22935,7 @@ pub const ProtectedClient = struct {
         errdefer quic_client.deinit();
         const max_capacity = std.math.cast(usize, config.local_settings.qpack_max_table_capacity) orelse
             return error.InvalidSetting;
-        return .{
+        var client: ProtectedClient = .{
             .quic_client = quic_client,
             .config = config,
             .control = try .init(.{
@@ -22973,6 +22977,9 @@ pub const ProtectedClient = struct {
                 limits.max_concurrent_request_streams,
             ),
         };
+        client.streaming_responses.setMaxBodyBytes(limits.max_body_bytes);
+        client.push_streams.setMaxBodyBytes(limits.max_body_bytes);
+        return client;
     }
 
     pub fn deinit(self: *ProtectedClient) void {

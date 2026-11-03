@@ -64,6 +64,7 @@ pub const Set = struct {
             control: http3.ControlState,
             settings: http3.Settings,
             max_informational_responses: usize,
+            max_body_bytes: usize,
         ) Error!PrefixResult {
             if (self.reader != null) return .push;
             const available = self.receive.available();
@@ -104,6 +105,7 @@ pub const Set = struct {
                 settings,
                 max_informational_responses,
             );
+            self.reader.?.max_body_bytes = max_body_bytes;
             self.push_id = push_id;
             return .push;
         }
@@ -160,7 +162,16 @@ pub const Set = struct {
     max_streams: usize,
     max_stream_buffer: usize,
     max_informational_responses: usize,
+    max_body_bytes: usize = std.math.maxInt(usize),
     settings: http3.Settings,
+
+    /// Apply a cumulative body budget to existing push readers and future ones.
+    pub fn setMaxBodyBytes(self: *Set, limit: usize) void {
+        self.max_body_bytes = limit;
+        for (self.entries.items) |*entry| {
+            if (entry.reader) |*reader| reader.max_body_bytes = limit;
+        }
+    }
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -474,6 +485,7 @@ pub const Set = struct {
                 control,
                 self.settings,
                 self.max_informational_responses,
+                self.max_body_bytes,
             )) {
                 .incomplete => {},
                 .push => {
@@ -543,6 +555,7 @@ pub const Set = struct {
             control,
             self.settings,
             self.max_informational_responses,
+            self.max_body_bytes,
         )) {
             .incomplete => {},
             .push => {
