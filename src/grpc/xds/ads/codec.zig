@@ -35,6 +35,8 @@ pub const Limits = struct {
     max_message_bytes: usize = 16 * 1024 * 1024,
     max_resources: usize = 4096,
     max_resource_bytes: usize = 8 * 1024 * 1024,
+    /// Bound for resource names, aliases and per-resource versions.
+    max_name_bytes: usize = 4096,
 };
 pub const OwnedResponse = struct {
     allocator: std.mem.Allocator,

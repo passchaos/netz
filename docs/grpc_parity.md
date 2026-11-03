@@ -3427,8 +3427,20 @@ read timeout recovery and delivery after a 50-ms opening budget. Two ADS streams
 must use one HTTP/2 connection and the server must see exactly nine requests.
 See [ADS usage and boundaries](grpc_ads.md) and
 `docs/evidence/grpc_ads/2026-11-03.json`. Typed resource validation/application,
-route selection, bootstrap/failover/resource expiry and Delta xDS remain open
-rather than being inferred from this transport evidence.
+route selection, bootstrap/failover and resource expiry remain open rather than
+being inferred from this transport evidence.
+
+`grpc.xds.ads.delta` adds the v3 `DeltaAggregatedResources` transport. It
+retains per-resource accepted versions, emits only subscribe/unsubscribe diffs,
+replays `initial_resource_versions` and the complete desired set after a
+reconnect, applies response versions and explicit removals only after
+application publication, keeps accepted versions across a NACK, and bounds
+Resource payloads, TTLs, aliases and names. Heartbeat resources without a payload
+are represented without inventing a new payload. Dynamic-parameter resource
+variants, `removed_resource_names` and `resource_errors` are rejected instead
+of being silently applied. See [delta xDS transport](grpc_delta_xds.md). Typed
+delta publication into the automatic controller and TTL expiry enforcement
+remain open.
 
 
 ## Typed EDS to reference-owned channel targets

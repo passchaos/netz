@@ -51,6 +51,7 @@ reference hashes are recorded in
 `docs/evidence/grpc_xds_sotw/2026-11-03.json`.
 
 This change covers SotW omission, including existing LDS/CDS deletion behavior.
-Resource expiry/timeouts, Resource envelopes, Delta xDS explicit removal,
-bootstrap, automatic control-plane failover and broader security/filter
-deployment remain open work.
+The separate [delta xDS transport](grpc_delta_xds.md) now covers explicit
+removals and Resource envelopes at the transport/state layer. Typed delta
+application, resource expiry/timeouts, bootstrap, automatic control-plane
+failover and broader security/filter deployment remain open work.

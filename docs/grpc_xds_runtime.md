@@ -93,7 +93,10 @@ configuration preservation and resource/entry budget priority. Evidence is in
 are recorded in `docs/evidence/grpc_xds_sotw/2026-11-03/runtime.Debug.json`.
 
 The controller requires one serialized application caller and an ADS transport
-provided by the application. Bootstrap, automatic control-plane retry/failover,
-resource expiry, Delta xDS, aggregate/DNS CDS and full security, LRS,
-non-router filters and capture/rewriting remain open. Unsupported resource
-features continue to fail typed validation rather than claim deployment support.
+provided by the application. The [delta ADS transport](grpc_delta_xds.md) now
+provides per-resource versions, subscribe/unsubscribe diffs, explicit removals
+and `initial_resource_versions` replay. Typed delta application into this
+controller, bootstrap, automatic control-plane retry/failover, resource expiry,
+aggregate/DNS CDS and full security, LRS, non-router filters and
+capture/rewriting remain open. Unsupported resource features continue to fail
+typed validation rather than claim deployment support.

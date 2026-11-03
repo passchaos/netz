@@ -90,5 +90,9 @@ existing cluster-manager children. [Client LDS/HCM](grpc_lds.md) now selects
 inline/dynamic RDS, inherits HCM duration and drives route subscription updates.
 [Automatic multi-cluster discovery](grpc_xds_runtime.md) connects all four
 typed resources and prepares CDS/EDS subscriptions with topology publication.
-Control-plane retry/failover, bootstrap parsing, resource
-expiry and Delta xDS remain required follow-up work for full xDS integration.
+The [delta ADS transport](grpc_delta_xds.md) now provides per-resource versions,
+subscribe/unsubscribe diffs, explicit removals, TTL/heartbeat resources,
+`initial_resource_versions` replay and the same ACK/NACK ownership model.
+Typed delta publication, control-plane retry/failover, bootstrap parsing and
+resource-expiry enforcement remain required follow-up work for full xDS
+integration.
