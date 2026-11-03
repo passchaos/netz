@@ -87,7 +87,9 @@ alive until the report is encoded.
 
 `lrs.Reporter` wraps a connected `Client` and a source SharedChannel. Its
 `onResponse` applies the server interval, cluster set and endpoint-granularity
-flag: `send_all_clusters` clears the filter, an explicit list reports exactly
+flag: `send_all_clusters` clears the filter only when the node advertised
+`envoy.lrs.supports_send_all_clusters`; otherwise the explicit cluster list is
+used. An explicit list reports exactly
 those clusters, and an empty list reports none. `nextDeadline` returns the next interval boundary and
 `reportIfDueWithDeadline` writes only when that boundary has passed.
 `reportWithDeadline` builds a filtered snapshot report immediately. After an
@@ -145,7 +147,7 @@ Native tests cover request/response round trips, locality counters, dropped
 categories, intervals, malformed/duplicate/over-limit input, UTF-8 rejection,
 per-cluster unary and streaming counter aggregation, in-progress tracking,
 channel drop and per-category attribution, integration conversion, reporter
-interval/filter/rebind behavior, endpoint granularity, EDS service-name propagation, interval-delta reporting with actual elapsed intervals and zero-report skipping,
+interval/filter/rebind behavior, send_all_clusters feature gating, endpoint granularity, EDS service-name propagation, interval-delta reporting with actual elapsed intervals and zero-report skipping,
 the scheduler report loop, same-server reconnect, scheduler failover across two servers, ControlPlane failover
 composition, and a real
 loopback duplex session that observes the node, a response, a report with exact

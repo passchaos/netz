@@ -141,6 +141,21 @@ test "gRPC LRS integration converts channel counters into cluster reports" {
     }
 }
 
+test "gRPC LRS reporter requires the node feature for send_all_clusters" {
+    const grpc = @import("../../mod.zig");
+    var source = try grpc.SharedChannel.init(allocator, std.testing.io, .{ .cleartext_ip = .{ .address = .{ .ip4 = .loopback(1) } } }, .{});
+    defer source.deinit();
+    var sender = source.sender();
+    defer sender.deinit();
+    var client = try @import("client.zig").Client.init(allocator, sender, .{ .node = .{ .id = "node" } });
+    defer client.deinit();
+    var reporter = @import("reporter.zig").Reporter.init(allocator, &client, source, .{});
+    defer reporter.deinit();
+    try reporter.onResponse(.{ .clusters = &.{"a"}, .send_all_clusters = true });
+    try std.testing.expectEqual(@as(usize, 1), reporter.filter.?.len);
+    try std.testing.expectEqualStrings("a", reporter.filter.?[0]);
+}
+
 test "gRPC LRS reporter applies response interval and cluster filter" {
     const grpc = @import("../../mod.zig");
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
@@ -152,7 +167,7 @@ test "gRPC LRS reporter applies response interval and cluster filter" {
     defer first_sender.deinit();
     var second = try grpc.SharedChannel.init(allocator, io, .{ .cleartext_ip = .{ .address = .{ .ip4 = .loopback(1) } } }, .{});
     defer second.deinit();
-    var client = try @import("client.zig").Client.init(allocator, first_sender, .{ .node = .{ .id = "node" } });
+    var client = try @import("client.zig").Client.init(allocator, first_sender, .{ .node = .{ .id = "node", .client_features = &.{"envoy.lrs.supports_send_all_clusters"} } });
     defer client.deinit();
     var reporter = @import("reporter.zig").Reporter.init(allocator, &client, first, .{ .interval_ns = std.time.ns_per_s });
     defer reporter.deinit();

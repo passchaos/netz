@@ -49,7 +49,7 @@ pub const Reporter = struct {
     pub fn onResponse(self: *Reporter, response: codec.Response) Error!void {
         if (response.interval_ns) |nanoseconds| self.interval_ns = @max(nanoseconds, std.time.ns_per_ms);
         self.endpoint_granularity = response.report_endpoint_granularity;
-        if (response.send_all_clusters) {
+        if (response.send_all_clusters and self.client.supportsSendAllClusters()) {
             self.clearFilter();
             return;
         }

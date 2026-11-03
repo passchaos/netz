@@ -33,6 +33,7 @@ pub const Client = struct {
     limits: codec.Limits,
     stream: ?shared.Duplex = null,
     node_sent: bool = false,
+    send_all_clusters_supported: bool = false,
 
     pub fn init(gpa: std.mem.Allocator, sender: shared.Sender, options: Options) Error!Client {
         if (options.limits.max_message_bytes == 0 or options.limits.max_clusters == 0 or options.limits.max_localities == 0 or options.limits.max_dropped == 0 or options.limits.max_text_bytes == 0) return error.InvalidLrsOptions;
@@ -44,7 +45,11 @@ pub const Client = struct {
         request.max_message_size = @min(request.max_message_size, options.limits.max_message_bytes);
         var owned = try @import("../../channel/shared/request_inputs.zig").clone(gpa, request);
         errdefer owned.inputs.deinit();
-        return .{ .allocator = gpa, .sender = sender.clone(), .inputs = owned.inputs, .request = owned.options, .node = node, .limits = options.limits };
+        var send_all_clusters_supported = false;
+        for (options.node.client_features) |feature| {
+            if (std.mem.eql(u8, feature, "envoy.lrs.supports_send_all_clusters")) send_all_clusters_supported = true;
+        }
+        return .{ .allocator = gpa, .sender = sender.clone(), .inputs = owned.inputs, .request = owned.options, .node = node, .limits = options.limits, .send_all_clusters_supported = send_all_clusters_supported };
     }
     pub fn deinit(self: *Client) void {
         self.disconnect();
@@ -52,6 +57,9 @@ pub const Client = struct {
         self.inputs.deinit();
         self.sender.deinit();
         self.* = undefined;
+    }
+    pub fn supportsSendAllClusters(self: Client) bool {
+        return self.send_all_clusters_supported;
     }
     pub fn disconnect(self: *Client) void {
         if (self.stream) |*value| value.deinit();
