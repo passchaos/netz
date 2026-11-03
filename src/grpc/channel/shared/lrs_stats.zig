@@ -1,5 +1,6 @@
 //! Per-cluster call counters for xDS Load Reporting Service.
 const std = @import("std");
+const orca = @import("../../orca.zig");
 pub const max_clusters: usize = 4096;
 pub const max_categories: usize = 256;
 pub const max_endpoints: usize = 4096;
@@ -16,6 +17,8 @@ pub const EndpointEntry = struct {
     in_progress: u64 = 0,
 };
 
+pub const Utilization = struct { sum: f64 = 0, count: u64 = 0 };
+
 pub const Entry = struct {
     cluster: []const u8,
     service_name: []const u8 = "",
@@ -24,6 +27,9 @@ pub const Entry = struct {
     error_requests: u64 = 0,
     dropped: u64 = 0,
     in_progress: u64 = 0,
+    cpu_utilization: Utilization = .{},
+    memory_utilization: Utilization = .{},
+    application_utilization: Utilization = .{},
     categories: []CategoryCount = &.{},
     endpoints: []EndpointEntry = &.{},
 };
@@ -78,6 +84,13 @@ const EndpointCounter = struct {
 
 const CategoryCounter = struct { count: u64 = 0, reported: u64 = 0 };
 
+const Accum = struct {
+    sum: f64 = 0,
+    count: u64 = 0,
+    reported_sum: f64 = 0,
+    reported_count: u64 = 0,
+};
+
 const Counter = struct {
     service_name: []const u8 = "",
     issued: u64 = 0,
@@ -85,6 +98,9 @@ const Counter = struct {
     error_requests: u64 = 0,
     dropped: u64 = 0,
     in_progress: u64 = 0,
+    cpu_utilization: Accum = .{},
+    memory_utilization: Accum = .{},
+    application_utilization: Accum = .{},
     reported_issued: u64 = 0,
     reported_successful: u64 = 0,
     reported_error_requests: u64 = 0,
@@ -243,6 +259,31 @@ pub const Stats = struct {
         gop.value_ptr.count +%= 1;
     }
 
+    pub fn recordOrca(self: *Stats, io: std.Io, cluster: []const u8, report: orca.LoadReport) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        const value = self.entryLocked(cluster, "") orelse return;
+        accumulate(&value.cpu_utilization, report.cpu_utilization);
+        accumulate(&value.memory_utilization, report.memory_utilization);
+        accumulate(&value.application_utilization, report.application_utilization);
+    }
+
+    fn accumulate(value: *Accum, sample: f64) void {
+        if (sample == 0) return;
+        value.sum += sample;
+        value.count +%= 1;
+    }
+
+    fn utilization(value: Accum, delta: bool) Utilization {
+        if (!delta) return .{ .sum = value.sum, .count = value.count };
+        return .{ .sum = value.sum - value.reported_sum, .count = value.count -| value.reported_count };
+    }
+
+    fn markReported(value: *Accum) void {
+        value.reported_sum = value.sum;
+        value.reported_count = value.count;
+    }
+
     fn takeSnapshot(self: *Stats, gpa: std.mem.Allocator, io: std.Io, comptime delta: bool) std.mem.Allocator.Error!Snapshot {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
@@ -323,6 +364,9 @@ pub const Stats = struct {
             const successful = if (delta) entry.value_ptr.successful -| entry.value_ptr.reported_successful else entry.value_ptr.successful;
             const error_requests = if (delta) entry.value_ptr.error_requests -| entry.value_ptr.reported_error_requests else entry.value_ptr.error_requests;
             const dropped = if (delta) entry.value_ptr.dropped -| entry.value_ptr.reported_dropped else entry.value_ptr.dropped;
+            const cpu = utilization(entry.value_ptr.cpu_utilization, delta);
+            const memory = utilization(entry.value_ptr.memory_utilization, delta);
+            const application = utilization(entry.value_ptr.application_utilization, delta);
             entries[index] = .{
                 .cluster = copy,
                 .service_name = service_copy,
@@ -331,6 +375,9 @@ pub const Stats = struct {
                 .error_requests = error_requests,
                 .dropped = dropped,
                 .in_progress = entry.value_ptr.in_progress,
+                .cpu_utilization = cpu,
+                .memory_utilization = memory,
+                .application_utilization = application,
                 .categories = categories[category_start..][0 .. category_index - category_start],
                 .endpoints = endpoints[endpoint_start..][0 .. endpoint_index - endpoint_start],
             };
@@ -339,6 +386,9 @@ pub const Stats = struct {
                 entry.value_ptr.reported_successful = entry.value_ptr.successful;
                 entry.value_ptr.reported_error_requests = entry.value_ptr.error_requests;
                 entry.value_ptr.reported_dropped = entry.value_ptr.dropped;
+                markReported(&entry.value_ptr.cpu_utilization);
+                markReported(&entry.value_ptr.memory_utilization);
+                markReported(&entry.value_ptr.application_utilization);
             }
             index += 1;
         }

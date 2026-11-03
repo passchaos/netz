@@ -68,7 +68,9 @@ Per-endpoint counters are retained for resolved IPv4/IPv6 endpoints; host
 endpoints without a resolved socket address omit endpoint granularity.
 Entries also retain the xDS cluster implementation `edsServiceName` and report
 it as `ClusterStats.cluster_service_name`, so management servers can aggregate
-clusters that share an EDS service.
+clusters that share an EDS service. Unary and streaming responses carrying an
+`endpoint-load-metrics-bin` ORCA report accumulate CPU, memory and application
+utilization per cluster; `LocalityStats` emits fields 12/13/14 when present.
 Counters use a dedicated mutex; disabled channels skip the lock entirely, so
 ordinary channels keep their existing hot path.
 
@@ -147,7 +149,7 @@ Native tests cover request/response round trips, locality counters, dropped
 categories, intervals, malformed/duplicate/over-limit input, UTF-8 rejection,
 per-cluster unary and streaming counter aggregation, in-progress tracking,
 channel drop and per-category attribution, integration conversion, reporter
-interval/filter/rebind behavior, send_all_clusters feature gating, endpoint granularity, EDS service-name propagation, interval-delta reporting with actual elapsed intervals and zero-report skipping,
+interval/filter/rebind behavior, send_all_clusters feature gating, endpoint granularity, EDS service-name propagation, ORCA utilization accumulation, interval-delta reporting with actual elapsed intervals and zero-report skipping,
 the scheduler report loop, same-server reconnect, scheduler failover across two servers, ControlPlane failover
 composition, and a real
 loopback duplex session that observes the node, a response, a report with exact

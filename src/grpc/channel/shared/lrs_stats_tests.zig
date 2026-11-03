@@ -107,6 +107,63 @@ test "gRPC LRS delta snapshots report only new counters" {
     try std.testing.expectEqual(@as(u64, 2), cumulative.entries[0].dropped);
 }
 
+test "gRPC LRS delta snapshots report ORCA utilization deltas" {
+    var stats: lrs_stats.Stats = .{ .allocator = allocator };
+    defer stats.deinit();
+    const io = std.testing.io;
+    stats.recordOrca(io, "a", .{ .cpu_utilization = 0.5, .memory_utilization = 0.25 });
+    var first = try stats.snapshotDelta(allocator, io);
+    defer first.deinit();
+    try std.testing.expectEqual(@as(f64, 0.5), first.entries[0].cpu_utilization.sum);
+    try std.testing.expectEqual(@as(u64, 1), first.entries[0].cpu_utilization.count);
+    try std.testing.expectEqual(@as(f64, 0.25), first.entries[0].memory_utilization.sum);
+    stats.recordOrca(io, "a", .{ .cpu_utilization = 0.7 });
+    var second = try stats.snapshotDelta(allocator, io);
+    defer second.deinit();
+    try std.testing.expectEqual(@as(f64, 0.7), second.entries[0].cpu_utilization.sum);
+    try std.testing.expectEqual(@as(u64, 1), second.entries[0].cpu_utilization.count);
+    var cumulative = try stats.snapshot(allocator, io);
+    defer cumulative.deinit();
+    try std.testing.expectEqual(@as(f64, 1.2), cumulative.entries[0].cpu_utilization.sum);
+    try std.testing.expectEqual(@as(u64, 2), cumulative.entries[0].cpu_utilization.count);
+}
+
+test "gRPC LRS records unary ORCA trailers" {
+    const orca = @import("../../orca.zig");
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try grpc.runtime.Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{}, 4096);
+    defer server.deinit();
+    const Peer = struct {
+        fn run(listener: *grpc.runtime.Server) !void {
+            var connection = try listener.acceptWithTimeout(.fromSeconds(3));
+            defer connection.deinit();
+            var unary = try connection.readUnaryWithTimeout(.fromSeconds(3));
+            defer unary.deinit();
+            const encoded = try orca.encodeAlloc(allocator, .{ .cpu_utilization = 0.5 });
+            defer allocator.free(encoded);
+            try connection.writeUnary(unary.transport.stream_id, .{ .message = "ok", .trailing_binary_metadata = &.{.{ .name = orca.name, .value = encoded }} });
+        }
+    };
+    var task = io.async(Peer.run, .{&server});
+    defer _ = task.cancel(io) catch {};
+    const path = [_][]const u8{"cluster:a"};
+    const endpoint: channel_endpoint = .{ .cleartext_ip = .{ .address = server.address(), .hierarchical_path = &path } };
+    var channel = try grpc.SharedChannel.init(allocator, io, .{ .resolved = .{ .endpoints = &.{endpoint} } }, .{ .enable_lrs_stats = true });
+    defer channel.deinit();
+    var sender = channel.sender();
+    defer sender.deinit();
+    var response = try sender.unary(.{ .path = "/demo.Lrs/Call", .message = "ok", .wait_for_ready = true });
+    defer response.deinit();
+    try std.testing.expectEqual(grpc.Status.ok, response.status);
+    var snapshot = try channel.lrsStatsDeltaSnapshot(allocator);
+    defer snapshot.deinit();
+    try std.testing.expectEqual(@as(f64, 0.5), snapshot.entries[0].cpu_utilization.sum);
+    try std.testing.expectEqual(@as(u64, 1), snapshot.entries[0].cpu_utilization.count);
+    try task.await(io);
+}
+
 test "gRPC LRS counters retain the EDS service name" {
     var stats: lrs_stats.Stats = .{ .allocator = allocator };
     defer stats.deinit();

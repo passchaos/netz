@@ -5,6 +5,7 @@ const duplex = @import("../../../stream/duplex.zig");
 const http2 = @import("../../../../http2/mod.zig");
 const Job = @import("../job.zig").Job;
 const lrs_stats = @import("../lrs_stats.zig");
+const orca = @import("../../../orca.zig");
 
 fn lrsCluster(worker: anytype) ?[]const u8 {
     if (comptime !@hasField(@TypeOf(worker.*), "source")) return null;
@@ -76,7 +77,17 @@ pub fn Owner(comptime State: type) type {
             call.circuit_permit = null;
             state.finishOutstandingLocked(worker);
             state.observeOutlierLocked(worker, response.status == .ok);
-            if (lrsCluster(worker)) |cluster| state.lrs_stats.recordCompletion(state.io, cluster, state.lrsServiceName(cluster), lrsEndpoint(worker), response.status == .ok);
+            if (lrsCluster(worker)) |cluster| {
+                state.lrs_stats.recordCompletion(state.io, cluster, state.lrsServiceName(cluster), lrsEndpoint(worker), response.status == .ok);
+                const trailers = response.trailers orelse &.{};
+                if (orca.fromMetadataAlloc(state.allocator, &.{}, trailers)) |owned| {
+                    if (owned) |value| {
+                        var report = value;
+                        defer report.deinit();
+                        state.lrs_stats.recordOrca(state.io, cluster, report.report);
+                    }
+                } else |_| {}
+            }
             call.terminal = response;
             call.retireLocked(null);
             state.unlock();

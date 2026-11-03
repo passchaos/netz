@@ -1,8 +1,8 @@
 {
   "schema": 1,
   "date": "2026-11-03",
-  "head": "24e295f2",
-  "gate": "Load Reporting Service envelopes, duplex reporting, interval-delta counters with actual elapsed intervals, zero-report skipping, EDS service names and send_all_clusters feature gating, reporter, endpoint granularity, foreground scheduler, same-server reconnect, backoff and control-plane failover composition",
+  "head": "c48b3b01",
+  "gate": "Load Reporting Service envelopes, duplex reporting, interval-delta counters with actual elapsed intervals, zero-report skipping, EDS service names, send_all_clusters feature gating and ORCA utilization, reporter, endpoint granularity, foreground scheduler, same-server reconnect, backoff and control-plane failover composition",
   "commands": {
     "lrs": "zig build test-lib -Dtest-filter=LRS --summary all",
     "xds": "zig build test-lib -Dtest-filter=xds --summary all",
@@ -13,8 +13,8 @@
   },
   "result": {
     "lrs": {
-      "passed": 183,
-      "total": 183,
+      "passed": 185,
+      "total": 185,
       "failed": 0,
       "exit_code": 0
     },
@@ -25,8 +25,8 @@
       "exit_code": 0
     },
     "delta": {
-      "passed": 190,
-      "total": 190,
+      "passed": 191,
+      "total": 191,
       "failed": 0,
       "exit_code": 0
     },
@@ -51,27 +51,27 @@
     "src/grpc/xds/lrs.zig": "625b1a743c8f80e490789443729fea3bac3de6a6736e79f05971675a6d74cb57",
     "src/grpc/xds/lrs/scheduler.zig": "4db200abbfc00f17741ed0a008a004d0e3c0113a81617e5a3a7105b522c74e83",
     "src/grpc/xds/lrs/scheduler_tests.zig": "8c94cb2e095dabfb2d974cb759f4662437f425e2702bd614efac053813bb5509",
-    "src/grpc/xds/lrs/codec.zig": "6c781a79de396bf3402667ae3998367e021b6df67d588f91a4bc9e89c11826e0",
+    "src/grpc/xds/lrs/codec.zig": "2499a8fb04024dc39d94b470f834ba31b7b953018009e481c994a5f4a6a8d113",
     "src/grpc/xds/lrs/client.zig": "57f8fcf62d0fd66fdcf76e0cec0bdabd663c13331e8639a82a3b8b93e3ee624c",
     "src/grpc/xds/lrs/reporter.zig": "3aa4645a1e97057211b8b62427a9611010ff213c9f948c2feaba388127745980",
-    "src/grpc/xds/lrs/integration.zig": "60d89ad54f33642b763b84fbaa0c6e13f6e34930bb3d350a4904c01332fe3dcc",
-    "src/grpc/xds/lrs/tests.zig": "42ac17fe489952bb12b94aa89a7736bd648831b66a177dfc7f988dd4954ad968",
+    "src/grpc/xds/lrs/integration.zig": "1f8ed3ce481d4ac0055b97b30d11ad3c96ed7773a2b56a9e586be33af46bd3d8",
+    "src/grpc/xds/lrs/tests.zig": "431f24be5756f6efa0c147b15a0905de816c6069891c032d7c936de476c85dad",
     "src/grpc/xds/lrs/transport_tests.zig": "af4f6ee7e4f1f61cf224d171763f9118a645dbfad9c7fb04d5d6af9f0faf9aae",
     "src/grpc/xds/lrs/control_plane_tests.zig": "46b2d685422cca5fc649fc6b8961007eda93911a402477204cd6d61dd59c857c",
     "src/grpc/xds/control_plane.zig": "2332a150bb4673e764cb74c541ed87e76c925467f6eef5934c983e3e493a856a",
-    "src/grpc/channel/shared/lrs_stats.zig": "d406b18d15242d319d16f2d3b52052d78e58ceab896cb48c7b2d4b77f795dc8a",
-    "src/grpc/channel/shared/lrs_stats_tests.zig": "8499e13bb0c50c1672db1ab5d90cfbdfec2487355e3671257bc46f90fd1bb063",
+    "src/grpc/channel/shared/lrs_stats.zig": "a461d59da9c57a334702ba249015c016d7d8a84ac50ae2067ac17b2cd21c1d83",
+    "src/grpc/channel/shared/lrs_stats_tests.zig": "368ecc3f50d90e5867505452c498b6fbb3fda77e2d38f591978b4d121e6586fe",
     "src/grpc/channel/shared.zig": "055995984e25bec3c6de178fe061025f46740c4f997d7f58361bc13cf778da86",
     "src/grpc/channel/cluster_impl.zig": "ebba2e5e15addad2ba3ceac7cf2f7c8b4276fb15d5542691e5db536b6b07b595",
-    "src/grpc/channel/shared/state.zig": "017412263e5d9d9f07aab18a7d9111ef8f0de91a2c43a23861c216a6b1e28e16",
+    "src/grpc/channel/shared/state.zig": "1b840789c083288857d38c5837b5e1e8f45fe49df6fe23ce8121b24baabdb86f",
     "src/grpc/channel/shared/job.zig": "2b3fe4e3ae37d143c09eac9afd881b58491263758b4538924c150a8e02e1f58a",
     "src/grpc/channel/shared/worker.zig": "3d411938e65e89a7f8cb9fb123edae3af4574289d983c3bd31358d365a7c9b6b",
-    "src/grpc/channel/shared/stream/owner.zig": "ebdc40b52d5ba9621caa9449d89cbe19476da99a80b35ee992ed60fe269c152f",
+    "src/grpc/channel/shared/stream/owner.zig": "146ed3c0ed180a858a82ec5fa03ffb9653652e4ed6e03e947abc4039761f4410",
     "src/grpc/channel/shared/drop_admission.zig": "f74177bb22cbddd7dcd4ca4cb4972ad5fcb342bd2e842603770d49f5c04a776f",
     "src/grpc/channel/shared/circuit_admission.zig": "366cbb0c93c9f2dbdc5c1d7787ba6cbd2ecd58092af5506f26740eda81475f82",
     "tools/interop/grpc_lrs/client.zig": "a7576d07283ebc3806f141e6cf7d52a65bc85f223ba47adbf7b553179c9821b0",
     "tools/interop/grpc_lrs/peer.js": "9b107638c1b9ed8a4bce1f17a28917c60e54a795aa24d5f9af662c61bab9ac26",
     "tools/interop/grpc_lrs/run.py": "6916605190ae91b93dd2ef48f6ebfd37b410ecb670052d1d0d789fca89ec4f48"
   },
-  "notes": "Native tests cover envelopes, locality/dropped counters, endpoint address/port counters, malformed/duplicate/over-limit input, a real loopback report/reconnect stream, opt-in per-cluster unary and streaming counters with in-progress tracking, channel drop attribution with per-category counts, report conversion, EDS service-name propagation from the xDS cluster implementation config, send_all_clusters feature gating, interval-delta snapshots (including an idle interval and an end-to-end two-interval report) with actual elapsed load_report_interval values, consecutive all-zero report skipping, reporter interval/filter/rebind behavior, endpoint granularity, the foreground scheduler interval/terminal loop, same-server reconnect, scheduler failover to a second control-plane server, and a real two-server ControlPlane failover composition. Official-schema interop evidence is docs/evidence/grpc_lrs/2026-11-03.json."
+  "notes": "Native tests cover envelopes, locality/dropped counters, endpoint address/port counters, malformed/duplicate/over-limit input, a real loopback report/reconnect stream, opt-in per-cluster unary and streaming counters with in-progress tracking, channel drop attribution with per-category counts, report conversion, EDS service-name propagation from the xDS cluster implementation config, send_all_clusters feature gating, ORCA utilization accumulation and encoding, interval-delta snapshots (including an idle interval and an end-to-end two-interval report) with actual elapsed load_report_interval values, consecutive all-zero report skipping, reporter interval/filter/rebind behavior, endpoint granularity, the foreground scheduler interval/terminal loop, same-server reconnect, scheduler failover to a second control-plane server, and a real two-server ControlPlane failover composition. Official-schema interop evidence is docs/evidence/grpc_lrs/2026-11-03.json."
 }

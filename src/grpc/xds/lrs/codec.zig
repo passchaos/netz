@@ -22,12 +22,19 @@ pub const EndpointStats = struct {
     error_requests: u64 = 0,
     issued: u64 = 0,
 };
+pub const MetricStats = struct {
+    count: u64 = 0,
+    value: f64 = 0,
+};
 pub const LocalityStats = struct {
     locality: Locality = .{},
     successful: u64 = 0,
     in_progress: u64 = 0,
     error_requests: u64 = 0,
     issued: u64 = 0,
+    cpu_utilization: ?MetricStats = null,
+    memory_utilization: ?MetricStats = null,
+    application_utilization: ?MetricStats = null,
     endpoints: []const EndpointStats = &.{},
 };
 pub const Dropped = struct { category: []const u8, count: u64 = 0 };
@@ -100,6 +107,22 @@ fn numberField(out: *std.ArrayList(u8), gpa: std.mem.Allocator, field: u32, valu
     try integer(out, gpa, value);
 }
 
+fn doubleField(out: *std.ArrayList(u8), gpa: std.mem.Allocator, field: u32, value: f64) Error!void {
+    try integer(out, gpa, @as(u64, field) * 8 + 1);
+    const bits: u64 = @bitCast(value);
+    var index: usize = 0;
+    while (index < 8) : (index += 1) try out.append(gpa, @truncate(bits >> @intCast(index * 8)));
+}
+
+fn encodeMetric(out: *std.ArrayList(u8), gpa: std.mem.Allocator, field: u32, metric: MetricStats) Error!void {
+    if (metric.count == 0 and metric.value == 0) return;
+    var nested: std.ArrayList(u8) = .empty;
+    defer nested.deinit(gpa);
+    if (metric.count != 0) try numberField(&nested, gpa, 1, metric.count);
+    if (metric.value != 0) try doubleField(&nested, gpa, 2, metric.value);
+    try bytesField(out, gpa, field, nested.items);
+}
+
 fn text(bytes: []const u8, limits: Limits, allow_empty: bool) Error!void {
     if (!std.unicode.utf8ValidateSlice(bytes)) return error.InvalidLoadReport;
     if ((!allow_empty and bytes.len == 0) or bytes.len > limits.max_text_bytes) return error.InvalidLoadReport;
@@ -157,6 +180,9 @@ fn encodeLocalityStats(out: *std.ArrayList(u8), gpa: std.mem.Allocator, value: L
     if (value.in_progress != 0) try numberField(&nested, gpa, 3, value.in_progress);
     if (value.error_requests != 0) try numberField(&nested, gpa, 4, value.error_requests);
     if (value.issued != 0) try numberField(&nested, gpa, 8, value.issued);
+    if (value.cpu_utilization) |metric| try encodeMetric(&nested, gpa, 12, metric);
+    if (value.memory_utilization) |metric| try encodeMetric(&nested, gpa, 13, metric);
+    if (value.application_utilization) |metric| try encodeMetric(&nested, gpa, 14, metric);
     for (value.endpoints) |endpoint| try encodeEndpointStats(&nested, gpa, endpoint, limits);
     try bytesField(out, gpa, 2, nested.items);
 }

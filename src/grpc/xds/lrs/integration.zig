@@ -25,6 +25,11 @@ fn selected(entry: lrs_stats.Entry, filter: ?[]const []const u8) bool {
     return false;
 }
 
+fn metric(value: lrs_stats.Utilization) ?codec.MetricStats {
+    if (value.count == 0) return null;
+    return .{ .count = value.count, .value = value.sum };
+}
+
 /// Cluster, category and endpoint names borrow the snapshot's storage; keep
 /// it alive until the report has been encoded.
 pub fn build(
@@ -95,6 +100,9 @@ pub fn buildWithOptions(
             .error_requests = entry.error_requests,
             .in_progress = entry.in_progress,
             .issued = entry.issued,
+            .cpu_utilization = metric(entry.cpu_utilization),
+            .memory_utilization = metric(entry.memory_utilization),
+            .application_utilization = metric(entry.application_utilization),
             .endpoints = endpoints[endpoint_start..][0 .. endpoint_index - endpoint_start],
         };
         const start = dropped_index;

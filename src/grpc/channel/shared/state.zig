@@ -385,6 +385,15 @@ pub const State = struct {
             err == null);
         if (job.lrs_started) if (lrsCluster(worker)) |cluster| {
             self.lrs_stats.recordCompletion(self.io, cluster, self.lrsServiceName(cluster), lrs_stats.endpointAddress(worker.source.endpoint), if (result) |response| response.status == .ok else err == null);
+            if (result) |response| if (response.transport) |transport| {
+                if (orca.fromMetadataAlloc(self.allocator, transport.headers, transport.trailers)) |owned| {
+                    if (owned) |value| {
+                        var report = value;
+                        defer report.deinit();
+                        self.lrs_stats.recordOrca(self.io, cluster, report.report);
+                    }
+                } else |_| {}
+            };
         };
         self.finishLocked(job, result, err);
         self.wakeAllLocked();
