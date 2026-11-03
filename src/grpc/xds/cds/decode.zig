@@ -242,13 +242,52 @@ fn tlsCertificate(bytes: []const u8, limits: Limits) Error!struct { chain: []con
     return .{ .chain = chain orelse return error.InvalidCdsResource, .key = key orelse return error.InvalidCdsResource };
 }
 
-fn validationContext(bytes: []const u8, limits: Limits) Error![]const u8 {
-    var trusted_ca: ?[]const u8 = null;
+const Validation = struct {
+    trusted_ca: []const u8,
+    san_matchers: []const tls_material.SanMatcher,
+};
+
+fn sanMatcher(bytes: []const u8, limits: Limits) Error!tls_material.SanMatcher {
+    var kind: ?tls_material.SanMatch = null;
+    var value: []const u8 = "";
+    var ignore_case = false;
+    var count: usize = 0;
     var reader: pb.Reader = .{ .bytes = bytes };
     while (try reader.next()) |field| {
-        if (field.number == 1 and field.wire_type == 2) trusted_ca = try dataSource(try reader.bytesValue(), limits) else if (field.number >= 2 and field.number <= 10) return error.UnsupportedCdsFeature else try reader.skip(field);
+        if (field.number == 1 and field.wire_type == 2) {
+            value = try pb.text(&reader, limits.max_text_bytes);
+            kind = .exact;
+            count += 1;
+        } else if (field.number == 2 and field.wire_type == 2) {
+            value = try pb.text(&reader, limits.max_text_bytes);
+            kind = .prefix;
+            count += 1;
+        } else if (field.number == 3 and field.wire_type == 2) {
+            value = try pb.text(&reader, limits.max_text_bytes);
+            kind = .suffix;
+            count += 1;
+        } else if (field.number == 7 and field.wire_type == 2) {
+            value = try pb.text(&reader, limits.max_text_bytes);
+            kind = .contains;
+            count += 1;
+        } else if ((field.number == 5 or field.number == 8) and field.wire_type == 2) return error.UnsupportedCdsFeature else if (field.number == 6 and field.wire_type == 0) {
+            ignore_case = (try pb.u32Value(&reader)) != 0;
+        } else try reader.skip(field);
     }
-    return trusted_ca orelse error.InvalidCdsResource;
+    if (count != 1) return error.InvalidCdsResource;
+    return .{ .kind = kind.?, .value = value, .ignore_case = ignore_case };
+}
+
+fn validationContext(arena: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!Validation {
+    var trusted_ca: ?[]const u8 = null;
+    var matchers: std.ArrayList(tls_material.SanMatcher) = .empty;
+    var reader: pb.Reader = .{ .bytes = bytes };
+    while (try reader.next()) |field| {
+        if (field.number == 1 and field.wire_type == 2) trusted_ca = try dataSource(try reader.bytesValue(), limits) else if (field.number == 2 and field.wire_type == 2) {
+            try matchers.append(arena, try sanMatcher(try reader.bytesValue(), limits));
+        } else if (field.number >= 3 and field.number <= 10) return error.UnsupportedCdsFeature else try reader.skip(field);
+    }
+    return .{ .trusted_ca = trusted_ca orelse return error.InvalidCdsResource, .san_matchers = try matchers.toOwnedSlice(arena) };
 }
 
 const TlsParams = struct {
@@ -301,7 +340,9 @@ fn commonTlsContext(arena: std.mem.Allocator, bytes: []const u8, limits: Limits)
             result.certificate_chain = certificate.chain;
             result.private_key = certificate.key;
         } else if (field.number == 3 and field.wire_type == 2) {
-            result.trusted_ca = try validationContext(try reader.bytesValue(), limits);
+            const validation = try validationContext(arena, try reader.bytesValue(), limits);
+            result.trusted_ca = validation.trusted_ca;
+            result.san_matchers = validation.san_matchers;
         } else if (field.number == 4 and field.wire_type == 2) {
             _ = try reader.bytesValue();
         } else if (field.number >= 6 and field.number <= 15 and field.wire_type == 2) return error.UnsupportedCdsFeature else try reader.skip(field);
@@ -320,6 +361,7 @@ fn upstreamTlsContext(arena: std.mem.Allocator, bytes: []const u8, limits: Limit
             result.private_key = common.private_key;
             result.version_policy = common.version_policy;
             result.tls12_cipher_suites = common.tls12_cipher_suites;
+            result.san_matchers = common.san_matchers;
         } else if (field.number == 2 and field.wire_type == 2) {
             const value = try pb.text(&reader, 255);
             result.server_name = value;

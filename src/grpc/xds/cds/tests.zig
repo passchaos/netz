@@ -185,6 +185,16 @@ test "gRPC CDS decodes inline upstream TLS transport sockets" {
     const encoded_unknown = try fixture.staticClusterTls(gpa, "backend", "127.0.0.1", 1001, unknown_cipher);
     defer gpa.free(encoded_unknown);
     try std.testing.expectError(error.UnsupportedCdsFeature, resource.decode(gpa, encoded_unknown, .{}));
+    const sans = try fixture.upstreamTlsWithSans(gpa, pem, "localhost", &.{ .{ .kind = .exact, .value = "localhost" }, .{ .kind = .contains, .value = "calhost" } });
+    defer gpa.free(sans);
+    const encoded_sans = try fixture.staticClusterTls(gpa, "backend", "127.0.0.1", 1001, sans);
+    defer gpa.free(encoded_sans);
+    var sans_decoded = try resource.decode(gpa, encoded_sans, .{});
+    defer sans_decoded.deinit();
+    try std.testing.expectEqual(@as(usize, 2), sans_decoded.value.tls.?.san_matchers.?.len);
+    try std.testing.expectEqual(@import("../tls_material.zig").SanMatch.exact, sans_decoded.value.tls.?.san_matchers.?[0].kind);
+    try std.testing.expectEqualStrings("localhost", sans_decoded.value.tls.?.san_matchers.?[0].value);
+    try std.testing.expectEqual(@import("../tls_material.zig").SanMatch.contains, sans_decoded.value.tls.?.san_matchers.?[1].kind);
 }
 
 test "gRPC CDS rejects unsupported discovery security invalid identities and ring ranges" {

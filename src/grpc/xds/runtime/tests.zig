@@ -194,7 +194,7 @@ test "gRPC xDS runtime connects to a STATIC cluster over inline TLS" {
     try accept(controller, &client, channel, io, lds.type_url, "l1", &.{.{ .type_url = lds.type_url, .value = listener }});
     const pem = try std.fmt.allocPrint(gpa, "-----BEGIN CERTIFICATE-----\n{s}\n-----END CERTIFICATE-----\n", .{tls_testing.certificate_base64});
     defer gpa.free(pem);
-    const tls = try cds_fixture.upstreamTls(gpa, pem, "localhost");
+    const tls = try cds_fixture.upstreamTlsWithSans(gpa, pem, "localhost", &.{.{ .kind = .exact, .value = "localhost" }});
     defer gpa.free(tls);
     const a = try cds_fixture.staticClusterTls(gpa, "a", "127.0.0.1", server.address().getPort(), tls);
     defer gpa.free(a);

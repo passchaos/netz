@@ -97,9 +97,12 @@ name, inline `trusted_ca`, one inline certificate chain/private-key pair, and
 `tls_params` minimum/maximum protocol versions using Envoy's `TlsProtocol`
 values (`AUTO` defaults to TLS 1.2/1.3; TLS 1.0/1.1 are rejected) and a TLS 1.2
 cipher-suite allowlist using the OpenSSL names for the supported ECDHE
-GCM/ChaCha suites. EDS, STATIC and DNS endpoints become TLS targets; without
+GCM/ChaCha suites, and `match_subject_alt_names` exact/prefix/suffix/contains
+matchers (case-sensitive or insensitive). SAN matching requires inline
+`trusted_ca` and replaces SNI hostname verification with the configured matcher
+set. EDS, STATIC and DNS endpoints become TLS targets; without
 `trusted_ca` the platform roots are used. SDS secret configs, certificate
-providers, ECDH curve lists, subject-alt-name matching, file/environment data
+providers, ECDH curve lists, regex/custom SAN matchers, file/environment data
 sources and other transport sockets are explicitly rejected.
 `transport_socket_matches`,
 outlier_detection, lrs_server and upstream_config are also rejected.

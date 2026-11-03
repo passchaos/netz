@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "date": "2026-11-03",
-  "head": "6c64d623",
+  "head": "a752a1e0",
   "gate": "Inline CDS UpstreamTlsContext decoding with TLS version policy and TLS endpoint publication",
   "commands": {
     "xds": "zig build test-lib -Dtest-filter=xds --summary all",
@@ -10,8 +10,8 @@
   },
   "result": {
     "xds": {
-      "passed": 262,
-      "total": 262,
+      "passed": 263,
+      "total": 263,
       "failed": 0,
       "exit_code": 0
     },
@@ -29,10 +29,11 @@
     }
   },
   "source_sha256": {
-    "src/grpc/xds/tls_material.zig": "b3a47746aaaffa01f040f5553b04a723b3040e0c8ac70644b9b6b8152dbd18e3",
-    "src/grpc/xds/cds/decode.zig": "f1d3e97fabd70122e1a1462d240add3b7d110ca9fafce3cf729a87da3ff6f0be",
-    "src/grpc/xds/cds/testing.zig": "fcddbacc05cfeb650663960d6ae2eda4da8ec740078cac892e3173e7668f214b",
-    "src/grpc/xds/cds/tests.zig": "29bc4a66a34d1db5e6e9b418a497607a3417d3ea682fe045b7d2a211bcbc63b0",
+    "src/grpc/xds/tls_material.zig": "8120fa9495a9b73e02e493537d46c0b61ead1cc4270c3a446f59beda578fe5ca",
+    "src/grpc/xds/cds/decode.zig": "1b4ec209c81c3b1db44e70a11a6fad81769cdd5f1189d27e69725944c01c6f33",
+    "src/grpc/xds/cds/testing.zig": "3264764e37da85523b95944949856825599012abbd55f8a672991973fb0e1fca",
+    "src/grpc/xds/cds/tests.zig": "116496b4b7df7bb5cf7ec128820e5a742cbf773068a09e164a238db86f92e246",
+    "src/grpc/xds/runtime/tests.zig": "a74d766104ee96e1a73f8561962a8bf4ae76e93f87f97bbef7996a32380ae82a",
     "src/grpc/xds/eds/target.zig": "0c11f6e3faec6c6375281dc2a4cf4aebd4cbfcd24ba508b560fa96417f27eb54",
     "src/grpc/xds/runtime/controller.zig": "6f97f7c1d855fc634d097003efee0489e68d6601778a8c6b54f77a5e55630ffa",
     "src/grpc/xds/runtime/target.zig": "e1334fd97ffbc662da2c1aac1be6f7e8effb084e43f872a7bb759bd5f7b00358",
@@ -43,5 +44,5 @@
     "src/grpc/xds/runtime/tests.zig": "014459522155d18758366bea97118db7495b13a77cb9500edae24db3bc2401cc",
     "src/grpc/xds/runtime/errors.zig": "5b05c39d27dfb23234c3f1cb2d4011fdb40295d49f89e463d48bde8cc59ad9d7"
   },
-  "notes": "CDS transport_socket accepts one inline UpstreamTlsContext with optional SNI, inline trusted_ca, one inline client certificate/key, Envoy TlsProtocol minimum/maximum versions (AUTO defaults to TLS 1.2/1.3; TLS 1.0/1.1 rejected) and a TLS 1.2 OpenSSL cipher-suite allowlist for the supported ECDHE GCM/ChaCha suites. The SNI and cipher-suite list are copied into owned material storage so a retained projection does not depend on the CDS resource arena. EDS, STATIC and DNS endpoints use TLS targets; EDS/STATIC project through the existing priority/locality runtime, DNS builds tls_host endpoints. The end-to-end test performs a certificate-verified RPC through a STATIC cluster using the inline CA. SDS, providers, ECDH curve lists, SAN matching and file/environment data sources are rejected."
+  "notes": "CDS transport_socket accepts one inline UpstreamTlsContext with optional SNI, inline trusted_ca, one inline client certificate/key, Envoy TlsProtocol minimum/maximum versions (AUTO defaults to TLS 1.2/1.3; TLS 1.0/1.1 rejected), a TLS 1.2 OpenSSL cipher-suite allowlist and exact/prefix/suffix/contains SAN matchers. SAN matching uses chain trust plus configured matchers instead of SNI hostname verification. SNI, cipher suites and matchers are copied into owned material storage so a retained projection does not depend on the CDS resource arena. EDS, STATIC and DNS endpoints use TLS targets; EDS/STATIC project through the existing priority/locality runtime, DNS builds tls_host endpoints. The end-to-end test performs a certificate-verified RPC through a STATIC cluster using the inline CA and an exact localhost SAN matcher. SDS, providers, ECDH curve lists, regex/custom SAN matchers and file/environment data sources are rejected."
 }

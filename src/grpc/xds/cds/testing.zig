@@ -89,19 +89,34 @@ pub fn upstreamTls(gpa: std.mem.Allocator, trusted_ca: []const u8, sni: []const 
     return upstreamTlsWithVersions(gpa, trusted_ca, sni, null);
 }
 pub const Versions = struct { min: u32, max: u32 };
+pub const SanSpec = struct { kind: enum { exact, prefix, suffix, contains }, value: []const u8 };
 pub fn upstreamTlsWithVersions(gpa: std.mem.Allocator, trusted_ca: []const u8, sni: []const u8, versions: ?Versions) ![]u8 {
-    return buildUpstreamTls(gpa, trusted_ca, sni, versions, &.{});
+    return buildUpstreamTls(gpa, trusted_ca, sni, versions, &.{}, &.{});
 }
 pub fn upstreamTlsWithCiphers(gpa: std.mem.Allocator, trusted_ca: []const u8, sni: []const u8, ciphers: []const []const u8) ![]u8 {
-    return buildUpstreamTls(gpa, trusted_ca, sni, null, ciphers);
+    return buildUpstreamTls(gpa, trusted_ca, sni, null, ciphers, &.{});
 }
-fn buildUpstreamTls(gpa: std.mem.Allocator, trusted_ca: []const u8, sni: []const u8, versions: ?Versions, ciphers: []const []const u8) ![]u8 {
+pub fn upstreamTlsWithSans(gpa: std.mem.Allocator, trusted_ca: []const u8, sni: []const u8, sans: []const SanSpec) ![]u8 {
+    return buildUpstreamTls(gpa, trusted_ca, sni, null, &.{}, sans);
+}
+fn buildUpstreamTls(gpa: std.mem.Allocator, trusted_ca: []const u8, sni: []const u8, versions: ?Versions, ciphers: []const []const u8, sans: []const SanSpec) ![]u8 {
     var trusted = Builder{ .allocator = gpa };
     defer trusted.deinit();
     try trusted.bytes(2, trusted_ca);
     var validation = Builder{ .allocator = gpa };
     defer validation.deinit();
     try validation.bytes(1, trusted.data.items);
+    for (sans) |san| {
+        var matcher = Builder{ .allocator = gpa };
+        defer matcher.deinit();
+        try matcher.bytes(switch (san.kind) {
+            .exact => 1,
+            .prefix => 2,
+            .suffix => 3,
+            .contains => 7,
+        }, san.value);
+        try validation.bytes(2, matcher.data.items);
+    }
     var common = Builder{ .allocator = gpa };
     defer common.deinit();
     if (versions != null or ciphers.len != 0) {
