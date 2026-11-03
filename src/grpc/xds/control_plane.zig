@@ -5,7 +5,9 @@ const delta = @import("ads/delta.zig");
 const shared = @import("../channel/shared.zig");
 const streaming = @import("../stream/runtime.zig");
 const deadline_policy = @import("../../internal/deadline.zig");
-pub const Error = bootstrap.Error || shared.Error || delta.Error || error{ InvalidControlPlaneOptions, NoUsableXdsServer, InvalidBootstrapNode };
+const server_identity_file = @import("../../tls/server_identity_file.zig");
+const http2 = @import("../../http2/mod.zig");
+pub const Error = bootstrap.Error || shared.Error || delta.Error || error{ InvalidControlPlaneOptions, NoUsableXdsServer, InvalidBootstrapNode, InvalidBootstrapTls };
 
 pub const Options = struct {
     /// Overrides the bootstrap node. The bootstrap node is used otherwise.
@@ -23,16 +25,71 @@ pub const Options = struct {
 };
 
 fn usable(server: bootstrap.Server) bool {
-    return server.target.scheme == .http and server.hasInsecureCreds();
+    return (server.target.scheme == .http and server.hasInsecureCreds()) or
+        (server.target.scheme == .https and server.hasTlsCreds());
 }
 
 fn earlier(a: std.Io.Clock.Timestamp, b: std.Io.Clock.Timestamp) std.Io.Clock.Timestamp {
     return if (a.raw.nanoseconds <= b.raw.nanoseconds) a else b;
 }
 
-fn createChannel(gpa: std.mem.Allocator, io: std.Io, server: bootstrap.Server, options: shared.Options) Error!shared.SharedChannel {
-    if (!usable(server)) return error.UnsupportedBootstrapCreds;
-    return shared.SharedChannel.init(gpa, io, .{ .cleartext_host = .{ .host = server.target.host, .port = server.target.port } }, options);
+const TlsMaterial = struct {
+    allocator: std.mem.Allocator,
+    bundle: std.crypto.Certificate.Bundle = .empty,
+    bundle_loaded: bool = false,
+    lock: std.Io.RwLock = .init,
+    identity: ?server_identity_file.Identity = null,
+
+    fn load(gpa: std.mem.Allocator, io: std.Io, config: ?bootstrap.TlsConfig) Error!*TlsMaterial {
+        const self = try gpa.create(TlsMaterial);
+        self.* = .{ .allocator = gpa };
+        errdefer self.deinit();
+        const tls = config orelse return self;
+        if (tls.ca_certificate_file.len != 0) {
+            self.bundle.addCertsFromFilePath(gpa, io, std.Io.Timestamp.now(io, .real), std.Io.Dir.cwd(), tls.ca_certificate_file) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.InvalidBootstrapTls,
+            };
+            self.bundle_loaded = true;
+        }
+        if (tls.certificate_file.len != 0) {
+            self.identity = server_identity_file.load(gpa, io, std.Io.Dir.cwd(), tls.certificate_file, tls.private_key_file) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.InvalidBootstrapTls,
+            };
+        }
+        return self;
+    }
+    fn deinit(self: *TlsMaterial) void {
+        if (self.identity) |*identity| identity.deinit();
+        self.bundle.deinit(self.allocator);
+        self.allocator.destroy(self);
+    }
+    fn options(self: *TlsMaterial) http2.runtime.TlsConnectOptions {
+        var result: http2.runtime.TlsConnectOptions = .{};
+        if (self.bundle_loaded) result.ca_bundle = .{ .bundle = &self.bundle, .lock = &self.lock };
+        if (self.identity) |*identity| {
+            const value = identity.serverIdentity();
+            result.client_identity = .{
+                .certificate_chain = value.certificate_chain,
+                .signer = value.signer,
+                .certificate_type = value.certificate_type,
+            };
+        }
+        return result;
+    }
+};
+
+fn createChannel(gpa: std.mem.Allocator, io: std.Io, server: bootstrap.Server, options: shared.Options, material: *TlsMaterial) Error!shared.SharedChannel {
+    if (server.target.scheme == .http) {
+        if (!server.hasInsecureCreds()) return error.UnsupportedBootstrapCreds;
+        return shared.SharedChannel.init(gpa, io, .{ .cleartext_host = .{ .host = server.target.host, .port = server.target.port } }, options);
+    }
+    if (server.target.scheme == .https) {
+        if (!server.hasTlsCreds()) return error.UnsupportedBootstrapCreds;
+        return shared.SharedChannel.init(gpa, io, .{ .tls_host = .{ .host = server.target.host, .port = server.target.port, .tls = material.options() } }, options);
+    }
+    return error.UnsupportedBootstrapCreds;
 }
 
 pub const ControlPlane = struct {
@@ -42,6 +99,7 @@ pub const ControlPlane = struct {
     options: Options,
     servers: []bootstrap.Server,
     server_index: usize,
+    material: *TlsMaterial,
     channel: shared.SharedChannel,
     client: delta.Client,
 
@@ -55,19 +113,22 @@ pub const ControlPlane = struct {
         var index: usize = 0;
         while (index < servers.len) : (index += 1) if (usable(servers[index])) break;
         if (index == servers.len) return error.NoUsableXdsServer;
-        var channel = try createChannel(gpa, io, servers[index], options.channel);
+        var material = try TlsMaterial.load(gpa, io, servers[index].tlsConfig());
+        errdefer material.deinit();
+        var channel = try createChannel(gpa, io, servers[index], options.channel, material);
         errdefer channel.deinit();
         var sender = channel.sender();
         defer sender.deinit();
         var client = try delta.Client.init(gpa, sender, .{ .node = node, .subscriptions = options.subscriptions, .limits = options.limits, .request = options.request });
         errdefer client.deinit();
         const self = try gpa.create(ControlPlane);
-        self.* = .{ .allocator = gpa, .io = io, .bootstrap = configuration, .options = options, .servers = servers, .server_index = index, .channel = channel, .client = client };
+        self.* = .{ .allocator = gpa, .io = io, .bootstrap = configuration, .options = options, .servers = servers, .server_index = index, .material = material, .channel = channel, .client = client };
         return self;
     }
     pub fn deinit(self: *ControlPlane) void {
         self.client.deinit();
         self.channel.deinit();
+        self.material.deinit();
         self.allocator.destroy(self);
     }
     pub fn discovery(self: *ControlPlane) *delta.Client {
@@ -95,7 +156,9 @@ pub const ControlPlane = struct {
             };
         }
         const selected = next orelse return error.NoUsableXdsServer;
-        var channel = try createChannel(self.allocator, self.io, servers[selected], self.options.channel);
+        var material = try TlsMaterial.load(self.allocator, self.io, servers[selected].tlsConfig());
+        errdefer material.deinit();
+        var channel = try createChannel(self.allocator, self.io, servers[selected], self.options.channel, material);
         errdefer channel.deinit();
         var sender = channel.sender();
         var sender_owned = true;
@@ -103,7 +166,9 @@ pub const ControlPlane = struct {
         try self.client.rebind(sender, self.options.request);
         sender_owned = false;
         self.channel.deinit();
+        self.material.deinit();
         self.channel = channel;
+        self.material = material;
         self.server_index = selected;
     }
     /// Connect, trying the remaining usable bootstrap servers on failure.

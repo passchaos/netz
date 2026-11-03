@@ -24,7 +24,12 @@ pub const Limits = struct {
 
 pub const Scheme = enum { http, https };
 pub const Target = struct { scheme: Scheme, host: []const u8, port: u16 };
-pub const Creds = struct { type: []const u8, config_json: ?[]const u8 = null };
+pub const TlsConfig = struct {
+    ca_certificate_file: []const u8 = "",
+    certificate_file: []const u8 = "",
+    private_key_file: []const u8 = "",
+};
+pub const Creds = struct { type: []const u8, config_json: ?[]const u8 = null, tls: ?TlsConfig = null };
 
 pub const Server = struct {
     uri: []const u8,
@@ -43,6 +48,10 @@ pub const Server = struct {
     pub fn hasTlsCreds(self: Server) bool {
         for (self.channel_creds) |creds| if (std.mem.eql(u8, creds.type, "tls")) return true;
         return false;
+    }
+    pub fn tlsConfig(self: Server) ?TlsConfig {
+        for (self.channel_creds) |creds| if (creds.tls) |config| return config;
+        return null;
     }
 };
 
@@ -165,6 +174,19 @@ fn parseTarget(uri: []const u8, limits: Limits) Error!Target {
     return .{ .scheme = scheme, .host = host, .port = port };
 }
 
+fn parseTlsConfig(object: std.json.ObjectMap, limits: Limits) Error!TlsConfig {
+    inline for (.{ "root_certificate_provider", "identity_certificate_provider" }) |field| {
+        if (object.get(field) != null) return error.UnsupportedBootstrapFeature;
+    }
+    const config: TlsConfig = .{
+        .ca_certificate_file = try optionalText(object, "ca_certificate_file", limits),
+        .certificate_file = try optionalText(object, "certificate_file", limits),
+        .private_key_file = try optionalText(object, "private_key_file", limits),
+    };
+    if ((config.certificate_file.len == 0) != (config.private_key_file.len == 0)) return error.InvalidBootstrap;
+    return config;
+}
+
 fn parseCreds(arena: std.mem.Allocator, value: std.json.Value, limits: Limits) Error![]Creds {
     const items = (try jsonArray(value)).items;
     if (items.len == 0 or items.len > limits.max_creds) return error.InvalidBootstrap;
@@ -177,7 +199,8 @@ fn parseCreds(arena: std.mem.Allocator, value: std.json.Value, limits: Limits) E
         const config = object.get("config");
         if (config) |raw| if (raw != .object) return error.InvalidBootstrap;
         const config_json: ?[]const u8 = if (config) |raw| try std.json.Stringify.valueAlloc(arena, raw, .{}) else null;
-        creds.* = .{ .type = type_name, .config_json = config_json };
+        const tls: ?TlsConfig = if (std.mem.eql(u8, type_name, "tls")) if (config) |raw| try parseTlsConfig(raw.object, limits) else TlsConfig{} else null;
+        creds.* = .{ .type = type_name, .config_json = config_json, .tls = tls };
     }
     return result;
 }

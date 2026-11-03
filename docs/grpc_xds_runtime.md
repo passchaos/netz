@@ -101,9 +101,9 @@ and `initial_resource_versions` replay, and this controller has matching
 publication. `nextDeltaExpiry` and `expireDeltaWithDeadline` enforce
 `Resource.ttl` for all four types, refresh timers from payload-free heartbeats
 and forget expired accepted versions. The
-[bootstrap parser and insecure control-plane failover](grpc_bootstrap.md)
+[bootstrap parser and control-plane failover](grpc_bootstrap.md)
 select `http://` servers, retry refused servers and rebind the same delta client
-with `initial_resource_versions` replay. TLS bootstrap credentials,
+with `initial_resource_versions` replay. Certificate providers and certificate rotation,
 authority-specific control planes, aggregate/DNS CDS and full security, LRS,
 non-router filters and capture/rewriting remain open. Unsupported resource
 features continue to fail typed validation rather than claim deployment

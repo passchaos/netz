@@ -3,6 +3,7 @@ const grpc = @import("../mod.zig");
 const bootstrap = @import("bootstrap.zig");
 const control = @import("control_plane.zig");
 const delta = @import("ads/delta.zig");
+const tls_testing = @import("../../tls/testing.zig");
 const gpa = std.testing.allocator;
 const cds = "type.googleapis.com/envoy.config.cluster.v3.Cluster";
 
@@ -44,15 +45,22 @@ fn expectReplay(duplex: anytype, node: []const u8) !void {
     try std.testing.expect(value.value.nack == null);
 }
 
+fn runPeer(listener: anytype, node: []const u8, terminal: grpc.Status) !void {
+    var connection = try listener.acceptWithTimeout(.fromSeconds(3));
+    defer connection.deinit();
+    var duplex = try connection.acceptDuplexWithTimeout(.fromSeconds(3));
+    defer duplex.deinit();
+    try expectReplay(&duplex, node);
+    try duplex.startResponse(.{});
+    if (terminal == .ok) try duplex.finishOk() else try duplex.finishWithOptions(.{ .status = terminal, .status_message = "restart" });
+}
+
 const Peer = struct {
     fn run(listener: *grpc.runtime.Server, node: []const u8, terminal: grpc.Status) !void {
-        var connection = try listener.acceptWithTimeout(.fromSeconds(3));
-        defer connection.deinit();
-        var duplex = try connection.acceptDuplexWithTimeout(.fromSeconds(3));
-        defer duplex.deinit();
-        try expectReplay(&duplex, node);
-        try duplex.startResponse(.{});
-        if (terminal == .ok) try duplex.finishOk() else try duplex.finishWithOptions(.{ .status = terminal, .status_message = "restart" });
+        return runPeer(listener, node, terminal);
+    }
+    fn runTls(listener: *grpc.runtime.TlsServer, node: []const u8, terminal: grpc.Status) !void {
+        return runPeer(listener, node, terminal);
     }
 };
 
@@ -133,11 +141,47 @@ test "gRPC xDS control plane selects authority servers" {
     try std.testing.expectError(error.InvalidControlPlaneOptions, control.ControlPlane.init(gpa, std.testing.io, configuration, .{ .authority = "missing" }));
 }
 
+test "gRPC xDS control plane connects over bootstrap TLS" {
+    var threaded = std.Io.Threaded.init(gpa, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(&certificate_der, tls_testing.certificate_base64);
+    const key_pair = try tls_testing.serverKeyPair();
+    var server = try grpc.runtime.TlsServer.listen(gpa, io, .{ .ip4 = .loopback(0) }, .{
+        .transport = .{
+            .identity = .{ .certificate_chain = &.{&certificate_der}, .signer = .{ .ecdsa_p256_sha256 = .{ .key_pair = key_pair } } },
+        },
+    });
+    defer server.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const pem = try std.fmt.allocPrint(gpa, "-----BEGIN CERTIFICATE-----\n{s}\n-----END CERTIFICATE-----\n", .{tls_testing.certificate_base64});
+    defer gpa.free(pem);
+    try tmp.dir.writeFile(io, .{ .sub_path = "ca.pem", .data = pem });
+    const ca_path = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/ca.pem", .{tmp.sub_path[0..]});
+    defer gpa.free(ca_path);
+    const json = try std.fmt.allocPrint(gpa, "{{\"xds_servers\":[{{\"server_uri\":\"https://localhost:{d}\",\"channel_creds\":[{{\"type\":\"tls\",\"config\":{{\"ca_certificate_file\":\"{s}\"}}}}]}}],\"node\":{{\"id\":\"node-1\"}}}}", .{ server.address().getPort(), ca_path });
+    defer gpa.free(json);
+    const configuration = try bootstrap.parse(gpa, json, .{});
+    defer configuration.deinit();
+    const plane = try control.ControlPlane.init(gpa, io, configuration, .{});
+    defer plane.deinit();
+    try seed(plane.discovery());
+    var task = io.async(Peer.runTls, .{ &server, "node-1", grpc.Status.ok });
+    defer _ = task.cancel(io) catch {};
+    try plane.connectWithDeadline(deadline(io));
+    var event = try plane.discovery().nextWithDeadline(deadline(io));
+    defer event.deinit();
+    try std.testing.expectEqual(grpc.Status.ok, event.terminal.status);
+    try task.await(io);
+}
+
 test "gRPC xDS control plane requires a usable server and node" {
-    const tls_only =
-        \\{"xds_servers":[{"server_uri":"https://host","channel_creds":[{"type":"tls"}]}],"node":{"id":"node"}}
+    const unusable =
+        \\{"xds_servers":[{"server_uri":"https://host","channel_creds":[{"type":"insecure"}]}],"node":{"id":"node"}}
     ;
-    const configuration = try bootstrap.parse(gpa, tls_only, .{});
+    const configuration = try bootstrap.parse(gpa, unusable, .{});
     defer configuration.deinit();
     try std.testing.expectError(error.NoUsableXdsServer, control.ControlPlane.init(gpa, std.testing.io, configuration, .{}));
 

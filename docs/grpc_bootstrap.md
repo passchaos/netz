@@ -2,8 +2,8 @@
 
 `grpc.xds.bootstrap` parses the gRPC xDS bootstrap JSON into bounded, owned
 configuration. `grpc.xds.control_plane.ControlPlane` turns an insecure
-`http://` bootstrap server into a SharedChannel and delta ADS client, and can
-move the same logical discovery session to the next server.
+`http://` or TLS `https://` bootstrap server into a SharedChannel and delta ADS
+client, and can move the same logical discovery session to the next server.
 
 ```zig
 const configuration = try netz.grpc.xds.bootstrap.parse(allocator, json, .{});
@@ -30,6 +30,7 @@ try plane.failoverWithDeadline(deadline);
 | `xds_servers` | Required, non-empty array of server objects |
 | `server_uri` | Required `http://` or `https://` authority; default ports 80/443; IPv6 brackets accepted |
 | `channel_creds` | Required array of `{type, config}`; at least one known type (`insecure`, `tls`, `google_default`, `xds`) |
+| `tls` config | `ca_certificate_file`, `certificate_file`, `private_key_file`; certificate/key must be paired; certificate providers are rejected |
 | `server_features` | Optional string array; the four grpc-core feature names set booleans, unknown entries are retained but inert |
 | `node` | Optional `{id, cluster, locality, metadata}`; `id` is required when present |
 | `authorities` | Optional map of authority name to `{xds_servers, client_listener_resource_name_template, fallback_on_reachability_only}` |
@@ -50,14 +51,17 @@ can be passed directly to `delta.Client`.
 
 ## Control plane
 
-`ControlPlane` currently supports insecure `http://` servers. `https://` or
-`tls`-only configurations parse but `ControlPlane.init` returns
-`NoUsableXdsServer`; certificate-provider and TLS credential support remain
-future work. `Options.authority` selects an authority's `xds_servers` (falling
-back to the top-level list when the authority has none); an unknown authority
-fails with `InvalidControlPlaneOptions`. The bootstrap node is used unless
-`Options.node` overrides it; a missing node id fails with
-`InvalidBootstrapNode`.
+`ControlPlane` supports `http://` and TLS `https://` servers and TLS `https://` servers.
+TLS uses `ca_certificate_file` as the server trust bundle when present and the
+platform roots otherwise. `certificate_file` plus `private_key_file` supply an
+optional client identity for mTLS. The files are loaded once at control-plane
+creation or failover; `refresh_interval` and certificate-provider rotation are
+not implemented, and a non-empty `root_certificate_provider` or
+`identity_certificate_provider` is rejected during bootstrap parsing.
+`Options.authority` selects an authority's `xds_servers` (falling back to the
+top-level list when the authority has none); an unknown authority fails with
+`InvalidControlPlaneOptions`. The bootstrap node is used unless `Options.node`
+overrides it; a missing node id fails with `InvalidBootstrapNode`.
 
 `connectWithDeadline` tries the current server and then the remaining usable
 servers. Each attempt gets `Options.server_open_timeout` (default 250 ms) or
@@ -81,12 +85,13 @@ server features, text, and metadata bytes/entries/depth. Native tests cover the
 complete parsed shape, URI defaults and IPv6, metadata Struct encoding through
 `ads.codec.encodeNode`, invalid/unsupported shapes, duplicate fields, bounds,
 allocation failure sweeps, refused-server failover, two-server failover with
-`initial_resource_versions` replay, and unusable TLS-only or node-less
-configurations. See `docs/evidence/grpc_bootstrap/2026-11-03.json`.
+`initial_resource_versions` replay, a real TLS handshake using a bootstrap CA
+file, and unusable server or node-less configurations. See
+`docs/evidence/grpc_bootstrap/2026-11-03.json`.
 
 ## Remaining integration
 
-TLS bootstrap channel credentials, certificate providers, a background retry
+Certificate providers and certificate-file rotation, a background retry
 schedule and DNS/aggregate control-plane targets remain follow-up work. The
 parser retains authority server lists and per-server feature flags, and
 `Options.authority` already selects those servers.

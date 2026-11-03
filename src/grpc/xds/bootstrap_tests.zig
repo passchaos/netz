@@ -37,6 +37,7 @@ test "gRPC xDS bootstrap parses servers node authorities and metadata" {
     try std.testing.expect(parsed.servers[1].fail_on_data_errors);
     try std.testing.expect(!parsed.servers[1].resource_timer_is_transient_error);
     try std.testing.expectEqualStrings("{\"ca_certificate_file\":\"/ca.pem\"}", parsed.servers[1].channel_creds[0].config_json.?);
+    try std.testing.expectEqualStrings("/ca.pem", parsed.servers[1].tlsConfig().?.ca_certificate_file);
     const first = parsed.firstInsecureServer().?;
     try std.testing.expectEqualStrings("http://127.0.0.1:8080", first.uri);
 
@@ -88,6 +89,8 @@ test "gRPC xDS bootstrap rejects invalid and unsupported shapes" {
         .{ .json = "{\"xds_servers\":[{\"server_uri\":\"http://host\",\"channel_creds\":[]}]}", .want = error.InvalidBootstrap },
         .{ .json = "{\"xds_servers\":[{\"server_uri\":\"http://host\",\"channel_creds\":[{\"type\":\"unknown\"}]}]}", .want = error.UnsupportedBootstrapCreds },
         .{ .json = "{\"xds_servers\":[{\"server_uri\":\"http://host\",\"channel_creds\":[{\"type\":\"insecure\",\"config\":[]}]}]}", .want = error.InvalidBootstrap },
+        .{ .json = "{\"xds_servers\":[{\"server_uri\":\"https://host\",\"channel_creds\":[{\"type\":\"tls\",\"config\":{\"certificate_file\":\"/c.pem\"}}]}]}", .want = error.InvalidBootstrap },
+        .{ .json = "{\"xds_servers\":[{\"server_uri\":\"https://host\",\"channel_creds\":[{\"type\":\"tls\",\"config\":{\"root_certificate_provider\":{\"instance_name\":\"p\"}}}]}]}", .want = error.UnsupportedBootstrapFeature },
         .{ .json = "{\"xds_servers\":[{\"server_uri\":\"http://host\",\"channel_creds\":[{\"type\":\"insecure\"}]}],\"node\":{}}", .want = error.InvalidBootstrapNode },
         .{ .json = "{\"xds_servers\":[{\"server_uri\":\"http://host\",\"channel_creds\":[{\"type\":\"insecure\"}]}],\"node\":{\"id\":\"n\",\"metadata\":[]}}", .want = error.InvalidBootstrap },
         .{ .json = "{\"xds_servers\":[{\"server_uri\":\"http://host\",\"channel_creds\":[{\"type\":\"insecure\"}]}],\"authorities\":{\"a\":{\"client_listener_resource_name_template\":\"wrong\"}}}", .want = error.InvalidBootstrap },

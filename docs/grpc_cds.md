@@ -85,8 +85,8 @@ and upstream_config are explicitly rejected. LOGICAL_DNS and aggregate/custom
 cluster discovery are also unsupported. This slice handles an explicitly
 selected EDS-backed cluster. Typed delta CDS/EDS publication is available
 through the automatic runtime; delta CDS/EDS TTL expiry is covered. Bootstrap
-parsing and insecure control-plane failover are available. LDS/RDS routing,
-TLS bootstrap credentials, authority-specific control planes, LRS and full
+parsing and control-plane failover are available. LDS/RDS routing,
+certificate providers and certificate rotation, authority-specific control planes, LRS and full
 security integration remain open.
 
 `zig build interop-grpc-cds --summary all` compares valid fixture policies and

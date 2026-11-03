@@ -100,7 +100,7 @@ expired decisions. Evidence is in
 [Automatic typed discovery](grpc_xds_runtime.md) now derives cluster/service
 subscriptions and publishes CDS/EDS children from these listener/RDS snapshots.
 Typed delta listener/RDS publication and TTL expiry are available through the
-same runtime. Bootstrap parsing and insecure control-plane failover are
-available; TLS bootstrap credentials, authority-specific control planes, LRS,
+same runtime. Bootstrap parsing and control-plane failover are
+available; certificate providers and certificate rotation, authority-specific control planes, LRS,
 non-router HTTP filters, server listener/filter-chain interpretation and full
 security/rewriting configuration remain open.
