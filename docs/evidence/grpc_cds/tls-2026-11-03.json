@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "date": "2026-11-03",
-  "head": "f9338f3b",
+  "head": "d72eb71e",
   "gate": "Inline CDS UpstreamTlsContext decoding with TLS version policy and TLS endpoint publication",
   "commands": {
     "xds": "zig build test-lib -Dtest-filter=xds --summary all",
@@ -29,7 +29,7 @@
     }
   },
   "source_sha256": {
-    "src/grpc/xds/tls_material.zig": "50a8c3124a6a347e5ed4e2bcce60ebc48fc32bc1b873aaef2d09c2521f7ff0bc",
+    "src/grpc/xds/tls_material.zig": "3370f61238d033d01724fd11d1994422c43bdd0ed21c4ec6769b014341476323",
     "src/grpc/xds/cds/decode.zig": "53898eeae0754ea9aa6d8b20929469b5b3601f9116d810d62ea87dfe4f10d321",
     "src/grpc/xds/cds/testing.zig": "3d663a15e77078a43c537f15c2c89efdcd4462994e19c62bd9fd01060923f23c",
     "src/grpc/xds/cds/tests.zig": "50cb4047fde81fe18f38e3877dd3211992f015116f139a5b4c34353cd209ffb4",
@@ -43,5 +43,5 @@
     "src/grpc/xds/runtime/tests.zig": "014459522155d18758366bea97118db7495b13a77cb9500edae24db3bc2401cc",
     "src/grpc/xds/runtime/errors.zig": "5b05c39d27dfb23234c3f1cb2d4011fdb40295d49f89e463d48bde8cc59ad9d7"
   },
-  "notes": "CDS transport_socket accepts one inline UpstreamTlsContext with optional SNI, inline trusted_ca, one inline client certificate/key and TLS 1.2/1.3 minimum/maximum version policy. EDS, STATIC and DNS endpoints use TLS targets; EDS/STATIC project through the existing priority/locality runtime, DNS builds tls_host endpoints. The end-to-end test performs a certificate-verified RPC through a STATIC cluster using the inline CA. SDS, providers, cipher-suite/curve lists, SAN matching and file/environment data sources are rejected."
+  "notes": "CDS transport_socket accepts one inline UpstreamTlsContext with optional SNI, inline trusted_ca, one inline client certificate/key and TLS 1.2/1.3 minimum/maximum version policy. The SNI is copied into owned material storage so a retained projection does not depend on the CDS resource arena. EDS, STATIC and DNS endpoints use TLS targets; EDS/STATIC project through the existing priority/locality runtime, DNS builds tls_host endpoints. The end-to-end test performs a certificate-verified RPC through a STATIC cluster using the inline CA. SDS, providers, cipher-suite/curve lists, SAN matching and file/environment data sources are rejected."
 }

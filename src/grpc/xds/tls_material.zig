@@ -34,8 +34,9 @@ pub const Material = struct {
             return if (config.certificate_chain.len == 0) error.MissingCertificate else error.MissingPrivateKey;
         }
         const self = try gpa.create(Material);
-        self.* = .{ .allocator = gpa, .server_name = config.server_name, .version_policy = config.version_policy };
+        self.* = .{ .allocator = gpa, .version_policy = config.version_policy };
         errdefer self.deinit();
+        self.server_name = try gpa.dupe(u8, config.server_name);
         if (config.trusted_ca.len != 0) {
             addCerts(gpa, io, &self.bundle, config.trusted_ca) catch return error.InvalidTlsMaterial;
             if (self.bundle.map.count() == 0) return error.InvalidTlsMaterial;
@@ -50,6 +51,7 @@ pub const Material = struct {
         return self;
     }
     pub fn deinit(self: *Material) void {
+        if (self.server_name.len != 0) self.allocator.free(self.server_name);
         if (self.identity) |*identity| identity.deinit();
         self.bundle.deinit(self.allocator);
         self.allocator.destroy(self);
