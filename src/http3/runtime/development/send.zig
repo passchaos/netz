@@ -161,6 +161,7 @@ pub fn responsePrefix(
     stream_id: u62,
     max_stream_frame_data: usize,
     offsets: *std.AutoHashMapUnmanaged(u62, u64),
+    fin: bool,
 ) Error!void {
     const slot = try offsets.getOrPut(endpoint.allocator, stream_id);
     const previous_offset = if (slot.found_existing) slot.value_ptr.* else 0;
@@ -176,7 +177,7 @@ pub fn responsePrefix(
         endpoint.allocator,
         scratch.encoded.items,
         max_stream_frame_data,
-        false,
+        fin,
     );
     try packetizer.sendEndpoint(
         endpoint.allocator,

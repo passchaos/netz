@@ -2291,6 +2291,7 @@ pub const Server = struct {
             stream_id,
             self.limits.max_stream_frame_data,
             response_context.response_send_offsets,
+            false,
         ) catch |err| {
             peer.markSendFailed();
             return err;
@@ -2496,6 +2497,58 @@ pub const Server = struct {
         peer.commitResponseBody(stream_id, fin);
     }
 
+    /// Emit response trailers on an admitted streaming request and finish the
+    /// response. The next stream offset continues after all DATA contributions.
+    pub fn finishResponseTrailers(
+        self: *Server,
+        to: net.IpAddress,
+        stream_id: u62,
+        trailers: []const http3.Qpack.HeaderField,
+    ) Error!void {
+        self.peer_state_mutex.lockUncancelable(
+            self.quic_server.endpoint.io,
+        );
+        defer self.peer_state_mutex.unlock(
+            self.quic_server.endpoint.io,
+        );
+        const peer = self.streaming_peers.find(to) orelse
+            return error.UnexpectedStream;
+        const bodies = try peer.prepareResponseBody(stream_id);
+        const body_entry = try bodies.prepareTrailers(stream_id);
+        const response_context = peer.responseContext();
+        try response_context.response_send_offsets.put(
+            self.quic_server.endpoint.allocator,
+            stream_id,
+            body_entry.send.next_offset,
+        );
+        self.response_send_mutex.lockUncancelable(
+            self.quic_server.endpoint.io,
+        );
+        defer self.response_send_mutex.unlock(self.quic_server.endpoint.io);
+        response_context.scratch.encoded.clearRetainingCapacity();
+        try http3.writeTrailersDynamic(
+            &response_context.scratch.encoded,
+            self.quic_server.endpoint.allocator,
+            trailers,
+            development_settings,
+            stream_id,
+            response_context.qpack_encode,
+        );
+        sendRuntimeResponsePrefix(
+            &self.quic_server.endpoint,
+            to,
+            response_context.scratch,
+            stream_id,
+            self.limits.max_stream_frame_data,
+            response_context.response_send_offsets,
+            true,
+        ) catch |err| {
+            peer.markSendFailed();
+            return err;
+        };
+        peer.commitResponseTrailers(stream_id);
+    }
+
     /// Abort both directions of a development request stream. If no response
     /// has started, the local final size is zero; otherwise the retained send
     /// state supplies the exact offset required by RESET_STREAM. Cleanup is
@@ -2638,13 +2691,7 @@ const DevelopmentConcurrentAdapter = struct {
         stream_id: u62,
         trailers: []const http3.Qpack.HeaderField,
     ) Error!void {
-        _ = session;
-        _ = from;
-        _ = stream_id;
-        _ = trailers;
-        // The development runtime has no streaming-trailer writer yet; use
-        // the protected session for trailer-producing handlers.
-        return error.UnexpectedFrame;
+        return session.finishResponseTrailers(from, stream_id, trailers);
     }
     pub fn cancel(
         session: *Server,

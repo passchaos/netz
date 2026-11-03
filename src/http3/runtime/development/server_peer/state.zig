@@ -189,6 +189,12 @@ pub const Set = struct {
             self.finishSendIfExchangeComplete(stream_id);
         }
 
+        /// Trailers always end the response; release the body state as well.
+        pub fn commitResponseTrailers(self: *Peer, stream_id: u62) void {
+            self.commitResponseBody(stream_id, true);
+            _ = self.outbound_bodies.finish(stream_id);
+        }
+
         pub fn cancelRequest(self: *Peer, stream_id: u62) Error!Cancellation {
             const body = self.outbound_bodies.find(stream_id);
             if (body == null and !self.lifecycle.contains(stream_id) and

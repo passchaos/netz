@@ -214,3 +214,93 @@ fn expectStreamedResponse(
     try std.testing.expect(saw_head);
     try std.testing.expectEqualStrings(expected_body, body[0..body_len]);
 }
+
+test "HTTP/3 continuous concurrent serving emits response trailers" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try runtime.Server.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        test_limits,
+    );
+    defer server.deinit();
+
+    const Context = struct { io: std.Io };
+    var context = Context{ .io = io };
+    const Handler = struct {
+        fn run(ctx: *Context, stream: *runtime.Server.ConcurrentStream) anyerror!void {
+            var body: [32]u8 = undefined;
+            var length: usize = 0;
+            while (try stream.nextBody(body[length..], futureDeadline(ctx.io))) |count| {
+                length += count;
+            }
+            try std.testing.expectEqualStrings("body", body[0..length]);
+            try stream.startResponse(.{ .status = 200 }, "body".len);
+            try stream.writeData("body", false);
+            try stream.finishWithTrailers(&.{.{ .name = "x-trailer", .value = "done" }});
+        }
+    };
+
+    const ServerTask = struct {
+        server: *runtime.Server,
+        context: *Context,
+        shutdown: *std.Io.Event,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            const summary = try self.server.serveConcurrentStreams(
+                Context,
+                self.context,
+                Handler.run,
+                .{ .max_streams = 1, .shutdown = self.shutdown },
+            );
+            try std.testing.expectEqual(@as(usize, 1), summary.accepted);
+            try std.testing.expectEqual(@as(usize, 1), summary.completed);
+        }
+    };
+
+    var shutdown: std.Io.Event = .unset;
+    var server_task = ServerTask{ .server = &server, .context = &context, .shutdown = &shutdown };
+    const thread = try std.Thread.spawn(.{}, ServerTask.run, .{&server_task});
+    var joined = false;
+    defer if (!joined) {
+        shutdown.set(io);
+        thread.join();
+    };
+
+    var client = try runtime.Client.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        test_limits,
+    );
+    defer client.deinit();
+    var response = try client.requestWithTimeout(.{
+        .method = "POST",
+        .path = "/trailers",
+        .authority = "localhost",
+        .body = "body",
+    }, .fromSeconds(3));
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 200), response.response.status);
+    try std.testing.expectEqualStrings("body", response.response.body);
+    try std.testing.expectEqual(@as(usize, 1), response.response.trailers.len);
+    try std.testing.expectEqualStrings("x-trailer", response.response.trailers[0].name);
+    try std.testing.expectEqualStrings("done", response.response.trailers[0].value);
+
+    shutdown.set(io);
+    thread.join();
+    joined = true;
+    if (server_task.err) |err| return err;
+}
