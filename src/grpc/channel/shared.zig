@@ -135,6 +135,10 @@ pub const SharedChannel = struct {
     pub fn lrsStatsDeltaSnapshot(self: SharedChannel, allocator: std.mem.Allocator) std.mem.Allocator.Error!LrsStatsSnapshot {
         return self.state.lrs_stats.snapshotDelta(allocator, self.state.io);
     }
+    /// Configure which ORCA metrics are propagated into LRS reports.
+    pub fn setLrsPropagation(self: SharedChannel, cluster: []const u8, propagation: @import("shared/lrs_stats.zig").Propagation) void {
+        self.state.lrs_stats.setPropagation(self.state.io, cluster, propagation);
+    }
     pub fn clusterCircuitStats(self: SharedChannel, cluster: ?[]const u8) Error!channel.circuit_breaker.Stats {
         self.state.lock();
         defer self.state.unlock();

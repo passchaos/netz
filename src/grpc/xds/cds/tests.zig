@@ -222,3 +222,36 @@ test "gRPC CDS rejects unsupported discovery security invalid identities and rin
     defer arena.deinit();
     try std.testing.expectError(error.InvalidCdsResource, policy.legacy(arena.allocator(), 2, "\x08\x00\x0a\x00"));
 }
+
+test "gRPC CDS decodes LRS ORCA propagation selectors" {
+    var extra = fixture.Builder{ .allocator = gpa };
+    defer extra.deinit();
+    try extra.bytes(57, "cpu_utilization");
+    try extra.bytes(57, "mem_utilization");
+    try extra.bytes(57, "application_utilization");
+    try extra.bytes(57, "named_metrics.*");
+    try extra.bytes(57, "named_metrics.foo");
+    try extra.bytes(57, "unknown_selector");
+    const encoded = try fixture.cluster(gpa, "backend", "", extra.data.items);
+    defer gpa.free(encoded);
+    var decoded = try resource.decode(gpa, encoded, .{});
+    defer decoded.deinit();
+    const propagation = decoded.value.lrs_propagation;
+    try std.testing.expect(propagation.cpu_utilization);
+    try std.testing.expect(propagation.memory_utilization);
+    try std.testing.expect(propagation.application_utilization);
+    try std.testing.expect(propagation.named_metrics_all);
+    try std.testing.expectEqual(@as(usize, 1), propagation.named_metrics.len);
+    try std.testing.expectEqualStrings("foo", propagation.named_metrics[0]);
+
+    const defaults = try fixture.cluster(gpa, "plain", "", "");
+    defer gpa.free(defaults);
+    var plain = try resource.decode(gpa, defaults, .{});
+    defer plain.deinit();
+    const none = plain.value.lrs_propagation;
+    try std.testing.expect(!none.cpu_utilization);
+    try std.testing.expect(!none.memory_utilization);
+    try std.testing.expect(!none.application_utilization);
+    try std.testing.expect(!none.named_metrics_all);
+    try std.testing.expectEqual(@as(usize, 0), none.named_metrics.len);
+}

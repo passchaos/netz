@@ -1,8 +1,8 @@
 {
   "schema": 1,
   "date": "2026-11-03",
-  "head": "5b5fe1b5",
-  "gate": "Load Reporting Service envelopes, duplex reporting, interval-delta counters with actual elapsed intervals, zero-report skipping, EDS service names, send_all_clusters feature gating, ORCA utilization and named metrics, reporter, endpoint granularity, foreground scheduler, same-server reconnect, backoff and control-plane failover composition",
+  "head": "668f1732",
+  "gate": "Load Reporting Service envelopes, duplex reporting, interval-delta counters with actual elapsed intervals, zero-report skipping, EDS service names, send_all_clusters feature gating, ORCA utilization and named metrics with opt-in CDS lrs_report_endpoint_metrics propagation, reporter, endpoint granularity, foreground scheduler, same-server reconnect, backoff and control-plane failover composition",
   "commands": {
     "lrs": "zig build test-lib -Dtest-filter=LRS --summary all",
     "xds": "zig build test-lib -Dtest-filter=xds --summary all",
@@ -13,8 +13,8 @@
   },
   "result": {
     "lrs": {
-      "passed": 185,
-      "total": 185,
+      "passed": 187,
+      "total": 187,
       "failed": 0,
       "exit_code": 0
     },
@@ -59,9 +59,12 @@
     "src/grpc/xds/lrs/transport_tests.zig": "af4f6ee7e4f1f61cf224d171763f9118a645dbfad9c7fb04d5d6af9f0faf9aae",
     "src/grpc/xds/lrs/control_plane_tests.zig": "46b2d685422cca5fc649fc6b8961007eda93911a402477204cd6d61dd59c857c",
     "src/grpc/xds/control_plane.zig": "2332a150bb4673e764cb74c541ed87e76c925467f6eef5934c983e3e493a856a",
-    "src/grpc/channel/shared/lrs_stats.zig": "55f2b2fb5d5fc477af04e60bd3873a1cbfbe66f493ffc5e80c6007ab58943aff",
-    "src/grpc/channel/shared/lrs_stats_tests.zig": "0351dbc81f4c3882dea9563f3ffa47143a9365c17a109c2a27edb108ebf1fe71",
-    "src/grpc/channel/shared.zig": "055995984e25bec3c6de178fe061025f46740c4f997d7f58361bc13cf778da86",
+    "src/grpc/channel/shared/lrs_stats.zig": "fe1496d4e5d9f179b6b4a102ad62b5ce4c0c3013858c23ed1d7c9b74c12c776a",
+    "src/grpc/channel/shared/lrs_stats_tests.zig": "7ec33c65e8bafbe7877d69b99d6fd66f15862159dc123802e491868484c7917a",
+    "src/grpc/channel/shared.zig": "a56dc2d696db523f306652ac3aeae1d27ba20988bc7084b7dbe796ca133bd509",
+    "src/grpc/xds/cds/decode.zig": "53004de155071eef8e69456c46b3bed72673f148b8dc89dd53dc0aa093c3fed9",
+    "src/grpc/xds/runtime/target.zig": "7671b17b062ee085107b14e4dd7a265e1a66a0856bde3c66e81969e16896b417",
+    "src/grpc/xds/runtime/controller.zig": "55b177a3da1c8ec859286bb94d916e557b0e64d87f345851af97458621658d39",
     "src/grpc/channel/cluster_impl.zig": "ebba2e5e15addad2ba3ceac7cf2f7c8b4276fb15d5542691e5db536b6b07b595",
     "src/grpc/channel/shared/state.zig": "1b840789c083288857d38c5837b5e1e8f45fe49df6fe23ce8121b24baabdb86f",
     "src/grpc/channel/shared/job.zig": "2b3fe4e3ae37d143c09eac9afd881b58491263758b4538924c150a8e02e1f58a",
@@ -73,5 +76,5 @@
     "tools/interop/grpc_lrs/peer.js": "9b107638c1b9ed8a4bce1f17a28917c60e54a795aa24d5f9af662c61bab9ac26",
     "tools/interop/grpc_lrs/run.py": "6916605190ae91b93dd2ef48f6ebfd37b410ecb670052d1d0d789fca89ec4f48"
   },
-  "notes": "Native tests cover envelopes, locality/dropped counters, endpoint address/port counters, malformed/duplicate/over-limit input, a real loopback report/reconnect stream, opt-in per-cluster unary and streaming counters with in-progress tracking, channel drop attribution with per-category counts, report conversion, EDS service-name propagation from the xDS cluster implementation config, send_all_clusters feature gating, ORCA utilization and named-metric accumulation/encoding, interval-delta snapshots (including an idle interval and an end-to-end two-interval report) with actual elapsed load_report_interval values, consecutive all-zero report skipping, reporter interval/filter/rebind behavior, endpoint granularity, the foreground scheduler interval/terminal loop, same-server reconnect, scheduler failover to a second control-plane server, and a real two-server ControlPlane failover composition. Official-schema interop evidence is docs/evidence/grpc_lrs/2026-11-03.json."
+  "notes": "Native tests cover envelopes, locality/dropped counters, endpoint address/port counters, malformed/duplicate/over-limit input, a real loopback report/reconnect stream, opt-in per-cluster unary and streaming counters with in-progress tracking, channel drop attribution with per-category counts, report conversion, EDS service-name propagation from the xDS cluster implementation config, send_all_clusters feature gating, ORCA utilization and named-metric accumulation/encoding, CDS field 57 lrs_report_endpoint_metrics parsing and opt-in propagation (including named-metric filtering and clearing), interval-delta snapshots (including an idle interval and an end-to-end two-interval report) with actual elapsed load_report_interval values, consecutive all-zero report skipping, reporter interval/filter/rebind behavior, endpoint granularity, the foreground scheduler interval/terminal loop, same-server reconnect, scheduler failover to a second control-plane server, and a real two-server ControlPlane failover composition. Official-schema interop evidence is docs/evidence/grpc_lrs/2026-11-03.json."
 }

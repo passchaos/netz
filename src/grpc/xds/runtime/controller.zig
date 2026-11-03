@@ -72,6 +72,18 @@ pub const Controller = struct {
         }
         if (storage > self.options.limits.max_storage_bytes) return error.XdsLimitExceeded;
         const revision = try target.publish(destination, projection.descriptor(), deadline);
+        // Clusters that leave the inventory must not keep a stale ORCA
+        // propagation selection; new/kept selections were applied above.
+        for (self.entries.items) |old_entry| {
+            var kept = false;
+            for (plan.entries.items) |new_entry| {
+                if (std.mem.eql(u8, old_entry.identity.name, new_entry.identity.name)) {
+                    kept = true;
+                    break;
+                }
+            }
+            if (!kept) destination.setLrsPropagation(old_entry.identity.name, .{});
+        }
         const old = self.entries;
         self.entries = plan.entries;
         plan.entries = old;

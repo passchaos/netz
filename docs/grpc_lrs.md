@@ -73,6 +73,23 @@ clusters that share an EDS service. Unary and streaming responses carrying an
 utilization per cluster; `LocalityStats` emits fields 12/13/14 when present,
 and named ORCA metrics are emitted as `load_metric_stats` field 5 with per-name
 sum and sample counts.
+
+ORCA propagation is opt-in per cluster, matching Envoy's
+`lrs_report_endpoint_metrics` contract. The xDS runtime reads CDS field 57
+(`lrs_report_endpoint_metrics`, repeated string) and applies it to the
+destination channel on publish:
+
+| CDS selector | Propagated metric |
+| --- | --- |
+| `cpu_utilization` | `LocalityStats` field 12 |
+| `mem_utilization` | `LocalityStats` field 13 |
+| `application_utilization` | `LocalityStats` field 14 |
+| `named_metrics.*` | all named metrics |
+| `named_metrics.<name>` | named metric `<name>` |
+
+Unknown selectors are ignored. A cluster with no selectors propagates nothing,
+so ORCA reports are decoded but not accumulated. Direct embedders can configure
+the same selection with `SharedChannel.setLrsPropagation(cluster, propagation)`.
 Counters use a dedicated mutex; disabled channels skip the lock entirely, so
 ordinary channels keep their existing hot path.
 

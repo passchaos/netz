@@ -6,6 +6,7 @@ const eds = @import("../eds.zig");
 const cds = @import("../cds.zig");
 const tls_material = @import("../tls_material.zig");
 const shared = @import("../../channel/shared.zig");
+const lrs_stats = @import("../../channel/shared/lrs_stats.zig");
 const Json = std.json.Value;
 fn object() Json {
     return .{ .object = .{} };
@@ -89,7 +90,15 @@ pub const Target = struct {
     snapshots: std.ArrayList(*eds.Snapshot) = .empty,
     tls_materials: std.ArrayList(*tls_material.Material) = .empty,
     endpoints: []const channel.Endpoint = &.{},
+    /// Per-cluster ORCA propagation selections derived from CDS field 57.
+    /// Entries are applied on publish; an empty selection clears any stale
+    /// propagation for a cluster that remains in the inventory.
+    propagations: []const PropagationEntry = &.{},
     json: []const u8 = "",
+    const PropagationEntry = struct {
+        cluster: []const u8,
+        propagation: lrs_stats.Propagation,
+    };
     pub fn create(gpa: std.mem.Allocator, io: std.Io, entries: []const entry.Entry, local_json: ?[]const u8) (std.mem.Allocator.Error || @import("../../service_config.zig").Error || tls_material.Error)!*Target {
         const self = try gpa.create(Target);
         self.* = .{ .allocator = gpa, .arena = .init(gpa) };
@@ -97,10 +106,23 @@ pub const Target = struct {
         const arena = self.arena.allocator();
         var children = object();
         var endpoints: std.ArrayList(channel.Endpoint) = .empty;
+        var propagations: std.ArrayList(PropagationEntry) = .empty;
         for (entries) |value| {
             var implementation = object();
             try field(arena, &implementation, "clusterName", string(value.identity.name));
             const cluster = if (value.cluster) |resource| resource.resource.value else null;
+            // Publish a selection for every retained identity so a cluster
+            // whose CDS resource disappeared also loses any stale propagation.
+            try propagations.append(arena, .{
+                .cluster = value.identity.name,
+                .propagation = if (cluster) |resource| .{
+                    .cpu_utilization = resource.lrs_propagation.cpu_utilization,
+                    .memory_utilization = resource.lrs_propagation.memory_utilization,
+                    .application_utilization = resource.lrs_propagation.application_utilization,
+                    .named_metrics_all = resource.lrs_propagation.named_metrics_all,
+                    .named_metrics = resource.lrs_propagation.named_metrics,
+                } else .{},
+            });
             try field(arena, &implementation, "edsServiceName", string(if (cluster) |resource| resource.edsName() else ""));
             try field(arena, &implementation, "maxConcurrentRequests", .{ .integer = if (cluster) |resource| resource.max_concurrent_requests else 1024 });
             try field(arena, &implementation, "discoveryPending", .{ .bool = value.pending() });
@@ -164,6 +186,7 @@ pub const Target = struct {
         try field(arena, &config, "loadBalancingConfig", try policy(arena, "xds_cluster_manager_experimental", manager));
         self.json = try std.json.Stringify.valueAlloc(arena, config, .{});
         self.endpoints = try endpoints.toOwnedSlice(arena);
+        self.propagations = try propagations.toOwnedSlice(arena);
         return self;
     }
     pub fn retain(self: *Target) void {
@@ -190,6 +213,8 @@ pub const Target = struct {
         return .{ .context = self, .retain_fn = retainContext, .release_fn = releaseContext };
     }
     pub fn publish(self: *Target, destination: shared.SharedChannel, selector: @import("../../channel/call_selector.zig").Selector, deadline: std.Io.Clock.Timestamp) shared.Error!u64 {
-        return destination.updateWithDeadline(.{ .target = .{ .resolved = .{ .endpoints = self.endpoints } }, .target_lifetime = self.lifetime(), .service_config = .{ .replace = self.json }, .call_selector = .{ .replace = selector } }, deadline);
+        const revision = try destination.updateWithDeadline(.{ .target = .{ .resolved = .{ .endpoints = self.endpoints } }, .target_lifetime = self.lifetime(), .service_config = .{ .replace = self.json }, .call_selector = .{ .replace = selector } }, deadline);
+        for (self.propagations) |value| destination.setLrsPropagation(value.cluster, value.propagation);
+        return revision;
     }
 };

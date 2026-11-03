@@ -17,6 +17,16 @@ pub const HostEndpoint = struct {
     zone: []const u8 = "",
     sub_zone: []const u8 = "",
 };
+/// CDS `lrs_report_endpoint_metrics` entries (field 57) that select which
+/// ORCA endpoint metrics are propagated into LRS locality reports. Envoy
+/// propagates nothing unless a cluster opts in, so the defaults are all false.
+pub const LrsPropagation = struct {
+    cpu_utilization: bool = false,
+    memory_utilization: bool = false,
+    application_utilization: bool = false,
+    named_metrics_all: bool = false,
+    named_metrics: []const []const u8 = &.{},
+};
 pub const Cluster = struct {
     name: []const u8,
     eds_service_name: []const u8,
@@ -27,6 +37,7 @@ pub const Cluster = struct {
     host_endpoints: []const HostEndpoint = &.{},
     tls: ?tls_material.Config = null,
     max_concurrent_requests: u32 = 1024,
+    lrs_propagation: LrsPropagation = .{},
     policy: policy.Result,
     pub fn isEds(self: Cluster) bool {
         return self.discovery == .eds;
@@ -407,11 +418,33 @@ pub fn decode(gpa: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!O
     var ring_config: ?[]const u8 = null;
     var typed_policy: ?[]const u8 = null;
     var breaker: ?[]const u8 = null;
+    var lrs_cpu: bool = false;
+    var lrs_memory: bool = false;
+    var lrs_application: bool = false;
+    var lrs_named_all: bool = false;
+    var lrs_named: std.ArrayList([]const u8) = .empty;
     while (try reader.next()) |field| {
         if (field.number == 1 and field.wire_type == 2) name = try pb.text(&reader, limits.max_text_bytes) else if (field.number == 2 and field.wire_type == 0) kind = try pb.u32Value(&reader) else if (field.number == 38 and field.wire_type == 2) {
             _ = try reader.bytesValue();
             kind = std.math.maxInt(u32);
-        } else if (field.number == 3 and field.wire_type == 2) config = try reader.bytesValue() else if (field.number == 24 and field.wire_type == 2) transport = try reader.bytesValue() else if (field.number == 33 and field.wire_type == 2) assignment = try reader.bytesValue() else if (field.number == 6 and field.wire_type == 0) lb = try pb.u32Value(&reader) else if (field.number == 23 and field.wire_type == 2) ring_config = try reader.bytesValue() else if (field.number == 41 and field.wire_type == 2) typed_policy = try reader.bytesValue() else if (field.number == 10 and field.wire_type == 2) breaker = try reader.bytesValue() else if ((field.number == 43 or field.number == 19 or field.number == 42 or field.number == 48) and field.wire_type == 2) return error.UnsupportedCdsFeature else try reader.skip(field);
+        } else if (field.number == 3 and field.wire_type == 2) config = try reader.bytesValue() else if (field.number == 24 and field.wire_type == 2) transport = try reader.bytesValue() else if (field.number == 33 and field.wire_type == 2) assignment = try reader.bytesValue() else if (field.number == 6 and field.wire_type == 0) lb = try pb.u32Value(&reader) else if (field.number == 23 and field.wire_type == 2) ring_config = try reader.bytesValue() else if (field.number == 41 and field.wire_type == 2) typed_policy = try reader.bytesValue() else if (field.number == 10 and field.wire_type == 2) breaker = try reader.bytesValue() else if (field.number == 57 and field.wire_type == 2) {
+            // Repeated string selecting ORCA metric propagation. Unknown
+            // entries are ignored so forward-compatible control planes can add
+            // selectors without failing the whole cluster.
+            const value = try pb.text(&reader, limits.max_text_bytes);
+            if (std.mem.eql(u8, value, "cpu_utilization")) {
+                lrs_cpu = true;
+            } else if (std.mem.eql(u8, value, "mem_utilization")) {
+                lrs_memory = true;
+            } else if (std.mem.eql(u8, value, "application_utilization")) {
+                lrs_application = true;
+            } else if (std.mem.eql(u8, value, "named_metrics.*")) {
+                lrs_named_all = true;
+            } else if (std.mem.startsWith(u8, value, "named_metrics.")) {
+                const metric = value["named_metrics.".len..];
+                if (metric.len != 0) try lrs_named.append(arena, metric);
+            }
+        } else if ((field.number == 43 or field.number == 19 or field.number == 42 or field.number == 48) and field.wire_type == 2) return error.UnsupportedCdsFeature else try reader.skip(field);
     }
     if (name.len == 0) return error.InvalidCdsResource;
     const discovery: Discovery = @enumFromInt(kind);
@@ -442,7 +475,14 @@ pub fn decode(gpa: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!O
         else => return error.UnsupportedCdsFeature,
     }
     const tls: ?tls_material.Config = if (transport) |raw| try transportSocket(arena, raw, limits) else null;
-    result.value = .{ .name = name, .eds_service_name = service, .discovery = discovery, .inline_assignment = inline_assignment, .host_endpoints = host_endpoints, .tls = tls, .max_concurrent_requests = if (breaker) |raw| try circuit(raw, limits.max_thresholds) else 1024, .policy = if (typed_policy) |raw| try policy.typed(arena, raw, limits.max_policies, limits.max_text_bytes, 0) else try policy.legacy(arena, lb, ring_config) };
+    const lrs_propagation: LrsPropagation = .{
+        .cpu_utilization = lrs_cpu,
+        .memory_utilization = lrs_memory,
+        .application_utilization = lrs_application,
+        .named_metrics_all = lrs_named_all,
+        .named_metrics = try lrs_named.toOwnedSlice(arena),
+    };
+    result.value = .{ .name = name, .eds_service_name = service, .discovery = discovery, .inline_assignment = inline_assignment, .host_endpoints = host_endpoints, .tls = tls, .max_concurrent_requests = if (breaker) |raw| try circuit(raw, limits.max_thresholds) else 1024, .lrs_propagation = lrs_propagation, .policy = if (typed_policy) |raw| try policy.typed(arena, raw, limits.max_policies, limits.max_text_bytes, 0) else try policy.legacy(arena, lb, ring_config) };
     // Converted policies must satisfy the same configuration parser/runtime
     // contract as direct callers, including complete range validation.
     const json = try std.fmt.allocPrint(arena, "{{\"loadBalancingConfig\":{s}}}", .{result.value.policy.child_json});

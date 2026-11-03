@@ -111,6 +111,7 @@ test "gRPC LRS delta snapshots report ORCA utilization deltas" {
     var stats: lrs_stats.Stats = .{ .allocator = allocator };
     defer stats.deinit();
     const io = std.testing.io;
+    stats.setPropagation(io, "a", .{ .cpu_utilization = true, .memory_utilization = true, .named_metrics_all = true });
     stats.recordOrca(io, "a", .{ .cpu_utilization = 0.5, .memory_utilization = 0.25, .named_metrics = &.{.{ .name = "util", .value = 2.0 }} });
     var first = try stats.snapshotDelta(allocator, io);
     defer first.deinit();
@@ -132,6 +133,37 @@ test "gRPC LRS delta snapshots report ORCA utilization deltas" {
     try std.testing.expectEqual(@as(u64, 2), cumulative.entries[0].cpu_utilization.count);
     try std.testing.expectEqual(@as(f64, 5.0), cumulative.entries[0].load_metrics[0].sum);
     try std.testing.expectEqual(@as(u64, 2), cumulative.entries[0].load_metrics[0].count);
+}
+
+test "gRPC LRS ORCA propagation is opt-in and filters metrics" {
+    var stats: lrs_stats.Stats = .{ .allocator = allocator };
+    defer stats.deinit();
+    const io = std.testing.io;
+    stats.recordOrca(io, "a", .{ .cpu_utilization = 0.5, .named_metrics = &.{.{ .name = "util", .value = 2.0 }} });
+    var none = try stats.snapshot(allocator, io);
+    defer none.deinit();
+    try std.testing.expectEqual(@as(usize, 0), none.entries.len);
+
+    stats.setPropagation(io, "a", .{ .cpu_utilization = true, .named_metrics = &.{"util"} });
+    stats.recordOrca(io, "a", .{
+        .cpu_utilization = 0.5,
+        .memory_utilization = 0.25,
+        .named_metrics = &.{ .{ .name = "util", .value = 2.0 }, .{ .name = "other", .value = 9.0 } },
+    });
+    var selected = try stats.snapshot(allocator, io);
+    defer selected.deinit();
+    try std.testing.expectEqual(@as(f64, 0.5), selected.entries[0].cpu_utilization.sum);
+    try std.testing.expectEqual(@as(u64, 0), selected.entries[0].memory_utilization.count);
+    try std.testing.expectEqual(@as(usize, 1), selected.entries[0].load_metrics.len);
+    try std.testing.expectEqualStrings("util", selected.entries[0].load_metrics[0].name);
+
+    // Clearing the selection removes the entry and stops accumulation.
+    stats.setPropagation(io, "a", .{});
+    stats.recordOrca(io, "a", .{ .cpu_utilization = 0.9 });
+    var cleared = try stats.snapshot(allocator, io);
+    defer cleared.deinit();
+    try std.testing.expectEqual(@as(f64, 0.5), cleared.entries[0].cpu_utilization.sum);
+    try std.testing.expectEqual(@as(u64, 1), cleared.entries[0].cpu_utilization.count);
 }
 
 test "gRPC LRS records unary ORCA trailers" {
@@ -158,6 +190,7 @@ test "gRPC LRS records unary ORCA trailers" {
     const endpoint: channel_endpoint = .{ .cleartext_ip = .{ .address = server.address(), .hierarchical_path = &path } };
     var channel = try grpc.SharedChannel.init(allocator, io, .{ .resolved = .{ .endpoints = &.{endpoint} } }, .{ .enable_lrs_stats = true });
     defer channel.deinit();
+    channel.setLrsPropagation("a", .{ .cpu_utilization = true, .named_metrics_all = true });
     var sender = channel.sender();
     defer sender.deinit();
     var response = try sender.unary(.{ .path = "/demo.Lrs/Call", .message = "ok", .wait_for_ready = true });

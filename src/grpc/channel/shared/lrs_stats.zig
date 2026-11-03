@@ -127,11 +127,28 @@ const Counter = struct {
     }
 };
 
+pub const Propagation = struct {
+    cpu_utilization: bool = false,
+    memory_utilization: bool = false,
+    application_utilization: bool = false,
+    named_metrics_all: bool = false,
+    named_metrics: []const []const u8 = &.{},
+};
+
 pub const Stats = struct {
     /// Null in test-only State literals; real channels set it during init.
     allocator: ?std.mem.Allocator = null,
     mutex: std.Io.Mutex = .init,
     map: std.StringHashMapUnmanaged(Counter) = .empty,
+    propagation: std.StringHashMapUnmanaged(StoredPropagation) = .empty,
+
+    const StoredPropagation = struct {
+        cpu_utilization: bool,
+        memory_utilization: bool,
+        application_utilization: bool,
+        named_metrics_all: bool,
+        named_metrics: []const []const u8,
+    };
 
     const Update = enum { issued_success, issued_error, started, aborted, issued, success, error_request, dropped };
 
@@ -270,13 +287,22 @@ pub const Stats = struct {
     pub fn recordOrca(self: *Stats, io: std.Io, cluster: []const u8, report: orca.LoadReport) void {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
+        const propagation = self.propagation.get(cluster) orelse return;
         const value = self.entryLocked(cluster, "") orelse return;
-        accumulate(&value.cpu_utilization, report.cpu_utilization);
-        accumulate(&value.memory_utilization, report.memory_utilization);
-        accumulate(&value.application_utilization, report.application_utilization);
+        if (propagation.cpu_utilization) accumulate(&value.cpu_utilization, report.cpu_utilization);
+        if (propagation.memory_utilization) accumulate(&value.memory_utilization, report.memory_utilization);
+        if (propagation.application_utilization) accumulate(&value.application_utilization, report.application_utilization);
         const gpa = self.allocator orelse return;
         for (report.named_metrics) |metric| {
             if (metric.value == 0 or metric.name.len == 0) continue;
+            if (!propagation.named_metrics_all) {
+                var selected = false;
+                for (propagation.named_metrics) |name| if (std.mem.eql(u8, name, metric.name)) {
+                    selected = true;
+                    break;
+                };
+                if (!selected) continue;
+            }
             const gop = value.named_metrics.getOrPut(gpa, metric.name) catch return;
             if (!gop.found_existing) {
                 const owned = gpa.dupe(u8, metric.name) catch {
@@ -288,6 +314,53 @@ pub const Stats = struct {
             }
             accumulate(gop.value_ptr, metric.value);
         }
+    }
+
+    pub fn setPropagation(self: *Stats, io: std.Io, cluster: []const u8, propagation: Propagation) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        const gpa = self.allocator orelse return;
+        if (self.propagation.fetchRemove(cluster)) |removed| {
+            for (removed.value.named_metrics) |name| gpa.free(name);
+            gpa.free(removed.value.named_metrics);
+            gpa.free(removed.key);
+        }
+        if (cluster.len == 0) return;
+        if (!propagation.cpu_utilization and !propagation.memory_utilization and !propagation.application_utilization and !propagation.named_metrics_all and propagation.named_metrics.len == 0) return;
+        const key = gpa.dupe(u8, cluster) catch return;
+        errdefer gpa.free(key);
+        const names = gpa.alloc([]const u8, propagation.named_metrics.len) catch {
+            gpa.free(key);
+            return;
+        };
+        var initialized: usize = 0;
+        errdefer {
+            for (names[0..initialized]) |name| gpa.free(name);
+            gpa.free(names);
+        }
+        for (propagation.named_metrics, names) |name, *copy| {
+            copy.* = gpa.dupe(u8, name) catch {
+                for (names[0..initialized]) |value| gpa.free(value);
+                gpa.free(names);
+                gpa.free(key);
+                return;
+            };
+            initialized += 1;
+        }
+        const gop = self.propagation.getOrPut(gpa, key) catch {
+            for (names) |name| gpa.free(name);
+            gpa.free(names);
+            gpa.free(key);
+            return;
+        };
+        gop.key_ptr.* = key;
+        gop.value_ptr.* = .{
+            .cpu_utilization = propagation.cpu_utilization,
+            .memory_utilization = propagation.memory_utilization,
+            .application_utilization = propagation.application_utilization,
+            .named_metrics_all = propagation.named_metrics_all,
+            .named_metrics = names,
+        };
     }
 
     fn accumulate(value: *Accum, sample: f64) void {
@@ -456,6 +529,13 @@ pub const Stats = struct {
             entry.value_ptr.deinit(gpa);
         }
         self.map.deinit(gpa);
+        var propagation_iterator = self.propagation.iterator();
+        while (propagation_iterator.next()) |entry| {
+            for (entry.value_ptr.named_metrics) |name| gpa.free(name);
+            gpa.free(entry.value_ptr.named_metrics);
+            gpa.free(entry.key_ptr.*);
+        }
+        self.propagation.deinit(gpa);
         self.* = undefined;
     }
 };
