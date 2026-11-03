@@ -50,6 +50,7 @@ const TlsMaterial = struct {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => return error.InvalidBootstrapTls,
             };
+            if (self.bundle.map.count() == 0) return error.InvalidBootstrapTls;
             self.bundle_loaded = true;
         }
         if (tls.certificate_file.len != 0) {
@@ -140,6 +141,23 @@ pub const ControlPlane = struct {
     pub fn serverUri(self: *const ControlPlane) []const u8 {
         return self.server().uri;
     }
+    fn rebindServer(self: *ControlPlane, selected: usize) Error!void {
+        const target_server = self.servers[selected];
+        var material = try TlsMaterial.load(self.allocator, self.io, target_server.tlsConfig());
+        errdefer material.deinit();
+        var channel = try createChannel(self.allocator, self.io, target_server, self.options.channel, material);
+        errdefer channel.deinit();
+        var sender = channel.sender();
+        var sender_owned = true;
+        defer if (sender_owned) sender.deinit();
+        try self.client.rebind(sender, self.options.request);
+        sender_owned = false;
+        self.channel.deinit();
+        self.material.deinit();
+        self.channel = channel;
+        self.material = material;
+        self.server_index = selected;
+    }
     fn advanceAndRebind(self: *ControlPlane) Error!void {
         const servers = self.servers;
         var next: ?usize = null;
@@ -156,20 +174,7 @@ pub const ControlPlane = struct {
             };
         }
         const selected = next orelse return error.NoUsableXdsServer;
-        var material = try TlsMaterial.load(self.allocator, self.io, servers[selected].tlsConfig());
-        errdefer material.deinit();
-        var channel = try createChannel(self.allocator, self.io, servers[selected], self.options.channel, material);
-        errdefer channel.deinit();
-        var sender = channel.sender();
-        var sender_owned = true;
-        defer if (sender_owned) sender.deinit();
-        try self.client.rebind(sender, self.options.request);
-        sender_owned = false;
-        self.channel.deinit();
-        self.material.deinit();
-        self.channel = channel;
-        self.material = material;
-        self.server_index = selected;
+        try self.rebindServer(selected);
     }
     /// Connect, trying the remaining usable bootstrap servers on failure.
     pub fn connectWithDeadline(self: *ControlPlane, deadline: std.Io.Clock.Timestamp) Error!void {
@@ -223,5 +228,17 @@ pub const ControlPlane = struct {
     pub fn reconnectWithTimeout(self: *ControlPlane, timeout: std.Io.Duration) Error!void {
         if (timeout.nanoseconds <= 0) return error.Timeout;
         return self.reconnectWithDeadline(.fromNow(self.io, .{ .clock = .awake, .raw = timeout }));
+    }
+    /// Re-read the current server's TLS files, recreate its channel, rebind the
+    /// client and reconnect. Desired names and accepted versions are retained.
+    /// A failed load leaves the current channel and material untouched.
+    pub fn reloadServerWithDeadline(self: *ControlPlane, deadline: std.Io.Clock.Timestamp) Error!void {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        try self.rebindServer(self.server_index);
+        try self.connectWithDeadline(deadline);
+    }
+    pub fn reloadServerWithTimeout(self: *ControlPlane, timeout: std.Io.Duration) Error!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.reloadServerWithDeadline(.fromNow(self.io, .{ .clock = .awake, .raw = timeout }));
     }
 };

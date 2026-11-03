@@ -62,6 +62,18 @@ const Peer = struct {
     fn runTls(listener: *grpc.runtime.TlsServer, node: []const u8, terminal: grpc.Status) !void {
         return runPeer(listener, node, terminal);
     }
+    fn runTlsTwice(listener: *grpc.runtime.TlsServer, node: []const u8) !void {
+        var index: usize = 0;
+        while (index < 2) : (index += 1) {
+            var connection = try listener.acceptWithTimeout(.fromSeconds(3));
+            defer connection.deinit();
+            var duplex = try connection.acceptDuplexWithTimeout(.fromSeconds(3));
+            defer duplex.deinit();
+            try expectReplay(&duplex, node);
+            try duplex.startResponse(.{});
+            try duplex.finishOk();
+        }
+    }
 };
 
 fn seed(client: *delta.Client) !void {
@@ -174,6 +186,50 @@ test "gRPC xDS control plane connects over bootstrap TLS" {
     var event = try plane.discovery().nextWithDeadline(deadline(io));
     defer event.deinit();
     try std.testing.expectEqual(grpc.Status.ok, event.terminal.status);
+    try task.await(io);
+}
+
+test "gRPC xDS control plane reloads TLS material and replays versions" {
+    var threaded = std.Io.Threaded.init(gpa, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(&certificate_der, tls_testing.certificate_base64);
+    const key_pair = try tls_testing.serverKeyPair();
+    var server = try grpc.runtime.TlsServer.listen(gpa, io, .{ .ip4 = .loopback(0) }, .{
+        .transport = .{
+            .identity = .{ .certificate_chain = &.{&certificate_der}, .signer = .{ .ecdsa_p256_sha256 = .{ .key_pair = key_pair } } },
+        },
+    });
+    defer server.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const pem = try std.fmt.allocPrint(gpa, "-----BEGIN CERTIFICATE-----\n{s}\n-----END CERTIFICATE-----\n", .{tls_testing.certificate_base64});
+    defer gpa.free(pem);
+    try tmp.dir.writeFile(io, .{ .sub_path = "ca.pem", .data = pem });
+    const ca_path = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/ca.pem", .{tmp.sub_path[0..]});
+    defer gpa.free(ca_path);
+    const json = try std.fmt.allocPrint(gpa, "{{\"xds_servers\":[{{\"server_uri\":\"https://localhost:{d}\",\"channel_creds\":[{{\"type\":\"tls\",\"config\":{{\"ca_certificate_file\":\"{s}\"}}}}]}}],\"node\":{{\"id\":\"node-1\"}}}}", .{ server.address().getPort(), ca_path });
+    defer gpa.free(json);
+    const configuration = try bootstrap.parse(gpa, json, .{});
+    defer configuration.deinit();
+    const plane = try control.ControlPlane.init(gpa, io, configuration, .{});
+    defer plane.deinit();
+    try seed(plane.discovery());
+    var task = io.async(Peer.runTlsTwice, .{ &server, "node-1" });
+    defer _ = task.cancel(io) catch {};
+    try plane.connectWithDeadline(deadline(io));
+    var first = try plane.discovery().nextWithDeadline(deadline(io));
+    defer first.deinit();
+    try std.testing.expectEqual(grpc.Status.ok, first.terminal.status);
+
+    try tmp.dir.writeFile(io, .{ .sub_path = "ca.pem", .data = "not a certificate" });
+    try std.testing.expectError(error.InvalidBootstrapTls, plane.reloadServerWithDeadline(deadline(io)));
+    try tmp.dir.writeFile(io, .{ .sub_path = "ca.pem", .data = pem });
+    try plane.reloadServerWithDeadline(deadline(io));
+    var second = try plane.discovery().nextWithDeadline(deadline(io));
+    defer second.deinit();
+    try std.testing.expectEqual(grpc.Status.ok, second.terminal.status);
     try task.await(io);
 }
 

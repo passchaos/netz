@@ -3457,7 +3457,7 @@ forget the accepted version so a reconnect does not advertise a stale payload.
 The [bootstrap parser and control-plane helper](grpc_bootstrap.md) parse
 `xds_servers`, node metadata, authorities and server features, and fail over
 across `http://` and TLS `https://` servers while replaying `initial_resource_versions`
-on the same delta client. Bootstrap certificate providers and certificate rotation,
+on the same delta client. Bootstrap certificate providers and automatic refresh scheduling,
 authority-specific control planes and LRS remain open.
 
 

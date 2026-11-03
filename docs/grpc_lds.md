@@ -101,6 +101,6 @@ expired decisions. Evidence is in
 subscriptions and publishes CDS/EDS children from these listener/RDS snapshots.
 Typed delta listener/RDS publication and TTL expiry are available through the
 same runtime. Bootstrap parsing and control-plane failover are
-available; certificate providers and certificate rotation, authority-specific control planes, LRS,
+available; certificate providers and automatic refresh scheduling, authority-specific control planes, LRS,
 non-router HTTP filters, server listener/filter-chain interpretation and full
 security/rewriting configuration remain open.

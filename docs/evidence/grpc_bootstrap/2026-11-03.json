@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "date": "2026-11-03",
-  "head": "dce5a1ac",
+  "head": "f0052dcc",
   "gate": "xDS bootstrap parsing, TLS material and control-plane failover",
   "commands": {
     "xds": "zig build test-lib -Dtest-filter=xds --summary all",
@@ -10,8 +10,8 @@
   },
   "result": {
     "xds": {
-      "passed": 239,
-      "total": 239,
+      "passed": 240,
+      "total": 240,
       "failed": 0,
       "exit_code": 0
     },
@@ -31,10 +31,10 @@
   "source_sha256": {
     "src/grpc/xds/bootstrap.zig": "67459673cd2ae6e62b11f07b65ef77b3a14633c012f527cea59b8c7a8183844e",
     "src/grpc/xds/bootstrap_tests.zig": "eb4f8630d13a11fae09a3f423dd49d6070bb1c56c574c27e5c9abd54aa02272d",
-    "src/grpc/xds/control_plane.zig": "7900c5086f1aef0ba555bc718d4bea9adb2312cfa6594e4d3ea40007fef4e415",
-    "src/grpc/xds/control_plane_tests.zig": "5d4cd1255a30e9430f78be0a4ba4eaed1839655df32248cf962c8738c4fe3619",
+    "src/grpc/xds/control_plane.zig": "8243cc14f98d9c69ef65acaf651defce9cae194f040a71f784f54fd909970874",
+    "src/grpc/xds/control_plane_tests.zig": "7d23785049adff95e302d1e9d7b32792a7bf3f60cdb2f4b295dc52f97bfe87a9",
     "src/grpc/xds/ads/delta_client.zig": "a45092e8c2cd638ae5261206bb3a92f55c748e412c6896eb0ba892583c3b2a48",
     "src/grpc/xds/ads/delta_transport_tests.zig": "65f95011c3369f88bbbfb33e72f9466d273671283b54dc1c34320e076b73c7b8"
   },
-  "notes": "Covers bootstrap servers/node/authorities/features, authority server selection, TLS CA and client-identity config parsing, URI defaults and IPv6, bounded metadata Struct encoding through ads.codec.encodeNode, invalid and unsupported shapes, duplicate fields, bounds, allocation failures, refused-server failover, two-server failover with initial_resource_versions replay, a real TLS handshake using a bootstrap CA file, and unusable server/node configurations. Certificate providers and certificate-file rotation remain open."
+  "notes": "Covers bootstrap servers/node/authorities/features, authority server selection, TLS CA and client-identity config parsing, URI defaults and IPv6, bounded metadata Struct encoding through ads.codec.encodeNode, invalid and unsupported shapes, duplicate fields, bounds, allocation failures, refused-server failover, two-server failover with initial_resource_versions replay, a real TLS handshake using a bootstrap CA file, TLS material reload with version replay and failed-load rollback, and unusable server/node configurations. Certificate providers and automatic refresh scheduling remain open."
 }

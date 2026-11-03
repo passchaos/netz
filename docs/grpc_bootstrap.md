@@ -75,8 +75,12 @@ of the new sender, disconnects the old stream and retains desired names plus
 accepted per-resource versions. The next connect therefore sends
 `initial_resource_versions` and the complete desired set to the replacement
 server. `reconnectWithDeadline` reconnects the current server after a terminal.
+`reloadServerWithDeadline` re-reads the current server's TLS files, creates a
+new channel and material, rebinds the client and reconnects. A failed load,
+including a CA file that yields no certificates, leaves the old channel and
+material untouched. Callers can drive reload from their own refresh schedule.
 The runtime controller can keep using the same `*delta.Client` pointer across
-failover.
+failover and reload.
 
 ## Bounds and verification
 
@@ -86,12 +90,14 @@ complete parsed shape, URI defaults and IPv6, metadata Struct encoding through
 `ads.codec.encodeNode`, invalid/unsupported shapes, duplicate fields, bounds,
 allocation failure sweeps, refused-server failover, two-server failover with
 `initial_resource_versions` replay, a real TLS handshake using a bootstrap CA
-file, and unusable server or node-less configurations. See
+file, TLS material reload with version replay and failed-load rollback, and
+unusable server or node-less configurations. See
 `docs/evidence/grpc_bootstrap/2026-11-03.json`.
 
 ## Remaining integration
 
-Certificate providers and certificate-file rotation, a background retry
-schedule and DNS/aggregate control-plane targets remain follow-up work. The
+Certificate providers, automatic refresh scheduling (reload is caller-driven),
+a background retry schedule and DNS/aggregate control-plane targets remain
+follow-up work. The
 parser retains authority server lists and per-server feature flags, and
 `Options.authority` already selects those servers.
