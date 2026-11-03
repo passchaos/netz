@@ -53,8 +53,11 @@ can be passed directly to `delta.Client`.
 `ControlPlane` currently supports insecure `http://` servers. `https://` or
 `tls`-only configurations parse but `ControlPlane.init` returns
 `NoUsableXdsServer`; certificate-provider and TLS credential support remain
-future work. The bootstrap node is used unless `Options.node` overrides it; a
-missing node id fails with `InvalidBootstrapNode`.
+future work. `Options.authority` selects an authority's `xds_servers` (falling
+back to the top-level list when the authority has none); an unknown authority
+fails with `InvalidControlPlaneOptions`. The bootstrap node is used unless
+`Options.node` overrides it; a missing node id fails with
+`InvalidBootstrapNode`.
 
 `connectWithDeadline` tries the current server and then the remaining usable
 servers. Each attempt gets `Options.server_open_timeout` (default 250 ms) or
@@ -83,7 +86,7 @@ configurations. See `docs/evidence/grpc_bootstrap/2026-11-03.json`.
 
 ## Remaining integration
 
-TLS bootstrap channel credentials, certificate providers, authority-specific
-control-plane selection, DNS/aggregate control-plane targets and a background
-retry schedule remain follow-up work. The parser already retains authority
-server lists and the per-server feature flags for those layers.
+TLS bootstrap channel credentials, certificate providers, a background retry
+schedule and DNS/aggregate control-plane targets remain follow-up work. The
+parser retains authority server lists and per-server feature flags, and
+`Options.authority` already selects those servers.

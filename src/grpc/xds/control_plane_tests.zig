@@ -119,6 +119,20 @@ test "gRPC xDS control plane failover replays versions on the next server" {
     try second_task.await(io);
 }
 
+test "gRPC xDS control plane selects authority servers" {
+    const json =
+        \\{"xds_servers":[{"server_uri":"http://127.0.0.1:1","channel_creds":[{"type":"insecure"}]}],
+        \\ "node":{"id":"node-1"},
+        \\ "authorities":{"auth-1":{"xds_servers":[{"server_uri":"http://127.0.0.1:2","channel_creds":[{"type":"insecure"}]}]}}}
+    ;
+    const configuration = try bootstrap.parse(gpa, json, .{});
+    defer configuration.deinit();
+    const plane = try control.ControlPlane.init(gpa, std.testing.io, configuration, .{ .authority = "auth-1" });
+    defer plane.deinit();
+    try std.testing.expectEqual(@as(u16, 2), plane.server().target.port);
+    try std.testing.expectError(error.InvalidControlPlaneOptions, control.ControlPlane.init(gpa, std.testing.io, configuration, .{ .authority = "missing" }));
+}
+
 test "gRPC xDS control plane requires a usable server and node" {
     const tls_only =
         \\{"xds_servers":[{"server_uri":"https://host","channel_creds":[{"type":"tls"}]}],"node":{"id":"node"}}

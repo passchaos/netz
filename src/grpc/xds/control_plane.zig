@@ -10,6 +10,9 @@ pub const Error = bootstrap.Error || shared.Error || delta.Error || error{ Inval
 pub const Options = struct {
     /// Overrides the bootstrap node. The bootstrap node is used otherwise.
     node: ?delta.codec.Node = null,
+    /// Select an authority's xds_servers. Empty authority server lists fall
+    /// back to the top-level servers.
+    authority: ?[]const u8 = null,
     channel: shared.Options = .{},
     request: streaming.RequestOptions = .{ .path = delta.path, .wait_for_ready = true },
     subscriptions: delta.subscriptions.Options = .{},
@@ -37,6 +40,7 @@ pub const ControlPlane = struct {
     io: std.Io,
     bootstrap: *bootstrap.Bootstrap,
     options: Options,
+    servers: []bootstrap.Server,
     server_index: usize,
     channel: shared.SharedChannel,
     client: delta.Client,
@@ -44,17 +48,21 @@ pub const ControlPlane = struct {
     pub fn init(gpa: std.mem.Allocator, io: std.Io, configuration: *bootstrap.Bootstrap, options: Options) Error!*ControlPlane {
         const node = options.node orelse configuration.adsNode() orelse return error.InvalidBootstrapNode;
         if (node.id.len == 0) return error.InvalidBootstrapNode;
+        const servers = if (options.authority) |name| blk: {
+            const authority = configuration.authority(name) orelse return error.InvalidControlPlaneOptions;
+            break :blk if (authority.servers.len != 0) authority.servers else configuration.servers;
+        } else configuration.servers;
         var index: usize = 0;
-        while (index < configuration.servers.len) : (index += 1) if (usable(configuration.servers[index])) break;
-        if (index == configuration.servers.len) return error.NoUsableXdsServer;
-        var channel = try createChannel(gpa, io, configuration.servers[index], options.channel);
+        while (index < servers.len) : (index += 1) if (usable(servers[index])) break;
+        if (index == servers.len) return error.NoUsableXdsServer;
+        var channel = try createChannel(gpa, io, servers[index], options.channel);
         errdefer channel.deinit();
         var sender = channel.sender();
         defer sender.deinit();
         var client = try delta.Client.init(gpa, sender, .{ .node = node, .subscriptions = options.subscriptions, .limits = options.limits, .request = options.request });
         errdefer client.deinit();
         const self = try gpa.create(ControlPlane);
-        self.* = .{ .allocator = gpa, .io = io, .bootstrap = configuration, .options = options, .server_index = index, .channel = channel, .client = client };
+        self.* = .{ .allocator = gpa, .io = io, .bootstrap = configuration, .options = options, .servers = servers, .server_index = index, .channel = channel, .client = client };
         return self;
     }
     pub fn deinit(self: *ControlPlane) void {
@@ -66,13 +74,13 @@ pub const ControlPlane = struct {
         return &self.client;
     }
     pub fn server(self: *const ControlPlane) *const bootstrap.Server {
-        return &self.bootstrap.servers[self.server_index];
+        return &self.servers[self.server_index];
     }
     pub fn serverUri(self: *const ControlPlane) []const u8 {
         return self.server().uri;
     }
     fn advanceAndRebind(self: *ControlPlane) Error!void {
-        const servers = self.bootstrap.servers;
+        const servers = self.servers;
         var next: ?usize = null;
         var index = self.server_index + 1;
         while (index < servers.len) : (index += 1) if (usable(servers[index])) {
