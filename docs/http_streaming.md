@@ -35,9 +35,13 @@ try connection.writeResponse(.{ .body = "ok", .request_method = request.method }
 
 Chunks are FIFO and the queue is bounded by `readRequestBodyWithBuffer`'s
 `max_buffered_bytes` (default 64 KiB); the producer blocks while the queue is
-full. The total body remains bounded by `Limits.max_body_bytes`. After the body
-completes, keep-alive and pipelining remain usable. `Expect: 100-continue` is
-handled by the underlying parser, and trailers are in `takeRequest`.
+full. The total body remains bounded by `Limits.max_body_bytes`; an oversized
+Content-Length is reported by `head`, and an oversized chunked body is reported
+by `next`. After the body completes, keep-alive and pipelining remain usable.
+`Expect: 100-continue` is handled by the underlying parser, and trailers are in
+`takeRequest`. `requestReady` reports whether the producer has finished;
+`takeRequest` is non-blocking and returns `error.RequestNotComplete` before then,
+so an undrained full queue cannot deadlock the caller.
 `deinit` before completion cancels the producer and closes the connection
 because an unread body cannot preserve keep-alive. The returned chunk slice
 must be consumed before the next `next` call.

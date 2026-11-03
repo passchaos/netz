@@ -149,18 +149,25 @@ pub fn Reader(comptime ConnectionType: type, comptime RuntimeError: type) type {
             }
         }
 
-        /// Take the completed request metadata. Call only after `next` returned
-        /// null (or after the producer finished); the caller owns the value.
+        /// Take the completed request metadata. `next` must have returned null
+        /// (or `requestReady` must be true); calling early returns
+        /// `error.RequestNotComplete` instead of blocking behind a full queue.
         pub fn takeRequest(self: *Self) !Streaming.Request {
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
-            while (!self.finished and self.failure == null) {
-                try self.cond.wait(self.io, &self.mutex);
-            }
             if (self.failure) |err| return err;
+            if (!self.finished) return error.RequestNotComplete;
             const request = self.request orelse return error.ConnectionClosed;
             self.request = null;
             return request;
+        }
+
+        /// True once the producer has completed the body and stored the request
+        /// metadata. Body chunks may still be pending; `next` drains them.
+        pub fn requestReady(self: *Self) bool {
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            return self.finished;
         }
 
         fn produce(self: *Self) anyerror!void {

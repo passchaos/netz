@@ -83,6 +83,50 @@ test "HTTP/1 pull body reader cancellation closes the connection" {
     try task.await(io);
 }
 
+test "HTTP/1 pull body reader enforces max_body_bytes" {
+    const small_limits: runtime.Limits = .{ .max_head_bytes = 4096, .max_body_bytes = 1024 };
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, small_limits);
+    defer server.deinit();
+    const body = try allocator.alloc(u8, 4096);
+    defer allocator.free(body);
+    @memset(body, 'x');
+
+    const Peer = struct {
+        fn run(listener: *runtime.Server) !void {
+            var connection = try listener.accept();
+            defer connection.close();
+            var reader = try connection.readRequestBody(.{});
+            defer reader.deinit();
+            _ = reader.head() catch |err| {
+                try std.testing.expectEqual(error.BodyTooLarge, err);
+                return;
+            };
+            var failure: ?anyerror = null;
+            while (true) {
+                const chunk = reader.next() catch |err| {
+                    failure = err;
+                    break;
+                };
+                if (chunk == null) break;
+            }
+            try std.testing.expectEqual(error.BodyTooLarge, failure.?);
+        }
+    };
+    var task = try io.concurrent(Peer.run, .{&server});
+    defer _ = task.cancel(io) catch {};
+    var client = try runtime.Client.connect(allocator, io, server.address(), small_limits);
+    defer client.close();
+    if (client.request(.{ .method = .POST, .target = "/limit", .host = "localhost", .body = body })) |response_value| {
+        var response = response_value;
+        response.deinit(allocator);
+        return error.TestUnexpectedResult;
+    } else |_| {}
+    try task.await(io);
+}
+
 test "HTTP/1 pull body reader streams keeps alive and handles 100-continue" {
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
     defer threaded.deinit();
@@ -103,6 +147,8 @@ test "HTTP/1 pull body reader streams keeps alive and handles 100-continue" {
             try std.testing.expect(head.method == .POST);
             try std.testing.expectEqualStrings("/upload", head.target);
             try std.testing.expectEqual(@as(?usize, expected.len), head.content_length);
+            try std.testing.expect(!reader.requestReady());
+            try std.testing.expectError(error.RequestNotComplete, reader.takeRequest());
             var total: usize = 0;
             var chunks: usize = 0;
             while (try reader.next()) |chunk| {
