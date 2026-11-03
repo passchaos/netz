@@ -6,7 +6,7 @@ pub fn evaluate(state: anytype, job: anytype) @TypeOf(state.*).Failure!?call.Una
     if (job.drop_revision != state.drop_revision) {
         job.drop_revision = state.drop_revision;
         if (state.drop.choose(state.io, &state.drop_counters)) |category| {
-            if (comptime @hasField(@TypeOf(state.*), "lrs_stats")) if (@import("../cluster_route.zig").jobCluster(job)) |key| state.lrs_stats.recordDropped(state.io, lrs_stats.stripCluster(key));
+            if (comptime @hasField(@TypeOf(state.*), "lrs_stats")) if (@import("../cluster_route.zig").jobCluster(job)) |key| state.lrs_stats.recordDropped(state.io, lrs_stats.stripCluster(key), category);
             if (job.stream != null) return error.CallDropped;
             return try call.policyDropResponse(state.allocator, category);
         }
@@ -17,7 +17,7 @@ pub fn evaluate(state: anytype, job: anytype) @TypeOf(state.*).Failure!?call.Una
         if (job.cluster_drop_revision == policy.revision) return null;
         job.cluster_drop_revision = policy.revision;
         const category = policy.drops.choose(state.io, &policy.counters) orelse return null;
-        if (comptime @hasField(@TypeOf(state.*), "lrs_stats")) if (@import("../cluster_route.zig").jobCluster(job)) |key| state.lrs_stats.recordDropped(state.io, lrs_stats.stripCluster(key));
+        if (comptime @hasField(@TypeOf(state.*), "lrs_stats")) if (@import("../cluster_route.zig").jobCluster(job)) |key| state.lrs_stats.recordDropped(state.io, lrs_stats.stripCluster(key), category);
         if (job.stream != null) return error.CallDropped;
         return try call.policyDropResponse(state.allocator, category);
     }

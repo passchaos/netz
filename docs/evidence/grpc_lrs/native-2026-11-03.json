@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "date": "2026-11-03",
-  "head": "f0b82bea",
+  "head": "b2343c42",
   "gate": "Load Reporting Service envelopes, duplex reporting and channel counters",
   "commands": {
     "xds": "zig build test-lib -Dtest-filter=xds --summary all",
@@ -36,15 +36,15 @@
     "src/grpc/xds/lrs.zig": "b2d4b5745aaa91fa1435a8bf314455c6caa656e49efc4743c31d0ac337efb6c3",
     "src/grpc/xds/lrs/codec.zig": "f405ff4c162793f39138bf6234f6533c9db30d5cd75d4a5356723b70feedec99",
     "src/grpc/xds/lrs/client.zig": "5cefd6b72c73f146442d6138770fa0a85b6528c53ba0bb92cf85570f8b9901f3",
-    "src/grpc/xds/lrs/integration.zig": "9ae4d75d7567bbb743d5207e71ecf01e6f23af5fe1733f4be6cbde3d7cb09517",
-    "src/grpc/xds/lrs/tests.zig": "091c0b7bcf2d92e3fa0621ee9677f8ec4dab59b8363daf2d86b650fd5a94e3b5",
+    "src/grpc/xds/lrs/integration.zig": "a16da2f158fef53e30574a0bb3529810b1fbd51a56db8cef99878d852e1ea28c",
+    "src/grpc/xds/lrs/tests.zig": "aefc9c5f3f0767c7466b6f336e84d0ef54ecce260997ce593e6b19cf827ab9e4",
     "src/grpc/xds/lrs/transport_tests.zig": "af4f6ee7e4f1f61cf224d171763f9118a645dbfad9c7fb04d5d6af9f0faf9aae",
-    "src/grpc/channel/shared/lrs_stats.zig": "c4091d60ca484e8971b94f5cdbd6536f501e19231dbaacce3c0f0a4b551e0fe6",
-    "src/grpc/channel/shared/lrs_stats_tests.zig": "e7a3d2a9439d88e5e4117bc4c9bc4700d02680cb84620bf9173568eaf8a7676c",
+    "src/grpc/channel/shared/lrs_stats.zig": "1a79123f8fbe19efd4e76a9f2c7ddf8b061b7f81b0f5759dfef943cbf77ade49",
+    "src/grpc/channel/shared/lrs_stats_tests.zig": "cc5814729f307dacd6a57c8338ae7496ff2c9cfaa2ca3c6bb0fe509f06d62035",
     "src/grpc/channel/shared/state.zig": "eb6530efa1d11985bb23db1e3bdb03503f7b5580aec573ae08c81a7ce5c4ae3d",
     "src/grpc/channel/shared/stream/owner.zig": "093240c2fa079bee62a49d984614b1f15869b236bcbbd19e044bbaaeb98e487f",
-    "src/grpc/channel/shared/drop_admission.zig": "66ecd6f4fb317829323872947ccefc4eb9e93d4227ece7d3be4abad506317e34",
-    "src/grpc/channel/shared/circuit_admission.zig": "0e98a6536572cc91cf234d3e795219ec71209b922a5cd150a6f9ce36b758944d"
+    "src/grpc/channel/shared/drop_admission.zig": "a353dffbb2a2144ff59dbe00750035c9ee98b1baa0115232801bd4439c875e6e",
+    "src/grpc/channel/shared/circuit_admission.zig": "eca5a83d1356107d7e33af99239b39c7fc5c7036a08734cb30bb67926028e83c"
   },
-  "notes": "Native tests cover envelopes, locality/dropped counters, malformed/duplicate/over-limit input, a real loopback report/reconnect stream, opt-in per-cluster unary and streaming channel counters, channel drop attribution, and conversion into LRS cluster reports. Per-category drops, endpoint granularity and a periodic scheduler remain open. Official-schema interop evidence is docs/evidence/grpc_lrs/2026-11-03.json."
+  "notes": "Native tests cover envelopes, locality/dropped counters, malformed/duplicate/over-limit input, a real loopback report/reconnect stream, opt-in per-cluster unary and streaming channel counters, channel drop attribution with per-category counts, and conversion into LRS cluster reports. Endpoint granularity, in-progress counts and a periodic scheduler remain open. Official-schema interop evidence is docs/evidence/grpc_lrs/2026-11-03.json."
 }

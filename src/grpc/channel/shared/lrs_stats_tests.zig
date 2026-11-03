@@ -19,6 +19,8 @@ test "gRPC LRS counters aggregate per cluster" {
     stats.record(io, "a", true);
     stats.record(io, "a", false);
     stats.record(io, "b", true);
+    stats.recordDropped(io, "a", "throttle");
+    stats.recordDropped(io, "a", "throttle");
     var snapshot = try stats.snapshot(allocator, io);
     defer snapshot.deinit();
     try std.testing.expectEqual(@as(usize, 2), snapshot.entries.len);
@@ -27,6 +29,10 @@ test "gRPC LRS counters aggregate per cluster" {
             try std.testing.expectEqual(@as(u64, 2), entry.issued);
             try std.testing.expectEqual(@as(u64, 1), entry.successful);
             try std.testing.expectEqual(@as(u64, 1), entry.error_requests);
+            try std.testing.expectEqual(@as(u64, 2), entry.dropped);
+            try std.testing.expectEqual(@as(usize, 1), entry.categories.len);
+            try std.testing.expectEqualStrings("throttle", entry.categories[0].category);
+            try std.testing.expectEqual(@as(u64, 2), entry.categories[0].count);
         } else {
             try std.testing.expectEqualStrings("b", entry.cluster);
             try std.testing.expectEqual(@as(u64, 1), entry.issued);
@@ -148,5 +154,8 @@ test "gRPC LRS counters attribute channel drops to the selected cluster" {
     try std.testing.expectEqual(@as(usize, 1), snapshot.entries.len);
     try std.testing.expectEqualStrings("a", snapshot.entries[0].cluster);
     try std.testing.expectEqual(@as(u64, 1), snapshot.entries[0].dropped);
+    try std.testing.expectEqual(@as(usize, 1), snapshot.entries[0].categories.len);
+    try std.testing.expectEqualStrings("throttle", snapshot.entries[0].categories[0].category);
+    try std.testing.expectEqual(@as(u64, 1), snapshot.entries[0].categories[0].count);
     try std.testing.expectEqual(@as(u64, 0), snapshot.entries[0].issued);
 }

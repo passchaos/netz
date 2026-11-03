@@ -63,7 +63,8 @@ Each unary completion derives the cluster from the selected endpoint's
 hierarchical path (`cluster:<name>`) and increments issued plus successful or
 error-request counters. Streaming calls increment issued when the stream opens
 and success/error when the terminal arrives. Channel drops and circuit
-rejections increment total dropped requests for the RPC-local cluster.
+rejections increment total dropped requests and per-category counts for the
+RPC-local cluster; circuit rejections use the `circuit_breaking` category.
 Counters use a dedicated mutex; disabled channels skip the lock entirely, so
 ordinary channels keep their existing hot path.
 
@@ -71,15 +72,15 @@ ordinary channels keep their existing hot path.
 `lrs.integration.build` converts them into `ClusterStats` with the caller's
 locality and reporting interval. Cluster names in the report borrow the
 snapshot storage, so keep the snapshot alive until the report is encoded.
-Per-category drop breakdowns, endpoint-granularity stats and in-progress
-counts remain follow-up work.
+Endpoint-granularity stats, in-progress counts and a periodic report
+scheduler remain follow-up work.
 
 ## Verification
 
 Native tests cover request/response round trips, locality counters, dropped
 categories, intervals, malformed/duplicate/over-limit input, UTF-8 rejection,
-per-cluster unary and streaming counter aggregation, channel drop attribution,
-integration conversion, and a real
+per-cluster unary and streaming counter aggregation, channel drop and
+per-category attribution, integration conversion, and a real
 loopback duplex session that observes the node, a response, a report with exact
 counters, a second `send_all_clusters` response, a terminal, and node replay on
 a replacement stream. See
@@ -94,8 +95,8 @@ cluster/service names, dropped requests and interval, then a second
 
 ## Remaining integration
 
-Per-category drop attribution, endpoint-granularity stats, a periodic report
-scheduler and ControlPlane failover/reload composition remain follow-up work.
+Endpoint-granularity stats, in-progress counts, a periodic report scheduler and
+ControlPlane failover/reload composition remain follow-up work.
 Unary and streaming channel counters, envelopes and caller-driven reporting are
 complete.
 caller-driven reporting path are complete.
