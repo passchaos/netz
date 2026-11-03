@@ -81,6 +81,16 @@ For step-driven ownership use `Connection.acceptDuplexRequest*`; it returns a
 `trailers`, `finished`, `reset`), `pollRequestEvent*`, response writes,
 `finishResponse*`, `reset`, and bounded request draining.
 
+`Connection.serveRequestBatchConcurrent` is the built-in concurrent batch
+surface. It reads `request_count` complete requests, runs each handler in its
+own task, and serializes responses in completion order. The `Connection` remains
+the sole frame-reader, HPACK owner and socket writer; workers receive immutable
+owned requests and never touch the connection. Handler failures reset only their
+stream with `INTERNAL_ERROR`, and the returned
+`netz.streaming.http2.ConcurrentResult` carries one error slot per input. CONNECT
+requests are rejected because their open-ended lifetime cannot be represented by
+a completed-response batch.
+
 Concurrency contract:
 
 - One task owns the connection frame reader at a time. Accept streams from that
@@ -98,7 +108,13 @@ Concurrency contract:
 `from` and `stream_id`. Its `message.value` is a DATA/trailers/FIN event; `reset`
 identifies the cancelled stream. Applications poll all streams from one loop and
 send responses with `sendResponseBody*`, `finishRequest`, or the full
-`sendResponse*` forms. The same single-reader/one-writer rules as HTTP/2 apply.
+`sendResponse*` forms.
+
+`Server.serveConcurrent` runs a fixed count of handlers concurrently and
+serializes response submission. Its `netz.streaming.http3.ConcurrentResult`
+owns the received requests and one error slot per input; handlers must not
+deinitialize the borrowed request or retain its slices after the result is
+deinitialized. The same single-reader/one-writer rules as HTTP/2 apply.
 
 ## Build status
 

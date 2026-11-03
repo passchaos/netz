@@ -36,6 +36,9 @@ pub const http2 = struct {
     /// a time.
     pub const Stream = @import("../http2/runtime.zig").ServerDuplexStream;
     pub const Event = @import("../http2/runtime.zig").DuplexRequestEvent;
+    /// Result of `Connection.serveRequestBatchConcurrent`: per-input handler
+    /// errors after responses were serialized in completion order.
+    pub const ConcurrentResult = @import("../http2/runtime.zig").ConcurrentHandlerServeResult;
     pub const Connection = @import("../http2/runtime.zig").Connection;
 };
 
@@ -45,6 +48,9 @@ pub const http3 = struct {
     /// DATA, trailers, FIN and reset to independent per-stream state.
     pub const RequestEvent = @import("../http3/runtime.zig").StreamingRequestEvent;
     pub const ResponseEvent = @import("../http3/runtime.zig").StreamingResponseEvent;
+    /// Result of `Server.serveConcurrent`; requests/errors stay alive until the
+    /// batch is deinitialized.
+    pub const ConcurrentResult = @import("../http3/runtime.zig").ConcurrentServeResult;
     pub const Server = @import("../http3/runtime.zig").Server;
 };
 
@@ -57,6 +63,8 @@ test "streaming aliases resolve to public runtime types" {
     _ = http2.RequestHead;
     _ = http2.Stream;
     _ = http2.Event;
+    _ = http2.ConcurrentResult;
     _ = http3.RequestEvent;
     _ = http3.ResponseEvent;
+    _ = http3.ConcurrentResult;
 }
