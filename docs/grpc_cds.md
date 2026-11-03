@@ -95,11 +95,13 @@ publication errors leave the response undecided and available for NACK.
 `envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext`: an optional SNI
 name, inline `trusted_ca`, one inline certificate chain/private-key pair, and
 `tls_params` minimum/maximum protocol versions using Envoy's `TlsProtocol`
-values (`AUTO` defaults to TLS 1.2/1.3; TLS 1.0/1.1 are rejected). EDS, STATIC
-and DNS endpoints become TLS targets; without `trusted_ca` the
-platform roots are used. SDS secret configs, certificate providers, cipher-suite
-and curve lists, subject-alt-name matching, file/environment data sources and
-other transport sockets are explicitly rejected. `transport_socket_matches`,
+values (`AUTO` defaults to TLS 1.2/1.3; TLS 1.0/1.1 are rejected) and a TLS 1.2
+cipher-suite allowlist using the OpenSSL names for the supported ECDHE
+GCM/ChaCha suites. EDS, STATIC and DNS endpoints become TLS targets; without
+`trusted_ca` the platform roots are used. SDS secret configs, certificate
+providers, ECDH curve lists, subject-alt-name matching, file/environment data
+sources and other transport sockets are explicitly rejected.
+`transport_socket_matches`,
 outlier_detection, lrs_server and upstream_config are also rejected.
 Aggregate/custom cluster discovery is unsupported. This slice handles
 EDS-backed, STATIC, STRICT_DNS and LOGICAL_DNS clusters. Typed delta CDS/EDS

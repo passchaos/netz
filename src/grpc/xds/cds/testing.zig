@@ -88,7 +88,14 @@ pub fn staticClusterTls(gpa: std.mem.Allocator, name: []const u8, host: []const 
 pub fn upstreamTls(gpa: std.mem.Allocator, trusted_ca: []const u8, sni: []const u8) ![]u8 {
     return upstreamTlsWithVersions(gpa, trusted_ca, sni, null);
 }
-pub fn upstreamTlsWithVersions(gpa: std.mem.Allocator, trusted_ca: []const u8, sni: []const u8, versions: ?struct { min: u32, max: u32 }) ![]u8 {
+pub const Versions = struct { min: u32, max: u32 };
+pub fn upstreamTlsWithVersions(gpa: std.mem.Allocator, trusted_ca: []const u8, sni: []const u8, versions: ?Versions) ![]u8 {
+    return buildUpstreamTls(gpa, trusted_ca, sni, versions, &.{});
+}
+pub fn upstreamTlsWithCiphers(gpa: std.mem.Allocator, trusted_ca: []const u8, sni: []const u8, ciphers: []const []const u8) ![]u8 {
+    return buildUpstreamTls(gpa, trusted_ca, sni, null, ciphers);
+}
+fn buildUpstreamTls(gpa: std.mem.Allocator, trusted_ca: []const u8, sni: []const u8, versions: ?Versions, ciphers: []const []const u8) ![]u8 {
     var trusted = Builder{ .allocator = gpa };
     defer trusted.deinit();
     try trusted.bytes(2, trusted_ca);
@@ -97,11 +104,14 @@ pub fn upstreamTlsWithVersions(gpa: std.mem.Allocator, trusted_ca: []const u8, s
     try validation.bytes(1, trusted.data.items);
     var common = Builder{ .allocator = gpa };
     defer common.deinit();
-    if (versions) |value| {
+    if (versions != null or ciphers.len != 0) {
         var params = Builder{ .allocator = gpa };
         defer params.deinit();
-        try params.number(1, value.min);
-        try params.number(2, value.max);
+        if (versions) |value| {
+            try params.number(1, value.min);
+            try params.number(2, value.max);
+        }
+        for (ciphers) |name| try params.bytes(3, name);
         try common.bytes(1, params.data.items);
     }
     try common.bytes(3, validation.data.items);

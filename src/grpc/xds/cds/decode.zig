@@ -251,28 +251,50 @@ fn validationContext(bytes: []const u8, limits: Limits) Error![]const u8 {
     return trusted_ca orelse error.InvalidCdsResource;
 }
 
-fn tlsParameters(bytes: []const u8) Error!tls_material.VersionPolicy {
+const TlsParams = struct {
+    version_policy: tls_material.VersionPolicy,
+    tls12_cipher_suites: []const tls_material.Tls12CipherSuite,
+};
+
+fn cipherSuite(name: []const u8) ?tls_material.Tls12CipherSuite {
+    const map = std.StaticStringMap(tls_material.Tls12CipherSuite).initComptime(.{
+        .{ "ECDHE-ECDSA-AES128-GCM-SHA256", .ecdhe_ecdsa_aes_128_gcm_sha256 },
+        .{ "ECDHE-ECDSA-AES256-GCM-SHA384", .ecdhe_ecdsa_aes_256_gcm_sha384 },
+        .{ "ECDHE-RSA-AES128-GCM-SHA256", .ecdhe_rsa_aes_128_gcm_sha256 },
+        .{ "ECDHE-RSA-AES256-GCM-SHA384", .ecdhe_rsa_aes_256_gcm_sha384 },
+        .{ "ECDHE-ECDSA-CHACHA20-POLY1305", .ecdhe_ecdsa_chacha20_poly1305_sha256 },
+        .{ "ECDHE-RSA-CHACHA20-POLY1305", .ecdhe_rsa_chacha20_poly1305_sha256 },
+    });
+    return map.get(name);
+}
+
+fn tlsParameters(arena: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!TlsParams {
     var minimum: ?u32 = null;
     var maximum: ?u32 = null;
+    var suites: std.ArrayList(tls_material.Tls12CipherSuite) = .empty;
     var reader: pb.Reader = .{ .bytes = bytes };
     while (try reader.next()) |field| {
-        if (field.number == 1 and field.wire_type == 0) minimum = try pb.u32Value(&reader) else if (field.number == 2 and field.wire_type == 0) maximum = try pb.u32Value(&reader) else if ((field.number == 3 or field.number == 4) and field.wire_type == 2) return error.UnsupportedCdsFeature else try reader.skip(field);
+        if (field.number == 1 and field.wire_type == 0) minimum = try pb.u32Value(&reader) else if (field.number == 2 and field.wire_type == 0) maximum = try pb.u32Value(&reader) else if (field.number == 3 and field.wire_type == 2) {
+            const name = try pb.text(&reader, limits.max_text_bytes);
+            try suites.append(arena, cipherSuite(name) orelse return error.UnsupportedCdsFeature);
+        } else if (field.number == 4 and field.wire_type == 2) return error.UnsupportedCdsFeature else try reader.skip(field);
     }
     // Envoy TlsProtocol: AUTO=0, TLSv1_0=1, TLSv1_1=2, TLSv1_2=3, TLSv1_3=4.
     const min = if (minimum) |value| if (value == 0) @as(u32, 3) else value else 3;
     const max = if (maximum) |value| if (value == 0) @as(u32, 4) else value else 4;
     if (min < 3 or max < 3 or min > max or max > 4) return if (min < 3 or max < 3) error.UnsupportedCdsFeature else error.InvalidCdsResource;
-    if (max == 3) return .tls12_only;
-    if (min == 4) return .tls13_only;
-    return .tls12_and_tls13;
+    const version_policy: tls_material.VersionPolicy = if (max == 3) .tls12_only else if (min == 4) .tls13_only else .tls12_and_tls13;
+    return .{ .version_policy = version_policy, .tls12_cipher_suites = try suites.toOwnedSlice(arena) };
 }
 
-fn commonTlsContext(bytes: []const u8, limits: Limits) Error!tls_material.Config {
+fn commonTlsContext(arena: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!tls_material.Config {
     var result: tls_material.Config = .{};
     var reader: pb.Reader = .{ .bytes = bytes };
     while (try reader.next()) |field| {
         if (field.number == 1 and field.wire_type == 2) {
-            result.version_policy = try tlsParameters(try reader.bytesValue());
+            const params = try tlsParameters(arena, try reader.bytesValue(), limits);
+            result.version_policy = params.version_policy;
+            result.tls12_cipher_suites = params.tls12_cipher_suites;
         } else if (field.number == 2 and field.wire_type == 2) {
             if (result.certificate_chain.len != 0) return error.UnsupportedCdsFeature;
             const certificate = try tlsCertificate(try reader.bytesValue(), limits);
@@ -287,16 +309,17 @@ fn commonTlsContext(bytes: []const u8, limits: Limits) Error!tls_material.Config
     return result;
 }
 
-fn upstreamTlsContext(bytes: []const u8, limits: Limits) Error!tls_material.Config {
+fn upstreamTlsContext(arena: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!tls_material.Config {
     var result: tls_material.Config = .{};
     var reader: pb.Reader = .{ .bytes = bytes };
     while (try reader.next()) |field| {
         if (field.number == 1 and field.wire_type == 2) {
-            const common = try commonTlsContext(try reader.bytesValue(), limits);
+            const common = try commonTlsContext(arena, try reader.bytesValue(), limits);
             result.trusted_ca = common.trusted_ca;
             result.certificate_chain = common.certificate_chain;
             result.private_key = common.private_key;
             result.version_policy = common.version_policy;
+            result.tls12_cipher_suites = common.tls12_cipher_suites;
         } else if (field.number == 2 and field.wire_type == 2) {
             const value = try pb.text(&reader, 255);
             result.server_name = value;
@@ -307,7 +330,7 @@ fn upstreamTlsContext(bytes: []const u8, limits: Limits) Error!tls_material.Conf
     return result;
 }
 
-fn transportSocket(bytes: []const u8, limits: Limits) Error!tls_material.Config {
+fn transportSocket(arena: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!tls_material.Config {
     var name: []const u8 = "";
     var typed: ?[]const u8 = null;
     var reader: pb.Reader = .{ .bytes = bytes };
@@ -322,7 +345,7 @@ fn transportSocket(bytes: []const u8, limits: Limits) Error!tls_material.Config 
         if (field.number == 1 and field.wire_type == 2) any_type_url = try any.string() else if (field.number == 2 and field.wire_type == 2) value = try any.bytesValue() else try any.skip(field);
     }
     if (!std.mem.eql(u8, any_type_url, "type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext")) return error.UnsupportedCdsFeature;
-    return upstreamTlsContext(value orelse return error.InvalidCdsResource, limits);
+    return upstreamTlsContext(arena, value orelse return error.InvalidCdsResource, limits);
 }
 
 pub fn decode(gpa: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!Owned {
@@ -376,7 +399,7 @@ pub fn decode(gpa: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!O
         },
         else => return error.UnsupportedCdsFeature,
     }
-    const tls: ?tls_material.Config = if (transport) |raw| try transportSocket(raw, limits) else null;
+    const tls: ?tls_material.Config = if (transport) |raw| try transportSocket(arena, raw, limits) else null;
     result.value = .{ .name = name, .eds_service_name = service, .discovery = discovery, .inline_assignment = inline_assignment, .host_endpoints = host_endpoints, .tls = tls, .max_concurrent_requests = if (breaker) |raw| try circuit(raw, limits.max_thresholds) else 1024, .policy = if (typed_policy) |raw| try policy.typed(arena, raw, limits.max_policies, limits.max_text_bytes, 0) else try policy.legacy(arena, lb, ring_config) };
     // Converted policies must satisfy the same configuration parser/runtime
     // contract as direct callers, including complete range validation.

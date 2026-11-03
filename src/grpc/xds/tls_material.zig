@@ -5,6 +5,7 @@ const tls_stream = @import("../../tls/mod.zig").stream;
 const server_identity_file = @import("../../tls/server_identity_file.zig");
 
 pub const VersionPolicy = tls_stream.VersionPolicy;
+pub const Tls12CipherSuite = tls_stream.Tls12CipherSuite;
 
 pub const Config = struct {
     server_name: []const u8 = "",
@@ -12,6 +13,7 @@ pub const Config = struct {
     certificate_chain: []const u8 = "",
     private_key: []const u8 = "",
     version_policy: ?tls_stream.VersionPolicy = null,
+    tls12_cipher_suites: ?[]const tls_stream.Tls12CipherSuite = null,
 };
 
 pub const Error = std.mem.Allocator.Error || server_identity_file.Error || error{
@@ -28,6 +30,7 @@ pub const Material = struct {
     identity: ?server_identity_file.Identity = null,
     server_name: []const u8 = "",
     version_policy: ?tls_stream.VersionPolicy = null,
+    tls12_cipher_suites: []const tls_stream.Tls12CipherSuite = &.{},
 
     pub fn create(gpa: std.mem.Allocator, io: std.Io, config: Config) Error!*Material {
         if ((config.certificate_chain.len == 0) != (config.private_key.len == 0)) {
@@ -37,6 +40,9 @@ pub const Material = struct {
         self.* = .{ .allocator = gpa, .version_policy = config.version_policy };
         errdefer self.deinit();
         self.server_name = try gpa.dupe(u8, config.server_name);
+        if (config.tls12_cipher_suites) |suites| {
+            if (suites.len != 0) self.tls12_cipher_suites = try gpa.dupe(tls_stream.Tls12CipherSuite, suites);
+        }
         if (config.trusted_ca.len != 0) {
             addCerts(gpa, io, &self.bundle, config.trusted_ca) catch return error.InvalidTlsMaterial;
             if (self.bundle.map.count() == 0) return error.InvalidTlsMaterial;
@@ -52,6 +58,7 @@ pub const Material = struct {
     }
     pub fn deinit(self: *Material) void {
         if (self.server_name.len != 0) self.allocator.free(self.server_name);
+        if (self.tls12_cipher_suites.len != 0) self.allocator.free(self.tls12_cipher_suites);
         if (self.identity) |*identity| identity.deinit();
         self.bundle.deinit(self.allocator);
         self.allocator.destroy(self);
@@ -62,6 +69,7 @@ pub const Material = struct {
     pub fn options(self: *Material) http2.runtime.TlsConnectOptions {
         var result: http2.runtime.TlsConnectOptions = .{};
         if (self.version_policy) |policy| result.protocol_policy = policy;
+        if (self.tls12_cipher_suites.len != 0) result.tls12_cipher_suites = self.tls12_cipher_suites;
         if (self.bundle_loaded) result.ca_bundle = .{ .bundle = &self.bundle, .lock = &self.lock };
         if (self.identity) |*identity| {
             const value = identity.serverIdentity();

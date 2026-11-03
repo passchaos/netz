@@ -171,6 +171,20 @@ test "gRPC CDS decodes inline upstream TLS transport sockets" {
     const encoded_legacy = try fixture.staticClusterTls(gpa, "backend", "127.0.0.1", 1001, legacy);
     defer gpa.free(encoded_legacy);
     try std.testing.expectError(error.UnsupportedCdsFeature, resource.decode(gpa, encoded_legacy, .{}));
+    const ciphers = try fixture.upstreamTlsWithCiphers(gpa, pem, "localhost", &.{ "ECDHE-ECDSA-AES128-GCM-SHA256", "ECDHE-RSA-CHACHA20-POLY1305" });
+    defer gpa.free(ciphers);
+    const encoded_ciphers = try fixture.staticClusterTls(gpa, "backend", "127.0.0.1", 1001, ciphers);
+    defer gpa.free(encoded_ciphers);
+    var ciphers_decoded = try resource.decode(gpa, encoded_ciphers, .{});
+    defer ciphers_decoded.deinit();
+    try std.testing.expectEqual(@as(usize, 2), ciphers_decoded.value.tls.?.tls12_cipher_suites.?.len);
+    try std.testing.expectEqual(@import("../tls_material.zig").Tls12CipherSuite.ecdhe_ecdsa_aes_128_gcm_sha256, ciphers_decoded.value.tls.?.tls12_cipher_suites.?[0]);
+    try std.testing.expectEqual(@import("../tls_material.zig").Tls12CipherSuite.ecdhe_rsa_chacha20_poly1305_sha256, ciphers_decoded.value.tls.?.tls12_cipher_suites.?[1]);
+    const unknown_cipher = try fixture.upstreamTlsWithCiphers(gpa, pem, "localhost", &.{"UNKNOWN-CIPHER"});
+    defer gpa.free(unknown_cipher);
+    const encoded_unknown = try fixture.staticClusterTls(gpa, "backend", "127.0.0.1", 1001, unknown_cipher);
+    defer gpa.free(encoded_unknown);
+    try std.testing.expectError(error.UnsupportedCdsFeature, resource.decode(gpa, encoded_unknown, .{}));
 }
 
 test "gRPC CDS rejects unsupported discovery security invalid identities and ring ranges" {
