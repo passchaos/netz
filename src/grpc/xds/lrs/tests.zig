@@ -118,3 +118,36 @@ test "gRPC LRS integration converts channel counters into cluster reports" {
         }
     }
 }
+
+test "gRPC LRS reporter applies response interval and cluster filter" {
+    const grpc = @import("../../mod.zig");
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var first = try grpc.SharedChannel.init(allocator, io, .{ .cleartext_ip = .{ .address = .{ .ip4 = .loopback(1) } } }, .{});
+    defer first.deinit();
+    var first_sender = first.sender();
+    defer first_sender.deinit();
+    var second = try grpc.SharedChannel.init(allocator, io, .{ .cleartext_ip = .{ .address = .{ .ip4 = .loopback(1) } } }, .{});
+    defer second.deinit();
+    var client = try @import("client.zig").Client.init(allocator, first_sender, .{ .node = .{ .id = "node" } });
+    defer client.deinit();
+    var reporter = @import("reporter.zig").Reporter.init(allocator, &client, first, .{ .interval_ns = std.time.ns_per_s });
+    defer reporter.deinit();
+    try reporter.onResponse(.{ .clusters = &.{"a"}, .interval_ns = 50 * std.time.ns_per_ms, .send_all_clusters = false });
+    try std.testing.expectEqual(@as(u64, 50 * std.time.ns_per_ms), reporter.interval_ns);
+    try std.testing.expectEqual(@as(usize, 1), reporter.filter.?.len);
+    try std.testing.expectEqualStrings("a", reporter.filter.?[0]);
+    try reporter.onResponse(.{ .clusters = &.{}, .send_all_clusters = true });
+    try std.testing.expect(reporter.filter == null);
+    const now = std.Io.Clock.Timestamp.now(io, .awake);
+    reporter.last_report_ns = now.raw.nanoseconds - 100 * std.time.ns_per_ms;
+    const next = reporter.nextDeadline();
+    try std.testing.expectEqual(now.raw.nanoseconds - 50 * std.time.ns_per_ms, next.raw.nanoseconds);
+
+    const second_sender = second.sender();
+    try client.rebind(second_sender, .{ .path = @import("client.zig").path });
+    try std.testing.expect(client.stream == null);
+    try std.testing.expect(client.sender.state == second.state);
+    try std.testing.expect(!client.node_sent);
+}

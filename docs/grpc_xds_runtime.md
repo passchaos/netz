@@ -104,7 +104,7 @@ and forget expired accepted versions. The
 [bootstrap parser and control-plane failover](grpc_bootstrap.md)
 select `http://` servers, retry refused servers and rebind the same delta client
 with `initial_resource_versions` replay. Certificate providers and certificate rotation,
-authority-specific control planes, aggregate/DNS CDS and full security, LRS periodic reporting and endpoint granularity,
+authority-specific control planes, aggregate/DNS CDS and full security, LRS endpoint granularity and background scheduling,
 non-router filters and capture/rewriting remain open. Unsupported resource
 features continue to fail typed validation rather than claim deployment
 support.

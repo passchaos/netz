@@ -58,6 +58,21 @@ pub const Client = struct {
         self.stream = null;
         self.node_sent = false;
     }
+    /// Move the client to another channel while retaining the encoded node.
+    /// Ownership of `sender` transfers to the client.
+    pub fn rebind(self: *Client, sender: shared.Sender, request: streaming.RequestOptions) Error!void {
+        var owned_request = request;
+        owned_request.path = path;
+        owned_request.max_message_size = @min(owned_request.max_message_size, self.limits.max_message_bytes);
+        var owned = try @import("../../channel/shared/request_inputs.zig").clone(self.allocator, owned_request);
+        errdefer owned.inputs.deinit();
+        self.disconnect();
+        self.inputs.deinit();
+        self.sender.deinit();
+        self.inputs = owned.inputs;
+        self.request = owned.options;
+        self.sender = sender;
+    }
     fn send(self: *Client, request: codec.Request, deadline: std.Io.Clock.Timestamp) Error!void {
         const stream = self.stream orelse return error.LrsNotConnected;
         _ = try deadline_policy.usableAwake(self.sender.state.io, deadline);

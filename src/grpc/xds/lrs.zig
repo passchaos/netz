@@ -6,6 +6,8 @@ pub const Options = @import("lrs/client.zig").Options;
 pub const Error = @import("lrs/client.zig").Error;
 pub const Event = @import("lrs/client.zig").Event;
 pub const integration = @import("lrs/integration.zig");
+pub const Reporter = @import("lrs/reporter.zig").Reporter;
+pub const ReporterOptions = @import("lrs/reporter.zig").Options;
 test {
     _ = @import("lrs/tests.zig");
     _ = @import("lrs/transport_tests.zig");

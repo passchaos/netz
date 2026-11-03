@@ -54,8 +54,6 @@ ambiguous write failure disconnects the stream; the next `connectWithDeadline`
 starts a fresh stream and sends the node again. The caller drives reporting
 from the response interval. There is no ACK/NACK protocol in LRS.
 
-## Verification
-
 ## Channel counters
 
 `SharedChannel.Options.enable_lrs_stats = true` opts into per-cluster counters.
@@ -73,15 +71,28 @@ ordinary channels keep their existing hot path.
 `lrs.integration.build` converts them into `ClusterStats` with the caller's
 locality and reporting interval. Cluster names in the report borrow the
 snapshot storage, so keep the snapshot alive until the report is encoded.
-Endpoint-granularity stats and a periodic report scheduler remain follow-up
-work.
+## Caller-driven reporter
+
+`lrs.Reporter` wraps a connected `Client` and a source SharedChannel. Its
+`onResponse` applies the server interval and cluster set: `send_all_clusters`
+clears the filter, an explicit list reports exactly those clusters, and an
+empty list reports none. `nextDeadline` returns the next interval boundary and
+`reportIfDueWithDeadline` writes only when that boundary has passed.
+`reportWithDeadline` builds a filtered snapshot report immediately. The caller
+remains responsible for driving the loop.
+
+`Client.rebind` moves the LRS client to a new channel while retaining the
+encoded node, so an application can compose the reporter with ControlPlane
+failover or TLS reload. The next connect sends the node again on the new
+stream.
 
 ## Verification
 
 Native tests cover request/response round trips, locality counters, dropped
 categories, intervals, malformed/duplicate/over-limit input, UTF-8 rejection,
 per-cluster unary and streaming counter aggregation, in-progress tracking,
-channel drop and per-category attribution, integration conversion, and a real
+channel drop and per-category attribution, integration conversion, reporter
+interval/filter/rebind behavior, and a real
 loopback duplex session that observes the node, a response, a report with exact
 counters, a second `send_all_clusters` response, a terminal, and node replay on
 a replacement stream. See
@@ -96,8 +107,7 @@ cluster/service names, dropped requests and interval, then a second
 
 ## Remaining integration
 
-Endpoint-granularity stats, a periodic report scheduler and ControlPlane
-failover/reload composition remain follow-up work.
-Unary and streaming channel counters, envelopes and caller-driven reporting are
-complete.
-caller-driven reporting path are complete.
+Endpoint-granularity stats, an automatic background report scheduler and
+ControlPlane failover/reload composition remain follow-up work. Unary and
+streaming channel counters, envelopes, the caller-driven reporter and
+rebinding are complete.
