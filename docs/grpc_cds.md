@@ -94,8 +94,9 @@ publication errors leave the response undecided and available for NACK.
 `transport_socket` accepts one inline
 `envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext`: an optional SNI
 name, inline `trusted_ca`, one inline certificate chain/private-key pair, and
-`tls_params` minimum/maximum protocol versions (TLS 1.2/1.3). EDS, STATIC and
-DNS endpoints become TLS targets; without `trusted_ca` the
+`tls_params` minimum/maximum protocol versions using Envoy's `TlsProtocol`
+values (`AUTO` defaults to TLS 1.2/1.3; TLS 1.0/1.1 are rejected). EDS, STATIC
+and DNS endpoints become TLS targets; without `trusted_ca` the
 platform roots are used. SDS secret configs, certificate providers, cipher-suite
 and curve lists, subject-alt-name matching, file/environment data sources and
 other transport sockets are explicitly rejected. `transport_socket_matches`,

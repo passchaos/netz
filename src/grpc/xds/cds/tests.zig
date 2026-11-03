@@ -147,9 +147,9 @@ test "gRPC CDS decodes inline upstream TLS transport sockets" {
     try std.testing.expectEqualStrings("localhost", decoded.value.tls.?.server_name);
     try std.testing.expect(std.mem.indexOf(u8, decoded.value.tls.?.trusted_ca, "BEGIN CERTIFICATE") != null);
     for ([_]struct { min: u32, max: u32, want: @import("../tls_material.zig").VersionPolicy }{
-        .{ .min = 2, .max = 2, .want = .tls12_only },
-        .{ .min = 3, .max = 3, .want = .tls13_only },
-        .{ .min = 2, .max = 3, .want = .tls12_and_tls13 },
+        .{ .min = 3, .max = 3, .want = .tls12_only },
+        .{ .min = 4, .max = 4, .want = .tls13_only },
+        .{ .min = 3, .max = 4, .want = .tls12_and_tls13 },
     }) |case| {
         const versioned = try fixture.upstreamTlsWithVersions(gpa, pem, "localhost", .{ .min = case.min, .max = case.max });
         defer gpa.free(versioned);
@@ -159,6 +159,18 @@ test "gRPC CDS decodes inline upstream TLS transport sockets" {
         defer versioned_decoded.deinit();
         try std.testing.expectEqual(case.want, versioned_decoded.value.tls.?.version_policy.?);
     }
+    const auto = try fixture.upstreamTlsWithVersions(gpa, pem, "localhost", .{ .min = 0, .max = 0 });
+    defer gpa.free(auto);
+    const encoded_auto = try fixture.staticClusterTls(gpa, "backend", "127.0.0.1", 1001, auto);
+    defer gpa.free(encoded_auto);
+    var auto_decoded = try resource.decode(gpa, encoded_auto, .{});
+    defer auto_decoded.deinit();
+    try std.testing.expectEqual(@import("../tls_material.zig").VersionPolicy.tls12_and_tls13, auto_decoded.value.tls.?.version_policy.?);
+    const legacy = try fixture.upstreamTlsWithVersions(gpa, pem, "localhost", .{ .min = 1, .max = 4 });
+    defer gpa.free(legacy);
+    const encoded_legacy = try fixture.staticClusterTls(gpa, "backend", "127.0.0.1", 1001, legacy);
+    defer gpa.free(encoded_legacy);
+    try std.testing.expectError(error.UnsupportedCdsFeature, resource.decode(gpa, encoded_legacy, .{}));
 }
 
 test "gRPC CDS rejects unsupported discovery security invalid identities and ring ranges" {

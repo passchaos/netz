@@ -258,11 +258,12 @@ fn tlsParameters(bytes: []const u8) Error!tls_material.VersionPolicy {
     while (try reader.next()) |field| {
         if (field.number == 1 and field.wire_type == 0) minimum = try pb.u32Value(&reader) else if (field.number == 2 and field.wire_type == 0) maximum = try pb.u32Value(&reader) else if ((field.number == 3 or field.number == 4) and field.wire_type == 2) return error.UnsupportedCdsFeature else try reader.skip(field);
     }
-    const min = minimum orelse 0;
-    const max = maximum orelse 3;
-    if (min > max or min > 3 or max > 3) return error.InvalidCdsResource;
-    if (max <= 2) return .tls12_only;
-    if (min >= 3) return .tls13_only;
+    // Envoy TlsProtocol: AUTO=0, TLSv1_0=1, TLSv1_1=2, TLSv1_2=3, TLSv1_3=4.
+    const min = if (minimum) |value| if (value == 0) @as(u32, 3) else value else 3;
+    const max = if (maximum) |value| if (value == 0) @as(u32, 4) else value else 4;
+    if (min < 3 or max < 3 or min > max or max > 4) return if (min < 3 or max < 3) error.UnsupportedCdsFeature else error.InvalidCdsResource;
+    if (max == 3) return .tls12_only;
+    if (min == 4) return .tls13_only;
     return .tls12_and_tls13;
 }
 
