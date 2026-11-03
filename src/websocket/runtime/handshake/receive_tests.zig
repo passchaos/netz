@@ -128,7 +128,7 @@ fn rejection(comptime transport: Transport, framing: Framing, budget: Budget, de
 
     const options = runtime.ConnectOptions{
         .host = "localhost",
-        .limits = .{ .http1_handshake_timeout = if (delivery == .complete or budget == .outer) .fromSeconds(3) else .fromMilliseconds(150) },
+        .limits = .{ .http1_handshake_timeout = if (delivery == .complete or budget == .outer) .fromSeconds(3) else if (delivery == .stalled) .fromSeconds(1) else .fromMilliseconds(150) },
         .tls_identity = if (transport == .native_tls) .{ .server_verifier = .{ .pinned_ecdsa_p256_public_key = key.public_key.toUncompressedSec1() }, .protocol_policy = .tls13_only } else null,
     };
     // The native TLS arm pins the test identity; the standard TLS arm exercises

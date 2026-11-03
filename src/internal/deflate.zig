@@ -1075,10 +1075,7 @@ test "focused wrapped decoder rejects corruption and trailing bytes" {
         const trailed = try std.mem.concat(allocator, u8, &.{ encoded, "x" });
         defer allocator.free(trailed);
         try std.testing.expectError(
-            if (container == .zlib)
-                error.TrailingData
-            else
-                error.OutputLimitExceeded,
+            error.TrailingData,
             switch (container) {
                 .raw => unreachable,
                 .zlib => decodeZlibAllocLimited(
@@ -1097,10 +1094,10 @@ test "focused wrapped decoder rejects corruption and trailing bytes" {
         defer allocator.free(corrupted);
         corrupted[corrupted.len - 1] ^= 1;
         try std.testing.expectError(
-            if (container == .zlib)
-                error.ChecksumMismatch
-            else
-                error.OutputLimitExceeded,
+            // zlib's last trailer byte is Adler-32; gzip's is ISIZE, so a
+            // flipped final byte is a size mismatch rather than a checksum
+            // failure.
+            if (container == .zlib) error.ChecksumMismatch else error.SizeMismatch,
             switch (container) {
                 .raw => unreachable,
                 .zlib => decodeZlibAllocLimited(

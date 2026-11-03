@@ -914,6 +914,33 @@ test "QUIC endpoint server routes two authenticated connections on one socket" {
         .raw = .fromSeconds(15),
         .clock = .awake,
     });
+    // A client may retire its original connection ID in the same packet that
+    // carries its request reply, so retirement must be observed in both the
+    // reply and retirement receive loops. Track by connection handle so a
+    // retransmitted packet cannot satisfy the second client's slot.
+    var retired_handles = [_]?u64{null} ** clients.len;
+    const client_count = clients.len;
+    const Retirement = struct {
+        fn note(handles: *[client_count]?u64, handle: u64, frames: anytype) void {
+            for (frames) |frame| {
+                if (frame != .retire_connection_id or
+                    frame.retire_connection_id.sequence_number != 0) continue;
+                for (&handles.*) |*slot| {
+                    if (slot.*) |seen| {
+                        if (seen == handle) return;
+                        continue;
+                    }
+                    slot.* = handle;
+                    return;
+                }
+            }
+        }
+        fn count(handles: [client_count]?u64) usize {
+            var total: usize = 0;
+            for (handles) |slot| total += @intFromBool(slot != null);
+            return total;
+        }
+    };
     var replies: usize = 0;
     var receive_storage: [4 * 4096]u8 = undefined;
     var receive_events: [4]endpoint_server.VisitEvent = undefined;
@@ -997,24 +1024,22 @@ test "QUIC endpoint server routes two authenticated connections on one socket" {
             }
         }
     }
-    var retirements: usize = 0;
-    while (retirements < clients.len) {
+    while (Retirement.count(retired_handles) < clients.len) {
         var event = server.receiveWithDeadline(&versions, deadline) catch |err| {
             std.debug.print(
                 "shared endpoint server stage=retirements count={d} error={s}\n",
-                .{ retirements, @errorName(err) },
+                .{ Retirement.count(retired_handles), @errorName(err) },
             );
             return err;
         };
         defer event.deinit(allocator);
         switch (event) {
             .packet => |*packet| {
-                for (packet.packet.frames) |frame| {
-                    retirements += @intFromBool(
-                        frame == .retire_connection_id and
-                            frame.retire_connection_id.sequence_number == 0,
-                    );
-                }
+                Retirement.note(
+                    &retired_handles,
+                    packet.connection_handle,
+                    packet.packet.frames,
+                );
                 _ = try server.acknowledgePacketIfNeeded(packet);
             },
             .timer => {},
@@ -1022,6 +1047,7 @@ test "QUIC endpoint server routes two authenticated connections on one socket" {
             .connected, .unrouted => return error.TestUnexpectedResult,
         }
     }
+    try std.testing.expectEqual(clients.len, Retirement.count(retired_handles));
 
     for (threads) |thread| thread.join();
     started = 0;

@@ -24237,7 +24237,9 @@ test "HTTP/2 connection keeps optional state compact" {
             @sizeOf(ClientDuplexStream),
         );
         try std.testing.expectEqual(
-            @as(usize, 208),
+            // Includes the pull-body `current_body` DATA owner and retained
+            // request trailers used by `nextBody`; both are per active stream.
+            @as(usize, 304),
             @sizeOf(ServerDuplexStream),
         );
         try std.testing.expectEqual(
