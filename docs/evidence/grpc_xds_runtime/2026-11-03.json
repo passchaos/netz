@@ -10,7 +10,7 @@
     "staging": "immutable identity/CDS/projected EDS references cloned into plans; all name sets allocated and type capacity reserved in a batch before one target/config/selector transaction; commit names/caches before version and ACK output",
     "lifetime": "retained target inventory owns prefixed paths and EDS references; projection epochs retain dependencies while old config/call references remain; synchronize/later updates prune unused cache",
     "budgets": "cluster/projection and unique route+CDS+EDS+target storage bounds, start/admission deadline priority, local non-LB configuration preserved and channel/cluster admission composed",
-    "aggregate": "CDS field 38 envoy.clusters.aggregate expands to ordered leaf subscriptions; target publication emits a priority_experimental policy over the live leaf child policies, with missing leaves falling back to round_robin",
+    "aggregate": "CDS field 38 envoy.clusters.aggregate expands to ordered leaf subscriptions; target publication emits a priority_experimental policy over the live leaf child policies, keeps the aggregate name as a manager selection key without consuming the leaf endpoint path, and was verified end-to-end with ordered fallback from leaf-a to leaf-b after retiring leaf-a",
     "open": "application drives serialized ADS/reconnect/synchronization; non-router filters and full rewrite integration remain open"
   },
   "verification": {
@@ -58,6 +58,12 @@
       "exit_code": 0,
       "log": "docs/evidence/grpc_xds_runtime/2026-11-03/impl-regression.Debug.log",
       "report": "docs/evidence/grpc_xds_runtime/2026-11-03/impl-regression.Debug.json"
+    },
+    "aggregate_e2e.Debug": {
+      "command": "zig build test-lib -Dtest-filter='aggregate clusters with ordered priority' --summary all",
+      "exit_code": 0,
+      "passed": 164,
+      "total": 164
     }
   },
   "interop": {
@@ -91,17 +97,17 @@
     "src/grpc/xds/ads/batch_tests.zig": "be92dcdc03c6b7a10e8d9b8d286986a004e49db5192ae0a36d36c9867b35e7e1",
     "src/grpc/xds/ads/prepared_batch.zig": "ae42649105d16f75f5d38cef8acdaaa662a2e84319f4c056160f582619595fdf",
     "src/grpc/xds/runtime.zig": "eb9547d890af235a7118a4b04433c1f79c2d3a89c6d7c4fde66cad99b8e75445",
-    "src/grpc/xds/runtime/apply_cds.zig": "a22430607f76178a7765f9912638309ba5671c5cb3ba4dafecd8395df95f0b04",
+    "src/grpc/xds/runtime/apply_cds.zig": "296695dac362acac99496c9dfe4779cd1416e4dfb65ab8fb4f3bd9298a664df1",
     "src/grpc/xds/runtime/apply_eds.zig": "18334464df31a0af12e3d1f3e21ef283f5ce4ea4dd9e1209a7db5e518bc9278b",
     "src/grpc/xds/runtime/constructor_tests.zig": "a06b63bb2aa4c83757a21a14d20f4594dfcd359f568925b53e3d2b3bfd2eb1f7",
     "src/grpc/xds/runtime/controller.zig": "ec160801588920811e1bf683b9cd15ec057413b282553e2f2036519cb15c033f",
     "src/grpc/xds/runtime/entry.zig": "d57c87b69bc82352799c45619ab0be5c966de6ad068806292cd37c3d3385dd46",
     "src/grpc/xds/runtime/errors.zig": "3e70b0c3b288dcad3c88fbcf37309faff52e60555b8a45f08b0798029629c404",
     "src/grpc/xds/runtime/options.zig": "10122b75e6bde61f91bc7d88f3bd9f1ef107cad02b6db19d0d5a31e3d4d6145a",
-    "src/grpc/xds/runtime/plan.zig": "33c045d29b3a98b7f1d77442d97000e15051a382470e9d329cf7e16e0bcedd94",
+    "src/grpc/xds/runtime/plan.zig": "1dfa7dc8abfbfffcfce8f54b5ac65171184ffc728de9e2263358619c5892e650",
     "src/grpc/xds/runtime/rollback_tests.zig": "a716de6fc76b7a7832b2f9b92879e2bad2bc45162e408f21859be711a0fbdd5a",
-    "src/grpc/xds/runtime/target.zig": "188cbb029a7b63884313836c5ae320f2bc75551babc218c330f6fd34e4b11329",
-    "src/grpc/xds/runtime/tests.zig": "65594bbda3fe2b636d307d609210bab47d7a9809e0cf898b82f8564745c110b3",
+    "src/grpc/xds/runtime/target.zig": "d71fedc8953e6162c3549babf2c5e7a1e3f1fe4648c35539255ee8cae1b26b61",
+    "src/grpc/xds/runtime/tests.zig": "da70a5ebbe33ff6103f735e8dbba576860c28ef384dab4d17ac6f3a19d783e01",
     "tools/interop/grpc_xds_runtime/README.md": "6823143eafaf0fb7410ee1afbe750079cf37fd29cfe03ed083ca9752eab5059c",
     "tools/interop/grpc_xds_runtime/client.zig": "ac1ae0dd96e93fd00ac62e2acab9d693a383b148c74817c050f1baff816364d8",
     "tools/interop/grpc_xds_runtime/peer.js": "7b20aa0c3b9629274ceca91884ce909e06ce69f3ada560e1180d90a313ea3baf",
@@ -117,7 +123,10 @@
     "src/grpc/xds/lds/apply_listener.zig": "70c89a304e8505f99a51e5ed6b7863def86180a75564e81664bd9a705939c334",
     "src/grpc/xds/lds/apply_routes.zig": "96203824485efd558985d3849fa9433924810c176b8710107f8cbc873b0c071d",
     "src/grpc/xds/lds/controller.zig": "9666bef2d6a917311c9cbbdcb99f30f521f38a5b2840f5431f56f5f31bf69076",
-    "src/grpc/xds/mod.zig": "3e1745a082103780f73814557b22cd1f5d5003790d12b4ffa654c56e403624e9"
+    "src/grpc/xds/mod.zig": "3e1745a082103780f73814557b22cd1f5d5003790d12b4ffa654c56e403624e9",
+    "src/grpc/channel/locality.zig": "7b66334a431f09e3b90a36177ff97c7b9e664563ffaad2ec957072e1eda08f71",
+    "src/grpc/channel/weighted_target.zig": "13b766062daca6508b4d6dd90191cfed1273244f93e663bef7e91b981efce220",
+    "src/grpc/channel/shared/weighted_target.zig": "7d0dd59275dc784fd4c7cf95816e6a7f9600124654faaf4be74c3cf3504e0a0d"
   },
   "reference_grpc_sha256": {
     "src/core/resolver/xds/xds_resolver.cc": "2d2c9e4b15fa899b3e118140f5f67d5fd34514d9f4a090d77fd26717cb35a251",

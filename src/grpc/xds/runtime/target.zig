@@ -202,10 +202,11 @@ pub const Target = struct {
             for (aggregate.leaves) |leaf| {
                 const leaf_policy = child_policies.get(leaf) orelse
                     try policy(arena, "round_robin", object());
+                const leaf_key = try std.fmt.allocPrint(arena, "cluster:{s}", .{leaf});
                 var child = object();
                 try field(arena, &child, "config", leaf_policy);
-                try field(arena, &priority_children, leaf, child);
-                try priorities.array.append(string(leaf));
+                try field(arena, &priority_children, leaf_key, child);
+                try priorities.array.append(string(leaf_key));
             }
             var priority = object();
             try field(arena, &priority, "children", priority_children);

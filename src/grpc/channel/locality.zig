@@ -119,7 +119,17 @@ fn expand(allocator: std.mem.Allocator, node: *const Node, endpoints: anytype, p
         },
         .cluster_manager => |value| blk: {
             const children = try allocator.dupe(config.WeightedTargetConfig.Target, value.targets);
-            for (children) |*child| child.child = try expand(allocator, child.child, endpoints, try childPath(allocator, path, child.name));
+            for (children) |*child| {
+                // An aggregate cluster child is an ordered priority over leaf
+                // clusters, not an endpoint path element of its own. Leaf paths
+                // already start with the leaf cluster key, so keep the parent
+                // path for priority children and let them match the leaves.
+                const child_path = switch (child.child.*) {
+                    .priority => path,
+                    else => try childPath(allocator, path, child.name),
+                };
+                child.child = try expand(allocator, child.child, endpoints, child_path);
+            }
             break :blk .{ .cluster_manager = .{ .targets = children } };
         },
         .priority => |value| blk: {

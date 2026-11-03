@@ -154,6 +154,90 @@ test "gRPC xDS runtime publishes STATIC clusters without an EDS subscription" {
     try std.testing.expectEqual(@as(usize, 1), channel.configuredEndpointCount());
 }
 
+test "gRPC xDS runtime serves aggregate clusters with ordered priority fallback" {
+    var threaded = std.Io.Threaded.init(gpa, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var a_server = try grpc.runtime.Server.listen(gpa, io, .{ .ip4 = .loopback(0) }, .{}, 4096);
+    var a_live = true;
+    defer if (a_live) a_server.deinit();
+    var b_server = try grpc.runtime.Server.listen(gpa, io, .{ .ip4 = .loopback(0) }, .{}, 4096);
+    defer b_server.deinit();
+    const Peer = struct {
+        body: []const u8,
+        fn run(listener: *grpc.runtime.Server, body: []const u8) !void {
+            var connection = try listener.acceptWithTimeout(.fromSeconds(3));
+            defer connection.deinit();
+            var unary = try connection.readUnaryWithTimeout(.fromSeconds(3));
+            defer unary.deinit();
+            try connection.writeUnary(unary.transport.stream_id, .{ .message = body });
+        }
+    };
+    var a_task = io.async(Peer.run, .{ &a_server, "a" });
+    defer _ = a_task.cancel(io) catch {};
+    var b_task = io.async(Peer.run, .{ &b_server, "b" });
+    defer _ = b_task.cancel(io) catch {};
+
+    var channel = try grpc.SharedChannel.init(gpa, io, .{ .cleartext_ip = .{ .address = .{ .ip4 = .loopback(1) } } }, .{});
+    defer channel.deinit();
+    var sender = channel.sender();
+    defer sender.deinit();
+    var client = try ads.Client.init(gpa, sender, .{ .node = .{ .id = "test" } });
+    defer client.deinit();
+    const controller = try runtime.Controller.create(gpa, .{ .listener_name = "frontend", .target = .{ .authority = "backend.test" } });
+    defer controller.deinit();
+    _ = try controller.startWithDeadline(&client, channel, .fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(3) }));
+
+    const routes = try rds_fixture.encode(gpa, "inline", &.{"backend.test"}, &.{.{ .prefix = "/", .cluster = "aggregate" }}, null);
+    defer gpa.free(routes);
+    const listener = try lds_fixture.encode(gpa, .{ .inline_rds = routes });
+    defer gpa.free(listener);
+    try accept(controller, &client, channel, io, lds.type_url, "l1", &.{.{ .type_url = lds.type_url, .value = listener }});
+
+    var config = cds_fixture.Builder{ .allocator = gpa };
+    defer config.deinit();
+    try config.bytes(1, "leaf-a");
+    try config.bytes(1, "leaf-b");
+    var any = cds_fixture.Builder{ .allocator = gpa };
+    defer any.deinit();
+    try any.bytes(1, "type.googleapis.com/envoy.extensions.clusters.aggregate.v3.ClusterConfig");
+    try any.bytes(2, config.data.items);
+    var custom = cds_fixture.Builder{ .allocator = gpa };
+    defer custom.deinit();
+    try custom.bytes(1, "envoy.clusters.aggregate");
+    try custom.bytes(2, any.data.items);
+    var extra = cds_fixture.Builder{ .allocator = gpa };
+    defer extra.deinit();
+    try extra.bytes(38, custom.data.items);
+    const aggregate = try cds_fixture.cluster(gpa, "aggregate", "", extra.data.items);
+    defer gpa.free(aggregate);
+    const leaf_a = try cds_fixture.staticCluster(gpa, "leaf-a", "127.0.0.1", a_server.address().getPort());
+    defer gpa.free(leaf_a);
+    const leaf_b = try cds_fixture.staticCluster(gpa, "leaf-b", "127.0.0.1", b_server.address().getPort());
+    defer gpa.free(leaf_b);
+    try accept(controller, &client, channel, io, cds.type_url, "c1", &.{
+        .{ .type_url = cds.type_url, .value = aggregate },
+        .{ .type_url = cds.type_url, .value = leaf_a },
+        .{ .type_url = cds.type_url, .value = leaf_b },
+    });
+    try std.testing.expectEqual(@as(usize, 2), channel.configuredEndpointCount());
+
+    var call_sender = channel.sender();
+    defer call_sender.deinit();
+    var first = try call_sender.unary(.{ .path = "/demo.Service/Call", .message = "ok", .timeout = .{ .value = 3, .unit = .second }, .wait_for_ready = true });
+    defer first.deinit();
+    try std.testing.expectEqual(grpc.Status.ok, first.status);
+    try std.testing.expectEqualStrings("a", first.message.?.payload);
+    try a_task.await(io);
+    a_server.deinit();
+    a_live = false;
+    var second = try call_sender.unary(.{ .path = "/demo.Service/Call", .message = "ok", .timeout = .{ .value = 3, .unit = .second }, .wait_for_ready = true });
+    defer second.deinit();
+    try std.testing.expectEqual(grpc.Status.ok, second.status);
+    try std.testing.expectEqualStrings("b", second.message.?.payload);
+    try b_task.await(io);
+}
+
 test "gRPC xDS runtime connects to a STATIC cluster over inline TLS" {
     var threaded = std.Io.Threaded.init(gpa, .{ .async_limit = .unlimited });
     defer threaded.deinit();

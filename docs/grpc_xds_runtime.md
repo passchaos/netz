@@ -109,6 +109,10 @@ authority-specific control planes, other custom CDS extensions (STATIC, DNS and
 `envoy.clusters.aggregate` clusters are supported), full security (inline
 upstream TLS is supported), non-router filters and capture/rewriting remain open.
 Aggregate clusters subscribe to their ordered leaf clusters and publish an
-ordered `priority_experimental` child policy over the live leaf policies.
+ordered `priority_experimental` child policy over the live leaf policies. The
+aggregate name remains a manager selection key rather than an endpoint path
+element, so leaf cluster paths match directly. A loopback regression serves the
+first leaf, retires it, and verifies the same channel falls back to the second
+leaf in order.
 Unsupported resource features continue to fail typed validation rather than
 claim deployment support.

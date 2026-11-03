@@ -51,7 +51,7 @@ pub fn apply(self: *ctl.Controller, client: *ads.Client, update: ads.Update, des
                     break :blk item.snapshot.?;
                 }
                 break :blk try self.project(client.sender.state.io, resource, if (after.isEds()) item.snapshot.?.resource.wire else after.inline_assignment);
-            } else if (after.isEds()) try self.emptyEds(client.sender.state.io, resource) else if (after.isDns()) null else try self.project(client.sender.state.io, resource, after.inline_assignment);
+            } else if (after.isEds()) try self.emptyEds(client.sender.state.io, resource) else if (after.isDns() or after.isAggregate()) null else try self.project(client.sender.state.io, resource, after.inline_assignment);
             resource.retain();
             if (item.cluster) |old| old.release();
             if (item.snapshot) |old| old.release();

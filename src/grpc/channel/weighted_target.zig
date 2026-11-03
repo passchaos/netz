@@ -500,7 +500,7 @@ pub fn Runtime(comptime Slot: type) type {
                     config_value,
                 ),
                 .cluster_manager => |children| blk: {
-                    const node = try self.buildWeighted(children, path);
+                    const node = try self.buildWeighted(children, path, true);
                     node.cluster_manager = true;
                     break :blk node;
                 },
@@ -515,10 +515,12 @@ pub fn Runtime(comptime Slot: type) type {
                 .weighted_target => |weighted| self.buildWeighted(
                     weighted,
                     path,
+                    false,
                 ),
                 .priority => |priority| self.buildPriority(
                     priority,
                     path,
+                    null,
                 ),
                 .outlier_detection => |wrapper| self.buildOutlier(
                     wrapper,
@@ -604,6 +606,7 @@ pub fn Runtime(comptime Slot: type) type {
             self: *Self,
             config: service_config.WeightedTargetConfig,
             path: []const []const u8,
+            skip_priority_child_path: bool,
         ) BuildError!*Node {
             const owned_path = try dupePath(self.allocator, path);
             errdefer freePath(self.allocator, owned_path);
@@ -614,6 +617,11 @@ pub fn Runtime(comptime Slot: type) type {
                 self.allocator.free(children);
             }
             for (config.targets, children) |target, *child| {
+                // Aggregate clusters select by manager name, but their priority
+                // node keeps the manager path while its children are leaf
+                // cluster keys rooted at the parent path.
+                const aggregate_child = skip_priority_child_path and
+                    std.meta.activeTag(target.child.*) == .priority;
                 const child_path = try self.allocator.alloc(
                     []const u8,
                     path.len + 1,
@@ -623,7 +631,14 @@ pub fn Runtime(comptime Slot: type) type {
                 child_path[path.len] = target.name;
                 child.* = .{
                     .weight = target.weight,
-                    .node = try self.build(target.child, child_path),
+                    .node = if (aggregate_child)
+                        try self.buildPriority(
+                            target.child.priority,
+                            child_path,
+                            path,
+                        )
+                    else
+                        try self.build(target.child, child_path),
                 };
                 initialized += 1;
             }
@@ -639,6 +654,7 @@ pub fn Runtime(comptime Slot: type) type {
             self: *Self,
             config: service_config.PriorityConfig,
             path: []const []const u8,
+            children_base_path: ?[]const []const u8,
         ) BuildError!*Node {
             const owned_path = try dupePath(self.allocator, path);
             errdefer freePath(self.allocator, owned_path);
@@ -651,14 +667,15 @@ pub fn Runtime(comptime Slot: type) type {
                 for (children[0..initialized]) |child| self.destroy(child.node);
                 self.allocator.free(children);
             }
+            const base_path = children_base_path orelse path;
             for (config.children, children) |child_config, *child| {
                 const child_path = try self.allocator.alloc(
                     []const u8,
-                    path.len + 1,
+                    base_path.len + 1,
                 );
                 defer self.allocator.free(child_path);
-                @memcpy(child_path[0..path.len], path);
-                child_path[path.len] = child_config.name;
+                @memcpy(child_path[0..base_path.len], base_path);
+                child_path[base_path.len] = child_config.name;
                 child.* = .{
                     .ignore_reresolution_requests = child_config.ignore_reresolution_requests,
                     .node = try self.build(child_config.child, child_path),
