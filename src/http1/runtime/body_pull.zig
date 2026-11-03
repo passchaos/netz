@@ -56,6 +56,20 @@ pub fn Reader(comptime ConnectionType: type, comptime RuntimeError: type) type {
             pub fn acceptsTrailers(self: Head) bool {
                 return http1.requestAcceptsTrailers(self.version, self.headers);
             }
+            /// Content-decoding chain for the encoded body chunks returned by
+            /// `next`. The caller drives `step`/`finish` with output buffers.
+            pub fn streamContentDecoder(self: Head, allocator: std.mem.Allocator, options: http1.content_coding.StreamOptions) http1.content_coding.Error!http1.content_coding.StreamDecoder {
+                const request_head: Streaming.RequestHead = .{
+                    .method = self.method,
+                    .target = self.target,
+                    .version = self.version,
+                    .headers = self.headers,
+                    .body_framing = self.body_framing,
+                    .content_length = self.content_length,
+                    .must_close = self.must_close,
+                };
+                return request_head.streamContentDecoder(allocator, options);
+            }
         };
 
         allocator: std.mem.Allocator,

@@ -127,6 +127,46 @@ test "HTTP/1 pull body reader enforces max_body_bytes" {
     try task.await(io);
 }
 
+test "HTTP/1 pull body head exposes a content decoder" {
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, limits);
+    defer server.deinit();
+
+    const Peer = struct {
+        fn run(listener: *runtime.Server) !void {
+            var connection = try listener.accept();
+            defer connection.close();
+            var reader = try connection.readRequestBody(.{});
+            defer reader.deinit();
+            const head = try reader.head();
+            var decoder = try head.streamContentDecoder(listener.allocator, .{ .max_encoded_bytes = 1024, .max_decoded_bytes = 1024 });
+            defer decoder.deinit();
+            var output: [64]u8 = undefined;
+            var written: usize = 0;
+            while (try reader.next()) |chunk| {
+                const result = try decoder.step(chunk, output[written..]);
+                written += result.output_written;
+            }
+            const result = try decoder.finish(output[written..]);
+            written += result.output_written;
+            try std.testing.expectEqualStrings("hello", output[0..written]);
+            var request = try reader.takeRequest();
+            defer request.deinit(listener.allocator);
+            try connection.writeResponse(.{ .body = "ok", .request_method = request.method });
+        }
+    };
+    var task = try io.concurrent(Peer.run, .{&server});
+    defer _ = task.cancel(io) catch {};
+    var client = try runtime.Client.connect(allocator, io, server.address(), limits);
+    defer client.close();
+    var response = try client.request(.{ .method = .POST, .target = "/decode", .host = "localhost", .body = "hello" });
+    defer response.deinit(allocator);
+    try std.testing.expectEqualStrings("ok", response.response.body);
+    try task.await(io);
+}
+
 test "HTTP/1 pull body reader streams keeps alive and handles 100-continue" {
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
     defer threaded.deinit();

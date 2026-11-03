@@ -1,8 +1,8 @@
 {
   "schema": 1,
   "date": "2026-11-04",
-  "head": "f9338f3b",
-  "gate": "Stable HTTP/1 pull body reader, HTTP/2 pull nextBody and concurrent stream serving aliases",
+  "head": "d17a8a7e",
+  "gate": "Stable HTTP/1 pull body reader with content decoding, HTTP/2 pull nextBody and concurrent stream serving aliases",
   "commands": {
     "pull_body": "zig build test-lib -Dtest-filter=\"pull body\" --summary all",
     "next_body": "zig build test-lib -Dtest-filter=\"nextBody\" --summary all",
@@ -11,8 +11,8 @@
   },
   "result": {
     "pull_body": {
-      "passed": 159,
-      "total": 159,
+      "passed": 160,
+      "total": 160,
       "failed": 0,
       "exit_code": 0
     },
@@ -36,12 +36,12 @@
     }
   },
   "source_sha256": {
-    "src/http1/runtime/body_pull.zig": "36a0938c5ef05674632e2d8940ef9d6e2a3138c1da04253f12240cbc8ee22b77",
-    "src/http1/runtime/body_pull_tests.zig": "9c393248769ccea26cb710977461afa98f4b6f9a6fe16fe26b1f6856b02f862b",
+    "src/http1/runtime/body_pull.zig": "c574204d2b3bbab85a7c6733fcf0a878dd5a17ea11231f48a6b85fd7c8512281",
+    "src/http1/runtime/body_pull_tests.zig": "ec70f35a1a967e29446e300f9cd332aa26f2d9cf170623caa9e30ea9778fed57",
     "src/http1/runtime.zig": "a2197eb2fc04ff49f024f71cf72c758dac6af5f92b3b59f64c4ba7a85c86dfb9",
     "src/http2/runtime.zig": "db7767600e4eedfba14615f7eff40c3d52b24cbf1de46c2fd72463a274807103",
     "src/http2/runtime/duplex/server_tests.zig": "75d27cec98b87fd2ff9fb3e7d4434f9564b7486e9d48092ff7202eceb24f2f22",
     "src/http/streaming.zig": "00e8b0bed7b439573733b4e9155f19ad597df5d271b7aeb69eba1ee7eb846293"
   },
-  "notes": "The HTTP/1 pull BodyReader drives the existing push parser through a bounded FIFO producer. Tests cover a 200 KiB body with 100-continue and keep-alive, chunked trailers, cancellation closing an unread connection, max_body_bytes rejection, and non-blocking takeRequest. HTTP/2 ServerDuplexStream.nextBody pulls DATA, retains trailers for requestTrailers, and returns null at END_STREAM. HTTP/2 and HTTP/3 concurrent batch aliases are exposed through netz.streaming."
+  "notes": "The HTTP/1 pull BodyReader drives the existing push parser through a bounded FIFO producer. Tests cover a 200 KiB body with 100-continue and keep-alive, chunked trailers, cancellation closing an unread connection, max_body_bytes rejection, non-blocking takeRequest, and Head.streamContentDecoder identity decoding. HTTP/2 ServerDuplexStream.nextBody pulls DATA, retains trailers for requestTrailers, and returns null at END_STREAM. HTTP/2 and HTTP/3 concurrent batch aliases are exposed through netz.streaming."
 }

@@ -35,7 +35,9 @@ try connection.writeResponse(.{ .body = "ok", .request_method = request.method }
 
 Chunks are FIFO and the queue is bounded by `readRequestBodyWithBuffer`'s
 `max_buffered_bytes` (default 64 KiB); the producer blocks while the queue is
-full. The total body remains bounded by `Limits.max_body_bytes`; an oversized
+full. `Head.streamContentDecoder` builds the `Content-Encoding` chain for
+`step`/`finish` decoding of the encoded chunks. The total body remains bounded by
+`Limits.max_body_bytes`; an oversized
 Content-Length is reported by `head`, and an oversized chunked body is reported
 by `next`. After the body completes, keep-alive and pipelining remain usable.
 `Expect: 100-continue` is handled by the underlying parser, and trailers are in
