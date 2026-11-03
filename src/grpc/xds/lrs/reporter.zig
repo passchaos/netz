@@ -33,6 +33,7 @@ pub const Reporter = struct {
             .source = source,
             .locality = options.locality,
             .interval_ns = @max(options.interval_ns, std.time.ns_per_ms),
+            .last_report_ns = std.Io.Clock.Timestamp.now(client.sender.state.io, .awake).raw.nanoseconds,
         };
     }
     pub fn deinit(self: *Reporter) void {
@@ -82,12 +83,18 @@ pub const Reporter = struct {
         return std.Io.Clock.Timestamp.now(io, .awake);
     }
     pub fn reportWithDeadline(self: *Reporter, deadline: std.Io.Clock.Timestamp) Error!void {
+        const io = self.client.sender.state.io;
+        const now = std.Io.Clock.Timestamp.now(io, .awake);
+        const elapsed_ns: u64 = if (self.last_report_ns) |last| blk: {
+            const elapsed = now.raw.nanoseconds - last;
+            break :blk if (elapsed > 0) @intCast(elapsed) else 0;
+        } else self.interval_ns;
         var snapshot = try self.source.lrsStatsDeltaSnapshot(self.allocator);
         defer snapshot.deinit();
-        var reports = try integration.buildWithOptions(self.allocator, &snapshot, self.locality, self.interval_ns, self.filter, self.endpoint_granularity);
+        var reports = try integration.buildWithOptions(self.allocator, &snapshot, self.locality, elapsed_ns, self.filter, self.endpoint_granularity);
         defer reports.deinit();
         try self.client.reportWithDeadline(reports.clusters, deadline);
-        self.last_report_ns = std.Io.Clock.Timestamp.now(self.client.sender.state.io, .awake).raw.nanoseconds;
+        self.last_report_ns = now.raw.nanoseconds;
     }
     pub fn reportWithTimeout(self: *Reporter, timeout: std.Io.Duration) Error!void {
         if (timeout.nanoseconds <= 0) return error.Timeout;

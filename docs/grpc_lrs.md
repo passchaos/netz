@@ -75,9 +75,11 @@ the previous delta snapshot, which is the LRS reporting-interval contract; the
 reporter uses it automatically. In both forms `in_progress` is a current gauge,
 while issued, successful, error and dropped counts are interval deltas in the
 delta form. `lrs.integration.build` converts either snapshot into
-`ClusterStats` with the caller's locality and reporting interval. Cluster names
-in the report borrow the snapshot storage, so keep the snapshot alive until the
-report is encoded.
+`ClusterStats` with the caller's locality and reporting interval. The reporter
+sets `load_report_interval` to the actual elapsed time between reports rather
+than the configured interval, matching the proto contract for delayed reports.
+Cluster names in the report borrow the snapshot storage, so keep the snapshot
+alive until the report is encoded.
 ## Caller-driven reporter
 
 `lrs.Reporter` wraps a connected `Client` and a source SharedChannel. Its
@@ -138,7 +140,7 @@ Native tests cover request/response round trips, locality counters, dropped
 categories, intervals, malformed/duplicate/over-limit input, UTF-8 rejection,
 per-cluster unary and streaming counter aggregation, in-progress tracking,
 channel drop and per-category attribution, integration conversion, reporter
-interval/filter/rebind behavior, endpoint granularity, interval-delta reporting,
+interval/filter/rebind behavior, endpoint granularity, interval-delta reporting with actual elapsed intervals,
 the scheduler report loop, same-server reconnect, scheduler failover across two servers, ControlPlane failover
 composition, and a real
 loopback duplex session that observes the node, a response, a report with exact

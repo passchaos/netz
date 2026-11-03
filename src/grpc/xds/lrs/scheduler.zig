@@ -21,11 +21,7 @@ pub const Scheduler = struct {
     retry_max_ns: u64 = 10 * std.time.ns_per_s,
 
     pub fn init(allocator: std.mem.Allocator, client: *Client, source: channel.SharedChannel, options: Options) Scheduler {
-        var reporter = Reporter.init(allocator, client, source, options);
-        // Start with a full interval before the first report instead of emitting
-        // an empty report as soon as the scheduler starts.
-        reporter.last_report_ns = std.Io.Clock.Timestamp.now(client.sender.state.io, .awake).raw.nanoseconds;
-        return .{ .client = client, .reporter = reporter };
+        return .{ .client = client, .reporter = Reporter.init(allocator, client, source, options) };
     }
     pub fn deinit(self: *Scheduler) void {
         self.reporter.deinit();
