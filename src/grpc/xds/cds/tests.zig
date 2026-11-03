@@ -74,6 +74,29 @@ test "gRPC CDS ordered typed LB fallback rejects recognized invalid policy" {
     try std.testing.expectError(error.CdsLimitExceeded, policy.typed(allocator, locality, 32, 4096, 16));
 }
 
+test "gRPC CDS decodes STATIC clusters with inline assignments" {
+    const encoded = try fixture.staticCluster(gpa, "backend", "127.0.0.1", 1001);
+    defer gpa.free(encoded);
+    var decoded = try resource.decode(gpa, encoded, .{});
+    defer decoded.deinit();
+    try std.testing.expectEqualStrings("backend", decoded.value.name);
+    try std.testing.expectEqual(resource.Discovery.static, decoded.value.discovery);
+    try std.testing.expect(!decoded.value.isEds());
+    try std.testing.expectEqualStrings("", decoded.value.edsName());
+    try std.testing.expect(decoded.value.static_assignment.len != 0);
+    const wrong_name = try fixture.assignment(gpa, "other", "127.0.0.1", 1001);
+    defer gpa.free(wrong_name);
+    var builder = fixture.Builder{ .allocator = gpa };
+    defer builder.deinit();
+    try builder.bytes(1, "backend");
+    try builder.number(2, 0);
+    try builder.bytes(33, wrong_name);
+    try std.testing.expectError(error.InvalidCdsResource, resource.decode(gpa, builder.data.items, .{}));
+    const missing = try fixture.cluster(gpa, "backend", "", "\x10\x00");
+    defer gpa.free(missing);
+    try std.testing.expectError(error.InvalidCdsResource, resource.decode(gpa, missing, .{}));
+}
+
 test "gRPC CDS rejects unsupported discovery security invalid identities and ring ranges" {
     try std.testing.expectError(error.InvalidCdsResource, resource.decode(gpa, "", .{}));
     try std.testing.expectError(error.TruncatedMessage, resource.decode(gpa, "\x0a\x02a", .{}));
@@ -84,10 +107,16 @@ test "gRPC CDS rejects unsupported discovery security invalid identities and rin
     const xdstp = try fixture.cluster(gpa, "xdstp://authority/cluster", "", "");
     defer gpa.free(xdstp);
     try std.testing.expectError(error.InvalidCdsResource, resource.decode(gpa, xdstp, .{}));
-    for ([_][]const u8{ "\x10\x00", "\xc2\x01\x00", "\x30\x01" }) |extra| {
-        const encoded = try fixture.cluster(gpa, "backend", "", extra);
+    for ([_]struct { extra: []const u8, want: anyerror }{
+        .{ .extra = "\x10\x00", .want = error.InvalidCdsResource },
+        .{ .extra = "\x10\x01", .want = error.UnsupportedCdsFeature },
+        .{ .extra = "\x10\x02", .want = error.UnsupportedCdsFeature },
+        .{ .extra = "\xc2\x01\x00", .want = error.UnsupportedCdsFeature },
+        .{ .extra = "\x30\x01", .want = error.UnsupportedCdsPolicy },
+    }) |case| {
+        const encoded = try fixture.cluster(gpa, "backend", "", case.extra);
         defer gpa.free(encoded);
-        if (extra[0] == 0x30) try std.testing.expectError(error.UnsupportedCdsPolicy, resource.decode(gpa, encoded, .{})) else try std.testing.expectError(error.UnsupportedCdsFeature, resource.decode(gpa, encoded, .{}));
+        try std.testing.expectError(case.want, resource.decode(gpa, encoded, .{}));
     }
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();

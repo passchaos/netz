@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "date": "2026-11-03",
+  "head": "5d5f20b7",
+  "gate": "STATIC CDS cluster decoding and transactional SotW/delta publication",
+  "commands": {
+    "xds": "zig build test-lib -Dtest-filter=xds --summary all",
+    "delta": "zig build test-lib -Dtest-filter=delta --summary all",
+    "package": "zig build test-package --summary all"
+  },
+  "result": {
+    "xds": {
+      "passed": 257,
+      "total": 257,
+      "failed": 0,
+      "exit_code": 0
+    },
+    "delta": {
+      "passed": 189,
+      "total": 189,
+      "failed": 0,
+      "exit_code": 0
+    },
+    "package": {
+      "passed": 26,
+      "total": 26,
+      "failed": 0,
+      "exit_code": 0
+    }
+  },
+  "source_sha256": {
+    "src/grpc/xds/cds/decode.zig": "e1fdc467e2c850e2e03ed4a48ebc34276902f30e27af1055246bcfd67fea75c2",
+    "src/grpc/xds/cds/testing.zig": "7206a32fa67a72d50516328848836dd30210982bee7190057888e58a921a9c5d",
+    "src/grpc/xds/cds/tests.zig": "eb648aac33100fdef19aba373c40f29cd5dbf870a2d9aca3d6acce52f278b1cf",
+    "src/grpc/xds/runtime/apply_cds.zig": "3969b46f60826930ca206f786846c964fd44f1f6e15d67e62516fa4217b367b3",
+    "src/grpc/xds/runtime/apply_delta_cds.zig": "18c508233bdab6cf7dc7babd2e923413526be0fa0b110b4975c49199e5b7c447",
+    "src/grpc/xds/runtime/plan.zig": "6dadf5d32914657aee7a6d88edb2b8a1d8e304f52d7d1bfa28ba52f2f1f3c081",
+    "src/grpc/xds/runtime/delta_tests.zig": "745ed95a2de0b2a342abbfffbe64b1eebe7e8d42bc4adc900829f46e249a0279",
+    "src/grpc/xds/runtime/tests.zig": "050f81cc34bb97181e065713ede4f842ff3ad3a37e00a73c6c402e5a69d664e0"
+  },
+  "notes": "STATIC clusters carry an inline ClusterLoadAssignment whose cluster_name must match the cluster. The assignment is decoded through the existing bounded EDS parser and projected through the same priority/locality runtime. STATIC clusters request no EDS subscription; switching a selected cluster between EDS and STATIC updates the subscription set in the same transaction. Native tests cover decode acceptance/rejection, SotW publication, delta publication, endpoint reprojection and absent EDS subscriptions."
+}

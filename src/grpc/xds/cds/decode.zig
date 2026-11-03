@@ -5,12 +5,20 @@ const policy = @import("policy.zig");
 pub const type_url = "type.googleapis.com/envoy.config.cluster.v3.Cluster";
 pub const Error = pb.Error;
 pub const Limits = struct { max_bytes: usize = 8 * 1024 * 1024, max_text_bytes: usize = 4096, max_thresholds: usize = 256, max_policies: usize = 32 };
+pub const Discovery = enum(u32) { static = 0, strict_dns = 1, logical_dns = 2, eds = 3, _ };
 pub const Cluster = struct {
     name: []const u8,
     eds_service_name: []const u8,
+    discovery: Discovery = .eds,
+    /// Raw inline `ClusterLoadAssignment` for STATIC clusters.
+    static_assignment: []const u8 = "",
     max_concurrent_requests: u32 = 1024,
     policy: policy.Result,
+    pub fn isEds(self: Cluster) bool {
+        return self.discovery == .eds;
+    }
     pub fn edsName(self: Cluster) []const u8 {
+        if (!self.isEds()) return "";
         return if (self.eds_service_name.len != 0) self.eds_service_name else self.name;
     }
 };
@@ -74,6 +82,7 @@ pub fn decode(gpa: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!O
     var name: []const u8 = "";
     var kind: u32 = 0;
     var config: ?[]const u8 = null;
+    var assignment: ?[]const u8 = null;
     var lb: u32 = 0;
     var ring_config: ?[]const u8 = null;
     var typed_policy: ?[]const u8 = null;
@@ -82,13 +91,30 @@ pub fn decode(gpa: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!O
         if (field.number == 1 and field.wire_type == 2) name = try pb.text(&reader, limits.max_text_bytes) else if (field.number == 2 and field.wire_type == 0) kind = try pb.u32Value(&reader) else if (field.number == 38 and field.wire_type == 2) {
             _ = try reader.bytesValue();
             kind = std.math.maxInt(u32);
-        } else if (field.number == 3 and field.wire_type == 2) config = try reader.bytesValue() else if (field.number == 6 and field.wire_type == 0) lb = try pb.u32Value(&reader) else if (field.number == 23 and field.wire_type == 2) ring_config = try reader.bytesValue() else if (field.number == 41 and field.wire_type == 2) typed_policy = try reader.bytesValue() else if (field.number == 10 and field.wire_type == 2) breaker = try reader.bytesValue() else if ((field.number == 24 or field.number == 43 or field.number == 19 or field.number == 42 or field.number == 48) and field.wire_type == 2) return error.UnsupportedCdsFeature else try reader.skip(field);
+        } else if (field.number == 3 and field.wire_type == 2) config = try reader.bytesValue() else if (field.number == 33 and field.wire_type == 2) assignment = try reader.bytesValue() else if (field.number == 6 and field.wire_type == 0) lb = try pb.u32Value(&reader) else if (field.number == 23 and field.wire_type == 2) ring_config = try reader.bytesValue() else if (field.number == 41 and field.wire_type == 2) typed_policy = try reader.bytesValue() else if (field.number == 10 and field.wire_type == 2) breaker = try reader.bytesValue() else if ((field.number == 24 or field.number == 43 or field.number == 19 or field.number == 42 or field.number == 48) and field.wire_type == 2) return error.UnsupportedCdsFeature else try reader.skip(field);
     }
     if (name.len == 0) return error.InvalidCdsResource;
-    if (kind != 3) return error.UnsupportedCdsFeature;
-    const service = try eds(config orelse return error.InvalidCdsResource, limits.max_text_bytes);
-    if (std.mem.startsWith(u8, name, "xdstp:") and service.len == 0) return error.InvalidCdsResource;
-    result.value = .{ .name = name, .eds_service_name = service, .max_concurrent_requests = if (breaker) |raw| try circuit(raw, limits.max_thresholds) else 1024, .policy = if (typed_policy) |raw| try policy.typed(arena, raw, limits.max_policies, limits.max_text_bytes, 0) else try policy.legacy(arena, lb, ring_config) };
+    const discovery: Discovery = @enumFromInt(kind);
+    var service: []const u8 = "";
+    var inline_assignment: []const u8 = "";
+    switch (discovery) {
+        .eds => {
+            service = try eds(config orelse return error.InvalidCdsResource, limits.max_text_bytes);
+            if (std.mem.startsWith(u8, name, "xdstp:") and service.len == 0) return error.InvalidCdsResource;
+        },
+        .static => {
+            const raw = assignment orelse return error.InvalidCdsResource;
+            var checked = @import("../eds/decode.zig").decode(arena, raw, .{ .max_bytes = limits.max_bytes }) catch |err| return switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                else => error.InvalidCdsResource,
+            };
+            defer checked.deinit();
+            if (!std.mem.eql(u8, checked.value.cluster_name, name)) return error.InvalidCdsResource;
+            inline_assignment = raw;
+        },
+        else => return error.UnsupportedCdsFeature,
+    }
+    result.value = .{ .name = name, .eds_service_name = service, .discovery = discovery, .static_assignment = inline_assignment, .max_concurrent_requests = if (breaker) |raw| try circuit(raw, limits.max_thresholds) else 1024, .policy = if (typed_policy) |raw| try policy.typed(arena, raw, limits.max_policies, limits.max_text_bytes, 0) else try policy.legacy(arena, lb, ring_config) };
     // Converted policies must satisfy the same configuration parser/runtime
     // contract as direct callers, including complete range validation.
     const json = try std.fmt.allocPrint(arena, "{{\"loadBalancingConfig\":{s}}}", .{result.value.policy.child_json});

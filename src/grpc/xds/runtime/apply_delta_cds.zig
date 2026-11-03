@@ -55,11 +55,14 @@ pub fn apply(self: *ctl.Controller, client: *delta.Client, update: delta.Update,
         if (selected) |candidate| {
             const resource = candidate.resource;
             const cds_deadline = try delta.codec.ttlDeadline(client.sender.state.io, candidate.ttl);
-            const same_name = if (item.cluster) |old| std.mem.eql(u8, old.resource.value.edsName(), resource.resource.value.edsName()) else false;
+            const after = resource.resource.value;
+            const same_identity = if (item.cluster) |old| blk: {
+                const before = old.resource.value;
+                break :blk before.discovery == after.discovery and std.mem.eql(u8, before.edsName(), after.edsName()) and std.mem.eql(u8, before.static_assignment, after.static_assignment);
+            } else false;
             const same_config = if (item.cluster) |old| blk: {
                 const before = old.resource.value;
-                const after = resource.resource.value;
-                break :blk same_name and before.max_concurrent_requests == after.max_concurrent_requests and before.policy.locality_weighted == after.policy.locality_weighted and std.mem.eql(u8, before.policy.child_json, after.policy.child_json);
+                break :blk same_identity and before.max_concurrent_requests == after.max_concurrent_requests and before.policy.locality_weighted == after.policy.locality_weighted and std.mem.eql(u8, before.policy.child_json, after.policy.child_json);
             } else false;
             if (same_config and item.snapshot != null and item.cds_seen and entry.sameDeadline(item.cds_deadline, cds_deadline)) {
                 item.cds_deadline = cds_deadline;
@@ -69,16 +72,18 @@ pub fn apply(self: *ctl.Controller, client: *delta.Client, update: delta.Update,
             const snapshot = if (same_config) blk: {
                 item.snapshot.?.retain();
                 break :blk item.snapshot.?;
-            } else if (same_name and item.snapshot != null)
-                try self.project(resource, item.snapshot.?.resource.wire)
+            } else if (same_identity and item.snapshot != null)
+                try self.project(resource, if (after.isEds()) item.snapshot.?.resource.wire else after.static_assignment)
+            else if (after.isEds())
+                try self.emptyEds(resource)
             else
-                try self.emptyEds(resource);
+                try self.project(resource, after.static_assignment);
             resource.retain();
             if (item.cluster) |old| old.release();
             if (item.snapshot) |old| old.release();
             item.cluster = resource;
             item.snapshot = snapshot;
-            if (!same_name) item.eds_seen = false;
+            item.eds_seen = !after.isEds() or (same_identity and item.eds_seen);
             item.cds_seen = true;
             item.cds_deadline = cds_deadline;
         } else if (removedName(response.removed, item.identity.name)) {

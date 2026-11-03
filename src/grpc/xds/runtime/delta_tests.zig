@@ -135,6 +135,47 @@ test "gRPC delta runtime applies partial EDS, removals and heartbeats" {
     try std.testing.expect(client.acceptedVersion(lds.type_url, "frontend") == null);
 }
 
+test "gRPC delta runtime publishes STATIC clusters without an EDS subscription" {
+    var threaded = std.Io.Threaded.init(gpa, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var channel = try grpc.SharedChannel.init(gpa, io, .{ .cleartext_ip = .{ .address = .{ .ip4 = .loopback(1) } } }, .{});
+    defer channel.deinit();
+    var sender = channel.sender();
+    defer sender.deinit();
+    var client = try delta.Client.init(gpa, sender, .{ .node = .{ .id = "test" } });
+    defer client.deinit();
+    const controller = try runtime.Controller.create(gpa, .{ .listener_name = "frontend", .target = .{ .authority = "backend.test" } });
+    defer controller.deinit();
+    _ = try controller.startDeltaWithDeadline(&client, channel, deadline(io));
+
+    const routes = try rds_fixture.encode(gpa, "inline", &.{"backend.test"}, &.{.{ .prefix = "/", .cluster = "a" }}, null);
+    defer gpa.free(routes);
+    const listener = try lds_fixture.encode(gpa, .{ .inline_rds = routes });
+    defer gpa.free(listener);
+    var lds_update = try update(&client, lds.type_url, "l1", &.{payload(lds.type_url, "frontend", "v1", listener)}, &.{});
+    defer lds_update.deinit();
+    try accept(controller, &client, channel, io, lds_update);
+    try std.testing.expectEqual(@as(usize, 1), controller.entries.items.len);
+    try std.testing.expectEqualStrings("a", client.subscriptions.find(cds.type_url).?.names[0]);
+
+    const a = try cds_fixture.staticCluster(gpa, "a", "127.0.0.1", 1001);
+    defer gpa.free(a);
+    var cds_update = try update(&client, cds.type_url, "c1", &.{payload(cds.type_url, "a", "ca1", a)}, &.{});
+    defer cds_update.deinit();
+    try accept(controller, &client, channel, io, cds_update);
+    try std.testing.expect(!controller.entries.items[0].pending());
+    try std.testing.expectEqual(@as(usize, 1), channel.configuredEndpointCount());
+    try std.testing.expect(client.subscriptions.find(eds.type_url) == null);
+
+    const moved = try cds_fixture.staticCluster(gpa, "a", "127.0.0.1", 1002);
+    defer gpa.free(moved);
+    var moved_update = try update(&client, cds.type_url, "c2", &.{payload(cds.type_url, "a", "ca2", moved)}, &.{});
+    defer moved_update.deinit();
+    try accept(controller, &client, channel, io, moved_update);
+    try std.testing.expectEqual(@as(usize, 1), channel.configuredEndpointCount());
+}
+
 test "gRPC delta runtime applies dynamic RDS removal and resubscription" {
     var threaded = std.Io.Threaded.init(gpa, .{ .async_limit = .unlimited });
     defer threaded.deinit();

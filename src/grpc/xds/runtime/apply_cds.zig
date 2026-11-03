@@ -39,22 +39,25 @@ pub fn apply(self: *ctl.Controller, client: *ads.Client, update: ads.Update, des
         } else null;
         if (selected) |resource| {
             changed = true;
-            const same = if (item.cluster) |old| std.mem.eql(u8, old.resource.value.edsName(), resource.resource.value.edsName()) else false;
+            const after = resource.resource.value;
+            const same = if (item.cluster) |old| blk: {
+                const before = old.resource.value;
+                break :blk before.discovery == after.discovery and std.mem.eql(u8, before.edsName(), after.edsName()) and std.mem.eql(u8, before.static_assignment, after.static_assignment);
+            } else false;
             const snapshot = if (same and item.snapshot != null) blk: {
                 const before = item.cluster.?.resource.value;
-                const after = resource.resource.value;
                 if (before.max_concurrent_requests == after.max_concurrent_requests and before.policy.locality_weighted == after.policy.locality_weighted and std.mem.eql(u8, before.policy.child_json, after.policy.child_json)) {
                     item.snapshot.?.retain();
                     break :blk item.snapshot.?;
                 }
-                break :blk try self.project(resource, item.snapshot.?.resource.wire);
-            } else try self.emptyEds(resource);
+                break :blk try self.project(resource, if (after.isEds()) item.snapshot.?.resource.wire else after.static_assignment);
+            } else if (after.isEds()) try self.emptyEds(resource) else try self.project(resource, after.static_assignment);
             resource.retain();
             if (item.cluster) |old| old.release();
             if (item.snapshot) |old| old.release();
             item.cluster = resource;
             item.snapshot = snapshot;
-            if (!same) item.eds_seen = false;
+            item.eds_seen = !after.isEds() or (same and item.eds_seen);
         } else {
             // Missing newly requested CDS is not a resource-not-found answer.
             // Delete only a previously received cluster, preserving pending

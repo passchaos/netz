@@ -81,7 +81,10 @@ pub const Plan = struct {
     }
     pub fn edsNames(self: *Plan) std.mem.Allocator.Error![]const []const u8 {
         var names: std.ArrayList([]const u8) = .empty;
-        for (self.entries.items) |item| if (item.cluster) |cluster| try names.append(self.allocator, cluster.resource.value.edsName());
+        for (self.entries.items) |item| if (item.cluster) |cluster| {
+            if (!cluster.resource.value.isEds()) continue;
+            try names.append(self.allocator, cluster.resource.value.edsName());
+        };
         std.mem.sort([]const u8, names.items, {}, struct {
             fn less(_: void, a: []const u8, b: []const u8) bool {
                 return std.mem.order(u8, a, b) == .lt;

@@ -1,9 +1,12 @@
 # CDS policy and CDS/EDS publication
 
-`grpc.xds.cds.decode` owns an Envoy v3 EDS-backed `Cluster`: logical cluster
-name, EDS service name, DEFAULT circuit request limit and endpoint LB policy.
-The EDS name defaults to the cluster name; an `xdstp:` cluster must specify its
-service name. EDS ConfigSource must select ADS or self. The first DEFAULT
+`grpc.xds.cds.decode` owns an Envoy v3 `Cluster`: logical cluster name,
+discovery type, EDS service name for EDS clusters, DEFAULT circuit request limit
+and endpoint LB policy. EDS clusters use an ADS/self `ConfigSource` and the
+service name defaults to the cluster name; an `xdstp:` EDS cluster must specify
+its service name. STATIC clusters carry an inline `load_assignment` whose
+`cluster_name` must match the cluster; they publish endpoints through the same
+priority/locality runtime without an EDS subscription. The first DEFAULT
 circuit threshold supplies `max_requests`, defaulting to 1024 when omitted;
 HIGH thresholds do not supply the application limit. Zero rejects new RPCs.
 
@@ -49,8 +52,12 @@ unique before publication. Invalid input, stale tokens, expired admission and
 allocation/publication failure retain the previous topology, subscription,
 cached resource and accepted version.
 
-A successful CDS update subscribes to its EDS name and atomically publishes
-the policy, circuit identity/limit, endpoints and drops. Subscription storage
+A successful CDS update subscribes to its EDS name when the cluster is EDS and
+atomically publishes the policy, circuit identity/limit, endpoints and drops.
+STATIC clusters publish their inline assignment immediately and request no EDS
+subscription; switching a selected cluster between EDS and STATIC updates the
+subscription set in the same transaction.
+Subscription storage
 is prepared first and committed without allocation after channel publication.
 The controller owns the accepted CDS configuration and matching EDS image.
 Changing policy or limit with the same EDS name reprojects that image without
@@ -81,9 +88,9 @@ NACKing a version that has already committed. Pre-publication validation and
 publication errors leave the response undecided and available for NACK.
 
 CDS transport_socket, transport_socket_matches, outlier_detection, lrs_server
-and upstream_config are explicitly rejected. LOGICAL_DNS and aggregate/custom
-cluster discovery are also unsupported. This slice handles an explicitly
-selected EDS-backed cluster. Typed delta CDS/EDS publication is available
+and upstream_config are explicitly rejected. LOGICAL_DNS/STRICT_DNS and
+aggregate/custom cluster discovery are also unsupported. This slice handles
+EDS-backed and STATIC clusters. Typed delta CDS/EDS publication is available
 through the automatic runtime; delta CDS/EDS TTL expiry is covered. Bootstrap
 parsing and control-plane failover are available. LDS/RDS routing,
 certificate providers and automatic refresh scheduling, authority-specific control planes, LRS automatic background scheduling and full
@@ -94,5 +101,7 @@ limits with the actual grpc-js-xds CDS parser and uses official Envoy schemas
 over ADS. Two independent grpc-js backends count locality and stable ring
 routing, same-EDS policy/circuit changes, zero-limit pre-wire rejection, changed
 EDS name, invalid CDS/EDS NACKs and CDS deletion with late EDS delivery. The
-backends must retain one HTTP/2 session each across updates. Evidence is stored
-in `docs/evidence/grpc_cds/2026-11-03.json`.
+backends must retain one HTTP/2 session each across updates. Native tests also
+cover STATIC inline-assignment decoding, cluster-name matching, SotW and delta
+publication, endpoint reprojection and the absence of an EDS subscription.
+Evidence is stored in `docs/evidence/grpc_cds/static-2026-11-03.json`.

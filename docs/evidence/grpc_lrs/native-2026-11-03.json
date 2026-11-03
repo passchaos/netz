@@ -19,14 +19,14 @@
       "exit_code": 0
     },
     "xds": {
-      "passed": 254,
-      "total": 254,
+      "passed": 257,
+      "total": 257,
       "failed": 0,
       "exit_code": 0
     },
     "delta": {
-      "passed": 188,
-      "total": 188,
+      "passed": 189,
+      "total": 189,
       "failed": 0,
       "exit_code": 0
     },
