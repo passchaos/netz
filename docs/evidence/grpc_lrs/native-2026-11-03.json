@@ -1,0 +1,43 @@
+{
+  "schema": 1,
+  "date": "2026-11-03",
+  "head": "5b1cc945",
+  "gate": "Load Reporting Service envelopes and duplex reporting",
+  "commands": {
+    "xds": "zig build test-lib -Dtest-filter=xds --summary all",
+    "delta": "zig build test-lib -Dtest-filter=delta --summary all",
+    "package": "zig build test-package --summary all",
+    "interop": "zig build interop-grpc-lrs --summary all"
+  },
+  "result": {
+    "xds": {
+      "passed": 244,
+      "total": 244,
+      "failed": 0,
+      "exit_code": 0
+    },
+    "delta": {
+      "passed": 186,
+      "total": 186,
+      "failed": 0,
+      "exit_code": 0
+    },
+    "package": {
+      "passed": 26,
+      "total": 26,
+      "failed": 0,
+      "exit_code": 0
+    },
+    "interop": {
+      "exit_code": 0
+    }
+  },
+  "source_sha256": {
+    "src/grpc/xds/lrs.zig": "99c03334c9223dfd643155804fafbb6e28d2c49fabd692ec25f8d50e6096984b",
+    "src/grpc/xds/lrs/codec.zig": "f405ff4c162793f39138bf6234f6533c9db30d5cd75d4a5356723b70feedec99",
+    "src/grpc/xds/lrs/client.zig": "5cefd6b72c73f146442d6138770fa0a85b6528c53ba0bb92cf85570f8b9901f3",
+    "src/grpc/xds/lrs/tests.zig": "1f89b3894b84c35f7793abb69c6d1a24650777856f5668069b88fc6590c32ae7",
+    "src/grpc/xds/lrs/transport_tests.zig": "af4f6ee7e4f1f61cf224d171763f9118a645dbfad9c7fb04d5d6af9f0faf9aae"
+  },
+  "notes": "Native tests cover request/response round trips, locality counters, dropped categories, intervals, malformed/duplicate/over-limit input, UTF-8 rejection, a real loopback duplex report/reconnect stream, and official-schema interop evidence in docs/evidence/grpc_lrs/2026-11-03.json. Automatic SharedChannel call-stat aggregation remains open."
+}

@@ -2135,6 +2135,21 @@ pub fn build(b: *std.Build) void {
     const grpc_delta_runtime_step = b.step("interop-grpc-delta-runtime", "Verify typed delta LDS/RDS/CDS/EDS publication and explicit removals with real RPCs");
     grpc_delta_runtime_step.dependOn(&grpc_delta_runtime.step);
 
+    const grpc_lrs_client = b.addExecutable(.{
+        .name = "netz-grpc-lrs-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/interop/grpc_lrs/client.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const grpc_lrs = b.addSystemCommand(&.{ "python3", "tools/interop/grpc_lrs/run.py" });
+    grpc_lrs.addArtifactArg(grpc_lrs_client);
+    if (b.args) |args| grpc_lrs.addArgs(args);
+    const grpc_lrs_step = b.step("interop-grpc-lrs", "Verify Load Reporting Service envelopes and counters against official Envoy schemas");
+    grpc_lrs_step.dependOn(&grpc_lrs.step);
+
     const grpc_impl_client = b.addExecutable(.{
         .name = "netz-grpc-cluster-impl-client",
         .root_module = b.createModule(.{

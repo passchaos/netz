@@ -120,7 +120,7 @@ reprojects cached routes under HCM defaults. Typed delta route publication is
 available through the automatic runtime. Bootstrap parsing and insecure
 control-plane failover are available; automatic multi-cluster CDS/EDS
 orchestration, certificate providers and automatic refresh scheduling, authority-specific control planes,
-LRS, capture/hash rewriting, HTTP filter overrides and host/path rewriting
+automatic LRS call-stat aggregation, capture/hash rewriting, HTTP filter overrides and host/path rewriting
 remain open. Delta route TTL expiry is covered. Unsupported recognized filter,
 rewrite, timeout-offset and plugin features fail validation; this module does
 not silently claim their deployment behavior.
