@@ -11,4 +11,5 @@ pub const ReporterOptions = @import("lrs/reporter.zig").Options;
 test {
     _ = @import("lrs/tests.zig");
     _ = @import("lrs/transport_tests.zig");
+    _ = @import("lrs/control_plane_tests.zig");
 }

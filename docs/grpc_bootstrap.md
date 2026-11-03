@@ -82,6 +82,13 @@ material untouched. Callers can drive reload from their own refresh schedule.
 The runtime controller can keep using the same `*delta.Client` pointer across
 failover and reload.
 
+`sender()` creates another sender on the current channel. `moveToNextServer`
+switches the channel without connecting the owned delta client, and
+`rebindDelta`/`rebindLrs` move external delta or LRS clients to that new
+channel. This lets multiple clients share one control-plane channel and follow
+the same failover or TLS reload; the LRS reporter keeps using the same client
+pointer after rebind.
+
 ## Bounds and verification
 
 Limits cover bootstrap bytes, servers, authorities, channel credentials,

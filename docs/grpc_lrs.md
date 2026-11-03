@@ -82,9 +82,11 @@ empty list reports none. `nextDeadline` returns the next interval boundary and
 remains responsible for driving the loop.
 
 `Client.rebind` moves the LRS client to a new channel while retaining the
-encoded node, so an application can compose the reporter with ControlPlane
-failover or TLS reload. The next connect sends the node again on the new
-stream.
+encoded node. `ControlPlane.moveToNextServer` switches the shared control
+channel without connecting its owned delta client, then
+`ControlPlane.rebindLrs` moves the LRS client and the reporter keeps using the
+same client pointer. The next connect sends the node again on the new stream.
+A real two-server test covers this composition.
 
 ## Verification
 
@@ -92,7 +94,7 @@ Native tests cover request/response round trips, locality counters, dropped
 categories, intervals, malformed/duplicate/over-limit input, UTF-8 rejection,
 per-cluster unary and streaming counter aggregation, in-progress tracking,
 channel drop and per-category attribution, integration conversion, reporter
-interval/filter/rebind behavior, and a real
+interval/filter/rebind behavior, ControlPlane failover composition, and a real
 loopback duplex session that observes the node, a response, a report with exact
 counters, a second `send_all_clusters` response, a terminal, and node replay on
 a replacement stream. See
@@ -107,7 +109,7 @@ cluster/service names, dropped requests and interval, then a second
 
 ## Remaining integration
 
-Endpoint-granularity stats, an automatic background report scheduler and
-ControlPlane failover/reload composition remain follow-up work. Unary and
-streaming channel counters, envelopes, the caller-driven reporter and
-rebinding are complete.
+Endpoint-granularity stats and an automatic background report scheduler remain
+follow-up work. Unary and streaming channel counters, envelopes, the
+caller-driven reporter, ControlPlane failover/reload composition and rebinding
+are complete.

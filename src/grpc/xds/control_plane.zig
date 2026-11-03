@@ -2,12 +2,13 @@
 const std = @import("std");
 const bootstrap = @import("bootstrap.zig");
 const delta = @import("ads/delta.zig");
+const lrs_client = @import("lrs/client.zig");
 const shared = @import("../channel/shared.zig");
 const streaming = @import("../stream/runtime.zig");
 const deadline_policy = @import("../../internal/deadline.zig");
 const server_identity_file = @import("../../tls/server_identity_file.zig");
 const http2 = @import("../../http2/mod.zig");
-pub const Error = bootstrap.Error || shared.Error || delta.Error || error{ InvalidControlPlaneOptions, NoUsableXdsServer, InvalidBootstrapNode, InvalidBootstrapTls };
+pub const Error = bootstrap.Error || shared.Error || delta.Error || lrs_client.Error || error{ InvalidControlPlaneOptions, NoUsableXdsServer, InvalidBootstrapNode, InvalidBootstrapTls };
 
 pub const Options = struct {
     /// Overrides the bootstrap node. The bootstrap node is used otherwise.
@@ -118,9 +119,9 @@ pub const ControlPlane = struct {
         errdefer material.deinit();
         var channel = try createChannel(gpa, io, servers[index], options.channel, material);
         errdefer channel.deinit();
-        var sender = channel.sender();
-        defer sender.deinit();
-        var client = try delta.Client.init(gpa, sender, .{ .node = node, .subscriptions = options.subscriptions, .limits = options.limits, .request = options.request });
+        var new_sender = channel.sender();
+        defer new_sender.deinit();
+        var client = try delta.Client.init(gpa, new_sender, .{ .node = node, .subscriptions = options.subscriptions, .limits = options.limits, .request = options.request });
         errdefer client.deinit();
         const self = try gpa.create(ControlPlane);
         self.* = .{ .allocator = gpa, .io = io, .bootstrap = configuration, .options = options, .servers = servers, .server_index = index, .material = material, .channel = channel, .client = client };
@@ -141,16 +142,42 @@ pub const ControlPlane = struct {
     pub fn serverUri(self: *const ControlPlane) []const u8 {
         return self.server().uri;
     }
+    /// A new sender on the current control-plane channel. The caller owns it.
+    pub fn sender(self: *ControlPlane) shared.Sender {
+        return self.channel.sender();
+    }
+    /// Switch the current channel to the next usable server without connecting
+    /// the owned delta client. Use this when other clients share the channel.
+    pub fn moveToNextServer(self: *ControlPlane, deadline: std.Io.Clock.Timestamp) Error!void {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        try self.advanceAndRebind();
+    }
+    pub fn moveToNextServerWithTimeout(self: *ControlPlane, timeout: std.Io.Duration) Error!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.moveToNextServer(.fromNow(self.io, .{ .clock = .awake, .raw = timeout }));
+    }
+    /// Rebind an external delta client to the current channel.
+    pub fn rebindDelta(self: *ControlPlane, client: *delta.Client, request: streaming.RequestOptions) Error!void {
+        var new_sender = self.channel.sender();
+        errdefer new_sender.deinit();
+        try client.rebind(new_sender, request);
+    }
+    /// Rebind an external LRS client to the current channel.
+    pub fn rebindLrs(self: *ControlPlane, client: *lrs_client.Client, request: streaming.RequestOptions) Error!void {
+        var new_sender = self.channel.sender();
+        errdefer new_sender.deinit();
+        try client.rebind(new_sender, request);
+    }
     fn rebindServer(self: *ControlPlane, selected: usize) Error!void {
         const target_server = self.servers[selected];
         var material = try TlsMaterial.load(self.allocator, self.io, target_server.tlsConfig());
         errdefer material.deinit();
         var channel = try createChannel(self.allocator, self.io, target_server, self.options.channel, material);
         errdefer channel.deinit();
-        var sender = channel.sender();
+        var new_sender = channel.sender();
         var sender_owned = true;
-        defer if (sender_owned) sender.deinit();
-        try self.client.rebind(sender, self.options.request);
+        defer if (sender_owned) new_sender.deinit();
+        try self.client.rebind(new_sender, self.options.request);
         sender_owned = false;
         self.channel.deinit();
         self.material.deinit();
