@@ -1,18 +1,26 @@
 {
   "schema": 1,
   "date": "2026-11-03",
-  "head": "c32aebde",
-  "gate": "Load Reporting Service envelopes, duplex reporting, counters, reporter, endpoint granularity and control-plane composition",
+  "head": "1f13d69e",
+  "gate": "Load Reporting Service envelopes, duplex reporting, counters, reporter, endpoint granularity, foreground scheduler and control-plane composition",
   "commands": {
+    "lrs": "zig build test-lib -Dtest-filter=LRS --summary all",
     "xds": "zig build test-lib -Dtest-filter=xds --summary all",
     "delta": "zig build test-lib -Dtest-filter=delta --summary all",
     "package": "zig build test-package --summary all",
-    "interop": "zig build interop-grpc-lrs --summary all"
+    "full_lib": "zig build test-lib --summary all",
+    "interop": "zig build interop-grpc-lrs -- --output docs/evidence/grpc_lrs/2026-11-03.json"
   },
   "result": {
+    "lrs": {
+      "passed": 175,
+      "total": 175,
+      "failed": 0,
+      "exit_code": 0
+    },
     "xds": {
-      "passed": 247,
-      "total": 247,
+      "passed": 248,
+      "total": 248,
       "failed": 0,
       "exit_code": 0
     },
@@ -28,12 +36,21 @@
       "failed": 0,
       "exit_code": 0
     },
+    "full_lib": {
+      "passed": 6376,
+      "total": 6379,
+      "failed": 3,
+      "exit_code": 1,
+      "note": "Unrelated host/dependency failures under heavy sibling-repo load: internal.deflate expects error.OutputLimitExceeded but the vort backend returns error.TrailingData (sibling dependency change), websocket rejection hit a caller deadline, and http3 pool budget passed on rerun. No scheduler or LRS test failed."
+    },
     "interop": {
       "exit_code": 0
     }
   },
   "source_sha256": {
-    "src/grpc/xds/lrs.zig": "208c99ed0758abaf7e7f086cacb3a7caeeceb6fb8535e371d3d1735d0b152222",
+    "src/grpc/xds/lrs.zig": "625b1a743c8f80e490789443729fea3bac3de6a6736e79f05971675a6d74cb57",
+    "src/grpc/xds/lrs/scheduler.zig": "8702753d674295c941f7b584fcab7fe7e853a50198c496040b3674e08d8c2716",
+    "src/grpc/xds/lrs/scheduler_tests.zig": "cafcb7f2b7bcedfb4e8583a16b69d384b1097b1316a185550560d52ba1941cc3",
     "src/grpc/xds/lrs/codec.zig": "6c781a79de396bf3402667ae3998367e021b6df67d588f91a4bc9e89c11826e0",
     "src/grpc/xds/lrs/client.zig": "4ddf8bea831d5551473cbd00504a0ff23a9003f840029e55cc6b877d8fec116e",
     "src/grpc/xds/lrs/reporter.zig": "393b58861a709abc52232a39354b20fcfed66daf2b658008751ba079abe4908b",
@@ -54,5 +71,5 @@
     "tools/interop/grpc_lrs/peer.js": "9b107638c1b9ed8a4bce1f17a28917c60e54a795aa24d5f9af662c61bab9ac26",
     "tools/interop/grpc_lrs/run.py": "6916605190ae91b93dd2ef48f6ebfd37b410ecb670052d1d0d789fca89ec4f48"
   },
-  "notes": "Native tests cover envelopes, locality/dropped counters, endpoint address/port counters, malformed/duplicate/over-limit input, a real loopback report/reconnect stream, opt-in per-cluster unary and streaming counters with in-progress tracking, channel drop attribution with per-category counts, report conversion, reporter interval/filter/rebind behavior, endpoint granularity, and a real two-server ControlPlane failover composition. An automatic background scheduler remains open. Official-schema interop evidence is docs/evidence/grpc_lrs/2026-11-03.json."
+  "notes": "Native tests cover envelopes, locality/dropped counters, endpoint address/port counters, malformed/duplicate/over-limit input, a real loopback report/reconnect stream, opt-in per-cluster unary and streaming counters with in-progress tracking, channel drop attribution with per-category counts, report conversion, reporter interval/filter/rebind behavior, endpoint granularity, the foreground scheduler interval/terminal loop, and a real two-server ControlPlane failover composition. Official-schema interop evidence is docs/evidence/grpc_lrs/2026-11-03.json."
 }

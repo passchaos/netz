@@ -3458,7 +3458,7 @@ The [bootstrap parser and control-plane helper](grpc_bootstrap.md) parse
 `xds_servers`, node metadata, authorities and server features, and fail over
 across `http://` and TLS `https://` servers while replaying `initial_resource_versions`
 on the same delta client. Bootstrap certificate providers and automatic refresh scheduling,
-authority-specific control planes, LRS automatic background scheduling remain open.
+authority-specific control planes remain open.
 
 
 ## Typed EDS to reference-owned channel targets

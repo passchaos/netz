@@ -24,7 +24,7 @@
   ],
   "grpc_js": "1.14.7",
   "source_sha256": {
-    "src/grpc/xds/lrs.zig": "208c99ed0758abaf7e7f086cacb3a7caeeceb6fb8535e371d3d1735d0b152222",
+    "src/grpc/xds/lrs.zig": "625b1a743c8f80e490789443729fea3bac3de6a6736e79f05971675a6d74cb57",
     "src/grpc/xds/lrs/codec.zig": "6c781a79de396bf3402667ae3998367e021b6df67d588f91a4bc9e89c11826e0",
     "src/grpc/xds/lrs/client.zig": "4ddf8bea831d5551473cbd00504a0ff23a9003f840029e55cc6b877d8fec116e",
     "tools/interop/grpc_lrs/client.zig": "a7576d07283ebc3806f141e6cf7d52a65bc85f223ba47adbf7b553179c9821b0",
@@ -37,5 +37,5 @@
     "envoy/service/load_stats/v3/lrs.proto": "f3ec006ea4b739ccbc9976c5f092952d8b8b2d1cfe8684c09512eb0515c10611",
     "envoy/config/endpoint/v3/load_report.proto": "f0981c753710fe83f845c09d0e06d217c713c5799508c9c17766fa7bbc3482b0"
   },
-  "client_sha256": "cb2c0f4a3aa6a1e9a33a45f5544d20de0eb394d6e0f5b1e95e36f61c7d091686"
+  "client_sha256": "952f3c16b88e028f6f44be609be3371e5949268611e2f700e775c171f106e68f"
 }

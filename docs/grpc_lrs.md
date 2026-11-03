@@ -90,14 +90,38 @@ channel without connecting its owned delta client, then
 same client pointer. The next connect sends the node again on the new stream.
 A real two-server test covers this composition.
 
+## Scheduler
+
+`lrs.Scheduler` owns a `Reporter` and drives the report loop:
+
+```zig
+var scheduler = lrs.Scheduler.init(allocator, &client, channel, .{});
+defer scheduler.deinit();
+scheduler.runWithTimeout(timeout) catch |err| switch (err) {
+    error.LrsTerminal => {}, // server closed the stream
+    error.Timeout => {}, // application deadline expired
+    else => return err,
+};
+```
+
+`run` waits for the next response or the current report deadline, whichever
+comes first. A response updates the interval, cluster filter and endpoint
+granularity; when the deadline arrives the scheduler writes a due report and
+returns to waiting. A terminal stream surfaces `error.LrsTerminal`; the overall
+deadline surfaces `error.Timeout`. Both are ordinary loop exits, so callers
+reconnect and restart the scheduler after failover. Run the scheduler in a
+background task and cancel it when discovery stops. A real loopback test drives
+a unary call, receives an interval response, observes one report with exact
+issued/successful counters, and then a terminal.
+
 ## Verification
 
 Native tests cover request/response round trips, locality counters, dropped
 categories, intervals, malformed/duplicate/over-limit input, UTF-8 rejection,
 per-cluster unary and streaming counter aggregation, in-progress tracking,
 channel drop and per-category attribution, integration conversion, reporter
-interval/filter/rebind behavior, endpoint granularity, ControlPlane failover
-composition, and a real
+interval/filter/rebind behavior, endpoint granularity, the scheduler report
+loop, ControlPlane failover composition, and a real
 loopback duplex session that observes the node, a response, a report with exact
 counters, a second `send_all_clusters` response, a terminal, and node replay on
 a replacement stream. See
@@ -112,6 +136,8 @@ then a second `send_all_clusters` response. Results and source/proto hashes are 
 
 ## Remaining integration
 
-An automatic background report scheduler remains follow-up work. Unary and
-streaming channel counters, endpoint granularity, envelopes, the caller-driven
-reporter, ControlPlane failover/reload composition and rebinding are complete.
+Unary and streaming channel counters, endpoint granularity, envelopes, the
+caller-driven reporter, the foreground scheduler, ControlPlane
+failover/reload composition and rebinding are complete. Applications still own
+the task that runs `Scheduler.run` and the decision to reconnect after
+`error.LrsTerminal` or `error.Timeout`.
