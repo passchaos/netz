@@ -28,7 +28,7 @@ const transcript=[];let control=null,step=0;
     assert.equal(cluster.upstream_locality_stats.length,1);
     const local=cluster.upstream_locality_stats[0];
     assert.equal(local.locality.region,'r');assert.equal(local.locality.zone,'z');
-    assert.equal(local.total_successful_requests,'1');assert.equal(local.total_error_requests,'1');assert.equal(local.total_issued_requests,'1');
+    assert.equal(local.total_successful_requests,'1');assert.equal(local.total_error_requests,'1');assert.equal(local.total_issued_requests,'1');assert.equal(local.upstream_endpoint_stats.length,1);const endpoint=local.upstream_endpoint_stats[0];assert.equal(endpoint.address.socket_address.address,'127.0.0.1');assert.equal(Number(endpoint.address.socket_address.port_value),1001);assert.equal(endpoint.total_successful_requests,'1');assert.equal(endpoint.total_issued_requests,'1');
     assert.equal(cluster.dropped_requests.length,1);assert.equal(cluster.dropped_requests[0].category,'throttle');assert.equal(cluster.dropped_requests[0].dropped_count,'1');
     call.write({clusters:[],send_all_clusters:true});call.end();step+=1;return;
    }
@@ -38,5 +38,5 @@ const transcript=[];let control=null,step=0;
  const port=await new Promise((r,j)=>control.bindAsync('127.0.0.1:0',grpc.ServerCredentials.createInsecure(),(e,p)=>e?j(e):r(p)));
  const result=await new Promise((r,j)=>{const child=spawn(process.argv[2],[String(port)]);let out='';const timer=setTimeout(()=>{child.kill();j(new Error(out));},30000);child.stdout.on('data',b=>out+=b);child.stderr.on('data',b=>out+=b);child.on('error',e=>{clearTimeout(timer);j(e);});child.on('exit',code=>{clearTimeout(timer);if(code)return j(new Error(out));const line=out.split('\n').find(x=>x.startsWith('LRS_RESULT '));if(!line)return j(new Error(out));r(JSON.parse(line.slice(11)));});});
  assert.equal(step,2);
- console.log(JSON.stringify({...result,transcript,grpc_js:require('../grpc_locality/node_modules/@grpc/grpc-js/package.json').version}));
+ console.log(JSON.stringify({...result,endpoint_granularity:true,transcript,grpc_js:require('../grpc_locality/node_modules/@grpc/grpc-js/package.json').version}));
 })().catch(e=>{console.error(e);process.exitCode=1;}).finally(()=>control?.forceShutdown());

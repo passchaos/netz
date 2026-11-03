@@ -3,6 +3,7 @@
   "initial_subscription": true,
   "report_counters": true,
   "send_all": true,
+  "endpoint_granularity": true,
   "transcript": [
     {
       "step": 0,
@@ -23,12 +24,12 @@
   ],
   "grpc_js": "1.14.7",
   "source_sha256": {
-    "src/grpc/xds/lrs.zig": "99c03334c9223dfd643155804fafbb6e28d2c49fabd692ec25f8d50e6096984b",
-    "src/grpc/xds/lrs/codec.zig": "f405ff4c162793f39138bf6234f6533c9db30d5cd75d4a5356723b70feedec99",
-    "src/grpc/xds/lrs/client.zig": "5cefd6b72c73f146442d6138770fa0a85b6528c53ba0bb92cf85570f8b9901f3",
-    "tools/interop/grpc_lrs/client.zig": "4985ef9488f51e296173df340c43a13ee921caef8029cfb0b7209d861177189e",
-    "tools/interop/grpc_lrs/peer.js": "6d96621e54b469ab5ecd03fcd29bd95e586bfbc97040c6dc12e11341900d9c39",
-    "tools/interop/grpc_lrs/run.py": "a307a826b9957dd8dc54316b7612acc3434ffbcc945a83743074eaf5a48cd094",
+    "src/grpc/xds/lrs.zig": "208c99ed0758abaf7e7f086cacb3a7caeeceb6fb8535e371d3d1735d0b152222",
+    "src/grpc/xds/lrs/codec.zig": "6c781a79de396bf3402667ae3998367e021b6df67d588f91a4bc9e89c11826e0",
+    "src/grpc/xds/lrs/client.zig": "4ddf8bea831d5551473cbd00504a0ff23a9003f840029e55cc6b877d8fec116e",
+    "tools/interop/grpc_lrs/client.zig": "a7576d07283ebc3806f141e6cf7d52a65bc85f223ba47adbf7b553179c9821b0",
+    "tools/interop/grpc_lrs/peer.js": "9b107638c1b9ed8a4bce1f17a28917c60e54a795aa24d5f9af662c61bab9ac26",
+    "tools/interop/grpc_lrs/run.py": "6916605190ae91b93dd2ef48f6ebfd37b410ecb670052d1d0d789fca89ec4f48",
     "tools/interop/grpc_locality/package.json": "8db54803ab44c882d2063b5e271764ea3b4901da17c3d065d5036e6a36c7ef53",
     "tools/interop/grpc_locality/package-lock.json": "9cae21a36a38e30b732bfb139abca82bf77ea326fd9ce981f22867c7c01ccb2b"
   },
@@ -36,5 +37,5 @@
     "envoy/service/load_stats/v3/lrs.proto": "f3ec006ea4b739ccbc9976c5f092952d8b8b2d1cfe8684c09512eb0515c10611",
     "envoy/config/endpoint/v3/load_report.proto": "f0981c753710fe83f845c09d0e06d217c713c5799508c9c17766fa7bbc3482b0"
   },
-  "client_sha256": "48d26108f3787da2561da55130da4112a82413238e88d2ab83cf8aa2c7169a40"
+  "client_sha256": "cb2c0f4a3aa6a1e9a33a45f5544d20de0eb394d6e0f5b1e95e36f61c7d091686"
 }

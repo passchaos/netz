@@ -30,12 +30,19 @@ pub fn main(init: std.process.Init) !void {
     try std.testing.expectEqual(@as(u64, 100 * std.time.ns_per_ms), first.response.value.interval_ns.?);
     try std.testing.expect(first.response.value.report_endpoint_granularity);
 
+    const endpoints = [_]lrs.codec.EndpointStats{.{
+        .host = "127.0.0.1",
+        .port = 1001,
+        .successful = 1,
+        .issued = 1,
+    }};
     const localities = [_]lrs.codec.LocalityStats{.{
         .locality = .{ .region = "r", .zone = "z" },
         .successful = 1,
         .in_progress = 0,
         .error_requests = 1,
         .issued = 1,
+        .endpoints = &endpoints,
     }};
     const dropped = [_]lrs.codec.Dropped{.{ .category = "throttle", .count = 1 }};
     const clusters = [_]lrs.codec.ClusterStats{.{

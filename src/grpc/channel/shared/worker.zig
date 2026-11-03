@@ -476,7 +476,7 @@ pub fn Worker(comptime State: type) type {
                     continue;
                 };
                 job.lrs_started = true;
-                if (lrs_stats.clusterName(self.source.endpoint)) |cluster| self.parent.lrs_stats.recordStarted(self.parent.io, cluster);
+                if (lrs_stats.clusterName(self.source.endpoint)) |cluster| self.parent.lrs_stats.recordStarted(self.parent.io, cluster, lrs_stats.endpointAddress(self.source.endpoint));
                 const storage = job.owned_message orelse {
                     stream.deinit();
                     self.parent.finishAttempt(self, job, null, error.InvalidStreamState);

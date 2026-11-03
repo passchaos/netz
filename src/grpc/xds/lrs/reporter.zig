@@ -19,6 +19,7 @@ pub const Reporter = struct {
     source: channel.SharedChannel,
     locality: codec.Locality,
     interval_ns: u64,
+    endpoint_granularity: bool = false,
     last_report_ns: ?i96 = null,
     filter_storage: []u8 = &.{},
     filter_names: [][]const u8 = &.{},
@@ -43,6 +44,7 @@ pub const Reporter = struct {
     /// falls back to 1 ms.
     pub fn onResponse(self: *Reporter, response: codec.Response) Error!void {
         if (response.interval_ns) |nanoseconds| self.interval_ns = @max(nanoseconds, std.time.ns_per_ms);
+        self.endpoint_granularity = response.report_endpoint_granularity;
         if (response.send_all_clusters) {
             self.clearFilter();
             return;
@@ -82,7 +84,7 @@ pub const Reporter = struct {
     pub fn reportWithDeadline(self: *Reporter, deadline: std.Io.Clock.Timestamp) Error!void {
         var snapshot = try self.source.lrsStatsSnapshot(self.allocator);
         defer snapshot.deinit();
-        var reports = try integration.buildWithFilter(self.allocator, &snapshot, self.locality, self.interval_ns, self.filter);
+        var reports = try integration.buildWithOptions(self.allocator, &snapshot, self.locality, self.interval_ns, self.filter, self.endpoint_granularity);
         defer reports.deinit();
         try self.client.reportWithDeadline(reports.clusters, deadline);
         self.last_report_ns = std.Io.Clock.Timestamp.now(self.client.sender.state.io, .awake).raw.nanoseconds;

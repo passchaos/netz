@@ -8,16 +8,27 @@ pub const Limits = struct {
     max_clusters: usize = 4096,
     max_localities: usize = 4096,
     max_dropped: usize = 256,
+    max_endpoints: usize = 4096,
     max_text_bytes: usize = 4096,
 };
 
 pub const Locality = struct { region: []const u8 = "", zone: []const u8 = "", sub_zone: []const u8 = "" };
+pub const EndpointStats = struct {
+    host: []const u8,
+    port: u16,
+    ipv6: bool = false,
+    successful: u64 = 0,
+    in_progress: u64 = 0,
+    error_requests: u64 = 0,
+    issued: u64 = 0,
+};
 pub const LocalityStats = struct {
     locality: Locality = .{},
     successful: u64 = 0,
     in_progress: u64 = 0,
     error_requests: u64 = 0,
     issued: u64 = 0,
+    endpoints: []const EndpointStats = &.{},
 };
 pub const Dropped = struct { category: []const u8, count: u64 = 0 };
 pub const ClusterStats = struct {
@@ -61,6 +72,7 @@ pub const OwnedRequest = struct {
     value: Request,
     pub fn deinit(self: *OwnedRequest) void {
         for (self.clusters) |cluster| {
+            for (cluster.localities) |locality| self.allocator.free(locality.endpoints);
             self.allocator.free(cluster.localities);
             self.allocator.free(cluster.dropped);
         }
@@ -115,7 +127,29 @@ fn encodeLocality(out: *std.ArrayList(u8), gpa: std.mem.Allocator, locality: Loc
     try bytesField(out, gpa, 1, nested.items);
 }
 
+fn encodeEndpointStats(out: *std.ArrayList(u8), gpa: std.mem.Allocator, value: EndpointStats, limits: Limits) Error!void {
+    try text(value.host, limits, false);
+    if (value.port == 0) return error.InvalidLoadReport;
+    var socket: std.ArrayList(u8) = .empty;
+    defer socket.deinit(gpa);
+    try numberField(&socket, gpa, 1, @intFromBool(value.ipv6));
+    try bytesField(&socket, gpa, 2, value.host);
+    try numberField(&socket, gpa, 3, value.port);
+    var address: std.ArrayList(u8) = .empty;
+    defer address.deinit(gpa);
+    try bytesField(&address, gpa, 1, socket.items);
+    var nested: std.ArrayList(u8) = .empty;
+    defer nested.deinit(gpa);
+    try bytesField(&nested, gpa, 1, address.items);
+    if (value.successful != 0) try numberField(&nested, gpa, 2, value.successful);
+    if (value.in_progress != 0) try numberField(&nested, gpa, 3, value.in_progress);
+    if (value.error_requests != 0) try numberField(&nested, gpa, 4, value.error_requests);
+    if (value.issued != 0) try numberField(&nested, gpa, 7, value.issued);
+    try bytesField(out, gpa, 7, nested.items);
+}
+
 fn encodeLocalityStats(out: *std.ArrayList(u8), gpa: std.mem.Allocator, value: LocalityStats, limits: Limits) Error!void {
+    if (value.endpoints.len > limits.max_endpoints) return error.LoadReportLimitExceeded;
     var nested: std.ArrayList(u8) = .empty;
     defer nested.deinit(gpa);
     try encodeLocality(&nested, gpa, value.locality, limits);
@@ -123,6 +157,7 @@ fn encodeLocalityStats(out: *std.ArrayList(u8), gpa: std.mem.Allocator, value: L
     if (value.in_progress != 0) try numberField(&nested, gpa, 3, value.in_progress);
     if (value.error_requests != 0) try numberField(&nested, gpa, 4, value.error_requests);
     if (value.issued != 0) try numberField(&nested, gpa, 8, value.issued);
+    for (value.endpoints) |endpoint| try encodeEndpointStats(&nested, gpa, endpoint, limits);
     try bytesField(out, gpa, 2, nested.items);
 }
 
@@ -211,12 +246,47 @@ fn parseLocality(bytes: []const u8, limits: Limits) Error!Locality {
     return result;
 }
 
-fn parseLocalityStats(bytes: []const u8, limits: Limits) Error!LocalityStats {
+fn parseEndpointStats(bytes: []const u8, limits: Limits) Error!EndpointStats {
+    var result: EndpointStats = .{ .host = "", .port = 0 };
+    var reader: protobuf.Reader = .{ .bytes = bytes };
+    while (try reader.next()) |field| {
+        if (field.number == 1 and field.wire_type == 2) {
+            var address_reader: protobuf.Reader = .{ .bytes = try reader.bytesValue() };
+            while (try address_reader.next()) |address_field| {
+                if (address_field.number == 1 and address_field.wire_type == 2) {
+                    var socket_reader: protobuf.Reader = .{ .bytes = try address_reader.bytesValue() };
+                    while (try socket_reader.next()) |socket_field| {
+                        if (socket_field.number == 1 and socket_field.wire_type == 0) {
+                            const protocol = try socket_reader.varint();
+                            if (protocol > 1) return error.InvalidLoadReport;
+                            result.ipv6 = protocol == 1;
+                        } else if (socket_field.number == 2 and socket_field.wire_type == 2) result.host = try socket_reader.string() else if (socket_field.number == 3 and socket_field.wire_type == 0) {
+                            const port = try socket_reader.varint();
+                            if (port == 0 or port > std.math.maxInt(u16)) return error.InvalidLoadReport;
+                            result.port = @intCast(port);
+                        } else try socket_reader.skip(socket_field);
+                    }
+                } else try address_reader.skip(address_field);
+            }
+        } else if (field.number == 2 and field.wire_type == 0) result.successful = try reader.varint() else if (field.number == 3 and field.wire_type == 0) result.in_progress = try reader.varint() else if (field.number == 4 and field.wire_type == 0) result.error_requests = try reader.varint() else if (field.number == 7 and field.wire_type == 0) result.issued = try reader.varint() else try reader.skip(field);
+    }
+    try text(result.host, limits, false);
+    if (result.port == 0) return error.InvalidLoadReport;
+    return result;
+}
+
+fn parseLocalityStats(gpa: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!LocalityStats {
+    var endpoints: std.ArrayList(EndpointStats) = .empty;
+    errdefer endpoints.deinit(gpa);
     var result: LocalityStats = .{};
     var reader: protobuf.Reader = .{ .bytes = bytes };
     while (try reader.next()) |field| {
-        if (field.number == 1 and field.wire_type == 2) result.locality = try parseLocality(try reader.bytesValue(), limits) else if (field.number == 2 and field.wire_type == 0) result.successful = try reader.varint() else if (field.number == 3 and field.wire_type == 0) result.in_progress = try reader.varint() else if (field.number == 4 and field.wire_type == 0) result.error_requests = try reader.varint() else if (field.number == 8 and field.wire_type == 0) result.issued = try reader.varint() else try reader.skip(field);
+        if (field.number == 1 and field.wire_type == 2) result.locality = try parseLocality(try reader.bytesValue(), limits) else if (field.number == 2 and field.wire_type == 0) result.successful = try reader.varint() else if (field.number == 3 and field.wire_type == 0) result.in_progress = try reader.varint() else if (field.number == 4 and field.wire_type == 0) result.error_requests = try reader.varint() else if (field.number == 8 and field.wire_type == 0) result.issued = try reader.varint() else if (field.number == 7 and field.wire_type == 2) {
+            if (endpoints.items.len >= limits.max_endpoints) return error.LoadReportLimitExceeded;
+            try endpoints.append(gpa, try parseEndpointStats(try reader.bytesValue(), limits));
+        } else try reader.skip(field);
     }
+    result.endpoints = try endpoints.toOwnedSlice(gpa);
     return result;
 }
 
@@ -232,7 +302,10 @@ fn parseDropped(bytes: []const u8, limits: Limits) Error!Dropped {
 
 fn parseCluster(gpa: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!OwnedCluster {
     var localities: std.ArrayList(LocalityStats) = .empty;
-    errdefer localities.deinit(gpa);
+    errdefer {
+        for (localities.items) |locality| gpa.free(locality.endpoints);
+        localities.deinit(gpa);
+    }
     var dropped: std.ArrayList(Dropped) = .empty;
     errdefer dropped.deinit(gpa);
     var value: ClusterStats = .{ .name = "" };
@@ -240,7 +313,7 @@ fn parseCluster(gpa: std.mem.Allocator, bytes: []const u8, limits: Limits) Error
     while (try reader.next()) |field| {
         if (field.number == 1 and field.wire_type == 2) value.name = try reader.string() else if (field.number == 2 and field.wire_type == 2) {
             if (localities.items.len >= limits.max_localities) return error.LoadReportLimitExceeded;
-            try localities.append(gpa, try parseLocalityStats(try reader.bytesValue(), limits));
+            try localities.append(gpa, try parseLocalityStats(gpa, try reader.bytesValue(), limits));
         } else if (field.number == 3 and field.wire_type == 0) value.total_dropped = try reader.varint() else if (field.number == 4 and field.wire_type == 2) value.interval_ns = try parseDuration(try reader.bytesValue()) else if (field.number == 5 and field.wire_type == 2) {
             if (dropped.items.len >= limits.max_dropped) return error.LoadReportLimitExceeded;
             try dropped.append(gpa, try parseDropped(try reader.bytesValue(), limits));
@@ -286,6 +359,7 @@ pub fn decodeRequest(gpa: std.mem.Allocator, bytes: []const u8, limits: Limits) 
     var clusters: std.ArrayList(OwnedCluster) = .empty;
     errdefer {
         for (clusters.items) |cluster| {
+            for (cluster.localities) |locality| gpa.free(locality.endpoints);
             gpa.free(cluster.localities);
             gpa.free(cluster.dropped);
         }

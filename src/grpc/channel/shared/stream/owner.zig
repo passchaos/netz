@@ -11,6 +11,11 @@ fn lrsCluster(worker: anytype) ?[]const u8 {
     return lrs_stats.clusterName(worker.source.endpoint);
 }
 
+fn lrsEndpoint(worker: anytype) ?std.Io.net.IpAddress {
+    if (comptime !@hasField(@TypeOf(worker.*), "source")) return null;
+    return lrs_stats.endpointAddress(worker.source.endpoint);
+}
+
 pub fn Owner(comptime State: type) type {
     return struct {
         pub const Active = struct {
@@ -43,7 +48,7 @@ pub fn Owner(comptime State: type) type {
             call.circuit_permit = job.circuit_permit;
             job.circuit_permit = null;
             state.finish(job, null, null);
-            if (lrsCluster(worker)) |cluster| state.lrs_stats.recordStarted(state.io, cluster);
+            if (lrsCluster(worker)) |cluster| state.lrs_stats.recordStarted(state.io, cluster, lrsEndpoint(worker));
         }
         pub fn fail(worker: anytype, index: usize, err: anyerror) void {
             const state = worker.parent;
@@ -56,7 +61,7 @@ pub fn Owner(comptime State: type) type {
             call.circuit_permit = null;
             state.finishOutstandingLocked(worker);
             state.observeOutlierLocked(worker, false);
-            if (lrsCluster(worker)) |cluster| state.lrs_stats.recordCompletion(state.io, cluster, false);
+            if (lrsCluster(worker)) |cluster| state.lrs_stats.recordCompletion(state.io, cluster, lrsEndpoint(worker), false);
             call.retireLocked(if (state.closed) error.SharedChannelClosed else err);
             state.unlock();
             call.release();
@@ -71,7 +76,7 @@ pub fn Owner(comptime State: type) type {
             call.circuit_permit = null;
             state.finishOutstandingLocked(worker);
             state.observeOutlierLocked(worker, response.status == .ok);
-            if (lrsCluster(worker)) |cluster| state.lrs_stats.recordCompletion(state.io, cluster, response.status == .ok);
+            if (lrsCluster(worker)) |cluster| state.lrs_stats.recordCompletion(state.io, cluster, lrsEndpoint(worker), response.status == .ok);
             call.terminal = response;
             call.retireLocked(null);
             state.unlock();

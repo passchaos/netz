@@ -23,7 +23,7 @@ def main():
         raise RuntimeError(result.stdout + result.stderr)
     report = json.loads(result.stdout)
     assert report["status"] == "passed"
-    for contract in ("initial_subscription", "report_counters", "send_all"):
+    for contract in ("initial_subscription", "report_counters", "send_all", "endpoint_granularity"):
         assert report[contract] is True
     repo = directory.parents[2]
     files = ["src/grpc/xds/lrs.zig", "src/grpc/xds/lrs/codec.zig", "src/grpc/xds/lrs/client.zig"]

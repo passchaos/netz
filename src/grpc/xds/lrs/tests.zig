@@ -9,12 +9,21 @@ const allocator = std.testing.allocator;
 test "gRPC LRS envelopes round-trip node, clusters, localities and dropped stats" {
     const node = try ads.codec.encodeNode(allocator, .{ .id = "node-1", .client_features = &.{"envoy.lrs.supports_send_all_clusters"} });
     defer allocator.free(node);
+    const endpoints = [_]codec.EndpointStats{.{
+        .host = "127.0.0.1",
+        .port = 1001,
+        .successful = 2,
+        .in_progress = 1,
+        .error_requests = 1,
+        .issued = 3,
+    }};
     const localities = [_]codec.LocalityStats{.{
         .locality = .{ .region = "r", .zone = "z", .sub_zone = "s" },
         .successful = 2,
         .in_progress = 1,
         .error_requests = 1,
         .issued = 3,
+        .endpoints = &endpoints,
     }};
     const dropped = [_]codec.Dropped{.{ .category = "throttle", .count = 1 }};
     const clusters = [_]codec.ClusterStats{.{
@@ -42,6 +51,10 @@ test "gRPC LRS envelopes round-trip node, clusters, localities and dropped stats
     try std.testing.expectEqual(@as(u64, 1), cluster.localities[0].in_progress);
     try std.testing.expectEqual(@as(u64, 1), cluster.localities[0].error_requests);
     try std.testing.expectEqual(@as(u64, 3), cluster.localities[0].issued);
+    try std.testing.expectEqual(@as(usize, 1), cluster.localities[0].endpoints.len);
+    try std.testing.expectEqualStrings("127.0.0.1", cluster.localities[0].endpoints[0].host);
+    try std.testing.expectEqual(@as(u16, 1001), cluster.localities[0].endpoints[0].port);
+    try std.testing.expectEqual(@as(u64, 3), cluster.localities[0].endpoints[0].issued);
     try std.testing.expectEqual(@as(usize, 1), cluster.dropped.len);
     try std.testing.expectEqualStrings("throttle", cluster.dropped[0].category);
     try std.testing.expectEqual(@as(u64, 1), cluster.dropped[0].count);
@@ -85,18 +98,21 @@ test "gRPC LRS envelopes reject malformed, duplicate and over-limit input" {
 }
 
 test "gRPC LRS integration converts channel counters into cluster reports" {
-    const storage = try allocator.alloc(u8, 10);
+    const storage = try allocator.alloc(u8, 19);
     const entries = try allocator.alloc(lrs_stats.Entry, 2);
     const categories = try allocator.alloc(lrs_stats.CategoryCount, 1);
     categories[0] = .{ .category = storage[2..10], .count = 1 };
-    entries[0] = .{ .cluster = storage[0..1], .issued = 2, .successful = 1, .error_requests = 1, .dropped = 1, .in_progress = 1, .categories = categories[0..1] };
+    const endpoints = try allocator.alloc(lrs_stats.EndpointEntry, 1);
+    endpoints[0] = .{ .host = storage[10..19], .port = 1001, .ipv6 = false, .issued = 2, .successful = 1, .error_requests = 1 };
+    @memcpy(storage[10..19], "127.0.0.1");
+    entries[0] = .{ .cluster = storage[0..1], .issued = 2, .successful = 1, .error_requests = 1, .dropped = 1, .in_progress = 1, .categories = categories[0..1], .endpoints = endpoints[0..1] };
     entries[1] = .{ .cluster = storage[1..2], .issued = 1, .successful = 1, .error_requests = 0 };
     @memcpy(storage[0..1], "a");
     @memcpy(storage[1..2], "b");
     @memcpy(storage[2..10], "throttle");
-    var snapshot: channel.LrsStatsSnapshot = .{ .allocator = allocator, .storage = storage, .entries = entries, .categories = categories };
+    var snapshot: channel.LrsStatsSnapshot = .{ .allocator = allocator, .storage = storage, .entries = entries, .categories = categories, .endpoints = endpoints };
     defer snapshot.deinit();
-    var reports = try integration.build(allocator, &snapshot, .{ .region = "r", .zone = "z" }, 100 * std.time.ns_per_ms);
+    var reports = try integration.buildWithOptions(allocator, &snapshot, .{ .region = "r", .zone = "z" }, 100 * std.time.ns_per_ms, null, true);
     defer reports.deinit();
     try std.testing.expectEqual(@as(usize, 2), reports.clusters.len);
     for (reports.clusters) |cluster| {
@@ -108,6 +124,10 @@ test "gRPC LRS integration converts channel counters into cluster reports" {
             try std.testing.expectEqual(@as(u64, 1), cluster.localities[0].successful);
             try std.testing.expectEqual(@as(u64, 1), cluster.localities[0].error_requests);
             try std.testing.expectEqual(@as(u64, 1), cluster.localities[0].in_progress);
+            try std.testing.expectEqual(@as(usize, 1), cluster.localities[0].endpoints.len);
+            try std.testing.expectEqualStrings("127.0.0.1", cluster.localities[0].endpoints[0].host);
+            try std.testing.expectEqual(@as(u16, 1001), cluster.localities[0].endpoints[0].port);
+            try std.testing.expectEqual(@as(u64, 2), cluster.localities[0].endpoints[0].issued);
             try std.testing.expectEqual(@as(u64, 1), cluster.total_dropped);
             try std.testing.expectEqual(@as(usize, 1), cluster.dropped.len);
             try std.testing.expectEqualStrings("throttle", cluster.dropped[0].category);
@@ -134,8 +154,9 @@ test "gRPC LRS reporter applies response interval and cluster filter" {
     defer client.deinit();
     var reporter = @import("reporter.zig").Reporter.init(allocator, &client, first, .{ .interval_ns = std.time.ns_per_s });
     defer reporter.deinit();
-    try reporter.onResponse(.{ .clusters = &.{"a"}, .interval_ns = 50 * std.time.ns_per_ms, .send_all_clusters = false });
+    try reporter.onResponse(.{ .clusters = &.{"a"}, .interval_ns = 50 * std.time.ns_per_ms, .send_all_clusters = false, .report_endpoint_granularity = true });
     try std.testing.expectEqual(@as(u64, 50 * std.time.ns_per_ms), reporter.interval_ns);
+    try std.testing.expect(reporter.endpoint_granularity);
     try std.testing.expectEqual(@as(usize, 1), reporter.filter.?.len);
     try std.testing.expectEqualStrings("a", reporter.filter.?[0]);
     try reporter.onResponse(.{ .clusters = &.{}, .send_all_clusters = true });

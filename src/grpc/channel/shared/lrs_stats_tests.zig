@@ -16,12 +16,13 @@ test "gRPC LRS counters aggregate per cluster" {
     var stats: lrs_stats.Stats = .{ .allocator = allocator };
     defer stats.deinit();
     const io = std.testing.io;
-    stats.recordStarted(io, "a");
-    stats.recordCompletion(io, "a", true);
-    stats.recordStarted(io, "a");
-    stats.recordCompletion(io, "a", false);
-    stats.recordStarted(io, "b");
-    stats.recordCompletion(io, "b", true);
+    const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(1001) };
+    stats.recordStarted(io, "a", address);
+    stats.recordCompletion(io, "a", address, true);
+    stats.recordStarted(io, "a", address);
+    stats.recordCompletion(io, "a", address, false);
+    stats.recordStarted(io, "b", null);
+    stats.recordCompletion(io, "b", null, true);
     stats.recordDropped(io, "a", "throttle");
     stats.recordDropped(io, "a", "throttle");
     var snapshot = try stats.snapshot(allocator, io);
@@ -34,6 +35,13 @@ test "gRPC LRS counters aggregate per cluster" {
             try std.testing.expectEqual(@as(u64, 1), entry.error_requests);
             try std.testing.expectEqual(@as(u64, 0), entry.in_progress);
             try std.testing.expectEqual(@as(u64, 2), entry.dropped);
+            try std.testing.expectEqual(@as(usize, 1), entry.endpoints.len);
+            try std.testing.expectEqualStrings("127.0.0.1", entry.endpoints[0].host);
+            try std.testing.expectEqual(@as(u16, 1001), entry.endpoints[0].port);
+            try std.testing.expectEqual(@as(u64, 2), entry.endpoints[0].issued);
+            try std.testing.expectEqual(@as(u64, 1), entry.endpoints[0].successful);
+            try std.testing.expectEqual(@as(u64, 1), entry.endpoints[0].error_requests);
+            try std.testing.expectEqual(@as(u64, 0), entry.endpoints[0].in_progress);
             try std.testing.expectEqual(@as(usize, 1), entry.categories.len);
             try std.testing.expectEqualStrings("throttle", entry.categories[0].category);
             try std.testing.expectEqual(@as(u64, 2), entry.categories[0].count);
@@ -79,6 +87,9 @@ test "gRPC LRS counters attribute unary completions to the endpoint cluster" {
     try std.testing.expectEqual(@as(usize, 1), snapshot.entries.len);
     try std.testing.expectEqualStrings("a", snapshot.entries[0].cluster);
     try std.testing.expectEqual(@as(u64, 1), snapshot.entries[0].successful);
+    try std.testing.expectEqual(@as(usize, 1), snapshot.entries[0].endpoints.len);
+    try std.testing.expectEqualStrings("127.0.0.1", snapshot.entries[0].endpoints[0].host);
+    try std.testing.expectEqual(server.address().getPort(), snapshot.entries[0].endpoints[0].port);
     var failed = try sender.unary(.{ .path = "/demo.Lrs/Call", .message = "fail", .wait_for_ready = true });
     defer failed.deinit();
     try std.testing.expectEqual(grpc.Status.internal, failed.status);
@@ -88,6 +99,11 @@ test "gRPC LRS counters attribute unary completions to the endpoint cluster" {
     try std.testing.expectEqual(@as(u64, 2), after.entries[0].issued);
     try std.testing.expectEqual(@as(u64, 1), after.entries[0].successful);
     try std.testing.expectEqual(@as(u64, 1), after.entries[0].error_requests);
+    try std.testing.expectEqual(@as(usize, 1), after.entries[0].endpoints.len);
+    try std.testing.expectEqual(@as(u64, 2), after.entries[0].endpoints[0].issued);
+    try std.testing.expectEqual(@as(u64, 1), after.entries[0].endpoints[0].successful);
+    try std.testing.expectEqual(@as(u64, 1), after.entries[0].endpoints[0].error_requests);
+    try std.testing.expectEqual(@as(u64, 0), after.entries[0].endpoints[0].in_progress);
     try task.await(io);
 }
 

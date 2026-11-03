@@ -64,6 +64,8 @@ plus the in-progress decrement when the terminal arrives. Queue, drop and
 circuit rejections never increment issued or in-progress. Channel drops and circuit
 rejections increment total dropped requests and per-category counts for the
 RPC-local cluster; circuit rejections use the `circuit_breaking` category.
+Per-endpoint counters are retained for resolved IPv4/IPv6 endpoints; host
+endpoints without a resolved socket address omit endpoint granularity.
 Counters use a dedicated mutex; disabled channels skip the lock entirely, so
 ordinary channels keep their existing hot path.
 
@@ -74,9 +76,9 @@ snapshot storage, so keep the snapshot alive until the report is encoded.
 ## Caller-driven reporter
 
 `lrs.Reporter` wraps a connected `Client` and a source SharedChannel. Its
-`onResponse` applies the server interval and cluster set: `send_all_clusters`
-clears the filter, an explicit list reports exactly those clusters, and an
-empty list reports none. `nextDeadline` returns the next interval boundary and
+`onResponse` applies the server interval, cluster set and endpoint-granularity
+flag: `send_all_clusters` clears the filter, an explicit list reports exactly
+those clusters, and an empty list reports none. `nextDeadline` returns the next interval boundary and
 `reportIfDueWithDeadline` writes only when that boundary has passed.
 `reportWithDeadline` builds a filtered snapshot report immediately. The caller
 remains responsible for driving the loop.
@@ -94,7 +96,8 @@ Native tests cover request/response round trips, locality counters, dropped
 categories, intervals, malformed/duplicate/over-limit input, UTF-8 rejection,
 per-cluster unary and streaming counter aggregation, in-progress tracking,
 channel drop and per-category attribution, integration conversion, reporter
-interval/filter/rebind behavior, ControlPlane failover composition, and a real
+interval/filter/rebind behavior, endpoint granularity, ControlPlane failover
+composition, and a real
 loopback duplex session that observes the node, a response, a report with exact
 counters, a second `send_all_clusters` response, a terminal, and node replay on
 a replacement stream. See
@@ -103,13 +106,12 @@ a replacement stream. See
 `zig build interop-grpc-lrs` runs the client against an independent Node peer
 that loads the pinned official Envoy `lrs.proto` and `load_report.proto`. It
 checks exact node/features, response interval and flags, report counters,
-cluster/service names, dropped requests and interval, then a second
-`send_all_clusters` response. Results and source/proto hashes are in
+cluster/service names, dropped requests, endpoint address/port and counters,
+then a second `send_all_clusters` response. Results and source/proto hashes are in
 `docs/evidence/grpc_lrs/2026-11-03.json`.
 
 ## Remaining integration
 
-Endpoint-granularity stats and an automatic background report scheduler remain
-follow-up work. Unary and streaming channel counters, envelopes, the
-caller-driven reporter, ControlPlane failover/reload composition and rebinding
-are complete.
+An automatic background report scheduler remains follow-up work. Unary and
+streaming channel counters, endpoint granularity, envelopes, the caller-driven
+reporter, ControlPlane failover/reload composition and rebinding are complete.
