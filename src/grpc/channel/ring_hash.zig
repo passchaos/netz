@@ -82,13 +82,30 @@ pub fn sameEndpointIdentity(left: anytype, right: @TypeOf(left)) bool {
                     @field(normalized_right, field) = @as(T, @field(normalized_left, field));
                 }
             }
-            normalized_left.ring_hash_weight = 1;
-            normalized_right.ring_hash_weight = 1;
-            normalized_left.locality_weight = 0;
-            normalized_right.locality_weight = 0;
+            if (comptime @hasField(@TypeOf(left_value), "ring_hash_weight")) {
+                normalized_left.ring_hash_weight = 1;
+                normalized_right.ring_hash_weight = 1;
+            }
+            if (comptime @hasField(@TypeOf(left_value), "locality_weight")) {
+                normalized_left.locality_weight = 0;
+                normalized_right.locality_weight = 0;
+            }
             break :blk std.meta.eql(normalized_left, normalized_right);
         },
     };
+}
+
+test "gRPC endpoint identity tolerates payloads without weight fields" {
+    const Target = struct {
+        host: []const u8 = "localhost",
+        hierarchical_path: []const []const u8 = &.{},
+    };
+    const Endpoint = union(enum) { cleartext_host: Target };
+    const left: Endpoint = .{ .cleartext_host = .{} };
+    const right: Endpoint = .{ .cleartext_host = .{} };
+    try std.testing.expect(sameEndpointIdentity(left, right));
+    const different: Endpoint = .{ .cleartext_host = .{ .host = "other" } };
+    try std.testing.expect(!sameEndpointIdentity(left, different));
 }
 
 pub fn uniqueEndpointCount(endpoints: anytype) usize {
