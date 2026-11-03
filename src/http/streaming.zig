@@ -42,3 +42,14 @@ pub const http3 = struct {
     pub const ResponseEvent = @import("../http3/runtime.zig").StreamingResponseEvent;
     pub const Server = @import("../http3/runtime.zig").Server;
 };
+
+test "streaming aliases resolve to public runtime types" {
+    _ = http1.Request;
+    _ = http1.RequestHead;
+    _ = http2.Request;
+    _ = http2.RequestHead;
+    _ = http2.Stream;
+    _ = http2.Event;
+    _ = http3.RequestEvent;
+    _ = http3.ResponseEvent;
+}
