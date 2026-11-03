@@ -166,6 +166,22 @@ test "HTTP/2 server duplex nextBody pulls DATA and trailers" {
     try stream.finishResponseHeaders(.{ .status = 200 });
 }
 
+test "HTTP/2 server duplex nextBody surfaces peer reset" {
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var fixture = try Fixture.init(threaded.io());
+    defer fixture.deinit();
+    var encoder: http2.Hpack.Encoder = .{};
+    defer encoder.deinit(allocator);
+    try fixture.requestHeaders(&encoder, 1, "/reset");
+    var stream = try fixture.connection.acceptDuplexRequest();
+    defer stream.deinit();
+    try fixture.frame(.data, 0, 1, "a");
+    try fixture.frame(.rst_stream, 0, 1, "\x00\x00\x00\x08");
+    try std.testing.expectEqualStrings("a", (try stream.nextBody()).?);
+    try std.testing.expectError(error.StreamReset, stream.nextBody());
+}
+
 test "HTTP/2 server duplex pump races command wake and routes streams" {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
