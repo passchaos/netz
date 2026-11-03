@@ -11,7 +11,10 @@ pub fn rejectIfSaturated(state: anytype, job: anytype) @TypeOf(state.*).Failure!
     const policy = saturated orelse return null;
     if (job.canceled()) return error.Canceled;
     policy.recordRejection();
-    if (comptime @hasField(@TypeOf(state.*), "lrs_stats")) if (@import("../cluster_route.zig").jobCluster(job)) |key| state.lrs_stats.recordDropped(state.io, lrs_stats.stripCluster(key), "circuit_breaking");
+    if (comptime @hasField(@TypeOf(state.*), "lrs_stats") and @hasDecl(@TypeOf(state.*), "lrsServiceName")) if (@import("../cluster_route.zig").jobCluster(job)) |key| {
+        const cluster = lrs_stats.stripCluster(key);
+        state.lrs_stats.recordDropped(state.io, cluster, state.lrsServiceName(cluster), "circuit_breaking");
+    };
     if (job.stream != null) return error.CallDropped;
     return try call.circuitBreakerResponse(state.allocator);
 }

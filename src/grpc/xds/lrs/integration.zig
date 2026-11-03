@@ -104,6 +104,7 @@ pub fn buildWithOptions(
         }
         clusters[cluster_index] = .{
             .name = entry.cluster,
+            .service_name = entry.service_name,
             .localities = localities[cluster_index..][0..1],
             .total_dropped = entry.dropped,
             .dropped = dropped[start..][0 .. dropped_index - start],

@@ -66,6 +66,9 @@ rejections increment total dropped requests and per-category counts for the
 RPC-local cluster; circuit rejections use the `circuit_breaking` category.
 Per-endpoint counters are retained for resolved IPv4/IPv6 endpoints; host
 endpoints without a resolved socket address omit endpoint granularity.
+Entries also retain the xDS cluster implementation `edsServiceName` and report
+it as `ClusterStats.cluster_service_name`, so management servers can aggregate
+clusters that share an EDS service.
 Counters use a dedicated mutex; disabled channels skip the lock entirely, so
 ordinary channels keep their existing hot path.
 
@@ -142,7 +145,7 @@ Native tests cover request/response round trips, locality counters, dropped
 categories, intervals, malformed/duplicate/over-limit input, UTF-8 rejection,
 per-cluster unary and streaming counter aggregation, in-progress tracking,
 channel drop and per-category attribution, integration conversion, reporter
-interval/filter/rebind behavior, endpoint granularity, interval-delta reporting with actual elapsed intervals and zero-report skipping,
+interval/filter/rebind behavior, endpoint granularity, EDS service-name propagation, interval-delta reporting with actual elapsed intervals and zero-report skipping,
 the scheduler report loop, same-server reconnect, scheduler failover across two servers, ControlPlane failover
 composition, and a real
 loopback duplex session that observes the node, a response, a report with exact

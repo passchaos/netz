@@ -16,11 +16,14 @@ pub const Policy = struct {
     revision: u64,
     counters: drop.Counters = .{},
     discovery_pending: bool,
+    /// EDS service name from the xDS cluster implementation config, used by
+    /// LRS cluster reports. Borrows the service-config arena.
+    eds_service_name: []const u8 = "",
     pub fn init(gpa: std.mem.Allocator, options: Options) (drop.Error || circuit.Error)!Policy {
         var drops = try drop.Policy.init(gpa, options.drop_categories);
         errdefer drops.deinit();
         const budget = try circuit.Policy.init(.{ .cluster = options.cluster, .eds_service_name = options.eds_service_name, .max_concurrent_requests = options.max_concurrent_requests });
-        return .{ .drops = drops, .circuit = budget, .revision = next_revision.fetchAdd(1, .monotonic), .discovery_pending = options.discovery_pending };
+        return .{ .drops = drops, .circuit = budget, .revision = next_revision.fetchAdd(1, .monotonic), .discovery_pending = options.discovery_pending, .eds_service_name = options.eds_service_name };
     }
     pub fn deinit(self: *Policy) void {
         self.drops.deinit();

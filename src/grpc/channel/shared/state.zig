@@ -364,6 +364,11 @@ pub const State = struct {
     fn lrsCluster(worker: *Worker) ?[]const u8 {
         return lrs_stats.clusterName(worker.source.endpoint);
     }
+    pub fn lrsServiceName(self: *State, cluster: []const u8) []const u8 {
+        const runtime = if (self.weighted_target) |*value| value else return "";
+        const policy = @import("../cluster_impl.zig").forCluster(runtime.root, cluster) catch return "";
+        return if (policy) |value| value.eds_service_name else "";
+    }
     pub fn finishAttempt(
         self: *State,
         worker: *Worker,
@@ -379,7 +384,7 @@ pub const State = struct {
         else
             err == null);
         if (job.lrs_started) if (lrsCluster(worker)) |cluster| {
-            self.lrs_stats.recordCompletion(self.io, cluster, lrs_stats.endpointAddress(worker.source.endpoint), if (result) |response| response.status == .ok else err == null);
+            self.lrs_stats.recordCompletion(self.io, cluster, self.lrsServiceName(cluster), lrs_stats.endpointAddress(worker.source.endpoint), if (result) |response| response.status == .ok else err == null);
         };
         self.finishLocked(job, result, err);
         self.wakeAllLocked();

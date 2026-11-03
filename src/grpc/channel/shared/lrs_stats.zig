@@ -18,6 +18,7 @@ pub const EndpointEntry = struct {
 
 pub const Entry = struct {
     cluster: []const u8,
+    service_name: []const u8 = "",
     issued: u64 = 0,
     successful: u64 = 0,
     error_requests: u64 = 0,
@@ -78,6 +79,7 @@ const EndpointCounter = struct {
 const CategoryCounter = struct { count: u64 = 0, reported: u64 = 0 };
 
 const Counter = struct {
+    service_name: []const u8 = "",
     issued: u64 = 0,
     successful: u64 = 0,
     error_requests: u64 = 0,
@@ -91,6 +93,7 @@ const Counter = struct {
     endpoints: std.StringHashMapUnmanaged(EndpointCounter) = .empty,
 
     fn deinit(self: *Counter, gpa: std.mem.Allocator) void {
+        if (self.service_name.len != 0) gpa.free(self.service_name);
         var iterator = self.dropped_categories.iterator();
         while (iterator.next()) |entry| gpa.free(entry.key_ptr.*);
         self.dropped_categories.deinit(gpa);
@@ -108,7 +111,7 @@ pub const Stats = struct {
 
     const Update = enum { issued_success, issued_error, started, aborted, issued, success, error_request, dropped };
 
-    fn entryLocked(self: *Stats, cluster: []const u8) ?*Counter {
+    fn entryLocked(self: *Stats, cluster: []const u8, service_name: []const u8) ?*Counter {
         const gpa = self.allocator orelse return null;
         if (cluster.len == 0) return null;
         if (self.map.count() >= max_clusters) {
@@ -120,8 +123,15 @@ pub const Stats = struct {
                 _ = self.map.remove(cluster);
                 return null;
             };
+            const owned_service = if (service_name.len == 0) &.{} else gpa.dupe(u8, service_name) catch {
+                gpa.free(owned);
+                _ = self.map.remove(cluster);
+                return null;
+            };
             gop.key_ptr.* = owned;
-            gop.value_ptr.* = .{};
+            gop.value_ptr.* = .{ .service_name = owned_service };
+        } else if (gop.value_ptr.service_name.len == 0 and service_name.len != 0) {
+            gop.value_ptr.service_name = gpa.dupe(u8, service_name) catch return gop.value_ptr;
         }
         return gop.value_ptr;
     }
@@ -176,45 +186,45 @@ pub const Stats = struct {
         } else gpa.free(key);
         apply(gop.value_ptr, kind);
     }
-    fn update(self: *Stats, io: std.Io, cluster: []const u8, kind: Update) void {
+    fn update(self: *Stats, io: std.Io, cluster: []const u8, service_name: []const u8, kind: Update) void {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
-        const value = self.entryLocked(cluster) orelse return;
+        const value = self.entryLocked(cluster, service_name) orelse return;
         apply(value, kind);
     }
 
-    pub fn record(self: *Stats, io: std.Io, cluster: []const u8, success: bool) void {
-        self.update(io, cluster, if (success) .issued_success else .issued_error);
+    pub fn record(self: *Stats, io: std.Io, cluster: []const u8, service_name: []const u8, success: bool) void {
+        self.update(io, cluster, service_name, if (success) .issued_success else .issued_error);
     }
-    pub fn recordIssued(self: *Stats, io: std.Io, cluster: []const u8) void {
-        self.update(io, cluster, .issued);
+    pub fn recordIssued(self: *Stats, io: std.Io, cluster: []const u8, service_name: []const u8) void {
+        self.update(io, cluster, service_name, .issued);
     }
-    pub fn recordStarted(self: *Stats, io: std.Io, cluster: []const u8, endpoint: ?std.Io.net.IpAddress) void {
+    pub fn recordStarted(self: *Stats, io: std.Io, cluster: []const u8, service_name: []const u8, endpoint: ?std.Io.net.IpAddress) void {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
-        const value = self.entryLocked(cluster) orelse return;
+        const value = self.entryLocked(cluster, service_name) orelse return;
         apply(value, .started);
         if (endpoint) |address| self.endpointUpdate(value, address, .started);
     }
-    pub fn recordAborted(self: *Stats, io: std.Io, cluster: []const u8, endpoint: ?std.Io.net.IpAddress) void {
+    pub fn recordAborted(self: *Stats, io: std.Io, cluster: []const u8, service_name: []const u8, endpoint: ?std.Io.net.IpAddress) void {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
-        const value = self.entryLocked(cluster) orelse return;
+        const value = self.entryLocked(cluster, service_name) orelse return;
         apply(value, .aborted);
         if (endpoint) |address| self.endpointUpdate(value, address, .aborted);
     }
-    pub fn recordCompletion(self: *Stats, io: std.Io, cluster: []const u8, endpoint: ?std.Io.net.IpAddress, success: bool) void {
+    pub fn recordCompletion(self: *Stats, io: std.Io, cluster: []const u8, service_name: []const u8, endpoint: ?std.Io.net.IpAddress, success: bool) void {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
-        const value = self.entryLocked(cluster) orelse return;
+        const value = self.entryLocked(cluster, service_name) orelse return;
         const kind: Update = if (success) .success else .error_request;
         apply(value, kind);
         if (endpoint) |address| self.endpointUpdate(value, address, kind);
     }
-    pub fn recordDropped(self: *Stats, io: std.Io, cluster: []const u8, category: []const u8) void {
+    pub fn recordDropped(self: *Stats, io: std.Io, cluster: []const u8, service_name: []const u8, category: []const u8) void {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
-        const value = self.entryLocked(cluster) orelse return;
+        const value = self.entryLocked(cluster, service_name) orelse return;
         value.dropped +%= 1;
         if (category.len == 0) return;
         const gpa = self.allocator orelse return;
@@ -241,7 +251,7 @@ pub const Stats = struct {
         var endpoint_count: usize = 0;
         var iterator = self.map.iterator();
         while (iterator.next()) |entry| {
-            storage_bytes += entry.key_ptr.*.len;
+            storage_bytes += entry.key_ptr.*.len + entry.value_ptr.service_name.len;
             category_count += entry.value_ptr.dropped_categories.count();
             endpoint_count += entry.value_ptr.endpoints.count();
             var categories = entry.value_ptr.dropped_categories.iterator();
@@ -267,6 +277,10 @@ pub const Stats = struct {
             const copy = storage[offset..][0..name.len];
             @memcpy(copy, name);
             offset += name.len;
+            const service_name = entry.value_ptr.service_name;
+            const service_copy = storage[offset..][0..service_name.len];
+            @memcpy(service_copy, service_name);
+            offset += service_name.len;
             const category_start = category_index;
             var category_iterator = entry.value_ptr.dropped_categories.iterator();
             while (category_iterator.next()) |category| {
@@ -311,6 +325,7 @@ pub const Stats = struct {
             const dropped = if (delta) entry.value_ptr.dropped -| entry.value_ptr.reported_dropped else entry.value_ptr.dropped;
             entries[index] = .{
                 .cluster = copy,
+                .service_name = service_copy,
                 .issued = issued,
                 .successful = successful,
                 .error_requests = error_requests,

@@ -98,18 +98,19 @@ test "gRPC LRS envelopes reject malformed, duplicate and over-limit input" {
 }
 
 test "gRPC LRS integration converts channel counters into cluster reports" {
-    const storage = try allocator.alloc(u8, 19);
+    const storage = try allocator.alloc(u8, 24);
     const entries = try allocator.alloc(lrs_stats.Entry, 2);
     const categories = try allocator.alloc(lrs_stats.CategoryCount, 1);
     categories[0] = .{ .category = storage[2..10], .count = 1 };
     const endpoints = try allocator.alloc(lrs_stats.EndpointEntry, 1);
     endpoints[0] = .{ .host = storage[10..19], .port = 1001, .ipv6 = false, .issued = 2, .successful = 1, .error_requests = 1 };
     @memcpy(storage[10..19], "127.0.0.1");
-    entries[0] = .{ .cluster = storage[0..1], .issued = 2, .successful = 1, .error_requests = 1, .dropped = 1, .in_progress = 1, .categories = categories[0..1], .endpoints = endpoints[0..1] };
+    entries[0] = .{ .cluster = storage[0..1], .service_name = storage[19..24], .issued = 2, .successful = 1, .error_requests = 1, .dropped = 1, .in_progress = 1, .categories = categories[0..1], .endpoints = endpoints[0..1] };
     entries[1] = .{ .cluster = storage[1..2], .issued = 1, .successful = 1, .error_requests = 0 };
     @memcpy(storage[0..1], "a");
     @memcpy(storage[1..2], "b");
     @memcpy(storage[2..10], "throttle");
+    @memcpy(storage[19..24], "eds-a");
     var snapshot: channel.LrsStatsSnapshot = .{ .allocator = allocator, .storage = storage, .entries = entries, .categories = categories, .endpoints = endpoints };
     defer snapshot.deinit();
     var reports = try integration.buildWithOptions(allocator, &snapshot, .{ .region = "r", .zone = "z" }, 100 * std.time.ns_per_ms, null, true);
@@ -120,6 +121,7 @@ test "gRPC LRS integration converts channel counters into cluster reports" {
         try std.testing.expectEqualStrings("r", cluster.localities[0].locality.region);
         try std.testing.expectEqual(@as(u64, 100 * std.time.ns_per_ms), cluster.interval_ns);
         if (std.mem.eql(u8, cluster.name, "a")) {
+            try std.testing.expectEqualStrings("eds-a", cluster.service_name);
             try std.testing.expectEqual(@as(u64, 2), cluster.localities[0].issued);
             try std.testing.expectEqual(@as(u64, 1), cluster.localities[0].successful);
             try std.testing.expectEqual(@as(u64, 1), cluster.localities[0].error_requests);

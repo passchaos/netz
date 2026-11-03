@@ -4,6 +4,16 @@ const channel_endpoint = @import("../../channel.zig").Endpoint;
 const lrs_stats = @import("lrs_stats.zig");
 const allocator = std.testing.allocator;
 
+const PeerUnary = struct {
+    fn run(listener: *grpc.runtime.Server) !void {
+        var connection = try listener.acceptWithTimeout(.fromSeconds(3));
+        defer connection.deinit();
+        var unary = try connection.readUnaryWithTimeout(.fromSeconds(3));
+        defer unary.deinit();
+        try connection.writeUnary(unary.transport.stream_id, .{ .message = "ok" });
+    }
+};
+
 fn readTerminal(reader: anytype) !void {
     while (true) {
         var event = try reader.nextWithTimeout(.fromSeconds(3));
@@ -17,14 +27,14 @@ test "gRPC LRS counters aggregate per cluster" {
     defer stats.deinit();
     const io = std.testing.io;
     const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(1001) };
-    stats.recordStarted(io, "a", address);
-    stats.recordCompletion(io, "a", address, true);
-    stats.recordStarted(io, "a", address);
-    stats.recordCompletion(io, "a", address, false);
-    stats.recordStarted(io, "b", null);
-    stats.recordCompletion(io, "b", null, true);
-    stats.recordDropped(io, "a", "throttle");
-    stats.recordDropped(io, "a", "throttle");
+    stats.recordStarted(io, "a", "", address);
+    stats.recordCompletion(io, "a", "", address, true);
+    stats.recordStarted(io, "a", "", address);
+    stats.recordCompletion(io, "a", "", address, false);
+    stats.recordStarted(io, "b", "", null);
+    stats.recordCompletion(io, "b", "", null, true);
+    stats.recordDropped(io, "a", "", "throttle");
+    stats.recordDropped(io, "a", "", "throttle");
     var snapshot = try stats.snapshot(allocator, io);
     defer snapshot.deinit();
     try std.testing.expectEqual(@as(usize, 2), snapshot.entries.len);
@@ -58,9 +68,9 @@ test "gRPC LRS delta snapshots report only new counters" {
     defer stats.deinit();
     const io = std.testing.io;
     const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(1001) };
-    stats.recordStarted(io, "a", address);
-    stats.recordCompletion(io, "a", address, true);
-    stats.recordDropped(io, "a", "throttle");
+    stats.recordStarted(io, "a", "", address);
+    stats.recordCompletion(io, "a", "", address, true);
+    stats.recordDropped(io, "a", "", "throttle");
     var first = try stats.snapshotDelta(allocator, io);
     defer first.deinit();
     try std.testing.expectEqual(@as(usize, 1), first.entries.len);
@@ -78,9 +88,9 @@ test "gRPC LRS delta snapshots report only new counters" {
     try std.testing.expectEqual(@as(u64, 0), idle.entries[0].categories[0].count);
     try std.testing.expectEqual(@as(u64, 0), idle.entries[0].endpoints[0].issued);
 
-    stats.recordStarted(io, "a", address);
-    stats.recordCompletion(io, "a", address, false);
-    stats.recordDropped(io, "a", "throttle");
+    stats.recordStarted(io, "a", "", address);
+    stats.recordCompletion(io, "a", "", address, false);
+    stats.recordDropped(io, "a", "", "throttle");
     var second = try stats.snapshotDelta(allocator, io);
     defer second.deinit();
     try std.testing.expectEqual(@as(u64, 1), second.entries[0].issued);
@@ -95,6 +105,49 @@ test "gRPC LRS delta snapshots report only new counters" {
     defer cumulative.deinit();
     try std.testing.expectEqual(@as(u64, 2), cumulative.entries[0].issued);
     try std.testing.expectEqual(@as(u64, 2), cumulative.entries[0].dropped);
+}
+
+test "gRPC LRS counters retain the EDS service name" {
+    var stats: lrs_stats.Stats = .{ .allocator = allocator };
+    defer stats.deinit();
+    const io = std.testing.io;
+    stats.recordStarted(io, "a", "eds-a", null);
+    var snapshot = try stats.snapshot(allocator, io);
+    defer snapshot.deinit();
+    try std.testing.expectEqualStrings("a", snapshot.entries[0].cluster);
+    try std.testing.expectEqualStrings("eds-a", snapshot.entries[0].service_name);
+    stats.recordStarted(io, "b", "", null);
+    var with_empty = try stats.snapshot(allocator, io);
+    defer with_empty.deinit();
+    try std.testing.expectEqual(@as(usize, 2), with_empty.entries.len);
+}
+
+test "gRPC LRS counters resolve the EDS service name from service config" {
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try grpc.runtime.Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{}, 4096);
+    defer server.deinit();
+    var task = io.async(PeerUnary.run, .{&server});
+    defer _ = task.cancel(io) catch {};
+    const path = [_][]const u8{"cluster:impl-a"};
+    const endpoint: channel_endpoint = .{ .cleartext_ip = .{ .address = server.address(), .hierarchical_path = &path } };
+    var channel = try grpc.SharedChannel.init(allocator, io, .{ .resolved = .{ .endpoints = &.{endpoint} } }, .{
+        .enable_lrs_stats = true,
+        .service_config_json = "{\"loadBalancingConfig\":[{\"xds_cluster_impl_experimental\":{\"clusterName\":\"impl-a\",\"edsServiceName\":\"eds-a\",\"childPolicy\":[{\"round_robin\":{}}]}}]}",
+    });
+    defer channel.deinit();
+    var sender = channel.sender();
+    defer sender.deinit();
+    var response = try sender.unary(.{ .path = "/demo.Lrs/Call", .message = "ok", .wait_for_ready = true });
+    defer response.deinit();
+    try std.testing.expectEqual(grpc.Status.ok, response.status);
+    var snapshot = try channel.lrsStatsDeltaSnapshot(allocator);
+    defer snapshot.deinit();
+    try std.testing.expectEqual(@as(usize, 1), snapshot.entries.len);
+    try std.testing.expectEqualStrings("impl-a", snapshot.entries[0].cluster);
+    try std.testing.expectEqualStrings("eds-a", snapshot.entries[0].service_name);
+    try task.await(io);
 }
 
 test "gRPC LRS counters attribute unary completions to the endpoint cluster" {

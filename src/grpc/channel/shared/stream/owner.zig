@@ -48,7 +48,7 @@ pub fn Owner(comptime State: type) type {
             call.circuit_permit = job.circuit_permit;
             job.circuit_permit = null;
             state.finish(job, null, null);
-            if (lrsCluster(worker)) |cluster| state.lrs_stats.recordStarted(state.io, cluster, lrsEndpoint(worker));
+            if (lrsCluster(worker)) |cluster| state.lrs_stats.recordStarted(state.io, cluster, state.lrsServiceName(cluster), lrsEndpoint(worker));
         }
         pub fn fail(worker: anytype, index: usize, err: anyerror) void {
             const state = worker.parent;
@@ -61,7 +61,7 @@ pub fn Owner(comptime State: type) type {
             call.circuit_permit = null;
             state.finishOutstandingLocked(worker);
             state.observeOutlierLocked(worker, false);
-            if (lrsCluster(worker)) |cluster| state.lrs_stats.recordCompletion(state.io, cluster, lrsEndpoint(worker), false);
+            if (lrsCluster(worker)) |cluster| state.lrs_stats.recordCompletion(state.io, cluster, state.lrsServiceName(cluster), lrsEndpoint(worker), false);
             call.retireLocked(if (state.closed) error.SharedChannelClosed else err);
             state.unlock();
             call.release();
@@ -76,7 +76,7 @@ pub fn Owner(comptime State: type) type {
             call.circuit_permit = null;
             state.finishOutstandingLocked(worker);
             state.observeOutlierLocked(worker, response.status == .ok);
-            if (lrsCluster(worker)) |cluster| state.lrs_stats.recordCompletion(state.io, cluster, lrsEndpoint(worker), response.status == .ok);
+            if (lrsCluster(worker)) |cluster| state.lrs_stats.recordCompletion(state.io, cluster, state.lrsServiceName(cluster), lrsEndpoint(worker), response.status == .ok);
             call.terminal = response;
             call.retireLocked(null);
             state.unlock();
