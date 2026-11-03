@@ -111,21 +111,27 @@ test "gRPC LRS delta snapshots report ORCA utilization deltas" {
     var stats: lrs_stats.Stats = .{ .allocator = allocator };
     defer stats.deinit();
     const io = std.testing.io;
-    stats.recordOrca(io, "a", .{ .cpu_utilization = 0.5, .memory_utilization = 0.25 });
+    stats.recordOrca(io, "a", .{ .cpu_utilization = 0.5, .memory_utilization = 0.25, .named_metrics = &.{.{ .name = "util", .value = 2.0 }} });
     var first = try stats.snapshotDelta(allocator, io);
     defer first.deinit();
     try std.testing.expectEqual(@as(f64, 0.5), first.entries[0].cpu_utilization.sum);
     try std.testing.expectEqual(@as(u64, 1), first.entries[0].cpu_utilization.count);
     try std.testing.expectEqual(@as(f64, 0.25), first.entries[0].memory_utilization.sum);
-    stats.recordOrca(io, "a", .{ .cpu_utilization = 0.7 });
+    try std.testing.expectEqual(@as(f64, 2.0), first.entries[0].load_metrics[0].sum);
+    try std.testing.expectEqual(@as(u64, 1), first.entries[0].load_metrics[0].count);
+    stats.recordOrca(io, "a", .{ .cpu_utilization = 0.7, .named_metrics = &.{.{ .name = "util", .value = 3.0 }} });
     var second = try stats.snapshotDelta(allocator, io);
     defer second.deinit();
     try std.testing.expectEqual(@as(f64, 0.7), second.entries[0].cpu_utilization.sum);
     try std.testing.expectEqual(@as(u64, 1), second.entries[0].cpu_utilization.count);
+    try std.testing.expectEqual(@as(f64, 3.0), second.entries[0].load_metrics[0].sum);
+    try std.testing.expectEqual(@as(u64, 1), second.entries[0].load_metrics[0].count);
     var cumulative = try stats.snapshot(allocator, io);
     defer cumulative.deinit();
     try std.testing.expectEqual(@as(f64, 1.2), cumulative.entries[0].cpu_utilization.sum);
     try std.testing.expectEqual(@as(u64, 2), cumulative.entries[0].cpu_utilization.count);
+    try std.testing.expectEqual(@as(f64, 5.0), cumulative.entries[0].load_metrics[0].sum);
+    try std.testing.expectEqual(@as(u64, 2), cumulative.entries[0].load_metrics[0].count);
 }
 
 test "gRPC LRS records unary ORCA trailers" {
@@ -141,7 +147,7 @@ test "gRPC LRS records unary ORCA trailers" {
             defer connection.deinit();
             var unary = try connection.readUnaryWithTimeout(.fromSeconds(3));
             defer unary.deinit();
-            const encoded = try orca.encodeAlloc(allocator, .{ .cpu_utilization = 0.5 });
+            const encoded = try orca.encodeAlloc(allocator, .{ .cpu_utilization = 0.5, .named_metrics = &.{.{ .name = "util", .value = 2.0 }} });
             defer allocator.free(encoded);
             try connection.writeUnary(unary.transport.stream_id, .{ .message = "ok", .trailing_binary_metadata = &.{.{ .name = orca.name, .value = encoded }} });
         }
@@ -161,6 +167,8 @@ test "gRPC LRS records unary ORCA trailers" {
     defer snapshot.deinit();
     try std.testing.expectEqual(@as(f64, 0.5), snapshot.entries[0].cpu_utilization.sum);
     try std.testing.expectEqual(@as(u64, 1), snapshot.entries[0].cpu_utilization.count);
+    try std.testing.expectEqual(@as(f64, 2.0), snapshot.entries[0].load_metrics[0].sum);
+    try std.testing.expectEqual(@as(u64, 1), snapshot.entries[0].load_metrics[0].count);
     try task.await(io);
 }
 

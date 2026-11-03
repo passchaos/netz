@@ -10,7 +10,9 @@ pub const Reports = struct {
     localities: []codec.LocalityStats,
     dropped: []codec.Dropped,
     endpoints: []codec.EndpointStats,
+    metrics: []codec.NamedMetric,
     pub fn deinit(self: *Reports) void {
+        self.allocator.free(self.metrics);
         self.allocator.free(self.endpoints);
         self.allocator.free(self.dropped);
         self.allocator.free(self.localities);
@@ -62,10 +64,12 @@ pub fn buildWithOptions(
     var cluster_count: usize = 0;
     var dropped_count: usize = 0;
     var endpoint_count: usize = 0;
+    var metric_count: usize = 0;
     for (snapshot.entries) |entry| {
         if (!selected(entry, filter)) continue;
         cluster_count += 1;
         dropped_count += entry.categories.len;
+        metric_count += entry.load_metrics.len;
         if (endpoint_granularity) endpoint_count += entry.endpoints.len;
     }
     const clusters = try allocator.alloc(codec.ClusterStats, cluster_count);
@@ -76,9 +80,12 @@ pub fn buildWithOptions(
     errdefer allocator.free(dropped);
     const endpoints = try allocator.alloc(codec.EndpointStats, endpoint_count);
     errdefer allocator.free(endpoints);
+    const metrics = try allocator.alloc(codec.NamedMetric, metric_count);
+    errdefer allocator.free(metrics);
     var cluster_index: usize = 0;
     var dropped_index: usize = 0;
     var endpoint_index: usize = 0;
+    var metric_index: usize = 0;
     for (snapshot.entries) |entry| {
         if (!selected(entry, filter)) continue;
         const endpoint_start = endpoint_index;
@@ -94,6 +101,11 @@ pub fn buildWithOptions(
             };
             endpoint_index += 1;
         };
+        const metric_start = metric_index;
+        for (entry.load_metrics) |load_metric| {
+            metrics[metric_index] = .{ .name = load_metric.name, .count = load_metric.count, .value = load_metric.sum };
+            metric_index += 1;
+        }
         localities[cluster_index] = .{
             .locality = locality,
             .successful = entry.successful,
@@ -103,6 +115,7 @@ pub fn buildWithOptions(
             .cpu_utilization = metric(entry.cpu_utilization),
             .memory_utilization = metric(entry.memory_utilization),
             .application_utilization = metric(entry.application_utilization),
+            .load_metrics = metrics[metric_start..][0 .. metric_index - metric_start],
             .endpoints = endpoints[endpoint_start..][0 .. endpoint_index - endpoint_start],
         };
         const start = dropped_index;
@@ -120,5 +133,5 @@ pub fn buildWithOptions(
         };
         cluster_index += 1;
     }
-    return .{ .allocator = allocator, .clusters = clusters, .localities = localities, .dropped = dropped, .endpoints = endpoints };
+    return .{ .allocator = allocator, .clusters = clusters, .localities = localities, .dropped = dropped, .endpoints = endpoints, .metrics = metrics };
 }

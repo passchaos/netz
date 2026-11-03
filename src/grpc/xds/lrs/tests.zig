@@ -105,7 +105,7 @@ test "gRPC LRS integration converts channel counters into cluster reports" {
     const endpoints = try allocator.alloc(lrs_stats.EndpointEntry, 1);
     endpoints[0] = .{ .host = storage[10..19], .port = 1001, .ipv6 = false, .issued = 2, .successful = 1, .error_requests = 1 };
     @memcpy(storage[10..19], "127.0.0.1");
-    entries[0] = .{ .cluster = storage[0..1], .service_name = storage[19..24], .issued = 2, .successful = 1, .error_requests = 1, .dropped = 1, .in_progress = 1, .cpu_utilization = .{ .sum = 0.5, .count = 1 }, .categories = categories[0..1], .endpoints = endpoints[0..1] };
+    entries[0] = .{ .cluster = storage[0..1], .service_name = storage[19..24], .issued = 2, .successful = 1, .error_requests = 1, .dropped = 1, .in_progress = 1, .cpu_utilization = .{ .sum = 0.5, .count = 1 }, .load_metrics = &.{.{ .name = storage[19..24], .sum = 2.0, .count = 2 }}, .categories = categories[0..1], .endpoints = endpoints[0..1] };
     entries[1] = .{ .cluster = storage[1..2], .issued = 1, .successful = 1, .error_requests = 0 };
     @memcpy(storage[0..1], "a");
     @memcpy(storage[1..2], "b");
@@ -128,6 +128,10 @@ test "gRPC LRS integration converts channel counters into cluster reports" {
             try std.testing.expectEqual(@as(u64, 1), cluster.localities[0].in_progress);
             try std.testing.expectEqual(@as(f64, 0.5), cluster.localities[0].cpu_utilization.?.value);
             try std.testing.expectEqual(@as(u64, 1), cluster.localities[0].cpu_utilization.?.count);
+            try std.testing.expectEqual(@as(usize, 1), cluster.localities[0].load_metrics.len);
+            try std.testing.expectEqualStrings("eds-a", cluster.localities[0].load_metrics[0].name);
+            try std.testing.expectEqual(@as(f64, 2.0), cluster.localities[0].load_metrics[0].value);
+            try std.testing.expectEqual(@as(u64, 2), cluster.localities[0].load_metrics[0].count);
             try std.testing.expectEqual(@as(usize, 1), cluster.localities[0].endpoints.len);
             try std.testing.expectEqualStrings("127.0.0.1", cluster.localities[0].endpoints[0].host);
             try std.testing.expectEqual(@as(u16, 1001), cluster.localities[0].endpoints[0].port);

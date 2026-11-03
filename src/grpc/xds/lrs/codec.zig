@@ -26,6 +26,11 @@ pub const MetricStats = struct {
     count: u64 = 0,
     value: f64 = 0,
 };
+pub const NamedMetric = struct {
+    name: []const u8,
+    count: u64 = 0,
+    value: f64 = 0,
+};
 pub const LocalityStats = struct {
     locality: Locality = .{},
     successful: u64 = 0,
@@ -35,6 +40,7 @@ pub const LocalityStats = struct {
     cpu_utilization: ?MetricStats = null,
     memory_utilization: ?MetricStats = null,
     application_utilization: ?MetricStats = null,
+    load_metrics: []const NamedMetric = &.{},
     endpoints: []const EndpointStats = &.{},
 };
 pub const Dropped = struct { category: []const u8, count: u64 = 0 };
@@ -123,6 +129,16 @@ fn encodeMetric(out: *std.ArrayList(u8), gpa: std.mem.Allocator, field: u32, met
     try bytesField(out, gpa, field, nested.items);
 }
 
+fn encodeNamedMetric(out: *std.ArrayList(u8), gpa: std.mem.Allocator, value: NamedMetric, limits: Limits) Error!void {
+    try text(value.name, limits, false);
+    var nested: std.ArrayList(u8) = .empty;
+    defer nested.deinit(gpa);
+    try bytesField(&nested, gpa, 1, value.name);
+    if (value.count != 0) try numberField(&nested, gpa, 2, value.count);
+    if (value.value != 0) try doubleField(&nested, gpa, 3, value.value);
+    try bytesField(out, gpa, 5, nested.items);
+}
+
 fn text(bytes: []const u8, limits: Limits, allow_empty: bool) Error!void {
     if (!std.unicode.utf8ValidateSlice(bytes)) return error.InvalidLoadReport;
     if ((!allow_empty and bytes.len == 0) or bytes.len > limits.max_text_bytes) return error.InvalidLoadReport;
@@ -183,6 +199,7 @@ fn encodeLocalityStats(out: *std.ArrayList(u8), gpa: std.mem.Allocator, value: L
     if (value.cpu_utilization) |metric| try encodeMetric(&nested, gpa, 12, metric);
     if (value.memory_utilization) |metric| try encodeMetric(&nested, gpa, 13, metric);
     if (value.application_utilization) |metric| try encodeMetric(&nested, gpa, 14, metric);
+    for (value.load_metrics) |metric| try encodeNamedMetric(&nested, gpa, metric, limits);
     for (value.endpoints) |endpoint| try encodeEndpointStats(&nested, gpa, endpoint, limits);
     try bytesField(out, gpa, 2, nested.items);
 }

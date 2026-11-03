@@ -18,6 +18,7 @@ pub const EndpointEntry = struct {
 };
 
 pub const Utilization = struct { sum: f64 = 0, count: u64 = 0 };
+pub const NamedMetric = struct { name: []const u8, sum: f64 = 0, count: u64 = 0 };
 
 pub const Entry = struct {
     cluster: []const u8,
@@ -30,6 +31,7 @@ pub const Entry = struct {
     cpu_utilization: Utilization = .{},
     memory_utilization: Utilization = .{},
     application_utilization: Utilization = .{},
+    load_metrics: []const NamedMetric = &.{},
     categories: []CategoryCount = &.{},
     endpoints: []EndpointEntry = &.{},
 };
@@ -40,7 +42,9 @@ pub const Snapshot = struct {
     entries: []Entry,
     categories: []CategoryCount,
     endpoints: []EndpointEntry,
+    metrics: []NamedMetric = &.{},
     pub fn deinit(self: *Snapshot) void {
+        self.allocator.free(self.metrics);
         self.allocator.free(self.endpoints);
         self.allocator.free(self.categories);
         self.allocator.free(self.entries);
@@ -101,6 +105,7 @@ const Counter = struct {
     cpu_utilization: Accum = .{},
     memory_utilization: Accum = .{},
     application_utilization: Accum = .{},
+    named_metrics: std.StringHashMapUnmanaged(Accum) = .empty,
     reported_issued: u64 = 0,
     reported_successful: u64 = 0,
     reported_error_requests: u64 = 0,
@@ -110,6 +115,9 @@ const Counter = struct {
 
     fn deinit(self: *Counter, gpa: std.mem.Allocator) void {
         if (self.service_name.len != 0) gpa.free(self.service_name);
+        var metric_iterator = self.named_metrics.iterator();
+        while (metric_iterator.next()) |entry| gpa.free(entry.key_ptr.*);
+        self.named_metrics.deinit(gpa);
         var iterator = self.dropped_categories.iterator();
         while (iterator.next()) |entry| gpa.free(entry.key_ptr.*);
         self.dropped_categories.deinit(gpa);
@@ -266,6 +274,20 @@ pub const Stats = struct {
         accumulate(&value.cpu_utilization, report.cpu_utilization);
         accumulate(&value.memory_utilization, report.memory_utilization);
         accumulate(&value.application_utilization, report.application_utilization);
+        const gpa = self.allocator orelse return;
+        for (report.named_metrics) |metric| {
+            if (metric.value == 0 or metric.name.len == 0) continue;
+            const gop = value.named_metrics.getOrPut(gpa, metric.name) catch return;
+            if (!gop.found_existing) {
+                const owned = gpa.dupe(u8, metric.name) catch {
+                    _ = value.named_metrics.remove(metric.name);
+                    return;
+                };
+                gop.key_ptr.* = owned;
+                gop.value_ptr.* = .{};
+            }
+            accumulate(gop.value_ptr, metric.value);
+        }
     }
 
     fn accumulate(value: *Accum, sample: f64) void {
@@ -290,15 +312,19 @@ pub const Stats = struct {
         var storage_bytes: usize = 0;
         var category_count: usize = 0;
         var endpoint_count: usize = 0;
+        var metric_count: usize = 0;
         var iterator = self.map.iterator();
         while (iterator.next()) |entry| {
             storage_bytes += entry.key_ptr.*.len + entry.value_ptr.service_name.len;
             category_count += entry.value_ptr.dropped_categories.count();
             endpoint_count += entry.value_ptr.endpoints.count();
+            metric_count += entry.value_ptr.named_metrics.count();
             var categories = entry.value_ptr.dropped_categories.iterator();
             while (categories.next()) |category| storage_bytes += category.key_ptr.*.len;
             var endpoints = entry.value_ptr.endpoints.iterator();
             while (endpoints.next()) |endpoint| storage_bytes += endpoint.value_ptr.host.len;
+            var metrics = entry.value_ptr.named_metrics.iterator();
+            while (metrics.next()) |metric| storage_bytes += metric.key_ptr.*.len;
         }
         const entries = try gpa.alloc(Entry, self.map.count());
         errdefer gpa.free(entries);
@@ -306,12 +332,15 @@ pub const Stats = struct {
         errdefer gpa.free(categories);
         const endpoints = try gpa.alloc(EndpointEntry, endpoint_count);
         errdefer gpa.free(endpoints);
+        const metrics = try gpa.alloc(NamedMetric, metric_count);
+        errdefer gpa.free(metrics);
         const storage = try gpa.alloc(u8, storage_bytes);
         errdefer gpa.free(storage);
         var offset: usize = 0;
         var index: usize = 0;
         var category_index: usize = 0;
         var endpoint_index: usize = 0;
+        var metric_index: usize = 0;
         iterator = self.map.iterator();
         while (iterator.next()) |entry| {
             const name = entry.key_ptr.*;
@@ -360,6 +389,18 @@ pub const Stats = struct {
                 }
                 endpoint_index += 1;
             }
+            const metric_start = metric_index;
+            var metric_iterator = entry.value_ptr.named_metrics.iterator();
+            while (metric_iterator.next()) |metric| {
+                const metric_name = metric.key_ptr.*;
+                const metric_copy = storage[offset..][0..metric_name.len];
+                @memcpy(metric_copy, metric_name);
+                offset += metric_name.len;
+                const output = utilization(metric.value_ptr.*, delta);
+                metrics[metric_index] = .{ .name = metric_copy, .sum = output.sum, .count = output.count };
+                if (delta) markReported(metric.value_ptr);
+                metric_index += 1;
+            }
             const issued = if (delta) entry.value_ptr.issued -| entry.value_ptr.reported_issued else entry.value_ptr.issued;
             const successful = if (delta) entry.value_ptr.successful -| entry.value_ptr.reported_successful else entry.value_ptr.successful;
             const error_requests = if (delta) entry.value_ptr.error_requests -| entry.value_ptr.reported_error_requests else entry.value_ptr.error_requests;
@@ -378,6 +419,7 @@ pub const Stats = struct {
                 .cpu_utilization = cpu,
                 .memory_utilization = memory,
                 .application_utilization = application,
+                .load_metrics = metrics[metric_start..][0 .. metric_index - metric_start],
                 .categories = categories[category_start..][0 .. category_index - category_start],
                 .endpoints = endpoints[endpoint_start..][0 .. endpoint_index - endpoint_start],
             };
@@ -392,7 +434,7 @@ pub const Stats = struct {
             }
             index += 1;
         }
-        return .{ .allocator = gpa, .storage = storage, .entries = entries, .categories = categories, .endpoints = endpoints };
+        return .{ .allocator = gpa, .storage = storage, .entries = entries, .categories = categories, .endpoints = endpoints, .metrics = metrics };
     }
 
     /// Cumulative counters since channel creation.
