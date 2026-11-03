@@ -1,5 +1,6 @@
 //! Circuit rejection remains a policy drop, before wire output or retry.
 const call = @import("../../call.zig");
+const lrs_stats = @import("lrs_stats.zig");
 pub fn rejectIfSaturated(state: anytype, job: anytype) @TypeOf(state.*).Failure!?call.UnaryResponse {
     var saturated = if (state.circuit) |policy| if (policy.saturated()) policy else null else null;
     if (saturated == null) if (state.weighted_target) |*runtime| {
@@ -10,6 +11,7 @@ pub fn rejectIfSaturated(state: anytype, job: anytype) @TypeOf(state.*).Failure!
     const policy = saturated orelse return null;
     if (job.canceled()) return error.Canceled;
     policy.recordRejection();
+    if (comptime @hasField(@TypeOf(state.*), "lrs_stats")) if (@import("../cluster_route.zig").jobCluster(job)) |key| state.lrs_stats.recordDropped(state.io, lrs_stats.stripCluster(key));
     if (job.stream != null) return error.CallDropped;
     return try call.circuitBreakerResponse(state.allocator);
 }

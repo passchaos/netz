@@ -4,6 +4,12 @@ const netz_runtime = @import("../../../../runtime.zig");
 const duplex = @import("../../../stream/duplex.zig");
 const http2 = @import("../../../../http2/mod.zig");
 const Job = @import("../job.zig").Job;
+const lrs_stats = @import("../lrs_stats.zig");
+
+fn lrsCluster(worker: anytype) ?[]const u8 {
+    if (comptime !@hasField(@TypeOf(worker.*), "source")) return null;
+    return lrs_stats.clusterName(worker.source.endpoint);
+}
 
 pub fn Owner(comptime State: type) type {
     return struct {
@@ -37,6 +43,7 @@ pub fn Owner(comptime State: type) type {
             call.circuit_permit = job.circuit_permit;
             job.circuit_permit = null;
             state.finish(job, null, null);
+            if (lrsCluster(worker)) |cluster| state.lrs_stats.recordIssued(state.io, cluster);
         }
         pub fn fail(worker: anytype, index: usize, err: anyerror) void {
             const state = worker.parent;
@@ -49,6 +56,7 @@ pub fn Owner(comptime State: type) type {
             call.circuit_permit = null;
             state.finishOutstandingLocked(worker);
             state.observeOutlierLocked(worker, false);
+            if (lrsCluster(worker)) |cluster| state.lrs_stats.recordCompletion(state.io, cluster, false);
             call.retireLocked(if (state.closed) error.SharedChannelClosed else err);
             state.unlock();
             call.release();
@@ -63,6 +71,7 @@ pub fn Owner(comptime State: type) type {
             call.circuit_permit = null;
             state.finishOutstandingLocked(worker);
             state.observeOutlierLocked(worker, response.status == .ok);
+            if (lrsCluster(worker)) |cluster| state.lrs_stats.recordCompletion(state.io, cluster, response.status == .ok);
             call.terminal = response;
             call.retireLocked(null);
             state.unlock();

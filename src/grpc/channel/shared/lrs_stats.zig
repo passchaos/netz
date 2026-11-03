@@ -7,7 +7,19 @@ pub const Entry = struct {
     issued: u64 = 0,
     successful: u64 = 0,
     error_requests: u64 = 0,
+    dropped: u64 = 0,
 };
+
+pub fn stripCluster(name: []const u8) []const u8 {
+    return if (std.mem.startsWith(u8, name, "cluster:") and name.len > "cluster:".len) name["cluster:".len..] else name;
+}
+
+pub fn clusterName(endpoint: anytype) ?[]const u8 {
+    for (endpoint.hierarchicalPath()) |part| {
+        if (std.mem.startsWith(u8, part, "cluster:") and part.len > "cluster:".len) return part["cluster:".len..];
+    }
+    return null;
+}
 
 pub const Snapshot = struct {
     allocator: std.mem.Allocator,
@@ -20,7 +32,7 @@ pub const Snapshot = struct {
     }
 };
 
-const Counter = struct { issued: u64 = 0, successful: u64 = 0, error_requests: u64 = 0 };
+const Counter = struct { issued: u64 = 0, successful: u64 = 0, error_requests: u64 = 0, dropped: u64 = 0 };
 
 pub const Stats = struct {
     /// Null in test-only State literals; real channels set it during init.
@@ -28,7 +40,8 @@ pub const Stats = struct {
     mutex: std.Io.Mutex = .init,
     map: std.StringHashMapUnmanaged(Counter) = .empty,
 
-    pub fn record(self: *Stats, io: std.Io, cluster: []const u8, success: bool) void {
+    const Update = enum { issued_success, issued_error, issued, success, error_request, dropped };
+    fn update(self: *Stats, io: std.Io, cluster: []const u8, kind: Update) void {
         const gpa = self.allocator orelse return;
         if (cluster.len == 0) return;
         self.mutex.lockUncancelable(io);
@@ -45,8 +58,32 @@ pub const Stats = struct {
             gop.key_ptr.* = owned;
             gop.value_ptr.* = .{};
         }
-        gop.value_ptr.issued +%= 1;
-        if (success) gop.value_ptr.successful +%= 1 else gop.value_ptr.error_requests +%= 1;
+        switch (kind) {
+            .issued_success => {
+                gop.value_ptr.issued +%= 1;
+                gop.value_ptr.successful +%= 1;
+            },
+            .issued_error => {
+                gop.value_ptr.issued +%= 1;
+                gop.value_ptr.error_requests +%= 1;
+            },
+            .issued => gop.value_ptr.issued +%= 1,
+            .success => gop.value_ptr.successful +%= 1,
+            .error_request => gop.value_ptr.error_requests +%= 1,
+            .dropped => gop.value_ptr.dropped +%= 1,
+        }
+    }
+    pub fn record(self: *Stats, io: std.Io, cluster: []const u8, success: bool) void {
+        self.update(io, cluster, if (success) .issued_success else .issued_error);
+    }
+    pub fn recordIssued(self: *Stats, io: std.Io, cluster: []const u8) void {
+        self.update(io, cluster, .issued);
+    }
+    pub fn recordCompletion(self: *Stats, io: std.Io, cluster: []const u8, success: bool) void {
+        self.update(io, cluster, if (success) .success else .error_request);
+    }
+    pub fn recordDropped(self: *Stats, io: std.Io, cluster: []const u8) void {
+        self.update(io, cluster, .dropped);
     }
 
     pub fn snapshot(self: *Stats, gpa: std.mem.Allocator, io: std.Io) std.mem.Allocator.Error!Snapshot {
@@ -72,6 +109,7 @@ pub const Stats = struct {
                 .issued = entry.value_ptr.issued,
                 .successful = entry.value_ptr.successful,
                 .error_requests = entry.value_ptr.error_requests,
+                .dropped = entry.value_ptr.dropped,
             };
             index += 1;
         }

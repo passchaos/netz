@@ -36,6 +36,7 @@ pub fn build(
         cluster.* = .{
             .name = entry.cluster,
             .localities = localities[index..][0..1],
+            .total_dropped = entry.dropped,
             .interval_ns = interval_ns,
         };
     }

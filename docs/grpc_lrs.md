@@ -58,24 +58,28 @@ from the response interval. There is no ACK/NACK protocol in LRS.
 
 ## Channel counters
 
-`SharedChannel.Options.enable_lrs_stats = true` opts into per-cluster unary
-counters. Each completed unary attempt derives the cluster from the selected
-endpoint's hierarchical path (`cluster:<name>`) and increments issued plus
-successful or error-request counters under a dedicated mutex. Disabled channels
-skip the lock entirely, so ordinary channels keep their existing hot path.
+`SharedChannel.Options.enable_lrs_stats = true` opts into per-cluster counters.
+Each unary completion derives the cluster from the selected endpoint's
+hierarchical path (`cluster:<name>`) and increments issued plus successful or
+error-request counters. Streaming calls increment issued when the stream opens
+and success/error when the terminal arrives. Channel drops and circuit
+rejections increment total dropped requests for the RPC-local cluster.
+Counters use a dedicated mutex; disabled channels skip the lock entirely, so
+ordinary channels keep their existing hot path.
 
 `SharedChannel.lrsStatsSnapshot(allocator)` returns owned entries;
 `lrs.integration.build` converts them into `ClusterStats` with the caller's
 locality and reporting interval. Cluster names in the report borrow the
 snapshot storage, so keep the snapshot alive until the report is encoded.
-Only unary attempts are counted; streaming completions, circuit/drop
-rejections and endpoint-granularity stats remain follow-up work.
+Per-category drop breakdowns, endpoint-granularity stats and in-progress
+counts remain follow-up work.
 
 ## Verification
 
 Native tests cover request/response round trips, locality counters, dropped
 categories, intervals, malformed/duplicate/over-limit input, UTF-8 rejection,
-per-cluster unary counter aggregation and integration conversion, and a real
+per-cluster unary and streaming counter aggregation, channel drop attribution,
+integration conversion, and a real
 loopback duplex session that observes the node, a response, a report with exact
 counters, a second `send_all_clusters` response, a terminal, and node replay on
 a replacement stream. See
@@ -90,8 +94,8 @@ cluster/service names, dropped requests and interval, then a second
 
 ## Remaining integration
 
-Streaming call-stat aggregation, circuit/drop rejection attribution,
-endpoint-granularity stats, a periodic report scheduler and ControlPlane
-failover/reload composition remain follow-up work. Unary channel counters,
-envelopes and caller-driven reporting are complete.
+Per-category drop attribution, endpoint-granularity stats, a periodic report
+scheduler and ControlPlane failover/reload composition remain follow-up work.
+Unary and streaming channel counters, envelopes and caller-driven reporting are
+complete.
 caller-driven reporting path are complete.

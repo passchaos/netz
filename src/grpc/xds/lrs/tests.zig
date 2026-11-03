@@ -87,7 +87,7 @@ test "gRPC LRS envelopes reject malformed, duplicate and over-limit input" {
 test "gRPC LRS integration converts channel counters into cluster reports" {
     const storage = try allocator.alloc(u8, 2);
     const entries = try allocator.alloc(lrs_stats.Entry, 2);
-    entries[0] = .{ .cluster = storage[0..1], .issued = 2, .successful = 1, .error_requests = 1 };
+    entries[0] = .{ .cluster = storage[0..1], .issued = 2, .successful = 1, .error_requests = 1, .dropped = 1 };
     entries[1] = .{ .cluster = storage[1..2], .issued = 1, .successful = 1, .error_requests = 0 };
     @memcpy(storage[0..1], "a");
     @memcpy(storage[1..2], "b");
@@ -104,6 +104,7 @@ test "gRPC LRS integration converts channel counters into cluster reports" {
             try std.testing.expectEqual(@as(u64, 2), cluster.localities[0].issued);
             try std.testing.expectEqual(@as(u64, 1), cluster.localities[0].successful);
             try std.testing.expectEqual(@as(u64, 1), cluster.localities[0].error_requests);
+            try std.testing.expectEqual(@as(u64, 1), cluster.total_dropped);
         } else {
             try std.testing.expectEqualStrings("b", cluster.name);
             try std.testing.expectEqual(@as(u64, 1), cluster.localities[0].successful);

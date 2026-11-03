@@ -362,10 +362,7 @@ pub const State = struct {
         self.wakeAllLocked();
     }
     fn lrsCluster(worker: *Worker) ?[]const u8 {
-        for (worker.source.endpoint.hierarchicalPath()) |part| {
-            if (std.mem.startsWith(u8, part, "cluster:") and part.len > "cluster:".len) return part["cluster:".len..];
-        }
-        return null;
+        return lrs_stats.clusterName(worker.source.endpoint);
     }
     pub fn finishAttempt(
         self: *State,
