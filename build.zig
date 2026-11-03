@@ -2120,6 +2120,21 @@ pub fn build(b: *std.Build) void {
     const grpc_delta_step = b.step("interop-grpc-delta-ads", "Verify delta ADS envelopes, diffs, NACK and reconnect against official Envoy protobuf schemas");
     grpc_delta_step.dependOn(&grpc_delta.step);
 
+    const grpc_delta_runtime_client = b.addExecutable(.{
+        .name = "netz-grpc-delta-runtime-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/interop/grpc_delta_runtime/client.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const grpc_delta_runtime = b.addSystemCommand(&.{ "python3", "tools/interop/grpc_delta_runtime/run.py" });
+    grpc_delta_runtime.addArtifactArg(grpc_delta_runtime_client);
+    if (b.args) |args| grpc_delta_runtime.addArgs(args);
+    const grpc_delta_runtime_step = b.step("interop-grpc-delta-runtime", "Verify typed delta LDS/RDS/CDS/EDS publication and explicit removals with real RPCs");
+    grpc_delta_runtime_step.dependOn(&grpc_delta_runtime.step);
+
     const grpc_impl_client = b.addExecutable(.{
         .name = "netz-grpc-cluster-impl-client",
         .root_module = b.createModule(.{

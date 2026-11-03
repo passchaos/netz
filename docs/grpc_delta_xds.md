@@ -164,6 +164,16 @@ RDS restoration and the exact accepted-version map. See
 `src/grpc/xds/runtime/delta_tests.zig` and
 `docs/evidence/grpc_delta_runtime/2026-11-03.json`.
 
+`zig build interop-grpc-delta-runtime --summary all` drives the same typed
+chain against an independent Node peer that implements
+`DeltaAggregatedResources` with official Envoy Listener, RouteConfiguration,
+Cluster and ClusterLoadAssignment schemas. A real grpc-js backend must receive
+exactly two RPCs on one connection: one after the EDS assignment, one after an
+explicit EDS removal followed by a resource restore. The client also observes
+UNAVAILABLE after the removal and after explicit listener deletion. Results and
+source/proto hashes are in
+`docs/evidence/grpc_delta_runtime/interop-2026-11-03.json`.
+
 ## Remaining integration
 
 This slice supplies the transport, envelope codec, subscription/version state,

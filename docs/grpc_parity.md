@@ -3447,7 +3447,11 @@ now accepts delta updates through `startDeltaWithDeadline`,
 resources select or replace listeners and routes, CDS updates only referenced
 clusters, EDS updates only the named assignment, payload-free heartbeats reuse
 accepted images, and explicit removals resolve resources as deleted or empty.
-TTL expiry enforcement remains open.
+`zig build interop-grpc-delta-runtime` validates this typed chain with official
+Envoy schemas and a real grpc-js backend across EDS removal/restore and listener
+deletion; results are in
+`docs/evidence/grpc_delta_runtime/interop-2026-11-03.json`. TTL expiry
+enforcement remains open.
 
 
 ## Typed EDS to reference-owned channel targets
