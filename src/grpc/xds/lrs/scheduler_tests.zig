@@ -76,6 +76,11 @@ const UnaryPeer = struct {
     }
 };
 
+fn reconnectThenHold(io: std.Io, listener: *grpc.runtime.Server, reported: *std.Io.Event, hold: *std.Io.Event) !void {
+    try ReportingPeer.run(io, listener, grpc.Status.unavailable, null, null);
+    try ReportingPeer.run(io, listener, grpc.Status.ok, reported, hold);
+}
+
 test "gRPC LRS scheduler emits interval reports and surfaces terminal" {
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
     defer threaded.deinit();
@@ -110,6 +115,57 @@ test "gRPC LRS scheduler emits interval reports and surfaces terminal" {
     var scheduler_task = try io.concurrent(runScheduler, .{ &scheduler, deadline(io) });
     defer _ = scheduler_task.cancel(io) catch {};
     try std.testing.expectError(error.LrsTerminal, scheduler_task.await(io));
+    try lrs_task.await(io);
+    try destination_task.await(io);
+}
+
+test "gRPC LRS scheduler reconnects the current server before failing over" {
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var control = try grpc.runtime.Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{}, 4096);
+    defer control.deinit();
+    var destination = try grpc.runtime.Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{}, 4096);
+    defer destination.deinit();
+    const json = try std.fmt.allocPrint(allocator, "{{\"xds_servers\":[{{\"server_uri\":\"http://127.0.0.1:{d}\",\"channel_creds\":[{{\"type\":\"insecure\"}}]}}],\"node\":{{\"id\":\"node-1\"}}}}", .{control.address().getPort()});
+    defer allocator.free(json);
+    const configuration = try bootstrap.parse(allocator, json, .{});
+    defer configuration.deinit();
+    const plane = try control_plane.ControlPlane.init(allocator, io, configuration, .{});
+    defer plane.deinit();
+    var reported: std.Io.Event = .unset;
+    var hold: std.Io.Event = .unset;
+    var lrs_task = io.async(reconnectThenHold, .{ io, &control, &reported, &hold });
+    defer _ = lrs_task.cancel(io) catch {};
+    var destination_task = io.async(UnaryPeer.run, .{&destination});
+    defer _ = destination_task.cancel(io) catch {};
+    const path = [_][]const u8{"cluster:a"};
+    const endpoint: @import("../../channel.zig").Endpoint = .{ .cleartext_ip = .{ .address = destination.address(), .hierarchical_path = &path } };
+    var source = try grpc.SharedChannel.init(allocator, io, .{ .resolved = .{ .endpoints = &.{endpoint} } }, .{ .enable_lrs_stats = true });
+    defer source.deinit();
+    var source_sender = source.sender();
+    defer source_sender.deinit();
+    var call = try source_sender.unary(.{ .path = "/demo.Lrs/Call", .message = "ok", .wait_for_ready = true });
+    defer call.deinit();
+    try std.testing.expectEqual(grpc.Status.ok, call.status);
+
+    var plane_sender = plane.sender();
+    defer plane_sender.deinit();
+    var client = try lrs.Client.init(allocator, plane_sender, .{ .node = .{ .id = "node-1" } });
+    defer client.deinit();
+    const until = std.Io.Clock.Timestamp.fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(10) });
+    try client.connectWithDeadline(until);
+    var scheduler = lrs.Scheduler.init(allocator, &client, source, .{ .interval_ns = std.time.ns_per_s });
+    defer scheduler.deinit();
+    var scheduler_task = try io.concurrent(runSchedulerWithControlPlane, .{ &scheduler, plane, until });
+    defer _ = scheduler_task.cancel(io) catch {};
+    while (!reported.isSet()) {
+        if (until.durationFromNow(io).raw.nanoseconds <= 0) return error.Timeout;
+        try std.Io.sleep(io, .fromMilliseconds(5), .awake);
+    }
+    try std.testing.expectEqual(control.address().getPort(), plane.server().target.port);
+    _ = scheduler_task.cancel(io) catch {};
+    hold.set(io);
     try lrs_task.await(io);
     try destination_task.await(io);
 }

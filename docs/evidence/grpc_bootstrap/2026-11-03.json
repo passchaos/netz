@@ -11,8 +11,8 @@
   },
   "result": {
     "xds": {
-      "passed": 251,
-      "total": 251,
+      "passed": 252,
+      "total": 252,
       "failed": 0,
       "exit_code": 0
     },
@@ -39,7 +39,7 @@
   "source_sha256": {
     "src/grpc/xds/bootstrap.zig": "6b0b94b602fb2d5b2aaa6b75b9dcb15664d907d0837959b9e728c1bb5d0f3eb3",
     "src/grpc/xds/bootstrap_tests.zig": "480cfb1a110c66283b0ebaff5bdb32a4687f6a903c5a42f7b82d707aba1cc137",
-    "src/grpc/xds/control_plane.zig": "6fae13601b01928fce12cc8670f7ea4de5f726461f93304633b913d68dac0ad8",
+    "src/grpc/xds/control_plane.zig": "2332a150bb4673e764cb74c541ed87e76c925467f6eef5934c983e3e493a856a",
     "src/grpc/xds/control_plane_tests.zig": "06c03b75d0e6f9dbaf39a3bc948137c306d75fd1d30da07d782c5d2866bbfb49",
     "src/grpc/xds/ads/delta_client.zig": "a45092e8c2cd638ae5261206bb3a92f55c748e412c6896eb0ba892583c3b2a48",
     "src/grpc/xds/ads/delta_transport_tests.zig": "65f95011c3369f88bbbfb33e72f9466d273671283b54dc1c34320e076b73c7b8"

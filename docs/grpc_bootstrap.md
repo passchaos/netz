@@ -92,8 +92,9 @@ switches the channel without connecting the owned delta client, and
 `rebindDelta`/`rebindLrs` move external delta or LRS clients to that new
 channel. This lets multiple clients share one control-plane channel and follow
 the same failover or TLS reload; the LRS reporter keeps using the same client
-pointer after rebind. `failoverLrsWithDeadline` combines the switch, rebind and
-reconnect for an LRS client and skips servers that refuse the new stream, so an
+pointer after rebind. `reconnectLrsWithDeadline` retries the current server with
+the per-server opening budget, while `failoverLrsWithDeadline` combines the
+switch, rebind and reconnect for an LRS client and skips servers that refuse the new stream, so an
 LRS scheduler can survive a terminal without the application driving each
 server step.
 

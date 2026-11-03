@@ -113,15 +113,19 @@ cancel it when discovery stops. A real loopback test drives a unary call,
 receives an interval response, observes one report with exact
 issued/successful counters, and then a terminal.
 
-`runWithControlPlane` makes the loop failover-aware. On a terminal it calls
-`ControlPlane.failoverLrsWithDeadline`, which advances to the next usable
-bootstrap server, rebinds the LRS client and reconnects with the retained node;
-reporting resumes one interval after the new stream starts. A server that
-refuses the reconnect is skipped until every usable server has been tried or
-the overall deadline expires. Use `run` when the application owns reconnection
-and `runWithControlPlane` when the scheduler should survive control-plane
-restarts. A real two-server test terminates the first stream, observes the
-failover to the second server and verifies the second report's counters.
+`runWithControlPlane` makes the loop recovery-aware. On a terminal it first
+calls `ControlPlane.reconnectLrsWithDeadline`, which reconnects the current
+server without moving the shared channel. If that fails, it calls
+`failoverLrsWithDeadline`, which advances to the next usable bootstrap server,
+rebinds the LRS client and reconnects with the retained node. Failed reconnects
+are retried with exponential backoff (`retry_initial_ns`, default 100 ms,
+doubling to `retry_max_ns`, default 10 s) until the overall deadline; permanent
+configuration and allocation errors are returned immediately. Reporting
+resumes one interval after a successful reconnect. Use `run` when the
+application owns reconnection and `runWithControlPlane` when the scheduler
+should survive control-plane restarts. Real tests cover a same-server
+reconnect and a failover to a second server, each verifying the next report's
+counters.
 
 ## Verification
 
@@ -130,7 +134,7 @@ categories, intervals, malformed/duplicate/over-limit input, UTF-8 rejection,
 per-cluster unary and streaming counter aggregation, in-progress tracking,
 channel drop and per-category attribution, integration conversion, reporter
 interval/filter/rebind behavior, endpoint granularity, the scheduler report
-loop, scheduler failover across two servers, ControlPlane failover
+loop, same-server reconnect, scheduler failover across two servers, ControlPlane failover
 composition, and a real
 loopback duplex session that observes the node, a response, a report with exact
 counters, a second `send_all_clusters` response, a terminal, and node replay on

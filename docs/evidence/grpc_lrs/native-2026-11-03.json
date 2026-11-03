@@ -2,7 +2,7 @@
   "schema": 1,
   "date": "2026-11-03",
   "head": "616819f8",
-  "gate": "Load Reporting Service envelopes, duplex reporting, counters, reporter, endpoint granularity, foreground scheduler, scheduler failover and control-plane composition",
+  "gate": "Load Reporting Service envelopes, duplex reporting, counters, reporter, endpoint granularity, foreground scheduler, same-server reconnect, backoff and control-plane failover composition",
   "commands": {
     "lrs": "zig build test-lib -Dtest-filter=LRS --summary all",
     "xds": "zig build test-lib -Dtest-filter=xds --summary all",
@@ -13,14 +13,14 @@
   },
   "result": {
     "lrs": {
-      "passed": 176,
-      "total": 176,
+      "passed": 177,
+      "total": 177,
       "failed": 0,
       "exit_code": 0
     },
     "xds": {
-      "passed": 249,
-      "total": 249,
+      "passed": 252,
+      "total": 252,
       "failed": 0,
       "exit_code": 0
     },
@@ -49,8 +49,8 @@
   },
   "source_sha256": {
     "src/grpc/xds/lrs.zig": "625b1a743c8f80e490789443729fea3bac3de6a6736e79f05971675a6d74cb57",
-    "src/grpc/xds/lrs/scheduler.zig": "5b3ae57e735393c425dc116645a1b646ff2dcbc263cfe36ed30ed8a92ea775df",
-    "src/grpc/xds/lrs/scheduler_tests.zig": "ea7302e5b24bac952070f1d6e48faa472b52c9dce099c978d6b2d9e558945d67",
+    "src/grpc/xds/lrs/scheduler.zig": "a4c664bf06236d456176b66b9d8707497cc8c53e9d4047efdbc4172f9cc79858",
+    "src/grpc/xds/lrs/scheduler_tests.zig": "5d908a1ba0a447edbcfcd8315c619e368a55cf4f130eba75e54968c735eb23ef",
     "src/grpc/xds/lrs/codec.zig": "6c781a79de396bf3402667ae3998367e021b6df67d588f91a4bc9e89c11826e0",
     "src/grpc/xds/lrs/client.zig": "4ddf8bea831d5551473cbd00504a0ff23a9003f840029e55cc6b877d8fec116e",
     "src/grpc/xds/lrs/reporter.zig": "393b58861a709abc52232a39354b20fcfed66daf2b658008751ba079abe4908b",
@@ -58,7 +58,7 @@
     "src/grpc/xds/lrs/tests.zig": "125935ad5f0a4e449842c4fed9374102984f38960bc2f682ef9d4bdfeb6262fb",
     "src/grpc/xds/lrs/transport_tests.zig": "af4f6ee7e4f1f61cf224d171763f9118a645dbfad9c7fb04d5d6af9f0faf9aae",
     "src/grpc/xds/lrs/control_plane_tests.zig": "46b2d685422cca5fc649fc6b8961007eda93911a402477204cd6d61dd59c857c",
-    "src/grpc/xds/control_plane.zig": "6fae13601b01928fce12cc8670f7ea4de5f726461f93304633b913d68dac0ad8",
+    "src/grpc/xds/control_plane.zig": "2332a150bb4673e764cb74c541ed87e76c925467f6eef5934c983e3e493a856a",
     "src/grpc/channel/shared/lrs_stats.zig": "0fdcb8eeaa137fe1fa8b5d704b3e80906956d7f61cfb9016043ccca6cdda8b2f",
     "src/grpc/channel/shared/lrs_stats_tests.zig": "ab8dff14d34b076d1b20057cb57a01507d56ef76f2925998188836d4041735ff",
     "src/grpc/channel/shared/state.zig": "0b927a463a60da777217ad04a70da660998c11c0eb42dd0d34a8c57b955959a3",
@@ -71,5 +71,5 @@
     "tools/interop/grpc_lrs/peer.js": "9b107638c1b9ed8a4bce1f17a28917c60e54a795aa24d5f9af662c61bab9ac26",
     "tools/interop/grpc_lrs/run.py": "6916605190ae91b93dd2ef48f6ebfd37b410ecb670052d1d0d789fca89ec4f48"
   },
-  "notes": "Native tests cover envelopes, locality/dropped counters, endpoint address/port counters, malformed/duplicate/over-limit input, a real loopback report/reconnect stream, opt-in per-cluster unary and streaming counters with in-progress tracking, channel drop attribution with per-category counts, report conversion, reporter interval/filter/rebind behavior, endpoint granularity, the foreground scheduler interval/terminal loop, scheduler failover to a second control-plane server, and a real two-server ControlPlane failover composition. Official-schema interop evidence is docs/evidence/grpc_lrs/2026-11-03.json."
+  "notes": "Native tests cover envelopes, locality/dropped counters, endpoint address/port counters, malformed/duplicate/over-limit input, a real loopback report/reconnect stream, opt-in per-cluster unary and streaming counters with in-progress tracking, channel drop attribution with per-category counts, report conversion, reporter interval/filter/rebind behavior, endpoint granularity, the foreground scheduler interval/terminal loop, same-server reconnect, scheduler failover to a second control-plane server, and a real two-server ControlPlane failover composition. Official-schema interop evidence is docs/evidence/grpc_lrs/2026-11-03.json."
 }

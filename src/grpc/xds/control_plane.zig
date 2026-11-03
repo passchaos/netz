@@ -208,6 +208,21 @@ pub const ControlPlane = struct {
         if (timeout.nanoseconds <= 0) return error.Timeout;
         return self.failoverLrsWithDeadline(client, request, .fromNow(self.io, .{ .clock = .awake, .raw = timeout }));
     }
+    /// Reconnect an external LRS client on the current server without moving
+    /// the shared control channel. The per-server stream-opening budget applies.
+    pub fn reconnectLrsWithDeadline(self: *ControlPlane, client: *lrs_client.Client, deadline: std.Io.Clock.Timestamp) Error!void {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        const now = std.Io.Clock.Timestamp.now(self.io, .awake);
+        const open_deadline = if (self.options.server_open_timeout.nanoseconds > 0)
+            earlier(deadline, now.addDuration(.{ .clock = .awake, .raw = self.options.server_open_timeout }))
+        else
+            deadline;
+        try client.connectWithDeadline(open_deadline);
+    }
+    pub fn reconnectLrsWithTimeout(self: *ControlPlane, client: *lrs_client.Client, timeout: std.Io.Duration) Error!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.reconnectLrsWithDeadline(client, .fromNow(self.io, .{ .clock = .awake, .raw = timeout }));
+    }
     fn rebindServer(self: *ControlPlane, selected: usize) Error!void {
         const target_server = self.servers[selected];
         var material = try TlsMaterial.load(self.allocator, self.io, target_server.tlsConfig());
