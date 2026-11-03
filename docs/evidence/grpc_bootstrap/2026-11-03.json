@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "date": "2026-11-03",
+  "head": "0566844f",
+  "gate": "xDS bootstrap parsing and insecure control-plane failover",
+  "commands": {
+    "xds": "zig build test-lib -Dtest-filter=xds --summary all",
+    "delta": "zig build test-lib -Dtest-filter=delta --summary all",
+    "package": "zig build test-package --summary all"
+  },
+  "result": {
+    "xds": {
+      "passed": 237,
+      "total": 237,
+      "failed": 0,
+      "exit_code": 0
+    },
+    "delta": {
+      "passed": 185,
+      "total": 185,
+      "failed": 0,
+      "exit_code": 0
+    },
+    "package": {
+      "passed": 26,
+      "total": 26,
+      "failed": 0,
+      "exit_code": 0
+    }
+  },
+  "source_sha256": {
+    "src/grpc/xds/bootstrap.zig": "fd53399a78bf6cf54cce4cd0600396b405c83231fe6f1dd368a531583fe2331c",
+    "src/grpc/xds/bootstrap_tests.zig": "a44c77d93519e9495a84d078ea0750b6c7a5e8fa4cc0944e99a8294ca50c8f61",
+    "src/grpc/xds/control_plane.zig": "8a4172707066c1ebe998edc2a36fd3ba434fffb092556b33323a7be994cfb912",
+    "src/grpc/xds/control_plane_tests.zig": "4041337c9ac7430c76aa413480004c20853c7283149bd8b3703fe164aeb5620e",
+    "src/grpc/xds/ads/delta_client.zig": "a45092e8c2cd638ae5261206bb3a92f55c748e412c6896eb0ba892583c3b2a48",
+    "src/grpc/xds/ads/delta_transport_tests.zig": "65f95011c3369f88bbbfb33e72f9466d273671283b54dc1c34320e076b73c7b8"
+  },
+  "notes": "Covers bootstrap servers/node/authorities/features, URI defaults and IPv6, bounded metadata Struct encoding through ads.codec.encodeNode, invalid and unsupported shapes, duplicate fields, bounds, allocation failures, refused-server failover, two-server failover with initial_resource_versions replay, and unusable TLS-only/node-less configurations. TLS bootstrap channel credentials and authority-specific control planes remain open."
+}

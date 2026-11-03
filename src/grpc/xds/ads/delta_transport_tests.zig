@@ -198,3 +198,28 @@ test "delta xDS construction and stream admission rollback preserves caller owne
     try std.testing.expectEqualStrings("a", client.subscriptions.find(cds).?.names[0]);
     try std.testing.expectError(error.Timeout, client.connectWithDeadline(.{ .clock = .real, .raw = .zero }));
 }
+
+test "delta xDS rebind retains desired names and accepted versions" {
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var first = try grpc.SharedChannel.init(allocator, io, .{ .cleartext_ip = .{ .address = .{ .ip4 = .loopback(1) } } }, .{});
+    defer first.deinit();
+    var first_sender = first.sender();
+    defer first_sender.deinit();
+    var second = try grpc.SharedChannel.init(allocator, io, .{ .cleartext_ip = .{ .address = .{ .ip4 = .loopback(1) } } }, .{});
+    defer second.deinit();
+    const second_sender = second.sender();
+    var client = try delta.Client.init(allocator, first_sender, .{ .node = .{ .id = "node" } });
+    defer client.deinit();
+    try client.setSubscription(cds, &.{"a"});
+    const token = try client.subscriptions.received(.{ .type_url = cds, .nonce = "n1" });
+    _ = try client.subscriptions.decide(cds, token, null, .{ .type_url = cds, .resources = &.{.{ .name = "a", .version = "v1", .resource = .{ .type_url = cds, .value = "one" } }} });
+    try client.rebind(second_sender, .{ .path = delta.path });
+    try std.testing.expect(client.stream == null);
+    try std.testing.expect(client.sender.state == second.state);
+    try std.testing.expectEqualStrings("v1", client.acceptedVersion(cds, "a").?);
+    try std.testing.expectEqualStrings("a", client.subscriptions.find(cds).?.names[0]);
+    try std.testing.expect(!client.subscriptions.find(cds).?.stream_started);
+    try std.testing.expect(client.subscriptions.find(cds).?.dirty);
+}

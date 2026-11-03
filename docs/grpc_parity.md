@@ -3454,7 +3454,11 @@ deletion; results are in
 `nextDeltaExpiry` and `expireDeltaWithDeadline` enforce `Resource.ttl` for all
 four types, refresh timers from payload-free heartbeats, publish the removal and
 forget the accepted version so a reconnect does not advertise a stale payload.
-Bootstrap and automatic control-plane failover remain open.
+The [bootstrap parser and control-plane helper](grpc_bootstrap.md) parse
+`xds_servers`, node metadata, authorities and server features, and fail over
+across insecure `http://` servers while replaying `initial_resource_versions`
+on the same delta client. TLS bootstrap credentials, certificate providers,
+authority-specific control planes and LRS remain open.
 
 
 ## Typed EDS to reference-owned channel targets

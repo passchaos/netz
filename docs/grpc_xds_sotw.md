@@ -53,5 +53,6 @@ reference hashes are recorded in
 This change covers SotW omission, including existing LDS/CDS deletion behavior.
 The separate [delta xDS transport](grpc_delta_xds.md) now covers explicit
 removals and Resource envelopes at the transport/state layer. Typed delta
-application, resource expiry/timeouts, bootstrap, automatic control-plane
-failover and broader security/filter deployment remain open work.
+application, TTL expiry, bootstrap parsing and insecure control-plane failover
+are implemented; TLS bootstrap credentials, authority-specific control planes
+and broader security/filter deployment remain open work.

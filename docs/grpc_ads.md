@@ -93,6 +93,8 @@ typed resources and prepares CDS/EDS subscriptions with topology publication.
 The [delta ADS transport](grpc_delta_xds.md) now provides per-resource versions,
 subscribe/unsubscribe diffs, explicit removals, TTL/heartbeat resources,
 `initial_resource_versions` replay and the same ACK/NACK ownership model.
-Typed delta publication, control-plane retry/failover, bootstrap parsing and
-resource-expiry enforcement remain required follow-up work for full xDS
-integration.
+Typed delta publication and resource-expiry enforcement are implemented.
+[The bootstrap parser and insecure control-plane failover](grpc_bootstrap.md)
+select and retry `http://` xDS servers while preserving accepted versions.
+TLS bootstrap credentials, authority-specific control planes and LRS remain
+required follow-up work for full xDS integration.
