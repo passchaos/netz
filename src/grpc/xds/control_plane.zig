@@ -168,6 +168,45 @@ pub const ControlPlane = struct {
         errdefer new_sender.deinit();
         try client.rebind(new_sender, request);
     }
+    fn advanceAndRebindLrs(self: *ControlPlane, client: *lrs_client.Client, request: streaming.RequestOptions) Error!void {
+        try self.advanceAndRebind();
+        try self.rebindLrs(client, request);
+    }
+    /// Fail over an external LRS client to the next usable server and reconnect
+    /// it, trying every remaining server when the first choice refuses. The
+    /// client retains its node, counters and stream state.
+    pub fn failoverLrsWithDeadline(self: *ControlPlane, client: *lrs_client.Client, request: streaming.RequestOptions, deadline: std.Io.Clock.Timestamp) Error!void {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        try self.advanceAndRebindLrs(client, request);
+        var attempts: usize = 0;
+        var last_error: ?Error = null;
+        while (attempts < self.bootstrap.servers.len) : (attempts += 1) {
+            if (!usable(self.bootstrap.servers[self.server_index])) {
+                try self.advanceAndRebindLrs(client, request);
+                continue;
+            }
+            const now = std.Io.Clock.Timestamp.now(self.io, .awake);
+            const open_deadline = if (self.options.server_open_timeout.nanoseconds > 0)
+                earlier(deadline, now.addDuration(.{ .clock = .awake, .raw = self.options.server_open_timeout }))
+            else
+                deadline;
+            client.connectWithDeadline(open_deadline) catch |err| {
+                switch (err) {
+                    error.OutOfMemory, error.InvalidLrsOptions, error.InvalidLoadReport, error.LoadReportLimitExceeded => return err,
+                    else => last_error = err,
+                }
+                if (deadline.durationFromNow(self.io).raw.nanoseconds <= 0) return error.Timeout;
+                try self.advanceAndRebindLrs(client, request);
+                continue;
+            };
+            return;
+        }
+        return last_error orelse error.NoUsableXdsServer;
+    }
+    pub fn failoverLrsWithTimeout(self: *ControlPlane, client: *lrs_client.Client, request: streaming.RequestOptions, timeout: std.Io.Duration) Error!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.failoverLrsWithDeadline(client, request, .fromNow(self.io, .{ .clock = .awake, .raw = timeout }));
+    }
     fn rebindServer(self: *ControlPlane, selected: usize) Error!void {
         const target_server = self.servers[selected];
         var material = try TlsMaterial.load(self.allocator, self.io, target_server.tlsConfig());

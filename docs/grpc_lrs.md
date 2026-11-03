@@ -108,11 +108,20 @@ scheduler.runWithTimeout(timeout) catch |err| switch (err) {
 comes first. A response updates the interval, cluster filter and endpoint
 granularity; when the deadline arrives the scheduler writes a due report and
 returns to waiting. A terminal stream surfaces `error.LrsTerminal`; the overall
-deadline surfaces `error.Timeout`. Both are ordinary loop exits, so callers
-reconnect and restart the scheduler after failover. Run the scheduler in a
-background task and cancel it when discovery stops. A real loopback test drives
-a unary call, receives an interval response, observes one report with exact
+deadline surfaces `error.Timeout`. Run the scheduler in a background task and
+cancel it when discovery stops. A real loopback test drives a unary call,
+receives an interval response, observes one report with exact
 issued/successful counters, and then a terminal.
+
+`runWithControlPlane` makes the loop failover-aware. On a terminal it calls
+`ControlPlane.failoverLrsWithDeadline`, which advances to the next usable
+bootstrap server, rebinds the LRS client and reconnects with the retained node;
+reporting resumes one interval after the new stream starts. A server that
+refuses the reconnect is skipped until every usable server has been tried or
+the overall deadline expires. Use `run` when the application owns reconnection
+and `runWithControlPlane` when the scheduler should survive control-plane
+restarts. A real two-server test terminates the first stream, observes the
+failover to the second server and verifies the second report's counters.
 
 ## Verification
 
@@ -121,7 +130,8 @@ categories, intervals, malformed/duplicate/over-limit input, UTF-8 rejection,
 per-cluster unary and streaming counter aggregation, in-progress tracking,
 channel drop and per-category attribution, integration conversion, reporter
 interval/filter/rebind behavior, endpoint granularity, the scheduler report
-loop, ControlPlane failover composition, and a real
+loop, scheduler failover across two servers, ControlPlane failover
+composition, and a real
 loopback duplex session that observes the node, a response, a report with exact
 counters, a second `send_all_clusters` response, a terminal, and node replay on
 a replacement stream. See

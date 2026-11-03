@@ -3,7 +3,9 @@ const std = @import("std");
 const channel = @import("../../channel/shared.zig");
 const Client = @import("client.zig").Client;
 const Reporter = @import("reporter.zig").Reporter;
+const ControlPlane = @import("../control_plane.zig").ControlPlane;
 pub const Error = @import("reporter.zig").Error || error{LrsTerminal};
+pub const ResilientError = Error || @import("../control_plane.zig").Error;
 
 pub const Options = @import("reporter.zig").Options;
 
@@ -55,5 +57,30 @@ pub const Scheduler = struct {
     pub fn runWithTimeout(self: *Scheduler, timeout: std.Io.Duration) Error!void {
         if (timeout.nanoseconds <= 0) return error.Timeout;
         return self.run(.fromNow(self.client.sender.state.io, .{ .clock = .awake, .raw = timeout }));
+    }
+    /// Run the report loop across control-plane failover. A terminal stream
+    /// triggers `ControlPlane.failoverLrsWithDeadline`, which moves the shared
+    /// control channel to the next usable server, rebinds this client and
+    /// reconnects with the retained node. Reporting resumes after one interval
+    /// on the new stream. The loop keeps retrying usable servers until the
+    /// overall deadline expires; it returns the last failover error when no
+    /// server accepts the new stream and `error.Timeout` at the deadline.
+    pub fn runWithControlPlane(self: *Scheduler, control_plane: *ControlPlane, deadline: std.Io.Clock.Timestamp) ResilientError!void {
+        const io = self.client.sender.state.io;
+        while (true) {
+            self.run(deadline) catch |err| switch (err) {
+                error.LrsTerminal => {
+                    if (deadline.durationFromNow(io).raw.nanoseconds <= 0) return error.Timeout;
+                    try control_plane.failoverLrsWithDeadline(self.client, self.client.request, deadline);
+                    self.reporter.last_report_ns = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
+                    continue;
+                },
+                else => return err,
+            };
+        }
+    }
+    pub fn runWithControlPlaneTimeout(self: *Scheduler, control_plane: *ControlPlane, timeout: std.Io.Duration) ResilientError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.runWithControlPlane(control_plane, .fromNow(self.client.sender.state.io, .{ .clock = .awake, .raw = timeout }));
     }
 };
