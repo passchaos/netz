@@ -38,6 +38,7 @@ test "gRPC xDS bootstrap parses servers node authorities and metadata" {
     try std.testing.expect(!parsed.servers[1].resource_timer_is_transient_error);
     try std.testing.expectEqualStrings("{\"ca_certificate_file\":\"/ca.pem\"}", parsed.servers[1].channel_creds[0].config_json.?);
     try std.testing.expectEqualStrings("/ca.pem", parsed.servers[1].tlsConfig().?.ca_certificate_file);
+    try std.testing.expectEqual(@as(i96, 600 * std.time.ns_per_s), parsed.servers[1].tlsConfig().?.refresh_interval.nanoseconds);
     const first = parsed.firstInsecureServer().?;
     try std.testing.expectEqualStrings("http://127.0.0.1:8080", first.uri);
 
@@ -77,6 +78,20 @@ test "gRPC xDS bootstrap server URI defaults and IPv6" {
     try std.testing.expectEqual(@as(u16, 9000), parsed.servers[2].target.port);
 }
 
+test "gRPC xDS bootstrap parses TLS refresh intervals" {
+    const parsed = try bootstrap.parse(gpa,
+        \\{"xds_servers": [
+        \\ {"server_uri": "https://host", "channel_creds": [{"type": "tls", "config": {"ca_certificate_file": "/ca.pem", "refresh_interval": "1.25s"}}]},
+        \\ {"server_uri": "https://host", "channel_creds": [{"type": "tls", "config": {"ca_certificate_file": "/ca.pem", "refresh_interval": "0s"}}]},
+        \\ {"server_uri": "https://host", "channel_creds": [{"type": "tls", "config": {"ca_certificate_file": "/ca.pem", "refresh_interval": "315576000000s"}}]}
+        \\]}
+    , .{});
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(i96, std.time.ns_per_s + 250 * std.time.ns_per_ms), parsed.servers[0].tlsConfig().?.refresh_interval.nanoseconds);
+    try std.testing.expectEqual(@as(i96, 0), parsed.servers[1].tlsConfig().?.refresh_interval.nanoseconds);
+    try std.testing.expectEqual(@as(i96, 315576000000 * std.time.ns_per_s), parsed.servers[2].tlsConfig().?.refresh_interval.nanoseconds);
+}
+
 test "gRPC xDS bootstrap rejects invalid and unsupported shapes" {
     const cases = [_]struct { json: []const u8, want: anyerror }{
         .{ .json = "{}", .want = error.InvalidBootstrap },
@@ -91,6 +106,12 @@ test "gRPC xDS bootstrap rejects invalid and unsupported shapes" {
         .{ .json = "{\"xds_servers\":[{\"server_uri\":\"http://host\",\"channel_creds\":[{\"type\":\"insecure\",\"config\":[]}]}]}", .want = error.InvalidBootstrap },
         .{ .json = "{\"xds_servers\":[{\"server_uri\":\"https://host\",\"channel_creds\":[{\"type\":\"tls\",\"config\":{\"certificate_file\":\"/c.pem\"}}]}]}", .want = error.InvalidBootstrap },
         .{ .json = "{\"xds_servers\":[{\"server_uri\":\"https://host\",\"channel_creds\":[{\"type\":\"tls\",\"config\":{\"root_certificate_provider\":{\"instance_name\":\"p\"}}}]}]}", .want = error.UnsupportedBootstrapFeature },
+        .{ .json = "{\"xds_servers\":[{\"server_uri\":\"https://host\",\"channel_creds\":[{\"type\":\"tls\",\"config\":{\"ca_certificate_file\":\"/ca.pem\",\"refresh_interval\":\"1\"}}]}]}", .want = error.InvalidBootstrap },
+        .{ .json = "{\"xds_servers\":[{\"server_uri\":\"https://host\",\"channel_creds\":[{\"type\":\"tls\",\"config\":{\"ca_certificate_file\":\"/ca.pem\",\"refresh_interval\":\"-1s\"}}]}]}", .want = error.InvalidBootstrap },
+        .{ .json = "{\"xds_servers\":[{\"server_uri\":\"https://host\",\"channel_creds\":[{\"type\":\"tls\",\"config\":{\"ca_certificate_file\":\"/ca.pem\",\"refresh_interval\":\"1.s\"}}]}]}", .want = error.InvalidBootstrap },
+        .{ .json = "{\"xds_servers\":[{\"server_uri\":\"https://host\",\"channel_creds\":[{\"type\":\"tls\",\"config\":{\"ca_certificate_file\":\"/ca.pem\",\"refresh_interval\":\"1.1234567890s\"}}]}]}", .want = error.InvalidBootstrap },
+        .{ .json = "{\"xds_servers\":[{\"server_uri\":\"https://host\",\"channel_creds\":[{\"type\":\"tls\",\"config\":{\"ca_certificate_file\":\"/ca.pem\",\"refresh_interval\":\"315576000001s\"}}]}]}", .want = error.InvalidBootstrap },
+        .{ .json = "{\"xds_servers\":[{\"server_uri\":\"https://host\",\"channel_creds\":[{\"type\":\"tls\",\"config\":{\"ca_certificate_file\":\"/ca.pem\",\"refresh_interval\":1}}]}]}", .want = error.InvalidBootstrap },
         .{ .json = "{\"xds_servers\":[{\"server_uri\":\"http://host\",\"channel_creds\":[{\"type\":\"insecure\"}]}],\"node\":{}}", .want = error.InvalidBootstrapNode },
         .{ .json = "{\"xds_servers\":[{\"server_uri\":\"http://host\",\"channel_creds\":[{\"type\":\"insecure\"}]}],\"node\":{\"id\":\"n\",\"metadata\":[]}}", .want = error.InvalidBootstrap },
         .{ .json = "{\"xds_servers\":[{\"server_uri\":\"http://host\",\"channel_creds\":[{\"type\":\"insecure\"}]}],\"authorities\":{\"a\":{\"client_listener_resource_name_template\":\"wrong\"}}}", .want = error.InvalidBootstrap },

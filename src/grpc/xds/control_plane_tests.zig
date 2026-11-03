@@ -233,6 +233,51 @@ test "gRPC xDS control plane reloads TLS material and replays versions" {
     try task.await(io);
 }
 
+test "gRPC xDS control plane schedules TLS material refresh" {
+    var threaded = std.Io.Threaded.init(gpa, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(&certificate_der, tls_testing.certificate_base64);
+    const key_pair = try tls_testing.serverKeyPair();
+    var server = try grpc.runtime.TlsServer.listen(gpa, io, .{ .ip4 = .loopback(0) }, .{
+        .transport = .{
+            .identity = .{ .certificate_chain = &.{&certificate_der}, .signer = .{ .ecdsa_p256_sha256 = .{ .key_pair = key_pair } } },
+        },
+    });
+    defer server.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const pem = try std.fmt.allocPrint(gpa, "-----BEGIN CERTIFICATE-----\n{s}\n-----END CERTIFICATE-----\n", .{tls_testing.certificate_base64});
+    defer gpa.free(pem);
+    try tmp.dir.writeFile(io, .{ .sub_path = "ca.pem", .data = pem });
+    const ca_path = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/ca.pem", .{tmp.sub_path[0..]});
+    defer gpa.free(ca_path);
+    const json = try std.fmt.allocPrint(gpa, "{{\"xds_servers\":[{{\"server_uri\":\"https://localhost:{d}\",\"channel_creds\":[{{\"type\":\"tls\",\"config\":{{\"ca_certificate_file\":\"{s}\",\"refresh_interval\":\"10s\"}}}}]}}],\"node\":{{\"id\":\"node-1\"}}}}", .{ server.address().getPort(), ca_path });
+    defer gpa.free(json);
+    const configuration = try bootstrap.parse(gpa, json, .{});
+    defer configuration.deinit();
+    const plane = try control.ControlPlane.init(gpa, io, configuration, .{});
+    defer plane.deinit();
+    try seed(plane.discovery());
+    var task = io.async(Peer.runTlsTwice, .{ &server, "node-1" });
+    defer _ = task.cancel(io) catch {};
+    try plane.connectWithDeadline(deadline(io));
+    var first = try plane.discovery().nextWithDeadline(deadline(io));
+    defer first.deinit();
+    try std.testing.expectEqual(grpc.Status.ok, first.terminal.status);
+    try std.testing.expectEqual(@as(i96, 10 * std.time.ns_per_s), plane.refreshInterval().?.nanoseconds);
+    try std.testing.expect(plane.nextRefreshDeadline() != null);
+    const now = std.Io.Clock.Timestamp.now(io, .awake);
+    plane.last_reload_ns = now.raw.nanoseconds - 11 * std.time.ns_per_s;
+    try std.testing.expect(try plane.reloadIfDueWithDeadline(deadline(io)));
+    var second = try plane.discovery().nextWithDeadline(deadline(io));
+    defer second.deinit();
+    try std.testing.expectEqual(grpc.Status.ok, second.terminal.status);
+    try std.testing.expect(!try plane.reloadIfDueWithDeadline(deadline(io)));
+    try task.await(io);
+}
+
 test "gRPC xDS control plane requires a usable server and node" {
     const unusable =
         \\{"xds_servers":[{"server_uri":"https://host","channel_creds":[{"type":"insecure"}]}],"node":{"id":"node"}}

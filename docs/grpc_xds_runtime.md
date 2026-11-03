@@ -103,7 +103,8 @@ publication. `nextDeltaExpiry` and `expireDeltaWithDeadline` enforce
 and forget expired accepted versions. The
 [bootstrap parser and control-plane failover](grpc_bootstrap.md)
 select `http://` servers, retry refused servers and rebind the same delta client
-with `initial_resource_versions` replay. Certificate providers and certificate rotation,
+with `initial_resource_versions` replay. Bootstrap `refresh_interval` exposes a
+TLS reload schedule checked by `reloadIfDue`; certificate providers and
 authority-specific control planes, aggregate/DNS CDS and full security,
 non-router filters and capture/rewriting remain open. Unsupported resource
 features continue to fail typed validation rather than claim deployment

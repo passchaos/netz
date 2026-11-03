@@ -1,23 +1,24 @@
 {
   "schema": 1,
   "date": "2026-11-03",
-  "head": "f0052dcc",
-  "gate": "xDS bootstrap parsing, TLS material and control-plane failover",
+  "head": "6715ed09",
+  "gate": "xDS bootstrap parsing, TLS refresh scheduling, TLS material and control-plane failover",
   "commands": {
     "xds": "zig build test-lib -Dtest-filter=xds --summary all",
     "delta": "zig build test-lib -Dtest-filter=delta --summary all",
-    "package": "zig build test-package --summary all"
+    "package": "zig build test-package --summary all",
+    "full_lib": "zig build test-lib --summary all"
   },
   "result": {
     "xds": {
-      "passed": 240,
-      "total": 240,
+      "passed": 251,
+      "total": 251,
       "failed": 0,
       "exit_code": 0
     },
     "delta": {
-      "passed": 185,
-      "total": 185,
+      "passed": 186,
+      "total": 186,
       "failed": 0,
       "exit_code": 0
     },
@@ -26,15 +27,22 @@
       "total": 26,
       "failed": 0,
       "exit_code": 0
+    },
+    "full_lib": {
+      "passed": 6377,
+      "total": 6382,
+      "failed": 5,
+      "exit_code": 1,
+      "note": "Unrelated host/dependency failures under heavy sibling-repo load: http3 DATAGRAM pacing, internal.deflate error precedence from the sibling vort backend, WebSocket rejection deadline, MQTT outbound bridge expiry, and QUIC endpoint two-connection routing. Both new refresh tests passed."
     }
   },
   "source_sha256": {
-    "src/grpc/xds/bootstrap.zig": "67459673cd2ae6e62b11f07b65ef77b3a14633c012f527cea59b8c7a8183844e",
-    "src/grpc/xds/bootstrap_tests.zig": "eb4f8630d13a11fae09a3f423dd49d6070bb1c56c574c27e5c9abd54aa02272d",
-    "src/grpc/xds/control_plane.zig": "8243cc14f98d9c69ef65acaf651defce9cae194f040a71f784f54fd909970874",
-    "src/grpc/xds/control_plane_tests.zig": "7d23785049adff95e302d1e9d7b32792a7bf3f60cdb2f4b295dc52f97bfe87a9",
+    "src/grpc/xds/bootstrap.zig": "6b0b94b602fb2d5b2aaa6b75b9dcb15664d907d0837959b9e728c1bb5d0f3eb3",
+    "src/grpc/xds/bootstrap_tests.zig": "480cfb1a110c66283b0ebaff5bdb32a4687f6a903c5a42f7b82d707aba1cc137",
+    "src/grpc/xds/control_plane.zig": "6fae13601b01928fce12cc8670f7ea4de5f726461f93304633b913d68dac0ad8",
+    "src/grpc/xds/control_plane_tests.zig": "06c03b75d0e6f9dbaf39a3bc948137c306d75fd1d30da07d782c5d2866bbfb49",
     "src/grpc/xds/ads/delta_client.zig": "a45092e8c2cd638ae5261206bb3a92f55c748e412c6896eb0ba892583c3b2a48",
     "src/grpc/xds/ads/delta_transport_tests.zig": "65f95011c3369f88bbbfb33e72f9466d273671283b54dc1c34320e076b73c7b8"
   },
-  "notes": "Covers bootstrap servers/node/authorities/features, authority server selection, TLS CA and client-identity config parsing, URI defaults and IPv6, bounded metadata Struct encoding through ads.codec.encodeNode, invalid and unsupported shapes, duplicate fields, bounds, allocation failures, refused-server failover, two-server failover with initial_resource_versions replay, a real TLS handshake using a bootstrap CA file, TLS material reload with version replay and failed-load rollback, and unusable server/node configurations. Certificate providers and automatic refresh scheduling remain open."
+  "notes": "Covers bootstrap servers/node/authorities/features, authority server selection, TLS CA and client-identity config parsing, gRPC refresh_interval durations including fractional seconds, bounds and malformed forms, URI defaults and IPv6, bounded metadata Struct encoding through ads.codec.encodeNode, invalid and unsupported shapes, duplicate fields, bounds, allocation failures, refused-server failover, two-server failover with initial_resource_versions replay, a real TLS handshake using a bootstrap CA file, TLS material reload with version replay and failed-load rollback, refresh deadline due/not-due transitions, and unusable server/node configurations. Certificate-provider plugins remain open."
 }

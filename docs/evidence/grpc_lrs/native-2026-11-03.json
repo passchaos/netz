@@ -37,11 +37,11 @@
       "exit_code": 0
     },
     "full_lib": {
-      "passed": 6375,
-      "total": 6380,
+      "passed": 6377,
+      "total": 6382,
       "failed": 5,
       "exit_code": 1,
-      "note": "Unrelated host/dependency failures under heavy sibling-repo load: http3 DATAGRAM pacing, internal.deflate error precedence from the sibling vort backend, MQTT outbound bridge expiry, QUIC endpoint two-connection routing, and HTTP/3 pool budget. The LRS filter gate passed 176/176 after the scheduler failover change."
+      "note": "Unrelated host/dependency failures under heavy sibling-repo load: http3 DATAGRAM pacing, internal.deflate error precedence from the sibling vort backend, WebSocket rejection deadline, MQTT outbound bridge expiry, and QUIC endpoint two-connection routing. The LRS and xds filter gates passed after the TLS refresh change."
     },
     "interop": {
       "exit_code": 0
@@ -58,7 +58,7 @@
     "src/grpc/xds/lrs/tests.zig": "125935ad5f0a4e449842c4fed9374102984f38960bc2f682ef9d4bdfeb6262fb",
     "src/grpc/xds/lrs/transport_tests.zig": "af4f6ee7e4f1f61cf224d171763f9118a645dbfad9c7fb04d5d6af9f0faf9aae",
     "src/grpc/xds/lrs/control_plane_tests.zig": "46b2d685422cca5fc649fc6b8961007eda93911a402477204cd6d61dd59c857c",
-    "src/grpc/xds/control_plane.zig": "e86d6038d71a165171e12f9ba3a718750ec12434db7559da56f5cfbc019b7d93",
+    "src/grpc/xds/control_plane.zig": "6fae13601b01928fce12cc8670f7ea4de5f726461f93304633b913d68dac0ad8",
     "src/grpc/channel/shared/lrs_stats.zig": "0fdcb8eeaa137fe1fa8b5d704b3e80906956d7f61cfb9016043ccca6cdda8b2f",
     "src/grpc/channel/shared/lrs_stats_tests.zig": "ab8dff14d34b076d1b20057cb57a01507d56ef76f2925998188836d4041735ff",
     "src/grpc/channel/shared/state.zig": "0b927a463a60da777217ad04a70da660998c11c0eb42dd0d34a8c57b955959a3",

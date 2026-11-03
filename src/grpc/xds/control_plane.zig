@@ -104,6 +104,7 @@ pub const ControlPlane = struct {
     material: *TlsMaterial,
     channel: shared.SharedChannel,
     client: delta.Client,
+    last_reload_ns: ?i96 = null,
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, configuration: *bootstrap.Bootstrap, options: Options) Error!*ControlPlane {
         const node = options.node orelse configuration.adsNode() orelse return error.InvalidBootstrapNode;
@@ -124,7 +125,7 @@ pub const ControlPlane = struct {
         var client = try delta.Client.init(gpa, new_sender, .{ .node = node, .subscriptions = options.subscriptions, .limits = options.limits, .request = options.request });
         errdefer client.deinit();
         const self = try gpa.create(ControlPlane);
-        self.* = .{ .allocator = gpa, .io = io, .bootstrap = configuration, .options = options, .servers = servers, .server_index = index, .material = material, .channel = channel, .client = client };
+        self.* = .{ .allocator = gpa, .io = io, .bootstrap = configuration, .options = options, .servers = servers, .server_index = index, .material = material, .channel = channel, .client = client, .last_reload_ns = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds };
         return self;
     }
     pub fn deinit(self: *ControlPlane) void {
@@ -223,6 +224,7 @@ pub const ControlPlane = struct {
         self.channel = channel;
         self.material = material;
         self.server_index = selected;
+        self.last_reload_ns = std.Io.Clock.Timestamp.now(self.io, .awake).raw.nanoseconds;
     }
     fn advanceAndRebind(self: *ControlPlane) Error!void {
         const servers = self.servers;
@@ -306,5 +308,38 @@ pub const ControlPlane = struct {
     pub fn reloadServerWithTimeout(self: *ControlPlane, timeout: std.Io.Duration) Error!void {
         if (timeout.nanoseconds <= 0) return error.Timeout;
         return self.reloadServerWithDeadline(.fromNow(self.io, .{ .clock = .awake, .raw = timeout }));
+    }
+    /// The current server's TLS file refresh period. Returns null when the
+    /// server has no file-based TLS material or the parsed interval is zero.
+    pub fn refreshInterval(self: *const ControlPlane) ?std.Io.Duration {
+        const tls = self.server().tlsConfig() orelse return null;
+        if (tls.ca_certificate_file.len == 0 and tls.certificate_file.len == 0) return null;
+        if (tls.refresh_interval.nanoseconds <= 0) return null;
+        return tls.refresh_interval;
+    }
+    /// Deadline for the next scheduled TLS file reload, or null when refresh
+    /// is disabled.
+    pub fn nextRefreshDeadline(self: *const ControlPlane) ?std.Io.Clock.Timestamp {
+        const interval = self.refreshInterval() orelse return null;
+        const last = self.last_reload_ns orelse return null;
+        return .{ .clock = .awake, .raw = .{ .nanoseconds = last + interval.nanoseconds } };
+    }
+    /// Reload the current server's TLS files when the bootstrap
+    /// `refresh_interval` has elapsed. The reload recreates the channel and
+    /// reconnects the delta client, so callers should invoke this from the
+    /// task that owns discovery. Returns false when refresh is disabled or not
+    /// yet due.
+    pub fn reloadIfDueWithDeadline(self: *ControlPlane, deadline: std.Io.Clock.Timestamp) Error!bool {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        const interval = self.refreshInterval() orelse return false;
+        const last = self.last_reload_ns orelse return false;
+        const now = std.Io.Clock.Timestamp.now(self.io, .awake);
+        if (now.raw.nanoseconds < last + interval.nanoseconds) return false;
+        try self.reloadServerWithDeadline(deadline);
+        return true;
+    }
+    pub fn reloadIfDueWithTimeout(self: *ControlPlane, timeout: std.Io.Duration) Error!bool {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.reloadIfDueWithDeadline(.fromNow(self.io, .{ .clock = .awake, .raw = timeout }));
     }
 };

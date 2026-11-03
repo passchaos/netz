@@ -30,7 +30,7 @@ try plane.failoverWithDeadline(deadline);
 | `xds_servers` | Required, non-empty array of server objects |
 | `server_uri` | Required `http://` or `https://` authority; default ports 80/443; IPv6 brackets accepted |
 | `channel_creds` | Required array of `{type, config}`; at least one known type (`insecure`, `tls`, `google_default`, `xds`) |
-| `tls` config | `ca_certificate_file`, `certificate_file`, `private_key_file`; certificate/key must be paired; certificate providers are rejected |
+| `tls` config | `ca_certificate_file`, `certificate_file`, `private_key_file`, `refresh_interval`; certificate/key must be paired; certificate providers are rejected |
 | `server_features` | Optional string array; the four grpc-core feature names set booleans, unknown entries are retained but inert |
 | `node` | Optional `{id, cluster, locality, metadata}`; `id` is required when present |
 | `authorities` | Optional map of authority name to `{xds_servers, client_listener_resource_name_template, fallback_on_reachability_only}` |
@@ -55,9 +55,14 @@ can be passed directly to `delta.Client`.
 TLS uses `ca_certificate_file` as the server trust bundle when present and the
 platform roots otherwise. `certificate_file` plus `private_key_file` supply an
 optional client identity for mTLS. The files are loaded once at control-plane
-creation or failover; `refresh_interval` and certificate-provider rotation are
-not implemented, and a non-empty `root_certificate_provider` or
-`identity_certificate_provider` is rejected during bootstrap parsing.
+creation or failover. `refresh_interval` accepts the gRPC duration form
+(`"10s"`, `"1.25s"`, default ten minutes); zero disables scheduled refresh.
+`refreshInterval` returns the current server's period and `nextRefreshDeadline`
+returns its next boundary. `reloadIfDueWithDeadline` reloads and reconnects only
+when that boundary has passed, so discovery can call it between stream
+operations. Certificate-provider rotation remains unimplemented, and a
+non-empty `root_certificate_provider` or `identity_certificate_provider` is
+rejected during bootstrap parsing.
 `Options.authority` selects an authority's `xds_servers` (falling back to the
 top-level list when the authority has none); an unknown authority fails with
 `InvalidControlPlaneOptions`. The bootstrap node is used unless `Options.node`
@@ -100,14 +105,17 @@ complete parsed shape, URI defaults and IPv6, metadata Struct encoding through
 `ads.codec.encodeNode`, invalid/unsupported shapes, duplicate fields, bounds,
 allocation failure sweeps, refused-server failover, two-server failover with
 `initial_resource_versions` replay, a real TLS handshake using a bootstrap CA
-file, TLS material reload with version replay and failed-load rollback, and
-unusable server or node-less configurations. See
+file, TLS material reload with version replay and failed-load rollback, the
+`refresh_interval` schedule including due/not-due transitions, and unusable
+server or node-less configurations. See
 `docs/evidence/grpc_bootstrap/2026-11-03.json`.
 
 ## Remaining integration
 
-Certificate providers, automatic refresh scheduling (reload is caller-driven),
-a background retry schedule and DNS/aggregate control-plane targets remain
+Certificate-provider plugins and a self-driving refresh task remain follow-up
+work; `reloadIfDue` exposes the bootstrap-derived schedule, but reload
+reconnects the delta client, so the discovery-owning task must call it. A
+background retry schedule and DNS/aggregate control-plane targets also remain
 follow-up work. The
 parser retains authority server lists and per-server feature flags, and
 `Options.authority` already selects those servers.

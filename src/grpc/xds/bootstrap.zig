@@ -28,6 +28,9 @@ pub const TlsConfig = struct {
     ca_certificate_file: []const u8 = "",
     certificate_file: []const u8 = "",
     private_key_file: []const u8 = "",
+    /// File refresh period. Zero disables scheduled refresh; the gRPC default
+    /// is ten minutes.
+    refresh_interval: std.Io.Duration = .fromSeconds(600),
 };
 pub const Creds = struct { type: []const u8, config_json: ?[]const u8 = null, tls: ?TlsConfig = null };
 
@@ -174,6 +177,32 @@ fn parseTarget(uri: []const u8, limits: Limits) Error!Target {
     return .{ .scheme = scheme, .host = host, .port = port };
 }
 
+/// Parse the gRPC bootstrap duration form: seconds with an optional `s`
+/// suffix and up to nine fractional digits, for example `"1s"` or `"1.25s"`.
+fn parseDuration(value: std.json.Value, limits: Limits) Error!std.Io.Duration {
+    const raw = try text(value, limits);
+    if (raw.len < 2 or raw[raw.len - 1] != 's') return error.InvalidBootstrap;
+    const body = raw[0 .. raw.len - 1];
+    if (body.len == 0) return error.InvalidBootstrap;
+    var seconds_text = body;
+    var nanos: u64 = 0;
+    if (std.mem.indexOfScalar(u8, body, '.')) |dot| {
+        seconds_text = body[0..dot];
+        const fraction = body[dot + 1 ..];
+        if (fraction.len == 0 or fraction.len > 9) return error.InvalidBootstrap;
+        for (fraction) |c| if (!std.ascii.isDigit(c)) return error.InvalidBootstrap;
+        nanos = std.fmt.parseInt(u64, fraction, 10) catch return error.InvalidBootstrap;
+        var index = fraction.len;
+        while (index < 9) : (index += 1) nanos *= 10;
+    }
+    if (seconds_text.len == 0) return error.InvalidBootstrap;
+    for (seconds_text) |c| if (!std.ascii.isDigit(c)) return error.InvalidBootstrap;
+    const seconds = std.fmt.parseInt(u64, seconds_text, 10) catch return error.InvalidBootstrap;
+    if (seconds > 315576000000) return error.InvalidBootstrap;
+    const total: i96 = @as(i96, @intCast(seconds)) * std.time.ns_per_s + @as(i96, @intCast(nanos));
+    return .fromNanoseconds(total);
+}
+
 fn parseTlsConfig(object: std.json.ObjectMap, limits: Limits) Error!TlsConfig {
     inline for (.{ "root_certificate_provider", "identity_certificate_provider" }) |field| {
         if (object.get(field) != null) return error.UnsupportedBootstrapFeature;
@@ -182,6 +211,7 @@ fn parseTlsConfig(object: std.json.ObjectMap, limits: Limits) Error!TlsConfig {
         .ca_certificate_file = try optionalText(object, "ca_certificate_file", limits),
         .certificate_file = try optionalText(object, "certificate_file", limits),
         .private_key_file = try optionalText(object, "private_key_file", limits),
+        .refresh_interval = if (object.get("refresh_interval")) |value| try parseDuration(value, limits) else .fromSeconds(600),
     };
     if ((config.certificate_file.len == 0) != (config.private_key_file.len == 0)) return error.InvalidBootstrap;
     return config;
