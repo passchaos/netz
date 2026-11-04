@@ -644,12 +644,7 @@ pub const Set = struct {
         const peer = self.find(from) orelse return error.UnexpectedStream;
         const entry = peer.streaming_requests.find(stream_id) orelse
             return error.UnexpectedStream;
-        return entry.reader.availableDataBytes() catch |err| switch (err) {
-            // No current DATA frame simply means this event's payload is fully
-            // consumed; it is not a protocol error for a byte-count query.
-            error.UnexpectedFrame => 0,
-            else => |other| return @errorCast(other),
-        };
+        return entry.reader.availableDataBytes();
     }
 
     pub fn readRequestData(

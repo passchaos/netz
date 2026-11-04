@@ -18,6 +18,10 @@ pub const Options = struct {
     poll_interval: std.Io.Duration = .fromMilliseconds(5),
     /// Bound for control output after a read or command wake.
     output_timeout: std.Io.Duration = .fromMilliseconds(100),
+    /// Stack size for handler workers. A per-connection pool grows lazily up
+    /// to `max_streams`, so this bounds virtual memory for connections that
+    /// actually multiplex. Raise it for handlers with deep native stacks.
+    worker_stack_size: usize = 1024 * 1024,
 };
 
 pub const Summary = struct {
@@ -80,7 +84,6 @@ pub fn Engine(
             handler_done: bool = false,
             handler_error: ?anyerror = null,
             canceled: bool = false,
-            thread: ?std.Thread = null,
 
             fn deinit(self: *Slot, allocator: std.mem.Allocator) void {
                 if (self.trailers) |fields| freeHeaders(allocator, fields);
@@ -185,6 +188,16 @@ pub fn Engine(
         wake: std.Io.Event = .unset,
         slots: std.ArrayList(*Slot) = .empty,
         pending: std.ArrayList(StreamType) = .empty,
+        /// Ready handlers. The owner enqueues accepted streams here; a
+        /// per-connection worker pool consumes them. Workers are created lazily
+        /// so a sequential connection keeps a single reusable thread instead of
+        /// spawning one thread per request.
+        task_mutex: std.Io.Mutex = .init,
+        task_cond: std.Io.Condition = .init,
+        task_queue: std.ArrayList(*Slot) = .empty,
+        workers: std.ArrayList(std.Thread) = .empty,
+        idle_workers: usize = 0,
+        stopping: bool = false,
         active: usize = 0,
         summary: Summary = .{},
 
@@ -209,6 +222,8 @@ pub fn Engine(
             self.pending.deinit(self.allocator);
             self.slots.deinit(self.allocator);
             self.commands.deinit(self.allocator);
+            self.task_queue.deinit(self.allocator);
+            self.workers.deinit(self.allocator);
             self.* = undefined;
         }
 
@@ -218,21 +233,6 @@ pub fn Engine(
             context: *Context,
             comptime handler: *const fn (*Context, *Stream) anyerror!void,
         ) anyerror!Summary {
-            const Task = struct {
-                engine: *Self,
-                slot: *Slot,
-                context: *Context,
-                handler: *const fn (*Context, *Stream) anyerror!void,
-
-                fn run(task: @This()) void {
-                    task.handler(task.context, &task.slot.public_stream) catch |err| {
-                        task.slot.handler_error = err;
-                    };
-                    task.engine.wake.set(task.engine.io);
-                    task.slot.handler_done = true;
-                }
-            };
-
             const limit = @min(self.options.max_streams, self.maxStreams());
             if (limit == 0) return error.InvalidServeOptions;
 
@@ -244,10 +244,10 @@ pub fn Engine(
             }
 
             while (true) {
-                try self.spawnPending(limit, Context, context, handler, Task);
+                try self.spawnPending(limit, Context, context, handler);
                 try self.drainCommands();
                 self.reap();
-                try self.spawnPending(limit, Context, context, handler, Task);
+                try self.spawnPending(limit, Context, context, handler);
 
                 if (self.shutdownRequested()) {
                     self.discardPending();
@@ -294,7 +294,7 @@ pub fn Engine(
                 };
                 if (event) |value| {
                     switch (value) {
-                        .request => |stream| try self.accept(stream, limit, Context, context, handler, Task),
+                        .request => |stream| try self.accept(stream, limit, Context, context, handler),
                         .stream => |stream_id| try self.drainSlot(stream_id),
                         .progress, .wake => {},
                     }
@@ -305,6 +305,8 @@ pub fn Engine(
             if (peer_closed) {
                 self.cancelCommands();
                 self.cancelActive();
+            } else {
+                self.stopWorkers();
             }
             self.connection.sendGoAway(
                 self.summary.last_stream_id,
@@ -340,7 +342,6 @@ pub fn Engine(
             comptime Context: type,
             context: *Context,
             comptime handler: *const fn (*Context, *Stream) anyerror!void,
-            comptime Task: type,
         ) !void {
             if (stream.stream_id > self.summary.last_stream_id) {
                 self.summary.last_stream_id = stream.stream_id;
@@ -349,7 +350,7 @@ pub fn Engine(
                 try self.pending.append(self.allocator, stream);
                 return;
             }
-            try self.spawn(stream, Context, context, handler, Task);
+            try self.enqueue(stream, limit, Context, context, handler);
         }
 
         fn spawnPending(
@@ -358,21 +359,24 @@ pub fn Engine(
             comptime Context: type,
             context: *Context,
             comptime handler: *const fn (*Context, *Stream) anyerror!void,
-            comptime Task: type,
         ) !void {
             while (self.active < limit and self.pending.items.len != 0) {
                 const stream = self.pending.orderedRemove(0);
-                try self.spawn(stream, Context, context, handler, Task);
+                try self.enqueue(stream, limit, Context, context, handler);
             }
         }
 
-        fn spawn(
+        /// Admit one accepted stream into the worker queue. The first worker is
+        /// started lazily; additional workers are added only while every
+        /// existing worker is busy, so a sequential connection keeps one
+        /// reusable thread instead of spawning one thread per request.
+        fn enqueue(
             self: *Self,
             stream: StreamType,
+            limit: usize,
             comptime Context: type,
             context: *Context,
             comptime handler: *const fn (*Context, *Stream) anyerror!void,
-            comptime Task: type,
         ) !void {
             const slot = try self.allocator.create(Slot);
             errdefer self.allocator.destroy(slot);
@@ -384,20 +388,101 @@ pub fn Engine(
             slot.public_stream = .{ .engine = self, .slot = slot };
             errdefer slot.deinit(self.allocator);
             self.slots.append(self.allocator, slot) catch |err| return err;
-            const thread = std.Thread.spawn(.{}, Task.run, .{Task{
-                .engine = self,
-                .slot = slot,
-                .context = context,
-                .handler = handler,
-            }}) catch |err| {
-                _ = self.slots.pop();
-                slot.deinit(self.allocator);
-                self.allocator.destroy(slot);
+            errdefer _ = self.slots.pop();
+
+            self.task_mutex.lockUncancelable(self.io);
+            const need_worker = self.idle_workers == 0 and
+                self.workers.items.len < limit;
+            self.task_mutex.unlock(self.io);
+            if (need_worker) try self.startWorker(Context, context, handler);
+
+            self.task_mutex.lockUncancelable(self.io);
+            self.task_queue.append(self.allocator, slot) catch |err| {
+                self.task_mutex.unlock(self.io);
                 return err;
             };
-            slot.thread = thread;
+            self.task_mutex.unlock(self.io);
+            self.task_cond.signal(self.io);
             self.active += 1;
             self.summary.accepted += 1;
+        }
+
+        fn Worker(comptime Context: type) type {
+            return struct {
+                engine: *Self,
+                context: *Context,
+                handler: *const fn (*Context, *Stream) anyerror!void,
+
+                fn run(worker: @This()) void {
+                    const engine = worker.engine;
+                    while (true) {
+                        engine.task_mutex.lockUncancelable(engine.io);
+                        engine.idle_workers += 1;
+                        while (engine.task_queue.items.len == 0 and !engine.stopping) {
+                            engine.task_cond.wait(engine.io, &engine.task_mutex) catch |err| switch (err) {
+                                error.Canceled => {
+                                    engine.idle_workers -= 1;
+                                    engine.task_mutex.unlock(engine.io);
+                                    return;
+                                },
+                            };
+                        }
+                        engine.idle_workers -= 1;
+                        if (engine.stopping) {
+                            engine.task_mutex.unlock(engine.io);
+                            return;
+                        }
+                        const slot = engine.task_queue.orderedRemove(0);
+                        engine.task_mutex.unlock(engine.io);
+
+                        worker.handler(worker.context, &slot.public_stream) catch |err| {
+                            slot.handler_error = err;
+                        };
+                        slot.body_mutex.lockUncancelable(engine.io);
+                        slot.handler_done = true;
+                        slot.body_mutex.unlock(engine.io);
+                        engine.wake.set(engine.io);
+                    }
+                }
+            };
+        }
+
+        fn startWorker(
+            self: *Self,
+            comptime Context: type,
+            context: *Context,
+            comptime handler: *const fn (*Context, *Stream) anyerror!void,
+        ) !void {
+            self.task_mutex.lockUncancelable(self.io);
+            self.workers.ensureUnusedCapacity(self.allocator, 1) catch |err| {
+                self.task_mutex.unlock(self.io);
+                return err;
+            };
+            self.task_mutex.unlock(self.io);
+            const thread = try std.Thread.spawn(
+                .{ .stack_size = self.options.worker_stack_size },
+                Worker(Context).run,
+                .{Worker(Context){
+                    .engine = self,
+                    .context = context,
+                    .handler = handler,
+                }},
+            );
+            self.task_mutex.lockUncancelable(self.io);
+            self.workers.appendAssumeCapacity(thread);
+            self.task_mutex.unlock(self.io);
+        }
+
+        fn stopWorkers(self: *Self) void {
+            self.task_mutex.lockUncancelable(self.io);
+            self.stopping = true;
+            const worker_count = self.workers.items.len;
+            self.task_mutex.unlock(self.io);
+            for (0..worker_count) |_| self.task_cond.signal(self.io);
+            for (self.workers.items) |thread| thread.join();
+            self.task_mutex.lockUncancelable(self.io);
+            self.workers.clearRetainingCapacity();
+            self.task_mutex.unlock(self.io);
         }
 
         fn find(self: *Self, stream_id: u31) ?*Slot {
@@ -510,10 +595,7 @@ pub fn Engine(
                     return null;
                 }
                 slot.body_mutex.unlock(self.io);
-                slot.body_wake.waitTimeout(self.io, timeoutValue(deadline)) catch |err| switch (err) {
-                    error.Timeout => return error.Timeout,
-                    error.Canceled => return error.Canceled,
-                };
+                try waitForEvent(self.io, &slot.body_wake, deadline);
                 slot.body_wake.reset();
             }
         }
@@ -526,13 +608,13 @@ pub fn Engine(
             };
             self.mutex.unlock(self.io);
             self.wake.set(self.io);
-            command.done.waitTimeout(self.io, timeoutValue(deadline)) catch |err| {
+            waitForEvent(self.io, &command.done, deadline) catch |err| {
                 command.abandoned.store(true, .release);
+                // The handler's stack owns the command and its payload. Wait
+                // for the owner to observe abandonment or finish execution
+                // before unwinding that stack.
                 command.done.wait(self.io) catch {};
-                return switch (err) {
-                    error.Timeout => error.Timeout,
-                    error.Canceled => error.Canceled,
-                };
+                return err;
             };
             if (command.result) |failure| return failure;
         }
@@ -600,20 +682,25 @@ pub fn Engine(
             var index: usize = 0;
             while (index < self.slots.items.len) {
                 const slot = self.slots.items[index];
-                if (!slot.handler_done) {
+                // `handler_done` is published under `body_mutex` by the worker;
+                // the same lock makes `handler_error` visible to the owner.
+                slot.body_mutex.lockUncancelable(self.io);
+                const done = slot.handler_done;
+                const failure = slot.handler_error;
+                slot.body_mutex.unlock(self.io);
+                if (!done) {
                     index += 1;
                     continue;
                 }
                 if (!slot.response_finished and slot.reset_code == null) {
                     slot.stream.reset(.cancel) catch {};
                 }
-                if (slot.handler_error != null) {
+                if (failure != null) {
                     self.summary.failed += 1;
                 } else {
                     self.summary.completed += 1;
                 }
                 if (slot.reset_code != null) self.summary.canceled += 1;
-                if (slot.thread) |thread| thread.join();
                 _ = self.slots.orderedRemove(index);
                 slot.deinit(self.allocator);
                 self.allocator.destroy(slot);
@@ -622,6 +709,14 @@ pub fn Engine(
         }
 
         fn cancelActive(self: *Self) void {
+            // Prevent idle workers from taking queued handlers while active
+            // handlers are canceled below.
+            self.task_mutex.lockUncancelable(self.io);
+            self.stopping = true;
+            const worker_count = self.workers.items.len;
+            self.task_mutex.unlock(self.io);
+            for (0..worker_count) |_| self.task_cond.signal(self.io);
+
             for (self.slots.items) |slot| {
                 slot.body_mutex.lockUncancelable(self.io);
                 slot.canceled = true;
@@ -629,8 +724,12 @@ pub fn Engine(
                 slot.body_wake.set(self.io);
             }
             self.cancelCommands();
+            for (self.workers.items) |thread| thread.join();
+            self.task_mutex.lockUncancelable(self.io);
+            self.workers.clearRetainingCapacity();
+            self.task_queue.clearRetainingCapacity();
+            self.task_mutex.unlock(self.io);
             for (self.slots.items) |slot| {
-                if (slot.thread) |thread| thread.join();
                 slot.stream.reset(.cancel) catch {};
             }
             for (self.slots.items) |slot| {
@@ -657,8 +756,31 @@ pub fn Engine(
     };
 }
 
-fn timeoutValue(deadline: ?std.Io.Clock.Timestamp) std.Io.Timeout {
-    return if (deadline) |value| .{ .deadline = value } else .none;
+/// Wait for `event` without treating a spurious futex wakeup as a timeout.
+/// `std.Io.Event.waitTimeout` reports `error.Timeout` when the futex returns
+/// spuriously, even with `.none`; looping keeps handler deadlines honest.
+fn waitForEvent(
+    io: std.Io,
+    event: *std.Io.Event,
+    deadline: ?std.Io.Clock.Timestamp,
+) anyerror!void {
+    if (deadline) |absolute| {
+        while (true) {
+            event.waitTimeout(io, .{ .deadline = absolute }) catch |err| switch (err) {
+                error.Timeout => {
+                    if (std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds >=
+                        absolute.raw.nanoseconds)
+                    {
+                        return error.Timeout;
+                    }
+                    continue;
+                },
+                error.Canceled => return error.Canceled,
+            };
+            return;
+        }
+    }
+    event.wait(io) catch |err| return @errorCast(err);
 }
 
 fn freeHeaders(allocator: std.mem.Allocator, headers: []http2.Hpack.HeaderField) void {

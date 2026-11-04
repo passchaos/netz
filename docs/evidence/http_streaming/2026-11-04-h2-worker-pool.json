@@ -1,0 +1,59 @@
+{
+  "schema": 1,
+  "date": "2026-11-04",
+  "head": "6e341c27",
+  "gate": "HTTP/2 continuous concurrent serving: spurious-timeout-free command/body waits and a lazily grown per-connection handler worker pool",
+  "commands": {
+    "h2_all": "zig build test-lib -Dtest-filter=\"HTTP/2\" --summary all",
+    "h2_stress": "zig build test-lib -Dtest-filter=\"repeated 32-stream batches\" --summary all",
+    "h3_concurrent": "zig build test-lib -Dtest-filter=\"HTTP/3 continuous concurrent\" --summary all",
+    "handshake_bounded": "zig build test-lib -Dtest-filter=\"handshake concurrent serving bounds\" --summary all",
+    "package": "zig build test-package --summary all",
+    "bench_batch8": "cd ../weft && zig build bench-h2 -Doptimize=ReleaseFast --global-cache-dir /tmp/weft-zig-global",
+    "bench_batch32": "cd ../weft && zig build bench-h2 -Doptimize=ReleaseFast -Dh2-batch=32 --global-cache-dir /tmp/weft-zig-global"
+  },
+  "result": {
+    "h2_all": { "passed": 971, "total": 971, "failed": 0, "exit_code": 0 },
+    "h2_stress": { "passed": 158, "total": 158, "failed": 0, "exit_code": 0, "runs": 4 },
+    "h3_concurrent": { "passed": 161, "total": 161, "failed": 0, "exit_code": 0 },
+    "handshake_bounded": { "passed": 159, "total": 159, "failed": 0, "exit_code": 0 },
+    "package": { "passed": 26, "total": 26, "failed": 0, "exit_code": 0 }
+  },
+  "benchmark": {
+    "host": "same host as the weft HTTP/1 reference; 32 logical CPUs",
+    "workload": "one loopback HTTP/2 connection, GET / -> 200 \"ok\"",
+    "http1_reference_from_weft": {
+      "sequential": { "ns_per_request": 16400, "requests_per_second": 61000 }
+    },
+    "before_worker_pool": {
+      "batch8": {
+        "sequential": { "ns_per_request": 52222.5, "requests_per_second": 19149 },
+        "batched": { "ns_per_request": 46305.2, "requests_per_second": 21596 }
+      },
+      "batch32": {
+        "sequential": { "ns_per_request": 54940.0, "requests_per_second": 18202 },
+        "batched": { "ns_per_request": 43051.6, "requests_per_second": 23228 },
+        "warning": "one 'http2 response failed: Timeout' per run"
+      }
+    },
+    "after_worker_pool": {
+      "batch8": {
+        "sequential": { "ns_per_request": 26531.3, "requests_per_second": 37691 },
+        "batched": { "ns_per_request": 16253.1, "requests_per_second": 61527 }
+      },
+      "batch32": {
+        "sequential": { "ns_per_request": 25763.1, "requests_per_second": 38815 },
+        "batched": { "ns_per_request": 15192.1, "requests_per_second": 65824 }
+      }
+    }
+  },
+  "source_sha256": {
+    "src/http2/runtime/concurrent.zig": "d63aa87925cc4a7ed2cafba90a570d7b428c1b9fdd3e9685faf4a75a4f1f55a8",
+    "src/http2/runtime/concurrent_tests.zig": "52f48643bc31d79d993aa0212f778f38e954f980e8da22f612dbe73343a1f70a",
+    "src/http3/runtime/concurrent.zig": "8b70adf652876b28325212645731260686d34f693aaafa09752f864cfe56005a",
+    "src/http3/runtime.zig": "844295b781e1bf899e275f991d5f305fda093befad609229af6b2a8ae7f146c8",
+    "src/http3/runtime/development/server_peer/state.zig": "ad451f7f4e38496d6e62a1ca37f9f7bafffdba7c4e8a3e9670c941a5a52d8603",
+    "docs/http_streaming.md": "3d9ca8e41b8412a8db707d0fe4a6a7d3f4bbbfb096150ab4bc261f4b35f57767"
+  },
+  "notes": "The server's ConcurrentStream.writeData waits on a command Event with no deadline. std.Io.Event.waitTimeout reports error.Timeout when a futex wait returns spuriously, even with .none, so a healthy write could surface Timeout, the handler reset the stream, and weft logged 'http2 response failed: Timeout'. The engines now loop on the event until it is set, or until the caller's absolute awake-clock deadline actually expires. Handlers previously ran one std.Thread per stream; a sequential request paid a spawn+join every time. The engines now use a per-connection worker pool that grows lazily while all workers are busy, up to max_streams. A sequential connection keeps one reusable worker; batch=32 grows to 32 workers. worker_stack_size defaults to 1 MiB. The new HTTP/2 stress test sends 100 batches of 32 streams (3200 requests) and asserts every response, exercising both the pool growth and the spurious-wake path. HTTP/3 uses the same pool. The HTTP/3 reader's availableDataBytes remains strict (UnexpectedFrame when no DATA frame is current, preserving the API-state test); the streaming engine treats that as 'no resident bytes' because the next data_available event carries the next frame. The unrelated pre-existing datagram pacing/QPACK feedback test fails on 73c34dac, 24d60aef and 6e341c27; it is not touched by these changes. The full unfiltered suite also shows intermittent failures in the MQTT outbound-bridge and WebSocket HTTP/1 handshake tests; the MQTT case still flaked with the new stress test removed, and both pass in isolation, so they are pre-existing timing-sensitive tests rather than regressions from the worker pool."
+}

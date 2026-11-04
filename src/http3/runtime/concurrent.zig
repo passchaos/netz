@@ -34,6 +34,10 @@ pub const Options = struct {
     /// session's `max_stream_buffer`; the total body remains bounded by
     /// `max_body_bytes`.
     max_buffered_body_bytes: ?usize = null,
+    /// Stack size for handler workers. A per-connection pool grows lazily up
+    /// to `max_streams`, so this bounds virtual memory for connections that
+    /// actually multiplex. Raise it for handlers with deep native stacks.
+    worker_stack_size: usize = 1024 * 1024,
 };
 
 pub const Summary = struct {
@@ -110,7 +114,6 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
             handler_done: bool = false,
             handler_error: ?anyerror = null,
             canceled: bool = false,
-            thread: ?std.Thread = null,
 
             fn deinit(self: *Slot, allocator: std.mem.Allocator) void {
                 self.head.deinit(allocator);
@@ -231,6 +234,15 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
         wake: std.Io.Event = .unset,
         slots: std.ArrayList(*Slot) = .empty,
         pending_heads: std.ArrayList(StreamingRequestEvent) = .empty,
+        /// Ready handlers consumed by a lazily grown per-connection worker
+        /// pool. A sequential connection keeps one reusable thread instead of
+        /// spawning a thread for every request.
+        task_mutex: std.Io.Mutex = .init,
+        task_cond: std.Io.Condition = .init,
+        task_queue: std.ArrayList(*Slot) = .empty,
+        workers: std.ArrayList(std.Thread) = .empty,
+        idle_workers: usize = 0,
+        stopping: bool = false,
         max_buffered_body_bytes: usize = 1,
         active: usize = 0,
         summary: Summary = .{},
@@ -260,6 +272,8 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
             for (self.pending_heads.items) |*event| event.deinit(self.allocator);
             self.pending_heads.deinit(self.allocator);
             self.commands.deinit(self.allocator);
+            self.task_queue.deinit(self.allocator);
+            self.workers.deinit(self.allocator);
             self.* = undefined;
         }
 
@@ -269,21 +283,6 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
             context: *Context,
             comptime handler: *const fn (*Context, *Stream) anyerror!void,
         ) anyerror!Summary {
-            const Task = struct {
-                engine: *Self,
-                slot: *Slot,
-                context: *Context,
-                handler: *const fn (*Context, *Stream) anyerror!void,
-
-                fn run(task: @This()) void {
-                    task.handler(task.context, &task.slot.stream) catch |err| {
-                        task.slot.handler_error = err;
-                    };
-                    task.engine.wake.set(task.engine.io);
-                    task.slot.handler_done = true;
-                }
-            };
-
             const limit = @min(
                 self.options.max_streams,
                 Adapter.maxStreams(self.session),
@@ -297,11 +296,11 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
             }
 
             while (true) {
-                try self.spawnPending(limit, Context, context, handler, Task);
+                try self.spawnPending(limit, Context, context, handler);
                 try self.drainCommands();
                 self.retryBlockedBodies();
                 self.reap();
-                try self.spawnPending(limit, Context, context, handler, Task);
+                try self.spawnPending(limit, Context, context, handler);
 
                 if (self.shutdownRequested()) {
                     try self.stopAccepting();
@@ -339,6 +338,7 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                 }
             }
 
+            self.stopWorkers();
             try Adapter.goaway(self.session, self.summary.last_stream_id);
             return self.summary;
         }
@@ -366,29 +366,123 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
             comptime Context: type,
             context: *Context,
             comptime handler: *const fn (*Context, *Stream) anyerror!void,
-            comptime Task: type,
         ) !void {
             while (self.active < limit and self.pending_heads.items.len != 0) {
                 const event = self.pending_heads.orderedRemove(0);
                 const slot = try self.createSlot(event);
                 errdefer {
+                    _ = self.slots.pop();
                     slot.deinit(self.allocator);
                     self.allocator.destroy(slot);
                 }
-                const thread = std.Thread.spawn(.{}, Task.run, .{Task{
+                try self.enqueue(slot, limit, Context, context, handler);
+            }
+        }
+
+        /// Queue a created slot for a worker. Workers are grown lazily so a
+        /// sequential connection reuses one thread instead of spawning one
+        /// thread per request.
+        fn enqueue(
+            self: *Self,
+            slot: *Slot,
+            limit: usize,
+            comptime Context: type,
+            context: *Context,
+            comptime handler: *const fn (*Context, *Stream) anyerror!void,
+        ) !void {
+            self.task_mutex.lockUncancelable(self.io);
+            const need_worker = self.idle_workers == 0 and
+                self.workers.items.len < limit;
+            self.task_mutex.unlock(self.io);
+            if (need_worker) try self.startWorker(Context, context, handler);
+
+            self.task_mutex.lockUncancelable(self.io);
+            self.task_queue.append(self.allocator, slot) catch |err| {
+                self.task_mutex.unlock(self.io);
+                return err;
+            };
+            self.task_mutex.unlock(self.io);
+            self.task_cond.signal(self.io);
+            self.active += 1;
+            self.summary.accepted += 1;
+        }
+
+        fn Worker(comptime Context: type) type {
+            return struct {
+                engine: *Self,
+                context: *Context,
+                handler: *const fn (*Context, *Stream) anyerror!void,
+
+                fn run(worker: @This()) void {
+                    const engine = worker.engine;
+                    while (true) {
+                        engine.task_mutex.lockUncancelable(engine.io);
+                        engine.idle_workers += 1;
+                        while (engine.task_queue.items.len == 0 and !engine.stopping) {
+                            engine.task_cond.wait(engine.io, &engine.task_mutex) catch |err| switch (err) {
+                                error.Canceled => {
+                                    engine.idle_workers -= 1;
+                                    engine.task_mutex.unlock(engine.io);
+                                    return;
+                                },
+                            };
+                        }
+                        engine.idle_workers -= 1;
+                        if (engine.stopping) {
+                            engine.task_mutex.unlock(engine.io);
+                            return;
+                        }
+                        const slot = engine.task_queue.orderedRemove(0);
+                        engine.task_mutex.unlock(engine.io);
+
+                        worker.handler(worker.context, &slot.stream) catch |err| {
+                            slot.handler_error = err;
+                        };
+                        slot.body_mutex.lockUncancelable(engine.io);
+                        slot.handler_done = true;
+                        slot.body_mutex.unlock(engine.io);
+                        engine.wake.set(engine.io);
+                    }
+                }
+            };
+        }
+
+        fn startWorker(
+            self: *Self,
+            comptime Context: type,
+            context: *Context,
+            comptime handler: *const fn (*Context, *Stream) anyerror!void,
+        ) !void {
+            self.task_mutex.lockUncancelable(self.io);
+            self.workers.ensureUnusedCapacity(self.allocator, 1) catch |err| {
+                self.task_mutex.unlock(self.io);
+                return err;
+            };
+            self.task_mutex.unlock(self.io);
+            const thread = try std.Thread.spawn(
+                .{ .stack_size = self.options.worker_stack_size },
+                Worker(Context).run,
+                .{Worker(Context){
                     .engine = self,
-                    .slot = slot,
                     .context = context,
                     .handler = handler,
-                }}) catch |err| {
-                    slot.deinit(self.allocator);
-                    self.allocator.destroy(slot);
-                    return err;
-                };
-                slot.thread = thread;
-                self.active += 1;
-                self.summary.accepted += 1;
-            }
+                }},
+            );
+            self.task_mutex.lockUncancelable(self.io);
+            self.workers.appendAssumeCapacity(thread);
+            self.task_mutex.unlock(self.io);
+        }
+
+        fn stopWorkers(self: *Self) void {
+            self.task_mutex.lockUncancelable(self.io);
+            self.stopping = true;
+            const worker_count = self.workers.items.len;
+            self.task_mutex.unlock(self.io);
+            for (0..worker_count) |_| self.task_cond.signal(self.io);
+            for (self.workers.items) |thread| thread.join();
+            self.task_mutex.lockUncancelable(self.io);
+            self.workers.clearRetainingCapacity();
+            self.task_mutex.unlock(self.io);
         }
 
         fn createSlot(self: *Self, event: StreamingRequestEvent) !*Slot {
@@ -491,12 +585,18 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                     self.session,
                     from,
                     stream_id,
-                ) catch |err| {
-                    slot.body_mutex.lockUncancelable(self.io);
-                    slot.body_error = err;
-                    slot.body_mutex.unlock(self.io);
-                    slot.body_wake.set(self.io);
-                    return;
+                ) catch |err| switch (err) {
+                    // The previous DATA frame was fully consumed. There is no
+                    // resident byte to report until the next
+                    // `.data_available` event, which is not a protocol error.
+                    error.UnexpectedFrame => 0,
+                    else => |other| {
+                        slot.body_mutex.lockUncancelable(self.io);
+                        slot.body_error = other;
+                        slot.body_mutex.unlock(self.io);
+                        slot.body_wake.set(self.io);
+                        return;
+                    },
                 };
                 if (available == 0) {
                     slot.body_mutex.lockUncancelable(self.io);
@@ -611,10 +711,7 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                     return null;
                 }
                 slot.body_mutex.unlock(self.io);
-                slot.body_wake.waitTimeout(self.io, timeoutValue(deadline)) catch |err| switch (err) {
-                    error.Timeout => return error.Timeout,
-                    error.Canceled => return error.Canceled,
-                };
+                try waitForEvent(self.io, &slot.body_wake, deadline);
                 slot.body_wake.reset();
             }
         }
@@ -627,16 +724,13 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
             };
             self.mutex.unlock(self.io);
             self.wake.set(self.io);
-            command.done.waitTimeout(self.io, timeoutValue(deadline)) catch |err| {
+            waitForEvent(self.io, &command.done, deadline) catch |err| {
                 command.abandoned.store(true, .release);
                 // The handler's stack owns the command and its payload. Wait
                 // for the owner to observe abandonment or finish execution
                 // before unwinding that stack.
                 command.done.wait(self.io) catch {};
-                return switch (err) {
-                    error.Timeout => error.Timeout,
-                    error.Canceled => error.Canceled,
-                };
+                return err;
             };
             if (command.result) |failure| return failure;
         }
@@ -733,20 +827,25 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
             var index: usize = 0;
             while (index < self.slots.items.len) {
                 const slot = self.slots.items[index];
-                if (!slot.handler_done) {
+                // `handler_done` is published under `body_mutex` by the worker;
+                // the same lock makes `handler_error` visible to the owner.
+                slot.body_mutex.lockUncancelable(self.io);
+                const done = slot.handler_done;
+                const failure = slot.handler_error;
+                slot.body_mutex.unlock(self.io);
+                if (!done) {
                     index += 1;
                     continue;
                 }
                 if (!slot.response_finished and slot.reset_code == null) {
                     Adapter.cancel(self.session, slot.from, slot.stream_id, 0) catch {};
                 }
-                if (slot.handler_error != null) {
+                if (failure != null) {
                     self.summary.failed += 1;
                 } else {
                     self.summary.completed += 1;
                 }
                 if (slot.reset_code != null) self.summary.canceled += 1;
-                if (slot.thread) |thread| thread.join();
                 _ = self.slots.orderedRemove(index);
                 slot.deinit(self.allocator);
                 self.allocator.destroy(slot);
@@ -755,6 +854,14 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
         }
 
         fn cancelActive(self: *Self) void {
+            // Prevent idle workers from taking queued handlers while active
+            // handlers are canceled below.
+            self.task_mutex.lockUncancelable(self.io);
+            self.stopping = true;
+            const worker_count = self.workers.items.len;
+            self.task_mutex.unlock(self.io);
+            for (0..worker_count) |_| self.task_cond.signal(self.io);
+
             for (self.slots.items) |slot| {
                 slot.body_mutex.lockUncancelable(self.io);
                 slot.canceled = true;
@@ -762,8 +869,12 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                 slot.body_wake.set(self.io);
             }
             self.cancelCommands();
+            for (self.workers.items) |thread| thread.join();
+            self.task_mutex.lockUncancelable(self.io);
+            self.workers.clearRetainingCapacity();
+            self.task_queue.clearRetainingCapacity();
+            self.task_mutex.unlock(self.io);
             for (self.slots.items) |slot| {
-                if (slot.thread) |thread| thread.join();
                 Adapter.cancel(self.session, slot.from, slot.stream_id, 0) catch {};
             }
             for (self.slots.items) |slot| {
@@ -830,6 +941,29 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
     };
 }
 
-fn timeoutValue(deadline: ?std.Io.Clock.Timestamp) std.Io.Timeout {
-    return if (deadline) |value| .{ .deadline = value } else .none;
+/// Wait for `event` without treating a spurious futex wakeup as a timeout.
+/// `std.Io.Event.waitTimeout` reports `error.Timeout` when the futex returns
+/// spuriously, even with `.none`; looping keeps handler deadlines honest.
+fn waitForEvent(
+    io: std.Io,
+    event: *std.Io.Event,
+    deadline: ?std.Io.Clock.Timestamp,
+) anyerror!void {
+    if (deadline) |absolute| {
+        while (true) {
+            event.waitTimeout(io, .{ .deadline = absolute }) catch |err| switch (err) {
+                error.Timeout => {
+                    if (std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds >=
+                        absolute.raw.nanoseconds)
+                    {
+                        return error.Timeout;
+                    }
+                    continue;
+                },
+                error.Canceled => return error.Canceled,
+            };
+            return;
+        }
+    }
+    event.wait(io) catch |err| return @errorCast(err);
 }

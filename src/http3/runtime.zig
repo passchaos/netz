@@ -7704,17 +7704,14 @@ pub const HandshakeServerSession = struct {
     }
 
     /// Return DATA bytes currently readable without receiving another packet.
+    /// A consumed DATA frame reports `error.UnexpectedFrame`; streaming
+    /// adapters treat that as "no resident bytes" because the next
+    /// `.data_available` event carries the following frame.
     pub fn availableRequestData(
         self: *HandshakeServerSession,
         stream_id: u62,
     ) Error!usize {
-        const value = self.accessRequestData(stream_id, &.{}, .available, false) catch |err| switch (err) {
-            // A consumed DATA frame simply has no readable bytes left; the
-            // next event carries the following frame.
-            error.UnexpectedFrame => return 0,
-            else => |other| return other,
-        };
-        return value orelse 0;
+        return (try self.accessRequestData(stream_id, &.{}, .available, false)) orelse 0;
     }
 
     pub fn skipRequestData(

@@ -216,9 +216,15 @@ Concurrency contract:
   active streams.
 - Response writes remain a single-writer path; a blocked write on one stream
   can delay sibling writes but never corrupts HPACK/QPACK or stream state.
-- Handler tasks currently use dedicated OS threads so the API is independent of
-  the caller's `std.Io` executor; the owner/command contract is unchanged if
-  the implementation later moves tasks onto `std.Io`.
+- Handlers run on a per-connection worker pool that grows lazily up to
+  `max_streams`. A sequential connection reuses one worker instead of spawning
+  a thread per request; a multiplexed connection adds workers only while every
+  existing worker is busy. `worker_stack_size` (default 1 MiB) bounds the
+  virtual memory reserved by each worker. The API is independent of the
+  caller's `std.Io` executor.
+- Handler `nextBody`/command waits ignore spurious futex wakeups: an expired
+  absolute deadline is checked against the awake clock, so a wake that does not
+  set the event cannot surface a false `error.Timeout`.
 
 ## Build status
 
