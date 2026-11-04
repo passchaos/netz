@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "date": "2026-11-04",
+  "head": "b162a1b2",
+  "subject": "HTTP/1 error responses can be destroyed by RST when the connection closes with unread request bytes",
+  "reported_by": "weft: an over-limit request head (431), an over-long target (414) or an oversized body (413) was written and then the connection was closed; the client observed ConnectionResetByPeer before reading the response.",
+  "change": "New `http1.runtime.Connection.drainAndClose(deadline)`: half-close the write side so the peer sees the response and EOF, then read and discard pending input until EOF or the deadline (bounded to 64 KiB), then close. The drain is best effort; failures and an expired deadline still close the connection.",
+  "why_it_helps": "Linux sends RST when a socket is closed with unread data in its receive queue. The RST can discard the response before the peer reads it. Half-closing first flushes the response and signals end-of-response, and draining removes the unread-data condition before the final close.",
+  "tests": {
+    "http1": { "passed": 522, "total": 522, "failed": 0 },
+    "package": { "passed": 26, "total": 26, "failed": 0 }
+  },
+  "test_note": "The added loopback test writes a 431 and closes through drainAndClose; the client reads the 431 and then EOF. The RST-specific failure is not deterministically reproduced on loopback because the response is usually queued before the RST is processed, so the test is a contract test for the API rather than a regression proof of the original weft symptom.",
+  "source_sha256": {
+    "src/http1/runtime.zig": "9d211dd89da3b3c8c5a23000d90539e3b9150bd272a64fcf9ff198de4d75d813"
+  }
+}

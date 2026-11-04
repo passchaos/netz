@@ -5609,6 +5609,11 @@ test "HTTP/1 vail TLS options preserve stapled OCSP policy" {
     try std.testing.expect(mapped.request_ocsp);
 }
 
+/// Upper bound on request bytes discarded by `Connection.drainAndClose`.
+/// Error responses are small and the peer has normally stopped sending, so a
+/// larger cap would only delay closing a misbehaving connection.
+const max_error_drain_bytes: usize = 64 * 1024;
+
 pub const Connection = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -5715,6 +5720,40 @@ pub const Connection = struct {
             self.stream.close(self.io);
         }
         self.* = undefined;
+    }
+
+    /// Close after an error response without destroying that response.
+    ///
+    /// Closing a socket while the peer's request bytes are still unread makes
+    /// Linux send RST, so a client can lose the 400/408/413/414/431 response it
+    /// was meant to see. This half-closes the write side first (so the response
+    /// is flushed and the peer sees EOF), then reads and discards pending input
+    /// until EOF or `deadline`, and finally closes. The drain is best effort:
+    /// failures and an expired deadline still close the connection.
+    pub fn drainAndClose(
+        self: *Connection,
+        deadline: std.Io.Clock.Timestamp,
+    ) void {
+        const drain_transport = self.transport();
+        // The response is already committed; a half-close failure only means
+        // the peer closed first, which is harmless here.
+        drain_transport.closeWrite() catch {};
+        var scratch: [4096]u8 = undefined;
+        var drained: usize = 0;
+        while (drained < max_error_drain_bytes) {
+            if (std.Io.Clock.awake.now(self.io).nanoseconds >=
+                deadline.raw.nanoseconds)
+            {
+                break;
+            }
+            const count = drain_transport.readWithDeadline(
+                &scratch,
+                deadline,
+            ) catch break;
+            if (count == 0) break;
+            drained += count;
+        }
+        self.close();
     }
 
     /// Stop accepting new HTTP/1 exchanges without interrupting one that is
@@ -14501,4 +14540,94 @@ test {
     _ = @import("runtime/connect_udp_tests.zig");
     _ = @import("runtime/connect_udp_relay_tests.zig");
     _ = @import("runtime/connect_ip_tests.zig");
+}
+
+test "HTTP/1 drainAndClose delivers an error response before closing" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 512 },
+    );
+    defer server.deinit();
+
+    const ServerTask = struct {
+        server: *Server,
+        io: std.Io,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.drainAndClose(.fromNow(self.io, .{
+                .raw = .fromMilliseconds(300),
+                .clock = .awake,
+            }));
+            try connection.writeResponse(.{
+                .status = 431,
+                .headers = &.{},
+            });
+        }
+    };
+
+    var task = ServerTask{ .server = &server, .io = io };
+    const thread = try std.Thread.spawn(.{}, ServerTask.run, .{&task});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const stream = try server.address().connect(io, .{ .mode = .stream });
+    defer stream.close(io);
+
+    // A request head well over max_head_bytes, with more bytes still queued
+    // when the server responds and closes.
+    var request: [2048]u8 = undefined;
+    @memset(&request, 'a');
+    const prefix = "GET / HTTP/1.1\r\nHost: example\r\nX: ";
+    @memcpy(request[0..prefix.len], prefix);
+    @memcpy(request[request.len - 4 ..], "\r\n\r\n");
+    writeAllToStream(io, stream, &request) catch |err| switch (err) {
+        error.ConnectionResetByPeer, error.SocketUnconnected => {},
+        else => return err,
+    };
+
+    // Let the server finish writing and closing before reading. Otherwise a
+    // fast loopback read can observe the response even when close() later
+    // destroys it with RST, which would hide the behaviour under test.
+    try std.Io.sleep(io, .fromMilliseconds(50), .awake);
+
+    var response: [256]u8 = undefined;
+    const deadline = std.Io.Clock.Timestamp.fromNow(io, .{
+        .raw = .fromSeconds(2),
+        .clock = .awake,
+    });
+    var received: usize = 0;
+    while (received < response.len) {
+        const count = stream_io.readSomeWithDeadline(
+            io,
+            stream,
+            response[received..],
+            deadline,
+        ) catch |err| switch (err) {
+            error.ConnectionResetByPeer => break,
+            else => return err,
+        };
+        if (count == 0) break;
+        received += count;
+        if (std.mem.indexOf(u8, response[0..received], "\r\n\r\n") != null) break;
+    }
+    try std.testing.expect(received != 0);
+    try std.testing.expect(std.mem.startsWith(u8, response[0..received], "HTTP/1.1 431"));
+    thread.join();
+    joined = true;
+    if (task.err) |err| return err;
 }
