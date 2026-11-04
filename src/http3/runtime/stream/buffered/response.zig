@@ -18,6 +18,11 @@ pub const Set = struct {
     const Entry = struct {
         receive: quic.stream_state.RecvState,
         from: net.IpAddress,
+        /// True once this complete message has been proven independent of any
+        /// outstanding QPACK dynamic-table insert. Field-section bytes are
+        /// immutable after FIN and the encoder's insert count only grows, so
+        /// the answer is monotonic and later scans can skip re-parsing.
+        qpack_unblocked: bool = false,
 
         fn deinit(self: *Entry) void {
             self.receive.deinit();
@@ -153,21 +158,24 @@ pub const Set = struct {
         for (self.entries.items) |*entry| {
             const final_size = entry.receive.final_size orelse continue;
             if (entry.receive.contiguous_end < final_size) continue;
-            const bytes = entry.receive.buffer.items[0..final_size];
-            if (common.messageBlockedByQpack(bytes, table) catch |err| {
-                self.last_error_stream_id =
-                    @intCast(entry.receive.stream_id);
-                self.last_error_from = entry.from;
-                return err;
-            }) {
-                blocked_streams += 1;
-                if (blocked_streams > max_blocked_streams) {
+            if (!entry.qpack_unblocked) {
+                const bytes = entry.receive.buffer.items[0..final_size];
+                if (common.messageBlockedByQpack(bytes, table) catch |err| {
                     self.last_error_stream_id =
                         @intCast(entry.receive.stream_id);
                     self.last_error_from = entry.from;
-                    return error.QpackDecompressionFailed;
+                    return err;
+                }) {
+                    blocked_streams += 1;
+                    if (blocked_streams > max_blocked_streams) {
+                        self.last_error_stream_id =
+                            @intCast(entry.receive.stream_id);
+                        self.last_error_from = entry.from;
+                        return error.QpackDecompressionFailed;
+                    }
+                    continue;
                 }
-                continue;
+                entry.qpack_unblocked = true;
             }
             if (ready_stream_id == null) {
                 ready_stream_id = @intCast(entry.receive.stream_id);
@@ -331,22 +339,25 @@ pub const Set = struct {
         const entry = &self.entries.items[index];
         const final_size = entry.receive.final_size orelse return null;
         if (entry.receive.contiguous_end < final_size) return null;
-        const bytes = entry.receive.buffer.items[0..final_size];
-        if (common.messageBlockedByQpack(bytes, table) catch |err| {
-            self.last_error_stream_id = stream_id;
-            self.last_error_from = entry.from;
-            return err;
-        }) {
-            if (self.blockedReadyStreamCount(table) catch |err| {
+        if (!entry.qpack_unblocked) {
+            const bytes = entry.receive.buffer.items[0..final_size];
+            if (common.messageBlockedByQpack(bytes, table) catch |err| {
                 self.last_error_stream_id = stream_id;
                 self.last_error_from = entry.from;
                 return err;
-            } > max_blocked_streams) {
-                self.last_error_stream_id = stream_id;
-                self.last_error_from = entry.from;
-                return error.QpackDecompressionFailed;
+            }) {
+                if (self.blockedReadyStreamCount(table) catch |err| {
+                    self.last_error_stream_id = stream_id;
+                    self.last_error_from = entry.from;
+                    return err;
+                } > max_blocked_streams) {
+                    self.last_error_stream_id = stream_id;
+                    self.last_error_from = entry.from;
+                    return error.QpackDecompressionFailed;
+                }
+                return null;
             }
-            return null;
+            entry.qpack_unblocked = true;
         }
         return entry;
     }
@@ -455,11 +466,14 @@ pub const Set = struct {
     ) Error!u64 {
         var blocked_streams: u64 = 0;
         for (self.entries.items) |*entry| {
+            if (entry.qpack_unblocked) continue;
             const final_size = entry.receive.final_size orelse continue;
             if (entry.receive.contiguous_end < final_size) continue;
             const bytes = entry.receive.buffer.items[0..final_size];
             if (try common.messageBlockedByQpack(bytes, table)) {
                 blocked_streams += 1;
+            } else {
+                entry.qpack_unblocked = true;
             }
         }
         return blocked_streams;

@@ -30,10 +30,9 @@ pub const Options = struct {
     /// Maximum time the owner blocks on one receive attempt before re-checking
     /// command and shutdown wakes while no handler is active.
     poll_interval: std.Io.Duration = .fromMilliseconds(1),
-    /// Maximum receive budget while at least one handler is active. The owner
-    /// cannot be interrupted by a handler command, so this bounds how long a
-    /// queued `startResponse`/`writeData` waits for the next receive poll.
-    /// Lower values reduce streaming latency at the cost of more wakeups.
+    /// Maximum receive budget while at least one handler is active. The
+    /// command wake races the receive, so this only bounds an otherwise idle
+    /// read; lower values cost more wakeups without lowering command latency.
     command_poll_interval: std.Io.Duration = .fromMicroseconds(100),
     /// Per-stream request DATA resident in the owner buffer. Null uses the
     /// session's `max_stream_buffer`; the total body remains bounded by

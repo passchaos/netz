@@ -1,0 +1,38 @@
+{
+  "schema": 1,
+  "date": "2026-11-04",
+  "head": "462906fc",
+  "gate": "HTTP/3 response stream set caches the monotonic QPACK-unblocked answer so a 32-stream batch no longer re-parses every complete message on each ready scan",
+  "commands": {
+    "h3_all": "zig build test-lib -Dtest-filter=\"HTTP/3\" --summary all",
+    "h3_concurrent": "zig build test-lib -Dtest-filter=\"HTTP/3 continuous concurrent\" --summary all",
+    "package": "zig build test-package --summary all",
+    "bench": "cd ../weft && zig build bench-h3 -Doptimize=ReleaseFast -Dh3-batch=32"
+  },
+  "result": {
+    "h3_all": { "passed": 928, "total": 928, "failed": 0, "exit_code": 0 },
+    "package": { "passed": 26, "total": 26, "failed": 0, "exit_code": 0 }
+  },
+  "benchmark": {
+    "workload": "weft synthetic-handshake HTTP/3 server, one loopback connection, GET / -> 200 \"ok\", 10k sequential plus 1k x 32-stream batches",
+    "before": {
+      "sequential": { "ns_per_request": 80735.1, "requests_per_second": 12386 },
+      "batched_32": { "ns_per_request": 152386.4, "requests_per_second": 6562 },
+      "upload_32": { "ns_per_request": 188057.8, "requests_per_second": 5318 }
+    },
+    "after": {
+      "sequential": { "ns_per_request": 76755.6, "requests_per_second": 13028 },
+      "batched_32": { "ns_per_request": 139861.9, "requests_per_second": 7150 },
+      "upload_32": { "ns_per_request": 173232.8, "requests_per_second": 5773 }
+    },
+    "batch8_reference": {
+      "batched_8": { "ns_per_request": 48482.1, "requests_per_second": 20626 },
+      "upload_8": { "ns_per_request": 97811.4, "requests_per_second": 10224 }
+    }
+  },
+  "source_sha256": {
+    "src/http3/runtime/stream/buffered/response.zig": "b67901800592e3478071ec0424039ce74d8201137a59eaced7dafdaba5a84d8b",
+    "src/http3/runtime/concurrent.zig": "7064b45836e33bfcff6cdc16284a22958fd6e9d67a6e232908508bb4c1816937"
+  },
+  "notes": "ResponseStreamSet.firstReadyStream, readyEntry and blockedReadyStreamCount each re-parsed every complete buffered message with common.messageBlockedByQpack on every ready scan. With 32 outstanding streams that is O(n^2) frame parsing and QPACK prefix decoding per batch. Entry now records qpack_unblocked once a complete message is proven independent of an outstanding insert; the field section is immutable after FIN and the encoder insert count only grows, so the answer is monotonic. Measured 32-stream GET improved 152.4 -> 139.9 us/request (6.6k -> 7.2k req/s) and upload 188.1 -> 173.2 us/request. A netz-only harness (zio event loop, HandshakeServer + serveConcurrentStreams + client batch API) reproduces the same shape as weft: batch=8 49-53 us/request versus batch=32 146-153 us/request before this change. Ruled out as the 32-stream cause: worker-pool size (caps of 8 and 16 changed nothing), server pacing (raising the max pacing rate to 1 GB/s changed 146-153 to 137-143 us/request), and per-command wake latency (0.4-12 us after the wake race). Owner-loop counters show two events per request at both widths, so the remaining gap is in the client/server lockstep rather than in command dispatch."
+}
