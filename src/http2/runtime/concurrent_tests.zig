@@ -409,6 +409,141 @@ test "HTTP/2 continuous concurrent serving handles repeated 32-stream batches" {
     );
 }
 
+test "HTTP/2 concurrent oversize declared body stays stream-scoped" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        // Server-wide request cap. The client is configured higher so it can
+        // actually put the oversize body on the wire.
+        .{ .max_frame_payload = 4096, .max_body_bytes = 1024 },
+    );
+    defer server.deinit();
+
+    const Context = struct {
+        io: std.Io,
+        oversize: std.atomic.Value(usize) = .init(0),
+        normal: std.atomic.Value(usize) = .init(0),
+    };
+    var context = Context{ .io = io };
+
+    const Handler = struct {
+        fn run(ctx: *Context, stream: *runtime.Connection.ConcurrentStream) anyerror!void {
+            const head = stream.head();
+            if (std.mem.eql(u8, head.path, "/oversize")) {
+                var scratch: [64]u8 = undefined;
+                // The stream reports the server-wide cap as a body error; the
+                // connection must not be torn down for this one request.
+                try std.testing.expectError(
+                    error.PayloadTooLarge,
+                    stream.nextBody(&scratch, futureDeadline(ctx.io)),
+                );
+                _ = ctx.oversize.fetchAdd(1, .monotonic);
+                try stream.startResponseWithBody(.{ .status = 413 }, "too large", true);
+                return;
+            }
+            _ = ctx.normal.fetchAdd(1, .monotonic);
+            try stream.startResponseWithBody(.{ .status = 200 }, "ok", true);
+        }
+    };
+
+    const ServerTask = struct {
+        server: *runtime.Server,
+        context: *Context,
+        shutdown: *std.Io.Event,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            const summary = try connection.serveConcurrentStreams(
+                Context,
+                self.context,
+                Handler.run,
+                .{ .max_streams = 4, .shutdown = self.shutdown },
+            );
+            try std.testing.expectEqual(@as(usize, 3), summary.accepted);
+            try std.testing.expectEqual(@as(usize, 3), summary.completed);
+            try std.testing.expectEqual(@as(usize, 0), summary.failed);
+        }
+    };
+
+    var shutdown: std.Io.Event = .unset;
+    var server_task = ServerTask{ .server = &server, .context = &context, .shutdown = &shutdown };
+    const thread = try std.Thread.spawn(.{}, ServerTask.run, .{&server_task});
+    var joined = false;
+    defer if (!joined) {
+        shutdown.set(io);
+        thread.join();
+    };
+
+    var client = try runtime.Client.connectWithTimeout(
+        allocator,
+        io,
+        server.address(),
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+        .fromSeconds(3),
+    );
+    defer client.close();
+
+    var oversize_body: [2048]u8 = undefined;
+    @memset(oversize_body[0..], 'x');
+    const oversize = try runtime.testing.sendCompleteRequest(&client, .{
+        .method = "POST",
+        .path = "/oversize",
+        .authority = "localhost",
+        .body = oversize_body[0..],
+    });
+    const sibling = try runtime.testing.sendCompleteRequest(&client, .{
+        .method = "GET",
+        .path = "/sibling",
+        .authority = "localhost",
+    });
+
+    var oversize_response = try client.readResponseWithTimeout(
+        oversize.stream_id,
+        oversize.request_method,
+        oversize.extended_connect,
+        .fromSeconds(3),
+    );
+    defer oversize_response.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 413), oversize_response.status);
+    try std.testing.expectEqualStrings("too large", oversize_response.body);
+
+    var sibling_response = try client.readResponseWithTimeout(
+        sibling.stream_id,
+        sibling.request_method,
+        sibling.extended_connect,
+        .fromSeconds(3),
+    );
+    defer sibling_response.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 200), sibling_response.status);
+    try std.testing.expectEqualStrings("ok", sibling_response.body);
+
+    // The connection must remain usable after the rejected stream.
+    var after = try client.requestWithTimeout(.{ .path = "/after" }, .fromSeconds(3));
+    defer after.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 200), after.status);
+    try std.testing.expectEqualStrings("ok", after.body);
+
+    shutdown.set(io);
+    thread.join();
+    joined = true;
+    if (server_task.err) |err| return err;
+    try std.testing.expectEqual(@as(usize, 1), context.oversize.load(.monotonic));
+    try std.testing.expectEqual(@as(usize, 2), context.normal.load(.monotonic));
+}
+
 fn futureDeadline(io: std.Io) std.Io.Clock.Timestamp {
     return .fromNow(io, .{
         .raw = .fromSeconds(3),

@@ -11086,9 +11086,13 @@ pub const Connection = struct {
         {
             return error.InvalidContentLength;
         }
-        if ((lookup.content_length orelse 0) > self.limits.max_body_bytes) {
-            return error.MessageTooLarge;
-        }
+        // A declared length above the server-wide cap is a property of this
+        // request, not of the connection. Accept the stream so the handler can
+        // answer 413; the body read reports PayloadTooLarge. Returning an error
+        // here would make one oversize request fatal to every multiplexed
+        // sibling stream.
+        const request_body_over_limit =
+            (lookup.content_length orelse 0) > self.limits.max_body_bytes;
         const request_priority = self.effectiveRequestPriority(
             stream_id,
             lookup.priority,
@@ -11112,6 +11116,7 @@ pub const Connection = struct {
             .authority = lookup.requestAuthority(),
             .protocol = protocol,
             .expected_request_length = lookup.content_length,
+            .request_body_over_limit = request_body_over_limit,
             .request_finished = end_stream or
                 (is_connect and !extended_connect),
             .priority = request_priority,
@@ -21865,6 +21870,10 @@ pub const ServerDuplexStream = struct {
     protocol: ?[]const u8,
     priority: http2.ExtensiblePriority,
     expected_request_length: ?usize,
+    /// The peer declared a request body above `Limits.max_body_bytes`. The
+    /// stream is still accepted so a streaming handler can answer 413; reading
+    /// the body reports `PayloadTooLarge` instead of failing the connection.
+    request_body_over_limit: bool = false,
     request_body_bytes: usize = 0,
     request_finished: bool = false,
     request_finished_reported: bool = false,

@@ -614,9 +614,19 @@ pub fn Engine(
                     slot.body_mutex.unlock(self.io);
                     return error.StreamReset;
                 }
+                // The head declared a body above the server-wide cap. Report it
+                // as a stream-scoped error so the handler can answer 413 while
+                // the connection and sibling streams stay alive.
+                if (slot.stream.request_body_over_limit) {
+                    slot.body_mutex.unlock(self.io);
+                    return error.PayloadTooLarge;
+                }
                 if (slot.body_error) |err| {
                     slot.body_mutex.unlock(self.io);
-                    return err;
+                    return if (err == error.MessageTooLarge)
+                        error.PayloadTooLarge
+                    else
+                        err;
                 }
                 if (slot.body_offset < slot.body.items.len) {
                     const available = slot.body.items.len - slot.body_offset;
