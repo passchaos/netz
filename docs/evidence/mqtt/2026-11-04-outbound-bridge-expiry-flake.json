@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "date": "2026-11-04",
+  "head": "d9979a03",
+  "subject": "mqtt.bridge.outbound_tests 'outbound bridge does not extend expiry across target reconnect' intermittent failure",
+  "status": "diagnosed, not fixed",
+  "symptom": "About half of isolated runs fail while waiting for the source PUBACK. Full-suite runs fail more often because the process is busier.",
+  "evidence": {
+    "stall_probe": "DBG stall source_err=error.ConnectionClosed target_err=null ping=0 calls=12 events=0",
+    "ack_probe": "DBG src-ack-fail err=ConnectionUnavailable connected=false",
+    "disconnect_tags": "Ten tagged self.source.disconnectTransport() sites; only the post-failure PUBACK site fired, so the bridge never closed the source before the acknowledgement.",
+    "keepalive_probe": "DBG src-poll ka=1 delta_ns=...: the source keepalive is armed and the deadline resets about once per second in passing runs."
+  },
+  "mechanism": "The test configures the source keep alive to 1 s and then makes the target peer a black hole: its listener still accepts TCP connections but never answers CONNECT, so the bridge's reconnect attempt blocks inside one CONNACK wait for the caller's whole 2 s budget. That attempt is not pausable, so serviceSourceWhileWaiting is not reached and the source never sends PINGREQ. The broker retires the source at 1.5x keep alive, the transport closes, and acknowledgeSource then fails with ConnectionUnavailable.",
+  "rejected_fixes": [
+    "Pre-ping before the long target poll: one PINGREQ resets the deadline by only one keep alive interval, so a 2 s block still expires it. Measured 4/8 passes, the same as before.",
+    "Capping the target poll by the source keepalive remaining: a short poll restarts the unpausable connect attempt and the target never completes. Measured 0/8 passes.",
+    "Pumping bridge.step in a loop from the test: step still blocks inside the same CONNACK wait, so the extra calls do not help."
+  ],
+  "next_options": [
+    "Make the target CONNACK wait resumable so a bounded poll can return to serviceSourceWhileWaiting without restarting the connection attempt.",
+    "Run the source keepalive on an independent timer that is not owned by the blocking bridge turn.",
+    "Decide that a black-hole target is allowed to retire the source transport and change the test expectation accordingly."
+  ],
+  "note": "The library behaviour is defensible; the arguable part is the test's expectation that a source survives an unresponsive target for twice its keep alive. The fix needs a design decision, not a timeout tweak."
+}
