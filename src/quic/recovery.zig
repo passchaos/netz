@@ -50,6 +50,32 @@ pub const QueueStats = struct {
     payload_cache_misses: u64,
 };
 
+/// One retransmittable frame kind that names a stream. Pending payloads are
+/// immutable after encoding, so the parsed references are cached to keep
+/// per-stream credit queries from re-decoding every queued frame.
+const StreamRef = struct {
+    stream_id: u64,
+    reset: bool,
+};
+
+const max_cached_stream_refs: usize = 4;
+
+const StreamRefs = struct {
+    refs: [max_cached_stream_refs]StreamRef = undefined,
+    count: u8 = 0,
+    state: enum { unknown, ready, overflow } = .unknown,
+
+    fn push(self: *StreamRefs, ref: StreamRef) bool {
+        if (self.count == self.refs.len) {
+            self.state = .overflow;
+            return false;
+        }
+        self.refs[self.count] = ref;
+        self.count += 1;
+        return true;
+    }
+};
+
 const PendingDatagram = struct {
     group_id: u64,
     /// Almost every payload is acknowledged without retransmission. Keep its
@@ -64,6 +90,9 @@ const PendingDatagram = struct {
     /// receives the original allocation size.
     payload_storage: []u8,
     payload_len: usize,
+    /// Cached STREAM/RESET_STREAM frame references. Populated lazily by
+    /// `hasPendingStreamFrame`; payload bytes never change after encoding.
+    stream_refs: StreamRefs = .{},
 
     fn initOwned(
         group_id: u64,
@@ -90,6 +119,13 @@ const PendingDatagram = struct {
 
     fn payload(self: PendingDatagram) []const u8 {
         return self.payload_storage[0..self.payload_len];
+    }
+
+    fn cachedStreamRefs(self: *PendingDatagram) *const StreamRefs {
+        if (self.stream_refs.state == .unknown) {
+            Queue.parseStreamRefs(self.payload(), &self.stream_refs);
+        }
+        return &self.stream_refs;
     }
 
     fn newestPacketNumber(self: PendingDatagram) u64 {
@@ -298,44 +334,61 @@ pub const Queue = struct {
     /// acknowledgement for `stream_id`. This is used only at stream-close
     /// boundaries; keeping recovery payloads encoded avoids per-packet stream
     /// metadata on the normal send/ACK path.
-    pub fn hasPendingStreamData(self: *const Queue, stream_id: u64) bool {
+    pub fn hasPendingStreamData(self: *Queue, stream_id: u64) bool {
         return self.hasPendingStreamFrame(stream_id, false);
     }
 
     /// Whether a RESET_STREAM for `stream_id` is still awaiting acknowledgement.
-    pub fn hasPendingResetStream(self: *const Queue, stream_id: u64) bool {
+    pub fn hasPendingResetStream(self: *Queue, stream_id: u64) bool {
         return self.hasPendingStreamFrame(stream_id, true);
     }
 
     fn hasPendingStreamFrame(
-        self: *const Queue,
+        self: *Queue,
         stream_id: u64,
         reset_only: bool,
     ) bool {
-        for (self.pending.items) |entry| {
-            const payload = entry.payload();
-            var pos: usize = 0;
-            while (pos < payload.len) {
-                const parsed = quic.parseFrame(payload[pos..]) catch
-                    return true;
-                if (reset_only) {
-                    switch (parsed.frame) {
-                        .reset_stream => |reset| if (reset.stream_id == stream_id) return true,
-                        .reset_stream_at => |reset| if (reset.stream_id == stream_id) return true,
-                        else => {},
-                    }
-                } else {
-                    if (parsed.frame == .stream and
-                        parsed.frame.stream.stream_id == stream_id)
-                    {
-                        return true;
-                    }
-                }
-                if (parsed.consumed == 0) return true;
-                pos += parsed.consumed;
+        for (self.pending.items) |*entry| {
+            const refs = entry.cachedStreamRefs();
+            if (refs.state == .overflow) return true;
+            for (refs.refs[0..refs.count]) |ref| {
+                if (ref.reset != reset_only) continue;
+                if (ref.stream_id == stream_id) return true;
             }
         }
         return false;
+    }
+
+    /// Parse one pending payload into its cached stream references. Returns
+    /// `.overflow` when the payload carries more references than fit inline or
+    /// cannot be decoded, which keeps the original conservative behavior.
+    fn parseStreamRefs(payload: []const u8, refs: *StreamRefs) void {
+        refs.count = 0;
+        refs.state = .ready;
+        var pos: usize = 0;
+        while (pos < payload.len) {
+            const parsed = quic.parseFrame(payload[pos..]) catch {
+                refs.state = .overflow;
+                return;
+            };
+            switch (parsed.frame) {
+                .stream => |stream| {
+                    if (!refs.push(.{ .stream_id = stream.stream_id, .reset = false })) return;
+                },
+                .reset_stream => |reset| {
+                    if (!refs.push(.{ .stream_id = reset.stream_id, .reset = true })) return;
+                },
+                .reset_stream_at => |reset| {
+                    if (!refs.push(.{ .stream_id = reset.stream_id, .reset = true })) return;
+                },
+                else => {},
+            }
+            if (parsed.consumed == 0) {
+                refs.state = .overflow;
+                return;
+            }
+            pos += parsed.consumed;
+        }
     }
 
     /// Stop retransmitting STREAM data after the application terminates that
@@ -475,6 +528,9 @@ pub const Queue = struct {
             }
             self.payload_bytes -= payload.len - write;
             entry.payload_len = write;
+            // Compaction rewrote the encoded frames, so the parsed stream
+            // references must be recomputed on the next query.
+            entry.stream_refs.state = .unknown;
             index += 1;
         }
         return removed_frames;

@@ -7186,7 +7186,7 @@ pub const Connection = struct {
 
     /// STREAM bytes/FIN or RESET delivery still protected for one send half.
     /// Unrelated streams and connection receive-credit frames are excluded.
-    pub fn pendingStreamDeliveryRecovery(self: *const Connection, stream_id: u64) bool {
+    pub fn pendingStreamDeliveryRecovery(self: *Connection, stream_id: u64) bool {
         return self.recovery.hasPendingStreamData(stream_id) or self.recovery.hasPendingResetStream(stream_id);
     }
 

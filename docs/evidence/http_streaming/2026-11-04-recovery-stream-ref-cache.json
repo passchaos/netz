@@ -1,0 +1,39 @@
+{
+  "schema": 1,
+  "date": "2026-11-04",
+  "head": "a458b3f5",
+  "gate": "QUIC recovery queue caches per-payload STREAM/RESET_STREAM references instead of re-parsing every pending frame on each stream-credit query",
+  "problem": "quic.recovery.Queue.hasPendingStreamFrame scanned every pending payload and re-decoded every frame on each call. peerStreamCreditState -> flushRequestedStreamReleasesAt -> requestCompletedPeerStreamRelease calls it per completed stream, so HTTP/3 multiplexing cost grew quadratically with concurrent streams. perf at 32 streams attributed 19.6% of samples to quic.parseFrameAfterType reached only from that scan.",
+  "change": "PendingDatagram caches up to four parsed StreamRef entries inline; the first query parses the payload once and later queries only compare ids. Payload compaction in abandonStreamData invalidates the cache. Payloads with more than four stream references, undecodable frames, or a zero-length parse step fall back to the previous conservative 'has pending' answer.",
+  "benchmark": {
+    "workload": "weft bench-h3, synthetic handshake, one loopback connection, GET / -> 200 \"ok\"",
+    "before": {
+      "sequential": { "ns_per_request": 77000, "requests_per_second": 12986 },
+      "batch8_get": { "ns_per_request": 44300, "requests_per_second": 22600 },
+      "batch32_get": { "ns_per_request": 151200, "requests_per_second": 6613 },
+      "batch32_upload": { "ns_per_request": 180600, "requests_per_second": 5538 }
+    },
+    "after": {
+      "sequential": { "ns_per_request": 84054.0, "requests_per_second": 11897 },
+      "batch8_get": { "ns_per_request": 48058.4, "requests_per_second": 20808 },
+      "batch32_get": { "ns_per_request": 65325.8, "requests_per_second": 15308 },
+      "batch32_upload": { "ns_per_request": 91830.0, "requests_per_second": 10890 }
+    },
+    "netz_only_harness": {
+      "before_batch32": { "ns_per_request": 145243, "requests_per_second": 6884, "send_ns_per_batch": 845090, "recv_ns_per_batch": 3802631 },
+      "after_batch32": { "ns_per_request": 49063, "requests_per_second": 20381, "send_ns_per_batch": 283958, "recv_ns_per_batch": 1286015 }
+    }
+  },
+  "result": {
+    "quic_recovery": { "passed": 341, "total": 341, "failed": 0 },
+    "http3": { "passed": 928, "total": 928, "failed": 0, "note": "one run reported the known flaky CONNECT DATAGRAM pacing feedback test" },
+    "package": { "passed": 26, "total": 26, "failed": 0 },
+    "weft_debug": { "passed": 124, "total": 124, "failed": 0 },
+    "weft_release_fast": { "passed": 124, "total": 124, "failed": 0 }
+  },
+  "source_sha256": {
+    "src/quic/recovery.zig": "b46040e171da01b0fdfca88aa36ee7c6595e551d0f28b73e290175b6069d1c4e",
+    "src/quic/one_rtt.zig": "47be7a3b432fe7aa06083924c4f3d5b5b91953cee2b30a0665ba64748aa19994"
+  },
+  "notes": "32-stream GET improved 151.2 -> 65.3 us/request (2.3x) and upload 180.6 -> 91.8 us/request (2.0x). The per-request gap between 32 and 8 streams fell from 3.4x to 1.36x. The netz-only split shows both halves were affected: sending 32 requests dropped 845 -> 284 us per batch and receiving 32 responses 3802 -> 1286 us. Earlier rejected attempts (worker-pool caps, pacing ceiling, burst drain ahead of the command queue, bounded command-drain slices) are recorded in 2026-11-04-h3-burst-drain-rejected.json."
+}
