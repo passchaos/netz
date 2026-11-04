@@ -481,6 +481,10 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                     slot.body_mutex.lockUncancelable(self.io);
                     slot.body_blocked = true;
                     slot.body_mutex.unlock(self.io);
+                    // The handler may already be waiting for its first chunk;
+                    // the resident bytes are readable even though the owner
+                    // stopped pulling more input.
+                    slot.body_wake.set(self.io);
                     return;
                 }
                 const available = Adapter.availableBody(

@@ -1,13 +1,15 @@
 {
   "schema": 1,
   "date": "2026-11-04",
-  "head": "0bed3ce4",
+  "head": "24d60aef",
   "gate": "Stable HTTP/1 pull body reader with content decoding, HTTP/2 pull nextBody and concurrent stream serving aliases, HTTP/3 cumulative max_body_bytes for server requests and client response/push bodies",
   "commands": {
     "pull_body": "zig build test-lib -Dtest-filter=\"pull body\" --summary all",
     "next_body": "zig build test-lib -Dtest-filter=\"nextBody\" --summary all",
     "streaming_aliases": "zig build test-lib -Dtest-filter=\"streaming aliases\" --summary all",
     "http3_body_bound": "zig build test-lib -Dtest-filter=\"HTTP/3 incremental reader\" --summary all",
+    "continuous_concurrent": "zig build test-lib -Dtest-filter=\"HTTP/3 continuous concurrent\" --summary all",
+    "handshake_bounded_body": "zig build test-lib -Dtest-filter=\"handshake concurrent serving bounds a large POST body\" --summary all",
     "package": "zig build test-package --summary all"
   },
   "result": {
@@ -52,6 +54,12 @@
       "total": 161,
       "failed": 0,
       "exit_code": 0
+    },
+    "handshake_bounded_body": {
+      "passed": 159,
+      "total": 159,
+      "failed": 0,
+      "exit_code": 0
     }
   },
   "source_sha256": {
@@ -65,13 +73,14 @@
     "src/http/streaming.zig": "3b0b9eed1ebb774fcbc747703d20460f9eed49aea2f4eaacccb3da207f3216cd",
     "src/http3/runtime.zig": "4146a8676668a49b2cda3b98c1cb236f724282595edb67c5b63e87d174f2cb2b",
     "src/http3/runtime/development/send.zig": "14a900808393439245f4f442e6355e3e4769df7582a8a6731a90fd9cc416fc7a",
-    "src/http3/runtime/concurrent.zig": "0bf2ecac8822f125bf349ff17b361f179475852c7464970e3ccda81426a3e5be",
-    "src/http3/runtime/concurrent_tests.zig": "2cfd01ce35649465440b8875ebe2f8af2a0e5cb065d3d7f8cfcc6798fa441294",
+    "src/http3/runtime/concurrent.zig": "6fee8ac15c733967c7e37e6a686192acb8694c37d10fc94efafff2fbe1ad9ae1",
+    "src/http3/runtime/concurrent_tests.zig": "bfb4f65f06be38acf5a0457481c0b634c110c137a86afef75e3e53a6424c6852",
+    "docs/http_streaming.md": "8f5df9a09fed208a59e8ca6782424361d096080fde7a6f0103cd0f9f8970053c",
     "src/http3/runtime/stream/reader.zig": "985c22d936fb168bbb25913b59b948e8bcbcbed77913e299d0afccebcbecc157",
     "src/http3/runtime/stream/reader_tests.zig": "bec1f75ac3ccb5f5ca47be23866c11bb57e7d7470f7904de45f1307c3e13b7f4",
     "src/http3/runtime/stream/set.zig": "07ca9f1d4c1a09dce67158b63b9526a3aa6d2957cea65b9c0bfddfff1c318290",
     "src/http3/runtime/stream/push/state.zig": "c31e8f594e897a76a1093477560960fa3da72d697a2b13c280f0e6b5d2cd2bc0",
     "src/http3/runtime/development/server_peer/state.zig": "5ffb50c351efefd715ff417abbc9e91118d3ca8450553c5966c0bbe80a9e2aa1"
   },
-  "notes": "The HTTP/1 pull BodyReader drives the existing push parser through a bounded FIFO producer. Tests cover a 200 KiB body with 100-continue and keep-alive, chunked trailers, cancellation closing an unread connection, max_body_bytes rejection, non-blocking takeRequest, and Head.streamContentDecoder identity decoding. HTTP/2 ServerDuplexStream.nextBody pulls DATA, retains trailers for requestTrailers, returns null at END_STREAM, surfaces peer resets as StreamReset and exposes streamContentDecoder. HTTP/2 and HTTP/3 concurrent batch aliases are exposed through netz.streaming. HTTP/3 streaming readers enforce a cumulative Limits.max_body_bytes budget for server requests and for client response/push bodies, counting already-read DATA so a later frame cannot reset it; exceeding the budget surfaces error.PayloadTooLarge at the next read boundary. `serveConcurrentStreams` on HTTP/2 Connection and HTTP/3 HandshakeServerSession accepts streams continuously, runs one handler task per stream up to max_streams, serializes body reads and response head/DATA/trailers/reset through the connection owner, supports streaming responses and response trailers on both HTTP/3 server types, and stops on shutdown/deadline/idle timeout with GOAWAY. The HTTP/2 continuous test multiplexes two streams on one connection with concurrent handlers. HTTP/3 request DATA is copied into a per-stream buffer capped by max_stream_buffer (or max_buffered_body_bytes) with owner-side backpressure; the total body remains bounded by max_body_bytes. Suppress-body HEAD/204/304 responses finish without DATA, and finishWithTrailers ends the stream after the final DATA. Peer cancellation is delivered to nextBody as error.StreamReset and is covered by a deterministic loopback test. HEAD responses with representation Content-Length finish from startResponse without DATA, and a handler may return without calling finish. HandshakeServerSession availableRequestData maps a consumed DATA frame to zero bytes instead of UnexpectedFrame, so non-empty POST bodies stream through the same engine."
+  "notes": "The HTTP/1 pull BodyReader drives the existing push parser through a bounded FIFO producer. Tests cover a 200 KiB body with 100-continue and keep-alive, chunked trailers, cancellation closing an unread connection, max_body_bytes rejection, non-blocking takeRequest, and Head.streamContentDecoder identity decoding. HTTP/2 ServerDuplexStream.nextBody pulls DATA, retains trailers for requestTrailers, returns null at END_STREAM, surfaces peer resets as StreamReset and exposes streamContentDecoder. HTTP/2 and HTTP/3 concurrent batch aliases are exposed through netz.streaming. HTTP/3 streaming readers enforce a cumulative Limits.max_body_bytes budget for server requests and for client response/push bodies, counting already-read DATA so a later frame cannot reset it; exceeding the budget surfaces error.PayloadTooLarge at the next read boundary. `serveConcurrentStreams` on HTTP/2 Connection and HTTP/3 HandshakeServerSession accepts streams continuously, runs one handler task per stream up to max_streams, serializes body reads and response head/DATA/trailers/reset through the connection owner, supports streaming responses and response trailers on both HTTP/3 server types, and stops on shutdown/deadline/idle timeout with GOAWAY. The HTTP/2 continuous test multiplexes two streams on one connection with concurrent handlers. HTTP/3 request DATA is copied into a per-stream buffer capped by max_stream_buffer (or max_buffered_body_bytes) with owner-side backpressure; the total body remains bounded by max_body_bytes. Suppress-body HEAD/204/304 responses finish without DATA, and finishWithTrailers ends the stream after the final DATA. Peer cancellation is delivered to nextBody as error.StreamReset and is covered by a deterministic loopback test. HEAD responses with representation Content-Length finish from startResponse without DATA, and a handler may return without calling finish. HandshakeServerSession availableRequestData maps a consumed DATA frame to zero bytes instead of UnexpectedFrame, so non-empty POST bodies stream through the same engine. A handshake concurrent test with the adapter default cap (HandshakeSessionOptions.max_stream_buffer = 1400, no per-call override) streams a 2048-byte POST in 16-byte handler reads; when the resident queue fills, the owner wakes the handler to drain it before resuming the reader. Without that wake the handler deadlocked until its deadline and the owner reset a correct stream. HandshakeSessionOptions.max_stream_buffer must still admit the largest incoming QUIC STREAM frame, so the test lowers the client's max_stream_frame_data to 512."
 }

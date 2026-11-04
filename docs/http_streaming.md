@@ -180,14 +180,20 @@ Concurrency contract:
   writer. Handlers never touch connection state; body reads and response
   head/DATA/trailers/reset are serialized through the owner.
 - Request DATA is delivered incrementally. The owner copies at most
-  `max_buffered_body_bytes` per stream (default: the session
-  `max_stream_buffer`; `HandshakeSessionOptions.max_stream_buffer` for the
-  production HTTP/3 session) into a per-stream ring; once full it stops
-  receiving until the handler consumes. The total body remains bounded by
-  `max_body_bytes`. This keeps `nextBody` incremental without first buffering a
-  whole upload. A fully consumed DATA frame reports zero readable bytes, not
-  `error.UnexpectedFrame`, so handshake and development sessions share the same
-  pull path.
+  `max_buffered_body_bytes` resident bytes per stream into a bounded per-stream
+  queue. The default is `HandshakeServerSession.maxBodyBuffer`, i.e.
+  `HandshakeSessionOptions.max_stream_buffer` for the production HTTP/3
+  session; an explicit engine option overrides it. This is a resident-buffer
+  cap, not a body-size cap: the total body remains bounded by `max_body_bytes`.
+  When the queue fills, the owner stops pulling new DATA and wakes the handler
+  so it can drain what is resident; `nextBody` frees space and wakes the owner
+  to resume reading. This keeps `nextBody` incremental without first buffering
+  a whole upload, and a small cap (for example 256 KiB) still delivers uploads
+  larger than the cap. A fully consumed DATA frame reports zero readable bytes,
+  not `error.UnexpectedFrame`, so handshake and development sessions share the
+  same pull path. `HandshakeSessionOptions.max_stream_buffer` must still admit
+  the largest incoming QUIC STREAM frame; lower the peer's
+  `max_stream_frame_data` when testing a cap below the default frame size.
 - The `ConcurrentStream` handle is valid only while its handler runs. `nextBody`
   copies into the caller buffer; `trailers()` borrows the retained trailer
   fields until the handler returns. All `ConcurrentStream` methods are safe from

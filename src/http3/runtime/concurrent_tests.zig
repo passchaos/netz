@@ -705,3 +705,128 @@ test "HTTP/3 handshake concurrent serving reads a POST body" {
     joined = true;
     if (server_task.err) |err| return err;
 }
+
+test "HTTP/3 handshake concurrent serving bounds a large POST body" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const original_dcid = [_]u8{ 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48 };
+    const client_cid = [_]u8{ 0x49, 0x4a, 0x4b, 0x4c };
+    const server_cid = [_]u8{ 0x4d, 0x4e, 0x4f, 0x50 };
+    var server = try runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .quic = .{ .max_datagram_size = 4096, .max_frames_per_datagram = 16 } },
+        .{
+            .handshake = .{
+                .local_connection_id = &server_cid,
+                .random = [_]u8{0x51} ** 32,
+                .x25519_secret_key = [_]u8{0x52} ** 32,
+            },
+            // The engine inherits this bound through
+            // `HandshakeServerSession.maxBodyBuffer`; no per-call override.
+            // It must still admit the largest incoming QUIC STREAM frame, so
+            // the client emits 512-byte DATA frames below.
+            .session = .{ .max_stream_buffer = 1400 },
+        },
+    );
+    defer server.deinit();
+
+    const Context = struct {
+        io: std.Io,
+        body: [2048]u8 = undefined,
+        length: usize = 0,
+    };
+    var context = Context{ .io = io };
+    const Handler = struct {
+        fn run(ctx: *Context, stream: *runtime.HandshakeServerSession.ConcurrentStream) anyerror!void {
+            var chunk: [16]u8 = undefined;
+            while (try stream.nextBody(&chunk, futureDeadline(ctx.io))) |count| {
+                @memcpy(ctx.body[ctx.length..][0..count], chunk[0..count]);
+                ctx.length += count;
+            }
+            try std.testing.expectEqual(@as(usize, 2048), ctx.length);
+            for (ctx.body[0..ctx.length]) |byte| try std.testing.expectEqual(@as(u8, 'x'), byte);
+            try stream.startResponse(.{ .status = 200 }, 2);
+            try stream.writeData("ok", true);
+        }
+    };
+
+    const ServerTask = struct {
+        server: *runtime.HandshakeServer,
+        context: *Context,
+        shutdown: *std.Io.Event,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                std.debug.print("handshake bounded large server error: {s}\n", .{@errorName(err)});
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var session = try self.server.acceptWithTimeout(.fromSeconds(3));
+            defer session.deinit();
+            const summary = try session.serveConcurrentStreams(
+                Context,
+                self.context,
+                Handler.run,
+                .{
+                    .max_streams = 1,
+                    .shutdown = self.shutdown,
+                },
+            );
+            try std.testing.expectEqual(@as(usize, 1), summary.accepted);
+            try std.testing.expectEqual(@as(usize, 1), summary.completed);
+            try std.testing.expectEqual(@as(usize, 0), summary.failed);
+        }
+    };
+
+    var shutdown: std.Io.Event = .unset;
+    var server_task = ServerTask{ .server = &server, .context = &context, .shutdown = &shutdown };
+    const thread = try std.Thread.spawn(.{}, ServerTask.run, .{&server_task});
+    var joined = false;
+    defer if (!joined) {
+        shutdown.set(io);
+        thread.join();
+    };
+
+    var client = try runtime.HandshakeClient.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{ .quic = .{ .max_datagram_size = 4096, .max_frames_per_datagram = 16 } },
+        .{
+            .handshake = .{
+                .original_destination_connection_id = &original_dcid,
+                .local_connection_id = &client_cid,
+                .server_name = "localhost",
+                .random = [_]u8{0x53} ** 32,
+                .x25519_secret_key = [_]u8{0x54} ** 32,
+            },
+            .session = .{ .max_stream_frame_data = 512 },
+        },
+    );
+    defer client.deinit();
+    var payload: [2048]u8 = undefined;
+    @memset(&payload, 'x');
+    var response = try client.request(.{
+        .method = "POST",
+        .path = "/upload",
+        .authority = "localhost",
+        .body = &payload,
+    });
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 200), response.response.status);
+    try std.testing.expectEqualStrings("ok", response.response.body);
+
+    shutdown.set(io);
+    thread.join();
+    joined = true;
+    if (server_task.err) |err| return err;
+}
