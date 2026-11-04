@@ -19,6 +19,28 @@ fn futureDeadline(io: std.Io) std.Io.Clock.Timestamp {
     });
 }
 
+/// Wait for `event` without treating a spurious futex wake as a timeout.
+fn waitForEvent(io: std.Io, event: *std.Io.Event, timeout: std.Io.Duration) !void {
+    const deadline = std.Io.Clock.Timestamp.fromNow(io, .{
+        .raw = timeout,
+        .clock = .awake,
+    });
+    while (true) {
+        event.waitTimeout(io, .{ .deadline = deadline }) catch |err| switch (err) {
+            error.Timeout => {
+                if (std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds >=
+                    deadline.raw.nanoseconds)
+                {
+                    return error.Timeout;
+                }
+                continue;
+            },
+            error.Canceled => return error.Canceled,
+        };
+        return;
+    }
+}
+
 test "HTTP/3 continuous concurrent serving streams bodies and responses" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
@@ -435,10 +457,17 @@ test "HTTP/3 continuous concurrent serving observes peer cancellation" {
     );
     defer server.deinit();
 
-    const Context = struct { io: std.Io };
+    const Context = struct {
+        io: std.Io,
+        /// Set once the engine has admitted the stream, so the peer can cancel
+        /// a request the server has actually accepted instead of racing the
+        /// first receive.
+        admitted: std.Io.Event = .unset,
+    };
     var context = Context{ .io = io };
     const Handler = struct {
         fn run(ctx: *Context, stream: *runtime.Server.ConcurrentStream) anyerror!void {
+            ctx.admitted.set(ctx.io);
             var body: [32]u8 = undefined;
             while (true) {
                 _ = stream.nextBody(&body, futureDeadline(ctx.io)) catch |err| switch (err) {
@@ -497,6 +526,7 @@ test "HTTP/3 continuous concurrent serving observes peer cancellation" {
         .path = "/wait",
         .authority = "localhost",
     }, null);
+    try waitForEvent(io, &context.admitted, .fromSeconds(3));
     try client.cancelRequest(wait_stream, 0x42);
 
     shutdown.set(io);
