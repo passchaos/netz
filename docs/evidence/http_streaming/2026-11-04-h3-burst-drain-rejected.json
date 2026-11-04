@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "date": "2026-11-04",
+  "head": "ac853df9",
+  "gate": "Rejected experiment: routing a retained receive burst before draining handler commands",
+  "status": "rejected",
+  "what_was_tried": "After routing one event, the HTTP/3 concurrent owner looped up to 16 times over already-retained datagrams (Adapter.hasBuffered + Adapter.receive) before servicing the queued response commands, so ACK and stream progress for siblings would not wait behind up to 64 queued commands.",
+  "measured": {
+    "netz_only_harness": {
+      "before": { "batch8_ns_per_request": 50875, "batch32_ns_per_request": 148965, "batch32_min_rtt_ns": 565201 },
+      "after": { "batch8_ns_per_request": 39963, "batch32_ns_per_request": 101988, "batch32_min_rtt_ns": 311465 },
+      "note": "zio event loop, HandshakeServer.serveConcurrentStreams plus the client batch API, 1000 batches of 32"
+    }
+  },
+  "why_rejected": "The same change hung the weft bench-h3 path after the sequential phase. A bounded 100us receive budget inside the drain still left the process sleeping with the client blocked in io_cqring_wait and the owner coroutine making no progress, so the burst drain interacts badly with response pacing and the single event loop. Shipping a 30% throughput win that can hang a server is not acceptable.",
+  "ruled_out": [
+    "worker pool size: caps of 8 and 16 did not change 32-stream per-request throughput",
+    "server pacing ceiling: raising it to 1 GB/s changed batch32 from 146-153us to 137-143us",
+    "command wake latency: 0.4-12us after the wake race",
+    "event count per request: two at both batch widths",
+    "congestion-window growth: cwnd stays at the 10-packet initial value in both shapes because the sender is application-limited, which is RFC-correct"
+  ],
+  "next_action": "Coalesce response DATA across streams into fewer QUIC packets (or batch-route inside the cursor visitor while still draining commands between datagram groups) rather than draining datagrams ahead of the command queue.",
+  "source_sha256": {
+    "src/http3/runtime/concurrent.zig": "7064b45836e33bfcff6cdc16284a22958fd6e9d67a6e232908508bb4c1816937"
+  }
+}
