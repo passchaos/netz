@@ -848,6 +848,41 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                     }
                 },
                 .start_response_with_body => |value| {
+                    slot.suppress_body = value.response.suppressesBody();
+                    if (slot.suppress_body) {
+                        // HEAD/204/304: the head already ended the stream.
+                        try Adapter.startResponse(
+                            self.session,
+                            slot.from,
+                            slot.stream_id,
+                            value.response,
+                            value.body_length,
+                        );
+                        if (value.data.len != 0) return error.InvalidContentLength;
+                        if (value.fin) slot.response_finished = true;
+                        return;
+                    }
+                    // A complete buffered response fits in one QUIC packet, so
+                    // skip the separate HEADERS and DATA submissions.
+                    if (self.active <= 1 and
+                        value.fin and
+                        value.data.len != 0 and
+                        value.response.trailers.len == 0 and
+                        (value.body_length == null or
+                            value.body_length.? == value.data.len))
+                    {
+                        try Adapter.sendCompleteResponse(
+                            self.session,
+                            slot.from,
+                            slot.stream_id,
+                            value.response,
+                            value.body_length,
+                            value.data,
+                            slot.head.method,
+                        );
+                        slot.response_finished = true;
+                        return;
+                    }
                     try Adapter.startResponse(
                         self.session,
                         slot.from,
@@ -855,13 +890,6 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                         value.response,
                         value.body_length,
                     );
-                    slot.suppress_body = value.response.suppressesBody();
-                    if (slot.suppress_body) {
-                        // HEAD/204/304: the head already ended the stream.
-                        if (value.data.len != 0) return error.InvalidContentLength;
-                        if (value.fin) slot.response_finished = true;
-                        return;
-                    }
                     try Adapter.sendBody(
                         self.session,
                         slot.from,

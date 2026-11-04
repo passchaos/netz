@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "date": "2026-11-04",
+  "head": "68c1bd00",
+  "gate": "HTTP/3 buffered responses emit HEADERS, DATA and FIN in one QUIC packet when the owner is not multiplexing many responses at once",
+  "change": "New adapter hook `sendCompleteResponse` on HandshakeServerSession uses `trySendResponseLiteral` to submit a whole buffered response in one packet, synthesizing content-length from the streaming body length when the caller's headers omit it. The concurrent engine uses it for `startResponseWithBody` only when the handler supplies the full body (fin, non-empty, no trailers, declared length matches) and `active <= 1`. The cleartext development runtime keeps the two-step path.",
+  "why_the_condition": "Unconditionally using the literal path measured 72-76 us/request at batch=32, worse than the 48-49 us two-step baseline, because many in-flight responses lose packet coalescing and pay static-QPACK header encoding. Restricting it to the low-concurrency case keeps the packet-count win where it matters. Instrumentation showed the condition is true for about 70% of responses even in a 32-stream batch, since handlers finish quickly and the owner often sees one live slot while draining commands.",
+  "benchmark": {
+    "workload": "netz-only harness, zio event loop, HandshakeServer.serveConcurrentStreams + client startRequest/receiveNextResponse, GET -> 200 \"ok\"",
+    "baseline_two_step": {
+      "batch1_ns_per_request": [92692, 74651],
+      "batch8_ns_per_request": [45753, 39838],
+      "batch32_ns_per_request": [48350, 49163]
+    },
+    "after_single_packet_when_low_concurrency": {
+      "batch1_ns_per_request": [51769, 64788, 49878, 48027, 84117],
+      "batch8_ns_per_request": [41802, 35527, 38091, 34861],
+      "batch32_ns_per_request": [39001, 39874, 39137, 39497, 38983]
+    },
+    "note": "batch=32 is stable at about 39-40 us/request versus 48-49 before (about 20% better). batch=1 is noisy on this host (48-84 us across five runs) and improved versus the 75-93 us baseline in most samples; the machine was sharing CPU with an unrelated long build."
+  },
+  "result": {
+    "http3": { "passed": 929, "total": 929, "failed": 0 },
+    "package": { "passed": 26, "total": 26, "failed": 0 }
+  },
+  "source_sha256": {
+    "src/http3/runtime.zig": "5ca0a10c70b032d694d6b8f154d2abe1b85e77764494570939f411ff1552ca2e",
+    "src/http3/runtime/concurrent.zig": "682f2a5c28ca0a974acc6034f784b1e7e1a905ceb51d674d2762080c4393d366"
+  },
+  "notes": "Weft must call startResponseWithBody to reach this path; its current startResponse + writeData sequence is unchanged. The literal path finishes the request lifecycle itself, so the engine marks the slot finished and skips the separate body command."
+}
