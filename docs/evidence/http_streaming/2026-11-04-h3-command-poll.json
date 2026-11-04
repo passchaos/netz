@@ -1,9 +1,10 @@
 {
   "schema": 1,
   "date": "2026-11-04",
-  "head": "39a99d08",
-  "gate": "HTTP/3 concurrent owner uses a short active-command receive budget instead of waiting a full idle poll for each response command",
+  "head": "b2b5e5cb",
+  "gate": "HTTP/3 concurrent owner races its QUIC receive against the handler command wake and retains a late completed event",
   "commands": {
+    "h3_all": "zig build test-lib -Dtest-filter=\"HTTP/3\" --summary all",
     "h3_concurrent": "zig build test-lib -Dtest-filter=\"HTTP/3 continuous concurrent\" --summary all",
     "package": "zig build test-package --summary all",
     "bench": "cd ../weft && zig build bench-h3 -Doptimize=ReleaseFast"
@@ -19,14 +20,18 @@
       "sequential": { "ns_per_request": 261595.6, "requests_per_second": 3823 },
       "batched": { "ns_per_request": 128212.8, "requests_per_second": 7800 }
     },
+    "after_wake_race": {
+      "sequential": { "ns_per_request": 62859.4, "requests_per_second": 15909 },
+      "batched": { "ns_per_request": 135018.5, "requests_per_second": 7406 }
+    },
     "h2_reference": {
       "sequential": { "ns_per_request": 25988.7, "requests_per_second": 38478 },
       "batched_32": { "ns_per_request": 14916.4, "requests_per_second": 67040 }
     }
   },
   "source_sha256": {
-    "src/http3/runtime/concurrent.zig": "3740e68916a5ce949a50dd2ded1ca3cdf02e237534fb8ea42c899e6727bc39cf",
-    "docs/http_streaming.md": "a5a6bfb9b912bf6e5a6b92e09d574469f5d20860f511c31111a39924d42d84ec"
+    "src/http3/runtime/concurrent.zig": "015e2b296a908c8489da3da22d6376682fa4a90da0abe27ecfef89db35f25845",
+    "docs/http_streaming.md": "5234f8d407e9cfb78df93298b5ff09a09881955e469af1cd6bba020b35244cab"
   },
-  "notes": "The HTTP/3 owner drains handler commands only after its current QUIC receive returns. A full poll_interval therefore appeared once per startResponse and once per writeData, producing ~2x poll latency per request. Command tracing at poll_interval=1ms measured 0.92-1.00ms between submit and drain for both command kinds, while execute itself took 5-45us. command_poll_interval defaults to 100us and is used only while active handlers exist; idle connections keep poll_interval. Sequential H3 improved 8.1x to 261.6us/req. The 32-stream batch path improved much less (117us -> 128us per request); server execute and drain tracing showed ~100us per command with 5-45us execute, so the remaining batch gap is not explained by the command poll alone. The likely next targets are the client's per-request send loop or per-packet QUIC response processing; that split has not yet been isolated. HTTP/2 remains at 26.0us sequential and 14.9us per batched request."
+  "notes": "The HTTP/3 owner drains handler commands only after its current QUIC receive returns. A full poll_interval therefore appeared once per startResponse and once per writeData, producing ~2x poll latency per request. Command tracing at poll_interval=1ms measured 0.92-1.00ms between submit and drain for both command kinds, while execute itself took 5-45us. command_poll_interval defaults to 100us and is used only while active handlers exist; idle connections keep poll_interval. Sequential H3 improved 8.1x to 261.6us/req. The owner now races Adapter.receive against the command wake with std.Io.Select. A wake cancels the receive; a receive that completes late is retained in pending_events and routed on the next iteration, so a fully processed packet is not dropped. Sequential H3 improved another 4.2x to 62.9us/req (33.6x from the original 2.11ms). The 32-stream batch path remained ~135us/req (117us -> 128us -> 135us across the two steps), confirming the batch gap is not the owner's command poll; the next isolation target is the client batch send loop versus per-packet QUIC response processing. Full HTTP/3 test filter passes 928/928; the H3 concurrent filter passes 161/161; weft's H3 adapter route test passes. HTTP/2 remains at 26.0us sequential and 14.9us per batched request."
 }

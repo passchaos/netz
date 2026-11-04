@@ -243,6 +243,10 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
         wake: std.Io.Event = .unset,
         slots: std.ArrayList(*Slot) = .empty,
         pending_heads: std.ArrayList(StreamingRequestEvent) = .empty,
+        /// Events completed by a receive that raced a command wake. The wake
+        /// path retains them so a completed packet is never dropped.
+        pending_events: std.ArrayList(StreamingRequestEvent) = .empty,
+        pending_event_error: ?anyerror = null,
         /// Ready handlers consumed by a lazily grown per-connection worker
         /// pool. A sequential connection keeps one reusable thread instead of
         /// spawning a thread for every request.
@@ -280,6 +284,8 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
             self.slots.deinit(self.allocator);
             for (self.pending_heads.items) |*event| event.deinit(self.allocator);
             self.pending_heads.deinit(self.allocator);
+            for (self.pending_events.items) |*event| event.deinit(self.allocator);
+            self.pending_events.deinit(self.allocator);
             self.commands.deinit(self.allocator);
             self.task_queue.deinit(self.allocator);
             self.workers.deinit(self.allocator);
@@ -920,6 +926,14 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
         }
 
         fn readOrWake(self: *Self, deadline: ?std.Io.Clock.Timestamp) anyerror!?StreamingRequestEvent {
+            if (self.pending_event_error) |err| {
+                self.pending_event_error = null;
+                return err;
+            }
+            if (self.pending_events.items.len != 0) {
+                return self.pending_events.orderedRemove(0);
+            }
+
             // Do not clear a wake that belongs to an already queued command.
             self.wake.reset();
             self.mutex.lockUncancelable(self.io);
@@ -942,11 +956,6 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                 return null;
             }
 
-            // Poll the receive path with a short absolute budget instead of
-            // cancelling a concurrent `std.Io` operation. The wake event is
-            // checked between polls, so command latency is bounded by the
-            // active-command poll interval while session state stays
-            // single-owner.
             const poll_deadline = std.Io.Clock.Timestamp.addDuration(
                 std.Io.Clock.Timestamp.now(self.io, .awake),
                 .{ .raw = poll, .clock = .awake },
@@ -955,9 +964,50 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                 if (value.raw.nanoseconds < poll_deadline.raw.nanoseconds) value else poll_deadline
             else
                 poll_deadline;
-            return Adapter.receive(self.session, use_deadline) catch |err| switch (err) {
-                error.Timeout => null,
-                else => |other| return other,
+            return self.receiveOrWake(use_deadline);
+        }
+
+        /// Race one receive against the command wake. A wake that wins cancels
+        /// the receive; a receive that completes late is retained in
+        /// `pending_events` and delivered on the next owner iteration. The
+        /// receive path is a cancellation point, and packets it fully processes
+        /// remain queued in the session, so no packet is dropped.
+        fn receiveOrWake(
+            self: *Self,
+            deadline: std.Io.Clock.Timestamp,
+        ) anyerror!?StreamingRequestEvent {
+            const Selection = union(enum) {
+                event: Error!StreamingRequestEvent,
+                wake: std.Io.Cancelable!void,
+            };
+            var results: [2]Selection = undefined;
+            var select: std.Io.Select(Selection) = .init(self.io, &results);
+            defer while (select.cancel()) |late| switch (late) {
+                .event => |result| {
+                    if (result) |event| self.retainEvent(event) else |err| switch (err) {
+                        error.Timeout, error.Canceled => {},
+                        else => self.pending_event_error = err,
+                    }
+                },
+                .wake => |result| result catch {},
+            };
+            try select.concurrent(.event, Adapter.receive, .{ self.session, deadline });
+            try select.concurrent(.wake, std.Io.Event.wait, .{ &self.wake, self.io });
+            switch (try select.await()) {
+                .event => |result| return result catch |err| switch (err) {
+                    error.Timeout => null,
+                    else => |other| return other,
+                },
+                .wake => |result| try result,
+            }
+            return null;
+        }
+
+        fn retainEvent(self: *Self, event: StreamingRequestEvent) void {
+            self.pending_events.append(self.allocator, event) catch {
+                var owned = event;
+                owned.deinit(self.allocator);
+                self.pending_event_error = error.OutOfMemory;
             };
         }
     };
