@@ -15,12 +15,14 @@
   "rejected_fixes": [
     "Pre-ping before the long target poll: one PINGREQ resets the deadline by only one keep alive interval, so a 2 s block still expires it. Measured 4/8 passes, the same as before.",
     "Capping the target poll by the source keepalive remaining: a short poll restarts the unpausable connect attempt and the target never completes. Measured 0/8 passes.",
-    "Pumping bridge.step in a loop from the test: step still blocks inside the same CONNACK wait, so the extra calls do not help."
+    "Pumping bridge.step in a loop from the test: step still blocks inside the same CONNACK wait, so the extra calls do not help.",
+    "Capping the target poll by the source keepalive with a 200 ms floor: 5/8 passes, no better than the 2/3 baseline. The floor keeps a responsive peer able to finish a handshake, but an unresponsive target still retires the source before the bridge notices."
   ],
   "next_options": [
     "Make the target CONNACK wait resumable so a bounded poll can return to serviceSourceWhileWaiting without restarting the connection attempt.",
     "Run the source keepalive on an independent timer that is not owned by the blocking bridge turn.",
-    "Decide that a black-hole target is allowed to retire the source transport and change the test expectation accordingly."
+    "Decide that a black-hole target is allowed to retire the source transport and change the test expectation accordingly.",
+    "Give the source client its own keepalive timer that is not owned by the blocking bridge turn, accepting the extra owner."
   ],
   "note": "The library behaviour is defensible; the arguable part is the test's expectation that a source survives an unresponsive target for twice its keep alive. The fix needs a design decision, not a timeout tweak."
 }
