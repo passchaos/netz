@@ -63,6 +63,14 @@ pub fn Engine(
                     data: []const u8,
                     fin: bool,
                 },
+                /// Response head and its first DATA contribution in one owner
+                /// turn. A sequential request otherwise pays two wake/command
+                /// round trips for a single logical response.
+                start_response_with_body: struct {
+                    options: ResponseOptions,
+                    data: []const u8,
+                    fin: bool,
+                },
                 finish_trailers: []const http2.Hpack.HeaderField,
                 cancel: http2.ErrorCode,
             };
@@ -146,6 +154,37 @@ pub fn Engine(
                 deadline: std.Io.Clock.Timestamp,
             ) anyerror!void {
                 var command = Command{ .slot = self.slot, .kind = .{ .start_response = options } };
+                return self.engine.submit(&command, deadline);
+            }
+
+            /// Submit the response head and its first DATA contribution as one
+            /// owner command. `data` must stay valid until this call returns.
+            pub fn startResponseWithBody(
+                self: Stream,
+                options: ResponseOptions,
+                data: []const u8,
+                fin: bool,
+            ) anyerror!void {
+                var command = Command{ .slot = self.slot, .kind = .{ .start_response_with_body = .{
+                    .options = options,
+                    .data = data,
+                    .fin = fin,
+                } } };
+                return self.engine.submit(&command, null);
+            }
+
+            pub fn startResponseWithBodyAndDeadline(
+                self: Stream,
+                options: ResponseOptions,
+                data: []const u8,
+                fin: bool,
+                deadline: std.Io.Clock.Timestamp,
+            ) anyerror!void {
+                var command = Command{ .slot = self.slot, .kind = .{ .start_response_with_body = .{
+                    .options = options,
+                    .data = data,
+                    .fin = fin,
+                } } };
                 return self.engine.submit(&command, deadline);
             }
 
@@ -667,6 +706,12 @@ pub fn Engine(
             switch (command.kind) {
                 .start_response => |options| {
                     try slot.stream.startResponse(options);
+                },
+                .start_response_with_body => |value| {
+                    try slot.stream.startResponse(value.options);
+                    const slices = if (value.data.len == 0) &.{} else &.{value.data};
+                    _ = try slot.stream.writeResponseSlices(slices, value.fin);
+                    if (value.fin) slot.response_finished = true;
                 },
                 .write_body => |value| {
                     const slices = if (value.data.len == 0) &.{} else &.{value.data};

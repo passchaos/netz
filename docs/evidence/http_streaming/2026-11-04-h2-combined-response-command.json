@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "date": "2026-11-04",
+  "head": "c2861d63",
+  "gate": "HTTP/2 ConcurrentStream.startResponseWithBody mirrors the HTTP/3 combined response command",
+  "change": "New additive API `ConcurrentStream.startResponseWithBody(options, data, fin)` plus a deadline form on the HTTP/2 continuous concurrent engine. The owner executes the response head and the first DATA contribution in one command, removing one wake/command round trip per buffered response. `startResponse`/`writeData` keep their existing semantics, and the HTTP/2 engine already suppresses bodies for HEAD/204/304 inside `startResponse`.",
+  "measured": {
+    "h3_reference": {
+      "note": "The same shape on HTTP/3 (c2861d63) measured 101.8 -> 59.2 us/request sequential and 53.2 -> 39.7 us/request at batch=8 in the netz harness."
+    },
+    "h2_baseline_weft": {
+      "note": "weft still calls startResponse + writeData, so this is the pre-adoption baseline",
+      "sequential": { "ns_per_request": 27620.2, "requests_per_second": 36205 },
+      "batched_32": { "ns_per_request": 15950.4, "requests_per_second": 62694 },
+      "upload_32": { "ns_per_request": 19903.1, "requests_per_second": 50243 }
+    }
+  },
+  "result": {
+    "http2": { "passed": 972, "total": 972, "failed": 0 },
+    "package": { "passed": 26, "total": 26, "failed": 0 }
+  },
+  "source_sha256": {
+    "src/http2/runtime/concurrent.zig": "dbb2e107309afd432b235e5c57ece393afa3661a2e3712a91fded2e0cdf39df6",
+    "src/http2/runtime/concurrent_tests.zig": "079dcf5a805a31140e4a4d579adcf4f1ae2d39d1ec579ada296c3a90e896d6b9"
+  },
+  "notes": "The H2 win is not yet measured because weft's handler has to adopt the new call; the HTTP/3 measurement of the identical shape is the reference. The new HTTP/2 test covers the ordinary GET path through the combined command."
+}
