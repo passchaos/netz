@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "date": "2026-11-04",
+  "head": "ac04c7ad",
+  "subject": "Literal RDS path_rewrite and host_rewrite",
+  "change": "RouteAction path_rewrite (field 45) and host_rewrite (field 44) are now decoded as literal rewrites when they contain no substitution format specifier. Empty path_rewrite/host_rewrite values preserve the original path/authority, matching Envoy's empty-output rule. Values containing '%' still fail validation because format substitution is not implemented. These fields join prefix_rewrite, host_rewrite_literal and host_rewrite_header in the same internal request-input rewrite path.",
+  "tests": {
+    "unit": "src/grpc/xds/rds/tests.zig 'gRPC RDS rewrites matched prefixes and literal or header authorities' now also selects a route with host_rewrite and path_rewrite and asserts the literal authority and whole-path rewrite.",
+    "focused_gate": {
+      "command": "zig build test-lib -Dtest-filter='gRPC RDS' --summary all",
+      "passed": 174,
+      "total": 174,
+      "failed": 0
+    },
+    "package": {
+      "command": "zig build test-package --summary all",
+      "passed": 26,
+      "total": 26,
+      "failed": 0
+    }
+  },
+  "source_sha256": {
+    "src/grpc/xds/rds/action.zig": "54d592f504613f281732d9044d6e762c2fbddecd1b939b68cf654db33098523e",
+    "src/grpc/xds/rds/tests.zig": "20abdef781b92d601555af497e5c9d550391835908b14f35d0b845faf8049e61",
+    "docs/grpc_rds.md": "d82a796156d88379e74430cf5204c016fdf66884e17f675b71c70e082306a069",
+    "docs/grpc_parity.md": "99127baf41920f529d938130de7144fc50464f19177b70a7f54d68fc9d0de3b3"
+  },
+  "notes": "Format substitution, regex rewrite, path_rewrite_policy, auto_host_rewrite and host_rewrite_path_regex remain explicitly rejected. The wire test from ac04c7ad continues to cover the shared request-input copy path."
+}

@@ -107,6 +107,18 @@ test "gRPC RDS rewrites matched prefixes and literal or header authorities" {
     defer whole_snapshot.release();
     const whole = try whole_snapshot.selectWith(gpa, .{ .path = "/demo.Service/Get", .authority = "backend.test" }, 1, prng.random());
     try std.testing.expectEqualStrings("/only", whole.path_rewrite.?.whole);
+
+    var literal_action = fixture.Builder{ .allocator = gpa };
+    defer literal_action.deinit();
+    try literal_action.bytes(44, "literal.example");
+    try literal_action.bytes(45, "/literal.Service/Get");
+    const literal_bytes = try fixture.encode(gpa, "routes", &.{"backend.test"}, &.{.{ .prefix = "/", .action_extra = literal_action.data.items }}, null);
+    defer gpa.free(literal_bytes);
+    const literal_snapshot = try rds.Snapshot.create(gpa, literal_bytes, .{}, .{ .authority = "backend.test" });
+    defer literal_snapshot.release();
+    const literal = try literal_snapshot.selectWith(gpa, .{ .path = "/demo.Service/Get", .authority = "backend.test" }, 1, prng.random());
+    try std.testing.expectEqualStrings("literal.example", literal.authority.?);
+    try std.testing.expectEqualStrings("/literal.Service/Get", literal.path_rewrite.?.whole);
 }
 test "gRPC RDS rejects unsupported regex and format rewrites" {
     var action = fixture.Builder{ .allocator = gpa };

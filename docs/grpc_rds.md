@@ -58,16 +58,18 @@ hash sources are ignored as in grpc-core. Hash regex rewriting is explicitly
 rejected until capture/substitution is implemented. Cluster/hash attributes
 remain internal request options and never become application wire metadata.
 
-`prefix_rewrite` and `host_rewrite_literal`/`host_rewrite_header` are applied
+`prefix_rewrite`, literal `path_rewrite`, and
+`host_rewrite_literal`/`host_rewrite_header`/literal `host_rewrite` are applied
 when the selected request inputs are copied. A prefix rewrite replaces the
 matched route prefix; for a non-prefix path match it replaces the complete
 path. A header host rewrite uses the first visible value, including the
 `:authority`, `:path`, `:method` and `:scheme` pseudo-headers. Rewritten paths
 and authorities are bounded by the selector's `max_header_bytes` before any
 copy. The rewrite descriptor is internal: it is consumed by unary, streaming
-and retry input ownership and never becomes application metadata. Regex,
-format-substitution (`path_rewrite`), policy and automatic-host rewrites fail
-validation instead of being ignored.
+and retry input ownership and never becomes application metadata. Regex
+rewrites, `path_rewrite`/`host_rewrite` values containing format specifiers,
+policy rewrites and automatic-host rewrites fail validation instead of being
+ignored.
 
 Route timeout prefers grpc_timeout_header_max to max_stream_duration; zero
 disables the route/HCM cap, preserving the caller's deadline. An absent route
