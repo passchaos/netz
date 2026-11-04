@@ -7,7 +7,25 @@ const service = @import("../../service_config.zig");
 const wire = @import("../../wire.zig");
 pub const Error = model.Error || selector.Error || error{InvalidRdsOptions};
 pub const Options = struct { authority: []const u8, max_header_bytes: usize = 65536, default_max_stream_duration: ?std.Io.Duration = null };
-pub const Selection = struct { cluster: []const u8, hash: u64, duration: ?std.Io.Duration, retry: ?@import("../../call.zig").RetryPolicy };
+pub const Selection = struct {
+    cluster: []const u8,
+    hash: u64,
+    duration: ?std.Io.Duration,
+    retry: ?@import("../../call.zig").RetryPolicy,
+    path_rewrite: ?@import("../../call.zig").PathRewrite = null,
+    authority: ?[]const u8 = null,
+};
+fn firstHeader(request: routing.header.Request, name: []const u8) ?[]const u8 {
+    if (std.ascii.eqlIgnoreCase(name, ":authority")) return request.authority;
+    if (std.ascii.eqlIgnoreCase(name, ":path")) return request.path;
+    if (std.ascii.eqlIgnoreCase(name, ":method")) return "POST";
+    if (std.ascii.eqlIgnoreCase(name, ":scheme")) return request.scheme;
+    if (std.mem.endsWith(u8, name, "-bin")) return null;
+    for (request.metadata) |field| {
+        if (std.ascii.eqlIgnoreCase(field.name, name)) return field.value;
+    }
+    return null;
+}
 pub const Snapshot = struct {
     allocator: std.mem.Allocator,
     refs: std.atomic.Value(usize) = .init(1),
@@ -81,6 +99,32 @@ pub const Snapshot = struct {
             if (route.fraction_per_million) |fraction| if (random.uintLessThan(u32, 1000000) >= fraction) continue;
             if (route.action != .forward) return error.InvalidRouteAction;
             const forward = route.action.forward;
+            var path_rewrite: ?@import("../../call.zig").PathRewrite = null;
+            if (forward.path_rewrite) |rewrite| {
+                path_rewrite = switch (rewrite) {
+                    .prefix => |replacement| switch (route.path) {
+                        .prefix => |literal| .{ .prefix = .{
+                            .matched = literal.text.len,
+                            .replacement = replacement,
+                        } },
+                        else => .{ .whole = replacement },
+                    },
+                    .whole => |value| .{ .whole = value },
+                };
+                if (path_rewrite.?.outputLen(request.path.len) > request.max_header_bytes) {
+                    return error.RouteMetadataLimitExceeded;
+                }
+            }
+            var authority: ?[]const u8 = null;
+            if (forward.host_rewrite) |rewrite| switch (rewrite) {
+                .literal => |value| authority = value,
+                .header => |name| authority = firstHeader(request, name),
+            };
+            if (authority) |value| {
+                if (value.len > request.max_header_bytes) {
+                    return error.RouteMetadataLimitExceeded;
+                }
+            }
             var key = random.uintLessThan(u32, forward.total_weight);
             const cluster = for (forward.clusters) |candidate| {
                 if (key < candidate.weight) break candidate.key;
@@ -99,7 +143,14 @@ pub const Snapshot = struct {
                 if (next) |value| hash = (if (hash) |previous| std.math.rotl(u64, previous, 1) else @as(u64, 0)) ^ value;
                 if (policy.terminal and hash != null) break;
             }
-            return .{ .cluster = cluster, .hash = hash orelse random.int(u64), .duration = forward.max_stream_duration orelse self.options.default_max_stream_duration, .retry = forward.retry_policy };
+            return .{
+                .cluster = cluster,
+                .hash = hash orelse random.int(u64),
+                .duration = forward.max_stream_duration orelse self.options.default_max_stream_duration,
+                .retry = forward.retry_policy,
+                .path_rewrite = path_rewrite,
+                .authority = authority,
+            };
         }
         return error.NoMatchingRoute;
     }
@@ -113,6 +164,8 @@ pub const Snapshot = struct {
         var selected = options;
         selected.xds_cluster = selection.cluster;
         selected.request_hash = selection.hash;
+        selected.xds_path_rewrite = selection.path_rewrite;
+        if (selection.authority) |authority| selected.authority = authority;
         if (selection.duration) |limit| if (limit.nanoseconds > 0) {
             const duration: std.Io.Duration = if (options.timeout) |timeout| .fromNanoseconds(@min(timeout.duration().nanoseconds, limit.nanoseconds)) else limit;
             selected.timeout = try wire.Timeout.fromDuration(duration);

@@ -211,6 +211,41 @@ fn parseUnaryRequestParts(
     };
 }
 
+/// Internal xDS route path rewrite. It is consumed while request inputs are
+/// copied and never becomes application metadata.
+pub const PathRewrite = union(enum) {
+    /// Replace the complete request path.
+    whole: []const u8,
+    /// Replace the matched route prefix with `replacement`.
+    prefix: struct { matched: usize, replacement: []const u8 },
+
+    pub fn outputLen(self: PathRewrite, original_len: usize) usize {
+        return switch (self) {
+            .whole => |value| value.len,
+            .prefix => |value| value.replacement.len +
+                (original_len - @min(value.matched, original_len)),
+        };
+    }
+
+    pub fn write(self: PathRewrite, original: []const u8, output: []u8) []const u8 {
+        return switch (self) {
+            .whole => |value| blk: {
+                @memcpy(output[0..value.len], value);
+                break :blk output[0..value.len];
+            },
+            .prefix => |value| blk: {
+                const matched = @min(value.matched, original.len);
+                @memcpy(output[0..value.replacement.len], value.replacement);
+                @memcpy(
+                    output[value.replacement.len..][0 .. original.len - matched],
+                    original[matched..],
+                );
+                break :blk output[0 .. value.replacement.len + original.len - matched];
+            },
+        };
+    }
+};
+
 pub const UnaryCallOptions = struct {
     path: []const u8,
     authority: ?[]const u8 = null,
@@ -233,6 +268,8 @@ pub const UnaryCallOptions = struct {
     request_hash: ?u64 = null,
     /// RPC-local xDS cluster attribute. It is never serialized as a header.
     xds_cluster: ?[]const u8 = null,
+    /// Internal xDS route path rewrite applied when request inputs are copied.
+    xds_path_rewrite: ?PathRewrite = null,
     /// Retry one REFUSED_STREAM before response commitment without charging a
     /// configured retry attempt. Disable for explicit single-attempt probes.
     transparent_retry: bool = true,

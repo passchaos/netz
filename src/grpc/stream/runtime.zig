@@ -39,6 +39,8 @@ pub const RequestOptions = struct {
     request_hash: ?u64 = null,
     /// RPC-local xDS cluster attribute. It is never serialized as a header.
     xds_cluster: ?[]const u8 = null,
+    /// Internal xDS route path rewrite applied when request inputs are copied.
+    xds_path_rewrite: ?call.PathRewrite = null,
     metadata: []const http2.Hpack.HeaderField = &.{},
     binary_metadata: []const metadata.BinaryMetadata = &.{},
     /// Compatibility ceiling used for both directions unless a directional

@@ -55,3 +55,116 @@ test "gRPC RDS automatic shared unary and streaming routing retains snapshot own
     try a_peer.await(io);
     try b_peer.await(io);
 }
+test "gRPC RDS rewrites path and authority on the wire" {
+    const RewritePeer = struct {
+        fn run(listener: *grpc.runtime.Server, stop: *std.Io.Event) !void {
+            var connection = try listener.acceptWithTimeout(.fromSeconds(5));
+            defer connection.deinit();
+            while (!stop.isSet()) {
+                var request = connection.acceptDuplexWithTimeout(.fromMilliseconds(100)) catch |err| switch (err) {
+                    error.Timeout => continue,
+                    error.ConnectionClosed,
+                    error.ConnectionResetByPeer,
+                    error.SocketUnconnected,
+                    error.UnexpectedEof,
+                    => return,
+                    else => return err,
+                };
+                defer request.deinit();
+                const Consumer = struct {
+                    seen: *bool,
+                    fn consume(self: *@This(), message: grpc.StreamingMessage) !void {
+                        if (self.seen.* or
+                            !std.mem.eql(u8, "request", message.payload))
+                        {
+                            return error.UnexpectedPayload;
+                        }
+                        self.seen.* = true;
+                    }
+                };
+                var seen = false;
+                var consumer = Consumer{ .seen = &seen };
+                while (true) {
+                    var event = try request.readRequestEventWithTimeout(
+                        .fromSeconds(3),
+                        &consumer,
+                        Consumer.consume,
+                    );
+                    defer event.deinit();
+                    switch (event) {
+                        .messages => {},
+                        .finished => break,
+                        .reset => return error.UnexpectedReset,
+                    }
+                }
+                if (!seen) return error.UnexpectedPayload;
+                var reply: [512]u8 = undefined;
+                const text = try std.fmt.bufPrint(
+                    &reply,
+                    "{s}\n{s}",
+                    .{ request.path, request.transport.authority orelse "" },
+                );
+                try request.startResponse(.{});
+                if (try request.writeMessage(text) != .complete) {
+                    return error.UnexpectedFlowControl;
+                }
+                try request.finishOk();
+            }
+        }
+    };
+    var threaded = std.Io.Threaded.init(gpa, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try grpc.runtime.Server.listen(gpa, io, .{ .ip4 = .loopback(0) }, .{}, 4096);
+    defer server.deinit();
+    var stop: std.Io.Event = .unset;
+    var peer = io.async(RewritePeer.run, .{ &server, &stop });
+    defer _ = peer.cancel(io) catch {};
+    const endpoints = [_]grpc.ChannelEndpoint{.{ .cleartext_ip = .{
+        .address = server.address(),
+        .hierarchical_path = &.{"cluster:a"},
+    } }};
+    var client = try grpc.SharedChannel.init(
+        gpa,
+        io,
+        .{ .resolved = .{ .endpoints = &endpoints } },
+        .{ .service_config_json = config },
+    );
+    var live = true;
+    defer if (live) client.deinit();
+    var sender = client.sender();
+    defer sender.deinit();
+    var action = fixture.Builder{ .allocator = gpa };
+    defer action.deinit();
+    try action.bytes(5, "/api");
+    try action.bytes(6, "rewritten.example");
+    const bytes = try fixture.encode(
+        gpa,
+        "routes",
+        &.{"backend.test"},
+        &.{.{ .prefix = "/demo", .action_extra = action.data.items }},
+        null,
+    );
+    defer gpa.free(bytes);
+    const snapshot = try rds.Snapshot.create(gpa, bytes, .{}, .{ .authority = "backend.test" });
+    _ = try snapshot.publishWithDeadline(
+        client,
+        .fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(3) }),
+    );
+    snapshot.release();
+    var response = try sender.unary(.{
+        .path = "/demo.Service/Get",
+        .message = "request",
+        .wait_for_ready = true,
+        .timeout = .{ .value = 3, .unit = .second },
+    });
+    defer response.deinit();
+    try std.testing.expectEqualStrings(
+        "/api.Service/Get\nrewritten.example",
+        response.message.?.payload,
+    );
+    client.deinit();
+    live = false;
+    stop.set(io);
+    try peer.await(io);
+}

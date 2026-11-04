@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "date": "2026-11-04",
+  "head": "ead4ce42",
+  "subject": "RDS literal prefix and authority rewrites",
+  "change": "RDS RouteAction now decodes prefix_rewrite, host_rewrite_literal and host_rewrite_header. The selector records the rewrite once per RPC and the shared request-input copy applies it to the owned path/authority before unary or streaming admission. A prefix match replaces only the matched route prefix; other path matches replace the complete path. A header authority rewrite uses the first visible value, including pseudo-headers. Rewritten values are bounded by the selector max_header_bytes. Regex, format-substitution, policy and automatic-host rewrites fail validation instead of being silently ignored; deprecated top-level timeout offsets and routing priority also fail closed.",
+  "tests": {
+    "unit": "src/grpc/xds/rds/tests.zig 'gRPC RDS rewrites matched prefixes and literal or header authorities' and 'gRPC RDS rejects unsupported regex and format rewrites'",
+    "wire": "src/grpc/xds/rds/transport_tests.zig 'gRPC RDS rewrites path and authority on the wire' starts a real gRPC server, routes a unary RPC through SharedChannel, and asserts the server observed /api.Service/Get and rewritten.example",
+    "test_lib": {
+      "command": "zig build test-lib -Dtest-filter='gRPC RDS' --summary all",
+      "passed": 174,
+      "total": 174,
+      "failed": 0,
+      "note": "Focused RDS selector, decoder, lifecycle and transport gate. A full test-lib run on the same worktree reached 6433/6434 with only the known host-load-sensitive WebSocket rejection timing failure; a later full run under heavier host load added unrelated WebSocket/SOCKS5/LRS timing failures."
+    },
+    "test_package": {
+      "passed": 26,
+      "total": 26,
+      "failed": 0
+    }
+  },
+  "source_sha256": {
+    "src/grpc/call.zig": "ee5f0465eb300f35d9df57e680af5712140164f3005945d2259354a81a26b891",
+    "src/grpc/stream/runtime.zig": "9a712444ee6f4b28541f596a1d0123e4c12701a47b429c57797ca517f8d63390",
+    "src/grpc/channel/shared/request_inputs.zig": "e93ee96066f6573b0c27ff25b076314636bac02b3609c6507e06093a71c2f31e",
+    "src/grpc/xds/rds/model.zig": "44aea186b8538ee89f2f5ba996a6a5a6a3b44e51aac831888e5ddb3a7b9e773d",
+    "src/grpc/xds/rds/action.zig": "f20f3754e47a4a2ccbd34cf5985d571e21f81dd1ae788db027fa6304a464b350",
+    "src/grpc/xds/rds/snapshot.zig": "bfbc828afce2e58d76a07dcdaaae14f6e7fa2c4836981225e143ca0c45e29596",
+    "src/grpc/xds/rds/tests.zig": "b3e2ca60ea074989ce0bced3aea88972f4ba2b0be82d277a21ca71e4ed2cab4c",
+    "src/grpc/xds/rds/transport_tests.zig": "3a23724b409466df8b738c0bc69a182acd188b902a681317ef25868bc949b10b",
+    "docs/grpc_rds.md": "67c54319dacf01f44985848fb61ddf743522bdb79964cc333ea32c38cb4fa15f",
+    "docs/grpc_parity.md": "18ec3862b55d1d37857e1fb77d3a0b912d610e3b6d1dbd803a8844728d3e48d1"
+  },
+  "notes": "The rewrite descriptor is internal request state. It is cleared by the owned-input copy, so retries and hedged attempts apply the rewrite exactly once to the original application path."
+}

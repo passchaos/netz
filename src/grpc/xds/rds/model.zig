@@ -20,6 +20,18 @@ pub const Limits = struct {
 };
 pub const Weighted = struct { name: []const u8, key: []const u8, weight: u32 };
 pub const HashPolicy = struct { kind: union(enum) { header: []const u8, channel_id }, terminal: bool };
+pub const PathRewrite = union(enum) {
+    /// Replace the complete request path.
+    whole: []const u8,
+    /// Replace the matched route prefix.
+    prefix: []const u8,
+};
+pub const HostRewrite = union(enum) {
+    /// Replace `:authority` with this literal.
+    literal: []const u8,
+    /// Replace `:authority` with the first value of this request header.
+    header: []const u8,
+};
 pub const Forward = struct {
     clusters: []const Weighted,
     total_weight: u32,
@@ -27,6 +39,8 @@ pub const Forward = struct {
     max_stream_duration: ?std.Io.Duration,
     retry_policy: ?@import("../../call.zig").RetryPolicy,
     retry_present: bool,
+    path_rewrite: ?PathRewrite = null,
+    host_rewrite: ?HostRewrite = null,
 };
 pub const Route = struct {
     path: routing.string.Match,

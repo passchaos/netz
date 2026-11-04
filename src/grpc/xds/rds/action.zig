@@ -63,6 +63,11 @@ fn timeout(bytes: []const u8) pb.Error!?std.Io.Duration {
     }
     return grpc orelse maximum;
 }
+fn rewriteText(reader: *pb.Reader, maximum: usize) pb.Error![]const u8 {
+    const value = try pb.text(reader, maximum);
+    for (value) |byte| if (byte < 0x20 or byte == 0x7f) return error.InvalidRdsResource;
+    return value;
+}
 pub fn decode(p: anytype, bytes: []const u8) pb.Error!?model.Forward {
     var reader = pb.Reader{ .bytes = bytes };
     var specifier: ?u32 = null;
@@ -71,6 +76,8 @@ pub fn decode(p: anytype, bytes: []const u8) pb.Error!?model.Forward {
     var duration: ?std.Io.Duration = null;
     var retry: ?@import("../../call.zig").RetryPolicy = null;
     var retry_present = false;
+    var path_rewrite: ?model.PathRewrite = null;
+    var host_rewrite: ?model.HostRewrite = null;
     var policies: std.ArrayList(model.HashPolicy) = .empty;
     defer policies.deinit(p.allocator);
     var hash_count: usize = 0;
@@ -91,7 +98,27 @@ pub fn decode(p: anytype, bytes: []const u8) pb.Error!?model.Forward {
             if (hash_count >= p.limits.max_hash_policies) return error.RdsLimitExceeded;
             hash_count += 1;
             if (try hash(p, try reader.bytesValue())) |policy| try policies.append(p.allocator, policy);
-        } else if ((field.number == 6 or field.number == 11 or field.number == 29 or field.number == 35) and field.wire_type == 2) return error.UnsupportedRdsFeature else try reader.skip(field);
+        } else if (field.number == 5 and field.wire_type == 2) {
+            if (path_rewrite != null) return error.InvalidRdsResource;
+            path_rewrite = .{ .prefix = try rewriteText(&reader, p.limits.max_text_bytes) };
+        } else if (field.number == 6 and field.wire_type == 2) {
+            if (host_rewrite != null) return error.InvalidRdsResource;
+            const value = try rewriteText(&reader, p.limits.max_text_bytes);
+            if (value.len == 0) return error.InvalidRdsResource;
+            host_rewrite = .{ .literal = value };
+        } else if (field.number == 29 and field.wire_type == 2) {
+            if (host_rewrite != null) return error.InvalidRdsResource;
+            const value = try rewriteText(&reader, p.limits.max_text_bytes);
+            if (value.len == 0) return error.InvalidRdsResource;
+            host_rewrite = .{ .header = value };
+        } else if (field.number == 7 or field.number == 32 or
+            field.number == 35 or field.number == 41 or
+            field.number == 44 or field.number == 45 or
+            field.number == 23 or field.number == 28 or
+            field.number == 11)
+        {
+            return error.UnsupportedRdsFeature;
+        } else try reader.skip(field);
     }
     const kind = specifier orelse return error.InvalidRdsResource;
     if (kind != 1 and kind != 3) return null;
@@ -104,5 +131,14 @@ pub fn decode(p: anytype, bytes: []const u8) pb.Error!?model.Forward {
     };
     var total: u32 = 0;
     for (clusters) |cluster| total += cluster.weight;
-    return .{ .clusters = clusters, .total_weight = total, .hash_policies = try policies.toOwnedSlice(p.allocator), .max_stream_duration = duration, .retry_policy = retry, .retry_present = retry_present };
+    return .{
+        .clusters = clusters,
+        .total_weight = total,
+        .hash_policies = try policies.toOwnedSlice(p.allocator),
+        .max_stream_duration = duration,
+        .retry_policy = retry,
+        .retry_present = retry_present,
+        .path_rewrite = path_rewrite,
+        .host_rewrite = host_rewrite,
+    };
 }
