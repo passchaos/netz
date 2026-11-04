@@ -34,7 +34,15 @@ pub const Active = struct {
     pub fn finish(self: *Active, terminal: duplex.Response) !call.UnaryResponse {
         if (terminal.status == .ok and self.count != 1) return error.InvalidMessageCount;
         const body: []u8 = self.body orelse &.{};
-        const head = terminal.head;
+        var head = terminal.head;
+        if (head) |*value| {
+            value.headers = try call.rewriteResponseHeaders(
+                self.stream.allocator,
+                value.headers,
+                self.job.options.xds_response_header_mutations,
+                self.job.options.xds_response_header_removals,
+            );
+        }
         const trailers_only = if (head) |value| call.headerValue(value.headers, "grpc-status") != null else false;
         const response: call.UnaryResponse = .{
             .allocator = self.stream.allocator,

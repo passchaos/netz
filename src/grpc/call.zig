@@ -289,6 +289,10 @@ pub const UnaryCallOptions = struct {
     xds_request_header_mutations: []const HeaderMutation = &.{},
     /// Internal xDS request-header removals applied before additions.
     xds_request_header_removals: []const []const u8 = &.{},
+    /// Internal xDS response-header additions applied to received metadata.
+    xds_response_header_mutations: []const HeaderMutation = &.{},
+    /// Internal xDS response-header removals applied before additions.
+    xds_response_header_removals: []const []const u8 = &.{},
     /// Internal xDS `auto_host_rewrite`: use the selected endpoint authority
     /// as the outbound `:authority`.
     xds_auto_host_rewrite: bool = false,
@@ -1110,6 +1114,88 @@ pub fn headerValue(
     name: []const u8,
 ) ?[]const u8 {
     return findHeader(headers, name);
+}
+
+/// Apply xDS response-header mutations to an owned HTTP/2 header block. The
+/// original block is freed only after every replacement allocation succeeds.
+/// The returned slice is owned by `allocator` and can be passed to the normal
+/// HTTP/2 response deinitializer.
+pub fn rewriteResponseHeaders(
+    allocator: std.mem.Allocator,
+    headers: []http2.Hpack.HeaderField,
+    mutations: []const HeaderMutation,
+    removals: []const []const u8,
+) std.mem.Allocator.Error![]http2.Hpack.HeaderField {
+    if (mutations.len == 0 and removals.len == 0) return headers;
+    var staged: std.ArrayList(http2.Hpack.HeaderField) = .empty;
+    defer staged.deinit(allocator);
+    const capacity = std.math.add(usize, headers.len, mutations.len) catch
+        return error.OutOfMemory;
+    try staged.ensureTotalCapacity(allocator, capacity);
+    for (headers) |field| {
+        var removed = false;
+        for (removals) |name| {
+            if (std.ascii.eqlIgnoreCase(field.name, name)) {
+                removed = true;
+                break;
+            }
+        }
+        if (!removed) staged.appendAssumeCapacity(field);
+    }
+    for (mutations) |mutation| {
+        const present = findHeader(staged.items, mutation.name) != null;
+        switch (mutation.action) {
+            .append => {},
+            .add_if_absent => if (present) continue,
+            .overwrite => removeStagedHeader(&staged, mutation.name),
+            .overwrite_if_exists => {
+                if (!present) continue;
+                removeStagedHeader(&staged, mutation.name);
+            },
+        }
+        staged.appendAssumeCapacity(.{
+            .name = mutation.name,
+            .value = mutation.value,
+            .never_index = false,
+        });
+    }
+    const owned = try allocator.alloc(http2.Hpack.HeaderField, staged.items.len);
+    var written: usize = 0;
+    errdefer {
+        for (owned[0..written]) |field| {
+            allocator.free(field.value);
+            allocator.free(field.name);
+        }
+        allocator.free(owned);
+    }
+    for (staged.items, owned) |field, *out| {
+        const name = try allocator.dupe(u8, field.name);
+        const value = allocator.dupe(u8, field.value) catch |err| {
+            allocator.free(name);
+            return err;
+        };
+        out.* = .{
+            .name = name,
+            .value = value,
+            .never_index = field.never_index,
+        };
+        written += 1;
+    }
+    http2.runtime.freeHeaderFields(allocator, headers);
+    return owned;
+}
+
+fn removeStagedHeader(
+    staged: *std.ArrayList(http2.Hpack.HeaderField),
+    name: []const u8,
+) void {
+    var write: usize = 0;
+    for (staged.items) |field| {
+        if (std.ascii.eqlIgnoreCase(field.name, name)) continue;
+        staged.items[write] = field;
+        write += 1;
+    }
+    staged.items.len = write;
 }
 
 pub const statusFromHttp = response_metadata.statusFromHttp;

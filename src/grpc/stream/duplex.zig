@@ -202,6 +202,8 @@ pub const ClientDuplex = struct {
     receive_mode: ReceiveMode = .unselected,
     deadline: ?std.Io.Clock.Timestamp = null,
     completion_observer: ?*completion.Observer = null,
+    response_header_mutations: []const call.HeaderMutation = &.{},
+    response_header_removals: []const []const u8 = &.{},
 
     pub fn deinit(self: *ClientDuplex) void {
         self.finishCompletion(false);
@@ -703,12 +705,16 @@ pub const ClientDuplex = struct {
         head: http2.runtime.DuplexResponseHead,
     ) Error!void {
         if (self.response_head != null) return error.InvalidStreamState;
-        errdefer {
-            var owned = head;
-            owned.deinit(self.allocator);
-        }
-        self.parse_response_body = response_metadata.parseBody(head.status, head.headers, &.{});
-        self.response_encoding = if (self.parse_response_body) call.headerValue(head.headers, "grpc-encoding") else null;
+        var owned = head;
+        errdefer owned.deinit(self.allocator);
+        owned.headers = try call.rewriteResponseHeaders(
+            self.allocator,
+            owned.headers,
+            self.response_header_mutations,
+            self.response_header_removals,
+        );
+        self.parse_response_body = response_metadata.parseBody(owned.status, owned.headers, &.{});
+        self.response_encoding = if (self.parse_response_body) call.headerValue(owned.headers, "grpc-encoding") else null;
         if (self.parse_response_body) {
             self.decoder = try codec.Decoder.init(
                 self.allocator,
@@ -717,7 +723,7 @@ pub const ClientDuplex = struct {
                 self.accepted_encodings,
             );
         }
-        self.response_head = head;
+        self.response_head = owned;
     }
 
     fn finishResponseDecoder(self: *ClientDuplex) Error!void {
@@ -922,6 +928,8 @@ fn clientFromTransport(
         .accepted_encodings = options.accepted_encodings,
         .max_message_size = options.responseMessageLimit(),
         .deadline = started.deadline,
+        .response_header_mutations = options.xds_response_header_mutations,
+        .response_header_removals = options.xds_response_header_removals,
     };
 }
 

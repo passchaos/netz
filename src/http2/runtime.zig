@@ -23815,6 +23815,15 @@ fn freeHeaders(allocator: std.mem.Allocator, headers: []http2.Hpack.HeaderField)
     allocator.free(headers);
 }
 
+/// Free a runtime-owned header block produced by the HTTP/2 layer or by
+/// `grpc.call.rewriteResponseHeaders`.
+pub fn freeHeaderFields(
+    allocator: std.mem.Allocator,
+    headers: []http2.Hpack.HeaderField,
+) void {
+    freeHeaders(allocator, headers);
+}
+
 pub const testing = struct {
     pub fn enablePeerExtensiblePriorities(
         connection: *Connection,

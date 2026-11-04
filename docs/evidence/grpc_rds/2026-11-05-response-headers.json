@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "date": "2026-11-05",
+  "head": "13e2ca10",
+  "subject": "RDS response header additions and removals",
+  "change": "Route-level response_headers_to_add and response_headers_to_remove are decoded, retained by the selector, copied into owned RPC state, and applied to received response metadata. Unary responses rewrite the owned HTTP/2 head in Active.finish; streaming and duplex responses rewrite the head in ClientDuplex.beginResponse before gRPC status/body parsing. Additions support append, add-if-absent, overwrite and overwrite-if-exists; removals run first and names match case-insensitively. The original header block is freed only after the replacement block is fully allocated, so allocation failure leaves the original response intact for normal cleanup.",
+  "tests": {
+    "decode_and_selection": "src/grpc/xds/rds/tests.zig 'gRPC RDS owns literal response header mutations and removals' checks fields 10/11, action decoding and selection projection.",
+    "owned_copy": "src/grpc/channel/shared/request_inputs.zig 'shared request inputs apply xDS header mutations and removals' now includes response mutations/removals and verifies the owned copies survive the caller's source slices.",
+    "wire": "src/grpc/xds/rds/transport_tests.zig 'gRPC RDS rewrites path and authority on the wire' now sends x-response: original from the server, applies an RDS overwrite to mutated, and asserts the client's OwnedResponse headers contain mutated.",
+    "focused_gate": {
+      "command": "zig build test-lib -Dtest-filter='gRPC RDS' --summary all",
+      "passed": 178,
+      "total": 178,
+      "failed": 0
+    },
+    "grpc_gate": {
+      "command": "zig build test-lib -Dtest-filter='gRPC' --summary all",
+      "passed": 735,
+      "total": 735,
+      "failed": 0
+    },
+    "package": {
+      "command": "zig build test-package --summary all",
+      "passed": 26,
+      "total": 26,
+      "failed": 0
+    }
+  },
+  "source_sha256": {
+    "src/grpc/call.zig": "fa890d75fc3e173ecdc2f6d567f8fa19b470c00907e054f09b4e2274975e1b37",
+    "src/grpc/stream/runtime.zig": "b70a801517ffcace9266bb4673c79b55d7c59c8c2a037bbabcd9172c3f50a7c0",
+    "src/grpc/stream/duplex.zig": "867e0dfdd8e2784edbbf901d3a2e131791f2870dd84bb58ab3134ca4a764a9b5",
+    "src/grpc/channel/shared/active.zig": "416fcd0ee00e0be4b8e9c2206c81bd58d505ed9138af52902b9d7bcc7467c64d",
+    "src/grpc/channel/shared/request_inputs.zig": "44405984352ea4ca4c4a7f43dd7756e5bed56754d88399c6fd18c68e8293836d",
+    "src/grpc/xds/rds/model.zig": "cd6de818be61a3ddb9e03fdeee58c8ca385dc2abf8a19c9bbd491c5ad47e1cf1",
+    "src/grpc/xds/rds/decode.zig": "27255b5779bb59d1697b55bed1ec505e84aaf949c471625bbaf9450184501da1",
+    "src/grpc/xds/rds/snapshot.zig": "d3e41feb82f7b5332f88d39403bf87aae51f0276325658250cea77f7df1d7b6f",
+    "src/grpc/xds/rds/tests.zig": "437a6c912c57c373e6aae8a36d06f57f9c5fa04b1b5b0b4902ff06cd1cacdf5a",
+    "src/grpc/xds/rds/transport_tests.zig": "8a1c2c8d4b5cd32a71e5b7ce1f09d08e695651198fde32830e671a21ba0b8ffc",
+    "src/http2/runtime.zig": "4a43e84b6d6a5146e0a5b59dd8a6fe8ea174d6ecbc78a1f518995d974d88eb02",
+    "docs/grpc_rds.md": "77c15b616c10d5fa6aceeb06bb2abd4925f0a19d7cadf5b4a552c1d3ac025440",
+    "docs/grpc_parity.md": "e8964b1c509a74d282b5546a11284f4e51bfa76524029cdac46974d5e52944d4"
+  },
+  "notes": "Response mutation names still use the non-binary gRPC metadata rules, so grpc-status/message, content-type, te, pseudo-headers and -bin names are rejected. Regex/format rewrites, HTTP filter overrides and non-router filters remain open."
+}

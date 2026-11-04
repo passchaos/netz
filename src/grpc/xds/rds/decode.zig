@@ -116,6 +116,10 @@ const Parser = struct {
         defer headers_to_add.deinit(self.allocator);
         var headers_to_remove: std.ArrayList([]const u8) = .empty;
         defer headers_to_remove.deinit(self.allocator);
+        var response_headers_to_add: std.ArrayList(@import("../../call.zig").HeaderMutation) = .empty;
+        defer response_headers_to_add.deinit(self.allocator);
+        var response_headers_to_remove: std.ArrayList([]const u8) = .empty;
+        defer response_headers_to_remove.deinit(self.allocator);
         while (try reader.next()) |field| {
             if (field.number == 1 and field.wire_type == 2) raw_match = try reader.bytesValue() else if (field.number == 2 and field.wire_type == 2) raw_action = try reader.bytesValue() else if ((field.number == 3 or field.number == 7 or field.number == 17 or field.number == 18 or field.number == 19) and field.wire_type == 2) {
                 _ = try reader.bytesValue();
@@ -134,6 +138,20 @@ const Parser = struct {
                 const name = try pb.text(&reader, self.limits.max_text_bytes);
                 if (!headerNameValid(name)) return error.InvalidRdsResource;
                 try headers_to_remove.append(self.allocator, name);
+            } else if (field.number == 10 and field.wire_type == 2) {
+                if (response_headers_to_add.items.len >= self.limits.max_headers_per_route) {
+                    return error.RdsLimitExceeded;
+                }
+                if (try self.headerMutation(try reader.bytesValue())) |mutation| {
+                    try response_headers_to_add.append(self.allocator, mutation);
+                }
+            } else if (field.number == 11 and field.wire_type == 2) {
+                if (response_headers_to_remove.items.len >= self.limits.max_headers_per_route) {
+                    return error.RdsLimitExceeded;
+                }
+                const name = try pb.text(&reader, self.limits.max_text_bytes);
+                if (!headerNameValid(name)) return error.InvalidRdsResource;
+                try response_headers_to_remove.append(self.allocator, name);
             } else if (field.number == 13 and field.wire_type == 2) return error.UnsupportedRdsFeature else try reader.skip(field);
         }
         const match = (try @import("match.zig").decode(self, raw_match orelse return error.InvalidRdsResource)) orelse return null;
@@ -150,6 +168,8 @@ const Parser = struct {
             .action = action,
             .request_headers_to_add = try headers_to_add.toOwnedSlice(self.allocator),
             .request_headers_to_remove = try headers_to_remove.toOwnedSlice(self.allocator),
+            .response_headers_to_add = try response_headers_to_add.toOwnedSlice(self.allocator),
+            .response_headers_to_remove = try response_headers_to_remove.toOwnedSlice(self.allocator),
         };
     }
     fn virtualHost(self: *Parser, bytes: []const u8) pb.Error!model.VirtualHost {

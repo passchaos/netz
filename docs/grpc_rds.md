@@ -81,6 +81,15 @@ only: `%` format specifiers, reserved gRPC/HTTP pseudo-headers, `content-type`,
 `te`, `grpc-*` and `-bin` names fail validation. Header mutations are internal
 request state and never survive as xDS attributes on the wire.
 
+Route-level `response_headers_to_add` and `response_headers_to_remove` follow
+the same literal-value and action rules. They are copied into owned RPC state
+so they remain valid after the selector generation is released, then applied
+to received response metadata before gRPC status parsing. Unary responses
+rewrite the owned HTTP/2 head; streaming and duplex responses rewrite the head
+in `ClientDuplex.beginResponse`. The original header block is freed only after
+the replacement block is fully allocated, so allocation failure leaves the
+original response intact for normal cleanup.
+
 Route timeout prefers grpc_timeout_header_max to max_stream_duration; zero
 disables the route/HCM cap, preserving the caller's deadline. An absent route
 cap can use Options.default_max_stream_duration. The selected cap and service
@@ -144,15 +153,15 @@ available through the automatic runtime. Bootstrap parsing and insecure
 control-plane failover are available; automatic multi-cluster CDS/EDS
 orchestration, certificate providers and automatic refresh scheduling, authority-specific control planes,
 LRS automatic background scheduling, capture/hash rewriting, HTTP filter
-overrides, response header mutations and regex/format path rewrites remain
-open.
+overrides and regex/format path rewrites remain open.
 Delta route TTL expiry is covered. Literal prefix/whole-path and authority
-rewrites, automatic endpoint authority rewriting, and literal request header
-additions/removals are covered by native selection, owned-input and on-wire
-tests. Unsupported recognized filter, rewrite, timeout-offset and plugin
-features fail validation; this module does not silently claim their deployment
-behavior. Evidence is recorded in
+rewrites, automatic endpoint authority rewriting, and literal request/response
+header additions/removals are covered by native selection, owned-input and
+on-wire tests. Unsupported recognized filter, rewrite, timeout-offset and
+plugin features fail validation; this module does not silently claim their
+deployment behavior. Evidence is recorded in
 `docs/evidence/grpc_rds/2026-11-04-rewrites.json`,
 `docs/evidence/grpc_rds/2026-11-04-literal-path-host.json`,
-`docs/evidence/grpc_rds/2026-11-04-request-headers.json` and
-`docs/evidence/grpc_rds/2026-11-05-auto-host-rewrite.json`.
+`docs/evidence/grpc_rds/2026-11-04-request-headers.json`,
+`docs/evidence/grpc_rds/2026-11-05-auto-host-rewrite.json` and
+`docs/evidence/grpc_rds/2026-11-05-response-headers.json`.

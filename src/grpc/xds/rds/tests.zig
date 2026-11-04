@@ -164,6 +164,37 @@ test "gRPC RDS owns literal request header mutations and removals" {
     try std.testing.expectEqual(@as(usize, 1), selected.request_header_mutations.len);
     try std.testing.expectEqual(@as(usize, 1), selected.request_header_removals.len);
 }
+test "gRPC RDS owns literal response header mutations and removals" {
+    var header = fixture.Builder{ .allocator = gpa };
+    defer header.deinit();
+    try header.bytes(1, "x-response");
+    try header.bytes(2, "mutated");
+    var option = fixture.Builder{ .allocator = gpa };
+    defer option.deinit();
+    try option.bytes(1, header.data.items);
+    try option.number(3, 2); // OVERWRITE_IF_EXISTS_OR_ADD
+    var route_extra = fixture.Builder{ .allocator = gpa };
+    defer route_extra.deinit();
+    try route_extra.bytes(10, option.data.items);
+    try route_extra.bytes(11, "x-response-remove");
+    const bytes = try fixture.encode(gpa, "routes", &.{"backend.test"}, &.{.{ .prefix = "/", .route_extra = route_extra.data.items }}, null);
+    defer gpa.free(bytes);
+    var owned = try rds.decode(gpa, bytes, .{});
+    defer owned.deinit();
+    const route = owned.value.virtual_hosts[0].routes[0];
+    try std.testing.expectEqual(@as(usize, 1), route.response_headers_to_add.len);
+    try std.testing.expectEqualStrings("x-response", route.response_headers_to_add[0].name);
+    try std.testing.expectEqualStrings("mutated", route.response_headers_to_add[0].value);
+    try std.testing.expectEqual(@import("../../call.zig").HeaderMutationAction.overwrite, route.response_headers_to_add[0].action);
+    try std.testing.expectEqual(@as(usize, 1), route.response_headers_to_remove.len);
+    try std.testing.expectEqualStrings("x-response-remove", route.response_headers_to_remove[0]);
+    const snapshot = try rds.Snapshot.create(gpa, bytes, .{}, .{ .authority = "backend.test" });
+    defer snapshot.release();
+    var prng = random();
+    const selected = try snapshot.selectWith(gpa, .{ .path = "/demo.Service/Get", .authority = "backend.test" }, 1, prng.random());
+    try std.testing.expectEqual(@as(usize, 1), selected.response_header_mutations.len);
+    try std.testing.expectEqual(@as(usize, 1), selected.response_header_removals.len);
+}
 test "gRPC RDS rejects reserved, binary and format request header mutations" {
     const Case = struct { key: []const u8, value: []const u8 = "v" };
     const cases = [_]Case{

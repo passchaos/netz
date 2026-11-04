@@ -1,5 +1,6 @@
 //! Request descriptions outlive callers when local interruption wins an RPC.
 const std = @import("std");
+const call = @import("../../call.zig");
 const Header = @import("../../../http2/mod.zig").Hpack.HeaderField;
 const Binary = @import("../../metadata.zig").BinaryMetadata;
 
@@ -8,8 +9,12 @@ pub const Inputs = struct {
     storage: []u8,
     metadata: []Header,
     binary_metadata: []Binary,
+    response_mutations: []call.HeaderMutation,
+    response_removals: [][]const u8,
 
     pub fn deinit(self: *Inputs) void {
+        if (self.response_removals.len != 0) self.allocator.free(self.response_removals);
+        if (self.response_mutations.len != 0) self.allocator.free(self.response_mutations);
         self.allocator.free(self.binary_metadata);
         self.allocator.free(self.metadata);
         self.allocator.free(self.storage);
@@ -34,6 +39,13 @@ pub fn clone(allocator: std.mem.Allocator, source: anytype) std.mem.Allocator.Er
         try add(&size, mutation.name.len);
         try add(&size, mutation.value.len);
     }
+    for (source.xds_response_header_mutations) |mutation| {
+        try add(&size, mutation.name.len);
+        try add(&size, mutation.value.len);
+    }
+    for (source.xds_response_header_removals) |name| {
+        try add(&size, name.len);
+    }
     for (source.binary_metadata) |field| {
         try add(&size, field.name.len);
         try add(&size, field.value.len);
@@ -44,6 +56,16 @@ pub fn clone(allocator: std.mem.Allocator, source: anytype) std.mem.Allocator.Er
     errdefer allocator.free(metadata);
     const binary = try allocator.alloc(Binary, source.binary_metadata.len);
     errdefer allocator.free(binary);
+    const response_mutations = if (source.xds_response_header_mutations.len == 0)
+        @as([]call.HeaderMutation, &.{})
+    else
+        try allocator.alloc(call.HeaderMutation, source.xds_response_header_mutations.len);
+    errdefer if (response_mutations.len != 0) allocator.free(response_mutations);
+    const response_removals = if (source.xds_response_header_removals.len == 0)
+        @as([][]const u8, &.{})
+    else
+        try allocator.alloc([]const u8, source.xds_response_header_removals.len);
+    errdefer if (response_removals.len != 0) allocator.free(response_removals);
     var options = source;
     var offset: usize = 0;
     options.path = if (source.xds_path_rewrite) |rewrite| blk: {
@@ -99,9 +121,28 @@ pub fn clone(allocator: std.mem.Allocator, source: anytype) std.mem.Allocator.Er
     options.xds_request_header_mutations = &.{};
     options.xds_request_header_removals = &.{};
     for (source.binary_metadata, binary) |field, *owned| owned.* = .{ .name = copy(storage, &offset, field.name), .value = copy(storage, &offset, field.value) };
+    for (source.xds_response_header_mutations, response_mutations) |mutation, *owned| {
+        owned.* = .{
+            .name = copy(storage, &offset, mutation.name),
+            .value = copy(storage, &offset, mutation.value),
+            .action = mutation.action,
+        };
+    }
+    for (source.xds_response_header_removals, response_removals) |name, *owned| {
+        owned.* = copy(storage, &offset, name);
+    }
     options.metadata = metadata[0..metadata_count];
     options.binary_metadata = binary;
-    return .{ .inputs = .{ .allocator = allocator, .storage = storage, .metadata = metadata, .binary_metadata = binary }, .options = options };
+    options.xds_response_header_mutations = response_mutations;
+    options.xds_response_header_removals = response_removals;
+    return .{ .inputs = .{
+        .allocator = allocator,
+        .storage = storage,
+        .metadata = metadata,
+        .binary_metadata = binary,
+        .response_mutations = response_mutations,
+        .response_removals = response_removals,
+    }, .options = options };
 }
 
 fn findHeader(headers: []const Header, name: []const u8) ?usize {
@@ -135,7 +176,6 @@ fn copy(storage: []u8, offset: *usize, bytes: []const u8) []const u8 {
 }
 
 test "shared request inputs apply xDS header mutations and removals" {
-    const call = @import("../../call.zig");
     const allocator = std.testing.allocator;
     const metadata = [_]Header{
         .{ .name = "x-keep", .value = "one" },
@@ -149,12 +189,18 @@ test "shared request inputs apply xDS header mutations and removals" {
         .{ .name = "x-missing", .value = "ignored", .action = .overwrite_if_exists },
     };
     const removals = [_][]const u8{"x-remove"};
+    const response_mutations = [_]call.HeaderMutation{
+        .{ .name = "x-response", .value = "mutated", .action = .overwrite },
+    };
+    const response_removals = [_][]const u8{"x-response-remove"};
     const source = call.UnaryCallOptions{
         .path = "/demo.Service/Get",
         .message = "request",
         .metadata = &metadata,
         .xds_request_header_mutations = &mutations,
         .xds_request_header_removals = &removals,
+        .xds_response_header_mutations = &response_mutations,
+        .xds_response_header_removals = &response_removals,
     };
     var cloned = try clone(allocator, source);
     defer cloned.inputs.deinit();
@@ -166,6 +212,12 @@ test "shared request inputs apply xDS header mutations and removals" {
     try std.testing.expect(headerValue(cloned.options.metadata, "x-missing") == null);
     try std.testing.expectEqual(@as(usize, 0), cloned.options.xds_request_header_mutations.len);
     try std.testing.expectEqual(@as(usize, 0), cloned.options.xds_request_header_removals.len);
+    try std.testing.expectEqual(@as(usize, 1), cloned.options.xds_response_header_mutations.len);
+    try std.testing.expectEqualStrings("x-response", cloned.options.xds_response_header_mutations[0].name);
+    try std.testing.expectEqualStrings("mutated", cloned.options.xds_response_header_mutations[0].value);
+    try std.testing.expectEqual(call.HeaderMutationAction.overwrite, cloned.options.xds_response_header_mutations[0].action);
+    try std.testing.expectEqual(@as(usize, 1), cloned.options.xds_response_header_removals.len);
+    try std.testing.expectEqualStrings("x-response-remove", cloned.options.xds_response_header_removals[0]);
 }
 
 fn headerValue(headers: []const Header, name: []const u8) ?[]const u8 {

@@ -104,7 +104,12 @@ test "gRPC RDS rewrites path and authority on the wire" {
                     "{s}\n{s}",
                     .{ request.path, request.transport.authority orelse "" },
                 );
-                try request.startResponse(.{});
+                try request.startResponse(.{
+                    .initial_metadata = &.{.{
+                        .name = "x-response",
+                        .value = "original",
+                    }},
+                });
                 if (try request.writeMessage(text) != .complete) {
                     return error.UnexpectedFlowControl;
                 }
@@ -168,11 +173,22 @@ test "gRPC RDS rewrites path and authority on the wire" {
     var auto_action = fixture.Builder{ .allocator = gpa };
     defer auto_action.deinit();
     try auto_action.wrapper(7, 1);
+    var response_header = fixture.Builder{ .allocator = gpa };
+    defer response_header.deinit();
+    try response_header.bytes(1, "x-response");
+    try response_header.bytes(2, "mutated");
+    var response_option = fixture.Builder{ .allocator = gpa };
+    defer response_option.deinit();
+    try response_option.bytes(1, response_header.data.items);
+    try response_option.number(3, 2);
+    var auto_route = fixture.Builder{ .allocator = gpa };
+    defer auto_route.deinit();
+    try auto_route.bytes(10, response_option.data.items);
     const auto_bytes = try fixture.encode(
         gpa,
         "routes",
         &.{"backend.test"},
-        &.{.{ .prefix = "/", .action_extra = auto_action.data.items }},
+        &.{.{ .prefix = "/", .action_extra = auto_action.data.items, .route_extra = auto_route.data.items }},
         null,
     );
     defer gpa.free(auto_bytes);
@@ -193,6 +209,13 @@ test "gRPC RDS rewrites path and authority on the wire" {
     try std.testing.expectEqualStrings(
         "/demo.Service/Auto\nendpoint.example",
         auto_response.message.?.payload,
+    );
+    try std.testing.expectEqualStrings(
+        "mutated",
+        grpc.call.headerValue(
+            auto_response.transport.?.headers,
+            "x-response",
+        ).?,
     );
 
     client.deinit();

@@ -46,6 +46,10 @@ pub const RequestOptions = struct {
     xds_request_header_mutations: []const call.HeaderMutation = &.{},
     /// Internal xDS request-header removals applied before additions.
     xds_request_header_removals: []const []const u8 = &.{},
+    /// Internal xDS response-header additions applied to received metadata.
+    xds_response_header_mutations: []const call.HeaderMutation = &.{},
+    /// Internal xDS response-header removals applied before additions.
+    xds_response_header_removals: []const []const u8 = &.{},
     /// Internal xDS `auto_host_rewrite`: use the selected endpoint authority
     /// as the outbound `:authority`.
     xds_auto_host_rewrite: bool = false,
