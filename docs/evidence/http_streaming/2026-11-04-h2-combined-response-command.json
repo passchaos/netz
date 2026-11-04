@@ -10,18 +10,50 @@
     },
     "h2_baseline_weft": {
       "note": "weft still calls startResponse + writeData, so this is the pre-adoption baseline",
-      "sequential": { "ns_per_request": 27620.2, "requests_per_second": 36205 },
-      "batched_32": { "ns_per_request": 15950.4, "requests_per_second": 62694 },
-      "upload_32": { "ns_per_request": 19903.1, "requests_per_second": 50243 }
+      "sequential": {
+        "ns_per_request": 27620.2,
+        "requests_per_second": 36205
+      },
+      "batched_32": {
+        "ns_per_request": 15950.4,
+        "requests_per_second": 62694
+      },
+      "upload_32": {
+        "ns_per_request": 19903.1,
+        "requests_per_second": 50243
+      }
+    },
+    "h2_netz_harness": {
+      "workload": "zio event loop, runtime.Server.listen + serveConcurrentStreams, client requestBatchInto, GET -> 200 \"ok\"",
+      "batch1": {
+        "two_calls_ns_per_request": 26187,
+        "combined_ns_per_request": 23174,
+        "two_calls_rps": 38185,
+        "combined_rps": 43150
+      },
+      "batch32": {
+        "two_calls_ns_per_request": 16566,
+        "combined_ns_per_request": 14130,
+        "two_calls_rps": 60364,
+        "combined_rps": 70771
+      }
     }
   },
   "result": {
-    "http2": { "passed": 972, "total": 972, "failed": 0 },
-    "package": { "passed": 26, "total": 26, "failed": 0 }
+    "http2": {
+      "passed": 972,
+      "total": 972,
+      "failed": 0
+    },
+    "package": {
+      "passed": 26,
+      "total": 26,
+      "failed": 0
+    }
   },
   "source_sha256": {
     "src/http2/runtime/concurrent.zig": "dbb2e107309afd432b235e5c57ece393afa3661a2e3712a91fded2e0cdf39df6",
     "src/http2/runtime/concurrent_tests.zig": "079dcf5a805a31140e4a4d579adcf4f1ae2d39d1ec579ada296c3a90e896d6b9"
   },
-  "notes": "The H2 win is not yet measured because weft's handler has to adopt the new call; the HTTP/3 measurement of the identical shape is the reference. The new HTTP/2 test covers the ordinary GET path through the combined command."
+  "notes": "Measured in a netz-only harness: batch=1 26.19 -> 23.17 us/request (11.5% faster) and batch=32 16.57 -> 14.13 us/request (14.7% faster). The HTTP/3 shape of the same change measured 101.8 -> 59.2 us/request because HTTP/3 pays a QUIC receive wake per owner turn as well. Weft still calls startResponse + writeData, so its bench-h2 numbers stay at the two-call baseline until it adopts the new method."
 }
