@@ -16,6 +16,7 @@ pub const Selection = struct {
     authority: ?[]const u8 = null,
     request_header_mutations: []const @import("../../call.zig").HeaderMutation = &.{},
     request_header_removals: []const []const u8 = &.{},
+    auto_host_rewrite: bool = false,
 };
 fn firstHeader(request: routing.header.Request, name: []const u8) ?[]const u8 {
     if (std.ascii.eqlIgnoreCase(name, ":authority")) return request.authority;
@@ -118,9 +119,11 @@ pub const Snapshot = struct {
                 }
             }
             var authority: ?[]const u8 = null;
+            var auto_host_rewrite = false;
             if (forward.host_rewrite) |rewrite| switch (rewrite) {
                 .literal => |value| authority = value,
                 .header => |name| authority = firstHeader(request, name),
+                .auto => auto_host_rewrite = true,
             };
             if (authority) |value| {
                 if (value.len > request.max_header_bytes) {
@@ -154,6 +157,7 @@ pub const Snapshot = struct {
                 .authority = authority,
                 .request_header_mutations = route.request_headers_to_add,
                 .request_header_removals = route.request_headers_to_remove,
+                .auto_host_rewrite = auto_host_rewrite,
             };
         }
         return error.NoMatchingRoute;
@@ -172,6 +176,7 @@ pub const Snapshot = struct {
         if (selection.authority) |authority| selected.authority = authority;
         selected.xds_request_header_mutations = selection.request_header_mutations;
         selected.xds_request_header_removals = selection.request_header_removals;
+        selected.xds_auto_host_rewrite = selection.auto_host_rewrite;
         if (selection.duration) |limit| if (limit.nanoseconds > 0) {
             const duration: std.Io.Duration = if (options.timeout) |timeout| .fromNanoseconds(@min(timeout.duration().nanoseconds, limit.nanoseconds)) else limit;
             selected.timeout = try wire.Timeout.fromDuration(duration);

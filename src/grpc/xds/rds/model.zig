@@ -31,6 +31,8 @@ pub const HostRewrite = union(enum) {
     literal: []const u8,
     /// Replace `:authority` with the first value of this request header.
     header: []const u8,
+    /// Use the selected endpoint's authority.
+    auto,
 };
 pub const Forward = struct {
     clusters: []const Weighted,

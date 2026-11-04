@@ -3796,11 +3796,11 @@ local method/retry defaults and resource-budget precedence. See
 [automatic typed discovery](grpc_xds_runtime.md) and
 `docs/evidence/grpc_xds_runtime/2026-11-03.json`. Bootstrap, retry/failover,
 expiry/Delta/LRS, security and aggregate/DNS discovery are covered. RDS
-`prefix_rewrite`, literal `path_rewrite`, literal/header host rewrites, and
-literal request header additions/removals are applied to the owned unary and
-streaming request inputs; regex/format path rewrites, response header
-mutations and non-router filters remain open for the full library/control-plane
-objective.
+`prefix_rewrite`, literal `path_rewrite`, literal/header/automatic host
+rewrites, and literal request header additions/removals are applied to the
+owned unary and streaming request inputs; regex/format path rewrites, response
+header mutations and non-router filters remain open for the full
+library/control-plane objective.
 
 ## SotW resource omission and initial discovery
 

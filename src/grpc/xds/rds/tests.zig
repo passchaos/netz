@@ -120,6 +120,19 @@ test "gRPC RDS rewrites matched prefixes and literal or header authorities" {
     try std.testing.expectEqualStrings("literal.example", literal.authority.?);
     try std.testing.expectEqualStrings("/literal.Service/Get", literal.path_rewrite.?.whole);
 }
+test "gRPC RDS marks auto host rewrite for endpoint selection" {
+    var action = fixture.Builder{ .allocator = gpa };
+    defer action.deinit();
+    try action.wrapper(7, 1);
+    const bytes = try fixture.encode(gpa, "routes", &.{"backend.test"}, &.{.{ .prefix = "/", .action_extra = action.data.items }}, null);
+    defer gpa.free(bytes);
+    const snapshot = try rds.Snapshot.create(gpa, bytes, .{}, .{ .authority = "backend.test" });
+    defer snapshot.release();
+    var prng = random();
+    const selected = try snapshot.selectWith(gpa, .{ .path = "/demo.Service/Get", .authority = "backend.test" }, 1, prng.random());
+    try std.testing.expect(selected.auto_host_rewrite);
+    try std.testing.expect(selected.authority == null);
+}
 test "gRPC RDS owns literal request header mutations and removals" {
     var header = fixture.Builder{ .allocator = gpa };
     defer header.deinit();
@@ -198,10 +211,4 @@ test "gRPC RDS rejects unsupported regex and format rewrites" {
     const path_bytes = try fixture.encode(gpa, "routes", &.{"backend.test"}, &.{.{ .prefix = "/", .action_extra = path_action.data.items }}, null);
     defer gpa.free(path_bytes);
     try std.testing.expectError(error.UnsupportedRdsFeature, rds.decode(gpa, path_bytes, .{}));
-    var auto_action = fixture.Builder{ .allocator = gpa };
-    defer auto_action.deinit();
-    try auto_action.bytes(7, &.{1});
-    const auto_bytes = try fixture.encode(gpa, "routes", &.{"backend.test"}, &.{.{ .prefix = "/", .action_extra = auto_action.data.items }}, null);
-    defer gpa.free(auto_bytes);
-    try std.testing.expectError(error.UnsupportedRdsFeature, rds.decode(gpa, auto_bytes, .{}));
 }

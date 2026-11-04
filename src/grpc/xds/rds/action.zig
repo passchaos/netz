@@ -106,6 +106,11 @@ pub fn decode(p: anytype, bytes: []const u8) pb.Error!?model.Forward {
             const value = try rewriteText(&reader, p.limits.max_text_bytes);
             if (value.len == 0) return error.InvalidRdsResource;
             host_rewrite = .{ .literal = value };
+        } else if (field.number == 7 and field.wire_type == 2) {
+            if (host_rewrite != null) return error.InvalidRdsResource;
+            if ((try pb.wrapper(try reader.bytesValue())) != 0) {
+                host_rewrite = .auto;
+            }
         } else if (field.number == 29 and field.wire_type == 2) {
             if (host_rewrite != null) return error.InvalidRdsResource;
             const value = try rewriteText(&reader, p.limits.max_text_bytes);
@@ -125,7 +130,7 @@ pub fn decode(p: anytype, bytes: []const u8) pb.Error!?model.Forward {
                 return error.UnsupportedRdsFeature;
             }
             if (value.len != 0) path_rewrite = .{ .whole = value };
-        } else if (field.number == 7 or field.number == 32 or
+        } else if (field.number == 32 or
             field.number == 35 or field.number == 41 or
             field.number == 23 or field.number == 28 or
             field.number == 11)

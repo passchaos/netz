@@ -122,6 +122,7 @@ test "gRPC RDS rewrites path and authority on the wire" {
     defer _ = peer.cancel(io) catch {};
     const endpoints = [_]grpc.ChannelEndpoint{.{ .cleartext_ip = .{
         .address = server.address(),
+        .authority = "endpoint.example",
         .hierarchical_path = &.{"cluster:a"},
     } }};
     var client = try grpc.SharedChannel.init(
@@ -163,6 +164,37 @@ test "gRPC RDS rewrites path and authority on the wire" {
         "/api.Service/Get\nrewritten.example",
         response.message.?.payload,
     );
+
+    var auto_action = fixture.Builder{ .allocator = gpa };
+    defer auto_action.deinit();
+    try auto_action.wrapper(7, 1);
+    const auto_bytes = try fixture.encode(
+        gpa,
+        "routes",
+        &.{"backend.test"},
+        &.{.{ .prefix = "/", .action_extra = auto_action.data.items }},
+        null,
+    );
+    defer gpa.free(auto_bytes);
+    const auto_snapshot = try rds.Snapshot.create(gpa, auto_bytes, .{}, .{ .authority = "backend.test" });
+    _ = try auto_snapshot.publishWithDeadline(
+        client,
+        .fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(3) }),
+    );
+    auto_snapshot.release();
+    var auto_response = try sender.unary(.{
+        .path = "/demo.Service/Auto",
+        .authority = "original.example",
+        .message = "request",
+        .wait_for_ready = true,
+        .timeout = .{ .value = 3, .unit = .second },
+    });
+    defer auto_response.deinit();
+    try std.testing.expectEqualStrings(
+        "/demo.Service/Auto\nendpoint.example",
+        auto_response.message.?.payload,
+    );
+
     client.deinit();
     live = false;
     stop.set(io);

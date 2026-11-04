@@ -66,6 +66,14 @@ pub fn Worker(comptime State: type) type {
 
         const Self = @This();
         const StreamOwner = @import("stream/owner.zig").Owner(State);
+        fn endpointAuthority(self: *const Self) ?[]const u8 {
+            if (self.source.authority) |value| return value;
+            return switch (self.source.endpoint) {
+                .cleartext_ip => |value| value.authority,
+                .tls_address => |value| value.authority,
+                else => null,
+            };
+        }
         pub fn run(self: *Self) std.Io.Cancelable!void {
             const parent = self.parent;
             defer {
@@ -450,7 +458,10 @@ pub fn Worker(comptime State: type) type {
                 };
                 const options: streaming.RequestOptions = .{
                     .path = job.options.path,
-                    .authority = job.options.authority,
+                    .authority = if (job.options.xds_auto_host_rewrite)
+                        self.endpointAuthority() orelse job.options.authority
+                    else
+                        job.options.authority,
                     .scheme = job.options.scheme,
                     .compression = job.options.compression,
                     .compression_level = job.options.compression_level,

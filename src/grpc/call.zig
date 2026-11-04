@@ -289,6 +289,9 @@ pub const UnaryCallOptions = struct {
     xds_request_header_mutations: []const HeaderMutation = &.{},
     /// Internal xDS request-header removals applied before additions.
     xds_request_header_removals: []const []const u8 = &.{},
+    /// Internal xDS `auto_host_rewrite`: use the selected endpoint authority
+    /// as the outbound `:authority`.
+    xds_auto_host_rewrite: bool = false,
     /// Retry one REFUSED_STREAM before response commitment without charging a
     /// configured retry attempt. Disable for explicit single-attempt probes.
     transparent_retry: bool = true,

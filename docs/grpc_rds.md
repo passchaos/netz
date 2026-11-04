@@ -63,13 +63,15 @@ remain internal request options and never become application wire metadata.
 when the selected request inputs are copied. A prefix rewrite replaces the
 matched route prefix; for a non-prefix path match it replaces the complete
 path. A header host rewrite uses the first visible value, including the
-`:authority`, `:path`, `:method` and `:scheme` pseudo-headers. Rewritten paths
-and authorities are bounded by the selector's `max_header_bytes` before any
-copy. The rewrite descriptor is internal: it is consumed by unary, streaming
-and retry input ownership and never becomes application metadata. Regex
-rewrites, `path_rewrite`/`host_rewrite` values containing format specifiers,
-policy rewrites and automatic-host rewrites fail validation instead of being
-ignored.
+`:authority`, `:path`, `:method` and `:scheme` pseudo-headers. `auto_host_rewrite`
+is resolved after endpoint selection: the worker replaces `:authority` with the
+selected endpoint's configured authority (host authority for host endpoints,
+explicit endpoint authority for IP endpoints). Rewritten paths and authorities
+are bounded by the selector's `max_header_bytes` before any copy. The rewrite
+descriptor is internal: it is consumed by unary, streaming and retry input
+ownership and never becomes application metadata. Regex rewrites,
+`path_rewrite`/`host_rewrite` values containing format specifiers, and policy
+rewrites fail validation instead of being ignored.
 
 Route-level `request_headers_to_add` and `request_headers_to_remove` are
 applied to non-binary application metadata when request inputs are copied.
@@ -142,13 +144,15 @@ available through the automatic runtime. Bootstrap parsing and insecure
 control-plane failover are available; automatic multi-cluster CDS/EDS
 orchestration, certificate providers and automatic refresh scheduling, authority-specific control planes,
 LRS automatic background scheduling, capture/hash rewriting, HTTP filter
-overrides, response header mutations, regex/format path rewrites and automatic
-host rewriting remain open.
+overrides, response header mutations and regex/format path rewrites remain
+open.
 Delta route TTL expiry is covered. Literal prefix/whole-path and authority
-rewrites plus literal request header additions/removals are covered by native
-selection and owned-input tests. Unsupported recognized filter, rewrite,
-timeout-offset and plugin features fail validation; this module does not
-silently claim their deployment behavior. Evidence is recorded in
+rewrites, automatic endpoint authority rewriting, and literal request header
+additions/removals are covered by native selection, owned-input and on-wire
+tests. Unsupported recognized filter, rewrite, timeout-offset and plugin
+features fail validation; this module does not silently claim their deployment
+behavior. Evidence is recorded in
 `docs/evidence/grpc_rds/2026-11-04-rewrites.json`,
-`docs/evidence/grpc_rds/2026-11-04-literal-path-host.json` and
-`docs/evidence/grpc_rds/2026-11-04-request-headers.json`.
+`docs/evidence/grpc_rds/2026-11-04-literal-path-host.json`,
+`docs/evidence/grpc_rds/2026-11-04-request-headers.json` and
+`docs/evidence/grpc_rds/2026-11-05-auto-host-rewrite.json`.

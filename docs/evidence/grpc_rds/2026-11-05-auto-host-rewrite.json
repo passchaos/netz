@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "date": "2026-11-05",
+  "head": "74acea01",
+  "subject": "RDS automatic endpoint-authority host rewrite",
+  "change": "RouteAction.auto_host_rewrite is now decoded as a host-rewrite mode instead of being rejected. The selector carries the flag through the owned request options, and the SharedChannel worker resolves it after endpoint selection by replacing :authority with the selected endpoint's authority. Host endpoints use their normalized host:port authority; IP/TLS-address endpoints use their explicit endpoint authority. If no endpoint authority is available, the original authority is retained.",
+  "tests": {
+    "unit": "src/grpc/xds/rds/tests.zig 'gRPC RDS marks auto host rewrite for endpoint selection' decodes auto_host_rewrite and asserts the selection flag without a literal authority.",
+    "wire": "src/grpc/xds/rds/transport_tests.zig 'gRPC RDS rewrites path and authority on the wire' now runs a second RPC through a route with auto_host_rewrite. The caller supplies original.example while the selected cleartext_ip endpoint authority is endpoint.example; the real server observes /demo.Service/Auto and endpoint.example.",
+    "focused_gate": {
+      "command": "zig build test-lib -Dtest-filter='gRPC RDS' --summary all",
+      "passed": 177,
+      "total": 177,
+      "failed": 0
+    }
+  },
+  "source_sha256": {
+    "src/grpc/call.zig": "ec5508a6c8456512cf3de6f1a1f61dc88a1ae8e17c5fc89034529f37103ed308",
+    "src/grpc/stream/runtime.zig": "efd6a873be8c40abcd219750d526fea4211ee4a3924bc2e24be426d8334be044",
+    "src/grpc/channel/shared/worker.zig": "79181ac2f69013f28f8060d98792a00f1896947e04bd6363e03122b2aa8aae3f",
+    "src/grpc/xds/rds/model.zig": "dba8ea5e2b6c605105eac3896a3d1c364d917f94275067c1d839b8240b5903be",
+    "src/grpc/xds/rds/action.zig": "c22ce0981693072c4dbe560c2992df3121a45df407d5a6fdf7c5a828e9b711c1",
+    "src/grpc/xds/rds/snapshot.zig": "50931333f3a61ad10ba12d85db82ea549634582fd5edb18411889ad45bfd699c",
+    "src/grpc/xds/rds/tests.zig": "6ccfa0e91d6beee1363bf438dc2dc0955b25ff18944eeb4fd2214cbb9d279283",
+    "src/grpc/xds/rds/transport_tests.zig": "fb89364865e1fc160a99b930d4997fecd9e984e589edac8e8742560565c1cd29",
+    "docs/grpc_rds.md": "c4d548484cceeaa56e8fb88d91e37e339107c1f94316ad9c6c0dc850e028016e",
+    "docs/grpc_parity.md": "5844f707edfb3a97bbc03773d027351709dfacc54aa2f7f7b9e7a031f95ef9ac"
+  },
+  "notes": "The endpoint authority is borrowed from the retained endpoint/source and remains valid for the channel lifetime. Regex/format rewrites, response header mutations and non-router filters remain open."
+}
