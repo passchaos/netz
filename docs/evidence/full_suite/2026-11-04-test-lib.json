@@ -4,9 +4,10 @@
   "head": "e0d72d80",
   "command": "zig build test-lib --summary all",
   "result": {
-    "passed": 6425,
+    "passed": 6426,
     "total": 6427,
-    "failed": 2
+    "failed": 1,
+    "note": "after fixing the endpoint retirement observation"
   },
   "failures": [
     {
@@ -14,12 +15,10 @@
       "known": true,
       "evidence": "docs/evidence/mqtt/2026-11-04-outbound-bridge-expiry-flake.json",
       "summary": "A black-hole target CONNACK wait is not pausable, so the source keepalive lapses and the broker retires the source transport."
-    },
-    {
-      "test": "quic.endpoint_server.tests.test.QUIC endpoint server routes two authenticated connections on one socket",
-      "known": true,
-      "summary": "The server observes only one of two client connection-ID retirements and times out with 'stage=retirements count=1'. The clients report no error, so one retirement never reaches the server's receive loop. Reproduced on 6e341c27 before the recent HTTP work; giving the retirement phase its own 15 s budget did not change the failure rate (3/6), so it is a genuine stall rather than an exhausted shared timer."
     }
   ],
-  "notes": "Both failures are pre-existing and reproduce on commits that predate the HTTP/2 and HTTP/3 changes in this session. Every test covering the changed files passes: HTTP/2 973/973, HTTP/3 929/929, QUIC recovery 341/341, test-package 26/26."
+  "notes": "The QUIC endpoint retirement failure is fixed: the replies loop's visitor now records RETIRE_CONNECTION_ID, so a client that coalesces retirement with its reply packet is counted. 14 consecutive isolated runs and the full QUIC filter (1156/1156) pass. The MQTT outbound-bridge expiry case remains the only known failure.",
+  "source_sha256": {
+    "src/quic/endpoint_server/tests.zig": "fcbcfdb1a14c28340cb25b3f15e656677d0fc171e4b3a797e00993c01912b4b4"
+  }
 }

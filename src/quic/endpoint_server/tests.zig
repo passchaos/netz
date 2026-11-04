@@ -946,10 +946,18 @@ test "QUIC endpoint server routes two authenticated connections on one socket" {
     var receive_events: [4]endpoint_server.VisitEvent = undefined;
     const Visitor = struct {
         fn visit(
-            _: void,
+            handles: *[client_count]?u64,
             packet: quic.endpoint_dispatcher.RoutedPacketView,
         ) !void {
             try std.testing.expect(packet.packet.frames.len != 0);
+            // A client may coalesce RETIRE_CONNECTION_ID with the packet that
+            // carries its request reply, so retirement has to be observed in
+            // this loop too.
+            Retirement.note(
+                handles,
+                packet.connection_handle,
+                packet.packet.frames,
+            );
         }
     };
     while (replies < clients.len) {
@@ -958,7 +966,7 @@ test "QUIC endpoint server routes two authenticated connections on one socket" {
             &receive_storage,
             &receive_events,
             deadline,
-            {},
+            &retired_handles,
             Visitor.visit,
         ) catch |err| {
             std.debug.print(
