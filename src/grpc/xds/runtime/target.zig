@@ -27,6 +27,7 @@ fn policy(gpa: std.mem.Allocator, name: []const u8, value: Json) !Json {
 
 fn dnsChildPolicy(
     arena: std.mem.Allocator,
+    logical_only: bool,
     hosts: []const cds.resource.HostEndpoint,
     base_policy: Json,
     locality_weighted: bool,
@@ -47,7 +48,10 @@ fn dnsChildPolicy(
             try field(arena, &locality_policy, "childPolicy", base_policy);
             try field(arena, &child, "config", try policy(arena, "xds_wrr_locality_experimental", locality_policy));
         } else try field(arena, &child, "config", base_policy);
-        try field(arena, &child, "ignoreReresolutionRequests", .{ .bool = true });
+        // LOGICAL_DNS resolves once when the cluster is applied. STRICT_DNS
+        // keeps re-resolution requests enabled so a connection failure can
+        // refresh the address list, matching gRFC A27.
+        try field(arena, &child, "ignoreReresolutionRequests", .{ .bool = logical_only });
         try field(arena, &children, priority_name, child);
         for (hosts) |host| {
             if (host.priority != priority) continue;
@@ -176,7 +180,7 @@ pub const Target = struct {
                         };
                         break :blk created;
                     } else null;
-                    child_policy = try dnsChildPolicy(arena, resource.host_endpoints, decoded, resource.policy.locality_weighted, key, material, &endpoints);
+                    child_policy = try dnsChildPolicy(arena, resource.isLogicalDns(), resource.host_endpoints, decoded, resource.policy.locality_weighted, key, material, &endpoints);
                 } else child_policy = try policy(arena, "round_robin", object());
             } else child_policy = try policy(arena, "round_robin", object());
             try field(arena, &implementation, "dropCategories", drops);

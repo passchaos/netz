@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "date": "2026-11-04",
+  "head": "30ca31a0",
+  "gate": "CDS DNS clusters distinguish LOGICAL_DNS from STRICT_DNS re-resolution",
+  "change": "`dnsChildPolicy` now sets `ignoreReresolutionRequests` from the cluster's discovery kind instead of always true. LOGICAL_DNS keeps `true` (resolve once when the CDS resource is applied); STRICT_DNS sets `false` so a connection failure can request an address-list refresh, matching gRFC A27. Added `Cluster.isLogicalDns()`.",
+  "evidence": {
+    "runtime_test": "src/grpc/xds/runtime/target_tests.zig 'gRPC xDS target resolves a LOGICAL_DNS cluster without re-resolution'",
+    "logical_assertions": [
+      "one endpoint with host logical.test and port 1003",
+      "child policy contains \"ignoreReresolutionRequests\":true"
+    ],
+    "strict_assertions": [
+      "one endpoint with host strict.test",
+      "child policy contains \"ignoreReresolutionRequests\":false"
+    ],
+    "resolution_consumer": "src/grpc/channel.zig only requests re-resolution for a slot when `!ignoresReresolution(slot)`, so the flag reaches the resolver refresh path."
+  },
+  "result": {
+    "xds": { "passed": 270, "total": 270, "failed": 0 },
+    "grpc": { "passed": 775, "total": 775, "failed": 0 },
+    "package": { "passed": 26, "total": 26, "failed": 0 }
+  },
+  "source_sha256": {
+    "src/grpc/xds/cds/decode.zig": "acb265346c221bf89fd3aa04749f26671335f7b1f60e604eaa8fc62e095b84e6",
+    "src/grpc/xds/runtime/target.zig": "6a438249cad5a9337e0f3bac0d3c2aee8f36f8b5ffa37526cab58aa8f0471667",
+    "src/grpc/xds/runtime/target_tests.zig": "e3d9cf64cf1b060122eb585c1e72913e941963ea42fab101263a26d8e098a8b8",
+    "docs/grpc_parity.md": "09e2a424d25c1f05238c8b456b0b176aabaa9c74a11b08d78644e912e91908e4"
+  },
+  "notes": "Both discovery kinds already shared one runtime path; only the re-resolution flag differed. Aggregate clusters were already expanded into ordered priorities and covered by an existing target test."
+}

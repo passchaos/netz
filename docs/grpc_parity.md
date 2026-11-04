@@ -3613,9 +3613,10 @@ LDS/RDS route selection, resource expiry, control-plane failover/retry,
 Delta xDS, per-child cluster management and LRS remain open. CDS transport
 security, outlier, LRS and upstream configuration fields are rejected.
 LOGICAL_DNS clusters are decoded and expanded into a priority tree whose child
-policy carries `ignoreReresolutionRequests`, i.e. addresses resolve once when
-the CDS resource is applied. STRICT_DNS is accepted but currently shares that
-same resolve-on-apply path instead of re-resolving after a connection failure.
+policy carries `ignoreReresolutionRequests: true`, i.e. addresses resolve once
+when the CDS resource is applied. STRICT_DNS sets that flag to `false`, so a
+connection failure can request a refresh of the address list, matching
+gRFC A27.
 Aggregate clusters expand into ordered priorities over their leaf clusters.
 Both are covered by `src/grpc/xds/runtime/target_tests.zig`. Ring allocation
 still has the existing 4096-entry runtime cap.

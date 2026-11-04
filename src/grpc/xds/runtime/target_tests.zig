@@ -91,4 +91,21 @@ test "gRPC xDS target resolves a LOGICAL_DNS cluster without re-resolution" {
     try std.testing.expectEqualStrings("logical.test", endpoint.host);
     try std.testing.expectEqual(@as(u16, 1003), endpoint.port);
     try std.testing.expect(std.mem.indexOf(u8, built.json, "\"ignoreReresolutionRequests\":true") != null);
+
+    // STRICT_DNS keeps re-resolution enabled so a connection failure can
+    // refresh the address list.
+    const strict = try fixture.dnsCluster(gpa, "strict", "strict.test", 1004, 1);
+    defer gpa.free(strict);
+    const strict_decoded = try cds.decode(gpa, strict, .{});
+    const strict_cluster = try entry.Cluster.create(gpa, strict_decoded);
+    defer strict_cluster.release();
+    const strict_identity = try entry.Identity.create(gpa, "strict");
+    defer strict_identity.release();
+    const strict_entries = [_]entry.Entry{
+        .{ .identity = strict_identity, .cluster = strict_cluster, .cds_seen = true, .eds_seen = true },
+    };
+    const strict_built = try target.Target.create(gpa, std.testing.io, &strict_entries, null);
+    defer strict_built.release();
+    try std.testing.expectEqualStrings("strict.test", strict_built.endpoints[0].cleartext_host.host);
+    try std.testing.expect(std.mem.indexOf(u8, strict_built.json, "\"ignoreReresolutionRequests\":false") != null);
 }

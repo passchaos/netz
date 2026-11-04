@@ -50,6 +50,11 @@ pub const Cluster = struct {
     pub fn isDns(self: Cluster) bool {
         return self.discovery == .strict_dns or self.discovery == .logical_dns;
     }
+    /// LOGICAL_DNS resolves once when the resource is applied; STRICT_DNS keeps
+    /// re-resolution requests enabled after a connection failure.
+    pub fn isLogicalDns(self: Cluster) bool {
+        return self.discovery == .logical_dns;
+    }
     pub fn isAggregate(self: Cluster) bool {
         return self.discovery == .aggregate;
     }
