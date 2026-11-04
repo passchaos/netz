@@ -229,9 +229,11 @@ Concurrency contract:
 - Handlers run on a per-connection worker pool that grows lazily up to
   `max_streams`. A sequential connection reuses one worker instead of spawning
   a thread per request; a multiplexed connection adds workers only while every
-  existing worker is busy. `worker_stack_size` (default 1 MiB) bounds the
-  virtual memory reserved by each worker. The API is independent of the
-  caller's `std.Io` executor.
+  existing worker is busy. `max_worker_threads` optionally caps the pool below
+  `max_streams` (clamped to at least one), which can reduce thread-scheduling
+  contention for CPU-bound handlers; queued handlers wait in arrival order.
+  `worker_stack_size` (default 1 MiB) bounds the virtual memory reserved by
+  each worker. The API is independent of the caller's `std.Io` executor.
 - Handler `nextBody`/command waits ignore spurious futex wakeups: an expired
   absolute deadline is checked against the awake clock, so a wake that does not
   set the event cannot surface a false `error.Timeout`.

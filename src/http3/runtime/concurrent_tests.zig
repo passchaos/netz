@@ -128,6 +128,7 @@ test "HTTP/3 continuous concurrent serving streams bodies and responses" {
                 Handler.run,
                 .{
                     .max_streams = 2,
+                    .max_worker_threads = 1,
                     .shutdown = self.shutdown,
                 },
             ) catch |err| {
@@ -442,7 +443,6 @@ test "HTTP/3 continuous concurrent serving suppress-body responses" {
     if (server_task.err) |err| return err;
 }
 
-
 test "HTTP/3 continuous concurrent serving observes peer cancellation" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
@@ -626,7 +626,6 @@ test "HTTP/3 continuous concurrent serving HEAD returns headers without DATA" {
     joined = true;
     if (server_task.err) |err| return err;
 }
-
 
 test "HTTP/3 continuous concurrent serving writes head and body in one command" {
     const allocator = std.testing.allocator;

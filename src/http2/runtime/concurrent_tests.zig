@@ -470,7 +470,7 @@ test "HTTP/2 concurrent oversize declared body stays stream-scoped" {
                 Context,
                 self.context,
                 Handler.run,
-                .{ .max_streams = 4, .shutdown = self.shutdown },
+                .{ .max_streams = 4, .max_worker_threads = 1, .shutdown = self.shutdown },
             );
             try std.testing.expectEqual(@as(usize, 3), summary.accepted);
             try std.testing.expectEqual(@as(usize, 3), summary.completed);

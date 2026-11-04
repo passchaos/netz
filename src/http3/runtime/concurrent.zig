@@ -42,6 +42,11 @@ pub const Options = struct {
     /// to `max_streams`, so this bounds virtual memory for connections that
     /// actually multiplex. Raise it for handlers with deep native stacks.
     worker_stack_size: usize = 1024 * 1024,
+    /// Optional cap on worker threads. Null keeps one worker per possible
+    /// concurrent handler (`max_streams`). Lower values reduce thread
+    /// scheduling contention for CPU-bound handlers; queued handlers wait in
+    /// arrival order. Values are clamped to `1..max_streams`.
+    max_worker_threads: ?usize = null,
 };
 
 pub const Summary = struct {
@@ -439,6 +444,11 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
             }
         }
 
+        fn workerLimit(self: *const Self, max_streams: usize) usize {
+            const configured = self.options.max_worker_threads orelse max_streams;
+            return @max(1, @min(max_streams, configured));
+        }
+
         /// Queue a created slot for a worker. Workers are grown lazily so a
         /// sequential connection reuses one thread instead of spawning one
         /// thread per request.
@@ -452,7 +462,7 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
         ) !void {
             self.task_mutex.lockUncancelable(self.io);
             const need_worker = self.idle_workers == 0 and
-                self.workers.items.len < limit;
+                self.workers.items.len < self.workerLimit(limit);
             self.task_mutex.unlock(self.io);
             if (need_worker) try self.startWorker(Context, context, handler);
 
