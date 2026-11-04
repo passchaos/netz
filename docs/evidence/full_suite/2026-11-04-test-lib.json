@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "date": "2026-11-04",
+  "head": "e0d72d80",
+  "command": "zig build test-lib --summary all",
+  "result": {
+    "passed": 6425,
+    "total": 6427,
+    "failed": 2
+  },
+  "failures": [
+    {
+      "test": "mqtt.bridge.outbound_tests.test.outbound bridge does not extend expiry across target reconnect",
+      "known": true,
+      "evidence": "docs/evidence/mqtt/2026-11-04-outbound-bridge-expiry-flake.json",
+      "summary": "A black-hole target CONNACK wait is not pausable, so the source keepalive lapses and the broker retires the source transport."
+    },
+    {
+      "test": "quic.endpoint_server.tests.test.QUIC endpoint server routes two authenticated connections on one socket",
+      "known": true,
+      "summary": "The server observes only one of two client connection-ID retirements and times out with 'stage=retirements count=1'. The clients report no error, so one retirement never reaches the server's receive loop. Reproduced on 6e341c27 before the recent HTTP work; giving the retirement phase its own 15 s budget did not change the failure rate (3/6), so it is a genuine stall rather than an exhausted shared timer."
+    }
+  ],
+  "notes": "Both failures are pre-existing and reproduce on commits that predate the HTTP/2 and HTTP/3 changes in this session. Every test covering the changed files passes: HTTP/2 973/973, HTTP/3 929/929, QUIC recovery 341/341, test-package 26/26."
+}
