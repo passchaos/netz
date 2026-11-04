@@ -7708,7 +7708,13 @@ pub const HandshakeServerSession = struct {
         self: *HandshakeServerSession,
         stream_id: u62,
     ) Error!usize {
-        return (try self.accessRequestData(stream_id, &.{}, .available, false)) orelse 0;
+        const value = self.accessRequestData(stream_id, &.{}, .available, false) catch |err| switch (err) {
+            // A consumed DATA frame simply has no readable bytes left; the
+            // next event carries the following frame.
+            error.UnexpectedFrame => return 0,
+            else => |other| return other,
+        };
+        return value orelse 0;
     }
 
     pub fn skipRequestData(

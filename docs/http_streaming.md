@@ -181,10 +181,13 @@ Concurrency contract:
   head/DATA/trailers/reset are serialized through the owner.
 - Request DATA is delivered incrementally. The owner copies at most
   `max_buffered_body_bytes` per stream (default: the session
-  `max_stream_buffer`) into a per-stream ring; once full it stops receiving
-  until the handler consumes. The total body remains bounded by
+  `max_stream_buffer`; `HandshakeSessionOptions.max_stream_buffer` for the
+  production HTTP/3 session) into a per-stream ring; once full it stops
+  receiving until the handler consumes. The total body remains bounded by
   `max_body_bytes`. This keeps `nextBody` incremental without first buffering a
-  whole upload.
+  whole upload. A fully consumed DATA frame reports zero readable bytes, not
+  `error.UnexpectedFrame`, so handshake and development sessions share the same
+  pull path.
 - The `ConcurrentStream` handle is valid only while its handler runs. `nextBody`
   copies into the caller buffer; `trailers()` borrows the retained trailer
   fields until the handler returns. All `ConcurrentStream` methods are safe from
