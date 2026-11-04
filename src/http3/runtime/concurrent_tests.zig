@@ -147,6 +147,10 @@ test "HTTP/3 continuous concurrent serving streams bodies and responses" {
                 self.err = err;
                 return;
             };
+            std.testing.expect(summary.workers_spawned <= 1) catch |err| {
+                self.err = err;
+                return;
+            };
         }
     };
 

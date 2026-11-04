@@ -232,6 +232,7 @@ Concurrency contract:
   existing worker is busy. `max_worker_threads` optionally caps the pool below
   `max_streams` (clamped to at least one), which can reduce thread-scheduling
   contention for CPU-bound handlers; queued handlers wait in arrival order.
+  `Summary.workers_spawned` reports how many handler threads the call created.
   `worker_stack_size` (default 1 MiB) bounds the virtual memory reserved by
   each worker. The API is independent of the caller's `std.Io` executor.
 - Handler `nextBody`/command waits ignore spurious futex wakeups: an expired

@@ -35,6 +35,8 @@ pub const Summary = struct {
     failed: usize = 0,
     canceled: usize = 0,
     last_stream_id: u31 = 0,
+    /// Total handler worker threads spawned for this serve call.
+    workers_spawned: usize = 0,
 };
 
 pub const Head = struct {
@@ -525,6 +527,7 @@ pub fn Engine(
             );
             self.task_mutex.lockUncancelable(self.io);
             self.workers.appendAssumeCapacity(thread);
+            self.summary.workers_spawned += 1;
             self.task_mutex.unlock(self.io);
         }
 

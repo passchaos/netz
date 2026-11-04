@@ -3,29 +3,29 @@
   "date": "2026-11-05",
   "head": "cb4c5fa3",
   "subject": "HTTP/2 and HTTP/3 concurrent worker-pool cap",
-  "change": "serveConcurrentStreams now accepts max_worker_threads. Null preserves the existing lazy growth up to max_streams; a configured value caps the per-connection worker pool and is clamped to 1..max_streams. This gives consumers a way to trade handler concurrency for less thread-scheduling contention on CPU-bound workloads while keeping accepted streams and bodies bounded by the existing owner queues.",
+  "change": "serveConcurrentStreams now accepts max_worker_threads. Null preserves the existing lazy growth up to max_streams; a configured value caps the per-connection worker pool and is clamped to 1..max_streams. Summary.workers_spawned reports the actual number of handler threads created, so callers and tests can verify the cap. This gives consumers a way to trade handler concurrency for less thread-scheduling contention on CPU-bound workloads while keeping accepted streams and bodies bounded by the existing owner queues.",
   "tests": {
     "http3": {
       "command": "zig build test-lib -Dtest-filter='HTTP/3 continuous concurrent' --summary all",
       "passed": 162,
       "total": 162,
       "failed": 0,
-      "coverage": "The two-stream continuous-serving test now runs with max_worker_threads=1, proving both handlers complete through one worker while the owner buffers bodies and responses."
+      "coverage": "The two-stream continuous-serving test runs with max_worker_threads=1, proves both handlers complete through one worker while the owner buffers bodies and responses, and asserts summary.workers_spawned <= 1."
     },
     "http2": {
       "command": "zig build test-lib -Dtest-filter='HTTP/2 concurrent' --summary all",
       "passed": 164,
       "total": 164,
       "failed": 0,
-      "coverage": "The four-stream concurrent test now runs with max_worker_threads=1, including the oversize-stream sibling case."
+      "coverage": "The four-stream concurrent test runs with max_worker_threads=1, including the oversize-stream sibling case, and asserts summary.workers_spawned <= 1."
     }
   },
   "source_sha256": {
-    "src/http2/runtime/concurrent.zig": "2930f4799d20888cf731754ae8b2a43c341ea6b7bb28bd4b8d5a11b02cf0b71e",
-    "src/http3/runtime/concurrent.zig": "e4df1ac4fa17d341c9b3a2a905afc10b987a37e527aa266f93f4826b0b946969",
-    "src/http2/runtime/concurrent_tests.zig": "d973705715f75e47eaebce56d5f859a65a9c7c18f33b640973435b4f4c576e4a",
-    "src/http3/runtime/concurrent_tests.zig": "f31c2259d2f90170a7cb38ba508922e1bd21e07eb0e7d95765c51b53f316dcd7",
-    "docs/http_streaming.md": "7f23f5e49105f344c25d96692ff385bb79f0ff4e6d9e62a7cc1460d62748070c"
+    "src/http2/runtime/concurrent.zig": "8ce64f83e8948a26bb74660aa31ffedb721822befaa3879ddba5e312e7c8521e",
+    "src/http3/runtime/concurrent.zig": "e3e8edbeb34e39224cb5ee752c29a95d11c5f7c9c39b24b0bbc3d62cf2ad4355",
+    "src/http2/runtime/concurrent_tests.zig": "82b797690e52413ba69b53847f23ba00c8996a85455b7cf3d2bbfed28785be04",
+    "src/http3/runtime/concurrent_tests.zig": "f2263d19e9aaa66858d91dae6ab0ea7e7db3a58feda919f2a2e3a7e6ba7a0788",
+    "docs/http_streaming.md": "db4bb817da1cfca2e2900705d74575e87891003ace0baa2d846323855a466070"
   },
   "notes": "The default remains one possible worker per max_streams so existing latency-sensitive streaming behavior is unchanged. The option is a tuning boundary, not a claim that a lower cap is faster for every workload."
 }

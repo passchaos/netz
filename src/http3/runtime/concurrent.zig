@@ -55,6 +55,8 @@ pub const Summary = struct {
     failed: usize = 0,
     canceled: usize = 0,
     last_stream_id: u64 = 0,
+    /// Total handler worker threads spawned for this serve call.
+    workers_spawned: usize = 0,
 };
 
 /// Adapter contract. `from` is the peer address carried by the event; sessions
@@ -540,6 +542,7 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
             );
             self.task_mutex.lockUncancelable(self.io);
             self.workers.appendAssumeCapacity(thread);
+            self.summary.workers_spawned += 1;
             self.task_mutex.unlock(self.io);
         }
 

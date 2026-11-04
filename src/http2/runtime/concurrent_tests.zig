@@ -475,6 +475,7 @@ test "HTTP/2 concurrent oversize declared body stays stream-scoped" {
             try std.testing.expectEqual(@as(usize, 3), summary.accepted);
             try std.testing.expectEqual(@as(usize, 3), summary.completed);
             try std.testing.expectEqual(@as(usize, 0), summary.failed);
+            try std.testing.expect(summary.workers_spawned <= 1);
         }
     };
 
