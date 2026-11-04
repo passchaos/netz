@@ -44,7 +44,9 @@ fn write(pending: *runtime.PendingUpgrade, bytes: []const u8) !void {
 }
 
 fn waitForClose(pending: *runtime.PendingUpgrade) !void {
-    const deadline = std.Io.Clock.Timestamp.fromNow(pending.io, .{ .raw = .fromSeconds(2), .clock = .awake });
+    // Cleanup budget only: the assertions live on the client side, so a busy
+    // host must not turn a slow close into a test failure.
+    const deadline = std.Io.Clock.Timestamp.fromNow(pending.io, .{ .raw = .fromSeconds(30), .clock = .awake });
     var byte: [1]u8 = undefined;
     const count = switch (pending.transport) {
         .tcp => |tcp| stream_io.readSomeWithDeadline(tcp.io, tcp.stream, &byte, deadline),
@@ -91,7 +93,7 @@ fn rejection(comptime transport: Transport, framing: Framing, budget: Budget, de
         }
 
         fn serve(self: *@This()) !void {
-            var pending = try self.server.receiveUpgradeRequestWithTimeout(.{}, .fromSeconds(3));
+            var pending = try self.server.receiveUpgradeRequestWithTimeout(.{}, .fromSeconds(30));
             defer pending.deinit();
             const head = switch (self.framing) {
                 .fixed => "HTTP/1.1 401 Unauthorized\r\nContent-Length: 4\r\nX-Auth: expired\r\nConnection: close\r\n\r\n",
