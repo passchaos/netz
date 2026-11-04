@@ -89,7 +89,11 @@ test "HTTP/3 CONNECT DATAGRAM pacing wake resumes QPACK feedback without another
         try pair.sendPeer(role, &.{.ping});
         const connection = pair.connection(role);
         connection.pacer.enabled = true;
-        connection.setMaxPacingRateBytesPerSecond(100000);
+        // Keep the refill well below one datagram for the whole call. A
+        // 100 kB/s ceiling refilled the deficit in ~350 us, so a scheduling
+        // delay between exhausting the budget and sending could let the first
+        // attempt succeed and skip the QPACK flush this test observes.
+        connection.setMaxPacingRateBytesPerSecond(20_000);
         quic.one_rtt.testing.exhaustPacingAt(connection, @intCast(std.Io.Clock.awake.now(threaded.io()).nanoseconds));
         var committed: usize = 0;
         try send(sender, threaded.io(), false, false, 0, &.{"resumed"}, &committed);
