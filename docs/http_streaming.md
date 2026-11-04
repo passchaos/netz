@@ -196,10 +196,11 @@ Concurrency contract:
   `max_stream_frame_data` when testing a cap below the default frame size.
 - The `ConcurrentStream` handle is valid only while its handler runs. `nextBody`
   copies into the caller buffer; `trailers()` borrows the retained trailer
-  fields until the handler returns. All `ConcurrentStream` methods are safe from
-  the handler task and must not be called concurrently from another task. The
-  connection driver must not call handler methods; it only runs
-  `serveConcurrentStreams`.
+  fields until the handler returns and takes the per-stream body mutex while
+  reading them, so the call is synchronized even before END_STREAM. All
+  `ConcurrentStream` methods are safe from the handler task and must not be
+  called concurrently from another task. The connection driver must not call
+  handler methods; it only runs `serveConcurrentStreams`.
 - Response ordering: `startResponse`, then any number of `writeData(data, false)`,
   then either `writeData(final, true)`, `finish()`, or `finishWithTrailers`.
   `finishWithTrailers` sends the trailing HEADERS with FIN; do not call `finish`

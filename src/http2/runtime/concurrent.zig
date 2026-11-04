@@ -122,7 +122,13 @@ pub fn Engine(
                 return self.engine.nextBody(self.slot, out, deadline);
             }
 
+            /// Trailers received after the request body. The returned slice is
+            /// borrowed until the handler returns. The owner publishes it
+            /// under `body_mutex`; taking the same lock makes the read
+            /// synchronized even if the handler asks before END_STREAM.
             pub fn trailers(self: Stream) ?[]const http2.Hpack.HeaderField {
+                self.slot.body_mutex.lockUncancelable(self.engine.io);
+                defer self.slot.body_mutex.unlock(self.engine.io);
                 return self.slot.trailers;
             }
 

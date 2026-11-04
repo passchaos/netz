@@ -149,9 +149,13 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                 return self.engine.nextBody(self.slot, out, deadline);
             }
 
-            /// Trailers received after the request body. Valid until the
-            /// handler returns.
+            /// Trailers received after the request body. The returned slice is
+            /// borrowed until the handler returns. The owner publishes it
+            /// under `body_mutex`; taking the same lock makes the read
+            /// synchronized even if the handler asks before END_STREAM.
             pub fn trailers(self: Stream) ?[]const http3.Qpack.HeaderField {
+                self.slot.body_mutex.lockUncancelable(self.engine.io);
+                defer self.slot.body_mutex.unlock(self.engine.io);
                 return if (self.slot.trailers) |value| value.fields else null;
             }
 
