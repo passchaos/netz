@@ -65,3 +65,30 @@ test "gRPC xDS target expands aggregate clusters into ordered priorities" {
     try std.testing.expect(std.mem.indexOf(u8, built.json, "\"leaf-b\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, built.json, "\"cluster:aggregate\"") != null);
 }
+
+test "gRPC xDS target resolves a LOGICAL_DNS cluster without re-resolution" {
+    // kind 2 is CDS Discovery.logical_dns.
+    const logical = try fixture.dnsCluster(gpa, "logical", "logical.test", 1003, 2);
+    defer gpa.free(logical);
+    const decoded = try cds.decode(gpa, logical, .{});
+    try std.testing.expect(decoded.value.isDns());
+
+    const cluster = try entry.Cluster.create(gpa, decoded);
+    defer cluster.release();
+    const identity = try entry.Identity.create(gpa, "logical");
+    defer identity.release();
+
+    const entries = [_]entry.Entry{
+        .{ .identity = identity, .cluster = cluster, .cds_seen = true, .eds_seen = true },
+    };
+    const built = try target.Target.create(gpa, std.testing.io, &entries, null);
+    defer built.release();
+
+    // LOGICAL_DNS resolves once when the cluster is applied and asks the child
+    // policy not to re-resolve on connection failure.
+    try std.testing.expectEqual(@as(usize, 1), built.endpoints.len);
+    const endpoint = built.endpoints[0].cleartext_host;
+    try std.testing.expectEqualStrings("logical.test", endpoint.host);
+    try std.testing.expectEqual(@as(u16, 1003), endpoint.port);
+    try std.testing.expect(std.mem.indexOf(u8, built.json, "\"ignoreReresolutionRequests\":true") != null);
+}

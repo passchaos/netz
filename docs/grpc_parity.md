@@ -3611,8 +3611,13 @@ retention when ACK has no active stream. See [CDS behavior](grpc_cds.md) and
 This covers one explicitly selected EDS-backed cluster. Full bootstrap and
 LDS/RDS route selection, resource expiry, control-plane failover/retry,
 Delta xDS, per-child cluster management and LRS remain open. CDS transport
-security, outlier, LRS and upstream configuration fields are rejected, and
-LOGICAL_DNS/aggregate cluster discovery remains unsupported. Ring allocation
+security, outlier, LRS and upstream configuration fields are rejected.
+LOGICAL_DNS clusters are decoded and expanded into a priority tree whose child
+policy carries `ignoreReresolutionRequests`, i.e. addresses resolve once when
+the CDS resource is applied. STRICT_DNS is accepted but currently shares that
+same resolve-on-apply path instead of re-resolving after a connection failure.
+Aggregate clusters expand into ordered priorities over their leaf clusters.
+Both are covered by `src/grpc/xds/runtime/target_tests.zig`. Ring allocation
 still has the existing 4096-entry runtime cap.
 
 
