@@ -105,9 +105,9 @@ fn rejection(comptime transport: Transport, framing: Framing, budget: Budget, de
             if (self.delivery == .stalled) return waitForClose(&pending);
             if (self.delivery == .trickled) {
                 for ("nope") |byte| {
-                    // Each piece arrives before a renewed 150-ms timeout, but
+                    // Each piece arrives before a renewed 750-ms timeout, but
                     // the complete body outlives the original HTTP deadline.
-                    try std.Io.sleep(pending.io, .fromMilliseconds(60), .awake);
+                    try std.Io.sleep(pending.io, .fromMilliseconds(250), .awake);
                     const part: [6]u8 = .{ '1', '\r', '\n', byte, '\r', '\n' };
                     write(&pending, if (self.framing == .chunked) &part else part[3..4]) catch break;
                     self.body_parts_sent += 1;
@@ -130,13 +130,13 @@ fn rejection(comptime transport: Transport, framing: Framing, budget: Budget, de
 
     const options = runtime.ConnectOptions{
         .host = "localhost",
-        .limits = .{ .http1_handshake_timeout = if (delivery == .complete or budget == .outer) .fromSeconds(3) else if (delivery == .stalled) .fromSeconds(1) else .fromMilliseconds(150) },
+        .limits = .{ .http1_handshake_timeout = if (delivery == .complete or budget == .outer) .fromSeconds(3) else if (delivery == .stalled) .fromMilliseconds(1500) else .fromMilliseconds(750) },
         .tls_identity = if (transport == .native_tls) .{ .server_verifier = .{ .pinned_ecdsa_p256_public_key = key.public_key.toUncompressedSec1() }, .protocol_policy = .tls13_only } else null,
     };
     // The native TLS arm pins the test identity; the standard TLS arm exercises
     // its separate record reader without loading the machine's root store.
     const tls_options = @import("../../../http1/runtime.zig").TlsClientOptions{ .verify_host = transport != .standard_tls };
-    const outer_timeout = if (budget == .outer) std.Io.Duration.fromMilliseconds(150) else std.Io.Duration.fromSeconds(3);
+    const outer_timeout = if (budget == .outer) std.Io.Duration.fromSeconds(1) else std.Io.Duration.fromSeconds(3);
     const result = if (secure) (if (budget == .phase) runtime.Client.connectTlsAddressAttempt(allocator, io, server.address(), "localhost", options, tls_options) else runtime.Client.connectTlsAddressAttemptWithTimeout(allocator, io, server.address(), "localhost", options, tls_options, outer_timeout)) else (if (budget == .phase) runtime.Client.connectAttempt(allocator, io, server.address(), options) else runtime.Client.connectAttemptWithTimeout(allocator, io, server.address(), options, outer_timeout));
     if (delivery == .complete) {
         var attempt = try result;

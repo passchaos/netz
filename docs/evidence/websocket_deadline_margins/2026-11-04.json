@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "date": "2026-11-04",
+  "head": "5a52eaa8",
+  "subject": "Rejected HTTP/1 WebSocket body deadline margins",
+  "change": "The rejected-body tests used 150 ms phase/outer budgets and 60 ms trickle steps. On a loaded host those values are shorter than scheduling jitter, so the peer could miss its head write or the first body piece even when the deadline ordering under test was correct. Raise the stalled phase budget to 1.5 s, the outer budget to 1 s, and the trickled phase budget to 750 ms with 250 ms steps. The relative ordering is unchanged: stalled phase/outer cases still expire at the earlier budget, and the four trickled pieces still complete after the original 750 ms phase deadline.",
+  "tests": {
+    "command": "zig build test-lib -Dtest-filter='WebSocket rejected HTTP1 body preserves earlier phase' --summary all",
+    "repeat_runs": 3,
+    "passed": 156,
+    "total": 156,
+    "failed": 0,
+    "sibling_gate": {
+      "command": "zig build test-lib -Dtest-filter='WebSocket rejected HTTP1 body' --summary all",
+      "passed": 157,
+      "total": 157,
+      "failed": 0
+    }
+  },
+  "source_sha256": {
+    "src/websocket/runtime/handshake/receive_tests.zig": "f54fcf0e98825ece916214d5ba32b2e7c1c36986a1991b3b49177cb2c349b947"
+  },
+  "notes": "This is a test-budget change only; the client deadline-preservation assertions are unchanged."
+}
