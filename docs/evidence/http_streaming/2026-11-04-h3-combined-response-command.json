@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "date": "2026-11-04",
+  "head": "fc3f2814",
+  "gate": "HTTP/3 ConcurrentStream.startResponseWithBody submits the response head and first DATA contribution as one owner command",
+  "problem": "A sequential request paid two owner round trips: the handler blocked on start_response, then blocked again on write_body. Command tracing had shown each round trip costs roughly the wake plus Select cycle, which dominated the 76-101 us sequential latency even though the owner's send itself took only 5-25 us.",
+  "change": "New additive API `ConcurrentStream.startResponseWithBody(response, body_length, data, fin)` plus a deadline form. The owner executes the head and the first body contribution in one command. HEAD/204/304 still suppress the body: non-empty data is rejected as InvalidContentLength and fin marks the response finished. `startResponse`/`writeData` keep their existing semantics.",
+  "benchmark": {
+    "workload": "netz-only harness (zio event loop, HandshakeServer.serveConcurrentStreams + client startRequest/receiveNextResponse), GET / -> 200 \"ok\"",
+    "before": {
+      "sequential": { "ns_per_request": 101830, "requests_per_second": 9820 },
+      "batch8": { "ns_per_request": 53202, "requests_per_second": 18796 },
+      "batch32": { "ns_per_request": 49063, "requests_per_second": 20381 }
+    },
+    "after": {
+      "sequential": { "ns_per_request": 59187, "requests_per_second": 16895 },
+      "batch8": { "ns_per_request": 39711, "requests_per_second": 25181 },
+      "batch32": { "ns_per_request": 51080, "requests_per_second": 19576 }
+    }
+  },
+  "result": {
+    "http3": { "passed": 929, "total": 929, "failed": 0, "runs": 2 },
+    "package": { "passed": 26, "total": 26, "failed": 0 }
+  },
+  "source_sha256": {
+    "src/http3/runtime/concurrent.zig": "b1f9ab232786cdc8bc784c35fac581c61929124ad918c8f56f10c0d9db34d1c3",
+    "src/http3/runtime/concurrent_tests.zig": "2c658c062f3622cfa12b541253408927a60523830dc76dacaa3c1f4ab331b6d4"
+  },
+  "notes": "Sequential dropped 101.8 -> 59.2 us/request in the netz harness and batch=8 dropped 53.2 -> 39.7 us/request. batch=32 is unchanged within noise because its latency is dominated by per-packet work, not by one extra command round trip. Weft must call the new method to see the win; the existing startResponse/writeData sequence keeps its current cost. The new test covers the ordinary GET path and HEAD suppression is already covered by the existing suppress-body tests."
+}

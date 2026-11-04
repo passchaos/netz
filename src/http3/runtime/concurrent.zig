@@ -86,6 +86,15 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                     data: []const u8,
                     fin: bool,
                 },
+                /// Response head and its first DATA contribution in one owner
+                /// turn. A sequential request otherwise pays two wake/command
+                /// round trips for what is a single logical response.
+                start_response_with_body: struct {
+                    response: http3.Response,
+                    body_length: ?usize,
+                    data: []const u8,
+                    fin: bool,
+                },
                 finish_trailers: []const http3.Qpack.HeaderField,
                 cancel: u64,
             };
@@ -186,6 +195,42 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                 var command = Command{ .slot = self.slot, .kind = .{ .start_response = .{
                     .response = response,
                     .body_length = body_length,
+                } } };
+                return self.engine.submit(&command, deadline);
+            }
+
+            /// Submit the response head and its first DATA contribution as one
+            /// owner command. `data` must stay valid until this call returns.
+            /// HEAD/204/304 responses still suppress the body.
+            pub fn startResponseWithBody(
+                self: Stream,
+                response: http3.Response,
+                body_length: ?usize,
+                data: []const u8,
+                fin: bool,
+            ) anyerror!void {
+                var command = Command{ .slot = self.slot, .kind = .{ .start_response_with_body = .{
+                    .response = response,
+                    .body_length = body_length,
+                    .data = data,
+                    .fin = fin,
+                } } };
+                return self.engine.submit(&command, null);
+            }
+
+            pub fn startResponseWithBodyAndDeadline(
+                self: Stream,
+                response: http3.Response,
+                body_length: ?usize,
+                data: []const u8,
+                fin: bool,
+                deadline: std.Io.Clock.Timestamp,
+            ) anyerror!void {
+                var command = Command{ .slot = self.slot, .kind = .{ .start_response_with_body = .{
+                    .response = response,
+                    .body_length = body_length,
+                    .data = data,
+                    .fin = fin,
                 } } };
                 return self.engine.submit(&command, deadline);
             }
@@ -801,6 +846,30 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                     if (value.body_length == 0 or slot.suppress_body) {
                         slot.response_finished = true;
                     }
+                },
+                .start_response_with_body => |value| {
+                    try Adapter.startResponse(
+                        self.session,
+                        slot.from,
+                        slot.stream_id,
+                        value.response,
+                        value.body_length,
+                    );
+                    slot.suppress_body = value.response.suppressesBody();
+                    if (slot.suppress_body) {
+                        // HEAD/204/304: the head already ended the stream.
+                        if (value.data.len != 0) return error.InvalidContentLength;
+                        if (value.fin) slot.response_finished = true;
+                        return;
+                    }
+                    try Adapter.sendBody(
+                        self.session,
+                        slot.from,
+                        slot.stream_id,
+                        value.data,
+                        value.fin,
+                    );
+                    if (value.fin) slot.response_finished = true;
                 },
                 .write_body => |value| {
                     if (slot.suppress_body) {

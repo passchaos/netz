@@ -628,6 +628,86 @@ test "HTTP/3 continuous concurrent serving HEAD returns headers without DATA" {
 }
 
 
+test "HTTP/3 continuous concurrent serving writes head and body in one command" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try runtime.Server.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        test_limits,
+    );
+    defer server.deinit();
+
+    const Context = struct { io: std.Io };
+    var context = Context{ .io = io };
+    const Handler = struct {
+        fn run(ctx: *Context, stream: *runtime.Server.ConcurrentStream) anyerror!void {
+            _ = ctx;
+            try stream.startResponseWithBody(.{ .status = 200 }, 2, "ok", true);
+        }
+    };
+
+    const ServerTask = struct {
+        server: *runtime.Server,
+        context: *Context,
+        shutdown: *std.Io.Event,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            const summary = try self.server.serveConcurrentStreams(
+                Context,
+                self.context,
+                Handler.run,
+                .{ .max_streams = 1, .shutdown = self.shutdown },
+            );
+            try std.testing.expectEqual(@as(usize, 1), summary.accepted);
+            try std.testing.expectEqual(@as(usize, 1), summary.completed);
+            try std.testing.expectEqual(@as(usize, 0), summary.failed);
+        }
+    };
+
+    var shutdown: std.Io.Event = .unset;
+    var server_task = ServerTask{ .server = &server, .context = &context, .shutdown = &shutdown };
+    const thread = try std.Thread.spawn(.{}, ServerTask.run, .{&server_task});
+    var joined = false;
+    defer if (!joined) {
+        shutdown.set(io);
+        thread.join();
+    };
+
+    var client = try runtime.Client.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        test_limits,
+    );
+    defer client.deinit();
+    var response = try client.requestWithTimeout(.{
+        .method = "GET",
+        .path = "/combined",
+        .authority = "localhost",
+    }, .fromSeconds(3));
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 200), response.response.status);
+    try std.testing.expectEqualStrings("ok", response.response.body);
+
+    shutdown.set(io);
+    thread.join();
+    joined = true;
+    if (server_task.err) |err| return err;
+}
+
 test "HTTP/3 handshake concurrent serving reads a POST body" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
