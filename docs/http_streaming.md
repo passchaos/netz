@@ -212,8 +212,10 @@ Concurrency contract:
   delivered to `nextBody` as `error.StreamReset` and does not poison siblings.
 - `shutdown` stops new acceptance, lets active handlers finish, then sends
   GOAWAY. An overall `deadline` or `idle_timeout` returns `error.Timeout` and
-  cancels active streams. Peer GOAWAY/close stops acceptance and releases
-  active streams.
+  cancels active streams. `idle_timeout` is a normal connection end, not a
+  failure: callers should treat `error.Timeout` from an idle-configured
+  `serveConcurrentStreams` as clean shutdown and not log it as an error.
+  Peer GOAWAY/close stops acceptance and releases active streams.
 - Response writes remain a single-writer path; a blocked write on one stream
   can delay sibling writes but never corrupts HPACK/QPACK or stream state.
 - Handlers run on a per-connection worker pool that grows lazily up to
