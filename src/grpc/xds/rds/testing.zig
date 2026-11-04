@@ -1,7 +1,7 @@
 //! Wire fixtures; official schema/runtime interop supplies the separate oracle.
 const std = @import("std");
 pub const Builder = @import("../cds/testing.zig").Builder;
-pub const Route = struct { prefix: []const u8 = "", exact: ?[]const u8 = null, regex: ?[]const u8 = null, cluster: []const u8 = "a", match_extra: []const u8 = "", action_extra: []const u8 = "", retry: ?[]const u8 = null };
+pub const Route = struct { prefix: []const u8 = "", exact: ?[]const u8 = null, regex: ?[]const u8 = null, cluster: []const u8 = "a", match_extra: []const u8 = "", action_extra: []const u8 = "", route_extra: []const u8 = "", retry: ?[]const u8 = null };
 pub fn encode(gpa: std.mem.Allocator, name: []const u8, domains: []const []const u8, routes: []const Route, retry: ?[]const u8) ![]u8 {
     var host = Builder{ .allocator = gpa };
     defer host.deinit();
@@ -26,6 +26,7 @@ pub fn encode(gpa: std.mem.Allocator, name: []const u8, domains: []const []const
         defer value.deinit();
         try value.bytes(1, match.data.items);
         try value.bytes(2, action.data.items);
+        try value.data.appendSlice(gpa, route.route_extra);
         try host.bytes(3, value.data.items);
     }
     var out = Builder{ .allocator = gpa };

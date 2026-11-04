@@ -71,6 +71,14 @@ rewrites, `path_rewrite`/`host_rewrite` values containing format specifiers,
 policy rewrites and automatic-host rewrites fail validation instead of being
 ignored.
 
+Route-level `request_headers_to_add` and `request_headers_to_remove` are
+applied to non-binary application metadata when request inputs are copied.
+Additions support append, add-if-absent, overwrite and overwrite-if-exists;
+removals run first and match header names case-insensitively. Literal values
+only: `%` format specifiers, reserved gRPC/HTTP pseudo-headers, `content-type`,
+`te`, `grpc-*` and `-bin` names fail validation. Header mutations are internal
+request state and never survive as xDS attributes on the wire.
+
 Route timeout prefers grpc_timeout_header_max to max_stream_duration; zero
 disables the route/HCM cap, preserving the caller's deadline. An absent route
 cap can use Options.default_max_stream_duration. The selected cap and service
@@ -134,9 +142,13 @@ available through the automatic runtime. Bootstrap parsing and insecure
 control-plane failover are available; automatic multi-cluster CDS/EDS
 orchestration, certificate providers and automatic refresh scheduling, authority-specific control planes,
 LRS automatic background scheduling, capture/hash rewriting, HTTP filter
-overrides, regex/format path rewrites and automatic host rewriting remain open.
-Delta route TTL expiry is covered. Literal prefix and authority rewrites are
-covered by native selection and on-wire tests. Unsupported recognized filter,
-rewrite, timeout-offset and plugin features fail validation; this module does
-not silently claim their deployment behavior. Evidence is recorded in
-`docs/evidence/grpc_rds/2026-11-04-rewrites.json`.
+overrides, response header mutations, regex/format path rewrites and automatic
+host rewriting remain open.
+Delta route TTL expiry is covered. Literal prefix/whole-path and authority
+rewrites plus literal request header additions/removals are covered by native
+selection and owned-input tests. Unsupported recognized filter, rewrite,
+timeout-offset and plugin features fail validation; this module does not
+silently claim their deployment behavior. Evidence is recorded in
+`docs/evidence/grpc_rds/2026-11-04-rewrites.json`,
+`docs/evidence/grpc_rds/2026-11-04-literal-path-host.json` and
+`docs/evidence/grpc_rds/2026-11-04-request-headers.json`.

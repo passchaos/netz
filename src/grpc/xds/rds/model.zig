@@ -47,6 +47,8 @@ pub const Route = struct {
     headers: []const routing.header.Match,
     fraction_per_million: ?u32,
     action: union(enum) { forward: Forward, inappropriate },
+    request_headers_to_add: []const @import("../../call.zig").HeaderMutation = &.{},
+    request_headers_to_remove: []const []const u8 = &.{},
 };
 pub const VirtualHost = struct { domains: []const []const u8, routes: []const Route };
 pub const Config = struct { name: []const u8, virtual_hosts: []const VirtualHost };

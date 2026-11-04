@@ -14,6 +14,8 @@ pub const Selection = struct {
     retry: ?@import("../../call.zig").RetryPolicy,
     path_rewrite: ?@import("../../call.zig").PathRewrite = null,
     authority: ?[]const u8 = null,
+    request_header_mutations: []const @import("../../call.zig").HeaderMutation = &.{},
+    request_header_removals: []const []const u8 = &.{},
 };
 fn firstHeader(request: routing.header.Request, name: []const u8) ?[]const u8 {
     if (std.ascii.eqlIgnoreCase(name, ":authority")) return request.authority;
@@ -150,6 +152,8 @@ pub const Snapshot = struct {
                 .retry = forward.retry_policy,
                 .path_rewrite = path_rewrite,
                 .authority = authority,
+                .request_header_mutations = route.request_headers_to_add,
+                .request_header_removals = route.request_headers_to_remove,
             };
         }
         return error.NoMatchingRoute;
@@ -166,6 +170,8 @@ pub const Snapshot = struct {
         selected.request_hash = selection.hash;
         selected.xds_path_rewrite = selection.path_rewrite;
         if (selection.authority) |authority| selected.authority = authority;
+        selected.xds_request_header_mutations = selection.request_header_mutations;
+        selected.xds_request_header_removals = selection.request_header_removals;
         if (selection.duration) |limit| if (limit.nanoseconds > 0) {
             const duration: std.Io.Duration = if (options.timeout) |timeout| .fromNanoseconds(@min(timeout.duration().nanoseconds, limit.nanoseconds)) else limit;
             selected.timeout = try wire.Timeout.fromDuration(duration);

@@ -31,16 +31,109 @@ const Parser = struct {
         if (self.arena.queryCapacity() > self.limits.max_storage_bytes) return error.RdsLimitExceeded;
         return matcher;
     }
+    fn headerNameValid(name: []const u8) bool {
+        if (name.len == 0 or name[0] == ':') return false;
+        if (std.mem.endsWith(u8, name, "-bin")) return false;
+        if (std.ascii.eqlIgnoreCase(name, "content-type") or
+            std.ascii.eqlIgnoreCase(name, "te") or
+            std.ascii.startsWithIgnoreCase(name, "grpc-"))
+        {
+            return false;
+        }
+        for (name) |byte| {
+            if ((byte >= 'a' and byte <= 'z') or
+                (byte >= '0' and byte <= '9') or
+                byte == '_' or byte == '-' or byte == '.')
+            {
+                continue;
+            }
+            return false;
+        }
+        return true;
+    }
+    fn headerValueValid(value: []const u8) bool {
+        for (value) |byte| if (byte < 0x20 or byte == 0x7f) return false;
+        return true;
+    }
+    fn headerMutation(
+        self: *Parser,
+        bytes: []const u8,
+    ) pb.Error!?@import("../../call.zig").HeaderMutation {
+        var reader = pb.Reader{ .bytes = bytes };
+        var key: []const u8 = "";
+        var value: ?[]const u8 = null;
+        var raw_value: ?[]const u8 = null;
+        var append: ?bool = null;
+        var append_action: ?u64 = null;
+        var keep_empty = false;
+        while (try reader.next()) |field| {
+            if (field.number == 1 and field.wire_type == 2) {
+                var nested = pb.Reader{ .bytes = try reader.bytesValue() };
+                while (try nested.next()) |entry| {
+                    if (entry.number == 1 and entry.wire_type == 2) {
+                        key = try pb.text(&nested, self.limits.max_text_bytes);
+                    } else if (entry.number == 2 and entry.wire_type == 2) {
+                        value = try pb.text(&nested, self.limits.max_text_bytes);
+                    } else if (entry.number == 3 and entry.wire_type == 2) {
+                        raw_value = try nested.bytesValue();
+                    } else try nested.skip(entry);
+                }
+            } else if (field.number == 2 and field.wire_type == 2) {
+                append = (try pb.wrapper(try reader.bytesValue())) != 0;
+            } else if (field.number == 3 and field.wire_type == 0) {
+                append_action = try reader.varint();
+            } else if (field.number == 4 and field.wire_type == 0) {
+                keep_empty = (try reader.varint()) != 0;
+            } else try reader.skip(field);
+        }
+        if (!headerNameValid(key)) return error.InvalidRdsResource;
+        if (value != null and raw_value != null) return error.InvalidRdsResource;
+        const header_value = raw_value orelse value orelse "";
+        if (!headerValueValid(header_value)) return error.InvalidRdsResource;
+        if (header_value.len == 0 and !keep_empty) return null;
+        if (std.mem.indexOfScalar(u8, header_value, '%') != null) {
+            return error.UnsupportedRdsFeature;
+        }
+        const action: @import("../../call.zig").HeaderMutationAction = if (append_action) |raw| switch (raw) {
+            0 => .append,
+            1 => .add_if_absent,
+            2 => .overwrite,
+            3 => .overwrite_if_exists,
+            else => return error.InvalidRdsResource,
+        } else if (append) |enabled|
+            if (enabled) .append else .overwrite
+        else
+            .append;
+        return .{ .name = key, .value = header_value, .action = action };
+    }
     fn route(self: *Parser, bytes: []const u8, inherited: ?@import("../../call.zig").RetryPolicy) pb.Error!?model.Route {
         if (self.routes >= self.limits.max_routes) return error.RdsLimitExceeded;
         self.routes += 1;
         var reader = pb.Reader{ .bytes = bytes };
         var raw_match: ?[]const u8 = null;
         var raw_action: ?[]const u8 = null;
+        var headers_to_add: std.ArrayList(@import("../../call.zig").HeaderMutation) = .empty;
+        defer headers_to_add.deinit(self.allocator);
+        var headers_to_remove: std.ArrayList([]const u8) = .empty;
+        defer headers_to_remove.deinit(self.allocator);
         while (try reader.next()) |field| {
             if (field.number == 1 and field.wire_type == 2) raw_match = try reader.bytesValue() else if (field.number == 2 and field.wire_type == 2) raw_action = try reader.bytesValue() else if ((field.number == 3 or field.number == 7 or field.number == 17 or field.number == 18 or field.number == 19) and field.wire_type == 2) {
                 _ = try reader.bytesValue();
                 raw_action = null;
+            } else if (field.number == 9 and field.wire_type == 2) {
+                if (headers_to_add.items.len >= self.limits.max_headers_per_route) {
+                    return error.RdsLimitExceeded;
+                }
+                if (try self.headerMutation(try reader.bytesValue())) |mutation| {
+                    try headers_to_add.append(self.allocator, mutation);
+                }
+            } else if (field.number == 12 and field.wire_type == 2) {
+                if (headers_to_remove.items.len >= self.limits.max_headers_per_route) {
+                    return error.RdsLimitExceeded;
+                }
+                const name = try pb.text(&reader, self.limits.max_text_bytes);
+                if (!headerNameValid(name)) return error.InvalidRdsResource;
+                try headers_to_remove.append(self.allocator, name);
             } else if (field.number == 13 and field.wire_type == 2) return error.UnsupportedRdsFeature else try reader.skip(field);
         }
         const match = (try @import("match.zig").decode(self, raw_match orelse return error.InvalidRdsResource)) orelse return null;
@@ -50,7 +143,14 @@ const Parser = struct {
             if (!forward.retry_present) forward.retry_policy = inherited;
             action = .{ .forward = forward };
         }
-        return .{ .path = match.path, .headers = match.headers, .fraction_per_million = match.fraction, .action = action };
+        return .{
+            .path = match.path,
+            .headers = match.headers,
+            .fraction_per_million = match.fraction,
+            .action = action,
+            .request_headers_to_add = try headers_to_add.toOwnedSlice(self.allocator),
+            .request_headers_to_remove = try headers_to_remove.toOwnedSlice(self.allocator),
+        };
     }
     fn virtualHost(self: *Parser, bytes: []const u8) pb.Error!model.VirtualHost {
         var reader = pb.Reader{ .bytes = bytes };

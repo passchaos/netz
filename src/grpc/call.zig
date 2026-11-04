@@ -211,6 +211,20 @@ fn parseUnaryRequestParts(
     };
 }
 
+/// Internal xDS request-header mutation applied while request inputs are
+/// copied. It never becomes application metadata on its own.
+pub const HeaderMutationAction = enum {
+    append,
+    add_if_absent,
+    overwrite,
+    overwrite_if_exists,
+};
+pub const HeaderMutation = struct {
+    name: []const u8,
+    value: []const u8,
+    action: HeaderMutationAction = .append,
+};
+
 /// Internal xDS route path rewrite. It is consumed while request inputs are
 /// copied and never becomes application metadata.
 pub const PathRewrite = union(enum) {
@@ -270,6 +284,11 @@ pub const UnaryCallOptions = struct {
     xds_cluster: ?[]const u8 = null,
     /// Internal xDS route path rewrite applied when request inputs are copied.
     xds_path_rewrite: ?PathRewrite = null,
+    /// Internal xDS request-header additions applied when request inputs are
+    /// copied. The slices remain borrowed from the selector snapshot.
+    xds_request_header_mutations: []const HeaderMutation = &.{},
+    /// Internal xDS request-header removals applied before additions.
+    xds_request_header_removals: []const []const u8 = &.{},
     /// Retry one REFUSED_STREAM before response commitment without charging a
     /// configured retry attempt. Disable for explicit single-attempt probes.
     transparent_retry: bool = true,

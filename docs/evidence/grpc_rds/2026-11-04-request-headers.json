@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "date": "2026-11-04",
+  "head": "8d94baff",
+  "subject": "Literal RDS request header additions and removals",
+  "change": "Route-level request_headers_to_add and request_headers_to_remove are decoded into the retained route model and carried in the per-RPC selection. The owned shared request-input copy applies removals first, then additions in listed order, supporting append, add-if-absent, overwrite and overwrite-if-exists. Names match case-insensitively. Only non-binary application metadata is mutable: pseudo-headers, content-type, te, grpc-* and -bin names fail validation. Values containing '%' fail validation because format substitution is not implemented; empty values are dropped unless keep_empty_value is set.",
+  "tests": {
+    "decode_and_selection": "src/grpc/xds/rds/tests.zig 'gRPC RDS owns literal request header mutations and removals' checks the decoded action, retained route fields and selection projection; 'gRPC RDS rejects reserved, binary and format request header mutations' covers fail-closed validation.",
+    "owned_inputs": "src/grpc/channel/shared/request_inputs.zig 'shared request inputs apply xDS header mutations and removals' exercises append, overwrite, add-if-absent, overwrite-if-exists and removal against the owned metadata copy.",
+    "focused_gate": {
+      "command": "zig build test-lib -Dtest-filter='gRPC RDS' --summary all",
+      "passed": 176,
+      "total": 176,
+      "failed": 0
+    },
+    "mutation_filter": {
+      "command": "zig build test-lib -Dtest-filter='header mutations' --summary all",
+      "passed": 156,
+      "total": 156,
+      "failed": 0
+    },
+    "package": {
+      "command": "zig build test-package --summary all",
+      "passed": 26,
+      "total": 26,
+      "failed": 0
+    }
+  },
+  "source_sha256": {
+    "src/grpc/call.zig": "14d05a5220b1af6fd91e671a51805f8c7078a125fcc6122c5efb4f9ffad6d936",
+    "src/grpc/stream/runtime.zig": "62979e3e8fba8d54e6daf600abb4ad9e147933eec4f11893dc3b21351d80bba1",
+    "src/grpc/channel/shared/request_inputs.zig": "2e13b444ba154f765bc6cdebbe26b5642de1d23a317a4e2467058a06818b9faa",
+    "src/grpc/xds/rds/model.zig": "a2c8aee26377d6d487d3ef74a6150faa63de9001a2d210c6bd21c38c2abc3317",
+    "src/grpc/xds/rds/decode.zig": "65e6c4f753272b02e9416968f1afa94c5ac3c25696cc9256929ef371e07da382",
+    "src/grpc/xds/rds/snapshot.zig": "13f696a9d8ee9d11a1708c3c83a97b49a1597ebccb3205824048e59d4f5b8176",
+    "src/grpc/xds/rds/testing.zig": "8f039088dfee96d8d08cbb7f9f92506d263fdfe2a417b19c6af511973b3aa9f4",
+    "src/grpc/xds/rds/tests.zig": "fff0d4fa714015eafe83a2277df4250144955a179e949bd05b0a1b8eaece82bc",
+    "docs/grpc_rds.md": "612ee6b6cdfd03bd7f3ce88fc55e7e7a35e1227bd91a284451fd1c0f62f2bb06",
+    "docs/grpc_parity.md": "c7a8fa39dd2156563af9b4dc592901191b6549fe339d4316898fddcc10009cbe"
+  },
+  "notes": "Response header mutations and HTTP filter overrides remain unsupported. The mutation descriptor is cleared by the owned-input copy, so retries and hedged attempts apply it exactly once."
+}

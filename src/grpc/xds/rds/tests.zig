@@ -120,6 +120,71 @@ test "gRPC RDS rewrites matched prefixes and literal or header authorities" {
     try std.testing.expectEqualStrings("literal.example", literal.authority.?);
     try std.testing.expectEqualStrings("/literal.Service/Get", literal.path_rewrite.?.whole);
 }
+test "gRPC RDS owns literal request header mutations and removals" {
+    var header = fixture.Builder{ .allocator = gpa };
+    defer header.deinit();
+    try header.bytes(1, "x-add");
+    try header.bytes(2, "added");
+    var option = fixture.Builder{ .allocator = gpa };
+    defer option.deinit();
+    try option.bytes(1, header.data.items);
+    try option.number(3, 2); // OVERWRITE_IF_EXISTS_OR_ADD
+    var route_extra = fixture.Builder{ .allocator = gpa };
+    defer route_extra.deinit();
+    try route_extra.bytes(9, option.data.items);
+    try route_extra.bytes(12, "x-remove");
+    const bytes = try fixture.encode(gpa, "routes", &.{"backend.test"}, &.{.{ .prefix = "/", .route_extra = route_extra.data.items }}, null);
+    defer gpa.free(bytes);
+    var owned = try rds.decode(gpa, bytes, .{});
+    defer owned.deinit();
+    const route = owned.value.virtual_hosts[0].routes[0];
+    try std.testing.expectEqual(@as(usize, 1), route.request_headers_to_add.len);
+    try std.testing.expectEqualStrings("x-add", route.request_headers_to_add[0].name);
+    try std.testing.expectEqualStrings("added", route.request_headers_to_add[0].value);
+    try std.testing.expectEqual(@import("../../call.zig").HeaderMutationAction.overwrite, route.request_headers_to_add[0].action);
+    try std.testing.expectEqual(@as(usize, 1), route.request_headers_to_remove.len);
+    try std.testing.expectEqualStrings("x-remove", route.request_headers_to_remove[0]);
+    const snapshot = try rds.Snapshot.create(gpa, bytes, .{}, .{ .authority = "backend.test" });
+    defer snapshot.release();
+    var prng = random();
+    const selected = try snapshot.selectWith(gpa, .{ .path = "/demo.Service/Get", .authority = "backend.test" }, 1, prng.random());
+    try std.testing.expectEqual(@as(usize, 1), selected.request_header_mutations.len);
+    try std.testing.expectEqual(@as(usize, 1), selected.request_header_removals.len);
+}
+test "gRPC RDS rejects reserved, binary and format request header mutations" {
+    const Case = struct { key: []const u8, value: []const u8 = "v" };
+    const cases = [_]Case{
+        .{ .key = "content-type" },
+        .{ .key = "x-data-bin" },
+        .{ .key = ":authority" },
+        .{ .key = "x-format", .value = "prefix-%REQ(x)%" },
+    };
+    for (cases) |case| {
+        var header = fixture.Builder{ .allocator = gpa };
+        defer header.deinit();
+        try header.bytes(1, case.key);
+        try header.bytes(2, case.value);
+        var option = fixture.Builder{ .allocator = gpa };
+        defer option.deinit();
+        try option.bytes(1, header.data.items);
+        var route_extra = fixture.Builder{ .allocator = gpa };
+        defer route_extra.deinit();
+        try route_extra.bytes(9, option.data.items);
+        const bytes = try fixture.encode(gpa, "routes", &.{"backend.test"}, &.{.{ .prefix = "/", .route_extra = route_extra.data.items }}, null);
+        defer gpa.free(bytes);
+        if (std.mem.eql(u8, case.value, "v")) {
+            try std.testing.expectError(error.InvalidRdsResource, rds.decode(gpa, bytes, .{}));
+        } else {
+            try std.testing.expectError(error.UnsupportedRdsFeature, rds.decode(gpa, bytes, .{}));
+        }
+    }
+    var remove_extra = fixture.Builder{ .allocator = gpa };
+    defer remove_extra.deinit();
+    try remove_extra.bytes(12, ":authority");
+    const remove_bytes = try fixture.encode(gpa, "routes", &.{"backend.test"}, &.{.{ .prefix = "/", .route_extra = remove_extra.data.items }}, null);
+    defer gpa.free(remove_bytes);
+    try std.testing.expectError(error.InvalidRdsResource, rds.decode(gpa, remove_bytes, .{}));
+}
 test "gRPC RDS rejects unsupported regex and format rewrites" {
     var action = fixture.Builder{ .allocator = gpa };
     defer action.deinit();
