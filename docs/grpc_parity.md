@@ -3574,7 +3574,13 @@ interop remains required regression evidence. See
 [cluster circuit behavior](grpc_circuit.md) and
 `docs/evidence/grpc_circuit/2026-11-03.json`. CDS extraction and selected
 cluster publication are covered by the following slice. Per-child cluster
-implementation, LRS and remaining full control-plane integration remain open.
+implementation and the remaining full control-plane orchestration remain open.
+LRS itself is implemented: `src/grpc/xds/lrs/` provides the v3 codec,
+per-cluster/locality/endpoint reports built from SharedChannel counters, an
+interval scheduler that emits deltas and skips all-zero intervals, and
+reconnect plus control-plane failover (`lrs/tests.zig`,
+`lrs/scheduler_tests.zig`, `lrs/transport_tests.zig`). Applications run the
+scheduler with `io.concurrent`; the runtime Controller does not own one yet.
 
 
 ## Typed CDS and transactional CDS/EDS application
@@ -3610,8 +3616,10 @@ retention when ACK has no active stream. See [CDS behavior](grpc_cds.md) and
 
 This covers one explicitly selected EDS-backed cluster. Full bootstrap and
 LDS/RDS route selection, resource expiry, control-plane failover/retry,
-Delta xDS, per-child cluster management and LRS remain open. CDS transport
-security, outlier, LRS and upstream configuration fields are rejected.
+Delta xDS and per-child cluster management remain open. CDS transport
+security, outlier, per-cluster LRS server and upstream configuration fields are
+rejected; the standalone LRS client and scheduler are implemented as described
+above.
 LOGICAL_DNS clusters are decoded and expanded into a priority tree whose child
 policy carries `ignoreReresolutionRequests: true`, i.e. addresses resolve once
 when the CDS resource is applied. STRICT_DNS sets that flag to `false`, so a
