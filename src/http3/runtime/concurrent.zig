@@ -98,6 +98,9 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
             /// True while the owner stopped reading because the resident
             /// buffer reached `max_buffered_body_bytes`.
             body_blocked: bool = false,
+            /// True while the session reader still has DATA for this stream
+            /// that the owner has not copied yet.
+            body_pending: bool = false,
             body_wake: std.Io.Event = .unset,
             body_finished: bool = false,
             body_error: ?anyerror = null,
@@ -467,6 +470,9 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
             const slot = self.find(from, stream_id) orelse return;
             const cap = self.max_buffered_body_bytes;
             var scratch: [16 * 1024]u8 = undefined;
+            slot.body_mutex.lockUncancelable(self.io);
+            slot.body_pending = true;
+            slot.body_mutex.unlock(self.io);
             while (true) {
                 slot.body_mutex.lockUncancelable(self.io);
                 const resident = slot.body.items.len - slot.body_offset;
@@ -488,7 +494,12 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                     slot.body_wake.set(self.io);
                     return;
                 };
-                if (available == 0) break;
+                if (available == 0) {
+                    slot.body_mutex.lockUncancelable(self.io);
+                    slot.body_pending = false;
+                    slot.body_mutex.unlock(self.io);
+                    break;
+                }
                 const room = cap - resident;
                 const want = @min(scratch.len, room);
                 const count = Adapter.readBody(
@@ -516,6 +527,7 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
             }
             slot.body_mutex.lockUncancelable(self.io);
             slot.body_blocked = false;
+            slot.body_pending = false;
             slot.body_mutex.unlock(self.io);
             slot.body_wake.set(self.io);
         }
@@ -526,9 +538,9 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
         fn retryBlockedBodies(self: *Self) void {
             for (self.slots.items) |slot| {
                 slot.body_mutex.lockUncancelable(self.io);
-                const blocked = slot.body_blocked;
+                const pending = slot.body_pending or slot.body_blocked;
                 slot.body_mutex.unlock(self.io);
-                if (!blocked) continue;
+                if (!pending) continue;
                 self.readBodyIntoSlot(slot.from, slot.stream_id) catch {};
             }
         }
@@ -584,10 +596,10 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                         slot.body.clearRetainingCapacity();
                         slot.body_offset = 0;
                     }
-                    const was_blocked = slot.body_blocked;
+                    const needs_retry = slot.body_blocked or slot.body_pending;
                     slot.body_blocked = false;
                     slot.body_mutex.unlock(self.io);
-                    if (was_blocked) self.wake.set(self.io);
+                    if (needs_retry) self.wake.set(self.io);
                     return count;
                 }
                 if (slot.body_finished) {

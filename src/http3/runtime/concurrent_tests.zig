@@ -504,3 +504,96 @@ test "HTTP/3 continuous concurrent serving observes peer cancellation" {
     joined = true;
     if (server_task.err) |err| return err;
 }
+
+test "HTTP/3 continuous concurrent serving HEAD returns headers without DATA" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try runtime.Server.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        test_limits,
+    );
+    defer server.deinit();
+
+    const Context = struct { io: std.Io };
+    var context = Context{ .io = io };
+    const Handler = struct {
+        fn run(ctx: *Context, stream: *runtime.Server.ConcurrentStream) anyerror!void {
+            var body: [32]u8 = undefined;
+            while (try stream.nextBody(&body, futureDeadline(ctx.io))) |_| {}
+            // Suppress-body startResponse already ends the stream; the handler
+            // deliberately returns without writeData/finish.
+            try stream.startResponse(.{
+                .status = 200,
+                .request_method = "HEAD",
+                .headers = &.{.{ .name = "content-length", .value = "123" }},
+            }, 123);
+        }
+    };
+
+    const ServerTask = struct {
+        server: *runtime.Server,
+        context: *Context,
+        shutdown: *std.Io.Event,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            const summary = try self.server.serveConcurrentStreams(
+                Context,
+                self.context,
+                Handler.run,
+                .{ .max_streams = 1, .shutdown = self.shutdown },
+            );
+            try std.testing.expectEqual(@as(usize, 1), summary.accepted);
+            try std.testing.expectEqual(@as(usize, 1), summary.completed);
+            try std.testing.expectEqual(@as(usize, 0), summary.failed);
+        }
+    };
+
+    var shutdown: std.Io.Event = .unset;
+    var server_task = ServerTask{ .server = &server, .context = &context, .shutdown = &shutdown };
+    const thread = try std.Thread.spawn(.{}, ServerTask.run, .{&server_task});
+    var joined = false;
+    defer if (!joined) {
+        shutdown.set(io);
+        thread.join();
+    };
+
+    var client = try runtime.Client.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        test_limits,
+    );
+    defer client.deinit();
+    var response = try client.requestWithTimeout(.{
+        .method = "HEAD",
+        .path = "/head",
+        .authority = "localhost",
+    }, .fromSeconds(3));
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 200), response.response.status);
+    try std.testing.expectEqualStrings("", response.response.body);
+    var content_length: ?[]const u8 = null;
+    for (response.response.headers) |header| {
+        if (std.ascii.eqlIgnoreCase(header.name, "content-length")) content_length = header.value;
+    }
+    try std.testing.expectEqualStrings("123", content_length.?);
+
+    shutdown.set(io);
+    thread.join();
+    joined = true;
+    if (server_task.err) |err| return err;
+}
+
