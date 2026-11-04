@@ -4,20 +4,24 @@
   "head": "e0d72d80",
   "command": "zig build test-lib --summary all",
   "result": {
-    "passed": 6426,
-    "total": 6427,
-    "failed": 1,
-    "note": "after fixing the endpoint retirement observation"
+    "passed": 6428,
+    "total": 6430,
+    "failed": 2,
+    "note": "measured on a host at load average 140-215 from unrelated builds"
   },
   "failures": [
     {
       "test": "mqtt.bridge.outbound_tests.test.outbound bridge does not extend expiry across target reconnect",
       "known": true,
-      "evidence": "docs/evidence/mqtt/2026-11-04-outbound-bridge-expiry-flake.json",
-      "summary": "A black-hole target CONNACK wait is not pausable, so the source keepalive lapses and the broker retires the source transport."
+      "evidence": "docs/evidence/mqtt/2026-11-04-outbound-bridge-expiry-flake.json"
+    },
+    {
+      "test": "websocket.runtime.handshake.receive_tests.test.WebSocket rejected HTTP1 body preserves earlier phase or caller deadline",
+      "known": true,
+      "summary": "Timing test with 150 ms and 1 s handshake budgets. Fails on this host at load average 140-215 but reproduces at 6e341c27, which predates every HTTP change in this session, so it is host-load sensitivity rather than a regression."
     }
   ],
-  "notes": "The QUIC endpoint retirement failure is fixed: the replies loop's visitor now records RETIRE_CONNECTION_ID, so a client that coalesces retirement with its reply packet is counted. 14 consecutive isolated runs and the full QUIC filter (1156/1156) pass. The MQTT outbound-bridge expiry case remains the only known failure.",
+  "notes": "Both failures reproduce on 6e341c27 under the same host load, so they predate the HTTP/1, HTTP/2, HTTP/3 and QUIC changes in this session. Targeted gates that cover the changed files stay green: HTTP/1 523/523, HTTP/2 973/973, HTTP/3 929/929, QUIC 1156/1156, grpc 775/775, test-package 26/26.",
   "source_sha256": {
     "src/quic/endpoint_server/tests.zig": "fcbcfdb1a14c28340cb25b3f15e656677d0fc171e4b3a797e00993c01912b4b4"
   }
