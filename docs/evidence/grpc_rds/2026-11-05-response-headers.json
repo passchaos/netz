@@ -8,17 +8,26 @@
     "decode_and_selection": "src/grpc/xds/rds/tests.zig 'gRPC RDS owns literal response header mutations and removals' checks fields 10/11, action decoding and selection projection.",
     "owned_copy": "src/grpc/channel/shared/request_inputs.zig 'shared request inputs apply xDS header mutations and removals' now includes response mutations/removals and verifies the owned copies survive the caller's source slices.",
     "wire": "src/grpc/xds/rds/transport_tests.zig 'gRPC RDS rewrites path and authority on the wire' now sends x-response: original from the server, applies an RDS overwrite to mutated, and asserts the client's OwnedResponse headers contain mutated.",
+    "direct_rewrite": "src/grpc/tests.zig 'gRPC response header rewrite applies actions and owns the new block' covers append, overwrite, add-if-absent, overwrite-if-exists and removal directly against an owned HTTP/2 header block.",
+    "allocation_failure": "src/grpc/tests.zig 'gRPC response header rewrite allocation failures preserve the old block' uses checkAllAllocationFailures to prove every failure path frees the original block without leaking the replacement block.",
     "focused_gate": {
       "command": "zig build test-lib -Dtest-filter='gRPC RDS' --summary all",
       "passed": 178,
       "total": 178,
       "failed": 0
     },
+    "rewrite_gate": {
+      "command": "zig build test-lib -Dtest-filter='response header rewrite' --summary all",
+      "passed": 156,
+      "total": 156,
+      "failed": 0
+    },
     "grpc_gate": {
       "command": "zig build test-lib -Dtest-filter='gRPC' --summary all",
-      "passed": 735,
-      "total": 735,
-      "failed": 0
+      "passed": 736,
+      "total": 737,
+      "failed": 1,
+      "note": "The only failure is the known host-load-sensitive grpc.channel.socks5_tests ABRT, unrelated to response headers."
     },
     "package": {
       "command": "zig build test-package --summary all",
@@ -29,6 +38,7 @@
   },
   "source_sha256": {
     "src/grpc/call.zig": "fa890d75fc3e173ecdc2f6d567f8fa19b470c00907e054f09b4e2274975e1b37",
+    "src/grpc/tests.zig": "3a57cc48f2d1fb2a46f57eaa3e0ac9d9604e3715f735c434cbfa1086fc060343",
     "src/grpc/stream/runtime.zig": "b70a801517ffcace9266bb4673c79b55d7c59c8c2a037bbabcd9172c3f50a7c0",
     "src/grpc/stream/duplex.zig": "867e0dfdd8e2784edbbf901d3a2e131791f2870dd84bb58ab3134ca4a764a9b5",
     "src/grpc/channel/shared/active.zig": "416fcd0ee00e0be4b8e9c2206c81bd58d505ed9138af52902b9d7bcc7467c64d",

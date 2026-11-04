@@ -1196,3 +1196,90 @@ test "gRPC validates custom metadata and HTTP fallback response" {
         grpc_response.status_message,
     );
 }
+
+fn makeResponseHeaders(allocator: std.mem.Allocator) ![]http2.Hpack.HeaderField {
+    const headers = try allocator.alloc(http2.Hpack.HeaderField, 3);
+    errdefer allocator.free(headers);
+    var written: usize = 0;
+    errdefer for (headers[0..written]) |header| {
+        allocator.free(header.name);
+        allocator.free(header.value);
+    };
+    const fields = [_]struct { name: []const u8, value: []const u8 }{
+        .{ .name = "x-keep", .value = "one" },
+        .{ .name = "x-remove", .value = "gone" },
+        .{ .name = "x-overwrite", .value = "old" },
+    };
+    for (fields, headers) |field, *header| {
+        const name = try allocator.dupe(u8, field.name);
+        const value = allocator.dupe(u8, field.value) catch |err| {
+            allocator.free(name);
+            return err;
+        };
+        header.* = .{ .name = name, .value = value };
+        written += 1;
+    }
+    return headers;
+}
+
+fn responseHeader(
+    headers: []const http2.Hpack.HeaderField,
+    name: []const u8,
+) ?[]const u8 {
+    return grpc.call.headerValue(headers, name);
+}
+
+test "gRPC response header rewrite applies actions and owns the new block" {
+    const allocator = std.testing.allocator;
+    const headers = try makeResponseHeaders(allocator);
+    const mutations = [_]grpc.call.HeaderMutation{
+        .{ .name = "x-add", .value = "added", .action = .append },
+        .{ .name = "x-overwrite", .value = "new", .action = .overwrite },
+        .{ .name = "x-keep", .value = "ignored", .action = .add_if_absent },
+        .{ .name = "x-missing", .value = "ignored", .action = .overwrite_if_exists },
+    };
+    const removals = [_][]const u8{"x-remove"};
+    const rewritten = grpc.call.rewriteResponseHeaders(
+        allocator,
+        headers,
+        &mutations,
+        &removals,
+    ) catch |err| {
+        http2.runtime.freeHeaderFields(allocator, headers);
+        return err;
+    };
+    defer http2.runtime.freeHeaderFields(allocator, rewritten);
+    try std.testing.expectEqual(@as(usize, 3), rewritten.len);
+    try std.testing.expectEqualStrings("one", responseHeader(rewritten, "x-keep").?);
+    try std.testing.expectEqualStrings("new", responseHeader(rewritten, "x-overwrite").?);
+    try std.testing.expectEqualStrings("added", responseHeader(rewritten, "x-add").?);
+    try std.testing.expect(responseHeader(rewritten, "x-remove") == null);
+    try std.testing.expect(responseHeader(rewritten, "x-missing") == null);
+}
+
+test "gRPC response header rewrite allocation failures preserve the old block" {
+    const mutations = [_]grpc.call.HeaderMutation{
+        .{ .name = "x-add", .value = "added", .action = .append },
+    };
+    const removals = [_][]const u8{"x-remove"};
+    const Harness = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            const headers = try makeResponseHeaders(allocator);
+            const rewritten = grpc.call.rewriteResponseHeaders(
+                allocator,
+                headers,
+                &mutations,
+                &removals,
+            ) catch |err| {
+                http2.runtime.freeHeaderFields(allocator, headers);
+                return err;
+            };
+            http2.runtime.freeHeaderFields(allocator, rewritten);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        Harness.run,
+        .{},
+    );
+}
