@@ -709,6 +709,13 @@ pub fn Engine(
                 },
                 .start_response_with_body => |value| {
                     try slot.stream.startResponse(value.options);
+                    if (slot.stream.responseFinished()) {
+                        // HEAD/204/304: the head already ended the stream, so
+                        // there is no DATA to append.
+                        if (value.data.len != 0) return error.InvalidContentLength;
+                        slot.response_finished = true;
+                        return;
+                    }
                     const slices = if (value.data.len == 0) &.{} else &.{value.data};
                     _ = try slot.stream.writeResponseSlices(slices, value.fin);
                     if (value.fin) slot.response_finished = true;
