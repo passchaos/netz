@@ -2643,6 +2643,9 @@ const DevelopmentConcurrentAdapter = struct {
     pub fn maxStreams(session: *Server) usize {
         return session.limits.max_concurrent_request_streams;
     }
+    pub fn maxBodyBuffer(session: *Server) usize {
+        return session.limits.max_stream_buffer;
+    }
     pub fn receive(
         session: *Server,
         deadline: ?std.Io.Clock.Timestamp,
@@ -11852,6 +11855,9 @@ pub const HandshakeServerSession = struct {
 const HandshakeConcurrentAdapter = struct {
     pub fn maxStreams(session: *HandshakeServerSession) usize {
         return session.options.max_concurrent_request_streams;
+    }
+    pub fn maxBodyBuffer(session: *HandshakeServerSession) usize {
+        return session.options.max_stream_buffer;
     }
     pub fn receive(
         session: *HandshakeServerSession,

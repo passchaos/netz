@@ -30,6 +30,10 @@ pub const Options = struct {
     /// Maximum time the owner blocks on one receive attempt before re-checking
     /// command and shutdown wakes.
     poll_interval: std.Io.Duration = .fromMilliseconds(1),
+    /// Per-stream request DATA resident in the owner buffer. Null uses the
+    /// session's `max_stream_buffer`; the total body remains bounded by
+    /// `max_body_bytes`.
+    max_buffered_body_bytes: ?usize = null,
 };
 
 pub const Summary = struct {
@@ -52,6 +56,7 @@ pub const Summary = struct {
 ///   cancel(session, from, stream_id, code) Error!void
 ///   goaway(session, last_stream_id) Error!void
 ///   maxStreams(session) usize
+///   maxBodyBuffer(session) usize
 pub fn Engine(comptime Session: type, comptime Adapter: type) type {
     return struct {
         const Self = @This();
@@ -90,11 +95,15 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
             /// the session stream. Bounded by the protocol body limit.
             body: std.ArrayList(u8) = .empty,
             body_offset: usize = 0,
+            /// True while the owner stopped reading because the resident
+            /// buffer reached `max_buffered_body_bytes`.
+            body_blocked: bool = false,
             body_wake: std.Io.Event = .unset,
             body_finished: bool = false,
             body_error: ?anyerror = null,
             reset_code: ?u64 = null,
             response_finished: bool = false,
+            suppress_body: bool = false,
             handler_done: bool = false,
             handler_error: ?anyerror = null,
             canceled: bool = false,
@@ -219,6 +228,7 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
         wake: std.Io.Event = .unset,
         slots: std.ArrayList(*Slot) = .empty,
         pending_heads: std.ArrayList(StreamingRequestEvent) = .empty,
+        max_buffered_body_bytes: usize = 1,
         active: usize = 0,
         summary: Summary = .{},
 
@@ -228,12 +238,16 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
             io: std.Io,
             options: Options,
         ) Self {
-            return .{
+            var self: Self = .{
                 .session = session,
                 .allocator = allocator,
                 .io = io,
                 .options = options,
             };
+            self.max_buffered_body_bytes =
+                options.max_buffered_body_bytes orelse Adapter.maxBodyBuffer(session);
+            self.max_buffered_body_bytes = @max(self.max_buffered_body_bytes, 1);
+            return self;
         }
 
         pub fn deinit(self: *Self) void {
@@ -282,6 +296,7 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
             while (true) {
                 try self.spawnPending(limit, Context, context, handler, Task);
                 try self.drainCommands();
+                self.retryBlockedBodies();
                 self.reap();
                 try self.spawnPending(limit, Context, context, handler, Task);
 
@@ -450,8 +465,18 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
             stream_id: u62,
         ) !void {
             const slot = self.find(from, stream_id) orelse return;
+            const cap = self.max_buffered_body_bytes;
             var scratch: [16 * 1024]u8 = undefined;
             while (true) {
+                slot.body_mutex.lockUncancelable(self.io);
+                const resident = slot.body.items.len - slot.body_offset;
+                slot.body_mutex.unlock(self.io);
+                if (resident >= cap) {
+                    slot.body_mutex.lockUncancelable(self.io);
+                    slot.body_blocked = true;
+                    slot.body_mutex.unlock(self.io);
+                    return;
+                }
                 const available = Adapter.availableBody(
                     self.session,
                     from,
@@ -464,11 +489,13 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                     return;
                 };
                 if (available == 0) break;
+                const room = cap - resident;
+                const want = @min(scratch.len, room);
                 const count = Adapter.readBody(
                     self.session,
                     from,
                     stream_id,
-                    &scratch,
+                    scratch[0..want],
                 ) catch |err| {
                     slot.body_mutex.lockUncancelable(self.io);
                     slot.body_error = err;
@@ -484,9 +511,36 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                     slot.body_wake.set(self.io);
                     return;
                 };
+                slot.body_blocked = false;
                 slot.body_mutex.unlock(self.io);
             }
+            slot.body_mutex.lockUncancelable(self.io);
+            slot.body_blocked = false;
+            slot.body_mutex.unlock(self.io);
             slot.body_wake.set(self.io);
+        }
+
+        /// Retry a stream whose resident buffer was full before the handler
+        /// consumed enough bytes. The session reader retains the current DATA
+        /// frame, so no new receive event is needed.
+        fn retryBlockedBodies(self: *Self) void {
+            for (self.slots.items) |slot| {
+                slot.body_mutex.lockUncancelable(self.io);
+                const blocked = slot.body_blocked;
+                slot.body_mutex.unlock(self.io);
+                if (!blocked) continue;
+                self.readBodyIntoSlot(slot.from, slot.stream_id) catch {};
+            }
+        }
+
+        fn anyBodyBlocked(self: *Self) bool {
+            for (self.slots.items) |slot| {
+                slot.body_mutex.lockUncancelable(self.io);
+                const blocked = slot.body_blocked;
+                slot.body_mutex.unlock(self.io);
+                if (blocked) return true;
+            }
+            return false;
         }
 
         fn find(self: *Self, from: net.IpAddress, stream_id: u62) ?*Slot {
@@ -530,7 +584,10 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                         slot.body.clearRetainingCapacity();
                         slot.body_offset = 0;
                     }
+                    const was_blocked = slot.body_blocked;
+                    slot.body_blocked = false;
                     slot.body_mutex.unlock(self.io);
+                    if (was_blocked) self.wake.set(self.io);
                     return count;
                 }
                 if (slot.body_finished) {
@@ -615,9 +672,17 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                         value.response,
                         value.body_length,
                     );
-                    if (value.body_length == 0) slot.response_finished = true;
+                    slot.suppress_body = value.response.suppressesBody();
+                    if (value.body_length == 0 or slot.suppress_body) {
+                        slot.response_finished = true;
+                    }
                 },
                 .write_body => |value| {
+                    if (slot.suppress_body) {
+                        if (value.data.len != 0) return error.InvalidContentLength;
+                        if (value.fin) slot.response_finished = true;
+                        return;
+                    }
                     try Adapter.sendBody(
                         self.session,
                         slot.from,
@@ -714,6 +779,20 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
             const has_commands = self.commands.items.len != 0;
             self.mutex.unlock(self.io);
             if (has_commands and !self.commands_blocked) return null;
+
+            // A full per-stream body buffer must not let the owner consume
+            // `.finished` and retire the session stream before the handler
+            // drains it. Wait for handler progress or a command instead of
+            // receiving more input.
+            if (self.anyBodyBlocked()) {
+                _ = self.wake.waitTimeout(self.io, .{
+                    .duration = .{
+                        .raw = self.options.poll_interval,
+                        .clock = .awake,
+                    },
+                }) catch {};
+                return null;
+            }
 
             // Poll the receive path with a short absolute budget instead of
             // cancelling a concurrent `std.Io` operation. The wake event is

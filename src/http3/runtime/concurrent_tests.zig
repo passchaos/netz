@@ -304,3 +304,119 @@ test "HTTP/3 continuous concurrent serving emits response trailers" {
     joined = true;
     if (server_task.err) |err| return err;
 }
+
+test "HTTP/3 continuous concurrent serving suppress-body responses" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try runtime.Server.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        test_limits,
+    );
+    defer server.deinit();
+
+    const Context = struct { io: std.Io };
+    var context = Context{ .io = io };
+    const Handler = struct {
+        fn run(ctx: *Context, stream: *runtime.Server.ConcurrentStream) anyerror!void {
+            var body: [32]u8 = undefined;
+            var length: usize = 0;
+            while (try stream.nextBody(body[length..], futureDeadline(ctx.io))) |count| {
+                length += count;
+            }
+            const path = stream.head().path;
+            if (std.mem.eql(u8, path, "/head")) {
+                try stream.startResponse(.{
+                    .status = 200,
+                    .request_method = "HEAD",
+                    .headers = &.{.{ .name = "content-length", .value = "4" }},
+                }, 4);
+            } else if (std.mem.eql(u8, path, "/empty")) {
+                try stream.startResponse(.{ .status = 204 }, null);
+            } else return error.TestUnexpectedResult;
+            try stream.finish();
+        }
+    };
+
+    const ServerTask = struct {
+        server: *runtime.Server,
+        context: *Context,
+        shutdown: *std.Io.Event,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            const summary = try self.server.serveConcurrentStreams(
+                Context,
+                self.context,
+                Handler.run,
+                .{ .max_streams = 2, .shutdown = self.shutdown },
+            );
+            try std.testing.expectEqual(@as(usize, 2), summary.accepted);
+            try std.testing.expectEqual(@as(usize, 2), summary.completed);
+        }
+    };
+
+    var shutdown: std.Io.Event = .unset;
+    var server_task = ServerTask{ .server = &server, .context = &context, .shutdown = &shutdown };
+    const thread = try std.Thread.spawn(.{}, ServerTask.run, .{&server_task});
+    var joined = false;
+    defer if (!joined) {
+        shutdown.set(io);
+        thread.join();
+    };
+
+    var head_client = try runtime.Client.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        test_limits,
+    );
+    defer head_client.deinit();
+    var head_response = try head_client.requestWithTimeout(.{
+        .method = "HEAD",
+        .path = "/head",
+        .authority = "localhost",
+    }, .fromSeconds(3));
+    defer head_response.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 200), head_response.response.status);
+    try std.testing.expectEqualStrings("", head_response.response.body);
+    var content_length: ?[]const u8 = null;
+    for (head_response.response.headers) |header| {
+        if (std.ascii.eqlIgnoreCase(header.name, "content-length")) content_length = header.value;
+    }
+    try std.testing.expectEqualStrings("4", content_length.?);
+
+    var empty_client = try runtime.Client.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        test_limits,
+    );
+    defer empty_client.deinit();
+    var empty_response = try empty_client.requestWithTimeout(.{
+        .method = "GET",
+        .path = "/empty",
+        .authority = "localhost",
+    }, .fromSeconds(3));
+    defer empty_response.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 204), empty_response.response.status);
+    try std.testing.expectEqualStrings("", empty_response.response.body);
+
+    shutdown.set(io);
+    thread.join();
+    joined = true;
+    if (server_task.err) |err| return err;
+}
+

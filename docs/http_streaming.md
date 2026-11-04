@@ -179,11 +179,28 @@ Concurrency contract:
 - One task owns the connection frame reader, HPACK/QPACK state and socket
   writer. Handlers never touch connection state; body reads and response
   head/DATA/trailers/reset are serialized through the owner.
-- Request DATA is copied into a per-stream buffer by the owner before the
-  protocol can retire the stream, so `nextBody` is a pull API even on HTTP/3
-  where `.finished` removes the session stream.
+- Request DATA is delivered incrementally. The owner copies at most
+  `max_buffered_body_bytes` per stream (default: the session
+  `max_stream_buffer`) into a per-stream ring; once full it stops receiving
+  until the handler consumes. The total body remains bounded by
+  `max_body_bytes`. This keeps `nextBody` incremental without first buffering a
+  whole upload.
+- The `ConcurrentStream` handle is valid only while its handler runs. `nextBody`
+  copies into the caller buffer; `trailers()` borrows the retained trailer
+  fields until the handler returns. All `ConcurrentStream` methods are safe from
+  the handler task and must not be called concurrently from another task. The
+  connection driver must not call handler methods; it only runs
+  `serveConcurrentStreams`.
+- Response ordering: `startResponse`, then any number of `writeData(data, false)`,
+  then either `writeData(final, true)`, `finish()`, or `finishWithTrailers`.
+  `finishWithTrailers` sends the trailing HEADERS with FIN; do not call `finish`
+  or `writeData` afterwards. For HEAD/204/304 responses, `startResponse` may
+  carry the representation `Content-Length` with a non-zero `body_length`; the
+  owner marks the response finished and `finish()` is a no-op, so no DATA frame
+  is emitted.
 - A handler that returns without finishing its response has that stream reset
-  (`INTERNAL_ERROR`/`cancel`) instead of leaking it.
+  (`INTERNAL_ERROR`/`cancel`) instead of leaking it. A peer reset/cancel is
+  delivered to `nextBody` as `error.StreamReset` and does not poison siblings.
 - `shutdown` stops new acceptance, lets active handlers finish, then sends
   GOAWAY. An overall `deadline` or `idle_timeout` returns `error.Timeout` and
   cancels active streams. Peer GOAWAY/close stops acceptance and releases
