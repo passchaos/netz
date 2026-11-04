@@ -228,6 +228,12 @@ Concurrency contract:
 - Handler `nextBody`/command waits ignore spurious futex wakeups: an expired
   absolute deadline is checked against the awake clock, so a wake that does not
   set the event cannot surface a false `error.Timeout`.
+- The HTTP/3 owner cannot be interrupted by a handler command while it is
+  blocked in a QUIC receive. `command_poll_interval` (default 100 µs) bounds
+  that wait while a handler is active; `poll_interval` remains the idle
+  receive budget. Lower values reduce per-request latency at the cost of more
+  wakeups. The HTTP/2 owner races its frame read against the command wake and
+  does not need this separate budget.
 
 ## Build status
 

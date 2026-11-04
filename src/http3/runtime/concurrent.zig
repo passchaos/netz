@@ -28,8 +28,13 @@ pub const Options = struct {
     /// handlers, and send GOAWAY.
     shutdown: ?*std.Io.Event = null,
     /// Maximum time the owner blocks on one receive attempt before re-checking
-    /// command and shutdown wakes.
+    /// command and shutdown wakes while no handler is active.
     poll_interval: std.Io.Duration = .fromMilliseconds(1),
+    /// Maximum receive budget while at least one handler is active. The owner
+    /// cannot be interrupted by a handler command, so this bounds how long a
+    /// queued `startResponse`/`writeData` waits for the next receive poll.
+    /// Lower values reduce streaming latency at the cost of more wakeups.
+    command_poll_interval: std.Io.Duration = .fromMicroseconds(100),
     /// Per-stream request DATA resident in the owner buffer. Null uses the
     /// session's `max_stream_buffer`; the total body remains bounded by
     /// `max_body_bytes`.
@@ -291,7 +296,8 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                 self.options.max_streams,
                 Adapter.maxStreams(self.session),
             );
-            if (limit == 0) return error.InvalidServeOptions;
+            if (limit == 0 or self.options.command_poll_interval.nanoseconds <= 0)
+                return error.InvalidServeOptions;
 
             var idle_deadline: ?std.Io.Clock.Timestamp = null;
             errdefer {
@@ -903,6 +909,16 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
             pending.deinit(self.allocator);
         }
 
+        fn receivePollInterval(self: *Self) std.Io.Duration {
+            if (self.active != 0 and
+                self.options.command_poll_interval.nanoseconds <
+                    self.options.poll_interval.nanoseconds)
+            {
+                return self.options.command_poll_interval;
+            }
+            return self.options.poll_interval;
+        }
+
         fn readOrWake(self: *Self, deadline: ?std.Io.Clock.Timestamp) anyerror!?StreamingRequestEvent {
             // Do not clear a wake that belongs to an already queued command.
             self.wake.reset();
@@ -915,10 +931,11 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
             // `.finished` and retire the session stream before the handler
             // drains it. Wait for handler progress or a command instead of
             // receiving more input.
+            const poll = self.receivePollInterval();
             if (self.anyBodyBlocked()) {
                 _ = self.wake.waitTimeout(self.io, .{
                     .duration = .{
-                        .raw = self.options.poll_interval,
+                        .raw = poll,
                         .clock = .awake,
                     },
                 }) catch {};
@@ -928,10 +945,11 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
             // Poll the receive path with a short absolute budget instead of
             // cancelling a concurrent `std.Io` operation. The wake event is
             // checked between polls, so command latency is bounded by the
-            // configured poll interval while session state stays single-owner.
+            // active-command poll interval while session state stays
+            // single-owner.
             const poll_deadline = std.Io.Clock.Timestamp.addDuration(
                 std.Io.Clock.Timestamp.now(self.io, .awake),
-                .{ .raw = self.options.poll_interval, .clock = .awake },
+                .{ .raw = poll, .clock = .awake },
             );
             const use_deadline = if (deadline) |value|
                 if (value.raw.nanoseconds < poll_deadline.raw.nanoseconds) value else poll_deadline
