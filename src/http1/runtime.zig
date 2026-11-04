@@ -5722,6 +5722,54 @@ pub const Connection = struct {
         self.* = undefined;
     }
 
+    /// Write one final response and retire the connection, even after the
+    /// request read failed.
+    ///
+    /// A request that fails during reading (an over-limit head, an over-long
+    /// target, an oversized body) marks the exchange unusable, so
+    /// `writeResponse` refuses with `error.ConnectionUnusable`. The peer is
+    /// still owed a 4xx response, so this method writes it, forces
+    /// `Connection: close`, half-closes, drains pending input and closes.
+    /// Do not use the connection afterwards.
+    pub fn respondAndClose(
+        self: *Connection,
+        response: ResponseOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!void {
+        if (self.writer_state.phase == .writing or
+            self.writer_state.phase == .awaiting_peer)
+        {
+            return error.ConnectionBusy;
+        }
+        // `drainAndClose` invalidates `self`, so keep the allocator locally.
+        const allocator = self.allocator;
+        var value = response;
+        var owned: ?[]http1.Header = null;
+        defer if (owned) |headers| allocator.free(headers);
+        var has_connection = false;
+        for (response.headers) |header| {
+            if (std.ascii.eqlIgnoreCase(header.name, "connection")) {
+                has_connection = true;
+                break;
+            }
+        }
+        if (!has_connection) {
+            const headers = try allocator.alloc(
+                http1.Header,
+                response.headers.len + 1,
+            );
+            @memcpy(headers[0..response.headers.len], response.headers);
+            headers[response.headers.len] = .{
+                .name = "Connection",
+                .value = "close",
+            };
+            owned = headers;
+            value.headers = headers;
+        }
+        try self.writeResponseFailClosed(value, self.defaultResponseDate());
+        self.drainAndClose(deadline);
+    }
+
     /// Close after an error response without destroying that response.
     ///
     /// Closing a socket while the peer's request bytes are still unread makes
@@ -14630,4 +14678,112 @@ test "HTTP/1 drainAndClose delivers an error response before closing" {
     thread.join();
     joined = true;
     if (task.err) |err| return err;
+}
+
+test "HTTP/1 respondAndClose answers after a failed request read" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 512 },
+    );
+    defer server.deinit();
+
+    const ServerTask = struct {
+        server: *Server,
+        io: std.Io,
+        saw_unusable: bool = false,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            // A head over max_head_bytes fails the read and marks the exchange
+            // unusable; writeResponse would now refuse with ConnectionUnusable.
+            _ = connection.readRequest(.{}) catch |err| switch (err) {
+                error.HeadersTooLarge => {
+                    // The streaming request reader retires the exchange with
+                    // failRead() when it gives up; reproduce that exact state.
+                    connection.writer_state.failRead();
+                    self.saw_unusable =
+                        connection.writer_state.phase == .unusable;
+                    // The ordinary writer refuses once the exchange is
+                    // retired; that is the state respondAndClose exists for.
+                    try std.testing.expectError(
+                        error.ConnectionUnusable,
+                        connection.writeResponse(.{ .status = 431 }),
+                    );
+                    try connection.respondAndClose(.{
+                        .status = 431,
+                        .reason = "Request Header Fields Too Large",
+                    }, .fromNow(self.io, .{
+                        .raw = .fromMilliseconds(300),
+                        .clock = .awake,
+                    }));
+                    return;
+                },
+                else => return err,
+            };
+            return error.TestUnexpectedResult;
+        }
+    };
+
+    var task = ServerTask{ .server = &server, .io = io };
+    const thread = try std.Thread.spawn(.{}, ServerTask.run, .{&task});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const stream = try server.address().connect(io, .{ .mode = .stream });
+    defer stream.close(io);
+
+    var request: [2048]u8 = undefined;
+    @memset(&request, 'a');
+    const prefix = "GET / HTTP/1.1\r\nHost: example\r\nX: ";
+    @memcpy(request[0..prefix.len], prefix);
+    @memcpy(request[request.len - 4 ..], "\r\n\r\n");
+    writeAllToStream(io, stream, &request) catch |err| switch (err) {
+        error.ConnectionResetByPeer, error.SocketUnconnected => {},
+        else => return err,
+    };
+
+    var response: [512]u8 = undefined;
+    const deadline = std.Io.Clock.Timestamp.fromNow(io, .{
+        .raw = .fromSeconds(2),
+        .clock = .awake,
+    });
+    var received: usize = 0;
+    while (received < response.len) {
+        const count = stream_io.readSomeWithDeadline(
+            io,
+            stream,
+            response[received..],
+            deadline,
+        ) catch |err| switch (err) {
+            error.ConnectionResetByPeer => break,
+            else => return err,
+        };
+        if (count == 0) break;
+        received += count;
+        if (std.mem.indexOf(u8, response[0..received], "\r\n\r\n") != null) break;
+    }
+    try std.testing.expect(received != 0);
+    try std.testing.expect(std.mem.startsWith(u8, response[0..received], "HTTP/1.1 431"));
+    try std.testing.expect(
+        std.mem.indexOf(u8, response[0..received], "Connection: close") != null,
+    );
+
+    thread.join();
+    joined = true;
+    if (task.err) |err| return err;
+    try std.testing.expect(task.saw_unusable);
 }
