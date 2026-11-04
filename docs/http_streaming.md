@@ -170,6 +170,8 @@ fn run(ctx: *Context, stream: *Stream) !void {
     try stream.startResponse(.{ .status = 200 });
     try stream.writeData(chunk_a, false); // may block on flow control
     try stream.writeData(chunk_b, true);
+    // or, for a buffered response, one owner round trip instead of two:
+    // try stream.startResponseWithBody(.{ .status = 200 }, chunk_a, true);
     // or: try stream.finishWithTrailers(fields);
 }
 ```
@@ -201,6 +203,11 @@ Concurrency contract:
   `ConcurrentStream` methods are safe from the handler task and must not be
   called concurrently from another task. The connection driver must not call
   handler methods; it only runs `serveConcurrentStreams`.
+- `startResponseWithBody(response, body_length, data, fin)` (HTTP/3) and
+  `startResponseWithBody(options, data, fin)` (HTTP/2) submit the head and the
+  first DATA contribution as one owner command. Use it for buffered responses:
+  a sequential request otherwise pays two wake/command round trips. Streaming
+  responses still use `startResponse` plus `writeData`.
 - Response ordering: `startResponse`, then any number of `writeData(data, false)`,
   then either `writeData(final, true)`, `finish()`, or `finishWithTrailers`.
   `finishWithTrailers` sends the trailing HEADERS with FIN; do not call `finish`
