@@ -1,0 +1,39 @@
+{
+  "schema": 1,
+  "date": "2026-11-05",
+  "head": "working-tree",
+  "subject": "Controller-owned LRS runner",
+  "change": "runtime.Controller accepts an optional Options.lrs { sender, control_plane, client, reporter, poll_interval, connect_timeout }. After the first successful SotW or delta start/synchronization it creates and starts one lrs.Runner against the destination channel, bounding the initial LRS connect budget by the caller's remaining deadline. Later starts/synchronizations are no-ops and Controller.deinit stops and joins the runner before releasing the destination. The LRS control plane must be dedicated to the runner, and the destination channel must enable LRS statistics.",
+  "tests": {
+    "unit": "src/grpc/xds/runtime/lrs_tests.zig starts a real loopback LRS server and bootstrap control plane, creates a controller with Options.lrs, runs both startWithDeadline and startDeltaWithDeadline, observes the initial node request, asserts no terminal runner failure, and verifies Controller.deinit shuts the runner down.",
+    "focused_gate": {
+      "command": "zig build test-lib -Dtest-filter='xDS runtime' -Dtest-filter='LRS' --summary all",
+      "passed": 201,
+      "total": 201,
+      "failed": 0
+    },
+    "compile": {
+      "command": "zig build test-compile",
+      "status": "passed"
+    },
+    "full_library": {
+      "command": "zig build test-lib",
+      "status": "passed",
+      "exit_code": 0,
+      "passed": 6474,
+      "total": 6474,
+      "failed": 0
+    }
+  },
+  "source_sha256": {
+    "src/grpc/xds/runtime/controller.zig": "9334398df72b2ed343ddfbdf468610ca842b0b469f6cb78f3dbfda00dfaa20db",
+    "src/grpc/xds/runtime/options.zig": "7b5dfe5a7aee0235f824621b77c61a93c938f7e2c614baafeb7cbd3fd457cd9d",
+    "src/grpc/xds/runtime/lrs_tests.zig": "5a1b947833fc06621098e3f972e01f089bf881aba7e0d5c45469c67688060749",
+    "src/grpc/xds/runtime.zig": "9f0ec80a9a9083065d2fe2b1272e618b9a2130fd41ed9336fdd35f0e21ce6118",
+    "src/grpc/xds/lrs.zig": "6d8d59172278cd9e2f99d807301805e3fffa2b32a3275a1d06c1474b7face89c",
+    "src/grpc/xds/lrs/runner.zig": "7737ee253b50921d4d05a68f486d02e4338e5c6558f45101fa882871999336c8",
+    "docs/grpc_lrs.md": "7cb00e6ade8ceda1d643e49140cfa3236d7aae94e3496d297cb97a4b6acf4cd4",
+    "docs/grpc_xds_runtime.md": "3145f75cb4d6b399175627895c71faccb915d3d917c8788e280824cd0e89af00"
+  },
+  "notes": "The runner is auxiliary to discovery: a failed initial LRS connect currently fails the start call. Applications that need reporting outages to be non-fatal should construct lrs.Runner themselves. Authority-specific control planes, SDS/certificate providers and non-router filters remain open."
+}
