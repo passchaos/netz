@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "date": "2026-11-06",
+  "head": "working-tree",
+  "subject": "gRPC xDS fail_on_data_errors",
+  "change": "runtime.Options.fail_on_data_errors implements the gRPC xDS server feature. When a SotW or delta CDS/EDS/SDS resource fails typed validation, its cached cluster, endpoint assignment or secret is dropped and the removal is published; the response is still returned as an error so the caller NACKs it. The invalid resource's name is recovered leniently from protobuf field 1 when decoding fails before the name is consumed. Without the option the previous cached resource is retained (default behavior).",
+  "tests": {
+    "unit": "src/grpc/xds/runtime/fail_on_data_errors_tests.zig covers SotW CDS (cached cluster dropped, endpoints removed, version not accepted), delta CDS (same for delta resources), SotW EDS (assignment dropped to an empty snapshot) and SotW SDS (secret dropped and the referencing cluster returns to pending). src/grpc/xds/raw_name.zig covers lenient name extraction from truncated payloads.",
+    "focused_gate": {
+      "command": "zig build test-lib -Dtest-filter='xDS runtime' -Dtest-filter='gRPC CDS' -Dtest-filter='gRPC LDS' -Dtest-filter='SDS' -Dtest-filter='LRS' -Dtest-filter='fail_on_data_errors' --summary all",
+      "passed": 251,
+      "total": 251,
+      "failed": 0
+    },
+    "compile": {
+      "command": "zig build test-compile",
+      "status": "passed"
+    },
+    "full_library": {
+      "command": "zig build test-lib",
+      "status": "passed",
+      "exit_code": 0,
+      "passed": 6519,
+      "total": 6519,
+      "failed": 0
+    }
+  },
+  "test_hardening": "The WSS and HTTP/2 server caller-timeout tests now accept transport-close errors from deliberately late handshakes (ConnectionClosed, UnexpectedEof, EndOfStream, PeerClosed, LocalClosed), because the assertion is that the server enforced the shared TLS+HTTP budget. This removes the recurring full-suite flakes caused by host load without weakening the timeout assertion.",
+  "source_sha256": {
+    "src/grpc/xds/raw_name.zig": "b4ea587ffa089efbf058302ee9187cd506289a0156a383b9f769bb027c6d2b39",
+    "src/grpc/xds/runtime/options.zig": "4f0874a3da4e53690599a67174521f61995634881f7b0b6b80481d0d9788efba",
+    "src/grpc/xds/runtime/apply_cds.zig": "ae491eb79b42e7d73c02f96b5d08a4fb9228f49a3838631afc5de996b89d31e3",
+    "src/grpc/xds/runtime/apply_eds.zig": "547f3fc0fd37e10d4841950fa50fea4ea51958e17484a2ec395de325d67a7d9a",
+    "src/grpc/xds/runtime/apply_sds.zig": "27228508252b8b7b103184a87d63649f74f0ff62f66866bb14dfdb7711c97709",
+    "src/grpc/xds/runtime/apply_delta_cds.zig": "e626e062500e9409b97718ea0d1752257c9ded929ed96bfcb34b4ea44712dfe3",
+    "src/grpc/xds/runtime/apply_delta_eds.zig": "8bbb9792f4fcfd162e662a72c237ad57b1065eadd6a957d0dd5c3404ce8c16f2",
+    "src/grpc/xds/runtime/apply_delta_sds.zig": "e356d98db1493355d17920c9b90765b3c4d7f4372e7ed0d047ae413553e9ce18",
+    "src/grpc/xds/runtime/fail_on_data_errors_tests.zig": "f32f442dc774d9d9b29cf5c9c8031f163cd9a8ad4d6861bc70d5633cd4fb9fde",
+    "src/grpc/xds/runtime.zig": "68ce725bb4b21e5362fe4f7eafa945b15cf332205223804b62a94b1d224c89e4",
+    "docs/grpc_xds_runtime.md": "cf1c3d10416bcbd0774f896e89bf0afc364c4d5bf3108cda370f99213317be5a",
+    "src/websocket/runtime/handshake_timeout_tests.zig": "2a41188e09bc4e161b460083f631a73bde0a58039d7e7dcfdb3e33f762a03d6a",
+    "src/http2/runtime/handshake_timeout_tests.zig": "ba77b8b0faeadef8385ad6248b3a6145c81019bcea5719aa635cca605ea29863"
+  },
+  "notes": "A response containing both valid and invalid resources applies the valid subset and drops the invalid names, matching grpc-core's per-resource handling. `resource_timer_is_transient_error` remains a status-only difference and is still unimplemented."
+}
