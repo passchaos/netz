@@ -155,6 +155,37 @@ fn tlsCertificate(bytes: []const u8, limits: Limits) Error!TlsCertificate {
     };
 }
 
+fn sanType(value: u64) Error!tls_material.SanType {
+    return switch (value) {
+        1 => .email,
+        2 => .dns,
+        3 => .uri,
+        4 => .ip,
+        5 => error.UnsupportedSdsFeature,
+        else => error.InvalidSdsResource,
+    };
+}
+
+fn typedSanMatcher(bytes: []const u8, limits: Limits) Error!tls_material.SanMatcher {
+    var san_type: ?tls_material.SanType = null;
+    var matcher_bytes: ?[]const u8 = null;
+    var oid: []const u8 = "";
+    var reader: pb.Reader = .{ .bytes = bytes };
+    while (try reader.next()) |field| {
+        if (field.number == 1 and field.wire_type == 0) {
+            san_type = try sanType(try reader.varint());
+        } else if (field.number == 2 and field.wire_type == 2) {
+            matcher_bytes = try reader.bytesValue();
+        } else if (field.number == 3 and field.wire_type == 2) {
+            oid = try text(&reader, limits);
+        } else try reader.skip(field);
+    }
+    if (oid.len != 0) return error.UnsupportedSdsFeature;
+    var matcher = try sanMatcher(matcher_bytes orelse return error.InvalidSdsResource, limits);
+    matcher.san_type = san_type orelse return error.InvalidSdsResource;
+    return matcher;
+}
+
 fn boolValue(bytes: []const u8) Error!bool {
     var result = false;
     var reader: pb.Reader = .{ .bytes = bytes };
@@ -231,6 +262,14 @@ fn validationContext(
             }
             try matchers.append(arena, try sanMatcher(try reader.bytesValue(), limits));
         },
+        15 => {
+            // match_typed_subject_alt_names: SubjectAltNameMatcher.
+            if (field.wire_type != 2) return error.InvalidSdsResource;
+            if (matchers.items.len >= limits.max_san_matchers) {
+                return error.SdsLimitExceeded;
+            }
+            try matchers.append(arena, try typedSanMatcher(try reader.bytesValue(), limits));
+        },
         10 => {
             if (field.wire_type != 0) return error.InvalidSdsResource;
             if ((try reader.varint()) != 0) return error.UnsupportedSdsFeature; // ACCEPT_UNTRUSTED
@@ -242,7 +281,7 @@ fn validationContext(
             _ = try reader.bytesValue();
             system_root_certs = true;
         },
-        11, 12, 13, 14, 15, 16 => return error.UnsupportedSdsFeature,
+        11, 12, 13, 14, 16 => return error.UnsupportedSdsFeature,
         else => try reader.skip(field),
     };
     const has_identity = matchers.items.len != 0 or hashes.items.len != 0 or spkis.items.len != 0;

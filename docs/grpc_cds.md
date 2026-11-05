@@ -106,7 +106,10 @@ GCM/ChaCha suites, and `match_subject_alt_names` exact/prefix/suffix/contains
 matchers (case-sensitive or insensitive). SAN matching requires a trust
 source and replaces SNI hostname verification with the configured matcher set.
 `system_root_certs` selects the platform trust store; without any inline CA,
-identity or hash verification also uses the platform store. Hex SHA-256 `verify_certificate_hash` pins and base64 SHA-256
+identity or hash verification also uses the platform store. Typed
+`match_typed_subject_alt_names` restricts matchers to EMAIL/DNS/URI/IP SANs;
+IP SANs are compared in RFC 5952 text form. `OTHER_NAME` and OID matching are
+rejected. Hex SHA-256 `verify_certificate_hash` pins and base64 SHA-256
 `verify_certificate_spki` pins are checked against the peer chain after normal
 chain verification. EDS, STATIC and
 DNS endpoints become TLS targets; without

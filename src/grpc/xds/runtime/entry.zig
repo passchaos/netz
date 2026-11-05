@@ -105,6 +105,7 @@ pub const Cluster = struct {
                                 .kind = source.kind,
                                 .value = try arena.dupe(u8, source.value),
                                 .ignore_case = source.ignore_case,
+                                .san_type = source.san_type,
                             };
                         }
                         config.san_matchers = matchers;

@@ -9,10 +9,15 @@ pub const VersionPolicy = tls_stream.VersionPolicy;
 pub const Tls12CipherSuite = tls_stream.Tls12CipherSuite;
 
 pub const SanMatch = enum { exact, prefix, suffix, contains };
+/// Envoy v3 SubjectAltNameMatcher.SanType.
+pub const SanType = enum { email, dns, uri, ip };
 pub const SanMatcher = struct {
     kind: SanMatch,
     value: []const u8,
     ignore_case: bool = false,
+    /// Null matches any textual SAN (legacy `match_subject_alt_names`).
+    /// A value restricts matching to that SAN type, including IP addresses.
+    san_type: ?SanType = null,
 };
 
 pub const Config = struct {
@@ -54,7 +59,7 @@ pub const Material = struct {
     verify_certificate_hashes: []const [32]u8 = &.{},
     verify_certificate_spkis: []const [32]u8 = &.{},
 
-    const OwnedSanMatcher = struct { kind: SanMatch, value: []u8, ignore_case: bool };
+    const OwnedSanMatcher = struct { kind: SanMatch, value: []u8, ignore_case: bool, san_type: ?SanType = null };
 
     pub fn create(gpa: std.mem.Allocator, io: std.Io, config: Config) Error!*Material {
         if ((config.certificate_chain.len == 0) != (config.private_key.len == 0)) {
@@ -92,7 +97,12 @@ pub const Material = struct {
                     gpa.free(owned);
                 }
                 for (matchers, owned) |matcher, *value| {
-                    value.* = .{ .kind = matcher.kind, .value = try gpa.dupe(u8, matcher.value), .ignore_case = matcher.ignore_case };
+                    value.* = .{
+                        .kind = matcher.kind,
+                        .value = try gpa.dupe(u8, matcher.value),
+                        .ignore_case = matcher.ignore_case,
+                        .san_type = matcher.san_type,
+                    };
                     initialized += 1;
                 }
                 self.san_matchers = owned;
@@ -202,13 +212,24 @@ pub const Material = struct {
         const sequence = reader.next() orelse return error.InvalidCertificateExtension;
         if (sequence.tag != 0x30) return error.InvalidCertificateExtension;
         var names = DerNames{ .bytes = sequence.value };
+        var ip_text: [39]u8 = undefined;
         var matched = false;
         while (names.next()) |name| {
-            const text = switch (name.tag) {
-                0x81, 0x82, 0x86 => name.value,
+            const san_type: SanType, const text: []const u8 = switch (name.tag) {
+                0x81 => .{ .email, name.value },
+                0x82 => .{ .dns, name.value },
+                0x86 => .{ .uri, name.value },
+                0x87 => .{
+                    .ip,
+                    formatIp(name.value, &ip_text) orelse continue,
+                },
                 else => continue,
             };
             for (self.san_matchers) |matcher| {
+                // Legacy matchers never match IP SANs, matching Envoy.
+                if (matcher.san_type) |required| {
+                    if (required != san_type) continue;
+                } else if (san_type == .ip) continue;
                 if (matches(matcher, text)) {
                     matched = true;
                     break;
@@ -267,6 +288,73 @@ fn certificateSpki(bytes: []const u8) ?[]const u8 {
     }
     const spki = der.Element.parse(bytes, index) catch return null;
     return bytes[index..spki.slice.end];
+}
+
+/// Format a DER IP SAN (4 or 16 raw bytes) as text. Returns null for any
+/// other length.
+fn formatIp(bytes: []const u8, out: *[39]u8) ?[]const u8 {
+    if (bytes.len == 4) {
+        return std.fmt.bufPrint(out, "{d}.{d}.{d}.{d}", .{
+            bytes[0], bytes[1], bytes[2], bytes[3],
+        }) catch null;
+    }
+    if (bytes.len != 16) return null;
+    var groups: [8]u16 = undefined;
+    for (0..8) |index| {
+        groups[index] = (@as(u16, bytes[index * 2]) << 8) | bytes[index * 2 + 1];
+    }
+    // RFC 5952: compress the longest run of two or more zero groups.
+    var best_start: usize = 8;
+    var best_len: usize = 0;
+    var scan: usize = 0;
+    while (scan < 8) {
+        if (groups[scan] != 0) {
+            scan += 1;
+            continue;
+        }
+        var run: usize = 1;
+        while (scan + run < 8 and groups[scan + run] == 0) run += 1;
+        if (run > best_len) {
+            best_len = run;
+            best_start = scan;
+        }
+        scan += run;
+    }
+    var written: usize = 0;
+    var index: usize = 0;
+    while (index < 8) {
+        if (index == best_start and best_len >= 2) {
+            out[written] = ':';
+            written += 1;
+            out[written] = ':';
+            written += 1;
+            index += best_len;
+            continue;
+        }
+        if (written != 0 and out[written - 1] != ':') {
+            out[written] = ':';
+            written += 1;
+        }
+        var digits: [4]u8 = undefined;
+        var count: usize = 0;
+        var value = groups[index];
+        if (value == 0) {
+            digits[0] = '0';
+            count = 1;
+        } else {
+            while (value != 0) : (value >>= 4) {
+                digits[count] = "0123456789abcdef"[value & 0xf];
+                count += 1;
+            }
+        }
+        while (count > 0) {
+            count -= 1;
+            out[written] = digits[count];
+            written += 1;
+        }
+        index += 1;
+    }
+    return out[0..written];
 }
 
 fn matches(matcher: Material.OwnedSanMatcher, text: []const u8) bool {
@@ -390,4 +478,83 @@ test "xDS TLS system root certs load the platform trust store" {
     defer material.deinit();
     try std.testing.expect(material.bundle_loaded);
     try std.testing.expect(material.bundle.map.count() != 0);
+}
+
+fn sanSequence(out: []u8, entries: []const struct { tag: u8, value: []const u8 }) []const u8 {
+    var length: usize = 0;
+    for (entries) |entry| length += 2 + entry.value.len;
+    var written: usize = 0;
+    out[written] = 0x30;
+    written += 1;
+    out[written] = @intCast(length);
+    written += 1;
+    for (entries) |entry| {
+        out[written] = entry.tag;
+        written += 1;
+        out[written] = @intCast(entry.value.len);
+        written += 1;
+        @memcpy(out[written..][0..entry.value.len], entry.value);
+        written += entry.value.len;
+    }
+    return out[0..written];
+}
+
+test "xDS typed SAN matchers restrict by type and format IP addresses" {
+    const tls_testing = @import("../../tls/testing.zig");
+    const allocator = std.testing.allocator;
+    const pem = try std.fmt.allocPrint(allocator, "-----BEGIN CERTIFICATE-----\n{s}\n-----END CERTIFICATE-----\n", .{tls_testing.certificate_base64});
+    defer allocator.free(pem);
+
+    const ipv4 = [_]u8{ 192, 168, 1, 10 };
+    const ipv6 = [_]u8{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 };
+    var buffer: [128]u8 = undefined;
+    const ipv4_san = sanSequence(&buffer, &.{.{ .tag = 0x87, .value = &ipv4 }});
+    var material = try Material.create(allocator, std.testing.io, .{
+        .trusted_ca = pem,
+        .san_matchers = &.{.{ .kind = .exact, .value = "192.168.1.10", .san_type = .ip }},
+    });
+    defer material.deinit();
+    try material.checkSans(ipv4_san);
+
+    var wrong_type = try Material.create(allocator, std.testing.io, .{
+        .trusted_ca = pem,
+        .san_matchers = &.{.{ .kind = .exact, .value = "192.168.1.10", .san_type = .dns }},
+    });
+    defer wrong_type.deinit();
+    try std.testing.expectError(error.CertificateHostMismatch, wrong_type.checkSans(ipv4_san));
+
+    var legacy = try Material.create(allocator, std.testing.io, .{
+        .trusted_ca = pem,
+        .san_matchers = &.{.{ .kind = .exact, .value = "192.168.1.10" }},
+    });
+    defer legacy.deinit();
+    try std.testing.expectError(error.CertificateHostMismatch, legacy.checkSans(ipv4_san));
+
+    const ipv6_san = sanSequence(&buffer, &.{.{ .tag = 0x87, .value = &ipv6 }});
+    var ipv6_material = try Material.create(allocator, std.testing.io, .{
+        .trusted_ca = pem,
+        .san_matchers = &.{.{ .kind = .exact, .value = "2001:db8::1", .san_type = .ip }},
+    });
+    defer ipv6_material.deinit();
+    try ipv6_material.checkSans(ipv6_san);
+
+    const dns_san = sanSequence(&buffer, &.{.{ .tag = 0x82, .value = "backend.test" }});
+    var dns_material = try Material.create(allocator, std.testing.io, .{
+        .trusted_ca = pem,
+        .san_matchers = &.{.{ .kind = .exact, .value = "backend.test", .san_type = .dns }},
+    });
+    defer dns_material.deinit();
+    try dns_material.checkSans(dns_san);
+    try std.testing.expectError(error.CertificateHostMismatch, wrong_type.checkSans(dns_san));
+}
+
+test "xDS IPv6 SAN formatting compresses zero runs" {
+    var out: [39]u8 = undefined;
+    try std.testing.expectEqualStrings("::", formatIp(&[_]u8{0} ** 16, &out).?);
+    try std.testing.expectEqualStrings("2001:db8::1", formatIp(&[_]u8{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 }, &out).?);
+    try std.testing.expectEqualStrings("1:2:3:4:5:6:7:8", formatIp(&[_]u8{ 0, 1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6, 0, 7, 0, 8 }, &out).?);
+    try std.testing.expectEqualStrings("::1", formatIp(&[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 }, &out).?);
+    // Equal-length zero runs compress the first one (RFC 5952).
+    try std.testing.expectEqualStrings("2001:db8::1:0:0:1", formatIp(&[_]u8{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1 }, &out).?);
+    try std.testing.expect(formatIp(&[_]u8{ 1, 2, 3 }, &out) == null);
 }

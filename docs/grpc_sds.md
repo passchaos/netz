@@ -15,7 +15,9 @@ of embedding certificate material.
   data sources.
 - `validation_context` (field 3) accepts `trusted_ca`, the `system_root_certs`
   marker, or identity/hash verification without an inline CA (which uses the
-  platform trust store). It also accepts
+  platform trust store). It also accepts legacy
+  `match_subject_alt_names` (field 9) and typed
+  `match_typed_subject_alt_names` (field 15) with EMAIL/DNS/URI/IP SAN types;
   `match_subject_alt_names` exact/prefix/suffix/contains matchers with optional
   `ignore_case`. Hex SHA-256 `verify_certificate_hash` pins are checked against
   every certificate in the peer chain, and base64 SHA-256
@@ -25,7 +27,8 @@ of embedding certificate material.
 - Envoy v3 field numbers are used: 2 `verify_certificate_hash`, 3
   `verify_certificate_spki`, 6 `require_signed_certificate_timestamp`, 7 `crl`,
   8 `allow_expired_certificate`, 9 `match_subject_alt_names`, 10
-  `trust_chain_verification`, 17 `system_root_certs`.
+  `trust_chain_verification`, 15 `match_typed_subject_alt_names`, 17
+  `system_root_certs`. Typed `OTHER_NAME` and OID matching are rejected.
 - Only inline data sources are accepted. File, environment and watched
   directory sources belong to bootstrap certificate providers, not SDS.
 - Encrypted private keys, OCSP staples, certificate timestamps, CRLs,

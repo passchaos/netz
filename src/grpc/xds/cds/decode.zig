@@ -5,7 +5,7 @@ const policy = @import("policy.zig");
 const tls_material = @import("../tls_material.zig");
 pub const type_url = "type.googleapis.com/envoy.config.cluster.v3.Cluster";
 pub const Error = pb.Error;
-pub const Limits = struct { max_bytes: usize = 8 * 1024 * 1024, max_text_bytes: usize = 4096, max_thresholds: usize = 256, max_policies: usize = 32, max_endpoints: usize = 65536, max_aggregate_clusters: usize = 256, max_certificate_hashes: usize = 64, allow_sds: bool = false };
+pub const Limits = struct { max_bytes: usize = 8 * 1024 * 1024, max_text_bytes: usize = 4096, max_thresholds: usize = 256, max_policies: usize = 32, max_endpoints: usize = 65536, max_aggregate_clusters: usize = 256, max_certificate_hashes: usize = 64, max_san_matchers: usize = 64, allow_sds: bool = false };
 /// `aggregate` is a netz-internal discovery kind selected by the CDS
 /// `envoy.clusters.aggregate` custom cluster extension; it has no Envoy enum
 /// wire value of its own.
@@ -322,6 +322,38 @@ fn sanMatcher(bytes: []const u8, limits: Limits) Error!tls_material.SanMatcher {
     return .{ .kind = kind.?, .value = value, .ignore_case = ignore_case };
 }
 
+fn sanType(value: u64) Error!tls_material.SanType {
+    return switch (value) {
+        1 => .email,
+        2 => .dns,
+        3 => .uri,
+        4 => .ip,
+        // OTHER_NAME requires OID-specific parsing and stays unsupported.
+        5 => error.UnsupportedCdsFeature,
+        else => error.InvalidCdsResource,
+    };
+}
+
+fn typedSanMatcher(bytes: []const u8, limits: Limits) Error!tls_material.SanMatcher {
+    var san_type: ?tls_material.SanType = null;
+    var matcher_bytes: ?[]const u8 = null;
+    var oid: []const u8 = "";
+    var reader: pb.Reader = .{ .bytes = bytes };
+    while (try reader.next()) |field| {
+        if (field.number == 1 and field.wire_type == 0) {
+            san_type = try sanType(try reader.varint());
+        } else if (field.number == 2 and field.wire_type == 2) {
+            matcher_bytes = try reader.bytesValue();
+        } else if (field.number == 3 and field.wire_type == 2) {
+            oid = try pb.text(&reader, limits.max_text_bytes);
+        } else try reader.skip(field);
+    }
+    if (oid.len != 0) return error.UnsupportedCdsFeature;
+    var matcher = try sanMatcher(matcher_bytes orelse return error.InvalidCdsResource, limits);
+    matcher.san_type = san_type orelse return error.InvalidCdsResource;
+    return matcher;
+}
+
 fn certificateHash(value: []const u8) Error![32]u8 {
     if (value.len != 64) return error.InvalidCdsResource;
     var result: [32]u8 = undefined;
@@ -365,13 +397,19 @@ fn validationContext(arena: std.mem.Allocator, bytes: []const u8, limits: Limits
             if (try pb.u32Value(&reader) != 0) return error.UnsupportedCdsFeature; // allow_expired_certificate
         } else if (field.number == 9 and field.wire_type == 2) {
             // match_subject_alt_names: repeated envoy.type.matcher.v3.StringMatcher.
-            if (matchers.items.len >= limits.max_certificate_hashes) return error.CdsLimitExceeded;
+            if (matchers.items.len >= limits.max_san_matchers) return error.CdsLimitExceeded;
             try matchers.append(arena, try sanMatcher(try reader.bytesValue(), limits));
+        } else if (field.number == 15 and field.wire_type == 2) {
+            // match_typed_subject_alt_names: SubjectAltNameMatcher.
+            if (matchers.items.len >= limits.max_san_matchers) return error.CdsLimitExceeded;
+            try matchers.append(arena, try typedSanMatcher(try reader.bytesValue(), limits));
         } else if (field.number == 10 and field.wire_type == 0) {
             if (try pb.u32Value(&reader) != 0) return error.UnsupportedCdsFeature; // ACCEPT_UNTRUSTED
         } else if (field.number == 17 and field.wire_type == 2) {
             _ = try reader.bytesValue();
             system_root_certs = true;
+        } else if (field.number == 15) {
+            return error.InvalidCdsResource;
         } else if (field.number >= 11 and field.number <= 16) return error.UnsupportedCdsFeature else try reader.skip(field);
     }
     const has_identity = matchers.items.len != 0 or hashes.items.len != 0 or spkis.items.len != 0;

@@ -592,3 +592,70 @@ test "gRPC CDS rejects an empty validation context and allow_expired" {
     defer gpa.free(encoded_expired);
     try std.testing.expectError(error.UnsupportedCdsFeature, resource.decode(gpa, encoded_expired, .{}));
 }
+
+test "gRPC CDS decodes typed subject alt name matchers" {
+    var matcher = fixture.Builder{ .allocator = gpa };
+    defer matcher.deinit();
+    try matcher.bytes(1, "backend.test");
+    var typed = fixture.Builder{ .allocator = gpa };
+    defer typed.deinit();
+    try typed.number(1, 2); // SAN_TYPE_DNS
+    try typed.bytes(2, matcher.data.items);
+    var validation = fixture.Builder{ .allocator = gpa };
+    defer validation.deinit();
+    var trusted = fixture.Builder{ .allocator = gpa };
+    defer trusted.deinit();
+    try trusted.bytes(1, "CA");
+    try validation.bytes(1, trusted.data.items);
+    try validation.bytes(15, typed.data.items);
+    var common = fixture.Builder{ .allocator = gpa };
+    defer common.deinit();
+    try common.bytes(3, validation.data.items);
+    var context = fixture.Builder{ .allocator = gpa };
+    defer context.deinit();
+    try context.bytes(1, common.data.items);
+    var any = fixture.Builder{ .allocator = gpa };
+    defer any.deinit();
+    try any.bytes(1, "type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext");
+    try any.bytes(2, context.data.items);
+    var socket = fixture.Builder{ .allocator = gpa };
+    defer socket.deinit();
+    try socket.bytes(1, "envoy.transport_sockets.tls");
+    try socket.bytes(3, any.data.items);
+    const encoded = try fixture.staticClusterTls(gpa, "backend", "127.0.0.1", 1001, socket.data.items);
+    defer gpa.free(encoded);
+    var decoded = try resource.decode(gpa, encoded, .{});
+    defer decoded.deinit();
+    const sans = decoded.value.tls.?.san_matchers.?;
+    try std.testing.expectEqual(@as(usize, 1), sans.len);
+    try std.testing.expectEqual(@import("../tls_material.zig").SanType.dns, sans[0].san_type.?);
+    try std.testing.expectEqualStrings("backend.test", sans[0].value);
+
+    // OTHER_NAME requires OID-specific parsing and stays unsupported.
+    var other = fixture.Builder{ .allocator = gpa };
+    defer other.deinit();
+    try other.number(1, 5);
+    try other.bytes(2, matcher.data.items);
+    try other.bytes(3, "1.3.6.1.4.1.311");
+    var unsupported = fixture.Builder{ .allocator = gpa };
+    defer unsupported.deinit();
+    try unsupported.bytes(1, trusted.data.items);
+    try unsupported.bytes(15, other.data.items);
+    var common_other = fixture.Builder{ .allocator = gpa };
+    defer common_other.deinit();
+    try common_other.bytes(3, unsupported.data.items);
+    var context_other = fixture.Builder{ .allocator = gpa };
+    defer context_other.deinit();
+    try context_other.bytes(1, common_other.data.items);
+    var any_other = fixture.Builder{ .allocator = gpa };
+    defer any_other.deinit();
+    try any_other.bytes(1, "type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext");
+    try any_other.bytes(2, context_other.data.items);
+    var socket_other = fixture.Builder{ .allocator = gpa };
+    defer socket_other.deinit();
+    try socket_other.bytes(1, "envoy.transport_sockets.tls");
+    try socket_other.bytes(3, any_other.data.items);
+    const encoded_other = try fixture.staticClusterTls(gpa, "backend", "127.0.0.1", 1001, socket_other.data.items);
+    defer gpa.free(encoded_other);
+    try std.testing.expectError(error.UnsupportedCdsFeature, resource.decode(gpa, encoded_other, .{}));
+}

@@ -262,3 +262,30 @@ test "gRPC SDS rejects an empty validation context" {
     try secret.bytes(3, "");
     try std.testing.expectError(error.InvalidSdsResource, sds.decode(gpa, secret.data.items, .{}));
 }
+
+test "gRPC SDS decodes typed subject alt name matchers" {
+    var matcher = fixture.Builder{ .allocator = gpa };
+    defer matcher.deinit();
+    try matcher.bytes(1, "backend.test");
+    var typed = fixture.Builder{ .allocator = gpa };
+    defer typed.deinit();
+    try typed.number(1, 2);
+    try typed.bytes(2, matcher.data.items);
+    var validation = fixture.Builder{ .allocator = gpa };
+    defer validation.deinit();
+    var trusted = fixture.Builder{ .allocator = gpa };
+    defer trusted.deinit();
+    try trusted.bytes(1, "CA");
+    try validation.bytes(1, trusted.data.items);
+    try validation.bytes(15, typed.data.items);
+    var secret = fixture.Builder{ .allocator = gpa };
+    defer secret.deinit();
+    try secret.bytes(1, "roots");
+    try secret.bytes(3, validation.data.items);
+    var owned = try sds.decode(gpa, secret.data.items, .{});
+    defer owned.deinit();
+    const sans = owned.value.kind.validation_context.san_matchers;
+    try std.testing.expectEqual(@as(usize, 1), sans.len);
+    try std.testing.expectEqual(@import("../tls_material.zig").SanType.dns, sans[0].san_type.?);
+    try std.testing.expectEqualStrings("backend.test", sans[0].value);
+}
