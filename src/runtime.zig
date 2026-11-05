@@ -76,6 +76,21 @@ pub const Backend = struct {
         };
     }
 
+    /// Initialize with an explicit executor count. One executor runs every
+    /// connection on the calling thread; larger values place independent
+    /// connection tasks on separate threads.
+    pub fn initWithExecutors(allocator: std.mem.Allocator, executors: u8) !Backend {
+        if (executors == 0) return error.InvalidExecutorCount;
+        const runtime = try zio.Runtime.init(allocator, .{
+            .executors = @enumFromInt(executors),
+        });
+        return .{
+            .allocator = allocator,
+            .backing_allocator = allocator,
+            .runtime = @ptrCast(runtime),
+        };
+    }
+
     /// Explicit spelling for applications that want to document the backend.
     pub fn initZio(allocator: std.mem.Allocator) !Backend {
         const runtime = try zio.Runtime.init(allocator, .{});

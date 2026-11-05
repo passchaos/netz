@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "date": "2026-11-06",
+  "feature": "MQTT serial QoS2 with multiple zio executors",
+  "decision": "API-only; no performance claim",
+  "change": "Added netz.runtime.Backend.initWithExecutors and an example broker --executors option so applications can run connection tasks on several zio executors instead of the single default executor.",
+  "workload": {
+    "protocol": "MQTT 5 over TCP",
+    "qos": 2,
+    "publishers": 1,
+    "subscribers": 1,
+    "payload_bytes": 256,
+    "warmup": 100,
+    "messages": 5000,
+    "publisher_window": 1,
+    "server_queue_capacity": 5000,
+    "session_expiry_seconds": 3600,
+    "build": "ReleaseFast"
+  },
+  "comparison": {
+    "executors_1": [30666, 31137, 34295, 32671, 33579],
+    "executors_2": [35292, 34259, 32730, null, 30914],
+    "executors_4": [34389],
+    "mosquitto_under_low_load": 48380,
+    "observation": "Two or four executors produced no consistent gain over the single default executor for the serial window-1 workload; differences stayed within run-to-run noise. The option is retained for workloads with independent connections that can use multiple cores, not as a serial-latency fix."
+  },
+  "tests": {
+    "compile": {
+      "command": "zig build test-compile",
+      "status": "passed"
+    },
+    "full_library": {
+      "command": "zig build test-lib",
+      "status": "passed",
+      "exit_code": 0,
+      "passed": 6513,
+      "total": 6513,
+      "failed": 0
+    }
+  },
+  "source_sha256": {
+    "src/runtime.zig": "22c607c0ccef044a4e52ed6e3884d36bbd0f78e0ff6000f2f5cfd465eb37b922",
+    "examples/mqtt_broker.zig": "fcc1da4c092dd30c09763e1570a1eae45c06f7cd10852845683fff1bd2b1bb3e"
+  },
+  "notes": "The single-executor default keeps scheduling deterministic and is still the right choice for serial workloads. The remaining serial gap is the task/event-loop cost described in 2026-11-06.json."
+}

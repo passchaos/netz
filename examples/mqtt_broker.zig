@@ -9,6 +9,7 @@ const InteropAuthentication = @import(
 
 const Config = struct {
     bind: std.Io.net.IpAddress = .{ .ip4 = .loopback(1883) },
+    executors: u8 = 1,
     connections: usize = 16,
     max_queued_deliveries: usize = 1024,
     max_pending_incoming_qos2: usize = 4096,
@@ -73,10 +74,10 @@ pub fn main(init: std.process.Init) !void {
     // Library users still choose the allocator passed to Broker.listen.
     const base_allocator = std.heap.c_allocator;
     const config_path = try parseConfigPath(init);
-    var backend = try netz.runtime.Backend.init(base_allocator);
-    defer backend.deinit();
-    const io = backend.io();
     if (config_path) |path| {
+        var backend = try netz.runtime.Backend.init(base_allocator);
+        defer backend.deinit();
+        const io = backend.io();
         broker_config_runner.run(base_allocator, io, path, .{
             .finite_test = if (init.environ_map.get(
                 "NETZ_MQTT_CONFIG_FINITE_TEST",
@@ -97,6 +98,12 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
     const config = try parseArgs(init);
+    var backend = try netz.runtime.Backend.initWithExecutors(
+        base_allocator,
+        config.executors,
+    );
+    defer backend.deinit();
+    const io = backend.io();
     var counting = CountingAllocator.init(base_allocator);
     const allocator = if (config.allocator_stats)
         counting.allocator()
@@ -516,7 +523,14 @@ fn parseArgs(
     var config: Config = .{};
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     for (args[1..]) |arg| {
-        if (std.mem.startsWith(u8, arg, "--bind=")) {
+        if (std.mem.startsWith(u8, arg, "--executors=")) {
+            config.executors = try std.fmt.parseInt(
+                u8,
+                arg["--executors=".len..],
+                10,
+            );
+            if (config.executors == 0) return error.InvalidArgument;
+        } else if (std.mem.startsWith(u8, arg, "--bind=")) {
             config.bind = try std.Io.net.IpAddress.parseLiteral(
                 arg["--bind=".len..],
             );
