@@ -1,0 +1,44 @@
+{
+  "schema": 1,
+  "date": "2026-11-06",
+  "head": "working-tree",
+  "subject": "xDS system root certs and correct CertificateValidationContext field numbers",
+  "change": "CertificateValidationContext decoding now uses the Envoy v3 field numbers: 2 verify_certificate_hash, 3 verify_certificate_spki, 6 require_signed_certificate_timestamp (BoolValue), 7 crl, 8 allow_expired_certificate, 9 match_subject_alt_names, 10 trust_chain_verification, 17 system_root_certs. Earlier code read SAN matchers from field 2 and pins from fields 4/5, which matched the project's own fixtures but not the real Envoy/gRPC wire format. tls_material now loads the platform trust store via Bundle.rescan when system_root_certs is set or when identity/hash verification is requested without an inline CA, matching gRPC's default-root behavior. The runtime SDS resolution copies system_root_certs into the cluster override.",
+  "tests": {
+    "unit": "src/grpc/xds/sds/secret_tests.zig covers system-root markers, hash-only validation, empty-validation rejection and SPKI/hash decoding with the corrected fields. src/grpc/xds/cds/tests.zig covers inline system roots with SAN matchers, empty-validation rejection and allow_expired rejection. src/grpc/xds/tls_material.zig now runs in the aggregator and covers SAN matchers, certificate hash pins, SPKI pins, hash-only system-root loading and system-root loading. src/grpc/xds/runtime/sds_tests.zig covers resolving an SDS system-root validation secret end to end.",
+    "focused_gate": {
+      "command": "zig build test-lib -Dtest-filter='xDS runtime' -Dtest-filter='gRPC CDS' -Dtest-filter='gRPC LDS' -Dtest-filter='SDS' -Dtest-filter='LRS' -Dtest-filter='xdstp' -Dtest-filter='xDS TLS' --summary all",
+      "passed": 248,
+      "total": 248,
+      "failed": 0
+    },
+    "compile": {
+      "command": "zig build test-compile",
+      "status": "passed"
+    },
+    "full_library": {
+      "command": "zig build test-lib",
+      "status": "passed",
+      "exit_code": 0,
+      "passed": 6505,
+      "total": 6505,
+      "failed": 0,
+      "notes": "Earlier full runs at host load 20-32 failed only the pre-existing WSS/HTTP2 caller-timeout test-isolation flake (its printed stack unwinds through unrelated WebTransport/HTTP3 frames); that test passes in isolation and the WebTransport/DATAGRAM subset passes 862/862 three consecutive times. The final full run passed."
+    }
+  },
+  "source_sha256": {
+    "src/grpc/xds/tls_material.zig": "0f9d13decd803747a143340dca8dc4674b7b682c2649edf6c993025b904124cd",
+    "src/grpc/xds/cds/decode.zig": "0801d8c959194d94c7eb119baa272d29ed5da870f6856010e2545cce570d8f95",
+    "src/grpc/xds/cds/testing.zig": "cea2c2ffc5d9b5c9fa1d07beb44cc48b0c76e1ad0ac90ca3d5243cc9a1ba3f14",
+    "src/grpc/xds/cds/tests.zig": "ad2e35a2681ff6d79bde7c5a8fd73693bbf544497760e440918b9d2e54127364",
+    "src/grpc/xds/sds/secret.zig": "c31bacd0fc41e53de189b90a936d24c23826c796f8e1bb28666950d2ff73b979",
+    "src/grpc/xds/sds/secret_tests.zig": "deeef7d5f4bb3f23814346ddc17863ae95000a313e8326abb3eccbfdfbdbc662",
+    "src/grpc/xds/sds/testing.zig": "1f01f4b90dc45db1a20fb2e96e08291a208115af029ef9967e001b56dd61bda5",
+    "src/grpc/xds/runtime/entry.zig": "f5f31c6dff6386e0064c0d3b45f6b99e15278607920b8ddd76903972b3eff6a0",
+    "src/grpc/xds/runtime/sds_tests.zig": "df1c8e212b15f96a971fa2683696b2d29be9e066d234258ef4c47985dc571689",
+    "src/grpc/xds/mod.zig": "9cf2a59222faa5b24799dacaa3efc6bbe5cb82b31243251b6ebf4c8746b89110",
+    "docs/grpc_sds.md": "bead8cc6d541f2ea6ab6fe67aaba6d1d6a79b93c4dd7b9101061dd906bffc287",
+    "docs/grpc_cds.md": "cdff12fa2c15a1bc3e857fb43fecc7e8edff35162f9aa4cd5a7a0b8d263a7c1c"
+  },
+  "notes": "Inline trusted_ca and system_root_certs are both accepted; when both are absent, identity or hash verification falls back to platform roots. require_ocsp_staple is not present in v3 and remains rejected through the unknown-field path only when its wire shape is not recognized. OCSP, CRL, custom validators, provider instances, max_verify_depth and typed SAN matchers remain unsupported."
+}
