@@ -358,3 +358,43 @@ test "gRPC delta xDS runtime expires SDS secrets and refreshes their TTL" {
     try acceptDelta(controller, &client, channel, io, restored);
     try std.testing.expectEqual(@as(usize, 1), channel.configuredEndpointCount());
 }
+
+test "gRPC xDS runtime resolves SDS system root certs" {
+    var threaded = std.Io.Threaded.init(gpa, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var channel = try grpc.SharedChannel.init(gpa, io, .{ .cleartext_ip = .{ .address = .{ .ip4 = .loopback(1) } } }, .{});
+    defer channel.deinit();
+    var sender = channel.sender();
+    defer sender.deinit();
+    var client = try ads.Client.init(gpa, sender, .{ .node = .{ .id = "test" } });
+    defer client.deinit();
+    const controller = try runtime.Controller.create(gpa, .{ .listener_name = "frontend", .target = .{ .authority = "backend.test" } });
+    defer controller.deinit();
+    _ = try controller.startWithDeadline(&client, channel, .fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(3) }));
+    try listenRoute(controller, &client, channel, io, "a");
+
+    const tls = try cds_fixture.upstreamTlsSds(gpa, "localhost", null, "roots");
+    defer gpa.free(tls);
+    const cluster = try cds_fixture.staticClusterTls(gpa, "a", "127.0.0.1", 1001, tls);
+    defer gpa.free(cluster);
+    try accept(controller, &client, channel, io, cds.type_url, "c1", &.{.{ .type_url = cds.type_url, .value = cluster }});
+    try std.testing.expect(controller.entries.items[0].cluster.?.sdsPending());
+
+    var validation = sds_fixture.Builder{ .allocator = gpa };
+    defer validation.deinit();
+    var roots = sds_fixture.Builder{ .allocator = gpa };
+    defer roots.deinit();
+    try roots.bytes(1, "");
+    try validation.bytes(17, roots.data.items);
+    var secret = sds_fixture.Builder{ .allocator = gpa };
+    defer secret.deinit();
+    try secret.bytes(1, "roots");
+    try secret.bytes(3, validation.data.items);
+    try accept(controller, &client, channel, io, sds.type_url, "s1", &.{.{ .type_url = sds.type_url, .value = secret.data.items }});
+    try std.testing.expect(!controller.entries.items[0].cluster.?.sdsPending());
+    try std.testing.expectEqual(@as(usize, 1), channel.configuredEndpointCount());
+    const config = controller.entries.items[0].cluster.?.resolvedTls().?;
+    try std.testing.expect(config.system_root_certs);
+    try std.testing.expectEqualStrings("", config.trusted_ca);
+}

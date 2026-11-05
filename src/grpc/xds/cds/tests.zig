@@ -481,10 +481,10 @@ test "gRPC CDS decodes inline certificate hash pins" {
     var validation = fixture.Builder{ .allocator = gpa };
     defer validation.deinit();
     try validation.bytes(1, trusted.data.items);
-    try validation.bytes(4, "abababababababababababababababababababababababababababababababab");
+    try validation.bytes(2, "abababababababababababababababababababababababababababababababab");
     const spki_pin = [_]u8{0xcd} ** 32;
     var spki_buffer: [std.base64.standard.Encoder.calcSize(32)]u8 = undefined;
-    try validation.bytes(5, std.base64.standard.Encoder.encode(&spki_buffer, &spki_pin));
+    try validation.bytes(3, std.base64.standard.Encoder.encode(&spki_buffer, &spki_pin));
     var common = fixture.Builder{ .allocator = gpa };
     defer common.deinit();
     try common.bytes(3, validation.data.items);
@@ -509,4 +509,86 @@ test "gRPC CDS decodes inline certificate hash pins" {
     const spkis = decoded.value.tls.?.verify_certificate_spkis.?;
     try std.testing.expectEqual(@as(usize, 1), spkis.len);
     try std.testing.expectEqualSlices(u8, &spki_pin, &spkis[0]);
+}
+
+test "gRPC CDS accepts system root certs with identity verification" {
+    var validation = fixture.Builder{ .allocator = gpa };
+    defer validation.deinit();
+    var roots = fixture.Builder{ .allocator = gpa };
+    defer roots.deinit();
+    try roots.bytes(1, "");
+    try validation.bytes(17, roots.data.items);
+    var matcher = fixture.Builder{ .allocator = gpa };
+    defer matcher.deinit();
+    try matcher.bytes(1, "backend.test");
+    try validation.bytes(9, matcher.data.items);
+    var common = fixture.Builder{ .allocator = gpa };
+    defer common.deinit();
+    try common.bytes(3, validation.data.items);
+    var context = fixture.Builder{ .allocator = gpa };
+    defer context.deinit();
+    try context.bytes(1, common.data.items);
+    var any = fixture.Builder{ .allocator = gpa };
+    defer any.deinit();
+    try any.bytes(1, "type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext");
+    try any.bytes(2, context.data.items);
+    var socket = fixture.Builder{ .allocator = gpa };
+    defer socket.deinit();
+    try socket.bytes(1, "envoy.transport_sockets.tls");
+    try socket.bytes(3, any.data.items);
+    const encoded = try fixture.staticClusterTls(gpa, "backend", "127.0.0.1", 1001, socket.data.items);
+    defer gpa.free(encoded);
+    var decoded = try resource.decode(gpa, encoded, .{});
+    defer decoded.deinit();
+    try std.testing.expect(decoded.value.tls.?.system_root_certs);
+    try std.testing.expectEqualStrings("", decoded.value.tls.?.trusted_ca);
+    try std.testing.expectEqual(@as(usize, 1), decoded.value.tls.?.san_matchers.?.len);
+}
+
+test "gRPC CDS rejects an empty validation context and allow_expired" {
+    var empty = fixture.Builder{ .allocator = gpa };
+    defer empty.deinit();
+    try empty.bytes(1, "");
+    var common = fixture.Builder{ .allocator = gpa };
+    defer common.deinit();
+    try common.bytes(3, empty.data.items);
+    var context = fixture.Builder{ .allocator = gpa };
+    defer context.deinit();
+    try context.bytes(1, common.data.items);
+    var any = fixture.Builder{ .allocator = gpa };
+    defer any.deinit();
+    try any.bytes(1, "type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext");
+    try any.bytes(2, context.data.items);
+    var socket = fixture.Builder{ .allocator = gpa };
+    defer socket.deinit();
+    try socket.bytes(1, "envoy.transport_sockets.tls");
+    try socket.bytes(3, any.data.items);
+    const encoded = try fixture.staticClusterTls(gpa, "backend", "127.0.0.1", 1001, socket.data.items);
+    defer gpa.free(encoded);
+    try std.testing.expectError(error.InvalidCdsResource, resource.decode(gpa, encoded, .{}));
+
+    var trusted = fixture.Builder{ .allocator = gpa };
+    defer trusted.deinit();
+    try trusted.bytes(1, "CA");
+    var expired = fixture.Builder{ .allocator = gpa };
+    defer expired.deinit();
+    try expired.bytes(1, trusted.data.items);
+    try expired.number(8, 1);
+    var common_expired = fixture.Builder{ .allocator = gpa };
+    defer common_expired.deinit();
+    try common_expired.bytes(3, expired.data.items);
+    var context_expired = fixture.Builder{ .allocator = gpa };
+    defer context_expired.deinit();
+    try context_expired.bytes(1, common_expired.data.items);
+    var any_expired = fixture.Builder{ .allocator = gpa };
+    defer any_expired.deinit();
+    try any_expired.bytes(1, "type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext");
+    try any_expired.bytes(2, context_expired.data.items);
+    var socket_expired = fixture.Builder{ .allocator = gpa };
+    defer socket_expired.deinit();
+    try socket_expired.bytes(1, "envoy.transport_sockets.tls");
+    try socket_expired.bytes(3, any_expired.data.items);
+    const encoded_expired = try fixture.staticClusterTls(gpa, "backend", "127.0.0.1", 1001, socket_expired.data.items);
+    defer gpa.free(encoded_expired);
+    try std.testing.expectError(error.UnsupportedCdsFeature, resource.decode(gpa, encoded_expired, .{}));
 }

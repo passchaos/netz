@@ -115,7 +115,7 @@ fn buildUpstreamTls(gpa: std.mem.Allocator, trusted_ca: []const u8, sni: []const
             .suffix => 3,
             .contains => 7,
         }, san.value);
-        try validation.bytes(2, matcher.data.items);
+        try validation.bytes(9, matcher.data.items);
     }
     var common = Builder{ .allocator = gpa };
     defer common.deinit();

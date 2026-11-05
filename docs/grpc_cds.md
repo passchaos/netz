@@ -103,9 +103,10 @@ name, inline `trusted_ca`, one inline certificate chain/private-key pair, and
 values (`AUTO` defaults to TLS 1.2/1.3; TLS 1.0/1.1 are rejected) and a TLS 1.2
 cipher-suite allowlist using the OpenSSL names for the supported ECDHE
 GCM/ChaCha suites, and `match_subject_alt_names` exact/prefix/suffix/contains
-matchers (case-sensitive or insensitive). SAN matching requires inline
-`trusted_ca` and replaces SNI hostname verification with the configured matcher
-set. Hex SHA-256 `verify_certificate_hash` pins and base64 SHA-256
+matchers (case-sensitive or insensitive). SAN matching requires a trust
+source and replaces SNI hostname verification with the configured matcher set.
+`system_root_certs` selects the platform trust store; without any inline CA,
+identity or hash verification also uses the platform store. Hex SHA-256 `verify_certificate_hash` pins and base64 SHA-256
 `verify_certificate_spki` pins are checked against the peer chain after normal
 chain verification. EDS, STATIC and
 DNS endpoints become TLS targets; without

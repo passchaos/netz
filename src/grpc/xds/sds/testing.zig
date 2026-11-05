@@ -18,6 +18,12 @@ pub const Builder = struct {
         try self.integer(@as(u64, field) * 8);
         try self.integer(value);
     }
+    pub fn wrapper(self: *Builder, field: u32, value: u64) !void {
+        var nested = Builder{ .allocator = self.allocator };
+        defer nested.deinit();
+        try nested.number(1, value);
+        try self.bytes(field, nested.data.items);
+    }
     pub fn bytes(self: *Builder, field: u32, value: []const u8) !void {
         try self.integer(@as(u64, field) * 8 + 2);
         try self.integer(value.len);
@@ -101,16 +107,16 @@ pub fn validationSecretPins(
             .contains => 7,
         }, san.value);
         if (san.ignore_case) try matcher.number(6, 1);
-        try validation.bytes(2, matcher.data.items);
+        try validation.bytes(9, matcher.data.items);
     }
     for (hashes) |hash| {
         const encoded = std.fmt.bytesToHex(hash, .lower);
-        try validation.bytes(4, &encoded);
+        try validation.bytes(2, &encoded);
     }
     for (spkis) |spki| {
         var buffer: [std.base64.standard.Encoder.calcSize(32)]u8 = undefined;
         const encoded = std.base64.standard.Encoder.encode(&buffer, &spki);
-        try validation.bytes(5, encoded);
+        try validation.bytes(3, encoded);
     }
     var out = Builder{ .allocator = gpa };
     errdefer out.deinit();

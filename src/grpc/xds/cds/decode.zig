@@ -285,6 +285,7 @@ fn tlsCertificate(bytes: []const u8, limits: Limits) Error!struct { chain: []con
 
 const Validation = struct {
     trusted_ca: []const u8,
+    system_root_certs: bool,
     san_matchers: []const tls_material.SanMatcher,
     verify_certificate_hashes: []const [32]u8,
     verify_certificate_spkis: []const [32]u8,
@@ -338,23 +339,48 @@ fn certificateSpkiHash(value: []const u8) Error![32]u8 {
 
 fn validationContext(arena: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!Validation {
     var trusted_ca: ?[]const u8 = null;
+    var system_root_certs = false;
     var matchers: std.ArrayList(tls_material.SanMatcher) = .empty;
     var hashes: std.ArrayList([32]u8) = .empty;
     var spkis: std.ArrayList([32]u8) = .empty;
     var reader: pb.Reader = .{ .bytes = bytes };
     while (try reader.next()) |field| {
-        if (field.number == 1 and field.wire_type == 2) trusted_ca = try dataSource(try reader.bytesValue(), limits) else if (field.number == 2 and field.wire_type == 2) {
-            try matchers.append(arena, try sanMatcher(try reader.bytesValue(), limits));
-        } else if (field.number == 4 and field.wire_type == 2) {
+        // Envoy v3 CertificateValidationContext field numbers.
+        if (field.number == 1 and field.wire_type == 2) {
+            trusted_ca = try dataSource(try reader.bytesValue(), limits);
+        } else if (field.number == 2 and field.wire_type == 2) {
+            // verify_certificate_hash: repeated hex SHA-256 strings.
             if (hashes.items.len >= limits.max_certificate_hashes) return error.CdsLimitExceeded;
             try hashes.append(arena, try certificateHash(try pb.text(&reader, limits.max_text_bytes)));
-        } else if (field.number == 5 and field.wire_type == 2) {
+        } else if (field.number == 3 and field.wire_type == 2) {
+            // verify_certificate_spki: repeated base64 SHA-256 strings.
             if (spkis.items.len >= limits.max_certificate_hashes) return error.CdsLimitExceeded;
             try spkis.append(arena, try certificateSpkiHash(try pb.text(&reader, limits.max_text_bytes)));
-        } else if (field.number >= 3 and field.number <= 10) return error.UnsupportedCdsFeature else try reader.skip(field);
+        } else if (field.number == 6 and field.wire_type == 2) {
+            // require_signed_certificate_timestamp: google.protobuf.BoolValue.
+            if (try pb.wrapper(try reader.bytesValue()) != 0) return error.UnsupportedCdsFeature;
+        } else if (field.number == 7 and field.wire_type == 2) {
+            return error.UnsupportedCdsFeature; // crl
+        } else if (field.number == 8 and field.wire_type == 0) {
+            if (try pb.u32Value(&reader) != 0) return error.UnsupportedCdsFeature; // allow_expired_certificate
+        } else if (field.number == 9 and field.wire_type == 2) {
+            // match_subject_alt_names: repeated envoy.type.matcher.v3.StringMatcher.
+            if (matchers.items.len >= limits.max_certificate_hashes) return error.CdsLimitExceeded;
+            try matchers.append(arena, try sanMatcher(try reader.bytesValue(), limits));
+        } else if (field.number == 10 and field.wire_type == 0) {
+            if (try pb.u32Value(&reader) != 0) return error.UnsupportedCdsFeature; // ACCEPT_UNTRUSTED
+        } else if (field.number == 17 and field.wire_type == 2) {
+            _ = try reader.bytesValue();
+            system_root_certs = true;
+        } else if (field.number >= 11 and field.number <= 16) return error.UnsupportedCdsFeature else try reader.skip(field);
+    }
+    const has_identity = matchers.items.len != 0 or hashes.items.len != 0 or spkis.items.len != 0;
+    if (trusted_ca == null and !system_root_certs and !has_identity) {
+        return error.InvalidCdsResource;
     }
     return .{
-        .trusted_ca = trusted_ca orelse return error.InvalidCdsResource,
+        .trusted_ca = trusted_ca orelse "",
+        .system_root_certs = system_root_certs,
         .san_matchers = try matchers.toOwnedSlice(arena),
         .verify_certificate_hashes = try hashes.toOwnedSlice(arena),
         .verify_certificate_spkis = try spkis.toOwnedSlice(arena),
@@ -448,6 +474,7 @@ fn commonTlsContext(arena: std.mem.Allocator, bytes: []const u8, limits: Limits)
             if (result.config.trusted_ca.len != 0 or result.sds.validation != null) return error.UnsupportedCdsFeature;
             const validation = try validationContext(arena, try reader.bytesValue(), limits);
             result.config.trusted_ca = validation.trusted_ca;
+            result.config.system_root_certs = validation.system_root_certs;
             result.config.san_matchers = validation.san_matchers;
             result.config.verify_certificate_hashes = validation.verify_certificate_hashes;
             result.config.verify_certificate_spkis = validation.verify_certificate_spkis;
@@ -472,6 +499,7 @@ fn upstreamTlsContext(arena: std.mem.Allocator, bytes: []const u8, limits: Limit
         if (field.number == 1 and field.wire_type == 2) {
             const common = try commonTlsContext(arena, try reader.bytesValue(), limits);
             result.trusted_ca = common.config.trusted_ca;
+            result.system_root_certs = common.config.system_root_certs;
             result.certificate_chain = common.config.certificate_chain;
             result.private_key = common.config.private_key;
             result.version_policy = common.config.version_policy;

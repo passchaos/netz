@@ -14,6 +14,7 @@ pub const runtime = @import("runtime.zig");
 pub const ads = @import("ads.zig");
 test {
     _ = ads;
+    _ = @import("tls_material.zig");
     _ = eds;
     _ = cds;
     _ = routing;

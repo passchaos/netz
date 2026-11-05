@@ -28,6 +28,10 @@ pub const Config = struct {
     /// SHA-256 hashes of DER-encoded SubjectPublicKeyInfo values accepted in
     /// the peer chain.
     verify_certificate_spkis: ?[]const [32]u8 = null,
+    /// Use the platform trust store instead of inline `trusted_ca`. Envoy and
+    /// gRPC also default to system roots when no CA source is configured but
+    /// identity or hash verification is requested.
+    system_root_certs: bool = false,
 };
 
 pub const Error = std.mem.Allocator.Error || server_identity_file.Error || error{
@@ -63,8 +67,18 @@ pub const Material = struct {
         if (config.tls12_cipher_suites) |suites| {
             if (suites.len != 0) self.tls12_cipher_suites = try gpa.dupe(tls_stream.Tls12CipherSuite, suites);
         }
+        const wants_identity_verification =
+            config.system_root_certs or
+            (config.san_matchers != null and config.san_matchers.?.len != 0) or
+            (config.verify_certificate_hashes != null and config.verify_certificate_hashes.?.len != 0) or
+            (config.verify_certificate_spkis != null and config.verify_certificate_spkis.?.len != 0);
         if (config.trusted_ca.len != 0) {
             addCerts(gpa, io, &self.bundle, config.trusted_ca) catch return error.InvalidTlsMaterial;
+            if (self.bundle.map.count() == 0) return error.InvalidTlsMaterial;
+            self.bundle_loaded = true;
+        } else if (wants_identity_verification) {
+            // No inline CA: use the platform trust store, matching Envoy/gRPC.
+            self.bundle.rescan(gpa, io, std.Io.Timestamp.now(io, .real)) catch return error.InvalidTlsMaterial;
             if (self.bundle.map.count() == 0) return error.InvalidTlsMaterial;
             self.bundle_loaded = true;
         }
@@ -356,4 +370,24 @@ test "xDS TLS SPKI pins accept and reject the peer chain" {
     var rejecting = try Material.create(allocator, std.testing.io, .{ .trusted_ca = pem, .verify_certificate_spkis = &.{wrong} });
     defer rejecting.deinit();
     try std.testing.expectError(error.CertificateUntrusted, Material.verifySanTrust(rejecting, trust));
+}
+
+test "xDS TLS hash-only verification uses the platform trust store" {
+    const allocator = std.testing.allocator;
+    var material = try Material.create(allocator, std.testing.io, .{
+        .verify_certificate_hashes = &.{.{0x11} ** 32},
+    });
+    defer material.deinit();
+    try std.testing.expect(material.bundle_loaded);
+    try std.testing.expect(material.bundle.map.count() != 0);
+}
+
+test "xDS TLS system root certs load the platform trust store" {
+    const allocator = std.testing.allocator;
+    var material = try Material.create(allocator, std.testing.io, .{
+        .system_root_certs = true,
+    });
+    defer material.deinit();
+    try std.testing.expect(material.bundle_loaded);
+    try std.testing.expect(material.bundle.map.count() != 0);
 }

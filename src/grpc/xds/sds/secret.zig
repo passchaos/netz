@@ -25,6 +25,10 @@ pub const TlsCertificate = struct {
 
 pub const ValidationContext = struct {
     trusted_ca: []const u8,
+    /// Use the platform trust store. Inline `trusted_ca` and this marker are
+    /// mutually exclusive in practice; when both are absent, gRPC/Envoy use
+    /// system roots for any identity or hash verification.
+    system_root_certs: bool = false,
     san_matchers: []const tls_material.SanMatcher = &.{},
     verify_certificate_hashes: []const [32]u8 = &.{},
     verify_certificate_spkis: []const [32]u8 = &.{},
@@ -50,6 +54,7 @@ pub const Secret = struct {
             },
             .validation_context => |value| .{
                 .trusted_ca = value.trusted_ca,
+                .system_root_certs = value.system_root_certs,
                 .san_matchers = value.san_matchers,
                 .verify_certificate_hashes = value.verify_certificate_hashes,
                 .verify_certificate_spkis = value.verify_certificate_spkis,
@@ -150,6 +155,17 @@ fn tlsCertificate(bytes: []const u8, limits: Limits) Error!TlsCertificate {
     };
 }
 
+fn boolValue(bytes: []const u8) Error!bool {
+    var result = false;
+    var reader: pb.Reader = .{ .bytes = bytes };
+    while (try reader.next()) |field| {
+        if (field.number == 1 and field.wire_type == 0) {
+            result = (try reader.varint()) != 0;
+        } else try reader.skip(field);
+    }
+    return result;
+}
+
 fn certificateHash(value: []const u8) Error![32]u8 {
     if (value.len != 64) return error.InvalidSdsResource;
     var result: [32]u8 = undefined;
@@ -171,6 +187,7 @@ fn validationContext(
     limits: Limits,
 ) Error!ValidationContext {
     var trusted_ca: ?[]const u8 = null;
+    var system_root_certs = false;
     var matchers: std.ArrayList(tls_material.SanMatcher) = .empty;
     var hashes: std.ArrayList([32]u8) = .empty;
     var spkis: std.ArrayList([32]u8) = .empty;
@@ -181,25 +198,15 @@ fn validationContext(
             trusted_ca = try dataSource(try reader.bytesValue(), limits);
         },
         2 => {
-            if (field.wire_type != 2) return error.InvalidSdsResource;
-            if (matchers.items.len >= limits.max_san_matchers) {
-                return error.SdsLimitExceeded;
-            }
-            try matchers.append(arena, try sanMatcher(try reader.bytesValue(), limits));
-        },
-        3 => {
-            // UNSPECIFIED performs ordinary chain verification with trusted_ca.
-            if (field.wire_type != 0) return error.InvalidSdsResource;
-            if (try reader.varint() != 0) return error.UnsupportedSdsFeature;
-        },
-        4 => {
+            // verify_certificate_hash: repeated hex SHA-256 strings.
             if (field.wire_type != 2) return error.InvalidSdsResource;
             if (hashes.items.len >= limits.max_certificate_hashes) {
                 return error.SdsLimitExceeded;
             }
             try hashes.append(arena, try certificateHash(try text(&reader, limits)));
         },
-        5 => {
+        3 => {
+            // verify_certificate_spki: repeated base64 SHA-256 strings.
             if (field.wire_type != 2) return error.InvalidSdsResource;
             if (spkis.items.len >= limits.max_certificate_hashes) {
                 return error.SdsLimitExceeded;
@@ -207,14 +214,44 @@ fn validationContext(
             try spkis.append(arena, try certificateSpkiHash(try text(&reader, limits)));
         },
         6 => {
-            if (field.wire_type != 0) return error.InvalidSdsResource;
-            if ((try reader.varint()) != 0) return error.UnsupportedSdsFeature;
+            // require_signed_certificate_timestamp: google.protobuf.BoolValue.
+            if (field.wire_type != 2) return error.InvalidSdsResource;
+            if (try boolValue(try reader.bytesValue())) return error.UnsupportedSdsFeature;
         },
-        7, 8, 9, 10, 11, 12, 13 => return error.UnsupportedSdsFeature,
+        7 => return error.UnsupportedSdsFeature, // crl
+        8 => {
+            if (field.wire_type != 0) return error.InvalidSdsResource;
+            if ((try reader.varint()) != 0) return error.UnsupportedSdsFeature; // allow_expired_certificate
+        },
+        9 => {
+            // match_subject_alt_names: repeated StringMatcher.
+            if (field.wire_type != 2) return error.InvalidSdsResource;
+            if (matchers.items.len >= limits.max_san_matchers) {
+                return error.SdsLimitExceeded;
+            }
+            try matchers.append(arena, try sanMatcher(try reader.bytesValue(), limits));
+        },
+        10 => {
+            if (field.wire_type != 0) return error.InvalidSdsResource;
+            if ((try reader.varint()) != 0) return error.UnsupportedSdsFeature; // ACCEPT_UNTRUSTED
+        },
+        17 => {
+            // SystemRootCerts is an empty marker message: use the platform
+            // trust store instead of an inline CA bundle.
+            if (field.wire_type != 2) return error.InvalidSdsResource;
+            _ = try reader.bytesValue();
+            system_root_certs = true;
+        },
+        11, 12, 13, 14, 15, 16 => return error.UnsupportedSdsFeature,
         else => try reader.skip(field),
     };
+    const has_identity = matchers.items.len != 0 or hashes.items.len != 0 or spkis.items.len != 0;
+    if (trusted_ca == null and !system_root_certs and !has_identity) {
+        return error.InvalidSdsResource;
+    }
     return .{
-        .trusted_ca = trusted_ca orelse return error.InvalidSdsResource,
+        .trusted_ca = trusted_ca orelse "",
+        .system_root_certs = system_root_certs,
         .san_matchers = try matchers.toOwnedSlice(arena),
         .verify_certificate_hashes = try hashes.toOwnedSlice(arena),
         .verify_certificate_spkis = try spkis.toOwnedSlice(arena),

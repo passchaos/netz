@@ -155,7 +155,7 @@ test "gRPC SDS rejects malformed and unsupported secrets" {
     defer trusted.deinit();
     try trusted.bytes(1, "CA");
     try expired_validation.bytes(1, trusted.data.items);
-    try expired_validation.number(6, 1);
+    try expired_validation.wrapper(6, 1);
     try allow_expired.bytes(1, "secret");
     try allow_expired.bytes(3, expired_validation.data.items);
     try std.testing.expectError(error.UnsupportedSdsFeature, sds.decode(gpa, allow_expired.data.items, .{}));
@@ -201,7 +201,7 @@ test "gRPC SDS decodes certificate hash pins" {
     defer trusted.deinit();
     try trusted.bytes(1, "CA");
     try validation_message.bytes(1, trusted.data.items);
-    try validation_message.bytes(4, "zz");
+    try validation_message.bytes(2, "zz");
     try invalid.bytes(3, validation_message.data.items);
     try std.testing.expectError(error.InvalidSdsResource, sds.decode(gpa, invalid.data.items, .{}));
 }
@@ -225,7 +225,40 @@ test "gRPC SDS decodes SPKI pins" {
     defer trusted.deinit();
     try trusted.bytes(1, "CA");
     try validation_message.bytes(1, trusted.data.items);
-    try validation_message.bytes(5, "!!");
+    try validation_message.bytes(3, "!!");
     try invalid.bytes(3, validation_message.data.items);
     try std.testing.expectError(error.InvalidSdsResource, sds.decode(gpa, invalid.data.items, .{}));
+}
+
+test "gRPC SDS accepts system root certs and hash-only validation" {
+    var validation_message = fixture.Builder{ .allocator = gpa };
+    defer validation_message.deinit();
+    var roots = fixture.Builder{ .allocator = gpa };
+    defer roots.deinit();
+    try roots.bytes(1, "");
+    try validation_message.bytes(17, roots.data.items);
+    var secret = fixture.Builder{ .allocator = gpa };
+    defer secret.deinit();
+    try secret.bytes(1, "roots");
+    try secret.bytes(3, validation_message.data.items);
+    var owned = try sds.decode(gpa, secret.data.items, .{});
+    defer owned.deinit();
+    const validation = owned.value.kind.validation_context;
+    try std.testing.expect(validation.system_root_certs);
+    try std.testing.expectEqualStrings("", validation.trusted_ca);
+
+    const hash = [_]u8{0x11} ** 32;
+    const hash_only = try fixture.validationSecretHashes(gpa, "roots", "", &.{}, &.{hash});
+    defer gpa.free(hash_only);
+    var hash_owned = try sds.decode(gpa, hash_only, .{});
+    defer hash_owned.deinit();
+    try std.testing.expectEqual(@as(usize, 1), hash_owned.value.kind.validation_context.verify_certificate_hashes.len);
+}
+
+test "gRPC SDS rejects an empty validation context" {
+    var secret = fixture.Builder{ .allocator = gpa };
+    defer secret.deinit();
+    try secret.bytes(1, "roots");
+    try secret.bytes(3, "");
+    try std.testing.expectError(error.InvalidSdsResource, sds.decode(gpa, secret.data.items, .{}));
 }

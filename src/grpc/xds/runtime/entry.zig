@@ -97,6 +97,7 @@ pub const Cluster = struct {
             switch (secret.kind) {
                 .validation_context => |value| {
                     config.trusted_ca = try arena.dupe(u8, value.trusted_ca);
+                    config.system_root_certs = value.system_root_certs;
                     if (value.san_matchers.len != 0) {
                         const matchers = try arena.alloc(tls_material.SanMatcher, value.san_matchers.len);
                         for (value.san_matchers, matchers) |source, *target| {
