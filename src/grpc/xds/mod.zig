@@ -5,6 +5,7 @@ pub const routing = @import("routing/mod.zig");
 pub const rds = @import("rds.zig");
 pub const lds = @import("lds.zig");
 pub const config_source = @import("config_source.zig");
+pub const resource_name = @import("resource_name.zig");
 pub const bootstrap = @import("bootstrap.zig");
 pub const control_plane = @import("control_plane.zig");
 pub const lrs = @import("lrs.zig");
@@ -19,6 +20,7 @@ test {
     _ = rds;
     _ = lds;
     _ = config_source;
+    _ = resource_name;
     _ = bootstrap;
     _ = control_plane;
     _ = lrs;

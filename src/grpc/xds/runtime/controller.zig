@@ -14,7 +14,7 @@ const entries = @import("entry.zig");
 const Plan = @import("plan.zig").Plan;
 const Target = @import("target.zig").Target;
 pub const Options = @import("options.zig").Options;
-pub const Error = @import("errors.zig").PublishError || lds.Error || cds.Error || eds.Error || tls_material.Error || lrs.RunnerError || sds.Error || error{ InvalidXdsOptions, XdsNotStarted, DuplicateSdsResource };
+pub const Error = @import("errors.zig").PublishError || lds.Error || cds.Error || eds.Error || tls_material.Error || lrs.RunnerError || sds.Error || error{ InvalidXdsOptions, XdsNotStarted, DuplicateSdsResource, InvalidXdsResourceName };
 pub const CachedSecret = struct {
     owned: sds.Owned,
     /// Delta `Resource.ttl` deadline; null means no timer.
@@ -43,6 +43,13 @@ pub const Controller = struct {
         self.* = .{ .allocator = gpa, .arena = .init(gpa), .options = options };
         errdefer self.deinit();
         self.options.target.authority = try self.arena.allocator().dupe(u8, options.target.authority);
+        if (self.options.authority) |authority| {
+            if (authority.len == 0) return error.InvalidXdsOptions;
+            self.options.authority = try self.arena.allocator().dupe(u8, authority);
+        }
+        if (!@import("../resource_name.zig").matches(options.listener_name, self.options.authority, lds.type_url)) {
+            return error.InvalidXdsResourceName;
+        }
         if (self.options.target.tls) |*tls| tls.host = try self.arena.allocator().dupe(u8, tls.host);
         if (options.local_service_config_json) |json| {
             if (json.len > options.limits.max_storage_bytes) return error.XdsLimitExceeded;
@@ -99,6 +106,13 @@ pub const Controller = struct {
         errdefer runner.deinit();
         try runner.start();
         self.lrs_runner = runner;
+    }
+    /// Validate an old-style or xdstp resource name against the configured
+    /// authority and resource type.
+    pub fn validateResourceName(self: *const Controller, name: []const u8, type_url: []const u8) @import("errors.zig").PublishError!void {
+        if (!@import("../resource_name.zig").matches(name, self.options.authority, type_url)) {
+            return error.InvalidXdsResourceName;
+        }
     }
     /// Resolve a cluster's SDS references from the current secret cache.
     /// Missing secrets leave the cluster pending instead of publishing it

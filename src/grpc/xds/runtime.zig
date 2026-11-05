@@ -13,4 +13,5 @@ test {
     _ = @import("runtime/lrs_tests.zig");
     _ = @import("runtime/sds_tests.zig");
     _ = @import("runtime/ignore_deletion_tests.zig");
+    _ = @import("runtime/authority_tests.zig");
 }

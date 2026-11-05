@@ -98,6 +98,12 @@ retains the accepted listener, route, cluster or endpoint assignment instead
 of deleting it. The default remains deletion for LDS/CDS and state retention
 for RDS/EDS as before.
 
+`Options.authority` enables single-authority `xdstp://` resource names. The
+listener, route, cluster, endpoint-assignment and secret names are parsed and
+must match both the configured authority and their expected resource type.
+Old-style names remain valid. Multi-authority routing to separate ADS streams
+is still open.
+
 `zig build interop-grpc-xds-runtime --summary all` starts with an empty
 application data plane and receives official LDS → RDS → CDS → EDS resources
 from an independent grpc-js ADS server. Two grpc-js backends verify pending

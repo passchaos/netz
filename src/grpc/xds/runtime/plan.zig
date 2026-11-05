@@ -6,6 +6,7 @@ const Error = @import("errors.zig").PublishError;
 const Projection = @import("../lds/projection.zig").Projection;
 pub const Plan = struct {
     allocator: std.mem.Allocator,
+    controller: *Controller,
     entries: std.ArrayList(identity.Entry) = .empty,
     route_storage: usize = 0,
     pub fn deinit(self: *Plan) void {
@@ -24,7 +25,7 @@ pub const Plan = struct {
         projection: ?*Projection,
         extra_clusters: []const *identity.Cluster,
     ) Error!Plan {
-        var self = Plan{ .allocator = controller.allocator };
+        var self = Plan{ .allocator = controller.allocator, .controller = controller };
         errdefer self.deinit();
         var keys: std.ArrayList([]const u8) = .empty;
         defer keys.deinit(controller.allocator);
@@ -87,6 +88,7 @@ pub const Plan = struct {
         }.less);
         for (sources.items, 0..) |source, i| {
             if (i != 0 and source == sources.items[i - 1]) continue;
+            try controller.validateResourceName(source.resource.value.name, @import("../rds.zig").type_url);
             self.route_storage = std.math.add(usize, self.route_storage, source.resource.arena.queryCapacity()) catch return error.XdsLimitExceeded;
             if (self.route_storage > controller.options.limits.max_storage_bytes) return error.XdsLimitExceeded;
         }
@@ -105,6 +107,7 @@ pub const Plan = struct {
         try self.entries.ensureUnusedCapacity(controller.allocator, count);
         for (keys.items[0..count]) |key| {
             if (!std.mem.startsWith(u8, key, "cluster:") or key.len == 8) return error.InvalidSharedOptions;
+            try controller.validateResourceName(key[8..], @import("../cds.zig").type_url);
             if (find(controller.entries.items, key)) |old| self.entries.appendAssumeCapacity(old.clone()) else {
                 self.entries.appendAssumeCapacity(.{ .identity = try identity.Identity.create(controller.allocator, key[8..]) });
             }
@@ -130,11 +133,13 @@ pub const Plan = struct {
         for (self.entries.items, names) |item, *name| name.* = item.identity.name;
         return names;
     }
-    pub fn edsNames(self: *Plan) std.mem.Allocator.Error![]const []const u8 {
+    pub fn edsNames(self: *Plan) @import("errors.zig").PublishError![]const []const u8 {
         var names: std.ArrayList([]const u8) = .empty;
         for (self.entries.items) |item| if (item.cluster) |cluster| {
             if (!cluster.resource.value.isEds()) continue;
-            try names.append(self.allocator, cluster.resource.value.edsName());
+            const name = cluster.resource.value.edsName();
+            try self.controller.validateResourceName(name, @import("../eds.zig").type_url);
+            try names.append(self.allocator, name);
         };
         std.mem.sort([]const u8, names.items, {}, struct {
             fn less(_: void, a: []const u8, b: []const u8) bool {
@@ -151,12 +156,18 @@ pub const Plan = struct {
         return names.toOwnedSlice(self.allocator);
     }
     /// Secret names referenced by the retained CDS resources.
-    pub fn sdsNames(self: *Plan) std.mem.Allocator.Error![]const []const u8 {
+    pub fn sdsNames(self: *Plan) @import("errors.zig").PublishError![]const []const u8 {
         var names: std.ArrayList([]const u8) = .empty;
         for (self.entries.items) |item| if (item.cluster) |cluster| {
             const refs = cluster.resource.value.tls_sds orelse continue;
-            if (refs.certificate) |name| try names.append(self.allocator, name);
-            if (refs.validation) |name| try names.append(self.allocator, name);
+            if (refs.certificate) |name| {
+                try self.controller.validateResourceName(name, @import("../sds.zig").type_url);
+                try names.append(self.allocator, name);
+            }
+            if (refs.validation) |name| {
+                try self.controller.validateResourceName(name, @import("../sds.zig").type_url);
+                try names.append(self.allocator, name);
+            }
         };
         std.mem.sort([]const u8, names.items, {}, struct {
             fn less(_: void, a: []const u8, b: []const u8) bool {

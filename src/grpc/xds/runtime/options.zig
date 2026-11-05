@@ -30,6 +30,9 @@ pub const Options = struct {
     /// Preserve local method/health/retry settings; discovery replaces only LB.
     /// Null captures the destination's initial service-config JSON at start.
     local_service_config_json: ?[]const u8 = null,
+    /// xDS authority for `xdstp://` resource names. Old-style names are always
+    /// accepted; xdstp names must match this authority and their resource type.
+    authority: ?[]const u8 = null,
     limits: Limits = .{},
     /// gRPC xDS `ignore_resource_deletion` server feature: retain resources
     /// omitted from SotW responses or listed in delta removals.
