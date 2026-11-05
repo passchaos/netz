@@ -109,15 +109,21 @@ set. EDS, STATIC and DNS endpoints become TLS targets; without
 `trusted_ca` the platform roots are used. SDS secret configs, certificate
 providers, ECDH curve lists, regex/custom SAN matchers, file/environment data
 sources and other transport sockets are explicitly rejected.
-`transport_socket_matches`,
-outlier_detection, lrs_server and upstream_config are also rejected.
-Aggregate/custom cluster discovery is unsupported. This slice handles
-EDS-backed, STATIC, STRICT_DNS and LOGICAL_DNS clusters. Typed delta CDS/EDS
-publication is available
-through the automatic runtime; delta CDS/EDS TTL expiry is covered. Bootstrap
-parsing and control-plane failover are available. LDS/RDS routing,
-certificate providers and automatic refresh scheduling, authority-specific control planes, LRS automatic background scheduling and full
-security integration remain open.
+`transport_socket_matches`, `lrs_server` and `upstream_config` are also
+rejected. Cluster `outlier_detection` is projected into the SharedChannel's
+`outlier_detection_experimental` wrapper: interval, base/max ejection time, max
+ejection percent, success-rate enforcement/stdev/minimum-hosts/request-volume,
+and failure-percentage threshold/enforcement/minimum-hosts/request-volume.
+Consecutive-5xx, gateway-failure and local-origin controls, ejection jitter,
+active-health-check unejection and monitors have no gRPC counterpart and are
+rejected when enabled. The generated policy passes the ordinary ServiceConfig
+parser before publication. Aggregate/custom cluster discovery is unsupported.
+This slice handles EDS-backed, STATIC, STRICT_DNS and LOGICAL_DNS clusters.
+Typed delta CDS/EDS publication is available through the automatic runtime;
+delta CDS/EDS TTL expiry is covered. Bootstrap parsing and control-plane
+failover are available. LDS/RDS routing, certificate providers and automatic
+refresh scheduling, authority-specific control planes, LRS automatic background
+scheduling and full security integration remain open.
 
 `zig build interop-grpc-cds --summary all` compares valid fixture policies and
 limits with the actual grpc-js-xds CDS parser and uses official Envoy schemas

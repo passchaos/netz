@@ -469,6 +469,197 @@ fn aggregateCluster(
     return clusters.toOwnedSlice(arena);
 }
 
+fn durationValue(bytes: []const u8) Error!std.Io.Duration {
+    var reader: pb.Reader = .{ .bytes = bytes };
+    var seconds: u64 = 0;
+    var nanos: u32 = 0;
+    while (try reader.next()) |field| {
+        if (field.number == 1 and field.wire_type == 0) {
+            seconds = try reader.varint();
+        } else if (field.number == 2 and field.wire_type == 0) {
+            const raw = try reader.varint();
+            if (raw >= std.time.ns_per_s) return error.InvalidCdsResource;
+            nanos = @intCast(raw);
+        } else try reader.skip(field);
+    }
+    const whole = std.math.mul(u64, seconds, std.time.ns_per_s) catch
+        return error.InvalidCdsResource;
+    const total = std.math.add(u64, whole, nanos) catch
+        return error.InvalidCdsResource;
+    if (total > std.math.maxInt(i64)) return error.InvalidCdsResource;
+    return .fromNanoseconds(@intCast(total));
+}
+
+fn u32Wrapper(bytes: []const u8) Error!u32 {
+    const value = try pb.wrapper(bytes);
+    if (value > std.math.maxInt(u32)) return error.InvalidCdsResource;
+    return @intCast(value);
+}
+
+fn formatDuration(
+    allocator: std.mem.Allocator,
+    value: std.Io.Duration,
+) Error![]const u8 {
+    const raw = value.nanoseconds;
+    if (raw < 0) return error.InvalidCdsResource;
+    const total: u64 = @intCast(raw);
+    const seconds = total / std.time.ns_per_s;
+    const fraction = total % std.time.ns_per_s;
+    if (fraction == 0) {
+        return std.fmt.allocPrint(allocator, "{d}s", .{seconds});
+    }
+    var digits: [9]u8 = undefined;
+    _ = std.fmt.bufPrint(&digits, "{d:0>9}", .{fraction}) catch
+        return error.InvalidCdsResource;
+    var end: usize = digits.len;
+    while (end != 0 and digits[end - 1] == '0') end -= 1;
+    return std.fmt.allocPrint(
+        allocator,
+        "{d}.{s}s",
+        .{ seconds, digits[0..end] },
+    );
+}
+
+fn appendJsonField(
+    out: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    comptime format: []const u8,
+    args: anytype,
+) Error!void {
+    if (out.items.len != 0) try out.append(allocator, ',');
+    const piece = try std.fmt.allocPrint(allocator, format, args);
+    try out.appendSlice(allocator, piece);
+}
+
+/// Project Envoy's Cluster.outlier_detection onto gRPC's
+/// `outlier_detection_experimental` policy. Consecutive-5xx and local-origin
+/// controls have no gRPC counterpart and fail closed when enabled.
+fn outlierConfig(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    limits: Limits,
+) Error![]const u8 {
+    _ = limits;
+    var reader: pb.Reader = .{ .bytes = bytes };
+    var interval: ?std.Io.Duration = null;
+    var base_ejection_time: ?std.Io.Duration = null;
+    var max_ejection_time: ?std.Io.Duration = null;
+    var max_ejection_percent: u32 = 10;
+    var enforcing_success_rate: u32 = 100;
+    var minimum_hosts: u32 = 5;
+    var request_volume: u32 = 100;
+    var stdev_factor: u32 = 1900;
+    var failure_threshold: u32 = 85;
+    var enforcing_failure: u32 = 0;
+    var failure_minimum_hosts: u32 = 5;
+    var failure_request_volume: u32 = 50;
+    var failure_present = false;
+    while (try reader.next()) |field| {
+        switch (field.number) {
+            1, 5, 10, 11, 13, 14, 15, 18 => {
+                if (try u32Wrapper(try reader.bytesValue()) != 0) {
+                    return error.UnsupportedCdsFeature;
+                }
+            },
+            2 => interval = try durationValue(try reader.bytesValue()),
+            3 => base_ejection_time = try durationValue(try reader.bytesValue()),
+            4 => max_ejection_percent = try u32Wrapper(try reader.bytesValue()),
+            6 => enforcing_success_rate = try u32Wrapper(try reader.bytesValue()),
+            7 => minimum_hosts = try u32Wrapper(try reader.bytesValue()),
+            8 => request_volume = try u32Wrapper(try reader.bytesValue()),
+            9 => stdev_factor = try u32Wrapper(try reader.bytesValue()),
+            12 => {
+                if (try reader.varint() != 0) return error.UnsupportedCdsFeature;
+            },
+            16 => {
+                failure_threshold = try u32Wrapper(try reader.bytesValue());
+                failure_present = true;
+            },
+            17 => {
+                enforcing_failure = try u32Wrapper(try reader.bytesValue());
+                failure_present = true;
+            },
+            19 => {
+                failure_minimum_hosts = try u32Wrapper(try reader.bytesValue());
+                failure_present = true;
+            },
+            20 => {
+                failure_request_volume = try u32Wrapper(try reader.bytesValue());
+                failure_present = true;
+            },
+            21 => max_ejection_time = try durationValue(try reader.bytesValue()),
+            22 => {
+                const jitter = try durationValue(try reader.bytesValue());
+                if (jitter.nanoseconds != 0) return error.UnsupportedCdsFeature;
+            },
+            23, 25 => {
+                if ((try pb.wrapper(try reader.bytesValue())) != 0) {
+                    return error.UnsupportedCdsFeature;
+                }
+            },
+            24 => return error.UnsupportedCdsFeature,
+            else => try reader.skip(field),
+        }
+    }
+    if (max_ejection_percent > 100 or enforcing_success_rate > 100 or
+        enforcing_failure > 100 or failure_threshold > 100)
+    {
+        return error.InvalidCdsResource;
+    }
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    if (interval) |value| {
+        try appendJsonField(
+            &out,
+            allocator,
+            "\"interval\":\"{s}\"",
+            .{try formatDuration(allocator, value)},
+        );
+    }
+    if (base_ejection_time) |value| {
+        try appendJsonField(
+            &out,
+            allocator,
+            "\"baseEjectionTime\":\"{s}\"",
+            .{try formatDuration(allocator, value)},
+        );
+    }
+    if (max_ejection_time) |value| {
+        try appendJsonField(
+            &out,
+            allocator,
+            "\"maxEjectionTime\":\"{s}\"",
+            .{try formatDuration(allocator, value)},
+        );
+    }
+    try appendJsonField(
+        &out,
+        allocator,
+        "\"maxEjectionPercent\":{d}",
+        .{max_ejection_percent},
+    );
+    try appendJsonField(
+        &out,
+        allocator,
+        "\"successRateEjection\":{{\"stdevFactor\":{d},\"enforcementPercentage\":{d},\"minimumHosts\":{d},\"requestVolume\":{d}}}",
+        .{ stdev_factor, enforcing_success_rate, minimum_hosts, request_volume },
+    );
+    if (failure_present and enforcing_failure > 0) {
+        try appendJsonField(
+            &out,
+            allocator,
+            "\"failurePercentageEjection\":{{\"threshold\":{d},\"enforcementPercentage\":{d},\"minimumHosts\":{d},\"requestVolume\":{d}}}",
+            .{
+                failure_threshold,
+                enforcing_failure,
+                failure_minimum_hosts,
+                failure_request_volume,
+            },
+        );
+    }
+    return out.toOwnedSlice(allocator);
+}
+
 pub fn decode(gpa: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!Owned {
     if (bytes.len > limits.max_bytes) return error.CdsLimitExceeded;
     var result = Owned{ .arena = .init(gpa), .value = undefined };
@@ -486,6 +677,7 @@ pub fn decode(gpa: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!O
     var ring_config: ?[]const u8 = null;
     var typed_policy: ?[]const u8 = null;
     var breaker: ?[]const u8 = null;
+    var outlier: ?[]const u8 = null;
     var lrs_cpu: bool = false;
     var lrs_memory: bool = false;
     var lrs_application: bool = false;
@@ -500,7 +692,7 @@ pub fn decode(gpa: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!O
                 limits,
             );
             kind = @intFromEnum(Discovery.aggregate);
-        } else if (field.number == 3 and field.wire_type == 2) config = try reader.bytesValue() else if (field.number == 24 and field.wire_type == 2) transport = try reader.bytesValue() else if (field.number == 33 and field.wire_type == 2) assignment = try reader.bytesValue() else if (field.number == 6 and field.wire_type == 0) lb = try pb.u32Value(&reader) else if (field.number == 23 and field.wire_type == 2) ring_config = try reader.bytesValue() else if (field.number == 41 and field.wire_type == 2) typed_policy = try reader.bytesValue() else if (field.number == 10 and field.wire_type == 2) breaker = try reader.bytesValue() else if (field.number == 57 and field.wire_type == 2) {
+        } else if (field.number == 3 and field.wire_type == 2) config = try reader.bytesValue() else if (field.number == 24 and field.wire_type == 2) transport = try reader.bytesValue() else if (field.number == 33 and field.wire_type == 2) assignment = try reader.bytesValue() else if (field.number == 6 and field.wire_type == 0) lb = try pb.u32Value(&reader) else if (field.number == 23 and field.wire_type == 2) ring_config = try reader.bytesValue() else if (field.number == 41 and field.wire_type == 2) typed_policy = try reader.bytesValue() else if (field.number == 10 and field.wire_type == 2) breaker = try reader.bytesValue() else if (field.number == 19 and field.wire_type == 2) outlier = try reader.bytesValue() else if (field.number == 57 and field.wire_type == 2) {
             // Repeated string selecting ORCA metric propagation. Unknown
             // entries are ignored so forward-compatible control planes can add
             // selectors without failing the whole cluster.
@@ -561,7 +753,19 @@ pub fn decode(gpa: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!O
         .named_metrics_all = lrs_named_all,
         .named_metrics = try lrs_named.toOwnedSlice(arena),
     };
-    result.value = .{ .name = name, .eds_service_name = service, .discovery = discovery, .inline_assignment = inline_assignment, .host_endpoints = host_endpoints, .tls = tls, .max_concurrent_requests = if (breaker) |raw| try circuit(raw, limits.max_thresholds) else 1024, .lrs_propagation = lrs_propagation, .aggregate_clusters = aggregate_clusters, .policy = if (typed_policy) |raw| try policy.typed(arena, raw, limits.max_policies, limits.max_text_bytes, 0) else try policy.legacy(arena, lb, ring_config) };
+    var cluster_policy = if (typed_policy) |raw|
+        try policy.typed(arena, raw, limits.max_policies, limits.max_text_bytes, 0)
+    else
+        try policy.legacy(arena, lb, ring_config);
+    if (outlier) |raw| {
+        const outlier_json = try outlierConfig(arena, raw, limits);
+        cluster_policy.child_json = try std.fmt.allocPrint(
+            arena,
+            "[{{\"outlier_detection_experimental\":{{\"childPolicy\":{s},{s}}}}}]",
+            .{ cluster_policy.child_json, outlier_json },
+        );
+    }
+    result.value = .{ .name = name, .eds_service_name = service, .discovery = discovery, .inline_assignment = inline_assignment, .host_endpoints = host_endpoints, .tls = tls, .max_concurrent_requests = if (breaker) |raw| try circuit(raw, limits.max_thresholds) else 1024, .lrs_propagation = lrs_propagation, .aggregate_clusters = aggregate_clusters, .policy = cluster_policy };
     // Converted policies must satisfy the same configuration parser/runtime
     // contract as direct callers, including complete range validation.
     const json = try std.fmt.allocPrint(arena, "{{\"loadBalancingConfig\":{s}}}", .{result.value.policy.child_json});

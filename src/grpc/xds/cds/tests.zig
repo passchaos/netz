@@ -3,6 +3,7 @@ const resource = @import("decode.zig");
 const policy = @import("policy.zig");
 const fixture = @import("testing.zig");
 const tls_testing = @import("../../../tls/testing.zig");
+const service_config = @import("../../service_config.zig");
 const gpa = std.testing.allocator;
 const prefix = "type.googleapis.com/envoy.extensions.load_balancing_policies.";
 
@@ -293,4 +294,63 @@ test "gRPC CDS decodes LRS ORCA propagation selectors" {
     try std.testing.expect(!none.application_utilization);
     try std.testing.expect(!none.named_metrics_all);
     try std.testing.expectEqual(@as(usize, 0), none.named_metrics.len);
+}
+test "gRPC CDS projects outlier detection into the channel policy" {
+    var outlier = fixture.Builder{ .allocator = gpa };
+    defer outlier.deinit();
+    try outlier.bytes(2, "\x08\x05"); // interval 5s
+    try outlier.bytes(3, "\x08\x0f"); // base ejection 15s
+    try outlier.wrapper(4, 25); // max ejection percent
+    try outlier.wrapper(6, 80); // enforcing success rate
+    try outlier.wrapper(7, 3); // success-rate minimum hosts
+    try outlier.wrapper(8, 20); // success-rate request volume
+    try outlier.wrapper(9, 1500); // success-rate stdev factor
+    try outlier.wrapper(16, 70); // failure-percentage threshold
+    try outlier.wrapper(17, 50); // enforcing failure percentage
+    try outlier.wrapper(19, 4); // failure-percentage minimum hosts
+    try outlier.wrapper(20, 10); // failure-percentage request volume
+    try outlier.bytes(21, "\x08\x3c"); // max ejection time 60s
+    var extra = fixture.Builder{ .allocator = gpa };
+    defer extra.deinit();
+    try extra.bytes(19, outlier.data.items);
+    const bytes = try fixture.cluster(gpa, "backend", "backend-eds", extra.data.items);
+    defer gpa.free(bytes);
+    var decoded = try resource.decode(gpa, bytes, .{});
+    defer decoded.deinit();
+    const json = try std.fmt.allocPrint(
+        gpa,
+        "{{\"loadBalancingConfig\":{s}}}",
+        .{decoded.value.policy.child_json},
+    );
+    defer gpa.free(json);
+    var config = try service_config.ServiceConfig.parse(gpa, json);
+    defer config.deinit();
+    const root = config.load_balancing.root orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(root.* == .outlier_detection);
+    const wrapper = root.outlier_detection;
+    try std.testing.expectEqual(
+        std.Io.Duration.fromSeconds(5),
+        wrapper.config.interval,
+    );
+    try std.testing.expectEqual(
+        std.Io.Duration.fromSeconds(15),
+        wrapper.config.base_ejection_time,
+    );
+    try std.testing.expectEqual(
+        std.Io.Duration.fromSeconds(60),
+        wrapper.config.max_ejection_time,
+    );
+    try std.testing.expectEqual(@as(u32, 25), wrapper.config.max_ejection_percent);
+    const success = wrapper.config.success_rate_ejection.?;
+    try std.testing.expectEqual(@as(u32, 1500), success.stdev_factor);
+    try std.testing.expectEqual(@as(u32, 80), success.enforcement_percentage);
+    try std.testing.expectEqual(@as(u32, 3), success.minimum_hosts);
+    try std.testing.expectEqual(@as(u32, 20), success.request_volume);
+    const failure = wrapper.config.failure_percentage_ejection.?;
+    try std.testing.expectEqual(@as(u32, 70), failure.threshold);
+    try std.testing.expectEqual(@as(u32, 50), failure.enforcement_percentage);
+    try std.testing.expectEqual(@as(u32, 4), failure.minimum_hosts);
+    try std.testing.expectEqual(@as(u32, 10), failure.request_volume);
+    try std.testing.expect(wrapper.child.* == .round_robin);
 }

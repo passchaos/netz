@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "date": "2026-11-05",
+  "head": "working-tree",
+  "subject": "CDS outlier detection projection",
+  "change": "Cluster.outlier_detection (field 19) is now decoded and projected into the SharedChannel's outlier_detection_experimental policy. Interval, base/max ejection time, max ejection percent, success-rate stdev/enforcement/minimum-hosts/request-volume and failure-percentage threshold/enforcement/minimum-hosts/request-volume are mapped. Consecutive-5xx, gateway-failure and local-origin controls, ejection jitter, active-health-check unejection and monitors fail closed when enabled. The generated policy is validated by the ordinary ServiceConfig parser before publication.",
+  "tests": {
+    "unit": "src/grpc/xds/cds/tests.zig 'gRPC CDS projects outlier detection into the channel policy' decodes all mapped fields, parses the generated loadBalancingConfig, and asserts the resulting outlier wrapper and round-robin child.",
+    "focused_gate": {
+      "command": "zig build test-lib -Dtest-filter='gRPC CDS' --summary all",
+      "passed": 176,
+      "total": 176,
+      "failed": 0
+    },
+    "compile": {
+      "command": "zig build test-compile",
+      "status": "passed"
+    }
+  },
+  "source_sha256": {
+    "src/grpc/xds/cds/decode.zig": "f91d24502ba47b883c1e6a34f6973d2fb219ab0bb8e87104185aabd285257c1e",
+    "src/grpc/xds/cds/tests.zig": "70247304129ac11de167f5a1eb678d8e23c2ae001cd22ad0ada49035e81a4b3c",
+    "docs/grpc_cds.md": "24690c2f58d6d8e20f45d785e93bc4ff820350f8d91763068669290c33218b46"
+  },
+  "notes": "CDS outlier detection now covers the gRPC-mappable subset. LRS automatic scheduling, authority-specific control planes, SDS/certificate providers and non-router HTTP filters remain open."
+}
