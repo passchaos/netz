@@ -25,6 +25,11 @@
       "compile": {
         "command": "zig build test-compile",
         "status": "passed"
+      },
+      "full_library": {
+        "command": "zig build test-lib",
+        "status": "passed",
+        "exit_code": 0
       }
     }
   },
