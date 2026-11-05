@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "date": "2026-11-06",
+  "browser": "Google Chrome 146.0.7680.164 (headless)",
+  "browser_launcher_sha256": "a75e953fc0fa6108e4fbe67fc9ab8ff8800b851f914b63504a4e26a431b7b22f",
+  "browser_process_sha256": "5ff9045f25d1e3e8f618ab86235e42a94e68cb9da8bda6d458625fc642adf1d6",
+  "commands": [
+    "zig build interop-webtransport-chrome --summary all"
+  ],
+  "status": "passed",
+  "transcripts": [
+    "Chrome WebTransport Origin policy passed: rejected=true browser_version=Chrome/146.0.7680.164 browser_launcher_sha256=a75e953fc0fa6108e4fbe67fc9ab8ff8800b851f914b63504a4e26a431b7b22f browser_process_sha256=5ff9045f25d1e3e8f618ab86235e42a94e68cb9da8bda6d458625fc642adf1d6 browser_ua=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/146.0.0.0 Safari/537.36",
+    "netz WebTransport Origin policy passed: rejected=403 client_io=chromium-network-service server_io=zio-std-io",
+    "Chrome WebTransport interop passed: CONNECT DATAGRAM max_datagram_size=1024 bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true drain-before-close=true close=77/netz-done browser_version=Chrome/146.0.7680.164 browser_launcher_sha256=a75e953fc0fa6108e4fbe67fc9ab8ff8800b851f914b63504a4e26a431b7b22f browser_process_sha256=5ff9045f25d1e3e8f618ab86235e42a94e68cb9da8bda6d458625fc642adf1d6 browser_ua=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/146.0.0.0 Safari/537.36",
+    "netz WebTransport server interop passed: CONNECT DATAGRAM max_datagram_size=1178 oversized_rejected=true bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true drain-before-close=true close client_io=chromium-network-service server_io=zio-std-io"
+  ],
+  "notes": [
+    "Both directions run: Chrome client against the netz WebTransport server, and the netz client against a Chrome-hosted server.",
+    "The local Firefox gate remains unrunnable: /usr/bin/firefox is a snap wrapper that fails with 'Could not find profile folder.' even with a writable HOME and explicit --profile. This is an environment limitation, not a netz regression."
+  ]
+}

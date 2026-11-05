@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "date": "2026-11-06",
+  "head": "working-tree",
+  "subject": "Typed subject alternative name matchers",
+  "change": "CertificateValidationContext.match_typed_subject_alt_names (Envoy v3 field 15) is decoded from SDS secrets and inline CDS transport sockets. SanMatcher carries an optional san_type; the TLS verifier restricts typed matchers to EMAIL/DNS/URI/IP SAN entries, formats IP SANs as RFC 5952 text (IPv4 dotted and IPv6 with longest-run compression), and keeps legacy match_subject_alt_names matching only textual SANs. OTHER_NAME and OID matching fail closed.",
+  "tests": {
+    "unit": "src/grpc/xds/tls_material.zig covers typed DNS/IP matching, type mismatch rejection, legacy matchers ignoring IP SANs, IPv4 and IPv6 formatting including longest-run compression and malformed lengths. src/grpc/xds/cds/tests.zig and src/grpc/xds/sds/secret_tests.zig cover typed matcher decoding and OTHER_NAME rejection.",
+    "focused_gate": {
+      "command": "zig build test-lib -Dtest-filter='xDS runtime' -Dtest-filter='gRPC CDS' -Dtest-filter='gRPC LDS' -Dtest-filter='SDS' -Dtest-filter='LRS' -Dtest-filter='xdstp' -Dtest-filter='xDS TLS' -Dtest-filter='typed' --summary all",
+      "passed": 284,
+      "total": 284,
+      "failed": 0
+    },
+    "compile": {
+      "command": "zig build test-compile",
+      "status": "passed"
+    },
+    "full_library": {
+      "command": "zig build test-lib",
+      "status": "passed",
+      "exit_code": 0,
+      "passed": 6509,
+      "total": 6509,
+      "failed": 0,
+      "notes": "Several earlier full runs under host load 12-45 failed only unrelated timing-sensitive cases (WSS/HTTP2 handshake budgets, MQTT journal retries and one control-plane TLS reload) or hung on I/O starvation; each failed case passed in isolation, every module subset passed, and the final full run passed."
+    }
+  },
+  "source_sha256": {
+    "src/grpc/xds/tls_material.zig": "a0ff8b4dbce76f83d1beb0c9ac063d3076a8f2dae1545bfad24142ae7e5448ef",
+    "src/grpc/xds/cds/decode.zig": "e8dfca9dd613292ae95ff8bfeed8e2ac0a6ed7dd20f0fa79ad3a8db363bfee54",
+    "src/grpc/xds/cds/tests.zig": "32b74dee05f538c4a5b53b77513c7d4316379ee7e4a4d6dcccda9976b26788cc",
+    "src/grpc/xds/sds/secret.zig": "064479db880848204dd9cf2fccf0e43e2fef603e4ac806fb2d3caa738636da1c",
+    "src/grpc/xds/sds/secret_tests.zig": "5220701e0803c7a63d72eaf8238d95cc6129eba8a71d553e594b5283f5040e9e",
+    "src/grpc/xds/runtime/entry.zig": "f04671ecedb86212e7c608cac2f90c9dd92e9a3298e9afa30eee4d0ea168c74e",
+    "docs/grpc_sds.md": "002b0b922cafd473e3f83e27469c25d1e17a1416ef98e3b145f5a57600fa229a",
+    "docs/grpc_cds.md": "35823be7fe9a555bf964cbf6aefe218b6135ce7cf9c3f5a752f98365fe60806e"
+  },
+  "notes": "Typed SAN matchers are an Envoy v3 feature; grpc-core currently parses only legacy match_subject_alt_names, so this is Envoy compatibility beyond gRPC parity."
+}
