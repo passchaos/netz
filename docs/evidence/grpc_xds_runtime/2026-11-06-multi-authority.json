@@ -1,0 +1,37 @@
+{
+  "schema": 1,
+  "date": "2026-11-06",
+  "head": "working-tree",
+  "subject": "Multiple xdstp authorities on one control plane",
+  "change": "runtime.Options.additional_authorities extends the accepted xdstp authority set beyond Options.authority. The controller stores the set, validates listener/route/cluster/EDS/SDS names against any configured authority plus the expected short resource type, and still accepts old-style names. Authorities served by different xDS servers still need separate controllers.",
+  "tests": {
+    "unit": "src/grpc/xds/resource_name.zig covers matching across several authorities. src/grpc/xds/runtime/authority_tests.zig accepts an auth-2 cluster through a controller configured with auth-1 plus auth-2, rejects an empty additional authority, and rejects an unlisted listener authority.",
+    "focused_gate": {
+      "command": "zig build test-lib -Dtest-filter='xDS runtime' -Dtest-filter='gRPC CDS' -Dtest-filter='gRPC LDS' -Dtest-filter='SDS' -Dtest-filter='LRS' -Dtest-filter='xdstp' -Dtest-filter='authority' --summary all",
+      "passed": 295,
+      "total": 295,
+      "failed": 0
+    },
+    "compile": {
+      "command": "zig build test-compile",
+      "status": "passed"
+    },
+    "full_library": {
+      "command": "zig build test-lib",
+      "status": "passed",
+      "exit_code": 0,
+      "passed": 6513,
+      "total": 6513,
+      "failed": 0,
+      "notes": "Earlier full runs at load 15-35 failed only the load-sensitive control-plane TLS reload test; that test was then migrated to memory-backed temp files and passes deterministically. The final run passed."
+    }
+  },
+  "source_sha256": {
+    "src/grpc/xds/resource_name.zig": "1b77a6eb1b5b8ffa83a784b85c949b5bba0e9efd44ed6390ea3ab49ffa287107",
+    "src/grpc/xds/runtime/options.zig": "0147c021e118f254613a7ca9072c5f157261eb80637e1a311cbe07f527e89a44",
+    "src/grpc/xds/runtime/controller.zig": "8d8822123fe28c10df2affbabbec554dab7e59a5a9ed0c5106032369c4a3d6b4",
+    "src/grpc/xds/runtime/authority_tests.zig": "a6a84aa56864b39524c48c4275671c969cc412e6721bb36d5b61f299c0312217",
+    "docs/grpc_xds_runtime.md": "c74a1ade71e04eb273799b74dcc3ee3b3b4148ed5476b470abde2b81e227e36e"
+  },
+  "notes": "Routing several authorities from one controller over distinct ADS streams remains open."
+}

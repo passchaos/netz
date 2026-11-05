@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "date": "2026-11-06",
+  "head": "working-tree",
+  "subject": "Memory-backed temp files for gRPC control-plane TLS reload tests",
+  "change": "test_tmp_dir now exposes the temp root and an absolute path helper while keeping the dir/cleanup surface. The xDS control-plane TLS reload tests use it and build absolute CA paths, so their bootstrap file reload no longer reads a file from the congested shared disk under a 3-second deadline.",
+  "tests": {
+    "unit": "src/internal/test_tmp_dir.zig checks the memory-backed root and path helper.",
+    "focused_gate": {
+      "command": "zig build test-lib -Dtest-filter='control plane' --summary all",
+      "passed": 174,
+      "total": 174,
+      "failed": 0
+    },
+    "full_library": {
+      "command": "zig build test-lib",
+      "status": "passed",
+      "exit_code": 0,
+      "passed": 6513,
+      "total": 6513,
+      "failed": 0
+    }
+  },
+  "source_sha256": {
+    "src/internal/test_tmp_dir.zig": "56a5c861a02b137b58efea69b7a721fc9788cc4879c76e9a5f432462b0424d25",
+    "src/grpc/xds/control_plane_tests.zig": "610ef899976d061fedff57dd875a5188db88bc79c8c11837889966937efa2342"
+  },
+  "notes": "The reload tests now use absolute certificate paths, which bootstrap also accepts for normal deployments."
+}
