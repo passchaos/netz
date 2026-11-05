@@ -44,13 +44,27 @@ pub fn parse(name: []const u8) Error!Parsed {
 }
 
 /// True when `name` is either an old-style name or an xdstp name whose
-/// authority and short type match.
-pub fn matches(name: []const u8, authority: ?[]const u8, type_url: []const u8) bool {
+/// authority is in `authorities` and whose short type matches.
+pub fn matchesAuthorities(
+    name: []const u8,
+    authorities: []const []const u8,
+    type_url: []const u8,
+) bool {
     const parsed = parse(name) catch return false;
     const parsed_authority = parsed.authority orelse return true;
-    const expected = authority orelse return false;
-    return std.mem.eql(u8, parsed_authority, expected) and
-        std.mem.eql(u8, parsed.type_url.?, shortType(type_url));
+    if (!std.mem.eql(u8, parsed.type_url.?, shortType(type_url))) return false;
+    for (authorities) |authority| {
+        if (std.mem.eql(u8, parsed_authority, authority)) return true;
+    }
+    return false;
+}
+
+/// Single-authority convenience wrapper.
+pub fn matches(name: []const u8, authority: ?[]const u8, type_url: []const u8) bool {
+    if (authority) |value| {
+        return matchesAuthorities(name, &.{value}, type_url);
+    }
+    return matchesAuthorities(name, &.{}, type_url);
 }
 
 test "xDS resource names parse old-style and xdstp forms" {
@@ -84,4 +98,27 @@ test "xDS resource name matching checks authority and short type" {
     try std.testing.expect(!matches("xdstp://other/envoy.config.cluster.v3.Cluster/c", "auth", "type.googleapis.com/envoy.config.cluster.v3.Cluster"));
     try std.testing.expect(!matches("xdstp://auth/envoy.config.listener.v3.Listener/c", "auth", "type.googleapis.com/envoy.config.cluster.v3.Cluster"));
     try std.testing.expect(!matches("xdstp://auth/envoy.config.cluster.v3.Cluster/c", null, "type.googleapis.com/envoy.config.cluster.v3.Cluster"));
+}
+
+test "xDS resource name matching accepts several authorities" {
+    try std.testing.expect(matchesAuthorities(
+        "xdstp://auth-2/envoy.config.cluster.v3.Cluster/c",
+        &.{ "auth-1", "auth-2" },
+        "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+    ));
+    try std.testing.expect(!matchesAuthorities(
+        "xdstp://auth-3/envoy.config.cluster.v3.Cluster/c",
+        &.{ "auth-1", "auth-2" },
+        "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+    ));
+    try std.testing.expect(matchesAuthorities(
+        "old-style",
+        &.{ "auth-1", "auth-2" },
+        "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+    ));
+    try std.testing.expect(!matchesAuthorities(
+        "xdstp://auth-1/envoy.config.cluster.v3.Cluster/c",
+        &.{},
+        "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+    ));
 }

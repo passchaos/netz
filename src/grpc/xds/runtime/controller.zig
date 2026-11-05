@@ -31,6 +31,8 @@ pub const Controller = struct {
     local_json: ?[]const u8 = null,
     local_captured: bool = false,
     lrs_runner: ?*lrs.Runner = null,
+    /// Accepted xdstp authorities; empty accepts only old-style names.
+    authorities: []const []const u8 = &.{},
     /// SotW/delta SDS cache keyed by secret name. Secrets are copied into each
     /// referencing cluster, so cache entries can be replaced independently.
     sds_secrets: std.StringHashMapUnmanaged(*CachedSecret) = .empty,
@@ -43,11 +45,24 @@ pub const Controller = struct {
         self.* = .{ .allocator = gpa, .arena = .init(gpa), .options = options };
         errdefer self.deinit();
         self.options.target.authority = try self.arena.allocator().dupe(u8, options.target.authority);
-        if (self.options.authority) |authority| {
-            if (authority.len == 0) return error.InvalidXdsOptions;
-            self.options.authority = try self.arena.allocator().dupe(u8, authority);
+        {
+            var count: usize = if (options.authority != null) 1 else 0;
+            count += options.additional_authorities.len;
+            const authorities = try self.arena.allocator().alloc([]const u8, count);
+            var index: usize = 0;
+            if (options.authority) |authority| {
+                if (authority.len == 0 or !std.unicode.utf8ValidateSlice(authority)) return error.InvalidXdsOptions;
+                authorities[index] = try self.arena.allocator().dupe(u8, authority);
+                index += 1;
+            }
+            for (options.additional_authorities) |authority| {
+                if (authority.len == 0 or !std.unicode.utf8ValidateSlice(authority)) return error.InvalidXdsOptions;
+                authorities[index] = try self.arena.allocator().dupe(u8, authority);
+                index += 1;
+            }
+            self.authorities = authorities;
         }
-        if (!@import("../resource_name.zig").matches(options.listener_name, self.options.authority, lds.type_url)) {
+        if (!@import("../resource_name.zig").matchesAuthorities(options.listener_name, self.authorities, lds.type_url)) {
             return error.InvalidXdsResourceName;
         }
         if (self.options.target.tls) |*tls| tls.host = try self.arena.allocator().dupe(u8, tls.host);
@@ -110,7 +125,7 @@ pub const Controller = struct {
     /// Validate an old-style or xdstp resource name against the configured
     /// authority and resource type.
     pub fn validateResourceName(self: *const Controller, name: []const u8, type_url: []const u8) @import("errors.zig").PublishError!void {
-        if (!@import("../resource_name.zig").matches(name, self.options.authority, type_url)) {
+        if (!@import("../resource_name.zig").matchesAuthorities(name, self.authorities, type_url)) {
             return error.InvalidXdsResourceName;
         }
     }

@@ -98,11 +98,13 @@ retains the accepted listener, route, cluster or endpoint assignment instead
 of deleting it. The default remains deletion for LDS/CDS and state retention
 for RDS/EDS as before.
 
-`Options.authority` enables single-authority `xdstp://` resource names. The
-listener, route, cluster, endpoint-assignment and secret names are parsed and
-must match both the configured authority and their expected resource type.
-Old-style names remain valid. Multi-authority routing to separate ADS streams
-is still open.
+`Options.authority` and `Options.additional_authorities` enable `xdstp://`
+resource names for one or more authorities served by the controller's control
+plane. The listener, route, cluster, endpoint-assignment and secret names are
+parsed and must match one of the configured authorities and their expected
+resource type. Old-style names remain valid. Authorities routed to different
+xDS servers still need separate controllers; routing several authorities from
+one controller over distinct ADS streams remains open.
 
 `zig build interop-grpc-xds-runtime --summary all` starts with an empty
 application data plane and receives official LDS → RDS → CDS → EDS resources

@@ -1,4 +1,5 @@
 const std = @import("std");
+const test_tmp = @import("../../internal/test_tmp_dir.zig");
 const grpc = @import("../mod.zig");
 const bootstrap = @import("bootstrap.zig");
 const control = @import("control_plane.zig");
@@ -166,13 +167,13 @@ test "gRPC xDS control plane connects over bootstrap TLS" {
         },
     });
     defer server.deinit();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     const pem = try std.fmt.allocPrint(gpa, "-----BEGIN CERTIFICATE-----\n{s}\n-----END CERTIFICATE-----\n", .{tls_testing.certificate_base64});
     defer gpa.free(pem);
     try tmp.dir.writeFile(io, .{ .sub_path = "ca.pem", .data = pem });
-    const ca_path = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/ca.pem", .{tmp.sub_path[0..]});
-    defer gpa.free(ca_path);
+    var ca_buffer: [256]u8 = undefined;
+    const ca_path = try tmp.path(&ca_buffer, "ca.pem");
     const json = try std.fmt.allocPrint(gpa, "{{\"xds_servers\":[{{\"server_uri\":\"https://localhost:{d}\",\"channel_creds\":[{{\"type\":\"tls\",\"config\":{{\"root_certificate_provider\":\"roots\"}}}}]}}],\"certificate_providers\":{{\"roots\":{{\"plugin_name\":\"file_watcher\",\"config\":{{\"ca_certificate_file\":\"{s}\",\"refresh_interval\":\"5s\"}}}}}},\"node\":{{\"id\":\"node-1\"}}}}", .{ server.address().getPort(), ca_path });
     defer gpa.free(json);
     const configuration = try bootstrap.parse(gpa, json, .{});
@@ -203,13 +204,13 @@ test "gRPC xDS control plane reloads TLS material and replays versions" {
         },
     });
     defer server.deinit();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     const pem = try std.fmt.allocPrint(gpa, "-----BEGIN CERTIFICATE-----\n{s}\n-----END CERTIFICATE-----\n", .{tls_testing.certificate_base64});
     defer gpa.free(pem);
     try tmp.dir.writeFile(io, .{ .sub_path = "ca.pem", .data = pem });
-    const ca_path = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/ca.pem", .{tmp.sub_path[0..]});
-    defer gpa.free(ca_path);
+    var ca_buffer: [256]u8 = undefined;
+    const ca_path = try tmp.path(&ca_buffer, "ca.pem");
     const json = try std.fmt.allocPrint(gpa, "{{\"xds_servers\":[{{\"server_uri\":\"https://localhost:{d}\",\"channel_creds\":[{{\"type\":\"tls\",\"config\":{{\"root_certificate_provider\":\"roots\"}}}}]}}],\"certificate_providers\":{{\"roots\":{{\"plugin_name\":\"file_watcher\",\"config\":{{\"ca_certificate_file\":\"{s}\",\"refresh_interval\":\"5s\"}}}}}},\"node\":{{\"id\":\"node-1\"}}}}", .{ server.address().getPort(), ca_path });
     defer gpa.free(json);
     const configuration = try bootstrap.parse(gpa, json, .{});
@@ -248,13 +249,13 @@ test "gRPC xDS control plane schedules TLS material refresh" {
         },
     });
     defer server.deinit();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     const pem = try std.fmt.allocPrint(gpa, "-----BEGIN CERTIFICATE-----\n{s}\n-----END CERTIFICATE-----\n", .{tls_testing.certificate_base64});
     defer gpa.free(pem);
     try tmp.dir.writeFile(io, .{ .sub_path = "ca.pem", .data = pem });
-    const ca_path = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/ca.pem", .{tmp.sub_path[0..]});
-    defer gpa.free(ca_path);
+    var ca_buffer: [256]u8 = undefined;
+    const ca_path = try tmp.path(&ca_buffer, "ca.pem");
     const json = try std.fmt.allocPrint(gpa, "{{\"xds_servers\":[{{\"server_uri\":\"https://localhost:{d}\",\"channel_creds\":[{{\"type\":\"tls\",\"config\":{{\"ca_certificate_file\":\"{s}\",\"refresh_interval\":\"10s\"}}}}]}}],\"node\":{{\"id\":\"node-1\"}}}}", .{ server.address().getPort(), ca_path });
     defer gpa.free(json);
     const configuration = try bootstrap.parse(gpa, json, .{});

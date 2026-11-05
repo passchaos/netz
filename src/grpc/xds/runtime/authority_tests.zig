@@ -142,3 +142,46 @@ test "gRPC xDS runtime rejects mismatched xdstp authority and type" {
         try std.testing.expectError(error.InvalidXdsResourceName, controller.applyWithDeadline(&client, listener_update, channel, deadline(io)));
     }
 }
+
+test "gRPC xDS runtime accepts additional authorities on one control plane" {
+    var threaded = std.Io.Threaded.init(gpa, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var channel = try grpc.SharedChannel.init(gpa, io, .{ .cleartext_ip = .{ .address = .{ .ip4 = .loopback(1) } } }, .{});
+    defer channel.deinit();
+    var sender = channel.sender();
+    defer sender.deinit();
+    var client = try ads.Client.init(gpa, sender, .{ .node = .{ .id = "test" } });
+    defer client.deinit();
+    const controller = try runtime.Controller.create(gpa, .{
+        .listener_name = "frontend",
+        .target = .{ .authority = "backend.test" },
+        .authority = "auth-1",
+        .additional_authorities = &.{"auth-2"},
+    });
+    defer controller.deinit();
+    _ = try controller.startWithDeadline(&client, channel, deadline(io));
+
+    const second_cluster = "xdstp://auth-2/envoy.config.cluster.v3.Cluster/b";
+    const routes = try rds_fixture.encode(gpa, "inline", &.{"backend.test"}, &.{.{ .prefix = "/", .cluster = second_cluster }}, null);
+    defer gpa.free(routes);
+    const listener = try lds_fixture.encode(gpa, .{ .inline_rds = routes });
+    defer gpa.free(listener);
+    var listener_update = try update(&client, lds.type_url, "l1", &.{.{ .type_url = lds.type_url, .value = listener }});
+    defer listener_update.deinit();
+    try accept(controller, &client, channel, io, listener_update);
+    try std.testing.expectEqualStrings(second_cluster, controller.entries.items[0].identity.name);
+
+    try std.testing.expectError(error.InvalidXdsOptions, runtime.Controller.create(gpa, .{
+        .listener_name = "frontend",
+        .target = .{ .authority = "backend.test" },
+        .authority = "auth-1",
+        .additional_authorities = &.{""},
+    }));
+    try std.testing.expectError(error.InvalidXdsResourceName, runtime.Controller.create(gpa, .{
+        .listener_name = "xdstp://auth-9/envoy.config.listener.v3.Listener/frontend",
+        .target = .{ .authority = "backend.test" },
+        .authority = "auth-1",
+        .additional_authorities = &.{"auth-2"},
+    }));
+}

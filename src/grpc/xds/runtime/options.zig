@@ -33,6 +33,10 @@ pub const Options = struct {
     /// xDS authority for `xdstp://` resource names. Old-style names are always
     /// accepted; xdstp names must match this authority and their resource type.
     authority: ?[]const u8 = null,
+    /// Further accepted authorities. They must be served by the same control
+    /// plane as `authority` (typically the same xDS server); use one controller
+    /// per distinct server.
+    additional_authorities: []const []const u8 = &.{},
     limits: Limits = .{},
     /// gRPC xDS `ignore_resource_deletion` server feature: retain resources
     /// omitted from SotW responses or listed in delta removals.
