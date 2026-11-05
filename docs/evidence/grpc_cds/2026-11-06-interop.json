@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "date": "2026-11-06",
+  "gate": "interop-grpc-cds",
+  "command": "zig build interop-grpc-cds --summary all",
+  "status": "passed",
+  "grpc_js": "1.14.7",
+  "grpc_js_xds": "1.14.2",
+  "checks": {
+    "zero_limit_pre_wire": true,
+    "cache_republished": true,
+    "switch_cleared_old": true,
+    "late_eds_ignored": true
+  },
+  "nacks": 4,
+  "wire_counts": [
+    54,
+    206
+  ],
+  "sessions": [
+    1,
+    1
+  ],
+  "notes": "Independent grpc-js-xds 1.14.2 CDS oracle; verifies typed LB translation, locality/ring shapes, zero-limit pre-wire rejection, cached republish, switch clearing and late-EDS ignore."
+}

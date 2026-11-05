@@ -1,0 +1,37 @@
+{
+  "schema": 1,
+  "date": "2026-11-06",
+  "gate": "interop-grpc-rds",
+  "command": "zig build interop-grpc-rds --summary all",
+  "status": "passed",
+  "grpc_js": "1.14.7",
+  "grpc_js_xds": "1.14.2",
+  "checks": {
+    "timeout": true,
+    "local_timeout": true,
+    "stream": true,
+    "storage_reused": true,
+    "old_route_completed": true,
+    "omission_retained": true,
+    "unrelated_retained": true,
+    "explicit_empty": true,
+    "sotw_omission_is_deletion": false,
+    "slow_canceled": true
+  },
+  "nacks": 3,
+  "wire_counts": {
+    "Unary": 20,
+    "Weighted": 400,
+    "Stream": 1,
+    "Retry": 2,
+    "Slow": 1,
+    "Hold": 1,
+    "After": 22,
+    "Release": 1
+  },
+  "sessions": [
+    1,
+    1
+  ],
+  "notes": "Independent grpc-js-xds 1.14.2 RDS oracle; verifies weighted dispatch, retries, route deadline, streaming, storage reuse, old-route completion, omission retention and explicit empty routes."
+}
