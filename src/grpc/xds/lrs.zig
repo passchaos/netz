@@ -10,6 +10,7 @@ pub const Reporter = @import("lrs/reporter.zig").Reporter;
 pub const ReporterOptions = @import("lrs/reporter.zig").Options;
 pub const Scheduler = @import("lrs/scheduler.zig").Scheduler;
 pub const Runner = @import("lrs/runner.zig").Runner;
+pub const RunnerError = @import("lrs/runner.zig").Error;
 pub const RunnerOptions = @import("lrs/runner.zig").Options;
 test {
     _ = @import("lrs/tests.zig");

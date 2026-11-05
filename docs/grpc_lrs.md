@@ -197,6 +197,39 @@ polls at `poll_interval` (default one second) and relies on the scheduler's
 overall deadline bound. A loopback lifecycle test verifies that the runner
 reports an interval delta and shuts down cleanly.
 
+## Controller-owned runner
+
+The xDS runtime controller can own the runner so applications do not have to
+schedule LRS themselves:
+
+```zig
+const controller = try runtime.Controller.create(allocator, .{
+    .listener_name = "frontend",
+    .target = .{ .authority = "payments.example" },
+    .lrs = .{
+        .sender = plane.sender(),
+        .control_plane = &plane,
+        .client = .{ .node = node },
+    },
+});
+defer controller.deinit();
+```
+
+`Options.lrs` is optional. When present, the controller starts one runner after
+the first successful `startWithDeadline`/`startDeltaWithDeadline` (or the
+matching synchronization when discovery was already started). The runner's
+initial connect budget is the smaller of `connect_timeout` and the caller's
+remaining deadline; an expired deadline fails the start rather than blocking
+it. Later starts and synchronizations are no-ops, and `Controller.deinit` stops
+and joins the runner before releasing the destination channel.
+
+The LRS `ControlPlane` must be dedicated to the runner: its background task
+mutates the plane, so sharing it with the ADS client would race. The destination
+channel must have `enable_lrs_stats` enabled, and the caller-supplied
+`control_plane` and channel must outlive the controller. A loopback test starts
+the controller with an LRS control plane, observes the initial node request and
+a clean shutdown.
+
 ## Verification
 
 Native tests cover request/response round trips, locality counters, dropped

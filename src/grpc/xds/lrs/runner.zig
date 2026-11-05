@@ -10,7 +10,7 @@ const scheduler_mod = @import("scheduler.zig");
 const Client = client_mod.Client;
 const Scheduler = scheduler_mod.Scheduler;
 
-pub const Error = client_mod.Error || error{InvalidRunnerOptions};
+pub const Error = client_mod.Error || std.Io.ConcurrentError || error{ InvalidRunnerOptions, RunnerAlreadyStarted };
 
 pub const Options = struct {
     client: client_mod.Options,
@@ -77,7 +77,7 @@ pub const Runner = struct {
 
     /// Start the background report loop. The runner must not be started twice
     /// without an intervening `stop`.
-    pub fn start(self: *Runner) !void {
+    pub fn start(self: *Runner) Error!void {
         if (self.task != null) return error.RunnerAlreadyStarted;
         self.shutdown = .unset;
         self.failure = null;

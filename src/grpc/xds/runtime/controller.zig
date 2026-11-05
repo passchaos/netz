@@ -8,11 +8,12 @@ const cds = @import("../cds.zig");
 const eds = @import("../eds.zig");
 const shared = @import("../../channel/shared.zig");
 const tls_material = @import("../tls_material.zig");
+const lrs = @import("../lrs.zig");
 const entries = @import("entry.zig");
 const Plan = @import("plan.zig").Plan;
 const Target = @import("target.zig").Target;
 pub const Options = @import("options.zig").Options;
-pub const Error = @import("errors.zig").PublishError || lds.Error || cds.Error || eds.Error || tls_material.Error || error{ InvalidXdsOptions, XdsNotStarted };
+pub const Error = @import("errors.zig").PublishError || lds.Error || cds.Error || eds.Error || tls_material.Error || lrs.RunnerError || error{ InvalidXdsOptions, XdsNotStarted };
 pub const Controller = struct {
     allocator: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
@@ -23,8 +24,12 @@ pub const Controller = struct {
     latest: ?*@import("../lds/projection.zig").Projection = null,
     local_json: ?[]const u8 = null,
     local_captured: bool = false,
+    lrs_runner: ?*lrs.Runner = null,
     pub fn create(gpa: std.mem.Allocator, options: Options) Error!*Controller {
         if (options.limits.max_clusters == 0 or options.limits.max_projections == 0 or options.limits.max_storage_bytes == 0 or options.target.authority.len == 0 or options.target.attempt_delay.nanoseconds <= 0) return error.InvalidXdsOptions;
+        if (options.lrs) |value| {
+            if (value.poll_interval.nanoseconds <= 0 or value.connect_timeout.nanoseconds <= 0) return error.InvalidXdsOptions;
+        }
         const self = try gpa.create(Controller);
         self.* = .{ .allocator = gpa, .arena = .init(gpa), .options = options };
         errdefer self.deinit();
@@ -39,6 +44,7 @@ pub const Controller = struct {
         return self;
     }
     pub fn deinit(self: *Controller) void {
+        if (self.lrs_runner) |runner| runner.deinit();
         if (self.listener) |*value| value.deinit();
         for (self.projections.items) |value| value.release();
         self.projections.deinit(self.allocator);
@@ -46,6 +52,38 @@ pub const Controller = struct {
         self.entries.deinit(self.allocator);
         self.arena.deinit();
         self.allocator.destroy(self);
+    }
+    fn ensureLrsRunner(
+        self: *Controller,
+        destination: shared.SharedChannel,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!void {
+        if (self.lrs_runner != null) return;
+        const options = self.options.lrs orelse return;
+        const remaining = deadline.durationFromNow(
+            destination.state.io,
+        ).raw.nanoseconds;
+        if (remaining <= 0) return error.Timeout;
+        const connect_ns = @min(
+            options.connect_timeout.nanoseconds,
+            remaining,
+        );
+        const runner = try lrs.Runner.create(
+            self.allocator,
+            destination.state.io,
+            options.sender,
+            options.control_plane,
+            destination,
+            .{
+                .client = options.client,
+                .reporter = options.reporter,
+                .poll_interval = options.poll_interval,
+                .connect_timeout = .fromNanoseconds(connect_ns),
+            },
+        );
+        errdefer runner.deinit();
+        try runner.start();
+        self.lrs_runner = runner;
     }
     fn cleanProjections(self: *Controller) void {
         var i: usize = 0;
@@ -191,6 +229,7 @@ pub const Controller = struct {
         defer plan.deinit();
         const revision = try self.publish(client, &plan, projection, true, destination, deadline);
         subscription.commit();
+        try self.ensureLrsRunner(destination, deadline);
         return revision;
     }
     pub fn synchronizeWithDeadline(self: *Controller, client: *ads.Client, destination: shared.SharedChannel, deadline: std.Io.Clock.Timestamp) Error!u64 {
@@ -205,6 +244,7 @@ pub const Controller = struct {
         };
         const revision = if (same) try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline) else try self.publish(client, &plan, projection, false, destination, deadline);
         _ = try client.flushWithDeadline(deadline);
+        try self.ensureLrsRunner(destination, deadline);
         return revision;
     }
     pub fn applyWithDeadline(self: *Controller, client: *ads.Client, update: ads.Update, destination: shared.SharedChannel, deadline: std.Io.Clock.Timestamp) Error!u64 {
@@ -245,6 +285,7 @@ pub const Controller = struct {
         defer plan.deinit();
         const revision = try self.publishDelta(client, &plan, projection, true, destination, deadline);
         subscription.commit();
+        try self.ensureLrsRunner(destination, deadline);
         return revision;
     }
     pub fn synchronizeDeltaWithDeadline(self: *Controller, client: *delta.Client, destination: shared.SharedChannel, deadline: std.Io.Clock.Timestamp) Error!u64 {
@@ -259,6 +300,7 @@ pub const Controller = struct {
         };
         const revision = if (same) try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline) else try self.publishDelta(client, &plan, projection, false, destination, deadline);
         _ = try client.flushWithDeadline(deadline);
+        try self.ensureLrsRunner(destination, deadline);
         return revision;
     }
     pub fn applyDeltaWithDeadline(self: *Controller, client: *delta.Client, update: delta.Update, destination: shared.SharedChannel, deadline: std.Io.Clock.Timestamp) Error!u64 {

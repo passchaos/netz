@@ -79,6 +79,12 @@ drop/circuit policies compose with cluster policies. Target authority, HTTP/2
 limits, TLS addressing and multi-address connection-race settings come from
 Options.target, with actual child LB/circuit identities supplied by CDS.
 
+`Options.lrs` optionally makes the controller own an `lrs.Runner`. The runner
+starts once after the first successful SotW or delta start/synchronization and
+is joined by `Controller.deinit`. Its LRS control plane must be dedicated to
+the runner, and the destination channel must enable LRS statistics; see
+[LRS](grpc_lrs.md#controller-owned-runner).
+
 `zig build interop-grpc-xds-runtime --summary all` starts with an empty
 application data plane and receives official LDS → RDS → CDS → EDS resources
 from an independent grpc-js ADS server. Two grpc-js backends verify pending
