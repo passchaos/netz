@@ -44,5 +44,5 @@
     "docs/grpc_cds.md": "df6290b5ef4069813c060c1c887cf992be538b50399c61bab480a6bdf3b23d4c",
     "docs/grpc_xds_runtime.md": "0ef399bbf394919bdca1aaf9bf009dce01f8a41116cd4a9263a5cab5e3d08b5b"
   },
-  "notes": "Bootstrap certificate providers, file/environment data sources, encrypted private keys, OCSP/CRL, certificate hash/SPKI pinning and SDS delta TTL expiry remain open. The controller requires one certificate and one validation reference per cluster."
+  "notes": "Bootstrap certificate providers, file/environment data sources, encrypted private keys, OCSP/CRL and certificate hash/SPKI pinning remain open. The controller requires one certificate and one validation reference per cluster. Delta SDS TTL expiry is covered by 2026-11-05-ttl.json."
 }

@@ -1,0 +1,38 @@
+{
+  "schema": 1,
+  "date": "2026-11-05",
+  "head": "working-tree",
+  "subject": "Delta SDS TTL expiry and heartbeat refresh",
+  "change": "Cached SDS secrets now carry a delta Resource.ttl deadline. Payload-free heartbeats refresh the deadline, nextDeltaExpiry includes secret timers, and expireDeltaWithDeadline removes expired secrets, forgets their accepted versions, and reprojects referencing clusters back to pending. SotW secrets remain untimed.",
+  "tests": {
+    "unit": "src/grpc/xds/runtime/sds_tests.zig 'gRPC delta xDS runtime expires SDS secrets and refreshes their TTL' covers short-TTL resolution, heartbeat refresh, timer clearing, expiry back to pending with endpoint removal and accepted-version forgetting, and restoration without a timer.",
+    "focused_gate": {
+      "command": "zig build test-lib -Dtest-filter='xDS runtime' -Dtest-filter='gRPC CDS' -Dtest-filter='LRS' -Dtest-filter='SDS' --summary all",
+      "passed": 224,
+      "total": 224,
+      "failed": 0
+    },
+    "compile": {
+      "command": "zig build test-compile",
+      "status": "passed"
+    },
+    "full_library": {
+      "command": "zig build test-lib",
+      "status": "passed",
+      "exit_code": 0,
+      "passed": 6486,
+      "total": 6486,
+      "failed": 0,
+      "notes": "An earlier full run under host load 12-16 crashed one SOCKS5 test in its test-only socket close path; the same test passed in isolation and the rerun passed with no failures."
+    }
+  },
+  "source_sha256": {
+    "src/grpc/xds/runtime/controller.zig": "f27c19cdf5e882abd538117b07fa79feffb395fb30aa72ef714c11fd5bc30d4b",
+    "src/grpc/xds/runtime/apply_sds.zig": "d16c4d408e4bfe013cc3b098240e4e3fb1b910f9d56b583970809076d00a59f7",
+    "src/grpc/xds/runtime/apply_delta_sds.zig": "83ec13293348e79649ec1eb4fd933abd9b54d06c1a89350e9b9bfe930edc254c",
+    "src/grpc/xds/runtime/sds_tests.zig": "7459bf3276b60d35c8385807382fe337153e4daad808d50253b0000e29b26430",
+    "docs/grpc_sds.md": "d1502a4a6fdd9a08a39c797b1c01791d5855f970988b4161b18b4d0791c2a212",
+    "docs/grpc_xds_runtime.md": "98ba7f2bc11a31de8f4a1d15c300ca9033587d59c13e7fdbdc41cc238ad476a6"
+  },
+  "notes": "SotW secrets have no TTL. SDS delta heartbeats for unknown names are ignored."
+}
