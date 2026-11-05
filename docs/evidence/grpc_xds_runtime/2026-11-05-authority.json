@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "date": "2026-11-05",
+  "head": "working-tree",
+  "subject": "Single-authority xdstp resource names",
+  "change": "Added xds.resource_name parsing for old-style and xdstp:// names and runtime.Options.authority. The controller validates listener, route, cluster, EDS assignment and SDS secret names against the configured authority and expected short resource type. Old-style names remain valid; xdstp names without a configured authority or with a mismatched authority/type are rejected before subscription or publication.",
+  "tests": {
+    "unit": "src/grpc/xds/resource_name.zig covers old-style/xdstp parsing and authority/type matching. src/grpc/xds/runtime/authority_tests.zig covers matching xdstp listener/cluster/EDS names end to end, xdstp listener validation, and rejection of mismatched authority and type.",
+    "focused_gate": {
+      "command": "zig build test-lib -Dtest-filter='xDS runtime' -Dtest-filter='gRPC CDS' -Dtest-filter='gRPC LDS' -Dtest-filter='LRS' -Dtest-filter='SDS' -Dtest-filter='xdstp' --summary all",
+      "passed": 239,
+      "total": 239,
+      "failed": 0
+    },
+    "compile": {
+      "command": "zig build test-compile",
+      "status": "passed"
+    },
+    "full_library": {
+      "command": "zig build test-lib",
+      "status": "passed",
+      "exit_code": 0,
+      "passed": 6498,
+      "total": 6498,
+      "failed": 0
+    }
+  },
+  "source_sha256": {
+    "src/grpc/xds/resource_name.zig": "b6e24538e169b5fed8df2be9d90f18ca66c9cde2fce482253a2b4d12cc976901",
+    "src/grpc/xds/mod.zig": "074b870ac9a8ad0acc1fffed067d1c7a81cdd005c4d4f4652b12d6a87d65655a",
+    "src/grpc/xds/runtime/options.zig": "7784747a9d5a542ce60008ec14ebd23312fd71c41f16dfe6cc02c16d357156f5",
+    "src/grpc/xds/runtime/controller.zig": "7a2d80c9cfc73363446840b2fa83d55d6efdce54308c83350da96eb01091505d",
+    "src/grpc/xds/runtime/plan.zig": "ec1f871d5e5ef1daa9aab0e4ef52373e2fd02fc1f5680c6972d8a0686017e8f4",
+    "src/grpc/xds/runtime/errors.zig": "3b4cbfb5011a55e01314ddbb32638fd8994f5fa8deda5f8fbbd41ef5628e2e40",
+    "src/grpc/xds/runtime.zig": "7c09090fc3f7ae4539a6df0580ed7a4a696c582dd371c5dd97370e4d74690aea",
+    "src/grpc/xds/runtime/authority_tests.zig": "1e44b6561de3b2345e88c6a6f8322857a6f4f9d83dd17cc532a1a9e31d7923c7",
+    "docs/grpc_xds_runtime.md": "623c94f533373671ad0095449f001b95868d9e9aec0e01e962491244ba57cab6"
+  },
+  "notes": "Only one authority is served per controller. Multi-authority routing to separate ADS streams, percent-decoded authority canonicalization and authority-specific bootstrap selection remain open."
+}
