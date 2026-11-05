@@ -9,9 +9,12 @@ pub const integration = @import("lrs/integration.zig");
 pub const Reporter = @import("lrs/reporter.zig").Reporter;
 pub const ReporterOptions = @import("lrs/reporter.zig").Options;
 pub const Scheduler = @import("lrs/scheduler.zig").Scheduler;
+pub const Runner = @import("lrs/runner.zig").Runner;
+pub const RunnerOptions = @import("lrs/runner.zig").Options;
 test {
     _ = @import("lrs/tests.zig");
     _ = @import("lrs/transport_tests.zig");
     _ = @import("lrs/control_plane_tests.zig");
     _ = @import("lrs/scheduler_tests.zig");
+    _ = @import("lrs/runner_tests.zig");
 }

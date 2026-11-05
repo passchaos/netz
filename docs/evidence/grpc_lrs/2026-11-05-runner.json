@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "date": "2026-11-05",
+  "head": "working-tree",
+  "subject": "Owned background LRS runner",
+  "change": "lrs.Runner now owns the LRS client and scheduler and runs the control-plane-aware report loop on a background task. create() establishes the initial LRS stream with a bounded connect timeout, start() spawns the loop, stop() sets a shutdown event and cancels the task, failureReason() exposes terminal failures, and deinit() joins and releases the client, scheduler and runner storage. The loop polls at poll_interval and relies on the scheduler's overall-deadline bound.",
+  "tests": {
+    "unit": "src/grpc/xds/lrs/runner_tests.zig 'gRPC LRS runner owns a background report loop' starts a real control plane, source channel and destination, waits for an interval report, asserts no terminal failure, and stops the runner cleanly.",
+    "focused_gate": {
+      "command": "zig build test-lib -Dtest-filter='LRS' --summary all",
+      "passed": 191,
+      "total": 191,
+      "failed": 0
+    },
+    "compile": {
+      "command": "zig build test-compile",
+      "status": "passed"
+    }
+  },
+  "source_sha256": {
+    "src/grpc/xds/lrs/runner.zig": "994f159cc7a8a57838586c9b55aeb7f26d4cbdcd69e307ef5bc61a8fc6e29fd7",
+    "src/grpc/xds/lrs/runner_tests.zig": "83e942d3cf58122bbf38ae701d6e42c68e9507603389b45e7042865aebe44a41",
+    "src/grpc/xds/lrs.zig": "2b6f5742f55b99cbef3436496ff99b996f88b1017571b264c033499635fa9421",
+    "docs/grpc_lrs.md": "3faf37071d9c2c1d336a0f6f006b3fa48a8a6a683bc157c134d49bf4b7146d60",
+    "docs/grpc_ads.md": "82f135ded28d45b7419e1173c45689846c5012c40d24b4229dfb657dd02b2014",
+    "docs/grpc_cds.md": "839242bd1d8ac030fa5fea23a33f0a9aacdfe4892c8f858413e6866747678484",
+    "docs/grpc_lds.md": "9e8539a9e95b5de4ec9adc5399b846f58c167a028b66ab098fc2f4c70ded8544",
+    "docs/grpc_rds.md": "ce8cf2e066d1d8cc4aae91fb6e6570a4a2f7b20102541a42a9f605f99a859cd4"
+  },
+  "notes": "Applications can now run LRS automatically with lrs.Runner. Wiring the runner into the runtime Controller, authority-specific control planes, SDS/certificate providers and non-router filters remain open."
+}

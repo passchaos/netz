@@ -179,7 +179,7 @@ reprojects cached routes under HCM defaults. Typed delta route publication is
 available through the automatic runtime. Bootstrap parsing and insecure
 control-plane failover are available; automatic multi-cluster CDS/EDS
 orchestration, certificate providers and automatic refresh scheduling, authority-specific control planes,
-LRS automatic background scheduling, HTTP filter
+LRS scheduling, HTTP filter
 overrides and `path_rewrite_policy` format rewrites remain open.
 Delta route TTL expiry is covered. Literal prefix/whole-path and authority
 rewrites, automatic endpoint authority rewriting, and literal request/response

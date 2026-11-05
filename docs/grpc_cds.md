@@ -122,7 +122,7 @@ This slice handles EDS-backed, STATIC, STRICT_DNS and LOGICAL_DNS clusters.
 Typed delta CDS/EDS publication is available through the automatic runtime;
 delta CDS/EDS TTL expiry is covered. Bootstrap parsing and control-plane
 failover are available. LDS/RDS routing, certificate providers and automatic
-refresh scheduling, authority-specific control planes, LRS automatic background
+refresh scheduling, authority-specific control planes, controller-owned LRS
 scheduling and full security integration remain open.
 
 `zig build interop-grpc-cds --summary all` compares valid fixture policies and

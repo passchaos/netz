@@ -166,6 +166,37 @@ should survive control-plane restarts. Real tests cover a same-server
 reconnect and a failover to a second server, each verifying the next report's
 counters.
 
+## Background runner
+
+`lrs.Runner` owns the LRS client and scheduler and runs the
+control-plane-aware loop on a background task. The caller supplies the
+control-plane sender, the `ControlPlane`, and the source `SharedChannel` (with
+`enable_lrs_stats` enabled); those objects must outlive the runner.
+
+```zig
+var runner = try lrs.Runner.create(
+    allocator,
+    io,
+    plane.sender(),
+    &plane,
+    source,
+    .{
+        .client = .{ .node = node },
+        .reporter = .{ .interval_ns = std.time.ns_per_s },
+    },
+);
+defer runner.deinit();
+try runner.start();
+// ... application lifetime ...
+runner.stop();
+```
+
+`start()` spawns the loop, `stop()` sets a shutdown event and cancels the task,
+and `failureReason()` exposes a terminal error observed by the loop. The runner
+polls at `poll_interval` (default one second) and relies on the scheduler's
+overall deadline bound. A loopback lifecycle test verifies that the runner
+reports an interval delta and shuts down cleanly.
+
 ## Verification
 
 Native tests cover request/response round trips, locality counters, dropped
