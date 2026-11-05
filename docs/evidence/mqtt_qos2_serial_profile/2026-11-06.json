@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "date": "2026-11-06",
+  "feature": "MQTT QoS2 serial durable-session ReleaseFast comparison and profile",
+  "decision": "profile-only; no code change accepted",
+  "workload": {
+    "protocol": "MQTT 5 over TCP",
+    "qos": 2,
+    "publishers": 1,
+    "subscribers": 1,
+    "payload_bytes": 256,
+    "warmup": 100,
+    "messages": 5000,
+    "publisher_window": 1,
+    "server_queue_capacity": 5000,
+    "session_expiry_seconds": 3600,
+    "build": "ReleaseFast",
+    "broker_sha256": "1b1e25ee545670acac48eaa41d0cf24a7be107ca668557d5b07ba48b8af478cb",
+    "driver_sha256": "c3f532f2536e77ae01b0964de00dbc110ce2ae1be03f2da73205f7554e91f862"
+  },
+  "commands": [
+    "MQTT_QOS=2 PUBLISHERS=1 SUBSCRIBERS=1 MESSAGES=5000 PUBLISHER_WINDOW=1 MQTT_SESSION_EXPIRY_SECONDS=3600 zig build compare-mqtt-mosquitto -Doptimize=ReleaseFast",
+    "perf record -F 2000 -e cycles:u -g -- netz-mqtt-vector-broker --bind=127.0.0.1:18834 --connections=2 --max-queued-deliveries=20000 --max-outgoing-inflight=64"
+  ],
+  "comparison": {
+    "netz_publishes_per_s": 25755,
+    "netz_p50_ns": 27015,
+    "netz_p99_ns": 120358,
+    "mosquitto_publishes_per_s": 47942,
+    "mosquitto_p50_ns": 15577,
+    "mosquitto_p99_ns": 37530,
+    "ratio": 0.537,
+    "checksum": 1249500,
+    "client_alloc_count": 35734
+  },
+  "profile": {
+    "samples": 326,
+    "event": "cpu_atom/cycles/u",
+    "hotspots": {
+      "Executor.run": "29.31% children, 2.63% self",
+      "common.Waiter.wait / AnyTask.yield": "31.86% / 31.55% children; parking and wakeups remain dominant",
+      "Broker.handlePubRel": "26.51% children, 2.46% self; durable session deliveries are written inline from the publisher task",
+      "Connection.readBrokerEventOptionsOut": "24.13% children, 3.76% self",
+      "ev.loop.Loop.poll": "18.49% children, 7.69% self",
+      "Broker.flushSlotLockedMode": "18.33% children, 3.81% self",
+      "receive.events.Reader.read": "14.73% children, 4.07% self",
+      "Broker.dispatchNetworkPlan": "14.93% children"
+    }
+  },
+  "conclusion": "The ReleaseFast serial QoS2 gap is 0.54x. Time is spread across parking/wakeup, event-loop polling, packet reads and inline session writes rather than one hotspot. The earlier cached-clock extension remains the main latency win; closing the rest requires reducing per-packet task handoffs or event-loop syscall cost, not route/flush micro-optimizations."
+}

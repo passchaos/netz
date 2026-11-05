@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "date": "2026-11-06",
+  "head": "working-tree",
+  "subject": "Cluster lrs_server ConfigSource.self",
+  "change": "CDS Cluster.lrs_server (field 42) is now decoded. Only ConfigSource.self is accepted, matching grpc-core; the cluster then reports through the controller's LRS control plane. Other LRS servers and malformed ConfigSource values fail closed. transport_socket_matches remains rejected.",
+  "tests": {
+    "unit": "src/grpc/xds/cds/tests.zig 'gRPC CDS accepts lrs_server self and rejects other servers' covers self acceptance, ConfigSource.ads rejection and malformed ConfigSource rejection.",
+    "focused_gate": {
+      "command": "zig build test-lib -Dtest-filter='xDS runtime' -Dtest-filter='gRPC CDS' -Dtest-filter='gRPC LDS' -Dtest-filter='SDS' -Dtest-filter='LRS' -Dtest-filter='xDS TLS' -Dtest-filter='lrs_server' --summary all",
+      "passed": 251,
+      "total": 251,
+      "failed": 0
+    },
+    "compile": {
+      "command": "zig build test-compile",
+      "status": "passed"
+    },
+    "full_library": {
+      "command": "cd /dev/shm/netz-run && .zig-cache/o/0aae0f0e9dce87df0f8dcf68b294092b/test",
+      "status": "passed",
+      "exit_code": 0,
+      "passed": 6510,
+      "total": 6510,
+      "failed": 0,
+      "notes": "This is the same test binary produced by zig build test-lib. It was run from a tmpfs working directory because the shared NVMe drive was 92% utilized by sibling projects and journal-writing bridge tests blocked for minutes on ext4 writeback, which made zig-build-driven full runs hang. With tmpfs temp files the suite printed per-test progress and passed all 6510 tests."
+    }
+  },
+  "source_sha256": {
+    "src/grpc/xds/cds/decode.zig": "a35130bf4b34c0c60948f93229037e1ab3ff004868398fab903296e2198f6307",
+    "src/grpc/xds/cds/tests.zig": "13483c5e55caffd7fae50e283b8130c8afcc319d8f73ae4cea2f19070b86e2ee",
+    "docs/grpc_cds.md": "ffc95f57f420ae036353299c2ea784c1191e16a2ed5f8da81531798b2c926424"
+  },
+  "notes": "Per-cluster LRS servers other than self remain unsupported. Cluster reporting still uses the single LRS control plane configured in runtime.Options.lrs."
+}
