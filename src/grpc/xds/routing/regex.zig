@@ -5,6 +5,15 @@ pub const Error = model.Error;
 pub const Limits = model.Limits;
 pub const Budget = @import("regex/budget.zig").Budget;
 pub const Workspace = @import("regex/execute.zig").Workspace;
+pub const ReplaceWorkspace = @import("regex/replace.zig").Workspace;
+pub const validateSubstitution = @import("regex/replace.zig").validateSubstitution;
+pub const Program = @import("regex/compile.zig").Program;
+/// Parse and compile directly into caller-owned storage. This is used by
+/// arena-backed xDS resources that keep the program for their whole lifetime.
+pub fn compile(gpa: std.mem.Allocator, pattern: []const u8, limits: Limits) Error!Program {
+    const root = try @import("regex/parse.zig").parse(gpa, pattern, limits);
+    return @import("regex/compile.zig").compile(gpa, root, limits);
+}
 pub const Regex = struct {
     arena: std.heap.ArenaAllocator,
     program: @import("regex/compile.zig").Program,
@@ -28,4 +37,5 @@ pub const Regex = struct {
 test {
     _ = @import("regex/tests.zig");
     _ = @import("regex/budget_tests.zig");
+    _ = @import("regex/replace.zig");
 }

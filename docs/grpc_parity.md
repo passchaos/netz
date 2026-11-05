@@ -3639,8 +3639,10 @@ classes, grouping/alternation/repetition, flags and assertions, quoting and
 byte escapes. Five rotating position buckets combine UTF-8 rune and byte
 consumption while deduplicating each instruction once per input position.
 Balanced syntax trees, explicit compile bounds and reusable workspaces keep
-construction, matching work and memory controlled. Captures are grouping for
-boolean matching; extraction and substitution remain open.
+construction, matching work and memory controlled. Capture extraction and
+RE2-style `\0`..`\9` replacement are implemented for route path regex rewrites
+through a bounded backtracking workspace; hash-policy header rewriting remains
+open.
 
 Pinned RE2 Unicode tables include reproducible generation, source hashes and
 BSD attribution. Native tests cover adversarial overlapping alternatives,
@@ -3796,11 +3798,11 @@ local method/retry defaults and resource-budget precedence. See
 [automatic typed discovery](grpc_xds_runtime.md) and
 `docs/evidence/grpc_xds_runtime/2026-11-03.json`. Bootstrap, retry/failover,
 expiry/Delta/LRS, security and aggregate/DNS discovery are covered. RDS
-`prefix_rewrite`, literal `path_rewrite`, literal/header/automatic host
-rewrites, and literal request/response header additions/removals are applied
-to the owned unary and streaming request/response inputs; regex/format path
-rewrites and non-router filters remain open for the full library/control-plane
-objective.
+`prefix_rewrite`, literal `path_rewrite`, `regex_rewrite`, literal/header/
+automatic host rewrites, and literal request/response header additions/
+removals are applied to the owned unary and streaming request/response inputs;
+`path_rewrite_policy` format rewrites, host path regex rewrites and non-router
+filters remain open for the full library/control-plane objective.
 
 ## SotW resource omission and initial discovery
 

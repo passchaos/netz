@@ -1,8 +1,18 @@
 //! Batched independent RE2 comparison; input/output have no network dependency.
 const std = @import("std");
 const regex = @import("xds_regex");
-const Case = struct { pattern: []const u8, inputs: []const []const u8 };
-const Result = struct { err: ?[]const u8 = null, matches: []const bool = &.{}, max_states: usize = 0, instructions: usize = 0 };
+const Case = struct {
+    pattern: []const u8,
+    inputs: []const []const u8,
+    substitution: ?[]const u8 = null,
+};
+const Result = struct {
+    err: ?[]const u8 = null,
+    matches: []const bool = &.{},
+    replacements: []const []const u8 = &.{},
+    max_states: usize = 0,
+    instructions: usize = 0,
+};
 pub fn main(init: std.process.Init) !void {
     const gpa = init.arena.allocator();
     const args = try init.minimal.args.toSlice(gpa);
@@ -24,6 +34,22 @@ pub fn main(init: std.process.Init) !void {
             match.* = workspace.matches(value.program, text);
             if (workspace.stats.states_visited > value.program.instructions.len * (text.len + 1)) return error.NonLinearRegexExecution;
             result.max_states = @max(result.max_states, workspace.stats.states_visited);
+        }
+        if (case.substitution) |substitution| {
+            var replacer = try regex.ReplaceWorkspace.init(
+                std.heap.page_allocator,
+                value.program,
+                .{},
+            );
+            defer replacer.deinit();
+            const replacements = try gpa.alloc([]const u8, case.inputs.len);
+            for (case.inputs, replacements) |text, *replacement| {
+                replacement.* = replacer.replaceAll(text, substitution) catch |err| {
+                    result.err = @errorName(err);
+                    break;
+                };
+            }
+            result.replacements = replacements;
         }
     }
     var buffer: [8192]u8 = undefined;

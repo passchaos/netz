@@ -2,6 +2,8 @@
 
 const std = @import("std");
 const http2 = @import("../http2/mod.zig");
+const path_rewrite = @import("path_rewrite.zig");
+pub const RegexRewrite = path_rewrite.RegexRewrite;
 const compression_mod = @import("compression.zig");
 const metadata_mod = @import("metadata.zig");
 const details_mod = @import("status_details.zig");
@@ -232,16 +234,27 @@ pub const PathRewrite = union(enum) {
     whole: []const u8,
     /// Replace the matched route prefix with `replacement`.
     prefix: struct { matched: usize, replacement: []const u8 },
+    /// Apply an RE2-style capture-aware replacement to the complete path.
+    regex: struct {
+        rewrite: *const RegexRewrite,
+        output_len: usize,
+    },
 
     pub fn outputLen(self: PathRewrite, original_len: usize) usize {
         return switch (self) {
             .whole => |value| value.len,
             .prefix => |value| value.replacement.len +
                 (original_len - @min(value.matched, original_len)),
+            .regex => |value| value.output_len,
         };
     }
 
-    pub fn write(self: PathRewrite, original: []const u8, output: []u8) []const u8 {
+    pub fn write(
+        self: PathRewrite,
+        allocator: std.mem.Allocator,
+        original: []const u8,
+        output: []u8,
+    ) std.mem.Allocator.Error![]const u8 {
         return switch (self) {
             .whole => |value| blk: {
                 @memcpy(output[0..value.len], value);
@@ -256,6 +269,12 @@ pub const PathRewrite = union(enum) {
                 );
                 break :blk output[0 .. value.replacement.len + original.len - matched];
             },
+            .regex => |value| path_rewrite.apply(
+                allocator,
+                value.rewrite,
+                original,
+                output,
+            ),
         };
     }
 };

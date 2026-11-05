@@ -69,7 +69,8 @@ pub fn clone(allocator: std.mem.Allocator, source: anytype) std.mem.Allocator.Er
     var options = source;
     var offset: usize = 0;
     options.path = if (source.xds_path_rewrite) |rewrite| blk: {
-        const rewritten = rewrite.write(
+        const rewritten = try rewrite.write(
+            allocator,
             source.path,
             storage[offset..][0..path_len],
         );

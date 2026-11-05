@@ -2,7 +2,19 @@
 const std = @import("std");
 pub const unicode = @import("unicode.zig");
 pub const Error = std.mem.Allocator.Error || error{ InvalidRegex, UnsupportedRegexFeature, RegexLimitExceeded };
-pub const Limits = struct { max_pattern_bytes: usize = 4096, max_nodes: usize = 8192, max_instructions: usize = 8192, max_depth: usize = 64, max_repeat: usize = 1000, max_ranges: usize = 4096 };
+pub const Limits = struct {
+    max_pattern_bytes: usize = 4096,
+    max_nodes: usize = 8192,
+    max_instructions: usize = 8192,
+    max_depth: usize = 64,
+    max_repeat: usize = 1000,
+    max_ranges: usize = 4096,
+    /// Bounded backtracking budget for capture-aware replacement. Boolean
+    /// matching remains linear and does not use these.
+    max_execution_steps: usize = 4_000_000,
+    max_backtrack_choices: usize = 262_144,
+    max_capture_trail: usize = 262_144,
+};
 pub const Flags = struct { fold: bool = false, dot_newline: bool = false, multiline: bool = false };
 pub const Range = unicode.Range;
 pub const Set = struct {
@@ -39,11 +51,18 @@ pub const Node = union(enum) {
     empty,
     flag_change,
     group: *const Node,
+    /// Numbered capturing group. `index` is 1-based in opening-paren order.
+    capture: struct { index: u16, child: *const Node },
     byte,
     set: Set,
     pair: struct { left: *const Node, right: *const Node },
     alternate: struct { left: *const Node, right: *const Node },
-    repeat: struct { child: *const Node, minimum: usize, maximum: ?usize },
+    repeat: struct {
+        child: *const Node,
+        minimum: usize,
+        maximum: ?usize,
+        lazy: bool = false,
+    },
     assertion: Assertion,
 };
 pub const Instruction = union(enum) {
@@ -52,4 +71,7 @@ pub const Instruction = union(enum) {
     consume: struct { set: Set, next: usize },
     split: struct { left: usize, right: usize },
     assertion: struct { kind: Assertion, next: usize },
+    /// Capture boundary. Slot 0/1 are the whole match; group `i` uses
+    /// slots `2*i` and `2*i+1`.
+    save: struct { slot: u16, next: usize },
 };

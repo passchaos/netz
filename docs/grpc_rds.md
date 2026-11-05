@@ -54,9 +54,20 @@ the joined visible value; `io.grpc.channel_id` supplies a stable channel hash.
 Multiple successful hash rules rotate the old hash left by one and XOR the new
 hash, with terminal rules stopping after a hash exists. Without a successful
 rule a random request hash is generated. Unsupported cookie/connection/query
-hash sources are ignored as in grpc-core. Hash regex rewriting is explicitly
-rejected until capture/substitution is implemented. Cluster/hash attributes
-remain internal request options and never become application wire metadata.
+hash sources are ignored as in grpc-core. Hash regex rewriting remains
+explicitly rejected; route path `regex_rewrite` is implemented with capture
+substitution. Cluster/hash attributes remain internal request options and never
+become application wire metadata.
+
+`regex_rewrite` (RouteAction field 32) decodes a `RegexMatchAndSubstitute`
+pattern and substitution, compiles the pattern with the bounded xDS safe-regex
+parser, and applies leftmost-first global replacement with RE2 `\0`..`\9`
+capture references and `\\` escaping. Greedy and lazy quantifiers retain their
+priority semantics. Replacement runs on an explicit backtracking stack with
+hard step, choice and capture-trail budgets; a pathological rewrite fails the
+request locally instead of running unboundedly. The selector precomputes the
+exact rewritten length so the existing request-input copy still uses one
+allocation and preserves the header-byte limit.
 
 `prefix_rewrite`, literal `path_rewrite`, and
 `host_rewrite_literal`/`host_rewrite_header`/literal `host_rewrite` are applied
@@ -152,8 +163,9 @@ reprojects cached routes under HCM defaults. Typed delta route publication is
 available through the automatic runtime. Bootstrap parsing and insecure
 control-plane failover are available; automatic multi-cluster CDS/EDS
 orchestration, certificate providers and automatic refresh scheduling, authority-specific control planes,
-LRS automatic background scheduling, capture/hash rewriting, HTTP filter
-overrides and regex/format path rewrites remain open.
+LRS automatic background scheduling, hash regex rewriting, HTTP filter
+overrides, `path_rewrite_policy` format rewrites and host path regex rewrites
+remain open.
 Delta route TTL expiry is covered. Literal prefix/whole-path and authority
 rewrites, automatic endpoint authority rewriting, and literal request/response
 header additions/removals are covered by native selection, owned-input and
@@ -163,5 +175,6 @@ deployment behavior. Evidence is recorded in
 `docs/evidence/grpc_rds/2026-11-04-rewrites.json`,
 `docs/evidence/grpc_rds/2026-11-04-literal-path-host.json`,
 `docs/evidence/grpc_rds/2026-11-04-request-headers.json`,
+`docs/evidence/grpc_rds/2026-11-05-regex-path-rewrite.json`,
 `docs/evidence/grpc_rds/2026-11-05-auto-host-rewrite.json` and
 `docs/evidence/grpc_rds/2026-11-05-response-headers.json`.

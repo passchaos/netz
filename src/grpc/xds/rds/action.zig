@@ -2,6 +2,7 @@
 const std = @import("std");
 const pb = @import("protobuf.zig");
 const model = @import("model.zig");
+const routing = @import("../routing/mod.zig");
 fn weighted(p: anytype, bytes: []const u8) pb.Error![]const model.Weighted {
     var reader = pb.Reader{ .bytes = bytes };
     var values: std.ArrayList(model.Weighted) = .empty;
@@ -68,6 +69,42 @@ fn rewriteText(reader: *pb.Reader, maximum: usize) pb.Error![]const u8 {
     for (value) |byte| if (byte < 0x20 or byte == 0x7f) return error.InvalidRdsResource;
     return value;
 }
+fn regexRewrite(p: anytype, bytes: []const u8) pb.Error!*const model.RegexRewrite {
+    var reader = pb.Reader{ .bytes = bytes };
+    var pattern: ?[]const u8 = null;
+    var substitution: ?[]const u8 = null;
+    while (try reader.next()) |field| {
+        if (field.number == 1 and field.wire_type == 2) {
+            var matcher = pb.Reader{ .bytes = try reader.bytesValue() };
+            while (try matcher.next()) |entry| {
+                if (entry.number == 2 and entry.wire_type == 2) {
+                    pattern = try pb.text(&matcher, p.limits.max_text_bytes);
+                } else try matcher.skip(entry);
+            }
+        } else if (field.number == 2 and field.wire_type == 2) {
+            substitution = try pb.text(&reader, p.limits.max_text_bytes);
+        } else try reader.skip(field);
+    }
+    const pattern_value = pattern orelse return error.InvalidRdsResource;
+    if (pattern_value.len == 0) return error.InvalidRdsResource;
+    const substitution_value = substitution orelse return error.InvalidRdsResource;
+    const program = try routing.regex.compile(
+        p.allocator,
+        pattern_value,
+        p.limits.regex,
+    );
+    routing.regex.validateSubstitution(
+        substitution_value,
+        program.capture_count,
+    ) catch return error.InvalidRdsResource;
+    const rewrite = try p.allocator.create(model.RegexRewrite);
+    rewrite.* = .{
+        .program = program,
+        .substitution = substitution_value,
+        .limits = p.limits.regex,
+    };
+    return rewrite;
+}
 pub fn decode(p: anytype, bytes: []const u8) pb.Error!?model.Forward {
     var reader = pb.Reader{ .bytes = bytes };
     var specifier: ?u32 = null;
@@ -130,8 +167,10 @@ pub fn decode(p: anytype, bytes: []const u8) pb.Error!?model.Forward {
                 return error.UnsupportedRdsFeature;
             }
             if (value.len != 0) path_rewrite = .{ .whole = value };
-        } else if (field.number == 32 or
-            field.number == 35 or field.number == 41 or
+        } else if (field.number == 32 and field.wire_type == 2) {
+            if (path_rewrite != null) return error.InvalidRdsResource;
+            path_rewrite = .{ .regex = try regexRewrite(p, try reader.bytesValue()) };
+        } else if (field.number == 35 or field.number == 41 or
             field.number == 23 or field.number == 28 or
             field.number == 11)
         {

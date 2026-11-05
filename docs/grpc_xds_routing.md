@@ -18,7 +18,9 @@ grouping, non-capturing groups, greedy/lazy repetition and counted bounds,
 inline `i/m/s/U` flags and scoped flags, anchors and ASCII word boundaries,
 literal quoting, Perl/POSIX classes, Unicode categories/scripts and simple
 folding, hex/octal escapes and RE2's `\C` byte escape. Capture extraction and
-replacement are separate work. Lookup data comes from pinned RE2 revision
+RE2-style `\0`..`\9` replacement are available to route regex rewrites through
+a bounded backtracking workspace; hash-policy header rewriting remains
+follow-up work. Lookup data comes from pinned RE2 revision
 `2da0056814cf180480a19f5cf811e7e1c054bf6d`; its BSD license and source hashes
 are included beside endian-independent binary tables. The generation script
 can reproduce and verify them with
@@ -63,6 +65,6 @@ ranges and virtual-host precedence. Evidence is stored in
 
 The matching engine also accepts an optional RPC budget, checking cancellation
 and the original deadline during evaluation. [Typed RDS and immutable per-RPC
-selector publication](grpc_rds.md) now use these primitives. Capture/hash
+selector publication](grpc_rds.md) now use these primitives. Hash-policy regex
 rewriting, HTTP filter overrides and full LDS/RDS/CDS resolver orchestration
 remain follow-up work.

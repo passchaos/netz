@@ -67,6 +67,7 @@ pub const Workspace = struct {
                     self.push(seen, stack, &pending, split.right);
                     self.push(seen, stack, &pending, split.left);
                 },
+                .save => |save| self.push(seen, stack, &pending, save.next),
                 .assertion => |assertion| if (context.allows(assertion.kind)) self.push(seen, stack, &pending, assertion.next),
             }
         }

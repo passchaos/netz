@@ -80,7 +80,7 @@ test "gRPC RDS rewrites matched prefixes and literal or header authorities" {
     try std.testing.expectEqualStrings("/api", prefixed.path_rewrite.?.prefix.replacement);
     try std.testing.expectEqualStrings("rewritten.example", prefixed.authority.?);
     var rewritten: [64]u8 = undefined;
-    try std.testing.expectEqualStrings("/api.Service/Get", prefixed.path_rewrite.?.write("/demo.Service/Get", &rewritten));
+    try std.testing.expectEqualStrings("/api.Service/Get", try prefixed.path_rewrite.?.write(gpa, "/demo.Service/Get", &rewritten));
 
     var header_action = fixture.Builder{ .allocator = gpa };
     defer header_action.deinit();
@@ -229,13 +229,71 @@ test "gRPC RDS rejects reserved, binary and format request header mutations" {
     defer gpa.free(remove_bytes);
     try std.testing.expectError(error.InvalidRdsResource, rds.decode(gpa, remove_bytes, .{}));
 }
-test "gRPC RDS rejects unsupported regex and format rewrites" {
+test "gRPC RDS applies regex rewrites and rejects format rewrites" {
+    var matcher = fixture.Builder{ .allocator = gpa };
+    defer matcher.deinit();
+    try matcher.bytes(2, "^/service/([^/]+)(/.*)$");
+    var rewrite = fixture.Builder{ .allocator = gpa };
+    defer rewrite.deinit();
+    try rewrite.bytes(1, matcher.data.items);
+    try rewrite.bytes(2, "\\2/instance/\\1");
     var action = fixture.Builder{ .allocator = gpa };
     defer action.deinit();
-    try action.bytes(32, "");
+    try action.bytes(32, rewrite.data.items);
     const regex_bytes = try fixture.encode(gpa, "routes", &.{"backend.test"}, &.{.{ .prefix = "/", .action_extra = action.data.items }}, null);
     defer gpa.free(regex_bytes);
-    try std.testing.expectError(error.UnsupportedRdsFeature, rds.decode(gpa, regex_bytes, .{}));
+    var decoded = try rds.decode(gpa, regex_bytes, .{});
+    defer decoded.deinit();
+    const snapshot = try rds.Snapshot.create(gpa, regex_bytes, .{}, .{ .authority = "backend.test" });
+    defer snapshot.release();
+    var prng = random();
+    const selected = try snapshot.selectWith(gpa, .{
+        .path = "/service/foo/v1/api",
+        .authority = "backend.test",
+    }, 1, prng.random());
+    try std.testing.expect(selected.path_rewrite != null);
+    try std.testing.expectEqual(@as(usize, "/v1/api/instance/foo".len), selected.path_rewrite.?.outputLen("/service/foo/v1/api".len));
+    var rewritten: [64]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "/v1/api/instance/foo",
+        try selected.path_rewrite.?.write(gpa, "/service/foo/v1/api", &rewritten),
+    );
+
+    var empty = fixture.Builder{ .allocator = gpa };
+    defer empty.deinit();
+    try empty.bytes(32, "");
+    const empty_bytes = try fixture.encode(gpa, "routes", &.{"backend.test"}, &.{.{ .prefix = "/", .action_extra = empty.data.items }}, null);
+    defer gpa.free(empty_bytes);
+    try std.testing.expectError(error.InvalidRdsResource, rds.decode(gpa, empty_bytes, .{}));
+
+    var bad_matcher = fixture.Builder{ .allocator = gpa };
+    defer bad_matcher.deinit();
+    try bad_matcher.bytes(2, "(a)");
+    var bad_rewrite = fixture.Builder{ .allocator = gpa };
+    defer bad_rewrite.deinit();
+    try bad_rewrite.bytes(1, bad_matcher.data.items);
+    try bad_rewrite.bytes(2, "\\2");
+    var bad_action = fixture.Builder{ .allocator = gpa };
+    defer bad_action.deinit();
+    try bad_action.bytes(32, bad_rewrite.data.items);
+    const bad_bytes = try fixture.encode(gpa, "routes", &.{"backend.test"}, &.{.{ .prefix = "/", .action_extra = bad_action.data.items }}, null);
+    defer gpa.free(bad_bytes);
+    try std.testing.expectError(error.InvalidRdsResource, rds.decode(gpa, bad_bytes, .{}));
+
+    var malformed_matcher = fixture.Builder{ .allocator = gpa };
+    defer malformed_matcher.deinit();
+    try malformed_matcher.bytes(2, "(");
+    var malformed_rewrite = fixture.Builder{ .allocator = gpa };
+    defer malformed_rewrite.deinit();
+    try malformed_rewrite.bytes(1, malformed_matcher.data.items);
+    try malformed_rewrite.bytes(2, "x");
+    var malformed_action = fixture.Builder{ .allocator = gpa };
+    defer malformed_action.deinit();
+    try malformed_action.bytes(32, malformed_rewrite.data.items);
+    const malformed_bytes = try fixture.encode(gpa, "routes", &.{"backend.test"}, &.{.{ .prefix = "/", .action_extra = malformed_action.data.items }}, null);
+    defer gpa.free(malformed_bytes);
+    try std.testing.expectError(error.InvalidRegex, rds.decode(gpa, malformed_bytes, .{}));
+
     var path_action = fixture.Builder{ .allocator = gpa };
     defer path_action.deinit();
     try path_action.bytes(45, "/formatted%REQ(x)%");

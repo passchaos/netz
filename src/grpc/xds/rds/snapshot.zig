@@ -2,6 +2,7 @@
 const std = @import("std");
 const model = @import("model.zig");
 const routing = @import("../routing/mod.zig");
+const path_rewrite_mod = @import("../../path_rewrite.zig");
 const selector = @import("../../channel/call_selector.zig");
 const service = @import("../../service_config.zig");
 const wire = @import("../../wire.zig");
@@ -115,6 +116,20 @@ pub const Snapshot = struct {
                         else => .{ .whole = replacement },
                     },
                     .whole => |value| .{ .whole = value },
+                    .regex => |value| blk: {
+                        const output_len = path_rewrite_mod.outputLen(
+                            gpa,
+                            value,
+                            request.path,
+                        ) catch |err| switch (err) {
+                            error.OutOfMemory => return error.OutOfMemory,
+                            error.RegexLimitExceeded => return error.RouteMetadataLimitExceeded,
+                        };
+                        break :blk .{ .regex = .{
+                            .rewrite = value,
+                            .output_len = output_len,
+                        } };
+                    },
                 };
                 if (path_rewrite.?.outputLen(request.path.len) > request.max_header_bytes) {
                     return error.RouteMetadataLimitExceeded;

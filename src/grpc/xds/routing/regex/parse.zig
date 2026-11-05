@@ -9,6 +9,7 @@ pub const Parser = struct {
     limits: m.Limits,
     cursor: usize = 0,
     nodes: usize = 0,
+    captures: u16 = 0,
     flags: m.Flags = .{},
     pub fn peek(self: *Parser) ?u8 {
         return if (self.cursor < self.pattern.len) self.pattern[self.cursor] else null;
@@ -61,8 +62,12 @@ pub const Parser = struct {
     }
     fn group(self: *Parser, depth: usize) m.Error!*const m.Node {
         const saved = self.flags;
+        var capturing = true;
+        var capture_index: ?u16 = null;
         if (self.take('?')) {
-            if (self.take(':')) {} else if (self.take('P')) {
+            if (self.take(':')) {
+                capturing = false;
+            } else if (self.take('P')) {
                 if (!self.take('<')) return error.InvalidRegex;
                 try self.name();
             } else if (self.take('<')) {
@@ -92,11 +97,20 @@ pub const Parser = struct {
                 if (flag_count == 0 or (negative and negative_count == 0)) return error.InvalidRegex;
                 if (self.take(')')) return self.node(.flag_change);
                 if (!self.take(':')) return error.InvalidRegex;
+                capturing = false;
             }
+        }
+        if (capturing) {
+            if (self.captures == std.math.maxInt(u16)) return error.RegexLimitExceeded;
+            self.captures += 1;
+            capture_index = self.captures;
         }
         defer self.flags = saved;
         const value = try self.expression(depth + 1);
         if (!self.take(')')) return error.InvalidRegex;
+        if (capture_index) |index| {
+            return self.node(.{ .capture = .{ .index = index, .child = value } });
+        }
         return self.node(.{ .group = value });
     }
     fn name(self: *Parser) m.Error!void {
@@ -212,9 +226,14 @@ pub const Parser = struct {
             maximum = count.maximum;
         } else return child;
         if (child.* == .flag_change) return error.InvalidRegex;
-        _ = self.take('?');
+        const lazy = self.take('?');
         if (self.peek()) |byte| if (byte == '*' or byte == '+' or byte == '?') return error.InvalidRegex;
-        return self.node(.{ .repeat = .{ .child = child, .minimum = minimum, .maximum = maximum } });
+        return self.node(.{ .repeat = .{
+            .child = child,
+            .minimum = minimum,
+            .maximum = maximum,
+            .lazy = lazy,
+        } });
     }
 };
 fn unquote(gpa: std.mem.Allocator, pattern: []const u8) m.Error![]const u8 {

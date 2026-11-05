@@ -20,11 +20,14 @@ pub const Limits = struct {
 };
 pub const Weighted = struct { name: []const u8, key: []const u8, weight: u32 };
 pub const HashPolicy = struct { kind: union(enum) { header: []const u8, channel_id }, terminal: bool };
+pub const RegexRewrite = @import("../../path_rewrite.zig").RegexRewrite;
 pub const PathRewrite = union(enum) {
     /// Replace the complete request path.
     whole: []const u8,
     /// Replace the matched route prefix.
     prefix: []const u8,
+    /// Apply an RE2-style capture-aware replacement.
+    regex: *const RegexRewrite,
 };
 pub const HostRewrite = union(enum) {
     /// Replace `:authority` with this literal.
