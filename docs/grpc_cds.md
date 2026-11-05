@@ -119,7 +119,10 @@ are resolved by the runtime controller; direct CDS consumers that leave the
 option unset keep rejecting them. Certificate providers, ECDH curve lists,
 regex/custom SAN matchers, file/environment data sources and other transport
 sockets are explicitly rejected. See [SDS](grpc_sds.md).
-`transport_socket_matches` and `lrs_server` are also rejected. Cluster
+`transport_socket_matches` is rejected. A cluster `lrs_server` is accepted
+only when it selects `ConfigSource.self`, matching grpc-core; that cluster
+reports through the controller's LRS control plane, while any other LRS
+server remains unsupported. Cluster
 `upstream_config` accepts `HttpProtocolOptions.http2_protocol_options` and maps
 `hpack_table_size`, `max_concurrent_streams`, `initial_stream_window_size` and
 `initial_connection_window_size` onto the cluster's HTTP/2 connection limits;

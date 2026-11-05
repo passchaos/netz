@@ -659,3 +659,22 @@ test "gRPC CDS decodes typed subject alt name matchers" {
     defer gpa.free(encoded_other);
     try std.testing.expectError(error.UnsupportedCdsFeature, resource.decode(gpa, encoded_other, .{}));
 }
+
+test "gRPC CDS accepts lrs_server self and rejects other servers" {
+    // ConfigSource.self (field 5) inside Cluster.lrs_server (field 42).
+    const self_cluster = try fixture.cluster(gpa, "backend", "", "\xd2\x02\x02\x2a\x00");
+    defer gpa.free(self_cluster);
+    var decoded = try resource.decode(gpa, self_cluster, .{});
+    defer decoded.deinit();
+    try std.testing.expect(decoded.value.lrs_self);
+
+    // ConfigSource.ads (field 3) is not a self LRS server.
+    const ads_cluster = try fixture.cluster(gpa, "backend", "", "\xd2\x02\x02\x1a\x00");
+    defer gpa.free(ads_cluster);
+    try std.testing.expectError(error.UnsupportedCdsFeature, resource.decode(gpa, ads_cluster, .{}));
+
+    // Malformed ConfigSource fails closed.
+    const bad_cluster = try fixture.cluster(gpa, "backend", "", "\xd2\x02\x02\x12\x00");
+    defer gpa.free(bad_cluster);
+    try std.testing.expectError(error.InvalidCdsResource, resource.decode(gpa, bad_cluster, .{}));
+}

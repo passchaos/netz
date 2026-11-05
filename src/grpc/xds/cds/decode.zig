@@ -58,6 +58,9 @@ pub const Cluster = struct {
     http2_limits: ?Http2Limits = null,
     max_concurrent_requests: u32 = 1024,
     lrs_propagation: LrsPropagation = .{},
+    /// `lrs_server` selected `ConfigSource.self`: report through the same
+    /// control plane as discovery.
+    lrs_self: bool = false,
     /// Ordered leaf cluster names for an `envoy.clusters.aggregate` cluster.
     aggregate_clusters: []const []const u8 = &.{},
     policy: policy.Result,
@@ -909,6 +912,7 @@ pub fn decode(gpa: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!O
     var lrs_named_all: bool = false;
     var lrs_named: std.ArrayList([]const u8) = .empty;
     var aggregate_clusters: []const []const u8 = &.{};
+    var lrs_self = false;
     while (try reader.next()) |field| {
         if (field.number == 1 and field.wire_type == 2) name = try pb.text(&reader, limits.max_text_bytes) else if (field.number == 2 and field.wire_type == 0) kind = try pb.u32Value(&reader) else if (field.number == 38 and field.wire_type == 2) {
             aggregate_clusters = try aggregateCluster(
@@ -940,7 +944,17 @@ pub fn decode(gpa: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!O
                 const metric = value["named_metrics.".len..];
                 if (metric.len != 0) try lrs_named.append(arena, metric);
             }
-        } else if ((field.number == 43 or field.number == 42) and field.wire_type == 2) return error.UnsupportedCdsFeature else try reader.skip(field);
+        } else if (field.number == 42 and field.wire_type == 2) {
+            // grpc-core accepts only ConfigSource.self for a cluster's
+            // LRS server; any other server remains unsupported.
+            const lrs_source = @import("../config_source.zig").decode(try reader.bytesValue()) catch |err| switch (err) {
+                error.UnsupportedConfigSource => return error.UnsupportedCdsFeature,
+                error.InvalidConfigSource => return error.InvalidCdsResource,
+                else => return @errorCast(err),
+            };
+            if (lrs_source != .self) return error.UnsupportedCdsFeature;
+            lrs_self = true;
+        } else if (field.number == 43 and field.wire_type == 2) return error.UnsupportedCdsFeature else try reader.skip(field);
     }
     if (name.len == 0) return error.InvalidCdsResource;
     const discovery: Discovery = @enumFromInt(kind);
@@ -999,7 +1013,7 @@ pub fn decode(gpa: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!O
             .{ cluster_policy.child_json, outlier_json },
         );
     }
-    result.value = .{ .name = name, .eds_service_name = service, .discovery = discovery, .inline_assignment = inline_assignment, .host_endpoints = host_endpoints, .tls = tls, .tls_sds = tls_sds, .http2_limits = http2, .max_concurrent_requests = if (breaker) |raw| try circuit(raw, limits.max_thresholds) else 1024, .lrs_propagation = lrs_propagation, .aggregate_clusters = aggregate_clusters, .policy = cluster_policy };
+    result.value = .{ .name = name, .eds_service_name = service, .discovery = discovery, .inline_assignment = inline_assignment, .host_endpoints = host_endpoints, .tls = tls, .tls_sds = tls_sds, .http2_limits = http2, .max_concurrent_requests = if (breaker) |raw| try circuit(raw, limits.max_thresholds) else 1024, .lrs_propagation = lrs_propagation, .lrs_self = lrs_self, .aggregate_clusters = aggregate_clusters, .policy = cluster_policy };
     // Converted policies must satisfy the same configuration parser/runtime
     // contract as direct callers, including complete range validation.
     const json = try std.fmt.allocPrint(arena, "{{\"loadBalancingConfig\":{s}}}", .{result.value.policy.child_json});
