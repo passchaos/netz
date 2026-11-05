@@ -65,6 +65,16 @@ pub fn validationSecret(
     trusted_ca: []const u8,
     sans: []const SanSpec,
 ) ![]u8 {
+    return validationSecretHashes(gpa, name, trusted_ca, sans, &.{});
+}
+
+pub fn validationSecretHashes(
+    gpa: std.mem.Allocator,
+    name: []const u8,
+    trusted_ca: []const u8,
+    sans: []const SanSpec,
+    hashes: []const [32]u8,
+) ![]u8 {
     var validation = Builder{ .allocator = gpa };
     defer validation.deinit();
     var trusted = try dataSource(gpa, trusted_ca);
@@ -81,6 +91,10 @@ pub fn validationSecret(
         }, san.value);
         if (san.ignore_case) try matcher.number(6, 1);
         try validation.bytes(2, matcher.data.items);
+    }
+    for (hashes) |hash| {
+        const encoded = std.fmt.bytesToHex(hash, .lower);
+        try validation.bytes(4, &encoded);
     }
     var out = Builder{ .allocator = gpa };
     errdefer out.deinit();

@@ -179,3 +179,29 @@ test "gRPC SDS enforces byte, text and SAN limits" {
     defer owned.deinit();
     try std.testing.expectEqual(@as(usize, 3), owned.value.kind.validation_context.san_matchers.len);
 }
+
+test "gRPC SDS decodes certificate hash pins" {
+    const hash = [_]u8{0xab} ** 32;
+    const bytes = try fixture.validationSecretHashes(gpa, "roots", "CA BUNDLE", &.{}, &.{hash});
+    defer gpa.free(bytes);
+    var owned = try sds.decode(gpa, bytes, .{});
+    defer owned.deinit();
+    const validation = owned.value.kind.validation_context;
+    try std.testing.expectEqual(@as(usize, 1), validation.verify_certificate_hashes.len);
+    try std.testing.expectEqualSlices(u8, &hash, &validation.verify_certificate_hashes[0]);
+    const config = owned.value.tlsConfig();
+    try std.testing.expectEqual(@as(usize, 1), config.verify_certificate_hashes.?.len);
+
+    var invalid = fixture.Builder{ .allocator = gpa };
+    defer invalid.deinit();
+    try invalid.bytes(1, "roots");
+    var validation_message = fixture.Builder{ .allocator = gpa };
+    defer validation_message.deinit();
+    var trusted = fixture.Builder{ .allocator = gpa };
+    defer trusted.deinit();
+    try trusted.bytes(1, "CA");
+    try validation_message.bytes(1, trusted.data.items);
+    try validation_message.bytes(4, "zz");
+    try invalid.bytes(3, validation_message.data.items);
+    try std.testing.expectError(error.InvalidSdsResource, sds.decode(gpa, invalid.data.items, .{}));
+}

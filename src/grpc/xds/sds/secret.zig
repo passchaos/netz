@@ -15,6 +15,7 @@ pub const Limits = struct {
     max_bytes: usize = 1024 * 1024,
     max_text_bytes: usize = 4096,
     max_san_matchers: usize = 64,
+    max_certificate_hashes: usize = 64,
 };
 
 pub const TlsCertificate = struct {
@@ -25,6 +26,7 @@ pub const TlsCertificate = struct {
 pub const ValidationContext = struct {
     trusted_ca: []const u8,
     san_matchers: []const tls_material.SanMatcher = &.{},
+    verify_certificate_hashes: []const [32]u8 = &.{},
 };
 
 pub const Kind = union(enum) {
@@ -48,6 +50,7 @@ pub const Secret = struct {
             .validation_context => |value| .{
                 .trusted_ca = value.trusted_ca,
                 .san_matchers = value.san_matchers,
+                .verify_certificate_hashes = value.verify_certificate_hashes,
             },
         };
     }
@@ -145,6 +148,13 @@ fn tlsCertificate(bytes: []const u8, limits: Limits) Error!TlsCertificate {
     };
 }
 
+fn certificateHash(value: []const u8) Error![32]u8 {
+    if (value.len != 64) return error.InvalidSdsResource;
+    var result: [32]u8 = undefined;
+    _ = std.fmt.hexToBytes(&result, value) catch return error.InvalidSdsResource;
+    return result;
+}
+
 fn validationContext(
     arena: std.mem.Allocator,
     bytes: []const u8,
@@ -152,6 +162,7 @@ fn validationContext(
 ) Error!ValidationContext {
     var trusted_ca: ?[]const u8 = null;
     var matchers: std.ArrayList(tls_material.SanMatcher) = .empty;
+    var hashes: std.ArrayList([32]u8) = .empty;
     var reader: pb.Reader = .{ .bytes = bytes };
     while (try reader.next()) |field| switch (field.number) {
         1 => {
@@ -170,16 +181,24 @@ fn validationContext(
             if (field.wire_type != 0) return error.InvalidSdsResource;
             if (try reader.varint() != 0) return error.UnsupportedSdsFeature;
         },
+        4 => {
+            if (field.wire_type != 2) return error.InvalidSdsResource;
+            if (hashes.items.len >= limits.max_certificate_hashes) {
+                return error.SdsLimitExceeded;
+            }
+            try hashes.append(arena, try certificateHash(try text(&reader, limits)));
+        },
         6 => {
             if (field.wire_type != 0) return error.InvalidSdsResource;
             if ((try reader.varint()) != 0) return error.UnsupportedSdsFeature;
         },
-        4, 5, 7, 8, 9, 10, 11, 12, 13 => return error.UnsupportedSdsFeature,
+        5, 7, 8, 9, 10, 11, 12, 13 => return error.UnsupportedSdsFeature,
         else => try reader.skip(field),
     };
     return .{
         .trusted_ca = trusted_ca orelse return error.InvalidSdsResource,
         .san_matchers = try matchers.toOwnedSlice(arena),
+        .verify_certificate_hashes = try hashes.toOwnedSlice(arena),
     };
 }
 

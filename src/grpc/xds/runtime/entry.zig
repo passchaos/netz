@@ -108,6 +108,9 @@ pub const Cluster = struct {
                         }
                         config.san_matchers = matchers;
                     }
+                    if (value.verify_certificate_hashes.len != 0) {
+                        config.verify_certificate_hashes = try arena.dupe([32]u8, value.verify_certificate_hashes);
+                    }
                 },
                 .tls_certificate => return error.InvalidSdsResource,
             }

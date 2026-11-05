@@ -5,7 +5,7 @@ const policy = @import("policy.zig");
 const tls_material = @import("../tls_material.zig");
 pub const type_url = "type.googleapis.com/envoy.config.cluster.v3.Cluster";
 pub const Error = pb.Error;
-pub const Limits = struct { max_bytes: usize = 8 * 1024 * 1024, max_text_bytes: usize = 4096, max_thresholds: usize = 256, max_policies: usize = 32, max_endpoints: usize = 65536, max_aggregate_clusters: usize = 256, allow_sds: bool = false };
+pub const Limits = struct { max_bytes: usize = 8 * 1024 * 1024, max_text_bytes: usize = 4096, max_thresholds: usize = 256, max_policies: usize = 32, max_endpoints: usize = 65536, max_aggregate_clusters: usize = 256, max_certificate_hashes: usize = 64, allow_sds: bool = false };
 /// `aggregate` is a netz-internal discovery kind selected by the CDS
 /// `envoy.clusters.aggregate` custom cluster extension; it has no Envoy enum
 /// wire value of its own.
@@ -286,6 +286,7 @@ fn tlsCertificate(bytes: []const u8, limits: Limits) Error!struct { chain: []con
 const Validation = struct {
     trusted_ca: []const u8,
     san_matchers: []const tls_material.SanMatcher,
+    verify_certificate_hashes: []const [32]u8,
 };
 
 fn sanMatcher(bytes: []const u8, limits: Limits) Error!tls_material.SanMatcher {
@@ -319,16 +320,31 @@ fn sanMatcher(bytes: []const u8, limits: Limits) Error!tls_material.SanMatcher {
     return .{ .kind = kind.?, .value = value, .ignore_case = ignore_case };
 }
 
+fn certificateHash(value: []const u8) Error![32]u8 {
+    if (value.len != 64) return error.InvalidCdsResource;
+    var result: [32]u8 = undefined;
+    _ = std.fmt.hexToBytes(&result, value) catch return error.InvalidCdsResource;
+    return result;
+}
+
 fn validationContext(arena: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!Validation {
     var trusted_ca: ?[]const u8 = null;
     var matchers: std.ArrayList(tls_material.SanMatcher) = .empty;
+    var hashes: std.ArrayList([32]u8) = .empty;
     var reader: pb.Reader = .{ .bytes = bytes };
     while (try reader.next()) |field| {
         if (field.number == 1 and field.wire_type == 2) trusted_ca = try dataSource(try reader.bytesValue(), limits) else if (field.number == 2 and field.wire_type == 2) {
             try matchers.append(arena, try sanMatcher(try reader.bytesValue(), limits));
+        } else if (field.number == 4 and field.wire_type == 2) {
+            if (hashes.items.len >= limits.max_certificate_hashes) return error.CdsLimitExceeded;
+            try hashes.append(arena, try certificateHash(try pb.text(&reader, limits.max_text_bytes)));
         } else if (field.number >= 3 and field.number <= 10) return error.UnsupportedCdsFeature else try reader.skip(field);
     }
-    return .{ .trusted_ca = trusted_ca orelse return error.InvalidCdsResource, .san_matchers = try matchers.toOwnedSlice(arena) };
+    return .{
+        .trusted_ca = trusted_ca orelse return error.InvalidCdsResource,
+        .san_matchers = try matchers.toOwnedSlice(arena),
+        .verify_certificate_hashes = try hashes.toOwnedSlice(arena),
+    };
 }
 
 const TlsParams = struct {
@@ -419,6 +435,7 @@ fn commonTlsContext(arena: std.mem.Allocator, bytes: []const u8, limits: Limits)
             const validation = try validationContext(arena, try reader.bytesValue(), limits);
             result.config.trusted_ca = validation.trusted_ca;
             result.config.san_matchers = validation.san_matchers;
+            result.config.verify_certificate_hashes = validation.verify_certificate_hashes;
         } else if (field.number == 4 and field.wire_type == 2) {
             _ = try reader.bytesValue();
         } else if (field.number == 6 and field.wire_type == 2) {
@@ -445,6 +462,7 @@ fn upstreamTlsContext(arena: std.mem.Allocator, bytes: []const u8, limits: Limit
             result.version_policy = common.config.version_policy;
             result.tls12_cipher_suites = common.config.tls12_cipher_suites;
             result.san_matchers = common.config.san_matchers;
+            result.verify_certificate_hashes = common.config.verify_certificate_hashes;
             sds = common.sds;
         } else if (field.number == 2 and field.wire_type == 2) {
             const value = try pb.text(&reader, 255);

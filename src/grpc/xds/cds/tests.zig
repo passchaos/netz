@@ -471,3 +471,36 @@ test "gRPC CDS decodes HTTP/2 upstream protocol limits" {
         limits.initial_connection_window_size,
     );
 }
+
+test "gRPC CDS decodes inline certificate hash pins" {
+    const pem = try std.fmt.allocPrint(gpa, "-----BEGIN CERTIFICATE-----\n{s}\n-----END CERTIFICATE-----\n", .{tls_testing.certificate_base64});
+    defer gpa.free(pem);
+    var trusted = fixture.Builder{ .allocator = gpa };
+    defer trusted.deinit();
+    try trusted.bytes(1, pem);
+    var validation = fixture.Builder{ .allocator = gpa };
+    defer validation.deinit();
+    try validation.bytes(1, trusted.data.items);
+    try validation.bytes(4, "abababababababababababababababababababababababababababababababab");
+    var common = fixture.Builder{ .allocator = gpa };
+    defer common.deinit();
+    try common.bytes(3, validation.data.items);
+    var context = fixture.Builder{ .allocator = gpa };
+    defer context.deinit();
+    try context.bytes(1, common.data.items);
+    var any = fixture.Builder{ .allocator = gpa };
+    defer any.deinit();
+    try any.bytes(1, "type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext");
+    try any.bytes(2, context.data.items);
+    var socket = fixture.Builder{ .allocator = gpa };
+    defer socket.deinit();
+    try socket.bytes(1, "envoy.transport_sockets.tls");
+    try socket.bytes(3, any.data.items);
+    const encoded = try fixture.staticClusterTls(gpa, "backend", "127.0.0.1", 1001, socket.data.items);
+    defer gpa.free(encoded);
+    var decoded = try resource.decode(gpa, encoded, .{});
+    defer decoded.deinit();
+    const hashes = decoded.value.tls.?.verify_certificate_hashes.?;
+    try std.testing.expectEqual(@as(usize, 1), hashes.len);
+    try std.testing.expectEqual(@as(u8, 0xab), hashes[0][0]);
+}

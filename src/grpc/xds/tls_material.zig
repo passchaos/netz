@@ -23,6 +23,8 @@ pub const Config = struct {
     version_policy: ?tls_stream.VersionPolicy = null,
     tls12_cipher_suites: ?[]const tls_stream.Tls12CipherSuite = null,
     san_matchers: ?[]const SanMatcher = null,
+    /// SHA-256 hashes of DER-encoded certificates accepted in the peer chain.
+    verify_certificate_hashes: ?[]const [32]u8 = null,
 };
 
 pub const Error = std.mem.Allocator.Error || server_identity_file.Error || error{
@@ -42,6 +44,7 @@ pub const Material = struct {
     version_policy: ?tls_stream.VersionPolicy = null,
     tls12_cipher_suites: []const tls_stream.Tls12CipherSuite = &.{},
     san_matchers: []const OwnedSanMatcher = &.{},
+    verify_certificate_hashes: []const [32]u8 = &.{},
 
     const OwnedSanMatcher = struct { kind: SanMatch, value: []u8, ignore_case: bool };
 
@@ -77,6 +80,12 @@ pub const Material = struct {
                 self.san_matchers = owned;
             }
         }
+        if (config.verify_certificate_hashes) |hashes| {
+            if (hashes.len != 0) {
+                if (!self.bundle_loaded) return error.InvalidTlsMaterial;
+                self.verify_certificate_hashes = try gpa.dupe([32]u8, hashes);
+            }
+        }
         if (config.certificate_chain.len != 0) {
             self.identity = server_identity_file.parse(gpa, config.certificate_chain, config.private_key) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
@@ -92,6 +101,7 @@ pub const Material = struct {
             for (self.san_matchers) |matcher| self.allocator.free(matcher.value);
             self.allocator.free(self.san_matchers);
         }
+        if (self.verify_certificate_hashes.len != 0) self.allocator.free(self.verify_certificate_hashes);
         if (self.identity) |*identity| identity.deinit();
         self.bundle.deinit(self.allocator);
         self.allocator.destroy(self);
@@ -104,7 +114,7 @@ pub const Material = struct {
         if (self.version_policy) |policy| result.protocol_policy = policy;
         if (self.tls12_cipher_suites.len != 0) result.tls12_cipher_suites = self.tls12_cipher_suites;
         if (self.bundle_loaded) result.ca_bundle = .{ .bundle = &self.bundle, .lock = &self.lock };
-        if (self.san_matchers.len != 0) {
+        if (self.san_matchers.len != 0 or self.verify_certificate_hashes.len != 0) {
             result.server_verifier = .{ .verify_trust = verifySanTrust, .context = self };
         }
         if (self.identity) |*identity| {
@@ -118,14 +128,31 @@ pub const Material = struct {
         return result;
     }
 
-    fn verifySanTrust(context: ?*anyopaque, trust: vail.tls.auth.TrustContext) anyerror!void {
+    pub fn verifySanTrust(context: ?*anyopaque, trust: vail.tls.auth.TrustContext) anyerror!void {
         const self: *Material = @ptrCast(@alignCast(context orelse return error.CertificateUntrusted));
         const now = std.Io.Clock.Timestamp.now(self.io, .real).raw.nanoseconds;
         var verifier = vail.x509.trust.BundleVerifier{ .bundle = &self.bundle, .now_seconds = @intCast(@divTrunc(now, std.time.ns_per_s)) };
         try verifier.serverChainVerifier().verifyTrust(trust.server_name, trust.chain);
         if (trust.chain.len == 0) return error.CertificateUntrusted;
-        const leaf = std.crypto.Certificate.parse(.{ .buffer = trust.chain[0], .index = 0 }) catch return error.CertificateUntrusted;
-        try self.checkSans(leaf.subjectAltName());
+        if (self.verify_certificate_hashes.len != 0) {
+            var pinned = false;
+            for (trust.chain) |certificate| {
+                var digest: [32]u8 = undefined;
+                std.crypto.hash.sha2.Sha256.hash(certificate, &digest, .{});
+                for (self.verify_certificate_hashes) |expected| {
+                    if (std.mem.eql(u8, &digest, &expected)) {
+                        pinned = true;
+                        break;
+                    }
+                }
+                if (pinned) break;
+            }
+            if (!pinned) return error.CertificateUntrusted;
+        }
+        if (self.san_matchers.len != 0) {
+            const leaf = std.crypto.Certificate.parse(.{ .buffer = trust.chain[0], .index = 0 }) catch return error.CertificateUntrusted;
+            try self.checkSans(leaf.subjectAltName());
+        }
     }
 
     fn checkSans(self: *const Material, encoded: []const u8) !void {
@@ -241,4 +268,24 @@ test "xDS TLS SAN matchers accept and reject leaf names" {
     var rejecting = try Material.create(allocator, std.testing.io, .{ .trusted_ca = pem, .san_matchers = &.{.{ .kind = .exact, .value = "other" }} });
     defer rejecting.deinit();
     try std.testing.expectError(error.CertificateHostMismatch, rejecting.checkSans(leaf.subjectAltName()));
+}
+
+test "xDS TLS certificate hash pins accept and reject the peer chain" {
+    const tls_testing = @import("../../tls/testing.zig");
+    const allocator = std.testing.allocator;
+    const pem = try std.fmt.allocPrint(allocator, "-----BEGIN CERTIFICATE-----\n{s}\n-----END CERTIFICATE-----\n", .{tls_testing.certificate_base64});
+    defer allocator.free(pem);
+    var der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(&der, tls_testing.certificate_base64);
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(&der, &digest, .{});
+    const trust: vail.tls.auth.TrustContext = .{ .server_name = "localhost", .chain = &.{&der} };
+    var matching = try Material.create(allocator, std.testing.io, .{ .trusted_ca = pem, .verify_certificate_hashes = &.{digest} });
+    defer matching.deinit();
+    try Material.verifySanTrust(matching, trust);
+    var wrong = digest;
+    wrong[0] ^= 0xff;
+    var rejecting = try Material.create(allocator, std.testing.io, .{ .trusted_ca = pem, .verify_certificate_hashes = &.{wrong} });
+    defer rejecting.deinit();
+    try std.testing.expectError(error.CertificateUntrusted, Material.verifySanTrust(rejecting, trust));
 }
