@@ -7,6 +7,7 @@ const decode = @import("decode.zig");
 const rds = @import("../rds.zig");
 const delta = @import("../ads/delta.zig");
 const shared = @import("../../channel/shared.zig");
+const raw_name = @import("../raw_name.zig");
 const Projection = @import("projection.zig").Projection;
 
 fn hasName(names: []const []const u8, name: []const u8) bool {
@@ -26,6 +27,8 @@ pub fn applyListener(self: *ctl.Controller, client: *delta.Client, update: delta
     var heartbeat = false;
     var heartbeat_ttl: ?delta.codec.Duration = null;
     var storage: usize = 0;
+    var first_error: ?model.Error = null;
+    var failed_listener = false;
     for (response.resources) |raw| {
         if (std.mem.eql(u8, raw.name, self.options.listener_name)) {
             if (raw.resource == null) {
@@ -35,7 +38,12 @@ pub fn applyListener(self: *ctl.Controller, client: *delta.Client, update: delta
             }
         }
         const any = raw.resource orelse continue;
-        var candidate = try decode.decode(self.allocator, any.value, self.options.limits);
+        var candidate = decode.decode(self.allocator, any.value, self.options.limits) catch |err| {
+            if (!self.options.fail_on_data_errors) return err;
+            if (std.mem.eql(u8, raw.name, self.options.listener_name)) failed_listener = true;
+            if (first_error == null) first_error = err;
+            continue;
+        };
         errdefer candidate.deinit();
         if (!std.mem.eql(u8, candidate.value.name, raw.name)) return error.InvalidDiscoveryMessage;
         storage = std.math.add(usize, storage, candidate.storageBytes()) catch return error.LdsLimitExceeded;
@@ -46,9 +54,13 @@ pub fn applyListener(self: *ctl.Controller, client: *delta.Client, update: delta
         }
         try candidates.append(self.allocator, candidate);
     }
-    if (hasName(response.removed, self.options.listener_name)) {
-        if (self.listener == null) return try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
-        if (self.options.ignore_resource_deletion) {
+    if (hasName(response.removed, self.options.listener_name) or failed_listener) {
+        if (self.listener == null) {
+            if (first_error) |err| return err;
+            return try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
+        }
+        if (self.options.ignore_resource_deletion and !failed_listener) {
+            if (first_error) |err| return err;
             return try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
         }
         var subscription = try client.subscriptions.prepare(rds.type_url, &.{});
@@ -66,6 +78,7 @@ pub fn applyListener(self: *ctl.Controller, client: *delta.Client, update: delta
         self.routes_accepted = false;
         self.listener_deadline = null;
         self.routes_deadline = null;
+        if (first_error) |err| return err;
         return revision;
     }
     if (selected) |index| {
@@ -96,6 +109,7 @@ pub fn applyListener(self: *ctl.Controller, client: *delta.Client, update: delta
         self.listener_deadline = listener_deadline;
         if (hcm.route_source == .inline_rds or !same) self.routes_deadline = null;
         source_owned = false;
+        if (first_error) |err| return err;
         return revision;
     }
     // A heartbeat for a listener we have never accepted is not a valid
@@ -105,6 +119,7 @@ pub fn applyListener(self: *ctl.Controller, client: *delta.Client, update: delta
         if (self.listener == null) return error.InvalidDiscoveryMessage;
         self.listener_deadline = try delta.codec.ttlDeadline(client.sender.state.io, heartbeat_ttl);
     }
+    if (first_error) |err| return err;
     return try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
 }
 
@@ -119,15 +134,21 @@ pub fn applyRoutes(self: *ctl.Controller, client: *delta.Client, update: delta.U
     if (listener.value.hcm.route_source != .rds) {
         // Inline listeners do not consume RDS, but malformed resources must
         // still be rejected before the update is acknowledged.
+        var inline_error: ?rds.Error = null;
         for (response.resources) |raw| {
             const any = raw.resource orelse continue;
-            const snapshot = try rds.Snapshot.create(self.allocator, any.value, self.options.limits.rds, self.routeOptions());
+            const snapshot = rds.Snapshot.create(self.allocator, any.value, self.options.limits.rds, self.routeOptions()) catch |err| {
+                if (!self.options.fail_on_data_errors) return err;
+                if (inline_error == null) inline_error = err;
+                continue;
+            };
             if (!std.mem.eql(u8, snapshot.resource.value.name, raw.name)) {
                 snapshot.release();
                 return error.InvalidDiscoveryMessage;
             }
             snapshot.release();
         }
+        if (inline_error) |err| return err;
         return try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
     }
     const name = listener.value.hcm.route_source.rds;
@@ -136,6 +157,8 @@ pub fn applyRoutes(self: *ctl.Controller, client: *delta.Client, update: delta.U
     var heartbeat = false;
     var heartbeat_ttl: ?delta.codec.Duration = null;
     var storage: usize = 0;
+    var first_error: ?rds.Error = null;
+    var failed_name: ?[]const u8 = null;
     for (response.resources) |raw| {
         if (std.mem.eql(u8, raw.name, name)) {
             if (raw.resource == null) {
@@ -145,7 +168,12 @@ pub fn applyRoutes(self: *ctl.Controller, client: *delta.Client, update: delta.U
             }
         }
         const any = raw.resource orelse continue;
-        const snapshot = try rds.Snapshot.create(self.allocator, any.value, self.options.limits.rds, self.routeOptions());
+        const snapshot = rds.Snapshot.create(self.allocator, any.value, self.options.limits.rds, self.routeOptions()) catch |err| {
+            if (!self.options.fail_on_data_errors) return err;
+            if (first_error == null) first_error = err;
+            failed_name = raw.name;
+            continue;
+        };
         errdefer snapshot.release();
         if (!std.mem.eql(u8, snapshot.resource.value.name, raw.name)) return error.InvalidDiscoveryMessage;
         storage = std.math.add(usize, storage, snapshot.resource.arena.queryCapacity()) catch return error.LdsLimitExceeded;
@@ -156,9 +184,14 @@ pub fn applyRoutes(self: *ctl.Controller, client: *delta.Client, update: delta.U
             selected_ttl = raw.ttl;
         }
     }
-    if (hasName(response.removed, name)) {
-        if (!self.routes_accepted or self.routes == null) return try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
-        if (self.options.ignore_resource_deletion) {
+    const failed_routes = if (failed_name) |invalid| std.mem.eql(u8, invalid, name) else false;
+    if (hasName(response.removed, name) or failed_routes) {
+        if (!self.routes_accepted or self.routes == null) {
+            if (first_error) |err| return err;
+            return try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
+        }
+        if (self.options.ignore_resource_deletion and !failed_routes) {
+            if (first_error) |err| return err;
             return try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
         }
         const empty = try self.empty(name);
@@ -171,12 +204,14 @@ pub fn applyRoutes(self: *ctl.Controller, client: *delta.Client, update: delta.U
         self.routes = empty;
         self.routes_accepted = false;
         self.routes_deadline = null;
+        if (first_error) |err| return err;
         return revision;
     }
     if (selected) |snapshot| {
         const routes_deadline = try delta.codec.ttlDeadline(client.sender.state.io, selected_ttl);
         if (self.routes_accepted and self.routes != null and std.mem.eql(u8, self.routes.?.resource.wire, snapshot.resource.wire)) {
             self.routes_deadline = routes_deadline;
+            if (first_error) |err| return err;
             return try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
         }
         const projection = try Projection.create(self.allocator, snapshot, listener.value.hcm.max_stream_duration);
@@ -187,12 +222,13 @@ pub fn applyRoutes(self: *ctl.Controller, client: *delta.Client, update: delta.U
         self.routes = snapshot;
         self.routes_accepted = true;
         self.routes_deadline = routes_deadline;
+        if (first_error) |err| return err;
         return revision;
     }
     if (heartbeat) {
         if (!self.routes_accepted or self.routes == null) return error.InvalidDiscoveryMessage;
         self.routes_deadline = try delta.codec.ttlDeadline(client.sender.state.io, heartbeat_ttl);
-        return try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
     }
+    if (first_error) |err| return err;
     return try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
 }

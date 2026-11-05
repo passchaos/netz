@@ -3,13 +3,13 @@
   "date": "2026-11-06",
   "head": "working-tree",
   "subject": "gRPC xDS fail_on_data_errors",
-  "change": "runtime.Options.fail_on_data_errors implements the gRPC xDS server feature. When a SotW or delta CDS/EDS/SDS resource fails typed validation, its cached cluster, endpoint assignment or secret is dropped and the removal is published; the response is still returned as an error so the caller NACKs it. The invalid resource's name is recovered leniently from protobuf field 1 when decoding fails before the name is consumed. Without the option the previous cached resource is retained (default behavior).",
+  "change": "runtime.Options.fail_on_data_errors implements the gRPC xDS server feature. When a SotW or delta LDS/RDS/CDS/EDS/SDS resource fails typed validation, its cached listener, route tree, cluster, endpoint assignment or secret is dropped and the removal is published; the response is still returned as an error so the caller NACKs it. The invalid resource's name is recovered leniently from protobuf field 1 when decoding fails before the name is consumed. Without the option the previous cached resource is retained (default behavior).",
   "tests": {
-    "unit": "src/grpc/xds/runtime/fail_on_data_errors_tests.zig covers SotW CDS (cached cluster dropped, endpoints removed, version not accepted), delta CDS (same for delta resources), SotW EDS (assignment dropped to an empty snapshot) and SotW SDS (secret dropped and the referencing cluster returns to pending). src/grpc/xds/raw_name.zig covers lenient name extraction from truncated payloads.",
+    "unit": "src/grpc/xds/runtime/fail_on_data_errors_tests.zig covers SotW CDS, delta CDS, SotW EDS, SotW SDS, SotW LDS, SotW dynamic RDS, delta LDS and invalid RDS for an inline listener: each drops the cached resource where applicable, publishes the removal and still returns the decode error; old projection epochs keep endpoints until the next synchronization prunes them. src/grpc/xds/raw_name.zig covers lenient name extraction from truncated payloads.",
     "focused_gate": {
       "command": "zig build test-lib -Dtest-filter='xDS runtime' -Dtest-filter='gRPC CDS' -Dtest-filter='gRPC LDS' -Dtest-filter='SDS' -Dtest-filter='LRS' -Dtest-filter='fail_on_data_errors' --summary all",
-      "passed": 251,
-      "total": 251,
+      "passed": 255,
+      "total": 255,
       "failed": 0
     },
     "compile": {
@@ -20,8 +20,8 @@
       "command": "zig build test-lib",
       "status": "passed",
       "exit_code": 0,
-      "passed": 6519,
-      "total": 6519,
+      "passed": 6523,
+      "total": 6523,
       "failed": 0
     }
   },
@@ -35,11 +35,16 @@
     "src/grpc/xds/runtime/apply_delta_cds.zig": "e626e062500e9409b97718ea0d1752257c9ded929ed96bfcb34b4ea44712dfe3",
     "src/grpc/xds/runtime/apply_delta_eds.zig": "8bbb9792f4fcfd162e662a72c237ad57b1065eadd6a957d0dd5c3404ce8c16f2",
     "src/grpc/xds/runtime/apply_delta_sds.zig": "e356d98db1493355d17920c9b90765b3c4d7f4372e7ed0d047ae413553e9ce18",
-    "src/grpc/xds/runtime/fail_on_data_errors_tests.zig": "f32f442dc774d9d9b29cf5c9c8031f163cd9a8ad4d6861bc70d5633cd4fb9fde",
+    "src/grpc/xds/runtime/fail_on_data_errors_tests.zig": "104174c525e616bfde7836c1ab3de47fef0176a1a462a1adc6c7b560c22119c8",
     "src/grpc/xds/runtime.zig": "68ce725bb4b21e5362fe4f7eafa945b15cf332205223804b62a94b1d224c89e4",
     "docs/grpc_xds_runtime.md": "cf1c3d10416bcbd0774f896e89bf0afc364c4d5bf3108cda370f99213317be5a",
     "src/websocket/runtime/handshake_timeout_tests.zig": "2a41188e09bc4e161b460083f631a73bde0a58039d7e7dcfdb3e33f762a03d6a",
-    "src/http2/runtime/handshake_timeout_tests.zig": "ba77b8b0faeadef8385ad6248b3a6145c81019bcea5719aa635cca605ea29863"
+    "src/http2/runtime/handshake_timeout_tests.zig": "ba77b8b0faeadef8385ad6248b3a6145c81019bcea5719aa635cca605ea29863",
+    "src/grpc/xds/lds/apply_listener.zig": "8665a56eb9307bb948acb3382aa1497aa4adbd5656c262e6df0c07718510a7ad",
+    "src/grpc/xds/lds/apply_routes.zig": "041dab1d0167d58136307c15ab257458fe6ddb9e42e2803a28945ee9b5ad6f4a",
+    "src/grpc/xds/lds/apply_delta.zig": "acb80010e59c60db236ff3f7d36044c3e99867a34095d76121da0da89bf5f60c",
+    "src/grpc/xds/lds/controller.zig": "07830f3761039df48e10dc79792b709c7b5e0fee7e691e340e01af5644e3127c",
+    "src/grpc/xds/runtime/controller.zig": "a9d68ced14e8064d8836b8ee6ab105cf4d4bbdefc5d1176a7ae730ee89c921cb"
   },
-  "notes": "A response containing both valid and invalid resources applies the valid subset and drops the invalid names, matching grpc-core's per-resource handling. `resource_timer_is_transient_error` remains a status-only difference and is still unimplemented."
+  "notes": "A response containing both valid and invalid resources applies the valid subset and drops the invalid names, matching grpc-core's per-resource handling. resource_timer_is_transient_error remains a status-only difference and is still unimplemented."
 }

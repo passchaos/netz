@@ -7,6 +7,7 @@ const delta = @import("../ads/delta.zig");
 const lds = @import("../lds.zig");
 const cds = @import("../cds.zig");
 const eds = @import("../eds.zig");
+const rds = @import("../rds.zig");
 const sds = @import("../sds.zig");
 const lds_fixture = @import("../lds/testing.zig");
 const rds_fixture = @import("../rds/testing.zig");
@@ -224,4 +225,168 @@ test "gRPC xDS runtime fail_on_data_errors drops a cached secret" {
     try std.testing.expectError(error.TruncatedMessage, controller.applyWithDeadline(&client, invalid_update, channel, deadline(io)));
     try std.testing.expect(controller.entries.items[0].cluster.?.sdsPending());
     try std.testing.expectEqual(@as(usize, 0), channel.configuredEndpointCount());
+}
+
+test "gRPC xDS runtime fail_on_data_errors drops a cached SotW listener" {
+    var threaded = std.Io.Threaded.init(gpa, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var channel = try grpc.SharedChannel.init(gpa, io, .{ .cleartext_ip = .{ .address = .{ .ip4 = .loopback(1) } } }, .{});
+    defer channel.deinit();
+    var sender = channel.sender();
+    defer sender.deinit();
+    var client = try ads.Client.init(gpa, sender, .{ .node = .{ .id = "test" } });
+    defer client.deinit();
+    const controller = try runtime.Controller.create(gpa, .{
+        .listener_name = "frontend",
+        .target = .{ .authority = "backend.test" },
+        .fail_on_data_errors = true,
+    });
+    defer controller.deinit();
+    _ = try controller.startWithDeadline(&client, channel, deadline(io));
+    try listenRoute(controller, &client, channel, io, "a");
+
+    const cluster = try cds_fixture.staticCluster(gpa, "a", "127.0.0.1", 1001);
+    defer gpa.free(cluster);
+    var cluster_update = try update(&client, cds.type_url, "c1", &.{.{ .type_url = cds.type_url, .value = cluster }});
+    defer cluster_update.deinit();
+    try accept(controller, &client, channel, io, cluster_update);
+    try std.testing.expectEqual(@as(usize, 1), channel.configuredEndpointCount());
+    try std.testing.expect(controller.listener.?.listener != null);
+
+    // Name field intact, followed by a truncated field.
+    const invalid = "\x0a\x08frontend\x1a";
+    var invalid_update = try update(&client, lds.type_url, "l2", &.{.{ .type_url = lds.type_url, .value = invalid }});
+    defer invalid_update.deinit();
+    try std.testing.expectError(error.TruncatedMessage, controller.applyWithDeadline(&client, invalid_update, channel, deadline(io)));
+    try std.testing.expect(controller.listener.?.listener == null);
+    try std.testing.expectEqual(@as(usize, 0), controller.latest.?.source.required_clusters.len);
+    // Old projection epochs keep their endpoints while config references
+    // remain; the next synchronization prunes them.
+    try std.testing.expectError(error.AdsNotConnected, controller.synchronizeWithDeadline(&client, channel, deadline(io)));
+    try std.testing.expectEqual(@as(usize, 0), channel.configuredEndpointCount());
+}
+
+test "gRPC xDS runtime fail_on_data_errors drops cached dynamic routes" {
+    var threaded = std.Io.Threaded.init(gpa, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var channel = try grpc.SharedChannel.init(gpa, io, .{ .cleartext_ip = .{ .address = .{ .ip4 = .loopback(1) } } }, .{});
+    defer channel.deinit();
+    var sender = channel.sender();
+    defer sender.deinit();
+    var client = try ads.Client.init(gpa, sender, .{ .node = .{ .id = "test" } });
+    defer client.deinit();
+    const controller = try runtime.Controller.create(gpa, .{
+        .listener_name = "frontend",
+        .target = .{ .authority = "backend.test" },
+        .fail_on_data_errors = true,
+    });
+    defer controller.deinit();
+    _ = try controller.startWithDeadline(&client, channel, deadline(io));
+
+    const listener = try lds_fixture.encode(gpa, .{ .route_name = "routes" });
+    defer gpa.free(listener);
+    var listener_update = try update(&client, lds.type_url, "l1", &.{.{ .type_url = lds.type_url, .value = listener }});
+    defer listener_update.deinit();
+    try accept(controller, &client, channel, io, listener_update);
+
+    const routes = try rds_fixture.encode(gpa, "routes", &.{"backend.test"}, &.{.{ .prefix = "/", .cluster = "a" }}, null);
+    defer gpa.free(routes);
+    var routes_update = try update(&client, rds.type_url, "r1", &.{.{ .type_url = rds.type_url, .value = routes }});
+    defer routes_update.deinit();
+    try accept(controller, &client, channel, io, routes_update);
+
+    const cluster = try cds_fixture.staticCluster(gpa, "a", "127.0.0.1", 1001);
+    defer gpa.free(cluster);
+    var cluster_update = try update(&client, cds.type_url, "c1", &.{.{ .type_url = cds.type_url, .value = cluster }});
+    defer cluster_update.deinit();
+    try accept(controller, &client, channel, io, cluster_update);
+    try std.testing.expectEqual(@as(usize, 1), channel.configuredEndpointCount());
+    try std.testing.expect(controller.listener.?.listener != null);
+
+    const invalid = "\x0a\x06routes\x12";
+    var invalid_update = try update(&client, rds.type_url, "r2", &.{.{ .type_url = rds.type_url, .value = invalid }});
+    defer invalid_update.deinit();
+    try std.testing.expectError(error.TruncatedMessage, controller.applyWithDeadline(&client, invalid_update, channel, deadline(io)));
+    try std.testing.expect(!controller.listener.?.routes_accepted);
+    try std.testing.expect(controller.listener.?.listener != null);
+    try std.testing.expectEqual(@as(usize, 0), controller.latest.?.source.required_clusters.len);
+    try std.testing.expectError(error.AdsNotConnected, controller.synchronizeWithDeadline(&client, channel, deadline(io)));
+    try std.testing.expectEqual(@as(usize, 0), channel.configuredEndpointCount());
+}
+
+test "gRPC delta xDS runtime fail_on_data_errors drops a cached listener" {
+    var threaded = std.Io.Threaded.init(gpa, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var channel = try grpc.SharedChannel.init(gpa, io, .{ .cleartext_ip = .{ .address = .{ .ip4 = .loopback(1) } } }, .{});
+    defer channel.deinit();
+    var sender = channel.sender();
+    defer sender.deinit();
+    var client = try delta.Client.init(gpa, sender, .{ .node = .{ .id = "test" } });
+    defer client.deinit();
+    const controller = try runtime.Controller.create(gpa, .{
+        .listener_name = "frontend",
+        .target = .{ .authority = "backend.test" },
+        .fail_on_data_errors = true,
+    });
+    defer controller.deinit();
+    _ = try controller.startDeltaWithDeadline(&client, channel, deadline(io));
+
+    const routes = try rds_fixture.encode(gpa, "inline", &.{"backend.test"}, &.{.{ .prefix = "/", .cluster = "a" }}, null);
+    defer gpa.free(routes);
+    const listener = try lds_fixture.encode(gpa, .{ .inline_rds = routes });
+    defer gpa.free(listener);
+    var listener_update = try deltaUpdate(&client, lds.type_url, "l1", &.{deltaPayload(lds.type_url, "frontend", "v1", listener)}, &.{});
+    defer listener_update.deinit();
+    try std.testing.expectError(error.AdsNotConnected, controller.applyDeltaWithDeadline(&client, listener_update, channel, deadline(io)));
+    const cluster = try cds_fixture.staticCluster(gpa, "a", "127.0.0.1", 1001);
+    defer gpa.free(cluster);
+    var cluster_update = try deltaUpdate(&client, cds.type_url, "c1", &.{deltaPayload(cds.type_url, "a", "v1", cluster)}, &.{});
+    defer cluster_update.deinit();
+    try std.testing.expectError(error.AdsNotConnected, controller.applyDeltaWithDeadline(&client, cluster_update, channel, deadline(io)));
+    try std.testing.expectEqual(@as(usize, 1), channel.configuredEndpointCount());
+
+    const invalid = "\x0a\x08frontend\x1a";
+    var invalid_update = try deltaUpdate(&client, lds.type_url, "l2", &.{deltaPayload(lds.type_url, "frontend", "v2", invalid)}, &.{});
+    defer invalid_update.deinit();
+    try std.testing.expectError(error.TruncatedMessage, controller.applyDeltaWithDeadline(&client, invalid_update, channel, deadline(io)));
+    try std.testing.expect(controller.listener.?.listener == null);
+    try std.testing.expectEqual(@as(usize, 0), controller.latest.?.source.required_clusters.len);
+    try std.testing.expectError(error.AdsNotConnected, controller.synchronizeDeltaWithDeadline(&client, channel, deadline(io)));
+    try std.testing.expectEqual(@as(usize, 0), channel.configuredEndpointCount());
+}
+
+test "gRPC xDS runtime fail_on_data_errors still rejects invalid RDS for an inline listener" {
+    var threaded = std.Io.Threaded.init(gpa, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var channel = try grpc.SharedChannel.init(gpa, io, .{ .cleartext_ip = .{ .address = .{ .ip4 = .loopback(1) } } }, .{});
+    defer channel.deinit();
+    var sender = channel.sender();
+    defer sender.deinit();
+    var client = try ads.Client.init(gpa, sender, .{ .node = .{ .id = "test" } });
+    defer client.deinit();
+    const controller = try runtime.Controller.create(gpa, .{
+        .listener_name = "frontend",
+        .target = .{ .authority = "backend.test" },
+        .fail_on_data_errors = true,
+    });
+    defer controller.deinit();
+    _ = try controller.startWithDeadline(&client, channel, deadline(io));
+    try listenRoute(controller, &client, channel, io, "a");
+    try std.testing.expect(controller.listener.?.routes != null);
+
+    // A control plane may send RDS even though the listener uses inline routes.
+    // Malformed resources must still be NACKed instead of silently acknowledged.
+    var subscription = try client.subscriptions.prepare(rds.type_url, &.{"routes"});
+    defer subscription.deinit();
+    subscription.commit();
+    const invalid = "\x0a\x06routes\x12";
+    var invalid_update = try update(&client, rds.type_url, "r2", &.{.{ .type_url = rds.type_url, .value = invalid }});
+    defer invalid_update.deinit();
+    try std.testing.expectError(error.TruncatedMessage, controller.applyWithDeadline(&client, invalid_update, channel, deadline(io)));
+    try std.testing.expect(controller.listener.?.listener != null);
+    try std.testing.expect(controller.listener.?.routes != null);
 }

@@ -24,6 +24,9 @@ pub const Options = struct {
     delta_publisher: ?DeltaPublisher = null,
     /// gRPC `ignore_resource_deletion`: retain resources omitted or removed.
     ignore_resource_deletion: bool = false,
+    /// gRPC `fail_on_data_errors`: drop the cached listener/routes when the
+    /// resource fails typed validation, then NACK the response.
+    fail_on_data_errors: bool = false,
 };
 pub const Controller = struct {
     allocator: std.mem.Allocator,
