@@ -2,6 +2,7 @@ const std = @import("std");
 const cds = @import("../cds.zig");
 const entry = @import("entry.zig");
 const target = @import("target.zig");
+const runtime = @import("../runtime.zig");
 const fixture = @import("../cds/testing.zig");
 
 const gpa = std.testing.allocator;
@@ -108,4 +109,64 @@ test "gRPC xDS target resolves a LOGICAL_DNS cluster without re-resolution" {
     defer strict_built.release();
     try std.testing.expectEqualStrings("strict.test", strict_built.endpoints[0].cleartext_host.host);
     try std.testing.expect(std.mem.indexOf(u8, strict_built.json, "\"ignoreReresolutionRequests\":false") != null);
+}
+test "gRPC xDS controller projects CDS HTTP/2 upstream limits" {
+    var h2 = fixture.Builder{ .allocator = gpa };
+    defer h2.deinit();
+    try h2.wrapper(1, 4096);
+    try h2.wrapper(2, 100);
+    try h2.wrapper(3, 1048576);
+    try h2.wrapper(4, 2097152);
+    var http = fixture.Builder{ .allocator = gpa };
+    defer http.deinit();
+    try http.bytes(2, h2.data.items);
+    var any = fixture.Builder{ .allocator = gpa };
+    defer any.deinit();
+    try any.bytes(1, "type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions");
+    try any.bytes(2, http.data.items);
+    var typed = fixture.Builder{ .allocator = gpa };
+    defer typed.deinit();
+    try typed.bytes(2, any.data.items);
+    var extra = fixture.Builder{ .allocator = gpa };
+    defer extra.deinit();
+    try extra.bytes(48, typed.data.items);
+    const cluster_bytes = try fixture.cluster(
+        gpa,
+        "backend",
+        "backend-eds",
+        extra.data.items,
+    );
+    defer gpa.free(cluster_bytes);
+    const decoded = try cds.decode(gpa, cluster_bytes, .{});
+    const cluster = try entry.Cluster.create(gpa, decoded);
+    defer cluster.release();
+    const controller = try runtime.Controller.create(gpa, .{
+        .listener_name = "frontend",
+        .target = .{ .authority = "backend.test" },
+    });
+    defer controller.deinit();
+    const assignment = try fixture.assignment(
+        gpa,
+        "backend-eds",
+        "127.0.0.1",
+        8080,
+    );
+    defer gpa.free(assignment);
+    const snapshot = try controller.project(
+        std.testing.io,
+        cluster,
+        assignment,
+    );
+    defer snapshot.release();
+    const limits = switch (snapshot.endpoints[0]) {
+        .cleartext_ip => |value| value.limits,
+        else => return error.UnexpectedEndpoint,
+    };
+    try std.testing.expectEqual(@as(?u32, 100), limits.max_concurrent_streams);
+    try std.testing.expectEqual(@as(u32, 1048576), limits.initial_window_size);
+    try std.testing.expectEqual(
+        @as(u32, 2097152),
+        limits.initial_connection_window_size,
+    );
+    try std.testing.expectEqual(@as(usize, 4096), limits.header_table_size);
 }

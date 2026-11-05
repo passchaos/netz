@@ -354,3 +354,47 @@ test "gRPC CDS projects outlier detection into the channel policy" {
     try std.testing.expectEqual(@as(u32, 10), failure.request_volume);
     try std.testing.expect(wrapper.child.* == .round_robin);
 }
+test "gRPC CDS decodes HTTP/2 upstream protocol limits" {
+    var h2 = fixture.Builder{ .allocator = gpa };
+    defer h2.deinit();
+    try h2.wrapper(1, 4096); // HPACK table size
+    try h2.wrapper(2, 100); // max concurrent streams
+    try h2.wrapper(3, 1048576); // initial stream window
+    try h2.wrapper(4, 2097152); // initial connection window
+    var http = fixture.Builder{ .allocator = gpa };
+    defer http.deinit();
+    try http.bytes(2, h2.data.items);
+    var any = fixture.Builder{ .allocator = gpa };
+    defer any.deinit();
+    try any.bytes(1, "type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions");
+    try any.bytes(2, http.data.items);
+    var typed = fixture.Builder{ .allocator = gpa };
+    defer typed.deinit();
+    try typed.bytes(2, any.data.items);
+    var extra = fixture.Builder{ .allocator = gpa };
+    defer extra.deinit();
+    try extra.bytes(48, typed.data.items);
+    const bytes = try fixture.cluster(
+        gpa,
+        "backend",
+        "backend-eds",
+        extra.data.items,
+    );
+    defer gpa.free(bytes);
+    var decoded = try resource.decode(gpa, bytes, .{});
+    defer decoded.deinit();
+    const limits = decoded.value.http2_limits.?;
+    try std.testing.expectEqual(@as(?u32, 4096), limits.header_table_size);
+    try std.testing.expectEqual(
+        @as(?u32, 100),
+        limits.max_concurrent_streams,
+    );
+    try std.testing.expectEqual(
+        @as(?u32, 1048576),
+        limits.initial_window_size,
+    );
+    try std.testing.expectEqual(
+        @as(?u32, 2097152),
+        limits.initial_connection_window_size,
+    );
+}

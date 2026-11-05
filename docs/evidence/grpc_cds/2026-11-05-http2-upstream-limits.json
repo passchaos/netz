@@ -1,0 +1,37 @@
+{
+  "schema": 1,
+  "date": "2026-11-05",
+  "head": "working-tree",
+  "subject": "CDS HTTP/2 upstream protocol limits",
+  "change": "Cluster.upstream_config (field 48) now accepts the Envoy HttpProtocolOptions extension when it selects http2_protocol_options. The decoder maps hpack_table_size, max_concurrent_streams, initial_stream_window_size and initial_connection_window_size into a per-cluster override. The runtime controller applies the override on top of the application's target HTTP/2 limits when projecting an EDS cluster. HTTP/1, HTTP/3 and automatic/downstream protocol selection fail closed.",
+  "tests": {
+    "unit": [
+      "src/grpc/xds/cds/tests.zig 'gRPC CDS decodes HTTP/2 upstream protocol limits' decodes all four mapped wrappers.",
+      "src/grpc/xds/runtime/target_tests.zig 'gRPC xDS controller projects CDS HTTP/2 upstream limits' projects an EDS assignment and asserts the endpoint connection limits."
+    ],
+    "focused_gates": {
+      "cds": {
+        "command": "zig build test-lib -Dtest-filter='gRPC CDS' --summary all",
+        "passed": 177,
+        "total": 177,
+        "failed": 0
+      },
+      "target": {
+        "command": "zig build test-lib -Dtest-filter='gRPC xDS target' --summary all",
+        "status": "passed"
+      },
+      "compile": {
+        "command": "zig build test-compile",
+        "status": "passed"
+      }
+    }
+  },
+  "source_sha256": {
+    "src/grpc/xds/cds/decode.zig": "f71bb5abd9ed08d2b76e2a8651cb106b1f28c146e7ad65ed7170abec8500a4ae",
+    "src/grpc/xds/cds/tests.zig": "4cd46769d2d8fa81f44a31b8c85110c9e6ebd17f1a431ce9002d1327c544a13c",
+    "src/grpc/xds/runtime/controller.zig": "35e16c056c375c38b85d7a49c5eb0c46937a954be2657db2864c360800d90016",
+    "src/grpc/xds/runtime/target_tests.zig": "df11bf6240284b34aea5810ad9fbfa8c6118dad64f9d94226b9c59a6762c4c17",
+    "docs/grpc_cds.md": "d6132dd524f22aeadc0ebe784dc14343a01fa1e452237ffac9c22bad2164d1c8"
+  },
+  "notes": "Per-cluster HTTP/2 limits now flow from CDS through the EDS projection. transport_socket_matches, lrs_server, SDS/certificate providers and non-router filters remain open."
+}

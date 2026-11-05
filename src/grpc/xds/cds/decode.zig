@@ -30,6 +30,12 @@ pub const LrsPropagation = struct {
     named_metrics_all: bool = false,
     named_metrics: []const []const u8 = &.{},
 };
+pub const Http2Limits = struct {
+    header_table_size: ?u32 = null,
+    max_concurrent_streams: ?u32 = null,
+    initial_window_size: ?u32 = null,
+    initial_connection_window_size: ?u32 = null,
+};
 pub const Cluster = struct {
     name: []const u8,
     eds_service_name: []const u8,
@@ -39,6 +45,7 @@ pub const Cluster = struct {
     /// Flattened DNS endpoints, retaining priority/locality identity.
     host_endpoints: []const HostEndpoint = &.{},
     tls: ?tls_material.Config = null,
+    http2_limits: ?Http2Limits = null,
     max_concurrent_requests: u32 = 1024,
     lrs_propagation: LrsPropagation = .{},
     /// Ordered leaf cluster names for an `envoy.clusters.aggregate` cluster.
@@ -496,6 +503,67 @@ fn u32Wrapper(bytes: []const u8) Error!u32 {
     return @intCast(value);
 }
 
+const http_protocol_options_type =
+    "type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions";
+
+fn typedConfigValue(
+    bytes: []const u8,
+    expected_type: []const u8,
+) Error!?[]const u8 {
+    var reader: pb.Reader = .{ .bytes = bytes };
+    var any_bytes: ?[]const u8 = null;
+    while (try reader.next()) |field| {
+        if (field.number == 2 and field.wire_type == 2) {
+            any_bytes = try reader.bytesValue();
+        } else try reader.skip(field);
+    }
+    var any: pb.Reader = .{ .bytes = any_bytes orelse
+        return error.InvalidCdsResource };
+    var type_url_value: []const u8 = "";
+    var value: ?[]const u8 = null;
+    while (try any.next()) |field| {
+        if (field.number == 1 and field.wire_type == 2) {
+            type_url_value = try any.string();
+        } else if (field.number == 2 and field.wire_type == 2) {
+            value = try any.bytesValue();
+        } else try any.skip(field);
+    }
+    if (!std.mem.eql(u8, type_url_value, expected_type)) return null;
+    return value orelse error.InvalidCdsResource;
+}
+
+fn http2Limits(bytes: []const u8) Error!Http2Limits {
+    var reader: pb.Reader = .{ .bytes = bytes };
+    var result: Http2Limits = .{};
+    while (try reader.next()) |field| {
+        switch (field.number) {
+            2 => {
+                var nested: pb.Reader = .{ .bytes = try reader.bytesValue() };
+                while (try nested.next()) |inner| {
+                    switch (inner.number) {
+                        1 => result.header_table_size = try u32Wrapper(try nested.bytesValue()),
+                        2 => result.max_concurrent_streams = try u32Wrapper(try nested.bytesValue()),
+                        3 => result.initial_window_size = try u32Wrapper(try nested.bytesValue()),
+                        4 => result.initial_connection_window_size = try u32Wrapper(try nested.bytesValue()),
+                        else => try nested.skip(inner),
+                    }
+                }
+            },
+            // HTTP/1, HTTP/3 and automatic/downstream protocol selection are
+            // not valid for a gRPC H2 upstream.
+            1, 3, 4, 5, 6 => return error.UnsupportedCdsFeature,
+            else => try reader.skip(field),
+        }
+    }
+    if (result.initial_window_size) |value| {
+        if (value > std.math.maxInt(i31)) return error.InvalidCdsResource;
+    }
+    if (result.initial_connection_window_size) |value| {
+        if (value > std.math.maxInt(i31)) return error.InvalidCdsResource;
+    }
+    return result;
+}
+
 fn formatDuration(
     allocator: std.mem.Allocator,
     value: std.Io.Duration,
@@ -678,6 +746,7 @@ pub fn decode(gpa: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!O
     var typed_policy: ?[]const u8 = null;
     var breaker: ?[]const u8 = null;
     var outlier: ?[]const u8 = null;
+    var http2: ?Http2Limits = null;
     var lrs_cpu: bool = false;
     var lrs_memory: bool = false;
     var lrs_application: bool = false;
@@ -692,7 +761,13 @@ pub fn decode(gpa: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!O
                 limits,
             );
             kind = @intFromEnum(Discovery.aggregate);
-        } else if (field.number == 3 and field.wire_type == 2) config = try reader.bytesValue() else if (field.number == 24 and field.wire_type == 2) transport = try reader.bytesValue() else if (field.number == 33 and field.wire_type == 2) assignment = try reader.bytesValue() else if (field.number == 6 and field.wire_type == 0) lb = try pb.u32Value(&reader) else if (field.number == 23 and field.wire_type == 2) ring_config = try reader.bytesValue() else if (field.number == 41 and field.wire_type == 2) typed_policy = try reader.bytesValue() else if (field.number == 10 and field.wire_type == 2) breaker = try reader.bytesValue() else if (field.number == 19 and field.wire_type == 2) outlier = try reader.bytesValue() else if (field.number == 57 and field.wire_type == 2) {
+        } else if (field.number == 3 and field.wire_type == 2) config = try reader.bytesValue() else if (field.number == 24 and field.wire_type == 2) transport = try reader.bytesValue() else if (field.number == 33 and field.wire_type == 2) assignment = try reader.bytesValue() else if (field.number == 6 and field.wire_type == 0) lb = try pb.u32Value(&reader) else if (field.number == 23 and field.wire_type == 2) ring_config = try reader.bytesValue() else if (field.number == 41 and field.wire_type == 2) typed_policy = try reader.bytesValue() else if (field.number == 10 and field.wire_type == 2) breaker = try reader.bytesValue() else if (field.number == 19 and field.wire_type == 2) outlier = try reader.bytesValue() else if (field.number == 48 and field.wire_type == 2) {
+            const value = (try typedConfigValue(
+                try reader.bytesValue(),
+                http_protocol_options_type,
+            )) orelse return error.UnsupportedCdsFeature;
+            http2 = try http2Limits(value);
+        } else if (field.number == 57 and field.wire_type == 2) {
             // Repeated string selecting ORCA metric propagation. Unknown
             // entries are ignored so forward-compatible control planes can add
             // selectors without failing the whole cluster.
@@ -709,7 +784,7 @@ pub fn decode(gpa: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!O
                 const metric = value["named_metrics.".len..];
                 if (metric.len != 0) try lrs_named.append(arena, metric);
             }
-        } else if ((field.number == 43 or field.number == 19 or field.number == 42 or field.number == 48) and field.wire_type == 2) return error.UnsupportedCdsFeature else try reader.skip(field);
+        } else if ((field.number == 43 or field.number == 42) and field.wire_type == 2) return error.UnsupportedCdsFeature else try reader.skip(field);
     }
     if (name.len == 0) return error.InvalidCdsResource;
     const discovery: Discovery = @enumFromInt(kind);
@@ -765,7 +840,7 @@ pub fn decode(gpa: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!O
             .{ cluster_policy.child_json, outlier_json },
         );
     }
-    result.value = .{ .name = name, .eds_service_name = service, .discovery = discovery, .inline_assignment = inline_assignment, .host_endpoints = host_endpoints, .tls = tls, .max_concurrent_requests = if (breaker) |raw| try circuit(raw, limits.max_thresholds) else 1024, .lrs_propagation = lrs_propagation, .aggregate_clusters = aggregate_clusters, .policy = cluster_policy };
+    result.value = .{ .name = name, .eds_service_name = service, .discovery = discovery, .inline_assignment = inline_assignment, .host_endpoints = host_endpoints, .tls = tls, .http2_limits = http2, .max_concurrent_requests = if (breaker) |raw| try circuit(raw, limits.max_thresholds) else 1024, .lrs_propagation = lrs_propagation, .aggregate_clusters = aggregate_clusters, .policy = cluster_policy };
     // Converted policies must satisfy the same configuration parser/runtime
     // contract as direct callers, including complete range validation.
     const json = try std.fmt.allocPrint(arena, "{{\"loadBalancingConfig\":{s}}}", .{result.value.policy.child_json});

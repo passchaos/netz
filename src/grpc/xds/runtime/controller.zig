@@ -357,6 +357,20 @@ pub const Controller = struct {
         options.max_concurrent_requests = config.max_concurrent_requests;
         options.child_policy_json = config.policy.child_json;
         options.locality_weighted = config.policy.locality_weighted;
+        if (config.http2_limits) |overrides| {
+            if (overrides.header_table_size) |value| {
+                options.limits.header_table_size = value;
+            }
+            if (overrides.max_concurrent_streams) |value| {
+                options.limits.max_concurrent_streams = value;
+            }
+            if (overrides.initial_window_size) |value| {
+                options.limits.initial_window_size = value;
+            }
+            if (overrides.initial_connection_window_size) |value| {
+                options.limits.initial_connection_window_size = value;
+            }
+        }
         if (config.tls) |tls_config| {
             const material = try tls_material.Material.create(self.allocator, io, tls_config);
             const host = material.serverName(config.name);

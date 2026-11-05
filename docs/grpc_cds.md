@@ -109,8 +109,13 @@ set. EDS, STATIC and DNS endpoints become TLS targets; without
 `trusted_ca` the platform roots are used. SDS secret configs, certificate
 providers, ECDH curve lists, regex/custom SAN matchers, file/environment data
 sources and other transport sockets are explicitly rejected.
-`transport_socket_matches`, `lrs_server` and `upstream_config` are also
-rejected. Cluster `outlier_detection` is projected into the SharedChannel's
+`transport_socket_matches` and `lrs_server` are also rejected. Cluster
+`upstream_config` accepts `HttpProtocolOptions.http2_protocol_options` and maps
+`hpack_table_size`, `max_concurrent_streams`, `initial_stream_window_size` and
+`initial_connection_window_size` onto the cluster's HTTP/2 connection limits;
+unspecified fields retain the application's target limits. HTTP/1, HTTP/3 and
+automatic/downstream protocol selection are rejected. Cluster
+`outlier_detection` is projected into the SharedChannel's
 `outlier_detection_experimental` wrapper: interval, base/max ejection time, max
 ejection percent, success-rate enforcement/stdev/minimum-hosts/request-volume,
 and failure-percentage threshold/enforcement/minimum-hosts/request-volume.
