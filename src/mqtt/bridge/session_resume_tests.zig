@@ -1,5 +1,6 @@
 //! Bridge journals must follow local Session retention as well as CONNACK.
 const std = @import("std");
+const test_tmp = @import("../../internal/test_tmp_dir.zig");
 const mqtt = @import("../mod.zig");
 const reconnect = @import("../reconnect.zig");
 const runtime = @import("../runtime.zig");
@@ -97,7 +98,7 @@ fn targetExpiry(pending: bool) !void {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     var server = try runtime.Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{});
     defer server.deinit();
@@ -130,7 +131,7 @@ test "outbound bridge local source expiry fails before target replay despite Ses
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     var source = try runtime.Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{});
     defer source.deinit();
@@ -164,7 +165,7 @@ test "MQTT inbound bridge local expiry durably retires old epoch despite Session
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     const id = [_]u8{0x5f} ** 16;
     const key = broker_mod.BridgeQoS2Key{ .bridge_id = id, .session_epoch = 1, .packet_id = 77 };

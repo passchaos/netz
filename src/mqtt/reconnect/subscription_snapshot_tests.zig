@@ -1,5 +1,6 @@
 //! Reconstructing a client must retain desired subscriptions and replay state.
 const std = @import("std");
+const test_tmp = @import("../../internal/test_tmp_dir.zig");
 const mqtt = @import("../mod.zig");
 const reconnect = @import("../reconnect.zig");
 const snapshot = @import("snapshot.zig");
@@ -180,7 +181,7 @@ test "MQTT subscription snapshot owns its allocator after the QoS Store is swapp
 test "MQTT subscription snapshot file API retains pending replay state" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     var shutdown: std.Io.Event = .unset;
     var source = try client(std.testing.allocator, threaded.io(), &shutdown);

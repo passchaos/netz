@@ -1,5 +1,6 @@
 //! Persistence retries after a selected QoS 0 delivery was sent successfully.
 const std = @import("std");
+const test_tmp = @import("../../internal/test_tmp_dir.zig");
 const Broker = @import("../broker.zig").Broker;
 
 test "broker local consumer retries QoS0 completion without consuming the next delivery" {
@@ -8,7 +9,7 @@ test "broker local consumer retries QoS0 completion without consuming the next d
     defer threaded.deinit();
     const io = threaded.io();
     for ([_]bool{ false, true }) |explicit_retry| {
-        var tmp = std.testing.tmpDir(.{});
+        var tmp = test_tmp.tmpDir(.{});
         defer tmp.cleanup();
         var failing = std.testing.FailingAllocator.init(allocator, .{});
         var broker = try Broker.init(failing.allocator(), io, .{ .queue_qos0_messages = true });

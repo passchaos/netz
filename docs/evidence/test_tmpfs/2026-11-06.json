@@ -1,0 +1,34 @@
+{
+  "schema": 1,
+  "date": "2026-11-06",
+  "head": "working-tree",
+  "subject": "Memory-backed temporary directories for MQTT journal tests",
+  "change": "Added src/internal/test_tmp_dir.zig, which creates test temporary directories under /dev/shm on Linux and falls back to std.testing.tmpDir elsewhere. All MQTT tests that used std.testing.tmpDir now use this helper. Journal and commit-log tests previously wrote to .zig-cache/tmp on the shared NVMe drive; under sibling-project load (92% disk utilization) an ext4 journal commit could block for minutes, causing timed retry steps to expire and the following thread join to wait on the same blocked write, which hung whole-suite runs.",
+  "tests": {
+    "unit": "src/internal/test_tmp_dir.zig asserts that on Linux the created directory resolves under /dev/shm.",
+    "focused_gate": {
+      "command": "zig build test-lib -Dtest-filter='mqtt.bridge' --summary all",
+      "passed": 243,
+      "total": 243,
+      "failed": 0
+    },
+    "compile": {
+      "command": "zig build test-compile",
+      "status": "passed"
+    },
+    "full_library": {
+      "command": "cd /dev/shm/netz-run && .zig-cache/o/6115eb903dabf142a9e3e21151f9a267/test",
+      "status": "passed",
+      "exit_code": 0,
+      "passed": 6511,
+      "total": 6511,
+      "failed": 0,
+      "notes": "A zig-build-driven full run during the change failed only the pre-existing load-sensitive WSS caller-timeout test (6510/6511); that test passed in isolation, and the direct binary run then passed all 6511 tests. No journal I/O hang occurred after the change."
+    }
+  },
+  "source_sha256": {
+    "src/internal/test_tmp_dir.zig": "623638414835a4b2a65e7b29c183170f067c32d3cf4eea397e40aaac8a2a41c7",
+    "src/mqtt/mod.zig": "229bc74d957f1e7030e12c2f7983e77cb135816a0164f9770a727da59eef6de0"
+  },
+  "notes": "Only MQTT tests were migrated. Other suites still use std.testing.tmpDir; their writes are one-off certificate or socket files and have not shown the journal-starvation hang."
+}

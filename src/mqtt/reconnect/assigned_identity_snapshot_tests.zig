@@ -1,5 +1,6 @@
 //! A fully validated MQTT 5 image can supply an unassigned client's identity.
 const std = @import("std");
+const test_tmp = @import("../../internal/test_tmp_dir.zig");
 const mqtt = @import("../mod.zig");
 const reconnect = @import("../reconnect.zig");
 const snapshot = @import("snapshot.zig");
@@ -90,7 +91,7 @@ test "MQTT reconnect assigned identity loads from files and version one images" 
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     var bytes = try image(io);
     defer bytes.deinit(std.testing.allocator);

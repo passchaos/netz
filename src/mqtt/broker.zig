@@ -7,6 +7,7 @@
 //! selection, downstream acknowledgements, and connection cleanup.
 
 const std = @import("std");
+const test_tmp = @import("../internal/test_tmp_dir.zig");
 const builtin = @import("builtin");
 const mqtt = @import("mod.zig");
 const netz_runtime = @import("../runtime.zig");
@@ -1406,7 +1407,7 @@ test "MQTT ACK flush lock handoff excludes live persistence backends" {
         broker.persistent_change_autosave_enabled.store(false, .release);
     }
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     try broker.createCommitLog(tmp.dir, "ack-handoff.log", .{});
 
@@ -9202,7 +9203,7 @@ test "MQTT Clean Start journals only committed Session replacement" {
         .session = .{ .max_sessions = 2 },
     });
     defer broker.deinit();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
 
     const now = std.Io.Clock.awake.now(io);
@@ -10629,7 +10630,7 @@ test "broker retained expiry scan persists physical removal" {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
 
     var source = try Broker.init(allocator, io, .{

@@ -1,4 +1,5 @@
 const std = @import("std");
+const test_tmp = @import("../../internal/test_tmp_dir.zig");
 const mqtt = @import("../mod.zig");
 const broker_mod = @import("../broker.zig");
 const source_mod = @import("local_source.zig");
@@ -62,7 +63,7 @@ test "local source QoS2 retries PUBCOMP durability before selecting another deli
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     var failing = std.testing.FailingAllocator.init(allocator, .{});
     var broker = try broker_mod.Broker.init(failing.allocator(), io, .{});
@@ -99,7 +100,7 @@ test "local source QoS0 retries completion journal failure before lazy activatio
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     var failing = std.testing.FailingAllocator.init(allocator, .{});
     var broker = try broker_mod.Broker.init(failing.allocator(), io, .{ .queue_qos0_messages = true });

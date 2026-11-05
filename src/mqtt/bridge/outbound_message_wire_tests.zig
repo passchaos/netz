@@ -1,5 +1,6 @@
 //! Expired target messages complete upstream without another target PUBLISH.
 const std = @import("std");
+const test_tmp = @import("../../internal/test_tmp_dir.zig");
 const runtime = @import("../runtime.zig");
 const outbound = @import("outbound.zig");
 const fixture = @import("outbound_retention_support.zig");
@@ -69,7 +70,7 @@ fn exercise(scenario: Scenario) !void {
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     var source_server = try runtime.Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{});
     defer source_server.deinit();

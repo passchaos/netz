@@ -1,4 +1,5 @@
 const std = @import("std");
+const test_tmp = @import("../../internal/test_tmp_dir.zig");
 const mqtt = @import("../mod.zig");
 const runtime = @import("../runtime.zig");
 
@@ -72,7 +73,7 @@ test "MQTT Unix server handles concurrent clients" {
     });
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     var path_storage: [std.fs.max_path_bytes]u8 = undefined;
     const directory_len = try tmp.dir.realPath(io, &path_storage);
@@ -207,7 +208,7 @@ test "MQTT Unix server caller timeout bounds CONNECT admission" {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     var path_storage: [std.fs.max_path_bytes]u8 = undefined;
     const directory_len = try tmp.dir.realPath(io, &path_storage);
@@ -271,7 +272,7 @@ test "MQTT accepted Unix stream exposes a CONNECT timeout" {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     var path_storage: [std.fs.max_path_bytes]u8 = undefined;
     const directory_len = try tmp.dir.realPath(io, &path_storage);

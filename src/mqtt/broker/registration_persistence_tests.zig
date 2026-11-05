@@ -1,4 +1,5 @@
 const std = @import("std");
+const test_tmp = @import("../../internal/test_tmp_dir.zig");
 const context = @import("../broker_tests.zig").TestContext;
 const mqtt = context.mqtt_mod;
 const runtime = context.runtime_mod;
@@ -112,7 +113,7 @@ fn failedConnAck(mode: SessionMode, failure: Failure) !void {
     vtable.fileSync = RejectConnAck.fileSync;
     vtable.netClose = RejectConnAck.netClose;
     const observed_io = std.Io{ .userdata = io.userdata, .vtable = &vtable };
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     var broker = try context.BrokerType.listen(allocator, observed_io, .{ .ip4 = .loopback(0) }, .{
         .limits = .{ .max_connections = 1, .max_queued_deliveries_per_connection = 8 },
@@ -223,7 +224,7 @@ test "broker retries rollback journal after concurrent CONNECT settles" {
     const observed_io = std.Io{ .userdata = io.userdata, .vtable = &vtable };
     var broker = try context.testBrokerFn(allocator, observed_io, 2, 64);
     defer broker.deinit();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     try broker.createCommitLog(tmp.dir, "concurrent-rollback.log", .{});
 

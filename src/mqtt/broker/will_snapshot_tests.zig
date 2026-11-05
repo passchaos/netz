@@ -1,4 +1,5 @@
 const std = @import("std");
+const test_tmp = @import("../../internal/test_tmp_dir.zig");
 const context = @import("../broker_tests.zig").TestContext;
 const mqtt = context.mqtt_mod;
 const runtime = context.runtime_mod;
@@ -15,7 +16,7 @@ fn restoreDefaultWill(protocol: mqtt.ProtocolVersion, journal: bool) !void {
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     var source = try context.testBrokerFn(allocator, io, 1, 64);
     defer source.deinit();

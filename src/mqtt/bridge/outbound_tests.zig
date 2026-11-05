@@ -1,4 +1,5 @@
 const std = @import("std");
+const test_tmp = @import("../../internal/test_tmp_dir.zig");
 const mqtt = @import("../mod.zig");
 const broker_mod = @import("../broker.zig");
 const outbound = @import("outbound.zig");
@@ -1301,7 +1302,7 @@ test "outbound bridge durably completes cross-broker QoS2" {
     });
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     var source = try runtime.Server.listen(
         allocator,
@@ -1511,7 +1512,7 @@ test "outbound bridge restores QoS2 staged before either wire boundary" {
     });
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     var source = try runtime.Server.listen(
         allocator,
@@ -1772,7 +1773,7 @@ test "outbound bridge restores target QoS2 at durable PUBREL boundary" {
     });
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     var source = try runtime.Server.listen(
         allocator,
@@ -2031,7 +2032,7 @@ test "outbound bridge reports target QoS2 capability rejection" {
     });
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     var source = try runtime.Server.listen(
         allocator,
@@ -2179,7 +2180,7 @@ test "outbound bridge rejects oversized QoS2 replay after reconnect" {
     });
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     var source = try runtime.Server.listen(
         allocator,
@@ -2349,7 +2350,7 @@ test "outbound bridge durably propagates negative QoS2 PUBREC" {
     });
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     var source = try runtime.Server.listen(
         allocator,
@@ -2507,7 +2508,7 @@ test "outbound bridge fails closed when source Session is lost" {
     });
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     var source = try runtime.Server.listen(
         allocator,
@@ -2693,7 +2694,7 @@ test "outbound bridge fails closed when target Session is lost" {
     });
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     var source = try runtime.Server.listen(
         allocator,
@@ -2884,7 +2885,7 @@ test "outbound bridge restores after durable source completion before PUBCOMP" {
     });
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     var source = try runtime.Server.listen(
         allocator,
@@ -3174,7 +3175,7 @@ test "outbound bridge validates persistence and rule intersections" {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     var shutdown: std.Io.Event = .unset;
     const unused = std.Io.net.IpAddress{ .ip4 = .loopback(1) };

@@ -1,4 +1,5 @@
 const std = @import("std");
+const test_tmp = @import("../../internal/test_tmp_dir.zig");
 const context = @import("../broker_tests.zig");
 
 const mqtt = context.TestContext.mqtt_mod;
@@ -18,7 +19,7 @@ test "broker shares TCP raw Unix and Unix WebSocket listeners" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     var directory_storage: [std.fs.max_path_bytes]u8 = undefined;
     const directory_len = try tmp.dir.realPath(io, &directory_storage);

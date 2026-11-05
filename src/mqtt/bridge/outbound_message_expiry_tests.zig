@@ -1,5 +1,6 @@
 //! Message expiry ends PUBLISH replay while preserving accepted QoS 2 release.
 const std = @import("std");
+const test_tmp = @import("../../internal/test_tmp_dir.zig");
 const coordinator = @import("outbound_coordinator.zig");
 const fixture = @import("outbound_retention_support.zig");
 
@@ -14,7 +15,7 @@ fn restoreCase(phase: coordinator.Phase, expiry: u32) !void {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     var shutdown: std.Io.Event = .unset;
     {
@@ -51,7 +52,7 @@ test "outbound coordinator Message Expiry cannot hide a malformed transaction bi
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     var shutdown: std.Io.Event = .unset;
     {
@@ -76,7 +77,7 @@ test "outbound coordinator Message Expiry commit retains live ownership on fsync
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     var shutdown: std.Io.Event = .unset;
     var source = try fixture.client(allocator, io, &shutdown, "expiry-source", 60);

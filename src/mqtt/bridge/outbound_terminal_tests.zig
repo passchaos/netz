@@ -1,5 +1,6 @@
 //! Durable target outcomes survive loss of the target MQTT Session.
 const std = @import("std");
+const test_tmp = @import("../../internal/test_tmp_dir.zig");
 const runtime = @import("../runtime.zig");
 const outbound = @import("outbound.zig");
 const coordinator = @import("outbound_coordinator.zig");
@@ -70,7 +71,7 @@ fn exercise(phase: coordinator.Phase, target_present: bool) !void {
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     var source_server = try runtime.Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{});
     defer source_server.deinit();

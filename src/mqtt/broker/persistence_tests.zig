@@ -1,4 +1,5 @@
 const std = @import("std");
+const test_tmp = @import("../../internal/test_tmp_dir.zig");
 const mqtt = @import("../mod.zig");
 const broker_mod = @import("../broker.zig");
 
@@ -70,7 +71,7 @@ test "MQTT persistent change autosave switches runtime policy atomically" {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
 
     var no_target = try createBroker(allocator, io);
@@ -180,7 +181,7 @@ test "MQTT persistent change autosave validates options and owns path" {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
 
     try std.testing.expectError(
@@ -213,7 +214,7 @@ test "MQTT persistent change autosave waits for threshold" {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     var broker = try createAutosaveBroker(
         allocator,
@@ -267,7 +268,7 @@ test "MQTT persistent change autosave ignores volatile and retained no-op publis
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     var broker = try createAutosaveBroker(
         allocator,
@@ -310,7 +311,7 @@ test "MQTT persistent change autosave retains threshold across SnapshotBusy" {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     var broker = try createAutosaveBroker(
         allocator,
@@ -368,7 +369,7 @@ test "MQTT manual snapshot does not acknowledge another autosave target" {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     var broker = try createAutosaveBroker(
         allocator,
@@ -411,7 +412,7 @@ test "MQTT snapshot to autosave target acknowledges captured generation" {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     var broker = try createAutosaveBroker(
         allocator,
@@ -464,7 +465,7 @@ test "MQTT equivalent path through another directory does not suppress autosave"
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     var broker = try createAutosaveBroker(
         allocator,
@@ -508,7 +509,7 @@ test "MQTT restore starts a fresh persistent change threshold" {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     var broker = try createAutosaveBroker(
         allocator,
@@ -551,7 +552,7 @@ test "MQTT persistent change autosave failure is best effort and retryable" {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     var broker = try createAutosaveBroker(
         allocator,
@@ -610,7 +611,7 @@ test "MQTT journal failure still services change autosave" {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     var broker = try createAutosaveBroker(
         allocator,
@@ -662,7 +663,7 @@ test "MQTT persistent change autosave counts durable Session enqueue" {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     var broker = try createAutosaveBroker(
         allocator,
@@ -718,7 +719,7 @@ test "MQTT persistent change autosave tracks durable subscription lifecycle" {
     });
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     var broker = try createAutosaveBroker(
         allocator,
@@ -798,7 +799,7 @@ test "MQTT broker shutdown persists an armed Session expiry deadline" {
     });
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
 
     var source = try Broker.listen(
@@ -957,7 +958,7 @@ test "MQTT broker snapshot restores retained and durable Session state" {
         },
     );
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     try source.saveSnapshot(tmp.dir, "broker.db");
     if (comptime @hasDecl(std.Io.File.Permissions, "toMode")) {
@@ -1039,7 +1040,7 @@ test "MQTT broker snapshot corruption preserves current state" {
         .{ .retain = true, .now = now },
     );
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     try broker.saveSnapshot(tmp.dir, "broker.db");
     const bytes = try tmp.dir.readFileAlloc(
@@ -1112,7 +1113,7 @@ test "MQTT broker commit log restores newest state generation" {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
 
     var source = try createBroker(allocator, io);
@@ -1190,7 +1191,7 @@ test "MQTT broker commit log decode failure preserves current state" {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
 
     var raw_log = try mqtt.persistence.commit_log.Log.create(
@@ -1243,7 +1244,7 @@ test "MQTT broker commit log persists acknowledgement boundaries" {
             },
         },
     );
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     try source.createCommitLog(tmp.dir, "broker.log", .{});
 
@@ -1359,7 +1360,7 @@ test "MQTT broker commit log persists graceful Session removal" {
     });
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
 
     var source = try Broker.listen(
@@ -1561,7 +1562,7 @@ test "MQTT atomic snapshot replacement keeps latest complete state" {
         "first",
         .{ .retain = true, .now = now },
     );
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     try broker.saveSnapshot(tmp.dir, "broker.db");
     _ = try broker.retained.applyPublish(
@@ -1587,7 +1588,7 @@ test "MQTT snapshot save rejects live transient broker state" {
     var broker = try createBroker(allocator, io);
     defer broker.deinit();
     broker.slots[0].state.active = true;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     try std.testing.expectError(
         error.SnapshotBusy,
@@ -1646,7 +1647,7 @@ test "MQTT live snapshot checkpoints connected durable state" {
         sessionRouteSubscriberId(opened.route_id),
     );
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     try source.saveLiveSnapshot(tmp.dir, "broker.db");
 
@@ -1843,7 +1844,7 @@ test "MQTT live snapshot omits transient inbound QoS 2" {
         now,
     );
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     try source.saveLiveSnapshot(tmp.dir, "broker.db");
 
@@ -1881,7 +1882,7 @@ test "MQTT live snapshot omits route-tagged transient inbound QoS 2" {
         now,
     );
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     try source.saveLiveSnapshot(tmp.dir, "broker.db");
 
@@ -1900,7 +1901,7 @@ test "MQTT live snapshot rejects provisional registrations" {
     defer broker.deinit();
     broker.slots[0].state.active = true;
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     try std.testing.expectError(
         error.SnapshotBusy,
@@ -1976,7 +1977,7 @@ test "MQTT live snapshot checkpoints an active broker connection" {
     defer pubrec.deinit(allocator);
     try std.testing.expectEqual(packet_id.?, pubrec.ack.packet_id);
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     try source.saveLiveSnapshot(tmp.dir, "broker.db");
     // Checkpointing must not disconnect or otherwise poison the live client.
@@ -2037,7 +2038,7 @@ test "MQTT broker restart resumes Session and live routing" {
     );
     try source.sessions.disconnect(opened.handle, null, now);
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     try source.saveSnapshot(tmp.dir, "broker.db");
     source.deinit();
@@ -2387,7 +2388,7 @@ test "MQTT broker restart publishes due retained Will" {
         scheduled,
         null,
     );
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     try source.saveSnapshot(tmp.dir, "broker.db");
     source.deinit();
@@ -2504,7 +2505,7 @@ test "MQTT broker restart releases inbound QoS 2 exactly once at PUBREL" {
         saved_now,
     );
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     try source.saveSnapshot(tmp.dir, "broker.db");
     source.deinit();
@@ -2663,7 +2664,7 @@ test "MQTT broker snapshot restores bridge QoS2 transactions" {
         .payload = "payload",
     }, std.Io.Clock.awake.now(io));
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     try broker.saveSnapshot(tmp.dir, "bridge-qos2.db");
 
@@ -2696,7 +2697,7 @@ test "MQTT broker persists bridge epoch without an active transaction" {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     const bridge_id = [_]u8{0x6b} ** 16;
 

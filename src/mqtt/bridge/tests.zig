@@ -1,4 +1,5 @@
 const std = @import("std");
+const test_tmp = @import("../../internal/test_tmp_dir.zig");
 const mqtt = @import("../mod.zig");
 const bridge_mod = @import("../bridge.zig");
 const broker_mod = @import("../broker.zig");
@@ -127,7 +128,7 @@ fn localCaBundle(
     writer.advance(encoded_len);
     try writer.writeAll("\n-----END CERTIFICATE-----\n");
 
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.writeFile(io, .{
         .sub_path = "ca.pem",
@@ -490,7 +491,7 @@ test "bridge public configuration retains MQTT types" {
 
 test "bridge QoS2 requires stable identity and persistent Session" {
     const allocator = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -1413,7 +1414,7 @@ fn exerciseInboundBridgeQoS2ExactlyOnce(
     const allocator = std.testing.allocator;
     const operation_timeout = std.Io.Duration.fromSeconds(2);
     const short_timeout = std.Io.Duration.fromMilliseconds(100);
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
 
     var threaded = std.Io.Threaded.init(allocator, .{

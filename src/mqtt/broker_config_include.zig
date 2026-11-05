@@ -4,6 +4,7 @@
 //! regular files use Mosquitto's case-insensitive-first filename ordering.
 
 const std = @import("std");
+const test_tmp = @import("../internal/test_tmp_dir.zig");
 
 pub const max_file_bytes: usize = 1024 * 1024;
 pub const max_total_bytes: usize = 4 * 1024 * 1024;
@@ -235,7 +236,7 @@ test "missing root config is distinct from dependent file failures" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
 
     try std.testing.expectError(
@@ -316,7 +317,7 @@ fn nameLessThan(_: void, lhs: []u8, rhs: []u8) bool {
 
 test "include directory expansion follows Mosquitto order and file scopes" {
     const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.createDir(io, "one.d", .default_dir);
     var one = try tmp.dir.openDir(io, "one.d", .{});
@@ -361,7 +362,7 @@ test "include directory expansion follows Mosquitto order and file scopes" {
 
 test "include directory expansion rejects nested directives" {
     const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.createDir(io, "nested.d", .default_dir);
     var nested = try tmp.dir.openDir(io, "nested.d", .{});
@@ -382,7 +383,7 @@ test "include directory expansion rejects nested directives" {
 
 test "include directory expansion rejects non-regular conf entries" {
     const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.createDir(io, "listeners.d", .default_dir);
     var included = try tmp.dir.openDir(io, "listeners.d", .{});
@@ -404,7 +405,7 @@ test "include directory expansion rejects non-regular conf entries" {
 
 test "include directory expansion bounds file count and file size" {
     const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.createDir(io, "many.d", .default_dir);
     var many = try tmp.dir.openDir(io, "many.d", .{});
@@ -446,7 +447,7 @@ test "include directory expansion bounds file count and file size" {
 test "include directory expansion bounds directories entries and total bytes" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.createDir(io, "empty.d", .default_dir);
     var main_source: std.ArrayList(u8) = .empty;

@@ -8,6 +8,7 @@
 //! changing the torn-tail and sequence guarantees implemented here.
 
 const std = @import("std");
+const test_tmp = @import("../../internal/test_tmp_dir.zig");
 const durability = @import("../../internal/durability.zig");
 
 const file_magic = "netz-mqtt-journal\x00\x01";
@@ -486,7 +487,7 @@ test "MQTT commit log recovers latest complete record" {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
 
     var log = try Log.create(allocator, io, tmp.dir, "state.log", .{});
@@ -507,7 +508,7 @@ test "MQTT commit log truncates torn tail but rejects committed corruption" {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
 
     var log = try Log.create(allocator, io, tmp.dir, "state.log", .{});
@@ -552,7 +553,7 @@ test "MQTT commit log reset compacts history atomically" {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
 
     var log = try Log.create(allocator, io, tmp.dir, "state.log", .{});
@@ -573,7 +574,7 @@ test "MQTT commit log latest recovery repairs a failed append suffix" {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
 
     var log = try Log.createWithInitial(
@@ -603,7 +604,7 @@ test "MQTT commit log auto compacts at configured bound" {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
 
     const options = Options{

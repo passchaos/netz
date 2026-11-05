@@ -6,6 +6,7 @@
 //! its parent directory before reporting success.
 
 const std = @import("std");
+const test_tmp = @import("../../internal/test_tmp_dir.zig");
 const mqtt = @import("../mod.zig");
 const persistence = @import("../persistence/codec.zig");
 const durability = @import("../../internal/durability.zig");
@@ -455,7 +456,7 @@ test "MQTT reconnect snapshot file round trips durable state" {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     const options = session.Options{
         .max_sessions = 1,
@@ -540,7 +541,7 @@ test "MQTT reconnect snapshot failed sync preserves installed file" {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const base_io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.writeFile(base_io, .{
         .sub_path = "session.db",

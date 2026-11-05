@@ -1,5 +1,6 @@
 //! Recovery of local-source completion after the target already accepted it.
 const std = @import("std");
+const test_tmp = @import("../../internal/test_tmp_dir.zig");
 const mqtt = @import("../mod.zig");
 const broker_mod = @import("../broker.zig");
 const runtime = @import("../runtime.zig");
@@ -92,7 +93,7 @@ test "local outbound QoS2 completion retries journal failures without target red
     defer suback.deinit(allocator);
     const poll: mqtt.reconnect.PollOptions = .{ .timeout = .fromSeconds(2) };
     for ([_]bool{ false, true }) |broker_failure| {
-        var tmp = std.testing.tmpDir(.{});
+        var tmp = test_tmp.tmpDir(.{});
         defer tmp.cleanup();
         var broker_alloc = std.testing.FailingAllocator.init(allocator, .{});
         var local = try broker_mod.Broker.init(broker_alloc.allocator(), io, .{});
@@ -153,7 +154,7 @@ test "local outbound QoS0 completion retries journal failure without blocking or
     var suback = try subscriber.subscribe(&.{.{ .topic_filter = "remote/#" }}, .{});
     defer suback.deinit(allocator);
     for ([_]bool{ false, true }) |reconnect_source| {
-        var tmp = std.testing.tmpDir(.{});
+        var tmp = test_tmp.tmpDir(.{});
         defer tmp.cleanup();
         var failing = std.testing.FailingAllocator.init(allocator, .{});
         var local = try broker_mod.Broker.init(failing.allocator(), io, .{ .queue_qos0_messages = true });

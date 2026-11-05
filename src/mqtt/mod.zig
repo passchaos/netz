@@ -27,6 +27,7 @@ pub const will_scheduler = @import("will/mod.zig");
 pub const testing = @import("testing/mod.zig");
 
 test {
+    _ = @import("../internal/test_tmp_dir.zig");
     _ = ack_reason;
     _ = @import("subscription/validation_tests.zig");
     _ = listener_namespace;

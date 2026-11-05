@@ -1,4 +1,5 @@
 const std = @import("std");
+const test_tmp = @import("../../internal/test_tmp_dir.zig");
 const mqtt_runtime = @import("../runtime.zig");
 const mqtt_ws = @import("../websocket_runtime.zig");
 const reconnect = @import("../reconnect.zig");
@@ -135,7 +136,7 @@ fn localCaBundle(
     );
     writer.advance(encoded_len);
     try writer.writeAll("\n-----END CERTIFICATE-----\n");
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.writeFile(io, .{
         .sub_path = "ca.pem",

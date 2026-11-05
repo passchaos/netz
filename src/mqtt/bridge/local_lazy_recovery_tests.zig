@@ -1,5 +1,6 @@
 //! Resume already-started deliveries before applying a lazy activation threshold.
 const std = @import("std");
+const test_tmp = @import("../../internal/test_tmp_dir.zig");
 const mqtt = @import("../mod.zig");
 const broker_mod = @import("../broker.zig");
 const runtime = @import("../runtime.zig");
@@ -62,7 +63,7 @@ test "local lazy recovery finishes journal retries below the activation threshol
     const Failure = enum { qos0_completion, pubcomp, coordinator_clear };
     for ([_]Failure{ .qos0_completion, .pubcomp, .coordinator_clear }) |failure| {
         for ([_]bool{ false, true }) |disconnect_target| {
-            var tmp = std.testing.tmpDir(.{});
+            var tmp = test_tmp.tmpDir(.{});
             defer tmp.cleanup();
             var failing = std.testing.FailingAllocator.init(allocator, .{});
             var local = try broker_mod.Broker.init(failing.allocator(), io, .{ .queue_qos0_messages = true });
@@ -150,7 +151,7 @@ test "local lazy recovery resumes an in-flight QoS1 delivery after source reopen
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     var local = try broker_mod.Broker.init(allocator, io, .{});
     defer local.deinit();

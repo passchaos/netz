@@ -1,4 +1,5 @@
 const std = @import("std");
+const test_tmp = @import("../../internal/test_tmp_dir.zig");
 const mqtt = @import("../mod.zig");
 const mqtt_ws = @import("../websocket_runtime.zig");
 
@@ -13,7 +14,7 @@ test "MQTT over WebSocket Unix server times out idle accept then handles concurr
     });
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     var path_storage: [std.fs.max_path_bytes]u8 = undefined;
     const directory_len = try tmp.dir.realPath(io, &path_storage);

@@ -7,6 +7,7 @@
 //! recovery simple and bounded.
 
 const std = @import("std");
+const test_tmp = @import("../../internal/test_tmp_dir.zig");
 const mqtt = @import("../mod.zig");
 const reconnect = @import("../reconnect.zig");
 const runtime = @import("../runtime.zig");
@@ -655,7 +656,7 @@ test "outbound coordinator journal restores both client snapshots" {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     var shutdown: std.Io.Event = .unset;
     const properties = [_]mqtt.Property{.{ .four_byte = .{

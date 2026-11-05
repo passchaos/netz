@@ -1,4 +1,5 @@
 const std = @import("std");
+const test_tmp = @import("../internal/test_tmp_dir.zig");
 const mqtt = @import("mod.zig");
 const broker_mod = @import("broker.zig");
 const runtime = @import("runtime.zig");
@@ -2051,7 +2052,7 @@ test "broker persistent autosave target prepares and commits ownership" {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
 
     var broker = try Broker.init(allocator, io, .{});

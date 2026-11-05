@@ -1,4 +1,5 @@
 const std = @import("std");
+const test_tmp = @import("../../internal/test_tmp_dir.zig");
 const mqtt = @import("../mod.zig");
 const runtime = @import("../runtime.zig");
 const broker_mod = @import("../broker.zig");
@@ -390,7 +391,7 @@ test "local outbound bridge forwards all QoS without a source listener" {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     var local = try broker_mod.Broker.init(allocator, io, .{});
     defer local.deinit();
@@ -612,7 +613,7 @@ test "local bidirectional bridge resumes remote QoS2 on the shared Session" {
     });
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     var local = try broker_mod.Broker.init(allocator, io, .{});
     defer local.deinit();
@@ -791,7 +792,7 @@ test "local outbound bridge restores all QoS2 ownership boundaries" {
     defer suback.deinit(allocator);
     const poll: mqtt.reconnect.PollOptions = .{ .timeout = .fromSeconds(2) };
     for (0..5) |phase| {
-        var tmp = std.testing.tmpDir(.{});
+        var tmp = test_tmp.tmpDir(.{});
         defer tmp.cleanup();
         var shutdown: std.Io.Event = .unset;
         {
@@ -1283,7 +1284,7 @@ test "local outbound bridge rejects QoS2 unsupported by target" {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     var local = try broker_mod.Broker.init(allocator, io, .{});
     defer local.deinit();

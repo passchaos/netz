@@ -1,5 +1,6 @@
 //! Session expiry is an ownership loss, not corruption of a valid journal.
 const std = @import("std");
+const test_tmp = @import("../../internal/test_tmp_dir.zig");
 const coordinator = @import("outbound_coordinator.zig");
 const fixture = @import("outbound_retention_support.zig");
 
@@ -24,7 +25,7 @@ fn exercise(phase: coordinator.Phase, source_expired: bool, target_expired: bool
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     var shutdown: std.Io.Event = .unset;
     const source_lifetime: u32 = if (source_expired) 1 else 60;
@@ -73,7 +74,7 @@ test "outbound coordinator validates checkpoint binding before source and target
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     var shutdown: std.Io.Event = .unset;
     try fixture.writeJournal(allocator, io, tmp.dir, &shutdown, 1, 1, .target_await_pubrec);
@@ -92,7 +93,7 @@ test "outbound coordinator terminal expiry propagates journal retirement sync fa
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const base_io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     var shutdown: std.Io.Event = .unset;
     try fixture.writeJournal(allocator, base_io, tmp.dir, &shutdown, 1, 60, .target_complete);

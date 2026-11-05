@@ -5,6 +5,7 @@
 //! authentication or resource policy.
 
 const std = @import("std");
+const test_tmp = @import("../internal/test_tmp_dir.zig");
 const http1 = @import("../http1/mod.zig");
 const mqtt = @import("mod.zig");
 const bridge_config = @import("broker_config_bridge.zig");
@@ -3078,7 +3079,7 @@ test "MQTT broker config keeps retained source policy global" {
 test "MQTT broker config loads include directories in Mosquitto order" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.createDir(io, "one.d", .default_dir);
     var one = try tmp.dir.openDir(io, "one.d", .{});
@@ -3136,7 +3137,7 @@ test "MQTT broker config loads include directories in Mosquitto order" {
 test "MQTT broker config isolates included file listener scopes" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.createDir(io, "listeners.d", .default_dir);
     var included = try tmp.dir.openDir(io, "listeners.d", .{});
@@ -3162,7 +3163,7 @@ test "MQTT broker config isolates included file listener scopes" {
 test "MQTT broker config isolates included file bridge scopes" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.createDir(io, "bridges.d", .default_dir);
     var included = try tmp.dir.openDir(io, "bridges.d", .{});
@@ -3189,7 +3190,7 @@ test "MQTT broker config isolates included file bridge scopes" {
 test "MQTT broker config rejects nested include directories" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.createDir(io, "listeners.d", .default_dir);
     var included = try tmp.dir.openDir(io, "listeners.d", .{});
@@ -3211,7 +3212,7 @@ test "MQTT broker config rejects nested include directories" {
 test "MQTT broker config rejects duplicate globals across include files" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.createDir(io, "settings.d", .default_dir);
     var included = try tmp.dir.openDir(io, "settings.d", .{});

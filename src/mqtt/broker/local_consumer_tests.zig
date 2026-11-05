@@ -1,4 +1,5 @@
 const std = @import("std");
+const test_tmp = @import("../../internal/test_tmp_dir.zig");
 const mqtt = @import("../mod.zig");
 const Broker = @import("../broker.zig").Broker;
 const LocalConsumerAckAction = @import("local_consumer.zig").AckAction;
@@ -231,7 +232,7 @@ test "broker clean local consumer removal is journaled" {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     const options: @import("local_consumer.zig").Options = .{
         .id = [_]u8{0x6f} ** 16,
@@ -269,7 +270,7 @@ test "broker local consumer restores every QoS2 journal phase" {
         .subscriptions = &.{.{ .topic_filter = "phases/#", .qos = .exactly_once }},
     };
     for (0..3) |phase| {
-        var tmp = std.testing.tmpDir(.{});
+        var tmp = test_tmp.tmpDir(.{});
         defer tmp.cleanup();
         var packet_id: u16 = undefined;
         {
@@ -434,7 +435,7 @@ test "broker local consumer PUBREL waits for retry of failed journal write" {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     const options: @import("local_consumer.zig").Options = .{
         .id = [_]u8{0x76} ** 16,
@@ -671,7 +672,7 @@ test "broker local consumer restores unacknowledged QoS1 from journal" {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     const id = [_]u8{0x57} ** 16;
     const subscriptions = [_]mqtt.Subscription{.{
@@ -814,7 +815,7 @@ test "broker local consumer ACK waits outside locks for provisional CONNECT" {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = test_tmp.tmpDir(.{});
     defer tmp.cleanup();
     var broker = try Broker.init(allocator, io, .{ .limits = .{ .max_connections = 1 } });
     defer broker.deinit();
