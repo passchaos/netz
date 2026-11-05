@@ -75,6 +75,17 @@ pub fn validationSecretHashes(
     sans: []const SanSpec,
     hashes: []const [32]u8,
 ) ![]u8 {
+    return validationSecretPins(gpa, name, trusted_ca, sans, hashes, &.{});
+}
+
+pub fn validationSecretPins(
+    gpa: std.mem.Allocator,
+    name: []const u8,
+    trusted_ca: []const u8,
+    sans: []const SanSpec,
+    hashes: []const [32]u8,
+    spkis: []const [32]u8,
+) ![]u8 {
     var validation = Builder{ .allocator = gpa };
     defer validation.deinit();
     var trusted = try dataSource(gpa, trusted_ca);
@@ -95,6 +106,11 @@ pub fn validationSecretHashes(
     for (hashes) |hash| {
         const encoded = std.fmt.bytesToHex(hash, .lower);
         try validation.bytes(4, &encoded);
+    }
+    for (spkis) |spki| {
+        var buffer: [std.base64.standard.Encoder.calcSize(32)]u8 = undefined;
+        const encoded = std.base64.standard.Encoder.encode(&buffer, &spki);
+        try validation.bytes(5, encoded);
     }
     var out = Builder{ .allocator = gpa };
     errdefer out.deinit();

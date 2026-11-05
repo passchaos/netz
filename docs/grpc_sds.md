@@ -16,12 +16,14 @@ of embedding certificate material.
 - `validation_context` (field 3) requires `trusted_ca` and accepts
   `match_subject_alt_names` exact/prefix/suffix/contains matchers with optional
   `ignore_case`. Hex SHA-256 `verify_certificate_hash` pins are checked against
-  every certificate in the peer chain after normal chain verification.
+  every certificate in the peer chain, and base64 SHA-256
+  `verify_certificate_spki` pins are checked against every chain certificate's
+  SubjectPublicKeyInfo, both after normal chain verification.
 - `generic_secret` and `session_ticket_keys` are rejected.
 - Only inline data sources are accepted. File, environment and watched
   directory sources belong to bootstrap certificate providers, not SDS.
 - Encrypted private keys, OCSP staples, certificate timestamps, CRLs,
-  certificate SPKI pinning, custom validators, system roots and
+  custom validators, system roots and
   `allow_expired_certificate` are rejected rather than silently weakened.
 
 The decoded secret is arena-owned and can be projected onto

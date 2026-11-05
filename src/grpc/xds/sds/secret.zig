@@ -27,6 +27,7 @@ pub const ValidationContext = struct {
     trusted_ca: []const u8,
     san_matchers: []const tls_material.SanMatcher = &.{},
     verify_certificate_hashes: []const [32]u8 = &.{},
+    verify_certificate_spkis: []const [32]u8 = &.{},
 };
 
 pub const Kind = union(enum) {
@@ -51,6 +52,7 @@ pub const Secret = struct {
                 .trusted_ca = value.trusted_ca,
                 .san_matchers = value.san_matchers,
                 .verify_certificate_hashes = value.verify_certificate_hashes,
+                .verify_certificate_spkis = value.verify_certificate_spkis,
             },
         };
     }
@@ -155,6 +157,14 @@ fn certificateHash(value: []const u8) Error![32]u8 {
     return result;
 }
 
+fn certificateSpkiHash(value: []const u8) Error![32]u8 {
+    var result: [32]u8 = undefined;
+    const size = std.base64.standard.Decoder.calcSizeForSlice(value) catch return error.InvalidSdsResource;
+    if (size != result.len) return error.InvalidSdsResource;
+    std.base64.standard.Decoder.decode(&result, value) catch return error.InvalidSdsResource;
+    return result;
+}
+
 fn validationContext(
     arena: std.mem.Allocator,
     bytes: []const u8,
@@ -163,6 +173,7 @@ fn validationContext(
     var trusted_ca: ?[]const u8 = null;
     var matchers: std.ArrayList(tls_material.SanMatcher) = .empty;
     var hashes: std.ArrayList([32]u8) = .empty;
+    var spkis: std.ArrayList([32]u8) = .empty;
     var reader: pb.Reader = .{ .bytes = bytes };
     while (try reader.next()) |field| switch (field.number) {
         1 => {
@@ -188,17 +199,25 @@ fn validationContext(
             }
             try hashes.append(arena, try certificateHash(try text(&reader, limits)));
         },
+        5 => {
+            if (field.wire_type != 2) return error.InvalidSdsResource;
+            if (spkis.items.len >= limits.max_certificate_hashes) {
+                return error.SdsLimitExceeded;
+            }
+            try spkis.append(arena, try certificateSpkiHash(try text(&reader, limits)));
+        },
         6 => {
             if (field.wire_type != 0) return error.InvalidSdsResource;
             if ((try reader.varint()) != 0) return error.UnsupportedSdsFeature;
         },
-        5, 7, 8, 9, 10, 11, 12, 13 => return error.UnsupportedSdsFeature,
+        7, 8, 9, 10, 11, 12, 13 => return error.UnsupportedSdsFeature,
         else => try reader.skip(field),
     };
     return .{
         .trusted_ca = trusted_ca orelse return error.InvalidSdsResource,
         .san_matchers = try matchers.toOwnedSlice(arena),
         .verify_certificate_hashes = try hashes.toOwnedSlice(arena),
+        .verify_certificate_spkis = try spkis.toOwnedSlice(arena),
     };
 }
 

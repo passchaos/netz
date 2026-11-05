@@ -205,3 +205,27 @@ test "gRPC SDS decodes certificate hash pins" {
     try invalid.bytes(3, validation_message.data.items);
     try std.testing.expectError(error.InvalidSdsResource, sds.decode(gpa, invalid.data.items, .{}));
 }
+
+test "gRPC SDS decodes SPKI pins" {
+    const spki = [_]u8{0xcd} ** 32;
+    const bytes = try fixture.validationSecretPins(gpa, "roots", "CA BUNDLE", &.{}, &.{}, &.{spki});
+    defer gpa.free(bytes);
+    var owned = try sds.decode(gpa, bytes, .{});
+    defer owned.deinit();
+    const validation = owned.value.kind.validation_context;
+    try std.testing.expectEqual(@as(usize, 1), validation.verify_certificate_spkis.len);
+    try std.testing.expectEqualSlices(u8, &spki, &validation.verify_certificate_spkis[0]);
+
+    var invalid = fixture.Builder{ .allocator = gpa };
+    defer invalid.deinit();
+    try invalid.bytes(1, "roots");
+    var validation_message = fixture.Builder{ .allocator = gpa };
+    defer validation_message.deinit();
+    var trusted = fixture.Builder{ .allocator = gpa };
+    defer trusted.deinit();
+    try trusted.bytes(1, "CA");
+    try validation_message.bytes(1, trusted.data.items);
+    try validation_message.bytes(5, "!!");
+    try invalid.bytes(3, validation_message.data.items);
+    try std.testing.expectError(error.InvalidSdsResource, sds.decode(gpa, invalid.data.items, .{}));
+}

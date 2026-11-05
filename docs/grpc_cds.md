@@ -105,8 +105,9 @@ cipher-suite allowlist using the OpenSSL names for the supported ECDHE
 GCM/ChaCha suites, and `match_subject_alt_names` exact/prefix/suffix/contains
 matchers (case-sensitive or insensitive). SAN matching requires inline
 `trusted_ca` and replaces SNI hostname verification with the configured matcher
-set. Hex SHA-256 `verify_certificate_hash` pins are checked against every
-certificate in the peer chain after normal chain verification. EDS, STATIC and
+set. Hex SHA-256 `verify_certificate_hash` pins and base64 SHA-256
+`verify_certificate_spki` pins are checked against the peer chain after normal
+chain verification. EDS, STATIC and
 DNS endpoints become TLS targets; without
 `trusted_ca` the platform roots are used. SDS certificate and validation
 references are exposed as `Cluster.tls_sds` when `Limits.allow_sds` is set and

@@ -482,6 +482,9 @@ test "gRPC CDS decodes inline certificate hash pins" {
     defer validation.deinit();
     try validation.bytes(1, trusted.data.items);
     try validation.bytes(4, "abababababababababababababababababababababababababababababababab");
+    const spki_pin = [_]u8{0xcd} ** 32;
+    var spki_buffer: [std.base64.standard.Encoder.calcSize(32)]u8 = undefined;
+    try validation.bytes(5, std.base64.standard.Encoder.encode(&spki_buffer, &spki_pin));
     var common = fixture.Builder{ .allocator = gpa };
     defer common.deinit();
     try common.bytes(3, validation.data.items);
@@ -503,4 +506,7 @@ test "gRPC CDS decodes inline certificate hash pins" {
     const hashes = decoded.value.tls.?.verify_certificate_hashes.?;
     try std.testing.expectEqual(@as(usize, 1), hashes.len);
     try std.testing.expectEqual(@as(u8, 0xab), hashes[0][0]);
+    const spkis = decoded.value.tls.?.verify_certificate_spkis.?;
+    try std.testing.expectEqual(@as(usize, 1), spkis.len);
+    try std.testing.expectEqualSlices(u8, &spki_pin, &spkis[0]);
 }

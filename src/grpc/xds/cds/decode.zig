@@ -287,6 +287,7 @@ const Validation = struct {
     trusted_ca: []const u8,
     san_matchers: []const tls_material.SanMatcher,
     verify_certificate_hashes: []const [32]u8,
+    verify_certificate_spkis: []const [32]u8,
 };
 
 fn sanMatcher(bytes: []const u8, limits: Limits) Error!tls_material.SanMatcher {
@@ -327,10 +328,19 @@ fn certificateHash(value: []const u8) Error![32]u8 {
     return result;
 }
 
+fn certificateSpkiHash(value: []const u8) Error![32]u8 {
+    var result: [32]u8 = undefined;
+    const size = std.base64.standard.Decoder.calcSizeForSlice(value) catch return error.InvalidCdsResource;
+    if (size != result.len) return error.InvalidCdsResource;
+    std.base64.standard.Decoder.decode(&result, value) catch return error.InvalidCdsResource;
+    return result;
+}
+
 fn validationContext(arena: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!Validation {
     var trusted_ca: ?[]const u8 = null;
     var matchers: std.ArrayList(tls_material.SanMatcher) = .empty;
     var hashes: std.ArrayList([32]u8) = .empty;
+    var spkis: std.ArrayList([32]u8) = .empty;
     var reader: pb.Reader = .{ .bytes = bytes };
     while (try reader.next()) |field| {
         if (field.number == 1 and field.wire_type == 2) trusted_ca = try dataSource(try reader.bytesValue(), limits) else if (field.number == 2 and field.wire_type == 2) {
@@ -338,12 +348,16 @@ fn validationContext(arena: std.mem.Allocator, bytes: []const u8, limits: Limits
         } else if (field.number == 4 and field.wire_type == 2) {
             if (hashes.items.len >= limits.max_certificate_hashes) return error.CdsLimitExceeded;
             try hashes.append(arena, try certificateHash(try pb.text(&reader, limits.max_text_bytes)));
+        } else if (field.number == 5 and field.wire_type == 2) {
+            if (spkis.items.len >= limits.max_certificate_hashes) return error.CdsLimitExceeded;
+            try spkis.append(arena, try certificateSpkiHash(try pb.text(&reader, limits.max_text_bytes)));
         } else if (field.number >= 3 and field.number <= 10) return error.UnsupportedCdsFeature else try reader.skip(field);
     }
     return .{
         .trusted_ca = trusted_ca orelse return error.InvalidCdsResource,
         .san_matchers = try matchers.toOwnedSlice(arena),
         .verify_certificate_hashes = try hashes.toOwnedSlice(arena),
+        .verify_certificate_spkis = try spkis.toOwnedSlice(arena),
     };
 }
 
@@ -436,6 +450,7 @@ fn commonTlsContext(arena: std.mem.Allocator, bytes: []const u8, limits: Limits)
             result.config.trusted_ca = validation.trusted_ca;
             result.config.san_matchers = validation.san_matchers;
             result.config.verify_certificate_hashes = validation.verify_certificate_hashes;
+            result.config.verify_certificate_spkis = validation.verify_certificate_spkis;
         } else if (field.number == 4 and field.wire_type == 2) {
             _ = try reader.bytesValue();
         } else if (field.number == 6 and field.wire_type == 2) {
@@ -463,6 +478,7 @@ fn upstreamTlsContext(arena: std.mem.Allocator, bytes: []const u8, limits: Limit
             result.tls12_cipher_suites = common.config.tls12_cipher_suites;
             result.san_matchers = common.config.san_matchers;
             result.verify_certificate_hashes = common.config.verify_certificate_hashes;
+            result.verify_certificate_spkis = common.config.verify_certificate_spkis;
             sds = common.sds;
         } else if (field.number == 2 and field.wire_type == 2) {
             const value = try pb.text(&reader, 255);

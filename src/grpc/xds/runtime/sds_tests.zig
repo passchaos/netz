@@ -101,7 +101,8 @@ test "gRPC xDS runtime gates STATIC endpoints on SDS and reopens after removal" 
     try std.testing.expectEqualStrings("roots", client.subscriptions.find(sds.type_url).?.names[1]);
 
     const pin = [_]u8{0x11} ** 32;
-    const roots = try sds_fixture.validationSecretHashes(gpa, "roots", tls_testing.certificate_pem, &.{}, &.{pin});
+    const spki_pin = [_]u8{0x22} ** 32;
+    const roots = try sds_fixture.validationSecretPins(gpa, "roots", tls_testing.certificate_pem, &.{}, &.{pin}, &.{spki_pin});
     defer gpa.free(roots);
     const certificate = try sds_fixture.tlsSecret(gpa, "cert-1", tls_testing.certificate_pem, tls_testing.private_key_pem);
     defer gpa.free(certificate);
@@ -121,6 +122,8 @@ test "gRPC xDS runtime gates STATIC endpoints on SDS and reopens after removal" 
     try std.testing.expect(std.mem.indexOf(u8, config.trusted_ca, "BEGIN CERTIFICATE") != null);
     try std.testing.expectEqual(@as(usize, 1), config.verify_certificate_hashes.?.len);
     try std.testing.expectEqualSlices(u8, &pin, &config.verify_certificate_hashes.?[0]);
+    try std.testing.expectEqual(@as(usize, 1), config.verify_certificate_spkis.?.len);
+    try std.testing.expectEqualSlices(u8, &spki_pin, &config.verify_certificate_spkis.?[0]);
 
     // SotW omission of the certificate secret makes the cluster pending again
     // and removes its endpoint instead of falling back to cleartext.

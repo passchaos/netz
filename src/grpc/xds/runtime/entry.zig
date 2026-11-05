@@ -111,6 +111,9 @@ pub const Cluster = struct {
                     if (value.verify_certificate_hashes.len != 0) {
                         config.verify_certificate_hashes = try arena.dupe([32]u8, value.verify_certificate_hashes);
                     }
+                    if (value.verify_certificate_spkis.len != 0) {
+                        config.verify_certificate_spkis = try arena.dupe([32]u8, value.verify_certificate_spkis);
+                    }
                 },
                 .tls_certificate => return error.InvalidSdsResource,
             }

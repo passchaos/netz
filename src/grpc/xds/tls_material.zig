@@ -25,6 +25,9 @@ pub const Config = struct {
     san_matchers: ?[]const SanMatcher = null,
     /// SHA-256 hashes of DER-encoded certificates accepted in the peer chain.
     verify_certificate_hashes: ?[]const [32]u8 = null,
+    /// SHA-256 hashes of DER-encoded SubjectPublicKeyInfo values accepted in
+    /// the peer chain.
+    verify_certificate_spkis: ?[]const [32]u8 = null,
 };
 
 pub const Error = std.mem.Allocator.Error || server_identity_file.Error || error{
@@ -45,6 +48,7 @@ pub const Material = struct {
     tls12_cipher_suites: []const tls_stream.Tls12CipherSuite = &.{},
     san_matchers: []const OwnedSanMatcher = &.{},
     verify_certificate_hashes: []const [32]u8 = &.{},
+    verify_certificate_spkis: []const [32]u8 = &.{},
 
     const OwnedSanMatcher = struct { kind: SanMatch, value: []u8, ignore_case: bool };
 
@@ -86,6 +90,12 @@ pub const Material = struct {
                 self.verify_certificate_hashes = try gpa.dupe([32]u8, hashes);
             }
         }
+        if (config.verify_certificate_spkis) |spkis| {
+            if (spkis.len != 0) {
+                if (!self.bundle_loaded) return error.InvalidTlsMaterial;
+                self.verify_certificate_spkis = try gpa.dupe([32]u8, spkis);
+            }
+        }
         if (config.certificate_chain.len != 0) {
             self.identity = server_identity_file.parse(gpa, config.certificate_chain, config.private_key) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
@@ -102,6 +112,7 @@ pub const Material = struct {
             self.allocator.free(self.san_matchers);
         }
         if (self.verify_certificate_hashes.len != 0) self.allocator.free(self.verify_certificate_hashes);
+        if (self.verify_certificate_spkis.len != 0) self.allocator.free(self.verify_certificate_spkis);
         if (self.identity) |*identity| identity.deinit();
         self.bundle.deinit(self.allocator);
         self.allocator.destroy(self);
@@ -114,7 +125,7 @@ pub const Material = struct {
         if (self.version_policy) |policy| result.protocol_policy = policy;
         if (self.tls12_cipher_suites.len != 0) result.tls12_cipher_suites = self.tls12_cipher_suites;
         if (self.bundle_loaded) result.ca_bundle = .{ .bundle = &self.bundle, .lock = &self.lock };
-        if (self.san_matchers.len != 0 or self.verify_certificate_hashes.len != 0) {
+        if (self.san_matchers.len != 0 or self.verify_certificate_hashes.len != 0 or self.verify_certificate_spkis.len != 0) {
             result.server_verifier = .{ .verify_trust = verifySanTrust, .context = self };
         }
         if (self.identity) |*identity| {
@@ -140,6 +151,22 @@ pub const Material = struct {
                 var digest: [32]u8 = undefined;
                 std.crypto.hash.sha2.Sha256.hash(certificate, &digest, .{});
                 for (self.verify_certificate_hashes) |expected| {
+                    if (std.mem.eql(u8, &digest, &expected)) {
+                        pinned = true;
+                        break;
+                    }
+                }
+                if (pinned) break;
+            }
+            if (!pinned) return error.CertificateUntrusted;
+        }
+        if (self.verify_certificate_spkis.len != 0) {
+            var pinned = false;
+            for (trust.chain) |certificate| {
+                const spki = certificateSpki(certificate) orelse continue;
+                var digest: [32]u8 = undefined;
+                std.crypto.hash.sha2.Sha256.hash(spki, &digest, .{});
+                for (self.verify_certificate_spkis) |expected| {
                     if (std.mem.eql(u8, &digest, &expected)) {
                         pinned = true;
                         break;
@@ -206,6 +233,27 @@ const DerNames = struct {
         return .{ .tag = tag, .value = value };
     }
 };
+
+fn certificateSpki(bytes: []const u8) ?[]const u8 {
+    const der = std.crypto.Certificate.der;
+    const outer = der.Element.parse(bytes, 0) catch return null;
+    const tbs = der.Element.parse(bytes, outer.slice.start) catch return null;
+    var index = tbs.slice.start;
+    var element = der.Element.parse(bytes, index) catch return null;
+    if (bytes[index] == 0xa0) {
+        index = element.slice.end;
+        element = der.Element.parse(bytes, index) catch return null;
+    }
+    // serialNumber
+    index = element.slice.end;
+    // signature, issuer, validity, subject
+    for (0..4) |_| {
+        element = der.Element.parse(bytes, index) catch return null;
+        index = element.slice.end;
+    }
+    const spki = der.Element.parse(bytes, index) catch return null;
+    return bytes[index..spki.slice.end];
+}
 
 fn matches(matcher: Material.OwnedSanMatcher, text: []const u8) bool {
     return switch (matcher.kind) {
@@ -286,6 +334,26 @@ test "xDS TLS certificate hash pins accept and reject the peer chain" {
     var wrong = digest;
     wrong[0] ^= 0xff;
     var rejecting = try Material.create(allocator, std.testing.io, .{ .trusted_ca = pem, .verify_certificate_hashes = &.{wrong} });
+    defer rejecting.deinit();
+    try std.testing.expectError(error.CertificateUntrusted, Material.verifySanTrust(rejecting, trust));
+}
+
+test "xDS TLS SPKI pins accept and reject the peer chain" {
+    const tls_testing = @import("../../tls/testing.zig");
+    const allocator = std.testing.allocator;
+    const pem = try std.fmt.allocPrint(allocator, "-----BEGIN CERTIFICATE-----\n{s}\n-----END CERTIFICATE-----\n", .{tls_testing.certificate_base64});
+    defer allocator.free(pem);
+    var der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(&der, tls_testing.certificate_base64);
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(certificateSpki(&der).?, &digest, .{});
+    const trust: vail.tls.auth.TrustContext = .{ .server_name = "localhost", .chain = &.{&der} };
+    var matching = try Material.create(allocator, std.testing.io, .{ .trusted_ca = pem, .verify_certificate_spkis = &.{digest} });
+    defer matching.deinit();
+    try Material.verifySanTrust(matching, trust);
+    var wrong = digest;
+    wrong[0] ^= 0xff;
+    var rejecting = try Material.create(allocator, std.testing.io, .{ .trusted_ca = pem, .verify_certificate_spkis = &.{wrong} });
     defer rejecting.deinit();
     try std.testing.expectError(error.CertificateUntrusted, Material.verifySanTrust(rejecting, trust));
 }
