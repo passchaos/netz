@@ -1,0 +1,43 @@
+{
+  "schema": 1,
+  "date": "2026-11-05",
+  "head": "working-tree",
+  "subject": "gRPC xDS ignore_resource_deletion",
+  "change": "runtime.Options.ignore_resource_deletion now implements the gRPC xDS server feature. SotW LDS/CDS omissions and delta listener, route, CDS and EDS removals retain the accepted resource instead of deleting it. The flag is forwarded to the LDS controller and applied in the runtime CDS/EDS paths; the default behavior is unchanged.",
+  "tests": {
+    "unit": "src/grpc/xds/runtime/ignore_deletion_tests.zig covers SotW CDS and LDS omissions plus delta cluster, route and listener removals, asserting the route tree and endpoints remain published.",
+    "focused_gate": {
+      "command": "zig build test-lib -Dtest-filter='xDS runtime' -Dtest-filter='gRPC CDS' -Dtest-filter='gRPC LDS' -Dtest-filter='LRS' -Dtest-filter='SDS' --summary all",
+      "passed": 232,
+      "total": 232,
+      "failed": 0
+    },
+    "compile": {
+      "command": "zig build test-compile",
+      "status": "passed"
+    },
+    "full_library": {
+      "command": "zig build test-lib",
+      "status": "passed",
+      "exit_code": 0,
+      "passed": 6488,
+      "total": 6488,
+      "failed": 0,
+      "notes": "Earlier full runs under host load 12-52 failed timing-sensitive WebSocket/gRPC cancellation cases and crashed one SOCKS5 test in its test-only socket close path; each failed case passed in isolation, and the final run at load 4 passed with no failures."
+    }
+  },
+  "source_sha256": {
+    "src/grpc/xds/lds/controller.zig": "ecc7e3aa38d158f3c013e6ca99ece4e00ef8bf5b713a449909e080c7d167da66",
+    "src/grpc/xds/lds/apply_listener.zig": "b45230e4ec73bde4f49ee1ff6defeedc8c03057f8bafe6e6344b5f0f1a2f9af4",
+    "src/grpc/xds/lds/apply_delta.zig": "30d715ce039fa5902f8c73191ec85be43a337f95d01d6e9a4cdce7f8304847a6",
+    "src/grpc/xds/runtime/options.zig": "a0e6980567944df0ec27619312ade65264b9d0eeba7b073bd59fb671ef8eef77",
+    "src/grpc/xds/runtime/controller.zig": "e427293ec112ce97cddcf5476322a64dc9dc072615400224c3d9f7106d98d5db",
+    "src/grpc/xds/runtime/apply_cds.zig": "fb2db74670c85f1f9b852146e690de16122062a6b12c279e818f9368091553b5",
+    "src/grpc/xds/runtime/apply_delta_cds.zig": "4f53a83c7d35f92302ab89cac466b8932ec271b13b2f10ee203ca5b5c7f00891",
+    "src/grpc/xds/runtime/apply_delta_eds.zig": "ed7c49ca86c802a6537866c0b45150f0bb256b6f152f800483714453f1547d84",
+    "src/grpc/xds/runtime/ignore_deletion_tests.zig": "8f0b564068a4b8fd1d411416fe83818e2c6a9907165e0b70ab5e2f82f4cbb0cb",
+    "src/grpc/xds/runtime.zig": "673d95e79e7de6b936bc33c74d733f7fc9442bc944d6952fd387de3261d66057",
+    "docs/grpc_xds_runtime.md": "0d958047bf117f9b8cd7471bec3510ca28d5400d916eea75795ab3773f11ca13"
+  },
+  "notes": "The feature must be enabled explicitly; bootstrap server_features still need application wiring. SotW RDS/EDS omissions already retained state before this change."
+}
