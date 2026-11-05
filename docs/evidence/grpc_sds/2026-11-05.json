@@ -1,0 +1,48 @@
+{
+  "schema": 1,
+  "date": "2026-11-05",
+  "head": "working-tree",
+  "subject": "SDS certificate and validation secrets",
+  "change": "Added grpc.xds.sds for Envoy v3 Secret resources: inline TLS certificates, certificate validation contexts, SAN matchers, bounds, and fail-closed rejection of unsupported sources or verification controls. CDS now exposes tls_certificate_sds_secret_configs and validation_context_sds_secret_config as Cluster.tls_sds when Limits.allow_sds is set. The runtime controller subscribes to referenced secrets, caches SotW and delta resources, keeps referencing clusters pending until every secret resolves, retains EDS payloads received while pending, reprojects on rotation, and returns clusters to pending when a secret is removed instead of publishing cleartext.",
+  "tests": {
+    "unit": "src/grpc/xds/sds/secret_tests.zig covers inline bytes/strings, SAN matchers, malformed and unsupported resources, and byte/text/SAN limits. src/grpc/xds/runtime/sds_tests.zig covers CDS reference decoding, STATIC and EDS clusters held pending until both secrets arrive, SotW removal/re-add, delta resolution/removal, and repeated rejection of wrong-kind references.",
+    "focused_gate": {
+      "command": "zig build test-lib -Dtest-filter='xDS runtime' -Dtest-filter='gRPC CDS' -Dtest-filter='LRS' -Dtest-filter='SDS' --summary all",
+      "passed": 223,
+      "total": 223,
+      "failed": 0
+    },
+    "compile": {
+      "command": "zig build test-compile",
+      "status": "passed"
+    },
+    "full_library": {
+      "command": "zig build test-lib",
+      "status": "passed",
+      "exit_code": 0,
+      "passed": 6485,
+      "total": 6485,
+      "failed": 0,
+      "notes": "Three earlier full runs under host load 20-44 failed only timing-sensitive WebSocket/WebTransport/QUIC/HTTP3 cases; each failed case passed when rerun in isolation, and the final run passed with no failures."
+    }
+  },
+  "source_sha256": {
+    "src/grpc/xds/sds.zig": "ab53a1d0a6d5d5f3a9943f573fa29731d8c278a5ba984a3352d0bcb1d3ab35d1",
+    "src/grpc/xds/sds/secret.zig": "ad292208d3483a66b0120ec1ee80024484bc57dacbe08ab551cc9f363b77d2e5",
+    "src/grpc/xds/sds/secret_tests.zig": "6ff8ce26541a4275cdce9b2db45598a242fb9f01d6de98e55054154cbce823c9",
+    "src/grpc/xds/cds/decode.zig": "edac68c5e7da171d162f43bf05d856a61be3e99de2a491e2507f31c31b282275",
+    "src/grpc/xds/runtime/controller.zig": "d57e86f293032a34059683738aa692142d8eeffce89f8638e224ad518d4f20db",
+    "src/grpc/xds/runtime/entry.zig": "a3803e57c014be63359817fe32d7a2a5470153d0297d33c929314c46c16f31b7",
+    "src/grpc/xds/runtime/apply_sds.zig": "3329300c1fca40fd53c68247da259403d297c7b9e2e4f0d9ae5ca8517d1a45b4",
+    "src/grpc/xds/runtime/apply_delta_sds.zig": "c68bdb505e91fce577231f29d23ae3a576a4bce19b176e30beab91ce5a780afa",
+    "src/grpc/xds/runtime/sds_tests.zig": "f8d0f3f95536ea49d888aedeed98be6924f9117e5601e84d36a53d8dd5a30ad9",
+    "src/grpc/xds/runtime/plan.zig": "7c65312f4f311fe4b191889eeaed511641fcc693318c54b9afc3cc35330db5dd",
+    "src/grpc/xds/runtime/target.zig": "fc7bb01879ddb81bd51a6646c6fb1b7383567db8365af81b72c87d5404d8844d",
+    "src/grpc/xds/runtime/apply_cds.zig": "3e9ec466d08e857000ac88af6a45e8c143a3847bcac7128b82684092b115a4fe",
+    "src/grpc/xds/runtime/apply_eds.zig": "1d04886446b27516ba356ec2900c536a4058729a472259d1a85496a726c62eab",
+    "docs/grpc_sds.md": "ef333fc8fece4b159339fdb2fccd1bc03db492f42d37fc48be8747378134655d",
+    "docs/grpc_cds.md": "df6290b5ef4069813c060c1c887cf992be538b50399c61bab480a6bdf3b23d4c",
+    "docs/grpc_xds_runtime.md": "0ef399bbf394919bdca1aaf9bf009dce01f8a41116cd4a9263a5cab5e3d08b5b"
+  },
+  "notes": "Bootstrap certificate providers, file/environment data sources, encrypted private keys, OCSP/CRL, certificate hash/SPKI pinning and SDS delta TTL expiry remain open. The controller requires one certificate and one validation reference per cluster."
+}
