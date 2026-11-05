@@ -62,6 +62,18 @@ fn deltaPayload(url: []const u8, name: []const u8, version: []const u8, bytes: [
     return .{ .name = name, .version = version, .resource = .{ .type_url = url, .value = bytes } };
 }
 
+fn deltaPayloadTtl(url: []const u8, name: []const u8, version: []const u8, bytes: []const u8, ttl: ?delta.codec.Duration) delta.codec.Resource {
+    return .{ .name = name, .version = version, .resource = .{ .type_url = url, .value = bytes }, .ttl = ttl };
+}
+
+fn heartbeat(name: []const u8, version: []const u8, ttl: ?delta.codec.Duration) delta.codec.Resource {
+    return .{ .name = name, .version = version, .ttl = ttl };
+}
+
+fn expireDelta(controller: *runtime.Controller, client: *delta.Client, channel: grpc.SharedChannel, io: std.Io) !void {
+    try std.testing.expectError(error.AdsNotConnected, controller.expireDeltaWithDeadline(client, channel, .fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(3) })));
+}
+
 test "gRPC xDS runtime gates STATIC endpoints on SDS and reopens after removal" {
     var threaded = std.Io.Threaded.init(gpa, .{ .async_limit = .unlimited });
     defer threaded.deinit();
@@ -249,5 +261,94 @@ test "gRPC delta xDS runtime resolves and removes SDS secrets incrementally" {
     var restore = try deltaUpdate(&client, sds.type_url, "s3", &.{deltaPayload(sds.type_url, "cert-1", "v2", certificate)}, &.{});
     defer restore.deinit();
     try acceptDelta(controller, &client, channel, io, restore);
+    try std.testing.expectEqual(@as(usize, 1), channel.configuredEndpointCount());
+}
+
+test "gRPC delta xDS runtime expires SDS secrets and refreshes their TTL" {
+    var threaded = std.Io.Threaded.init(gpa, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var channel = try grpc.SharedChannel.init(gpa, io, .{ .cleartext_ip = .{ .address = .{ .ip4 = .loopback(1) } } }, .{});
+    defer channel.deinit();
+    var sender = channel.sender();
+    defer sender.deinit();
+    var client = try delta.Client.init(gpa, sender, .{ .node = .{ .id = "test" } });
+    defer client.deinit();
+    const controller = try runtime.Controller.create(gpa, .{ .listener_name = "frontend", .target = .{ .authority = "backend.test" } });
+    defer controller.deinit();
+    _ = try controller.startDeltaWithDeadline(&client, channel, .fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(3) }));
+
+    const routes = try rds_fixture.encode(gpa, "inline", &.{"backend.test"}, &.{.{ .prefix = "/", .cluster = "a" }}, null);
+    defer gpa.free(routes);
+    const listener = try lds_fixture.encode(gpa, .{ .inline_rds = routes });
+    defer gpa.free(listener);
+    var listener_update = try deltaUpdate(&client, lds.type_url, "l1", &.{deltaPayload(lds.type_url, "frontend", "v1", listener)}, &.{});
+    defer listener_update.deinit();
+    try acceptDelta(controller, &client, channel, io, listener_update);
+
+    const tls = try cds_fixture.upstreamTlsSds(gpa, "localhost", "cert-1", "roots");
+    defer gpa.free(tls);
+    const cluster = try cds_fixture.staticClusterTls(gpa, "a", "127.0.0.1", 1001, tls);
+    defer gpa.free(cluster);
+    var cluster_update = try deltaUpdate(&client, cds.type_url, "c1", &.{deltaPayload(cds.type_url, "a", "v1", cluster)}, &.{});
+    defer cluster_update.deinit();
+    try acceptDelta(controller, &client, channel, io, cluster_update);
+
+    const roots = try sds_fixture.validationSecret(gpa, "roots", tls_testing.certificate_pem, &.{});
+    defer gpa.free(roots);
+    const certificate = try sds_fixture.tlsSecret(gpa, "cert-1", tls_testing.certificate_pem, tls_testing.private_key_pem);
+    defer gpa.free(certificate);
+    const short: delta.codec.Duration = .{ .nanos = 50_000_000 };
+    const long: delta.codec.Duration = .{ .nanos = 200_000_000 };
+    var secret_update = try deltaUpdate(&client, sds.type_url, "s1", &.{
+        deltaPayloadTtl(sds.type_url, "cert-1", "v1", certificate, short),
+        deltaPayloadTtl(sds.type_url, "roots", "v1", roots, short),
+    }, &.{});
+    defer secret_update.deinit();
+    try acceptDelta(controller, &client, channel, io, secret_update);
+    try std.testing.expectEqual(@as(usize, 1), channel.configuredEndpointCount());
+    try std.testing.expect(controller.nextDeltaExpiry() != null);
+
+    // A heartbeat moves both timers before the short TTL elapses.
+    try std.Io.sleep(io, .fromMilliseconds(20), .awake);
+    var refreshed = try deltaUpdate(&client, sds.type_url, "s2", &.{
+        heartbeat("cert-1", "v1", long),
+        heartbeat("roots", "v1", long),
+    }, &.{});
+    defer refreshed.deinit();
+    try acceptDelta(controller, &client, channel, io, refreshed);
+    try std.Io.sleep(io, .fromMilliseconds(60), .awake);
+    try expireDelta(controller, &client, channel, io);
+    try std.testing.expectEqual(@as(usize, 1), channel.configuredEndpointCount());
+
+    // Clearing the TTL stops expiry entirely.
+    var cleared = try deltaUpdate(&client, sds.type_url, "s3", &.{
+        heartbeat("cert-1", "v1", null),
+        heartbeat("roots", "v1", null),
+    }, &.{});
+    defer cleared.deinit();
+    try acceptDelta(controller, &client, channel, io, cleared);
+    try std.testing.expect(controller.nextDeltaExpiry() == null);
+
+    // Re-arm, let both expire, and observe the cluster return to pending.
+    var rearmed = try deltaUpdate(&client, sds.type_url, "s4", &.{
+        heartbeat("cert-1", "v1", short),
+        heartbeat("roots", "v1", short),
+    }, &.{});
+    defer rearmed.deinit();
+    try acceptDelta(controller, &client, channel, io, rearmed);
+    try std.Io.sleep(io, .fromMilliseconds(100), .awake);
+    try expireDelta(controller, &client, channel, io);
+    try std.testing.expectEqual(@as(usize, 0), channel.configuredEndpointCount());
+    try std.testing.expect(controller.entries.items[0].pending());
+    try std.testing.expect(client.acceptedVersion(sds.type_url, "cert-1") == null);
+    try std.testing.expect(controller.nextDeltaExpiry() == null);
+
+    var restored = try deltaUpdate(&client, sds.type_url, "s5", &.{
+        deltaPayload(sds.type_url, "cert-1", "v2", certificate),
+        deltaPayload(sds.type_url, "roots", "v2", roots),
+    }, &.{});
+    defer restored.deinit();
+    try acceptDelta(controller, &client, channel, io, restored);
     try std.testing.expectEqual(@as(usize, 1), channel.configuredEndpointCount());
 }

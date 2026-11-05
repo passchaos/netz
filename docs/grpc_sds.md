@@ -51,7 +51,9 @@ instead of publishing cleartext.
 
 A secret of the wrong kind for a reference (for example, a validation secret
 used as a certificate) is rejected on every retry until the control plane
-corrects it.
+corrects it. Delta secrets honor `Resource.ttl`: payload-free heartbeats
+refresh the timer, expiry removes the cached secret and forgets its accepted
+version, and the referencing cluster returns to pending.
 
 ## Verification
 

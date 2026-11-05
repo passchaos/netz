@@ -15,6 +15,11 @@ const Plan = @import("plan.zig").Plan;
 const Target = @import("target.zig").Target;
 pub const Options = @import("options.zig").Options;
 pub const Error = @import("errors.zig").PublishError || lds.Error || cds.Error || eds.Error || tls_material.Error || lrs.RunnerError || sds.Error || error{ InvalidXdsOptions, XdsNotStarted, DuplicateSdsResource };
+pub const CachedSecret = struct {
+    owned: sds.Owned,
+    /// Delta `Resource.ttl` deadline; null means no timer.
+    deadline: ?std.Io.Clock.Timestamp = null,
+};
 pub const Controller = struct {
     allocator: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
@@ -26,9 +31,9 @@ pub const Controller = struct {
     local_json: ?[]const u8 = null,
     local_captured: bool = false,
     lrs_runner: ?*lrs.Runner = null,
-    /// SotW SDS cache keyed by secret name. Secrets are copied into each
+    /// SotW/delta SDS cache keyed by secret name. Secrets are copied into each
     /// referencing cluster, so cache entries can be replaced independently.
-    sds_secrets: std.StringHashMapUnmanaged(*sds.Owned) = .empty,
+    sds_secrets: std.StringHashMapUnmanaged(*CachedSecret) = .empty,
     pub fn create(gpa: std.mem.Allocator, options: Options) Error!*Controller {
         if (options.limits.max_clusters == 0 or options.limits.max_projections == 0 or options.limits.max_storage_bytes == 0 or options.target.authority.len == 0 or options.target.attempt_delay.nanoseconds <= 0) return error.InvalidXdsOptions;
         if (options.lrs) |value| {
@@ -51,7 +56,7 @@ pub const Controller = struct {
         if (self.lrs_runner) |runner| runner.deinit();
         var secrets = self.sds_secrets.iterator();
         while (secrets.next()) |item| {
-            item.value_ptr.*.deinit();
+            item.value_ptr.*.owned.deinit();
             self.allocator.destroy(item.value_ptr.*);
         }
         self.sds_secrets.deinit(self.allocator);
@@ -110,21 +115,21 @@ pub const Controller = struct {
             return;
         }
         try cluster.applySds(
-            if (certificate) |value| value.value else null,
-            if (validation) |value| value.value else null,
+            if (certificate) |value| value.owned.value else null,
+            if (validation) |value| value.owned.value else null,
         );
     }
     /// Replace the cached SotW secret set and resolve every referencing
     /// cluster. Returns true when any cached secret changed.
     pub fn updateSecrets(
         self: *Controller,
-        decoded: []const *sds.Owned,
+        decoded: []const *CachedSecret,
     ) Error!bool {
         var changed = decoded.len != self.sds_secrets.count();
         for (decoded) |value| {
-            const name = value.value.name;
+            const name = value.owned.value.name;
             if (self.sds_secrets.get(name)) |old| {
-                if (!std.mem.eql(u8, old.wire, value.wire)) changed = true;
+                if (!std.mem.eql(u8, old.owned.wire, value.owned.wire)) changed = true;
             } else changed = true;
         }
         // SotW SDS is complete for the subscribed type: omitted names expire.
@@ -132,7 +137,7 @@ pub const Controller = struct {
         while (iterator.next()) |item| {
             var present = false;
             for (decoded) |value| {
-                if (std.mem.eql(u8, item.key_ptr.*, value.value.name)) {
+                if (std.mem.eql(u8, item.key_ptr.*, value.owned.value.name)) {
                     present = true;
                     break;
                 }
@@ -149,11 +154,11 @@ pub const Controller = struct {
         while (all.next()) |item| names.appendAssumeCapacity(item.key_ptr.*);
         for (names.items) |name| {
             const removed = self.sds_secrets.fetchRemove(name).?;
-            removed.value.deinit();
+            removed.value.owned.deinit();
             self.allocator.destroy(removed.value);
         }
         for (decoded) |value| {
-            self.sds_secrets.putAssumeCapacity(value.value.name, value);
+            self.sds_secrets.putAssumeCapacity(value.owned.value.name, value);
         }
         return true;
     }
@@ -465,7 +470,41 @@ pub const Controller = struct {
                 if (earliest == null or value.raw.nanoseconds < earliest.?.raw.nanoseconds) earliest = value;
             }
         }
+        var secrets = self.sds_secrets.iterator();
+        while (secrets.next()) |item| {
+            if (item.value_ptr.*.deadline) |value| {
+                if (earliest == null or value.raw.nanoseconds < earliest.?.raw.nanoseconds) earliest = value;
+            }
+        }
         return earliest;
+    }
+    /// Remove cached secrets whose delta TTL has expired and forget their
+    /// accepted versions. Returns true when at least one secret expired.
+    fn expireSecrets(
+        self: *Controller,
+        now: std.Io.Clock.Timestamp,
+        client: *delta.Client,
+    ) Error!bool {
+        var names: std.ArrayList([]const u8) = .empty;
+        defer names.deinit(self.allocator);
+        var iterator = self.sds_secrets.iterator();
+        while (iterator.next()) |item| {
+            if (item.value_ptr.*.deadline) |value| {
+                if (value.raw.nanoseconds <= now.raw.nanoseconds) {
+                    try names.append(self.allocator, item.key_ptr.*);
+                }
+            }
+        }
+        if (names.items.len == 0) return false;
+        for (names.items) |name| {
+            if (client.subscriptions.find(sds.type_url) != null) {
+                try client.subscriptions.forget(sds.type_url, name);
+            }
+            const removed = self.sds_secrets.fetchRemove(name).?;
+            removed.value.owned.deinit();
+            self.allocator.destroy(removed.value);
+        }
+        return true;
     }
     /// Expire due TTL resources, republish their removal, and forget their
     /// accepted versions. The caller drives this between delta updates.
@@ -520,6 +559,15 @@ pub const Controller = struct {
                     changed = true;
                 }
             }
+        }
+        if (try self.expireSecrets(now, client)) {
+            for (plan.entries.items) |*item| {
+                const cluster = item.cluster orelse continue;
+                if (cluster.resource.value.tls_sds == null) continue;
+                try self.resolveClusterTls(cluster);
+                try self.reproject(client.sender.state.io, item);
+            }
+            changed = true;
         }
         if (changed) revision = try self.publishDelta(client, &plan, self.latest.?, false, destination, deadline);
         _ = try client.flushWithDeadline(deadline);

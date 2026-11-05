@@ -9,36 +9,36 @@ pub fn apply(self: *ctl.Controller, client: *ads.Client, update: ads.Update, des
     if (self.latest == null) return error.XdsNotStarted;
     _ = try @import("../../../internal/deadline.zig").usableAwake(client.sender.state.io, deadline);
     const resources = update.response.value.resources;
-    const decoded = try self.allocator.alloc(*sds.Owned, resources.len);
+    const decoded = try self.allocator.alloc(*ctl.CachedSecret, resources.len);
     defer self.allocator.free(decoded);
     var initialized: usize = 0;
     var committed = false;
     defer if (!committed) {
         for (decoded[0..initialized]) |value| {
-            value.deinit();
+            value.owned.deinit();
             self.allocator.destroy(value);
         }
     };
     var storage: usize = 0;
     for (resources, 0..) |raw, index| {
         var owned = try sds.decode(self.allocator, raw.value, self.options.limits.sds);
-        const pointer = self.allocator.create(sds.Owned) catch |err| {
+        const pointer = self.allocator.create(ctl.CachedSecret) catch |err| {
             owned.deinit();
             return err;
         };
-        pointer.* = owned;
+        pointer.* = .{ .owned = owned };
         decoded[index] = pointer;
         initialized += 1;
         storage = std.math.add(usize, storage, owned.arena.queryCapacity()) catch return error.XdsLimitExceeded;
         if (storage > self.options.limits.max_storage_bytes) return error.XdsLimitExceeded;
     }
-    std.mem.sort(*sds.Owned, decoded, {}, struct {
-        fn less(_: void, a: *sds.Owned, b: *sds.Owned) bool {
-            return std.mem.order(u8, a.value.name, b.value.name) == .lt;
+    std.mem.sort(*ctl.CachedSecret, decoded, {}, struct {
+        fn less(_: void, a: *ctl.CachedSecret, b: *ctl.CachedSecret) bool {
+            return std.mem.order(u8, a.owned.value.name, b.owned.value.name) == .lt;
         }
     }.less);
     if (decoded.len > 1) for (decoded[1..], 0..) |value, i| {
-        if (std.mem.eql(u8, value.value.name, decoded[i].value.name)) return error.DuplicateSdsResource;
+        if (std.mem.eql(u8, value.owned.value.name, decoded[i].owned.value.name)) return error.DuplicateSdsResource;
     };
     const cache_changed = try self.updateSecrets(decoded);
     committed = cache_changed;

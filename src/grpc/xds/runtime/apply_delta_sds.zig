@@ -9,8 +9,9 @@ const Plan = @import("plan.zig").Plan;
 pub fn apply(self: *ctl.Controller, client: *delta.Client, update: delta.Update, destination: shared.SharedChannel, deadline: std.Io.Clock.Timestamp) ctl.Error!u64 {
     if (self.latest == null) return error.XdsNotStarted;
     _ = try @import("../../../internal/deadline.zig").usableAwake(client.sender.state.io, deadline);
+    const io = client.sender.state.io;
     const response = update.response.value;
-    const decoded = try self.allocator.alloc(*sds.Owned, response.resources.len);
+    const decoded = try self.allocator.alloc(*ctl.CachedSecret, response.resources.len);
     defer self.allocator.free(decoded);
     const owned = try self.allocator.alloc(bool, response.resources.len);
     defer self.allocator.free(owned);
@@ -18,52 +19,63 @@ pub fn apply(self: *ctl.Controller, client: *delta.Client, update: delta.Update,
     var storage: usize = 0;
     defer for (decoded[0..count], owned[0..count]) |value, keep| {
         if (!keep) continue;
-        value.deinit();
+        value.owned.deinit();
         self.allocator.destroy(value);
     };
     for (response.resources) |raw| {
         const any = raw.resource orelse continue;
         var value = try sds.decode(self.allocator, any.value, self.options.limits.sds);
-        const pointer = self.allocator.create(sds.Owned) catch |err| {
+        const pointer = self.allocator.create(ctl.CachedSecret) catch |err| {
             value.deinit();
             return err;
         };
-        pointer.* = value;
+        pointer.* = .{
+            .owned = value,
+            .deadline = try delta.codec.ttlDeadline(io, raw.ttl),
+        };
         decoded[count] = pointer;
         owned[count] = true;
         count += 1;
         storage = std.math.add(usize, storage, value.arena.queryCapacity()) catch return error.XdsLimitExceeded;
         if (storage > self.options.limits.max_storage_bytes) return error.XdsLimitExceeded;
     }
-    std.mem.sort(*sds.Owned, decoded[0..count], {}, struct {
-        fn less(_: void, a: *sds.Owned, b: *sds.Owned) bool {
-            return std.mem.order(u8, a.value.name, b.value.name) == .lt;
+    std.mem.sort(*ctl.CachedSecret, decoded[0..count], {}, struct {
+        fn less(_: void, a: *ctl.CachedSecret, b: *ctl.CachedSecret) bool {
+            return std.mem.order(u8, a.owned.value.name, b.owned.value.name) == .lt;
         }
     }.less);
     if (count > 1) for (decoded[1..count], 0..) |value, i| {
-        if (std.mem.eql(u8, value.value.name, decoded[i].value.name)) return error.DuplicateSdsResource;
+        if (std.mem.eql(u8, value.owned.value.name, decoded[i].owned.value.name)) return error.DuplicateSdsResource;
     };
     try self.sds_secrets.ensureUnusedCapacity(self.allocator, @intCast(count));
     var changed = false;
     for (decoded[0..count], owned[0..count]) |value, *keep| {
-        if (self.sds_secrets.get(value.value.name)) |old| {
-            if (std.mem.eql(u8, old.wire, value.wire)) {
+        if (self.sds_secrets.get(value.owned.value.name)) |old| {
+            if (std.mem.eql(u8, old.owned.wire, value.owned.wire)) {
+                // Same payload: only the delta timer may have moved.
+                old.deadline = value.deadline;
                 keep.* = false;
-                value.deinit();
+                value.owned.deinit();
                 self.allocator.destroy(value);
                 continue;
             }
-            const removed = self.sds_secrets.fetchRemove(value.value.name).?;
-            removed.value.deinit();
+            const removed = self.sds_secrets.fetchRemove(value.owned.value.name).?;
+            removed.value.owned.deinit();
             self.allocator.destroy(removed.value);
         }
-        self.sds_secrets.putAssumeCapacity(value.value.name, value);
+        self.sds_secrets.putAssumeCapacity(value.owned.value.name, value);
         keep.* = false;
         changed = true;
     }
+    // Payload-free heartbeats refresh the timer without republishing secrets.
+    for (response.resources) |raw| {
+        if (raw.resource != null) continue;
+        const cached = self.sds_secrets.get(raw.name) orelse continue;
+        cached.deadline = try delta.codec.ttlDeadline(io, raw.ttl);
+    }
     for (response.removed) |name| {
         if (self.sds_secrets.fetchRemove(name)) |removed| {
-            removed.value.deinit();
+            removed.value.owned.deinit();
             self.allocator.destroy(removed.value);
             changed = true;
         }
@@ -89,7 +101,7 @@ pub fn apply(self: *ctl.Controller, client: *delta.Client, update: delta.Update,
     for (plan.entries.items) |*item| {
         const cluster = item.cluster orelse continue;
         if (cluster.resource.value.tls_sds == null) continue;
-        try self.reproject(client.sender.state.io, item);
+        try self.reproject(io, item);
     }
     return self.publishDelta(client, &plan, self.latest.?, false, destination, deadline);
 }

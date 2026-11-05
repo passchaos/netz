@@ -113,8 +113,8 @@ and `initial_resource_versions` replay, and this controller has matching
 `applyDeltaWithDeadline` entry points for typed incremental LDS/RDS/CDS/EDS
 publication. `nextDeltaExpiry` and `expireDeltaWithDeadline` enforce
 `Resource.ttl` for LDS/RDS/CDS/EDS, refresh timers from payload-free heartbeats
-and forget expired accepted versions. Delta SDS is supported without TTL
-expiry. The
+and forget expired accepted versions. Delta SDS resources use the same TTL
+driver, including payload-free heartbeat refreshes. The
 [bootstrap parser and control-plane failover](grpc_bootstrap.md)
 select `http://` servers, retry refused servers and rebind the same delta client
 with `initial_resource_versions` replay. Bootstrap `refresh_interval` exposes a
