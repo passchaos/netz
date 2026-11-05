@@ -19,8 +19,17 @@ pub const Limits = struct {
     regex: routing.regex.Limits = .{},
 };
 pub const Weighted = struct { name: []const u8, key: []const u8, weight: u32 };
-pub const HashPolicy = struct { kind: union(enum) { header: []const u8, channel_id }, terminal: bool };
 pub const RegexRewrite = @import("../../path_rewrite.zig").RegexRewrite;
+pub const HashPolicy = struct {
+    kind: union(enum) {
+        header: struct {
+            name: []const u8,
+            regex: ?*const RegexRewrite = null,
+        },
+        channel_id,
+    },
+    terminal: bool,
+};
 pub const PathRewrite = union(enum) {
     /// Replace the complete request path.
     whole: []const u8,

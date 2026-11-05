@@ -2,13 +2,14 @@
   "schema": 1,
   "date": "2026-11-05",
   "head": "working-tree",
-  "subject": "RDS regex path rewrite with capture substitution",
-  "change": "RouteAction.regex_rewrite (field 32) now decodes RegexMatchAndSubstitute, compiles the pattern with the bounded xDS safe-regex parser, validates RE2-style \\0..\\9 substitution references, and applies leftmost-first global replacement while copying owned request inputs. Greedy and lazy quantifiers keep their priority semantics. Replacement runs on an explicit backtracking stack with hard step, choice and capture-trail budgets; the selector precomputes the exact rewritten length so the existing single-allocation request-input copy and max_header_bytes check remain unchanged.",
+  "subject": "RDS regex path and header-hash rewrites",
+  "change": "RouteAction.regex_rewrite (field 32) and HashPolicy.Header.regex_rewrite now decode RegexMatchAndSubstitute, compile the pattern with the bounded xDS safe-regex parser, validate RE2-style \\0..\\9 substitution references, and apply leftmost-first global replacement. Path rewrites run while copying owned request inputs; header hash rewrites transform the joined header value before XXH64. Greedy and lazy quantifiers keep their priority semantics. Replacement runs on an explicit backtracking stack with hard step, choice and capture-trail budgets; the selector precomputes the exact rewritten path length so the existing single-allocation request-input copy and max_header_bytes check remain unchanged.",
   "tests": {
     "unit": [
       "src/grpc/xds/routing/regex/replace_tests.zig covers numbered groups, global replacement, lazy quantifiers, inline case folding, \\0 and \\\\, unmatched groups, Unicode captures, unknown group references and the backtracking budget.",
       "src/grpc/xds/rds/tests.zig 'gRPC RDS applies regex rewrites and rejects format rewrites' decodes a route with ^/service/([^/]+)(/.*)$ -> \\2/instance/\\1, asserts the selected output length and rewritten path, and rejects empty rewrites, unknown capture references, malformed patterns and format path_rewrite.",
-      "src/grpc/channel/shared/request_inputs_tests.zig applies the selected regex rewrite through the production owned-input copy and verifies the rewritten path, authority and header mutation layout."
+      "src/grpc/channel/shared/request_inputs_tests.zig applies the selected regex rewrite through the production owned-input copy and verifies the rewritten path, authority and header mutation layout.",
+      "src/grpc/xds/rds/tests.zig 'gRPC RDS applies header hash regex rewrites' decodes a terminal HashPolicy.Header with ^tenant-(\\d+)$ -> \\1 and asserts the selected hash is XXH64 of the rewritten value."
     ],
     "focused_gates": {
       "regex": {
@@ -19,8 +20,8 @@
       },
       "rds": {
         "command": "zig build test-lib -Dtest-filter='gRPC RDS' --summary all",
-        "passed": 179,
-        "total": 179,
+        "passed": 180,
+        "total": 180,
         "failed": 0
       },
       "request_inputs": {
@@ -46,11 +47,10 @@
         "corpus_sha256": "e1c3658163569ab8e0cf262f49c297c52efe947ab802675984c769b552f26abf"
       },
       "full_library": {
-        "command": "zig build test-lib --summary all",
-        "passed": 6451,
-        "total": 6454,
-        "failed": 3,
-        "note": "The three failures were MQTT bridge timeout tests under concurrent host load; each passed when rerun in isolation."
+        "command": "zig build test-lib",
+        "status": "passed",
+        "exit_code": 0,
+        "note": "The full library suite passed after the header hash rewrite. The focused RDS gate separately covers the final output-size limit and non-matching-rewrite assertions."
       }
     }
   },
@@ -66,16 +66,16 @@
     "src/grpc/call.zig": "32230b7fc09477bcbce00d9620f7dc0d19c76d9924aace073d2e1b32673a2495",
     "src/grpc/channel/shared/request_inputs.zig": "0bc74df9110963bc8454dbb74eaa8f633625a7b369949d70e58683d88fd4a851",
     "src/grpc/channel/shared/request_inputs_tests.zig": "bf3cada204eb8fdf4e30f07a460f9663c4f862dc9f8e0b2ce77332c7e42ac0d8",
-    "src/grpc/xds/rds/model.zig": "48710780d250f77a3f06e57def1560a8f3f1c0ae361e1ba042693f00f3ba9a86",
-    "src/grpc/xds/rds/action.zig": "115c99d01d42ab400ea6e1234466699f320eae825b6854f5e71a661d725dc3ff",
-    "src/grpc/xds/rds/snapshot.zig": "ca485f5b4a09c53185c2a931c4b8a6c2f3a0e28247927bde0ccc9b1e5f74fb0d",
-    "src/grpc/xds/rds/tests.zig": "7d4a4e9d5c113c76afeadaf6d149a889dd82f9af38df37d0fd854da7f97853d1",
-    "docs/grpc_rds.md": "700ea7b7ae7232b792b9cbf5797e69ceb263804903a76647ca4e0cd76f5e3de0",
-    "docs/grpc_parity.md": "9b0662354125c3ab02e5be03460fff5637591d728fa98327efae1cfc22cc5f80",
-    "docs/grpc_xds_routing.md": "45fda0acba5535c673bf4ae9ea205a7737bcc568a7f71d7beb8af95dbf7f3907",
+    "src/grpc/xds/rds/model.zig": "c0b77ce780b32751f34f2465ad57b62da3fc7c401201a595c7f284b9d68b23c2",
+    "src/grpc/xds/rds/action.zig": "bd066aebe3a872445c53b1ad04cc42729ec946933ff39a010a88708db5970708",
+    "src/grpc/xds/rds/snapshot.zig": "02bbbaa0670f655f031c0caa1099e97f8e594823e720270026f8517ebab1ea9e",
+    "src/grpc/xds/rds/tests.zig": "36fd7c21ef8ad4d10f755c43c547337915a8d174cbc38aa3918f97baf7da8d81",
+    "docs/grpc_rds.md": "cfe04e37970817b6284a7def2f492939d7d02367683d9dd4ac3f732de65ba543",
+    "docs/grpc_parity.md": "29ae70a5ff483df7fe0cd05223e531897f649d3c2b6dd173bb12f32631f01af5",
+    "docs/grpc_xds_routing.md": "a669495d5aa15fdd4dbc686a5c04786f1163b949523eef017a5b3c788c39ee3c",
     "tools/interop/grpc_xds_matching/regex_client.zig": "425b85cea2c62642a05d2a13fb0e3cbed9b4c5b9cd739d9acb9414eba41d404b",
     "tools/interop/grpc_xds_matching/regex_peer.js": "7b70373bd09514cd9bd80e167460dc54d39f61adcd5d0bd7dd25f7964ba89100",
     "tools/interop/grpc_xds_matching/regex_run.py": "47d25e4cecb397b448ca8f7c1f38d0daf967c08c2af29f5d4b09f6777cb9a0f7"
   },
-  "notes": "Route path regex rewriting is covered by native tests and 1,333 independent RE2 WASM replacement vectors. Hash-policy header regex rewriting, path_rewrite_policy format rewrites, host_rewrite_path_regex and non-router HTTP filters remain open."
+  "notes": "Route path and header-hash regex rewriting are covered by native tests and 1,333 independent RE2 WASM replacement vectors. path_rewrite_policy format rewrites, host_rewrite_path_regex and non-router HTTP filters remain open."
 }

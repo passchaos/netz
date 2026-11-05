@@ -301,3 +301,46 @@ test "gRPC RDS applies regex rewrites and rejects format rewrites" {
     defer gpa.free(path_bytes);
     try std.testing.expectError(error.UnsupportedRdsFeature, rds.decode(gpa, path_bytes, .{}));
 }
+test "gRPC RDS applies header hash regex rewrites" {
+    var matcher = fixture.Builder{ .allocator = gpa };
+    defer matcher.deinit();
+    try matcher.bytes(2, "^tenant-(\\d+)$");
+    var rewrite = fixture.Builder{ .allocator = gpa };
+    defer rewrite.deinit();
+    try rewrite.bytes(1, matcher.data.items);
+    try rewrite.bytes(2, "\\1");
+    var header = fixture.Builder{ .allocator = gpa };
+    defer header.deinit();
+    try header.bytes(1, "x-tenant");
+    try header.bytes(2, rewrite.data.items);
+    var policy = fixture.Builder{ .allocator = gpa };
+    defer policy.deinit();
+    try policy.bytes(1, header.data.items);
+    try policy.number(4, 1);
+    var action = fixture.Builder{ .allocator = gpa };
+    defer action.deinit();
+    try action.bytes(15, policy.data.items);
+    const bytes = try fixture.encode(gpa, "routes", &.{"backend.test"}, &.{.{ .prefix = "/", .action_extra = action.data.items }}, null);
+    defer gpa.free(bytes);
+    const snapshot = try rds.Snapshot.create(gpa, bytes, .{}, .{ .authority = "backend.test" });
+    defer snapshot.release();
+    var prng = random();
+    const selected = try snapshot.selectWith(gpa, .{
+        .path = "/demo.Service/Get",
+        .authority = "backend.test",
+        .metadata = &.{.{ .name = "x-tenant", .value = "tenant-42" }},
+    }, 1, prng.random());
+    try std.testing.expectEqual(
+        std.hash.XxHash64.hash(0, "42"),
+        selected.hash,
+    );
+    const unmatched = try snapshot.selectWith(gpa, .{
+        .path = "/demo.Service/Get",
+        .authority = "backend.test",
+        .metadata = &.{.{ .name = "x-tenant", .value = "other" }},
+    }, 1, prng.random());
+    try std.testing.expectEqual(
+        std.hash.XxHash64.hash(0, "other"),
+        unmatched.hash,
+    );
+}

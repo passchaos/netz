@@ -54,10 +54,12 @@ the joined visible value; `io.grpc.channel_id` supplies a stable channel hash.
 Multiple successful hash rules rotate the old hash left by one and XOR the new
 hash, with terminal rules stopping after a hash exists. Without a successful
 rule a random request hash is generated. Unsupported cookie/connection/query
-hash sources are ignored as in grpc-core. Hash regex rewriting remains
-explicitly rejected; route path `regex_rewrite` is implemented with capture
-substitution. Cluster/hash attributes remain internal request options and never
-become application wire metadata.
+hash sources are ignored as in grpc-core. A header hash policy's optional
+`regex_rewrite` applies the same capture-aware replacement to the joined header
+value before XXH64; a non-matching rewrite keeps the original value. Route path
+`regex_rewrite` is implemented with the same substitution engine. Cluster/hash
+attributes remain internal request options and never become application wire
+metadata.
 
 `regex_rewrite` (RouteAction field 32) decodes a `RegexMatchAndSubstitute`
 pattern and substitution, compiles the pattern with the bounded xDS safe-regex
@@ -163,7 +165,7 @@ reprojects cached routes under HCM defaults. Typed delta route publication is
 available through the automatic runtime. Bootstrap parsing and insecure
 control-plane failover are available; automatic multi-cluster CDS/EDS
 orchestration, certificate providers and automatic refresh scheduling, authority-specific control planes,
-LRS automatic background scheduling, hash regex rewriting, HTTP filter
+LRS automatic background scheduling, HTTP filter
 overrides, `path_rewrite_policy` format rewrites and host path regex rewrites
 remain open.
 Delta route TTL expiry is covered. Literal prefix/whole-path and authority

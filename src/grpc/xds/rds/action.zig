@@ -41,12 +41,18 @@ fn hash(p: anytype, bytes: []const u8) pb.Error!?model.HashPolicy {
         if (field.number == 4 and field.wire_type == 0) terminal = try reader.varint() != 0 else if ((field.number == 1 or field.number == 6) and field.wire_type == 2) {
             var nested = pb.Reader{ .bytes = try reader.bytesValue() };
             var name: []const u8 = "";
+            var regex: ?*const model.RegexRewrite = null;
             while (try nested.next()) |entry| {
-                if (entry.number == 1 and entry.wire_type == 2) name = try pb.text(&nested, p.limits.max_text_bytes) else if (field.number == 1 and entry.number == 2 and entry.wire_type == 2) return error.UnsupportedRdsFeature else try nested.skip(entry);
+                if (entry.number == 1 and entry.wire_type == 2) {
+                    name = try pb.text(&nested, p.limits.max_text_bytes);
+                } else if (field.number == 1 and entry.number == 2 and entry.wire_type == 2) {
+                    if (regex != null) return error.InvalidRdsResource;
+                    regex = try regexRewrite(p, try nested.bytesValue());
+                } else try nested.skip(entry);
             }
             if (field.number == 1) {
                 if (name.len == 0) return error.InvalidRdsResource;
-                kind = .{ .header = name };
+                kind = .{ .header = .{ .name = name, .regex = regex } };
             } else kind = if (std.mem.eql(u8, name, "io.grpc.channel_id")) .channel_id else null;
         } else if ((field.number == 2 or field.number == 3 or field.number == 5) and field.wire_type == 2) {
             _ = try reader.bytesValue();

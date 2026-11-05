@@ -156,10 +156,35 @@ pub const Snapshot = struct {
             for (forward.hash_policies) |policy| {
                 const next: ?u64 = switch (policy.kind) {
                     .channel_id => channel_id,
-                    .header => |name| blk: {
-                        var header = try request.header(gpa, name);
+                    .header => |header_policy| blk: {
+                        var header = try request.header(gpa, header_policy.name);
                         defer header.deinit();
-                        break :blk if (header.value) |value| std.hash.XxHash64.hash(0, value) else null;
+                        const value = header.value orelse break :blk null;
+                        const hashed = if (header_policy.regex) |rewrite| blk2: {
+                            const output_len = path_rewrite_mod.outputLen(
+                                gpa,
+                                rewrite,
+                                value,
+                            ) catch |err| switch (err) {
+                                error.OutOfMemory => return error.OutOfMemory,
+                                error.RegexLimitExceeded => return error.RouteMetadataLimitExceeded,
+                            };
+                            if (output_len > request.max_header_bytes) {
+                                return error.RouteMetadataLimitExceeded;
+                            }
+                            const output = try gpa.alloc(u8, output_len);
+                            defer gpa.free(output);
+                            const rewritten = path_rewrite_mod.apply(
+                                gpa,
+                                rewrite,
+                                value,
+                                output,
+                            ) catch |err| switch (err) {
+                                error.OutOfMemory => return error.OutOfMemory,
+                            };
+                            break :blk2 std.hash.XxHash64.hash(0, rewritten);
+                        } else std.hash.XxHash64.hash(0, value);
+                        break :blk hashed;
                     },
                 };
                 if (next) |value| hash = (if (hash) |previous| std.math.rotl(u64, previous, 1) else @as(u64, 0)) ^ value;

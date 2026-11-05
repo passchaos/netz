@@ -18,9 +18,9 @@ grouping, non-capturing groups, greedy/lazy repetition and counted bounds,
 inline `i/m/s/U` flags and scoped flags, anchors and ASCII word boundaries,
 literal quoting, Perl/POSIX classes, Unicode categories/scripts and simple
 folding, hex/octal escapes and RE2's `\C` byte escape. Capture extraction and
-RE2-style `\0`..`\9` replacement are available to route regex rewrites through
-a bounded backtracking workspace; hash-policy header rewriting remains
-follow-up work. Lookup data comes from pinned RE2 revision
+RE2-style `\0`..`\9` replacement are available to route path rewrites and
+header hash rewrites through a bounded backtracking workspace. Lookup data
+comes from pinned RE2 revision
 `2da0056814cf180480a19f5cf811e7e1c054bf6d`; its BSD license and source hashes
 are included beside endian-independent binary tables. The generation script
 can reproduce and verify them with
