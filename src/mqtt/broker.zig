@@ -2903,7 +2903,7 @@ pub const Broker = struct {
         retain: bool,
         subscription_identifier: ?usize,
     ) Error!void {
-        const now = std.Io.Clock.awake.now(self.io);
+        const now = netz_runtime.cachedAwakeNow(self.io);
         self.state_mutex.lockUncancelable(self.io);
         var state_locked = true;
         var persistent_changed = self.pruneExpiredSessionRoutesLocked(now) != 0;
@@ -3013,7 +3013,7 @@ pub const Broker = struct {
             null,
             null,
             self.options.upgrade_outgoing_qos,
-            std.Io.Clock.awake.now(self.io),
+            netz_runtime.cachedAwakeNow(self.io),
             &persistent_changed,
             null,
             null,
@@ -3062,7 +3062,7 @@ pub const Broker = struct {
         const result = self.bridge_qos2.stage(
             key,
             staged,
-            std.Io.Clock.awake.now(self.io),
+            netz_runtime.cachedAwakeNow(self.io),
         ) catch |err| {
             self.state_mutex.unlock(self.io);
             return err;
@@ -3128,7 +3128,7 @@ pub const Broker = struct {
             try self.finalizePersistentChangeLocked(true, true);
             return .{ .disposition = .already_applied };
         }
-        const release_now = std.Io.Clock.awake.now(self.io);
+        const release_now = netz_runtime.cachedAwakeNow(self.io);
         var adjusted_properties: std.ArrayList(mqtt.Property) = .empty;
         defer adjusted_properties.deinit(self.allocator);
         const maybe_publish = self.bridge_qos2.pendingAsPublish(
@@ -3424,7 +3424,7 @@ pub const Broker = struct {
                 null,
                 null,
                 self.options.upgrade_outgoing_qos,
-                std.Io.Clock.awake.now(self.io),
+                netz_runtime.cachedAwakeNow(self.io),
                 null,
                 null,
                 null,

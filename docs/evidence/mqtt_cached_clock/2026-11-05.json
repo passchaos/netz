@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "date": "2026-11-05",
+  "head": "working-tree",
+  "subject": "MQTT broker cached event-loop timestamps in publish and QoS2 release paths",
+  "change": "The broker's publish, bridge staging and QoS2 release paths now use netz_runtime.cachedAwakeNow instead of direct std.Io.Clock.awake.now calls. This reuses the executor's per-loop timestamp for the hot serial QoS2 path instead of issuing a fresh clock syscall for every publish/release transition.",
+  "benchmark": {
+    "command": "MQTT_QOS=2 PUBLISHERS=1 SUBSCRIBERS=1 MESSAGES=5000 PUBLISHER_WINDOW=1 MQTT_SESSION_EXPIRY_SECONDS=3600 zig build compare-mqtt-mosquitto",
+    "workload": "MQTT 5 over TCP, QoS 2, one publisher, one subscriber, 256-byte payload, persistent session",
+    "baseline_runs": [
+      { "netz_publishes_per_s": 9262, "netz_p50_ns": 95476, "mosquitto_publishes_per_s": 17700, "mosquitto_p50_ns": 43674 },
+      { "netz_publishes_per_s": 11366, "netz_p50_ns": 73627, "mosquitto_publishes_per_s": 23664, "mosquitto_p50_ns": 25449 }
+    ],
+    "cached_runs": [
+      { "netz_publishes_per_s": 15967, "netz_p50_ns": 44819, "mosquitto_publishes_per_s": 27105, "mosquitto_p50_ns": 25753 },
+      { "netz_publishes_per_s": 16505, "netz_p50_ns": 44708, "mosquitto_publishes_per_s": 26197, "mosquitto_p50_ns": 32275 },
+      { "netz_publishes_per_s": 17080, "netz_p50_ns": 45154, "mosquitto_publishes_per_s": 29195, "mosquitto_p50_ns": 24440 }
+    ],
+    "observation": "Netz serial QoS2 p50 fell from 73-95 us to 44-45 us and throughput rose from 9.3-11.4k to 16.0-17.1k publishes/s. The paired share of Mosquitto rose from roughly 0.48-0.52 to 0.60-0.63 under the same host-load band. The remaining gap is still dominated by task wakeups and parking."
+  },
+  "tests": {
+    "focused_gate": {
+      "command": "zig build test-lib -Dtest-filter='mqtt.broker' --summary all",
+      "passed": 519,
+      "total": 519,
+      "failed": 0
+    },
+    "compile": {
+      "command": "zig build test-compile",
+      "status": "passed"
+    },
+    "full_library": {
+      "command": "zig build test-lib",
+      "status": "passed",
+      "exit_code": 0,
+      "passed": 6498,
+      "total": 6498,
+      "failed": 0,
+      "notes": "Earlier full runs under host load 10-42 failed only timing-sensitive HTTP/2 and WebSocket handshake-budget cases (and one SOCKS5 test-only socket close crash); each passed in isolation, and the final run at load 5-13 passed with no failures."
+    }
+  },
+  "source_sha256": {
+    "src/mqtt/broker.zig": "b0f4f305c5cf162441719f24d78957f4fc788aa93d8a70f6b6ae76fa1d01f03c"
+  },
+  "notes": "The benchmark client is the same netz client for both brokers. Host load varied between runs; the A/B baseline was rerun immediately before the cached version under the same load band."
+}

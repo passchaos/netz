@@ -2127,6 +2127,18 @@ throughput improvement. Seven-pair transport controls at
 `zig-out/mqtt-cached-awake-transports-ab` were also neutral: 1.009x for
 MQTT-over-WebSocket and 1.003x for MQTT-over-TLS.
 
+A later extension applies the same per-loop snapshot to the outbound Session
+publish, bridge QoS 2 staging/release, and Session release paths. In the same
+5,000-message serial QoS 2 comparison (`zig build compare-mqtt-mosquitto`,
+window 1), the immediate A/B baseline measured 9.3-11.4k publishes/s with
+p50 73-95 us, while the cached-clock version measured 16.0-17.1k with
+p50 44-45 us; Mosquitto under the same load band measured 17.7-29.2k. The
+paired netz/Mosquitto ratio moved from roughly 0.48-0.52 to 0.60-0.63. This
+remains a host-load-sensitive comparison and does not close the serial/RSS
+gap; the durable serial deficit is still dominated by task wakeups and
+parking. Evidence is in
+`docs/evidence/mqtt_cached_clock/2026-11-05.json`.
+
 The remaining UTF-8 profile was not a license to weaken MQTT validation.
 `validateMqttUtf8StringWithPolicy` now validates the common all-ASCII case in
 one pass and returns without constructing a UTF-8 view or decoding each byte
