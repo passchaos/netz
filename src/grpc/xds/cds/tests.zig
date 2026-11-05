@@ -198,6 +198,79 @@ test "gRPC CDS decodes inline upstream TLS transport sockets" {
     try std.testing.expectEqual(@import("../tls_material.zig").SanMatch.contains, sans_decoded.value.tls.?.san_matchers.?[1].kind);
 }
 
+test "gRPC CDS decodes SDS certificate and validation references" {
+    const tls = try fixture.upstreamTlsSds(gpa, "backend.test", "cert-1", "roots");
+    defer gpa.free(tls);
+    const encoded = try fixture.staticClusterTls(gpa, "backend", "127.0.0.1", 1001, tls);
+    defer gpa.free(encoded);
+    var decoded = try resource.decode(gpa, encoded, .{ .allow_sds = true });
+    defer decoded.deinit();
+    const refs = decoded.value.tls_sds.?;
+    try std.testing.expectEqualStrings("cert-1", refs.certificate.?);
+    try std.testing.expectEqualStrings("roots", refs.validation.?);
+    try std.testing.expectEqualStrings("backend.test", decoded.value.tls.?.server_name);
+    try std.testing.expectEqualStrings("", decoded.value.tls.?.certificate_chain);
+    try std.testing.expectEqualStrings("", decoded.value.tls.?.trusted_ca);
+    // Direct CDS consumers must opt in; unresolved references fail closed.
+    try std.testing.expectError(error.UnsupportedCdsFeature, resource.decode(gpa, encoded, .{}));
+
+    // Inline certificate material and an SDS certificate reference for the
+    // same aspect are ambiguous and must fail closed.
+    var common = fixture.Builder{ .allocator = gpa };
+    defer common.deinit();
+    var chain_source = fixture.Builder{ .allocator = gpa };
+    defer chain_source.deinit();
+    try chain_source.bytes(1, "CERT");
+    var key_source = fixture.Builder{ .allocator = gpa };
+    defer key_source.deinit();
+    try key_source.bytes(1, "KEY");
+    var inline_cert = fixture.Builder{ .allocator = gpa };
+    defer inline_cert.deinit();
+    try inline_cert.bytes(1, chain_source.data.items);
+    try inline_cert.bytes(2, key_source.data.items);
+    try common.bytes(2, inline_cert.data.items);
+    const certificate_config = try fixture.sdsSecretConfig(gpa, "cert-1");
+    defer gpa.free(certificate_config);
+    try common.bytes(6, certificate_config);
+    var context = fixture.Builder{ .allocator = gpa };
+    defer context.deinit();
+    try context.bytes(1, common.data.items);
+    var any = fixture.Builder{ .allocator = gpa };
+    defer any.deinit();
+    try any.bytes(1, "type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext");
+    try any.bytes(2, context.data.items);
+    var socket = fixture.Builder{ .allocator = gpa };
+    defer socket.deinit();
+    try socket.bytes(1, "envoy.transport_sockets.tls");
+    try socket.bytes(3, any.data.items);
+    const conflict = try fixture.staticClusterTls(gpa, "backend", "127.0.0.1", 1001, socket.data.items);
+    defer gpa.free(conflict);
+    try std.testing.expectError(error.UnsupportedCdsFeature, resource.decode(gpa, conflict, .{}));
+
+    // A non-ADS SDS source cannot be resolved on this stream.
+    var source = fixture.Builder{ .allocator = gpa };
+    defer source.deinit();
+    try source.bytes(1, "cert-1");
+    try source.bytes(2, "\x2a\x00"); // ConfigSource.self
+    var common_self = fixture.Builder{ .allocator = gpa };
+    defer common_self.deinit();
+    try common_self.bytes(6, source.data.items);
+    var context_self = fixture.Builder{ .allocator = gpa };
+    defer context_self.deinit();
+    try context_self.bytes(1, common_self.data.items);
+    var any_self = fixture.Builder{ .allocator = gpa };
+    defer any_self.deinit();
+    try any_self.bytes(1, "type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext");
+    try any_self.bytes(2, context_self.data.items);
+    var socket_self = fixture.Builder{ .allocator = gpa };
+    defer socket_self.deinit();
+    try socket_self.bytes(1, "envoy.transport_sockets.tls");
+    try socket_self.bytes(3, any_self.data.items);
+    const self_source = try fixture.staticClusterTls(gpa, "backend", "127.0.0.1", 1001, socket_self.data.items);
+    defer gpa.free(self_source);
+    try std.testing.expectError(error.UnsupportedCdsFeature, resource.decode(gpa, self_source, .{}));
+}
+
 test "gRPC CDS rejects unsupported discovery security invalid identities and ring ranges" {
     try std.testing.expectError(error.InvalidCdsResource, resource.decode(gpa, "", .{}));
     try std.testing.expectError(error.TruncatedMessage, resource.decode(gpa, "\x0a\x02a", .{}));

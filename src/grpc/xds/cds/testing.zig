@@ -144,6 +144,52 @@ fn buildUpstreamTls(gpa: std.mem.Allocator, trusted_ca: []const u8, sni: []const
     try socket.bytes(3, any.data.items);
     return socket.data.toOwnedSlice(gpa);
 }
+fn tlsSocket(gpa: std.mem.Allocator, context: []const u8) ![]u8 {
+    var any = Builder{ .allocator = gpa };
+    defer any.deinit();
+    try any.bytes(1, "type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext");
+    try any.bytes(2, context);
+    var socket = Builder{ .allocator = gpa };
+    errdefer socket.deinit();
+    try socket.bytes(1, "envoy.transport_sockets.tls");
+    try socket.bytes(3, any.data.items);
+    return socket.data.toOwnedSlice(gpa);
+}
+
+pub fn sdsSecretConfig(gpa: std.mem.Allocator, name: []const u8) ![]u8 {
+    var out = Builder{ .allocator = gpa };
+    errdefer out.deinit();
+    try out.bytes(1, name);
+    // ConfigSource.ads (field 3) selects the enclosing ADS stream.
+    try out.bytes(2, "\x1a\x00");
+    return out.data.toOwnedSlice(gpa);
+}
+
+pub fn upstreamTlsSds(
+    gpa: std.mem.Allocator,
+    sni: []const u8,
+    certificate: ?[]const u8,
+    validation: ?[]const u8,
+) ![]u8 {
+    var common = Builder{ .allocator = gpa };
+    defer common.deinit();
+    if (certificate) |name| {
+        const config = try sdsSecretConfig(gpa, name);
+        defer gpa.free(config);
+        try common.bytes(6, config);
+    }
+    if (validation) |name| {
+        const config = try sdsSecretConfig(gpa, name);
+        defer gpa.free(config);
+        try common.bytes(7, config);
+    }
+    var context = Builder{ .allocator = gpa };
+    defer context.deinit();
+    try context.bytes(1, common.data.items);
+    if (sni.len != 0) try context.bytes(2, sni);
+    return tlsSocket(gpa, context.data.items);
+}
+
 pub fn dnsCluster(gpa: std.mem.Allocator, name: []const u8, host: []const u8, port: u16, kind: u32) ![]u8 {
     return discoveryCluster(gpa, name, host, port, kind);
 }

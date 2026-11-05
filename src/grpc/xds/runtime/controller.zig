@@ -9,11 +9,12 @@ const eds = @import("../eds.zig");
 const shared = @import("../../channel/shared.zig");
 const tls_material = @import("../tls_material.zig");
 const lrs = @import("../lrs.zig");
+const sds = @import("../sds.zig");
 const entries = @import("entry.zig");
 const Plan = @import("plan.zig").Plan;
 const Target = @import("target.zig").Target;
 pub const Options = @import("options.zig").Options;
-pub const Error = @import("errors.zig").PublishError || lds.Error || cds.Error || eds.Error || tls_material.Error || lrs.RunnerError || error{ InvalidXdsOptions, XdsNotStarted };
+pub const Error = @import("errors.zig").PublishError || lds.Error || cds.Error || eds.Error || tls_material.Error || lrs.RunnerError || sds.Error || error{ InvalidXdsOptions, XdsNotStarted, DuplicateSdsResource };
 pub const Controller = struct {
     allocator: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
@@ -25,6 +26,9 @@ pub const Controller = struct {
     local_json: ?[]const u8 = null,
     local_captured: bool = false,
     lrs_runner: ?*lrs.Runner = null,
+    /// SotW SDS cache keyed by secret name. Secrets are copied into each
+    /// referencing cluster, so cache entries can be replaced independently.
+    sds_secrets: std.StringHashMapUnmanaged(*sds.Owned) = .empty,
     pub fn create(gpa: std.mem.Allocator, options: Options) Error!*Controller {
         if (options.limits.max_clusters == 0 or options.limits.max_projections == 0 or options.limits.max_storage_bytes == 0 or options.target.authority.len == 0 or options.target.attempt_delay.nanoseconds <= 0) return error.InvalidXdsOptions;
         if (options.lrs) |value| {
@@ -45,6 +49,12 @@ pub const Controller = struct {
     }
     pub fn deinit(self: *Controller) void {
         if (self.lrs_runner) |runner| runner.deinit();
+        var secrets = self.sds_secrets.iterator();
+        while (secrets.next()) |item| {
+            item.value_ptr.*.deinit();
+            self.allocator.destroy(item.value_ptr.*);
+        }
+        self.sds_secrets.deinit(self.allocator);
         if (self.listener) |*value| value.deinit();
         for (self.projections.items) |value| value.release();
         self.projections.deinit(self.allocator);
@@ -84,6 +94,106 @@ pub const Controller = struct {
         errdefer runner.deinit();
         try runner.start();
         self.lrs_runner = runner;
+    }
+    /// Resolve a cluster's SDS references from the current secret cache.
+    /// Missing secrets leave the cluster pending instead of publishing it
+    /// without transport security.
+    pub fn resolveClusterTls(self: *Controller, cluster: *entries.Cluster) Error!void {
+        const refs = cluster.resource.value.tls_sds orelse return;
+        const certificate = if (refs.certificate) |name| self.sds_secrets.get(name) else null;
+        const validation = if (refs.validation) |name| self.sds_secrets.get(name) else null;
+        if ((refs.certificate != null and certificate == null) or
+            (refs.validation != null and validation == null))
+        {
+            _ = cluster.tls_arena.reset(.retain_capacity);
+            cluster.tls_override = null;
+            return;
+        }
+        try cluster.applySds(
+            if (certificate) |value| value.value else null,
+            if (validation) |value| value.value else null,
+        );
+    }
+    /// Replace the cached SotW secret set and resolve every referencing
+    /// cluster. Returns true when any cached secret changed.
+    pub fn updateSecrets(
+        self: *Controller,
+        decoded: []const *sds.Owned,
+    ) Error!bool {
+        var changed = decoded.len != self.sds_secrets.count();
+        for (decoded) |value| {
+            const name = value.value.name;
+            if (self.sds_secrets.get(name)) |old| {
+                if (!std.mem.eql(u8, old.wire, value.wire)) changed = true;
+            } else changed = true;
+        }
+        // SotW SDS is complete for the subscribed type: omitted names expire.
+        var iterator = self.sds_secrets.iterator();
+        while (iterator.next()) |item| {
+            var present = false;
+            for (decoded) |value| {
+                if (std.mem.eql(u8, item.key_ptr.*, value.value.name)) {
+                    present = true;
+                    break;
+                }
+            }
+            if (!present) changed = true;
+        }
+        if (!changed) return false;
+
+        try self.sds_secrets.ensureUnusedCapacity(self.allocator, @intCast(decoded.len));
+        var names: std.ArrayList([]const u8) = .empty;
+        defer names.deinit(self.allocator);
+        try names.ensureTotalCapacity(self.allocator, self.sds_secrets.count());
+        var all = self.sds_secrets.iterator();
+        while (all.next()) |item| names.appendAssumeCapacity(item.key_ptr.*);
+        for (names.items) |name| {
+            const removed = self.sds_secrets.fetchRemove(name).?;
+            removed.value.deinit();
+            self.allocator.destroy(removed.value);
+        }
+        for (decoded) |value| {
+            self.sds_secrets.putAssumeCapacity(value.value.name, value);
+        }
+        return true;
+    }
+    /// Rebuild the projected snapshot of one entry after a TLS change.
+    pub fn reproject(self: *Controller, io: std.Io, item: *entries.Entry) Error!void {
+        const cluster = item.cluster orelse return;
+        if (cluster.sdsPending()) {
+            if (cluster.resource.value.isEds()) {
+                if (item.eds_seen) if (item.snapshot) |old| try cluster.setPendingEds(old.resource.wire);
+                if (item.snapshot) |old| old.release();
+                item.snapshot = try self.emptyEds(io, cluster);
+                item.eds_seen = false;
+            } else {
+                if (item.snapshot) |old| old.release();
+                item.snapshot = null;
+            }
+            return;
+        }
+        if (cluster.resource.value.isEds()) {
+            if (!item.eds_seen) {
+                if (cluster.pending_eds) |wire| {
+                    const snapshot = try self.project(io, cluster, wire);
+                    if (item.snapshot) |old| old.release();
+                    item.snapshot = snapshot;
+                    item.eds_seen = true;
+                } else if (item.snapshot == null) item.snapshot = try self.emptyEds(io, cluster);
+                return;
+            }
+            const wire = item.snapshot.?.resource.wire;
+            const snapshot = try self.project(io, cluster, wire);
+            if (item.snapshot) |old| old.release();
+            item.snapshot = snapshot;
+        } else if (cluster.resource.value.isDns() or cluster.resource.value.isAggregate()) {
+            if (item.snapshot) |old| old.release();
+            item.snapshot = null;
+        } else {
+            const snapshot = try self.project(io, cluster, cluster.resource.value.inline_assignment);
+            if (item.snapshot) |old| old.release();
+            item.snapshot = snapshot;
+        }
     }
     fn cleanProjections(self: *Controller) void {
         var i: usize = 0;
@@ -133,21 +243,27 @@ pub const Controller = struct {
         self.cleanProjections();
         return revision;
     }
-    fn planNames(plan: *Plan) @import("errors.zig").PublishError![2]?[]const []const u8 {
+    fn planNames(plan: *Plan) @import("errors.zig").PublishError![3]?[]const []const u8 {
         const cds_names = try plan.cdsNames();
         const eds_names = plan.edsNames() catch |err| {
             plan.allocator.free(cds_names);
             return err;
         };
-        return .{ cds_names, eds_names };
+        const sds_names = plan.sdsNames() catch |err| {
+            plan.allocator.free(cds_names);
+            plan.allocator.free(eds_names);
+            return err;
+        };
+        return .{ cds_names, eds_names, sds_names };
     }
     pub fn publish(self: *Controller, client: *ads.Client, plan: *Plan, projection: *@import("../lds/projection.zig").Projection, new_projection: bool, destination: shared.SharedChannel, deadline: std.Io.Clock.Timestamp) @import("errors.zig").PublishError!u64 {
         const names = try planNames(plan);
         defer {
             if (names[0]) |value| self.allocator.free(value);
             if (names[1]) |value| self.allocator.free(value);
+            if (names[2]) |value| self.allocator.free(value);
         }
-        var requested: [2]ads.subscriptions.Subscription = undefined;
+        var requested: [3]ads.subscriptions.Subscription = undefined;
         var count: usize = 0;
         if (names[0]) |value| {
             if (value.len != 0) {
@@ -158,6 +274,12 @@ pub const Controller = struct {
         if (names[1]) |value| {
             if (value.len != 0) {
                 requested[count] = .{ .type_url = eds.type_url, .names = value };
+                count += 1;
+            }
+        }
+        if (names[2]) |value| {
+            if (value.len != 0) {
+                requested[count] = .{ .type_url = sds.type_url, .names = value };
                 count += 1;
             }
         }
@@ -172,8 +294,9 @@ pub const Controller = struct {
         defer {
             if (names[0]) |value| self.allocator.free(value);
             if (names[1]) |value| self.allocator.free(value);
+            if (names[2]) |value| self.allocator.free(value);
         }
-        var requested: [2]delta.subscriptions.Subscription = undefined;
+        var requested: [3]delta.subscriptions.Subscription = undefined;
         var count: usize = 0;
         if (names[0]) |value| {
             // Delta has no wildcard: an empty desired set is a real unsubscribe
@@ -186,6 +309,12 @@ pub const Controller = struct {
         if (names[1]) |value| {
             if (value.len != 0 or client.subscriptions.find(eds.type_url) != null) {
                 requested[count] = .{ .type_url = eds.type_url, .names = value };
+                count += 1;
+            }
+        }
+        if (names[2]) |value| {
+            if (value.len != 0 or client.subscriptions.find(sds.type_url) != null) {
+                requested[count] = .{ .type_url = sds.type_url, .names = value };
                 count += 1;
             }
         }
@@ -257,6 +386,8 @@ pub const Controller = struct {
             try @import("apply_cds.zig").apply(self, client, update, destination, deadline)
         else if (std.mem.eql(u8, url, eds.type_url))
             try @import("apply_eds.zig").apply(self, client, update, destination, deadline)
+        else if (std.mem.eql(u8, url, sds.type_url))
+            try @import("apply_sds.zig").apply(self, client, update, destination, deadline)
         else
             return error.InvalidDiscoveryMessage;
         try client.acceptAppliedUpdate(update);
@@ -313,6 +444,8 @@ pub const Controller = struct {
             try @import("apply_delta_cds.zig").apply(self, client, update, destination, deadline)
         else if (std.mem.eql(u8, url, eds.type_url))
             try @import("apply_delta_eds.zig").apply(self, client, update, destination, deadline)
+        else if (std.mem.eql(u8, url, sds.type_url))
+            try @import("apply_delta_sds.zig").apply(self, client, update, destination, deadline)
         else
             return error.InvalidDiscoveryMessage;
         try client.acceptAppliedUpdate(update);
@@ -413,7 +546,7 @@ pub const Controller = struct {
                 options.limits.initial_connection_window_size = value;
             }
         }
-        if (config.tls) |tls_config| {
+        if (cluster.resolvedTls()) |tls_config| {
             const material = try tls_material.Material.create(self.allocator, io, tls_config);
             const host = material.serverName(config.name);
             options.tls = .{ .host = host, .options = material.options() };

@@ -168,11 +168,12 @@ pub const Target = struct {
                     try endpoints.append(arena, projected);
                 }
             } else if (cluster) |resource| {
-                if (resource.isDns() and resource.host_endpoints.len != 0) {
+                const source = value.cluster.?;
+                if (!source.sdsPending() and resource.isDns() and resource.host_endpoints.len != 0) {
                     const decoded = std.json.parseFromSliceLeaky(Json, arena, resource.policy.child_json, .{ .allocate = .alloc_always }) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else error.InvalidServiceConfig;
                     if (decoded != .array) return error.InvalidServiceConfig;
                     const key = try arena.dupe(u8, value.identity.key);
-                    const material: ?*tls_material.Material = if (resource.tls) |config| blk: {
+                    const material: ?*tls_material.Material = if (source.resolvedTls()) |config| blk: {
                         const created = try tls_material.Material.create(gpa, io, config);
                         self.tls_materials.append(gpa, created) catch |err| {
                             created.deinit();

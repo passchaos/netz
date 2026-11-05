@@ -5,7 +5,7 @@ const policy = @import("policy.zig");
 const tls_material = @import("../tls_material.zig");
 pub const type_url = "type.googleapis.com/envoy.config.cluster.v3.Cluster";
 pub const Error = pb.Error;
-pub const Limits = struct { max_bytes: usize = 8 * 1024 * 1024, max_text_bytes: usize = 4096, max_thresholds: usize = 256, max_policies: usize = 32, max_endpoints: usize = 65536, max_aggregate_clusters: usize = 256 };
+pub const Limits = struct { max_bytes: usize = 8 * 1024 * 1024, max_text_bytes: usize = 4096, max_thresholds: usize = 256, max_policies: usize = 32, max_endpoints: usize = 65536, max_aggregate_clusters: usize = 256, allow_sds: bool = false };
 /// `aggregate` is a netz-internal discovery kind selected by the CDS
 /// `envoy.clusters.aggregate` custom cluster extension; it has no Envoy enum
 /// wire value of its own.
@@ -36,6 +36,13 @@ pub const Http2Limits = struct {
     initial_window_size: ?u32 = null,
     initial_connection_window_size: ?u32 = null,
 };
+/// Secret Discovery Service references from an `UpstreamTlsContext`.
+/// Inline certificate/validation material and SDS references for the same
+/// aspect are mutually exclusive.
+pub const TlsSds = struct {
+    certificate: ?[]const u8 = null,
+    validation: ?[]const u8 = null,
+};
 pub const Cluster = struct {
     name: []const u8,
     eds_service_name: []const u8,
@@ -45,6 +52,9 @@ pub const Cluster = struct {
     /// Flattened DNS endpoints, retaining priority/locality identity.
     host_endpoints: []const HostEndpoint = &.{},
     tls: ?tls_material.Config = null,
+    /// SDS references resolved by the runtime controller. When present, the
+    /// referenced secrets must be available before endpoints are published.
+    tls_sds: ?TlsSds = null,
     http2_limits: ?Http2Limits = null,
     max_concurrent_requests: u32 = 1024,
     lrs_propagation: LrsPropagation = .{},
@@ -357,42 +367,85 @@ fn tlsParameters(arena: std.mem.Allocator, bytes: []const u8, limits: Limits) Er
     return .{ .version_policy = version_policy, .tls12_cipher_suites = try suites.toOwnedSlice(arena) };
 }
 
-fn commonTlsContext(arena: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!tls_material.Config {
-    var result: tls_material.Config = .{};
+const CommonTls = struct {
+    config: tls_material.Config = .{},
+    sds: TlsSds = .{},
+};
+
+const TlsResult = struct {
+    config: tls_material.Config,
+    sds: ?TlsSds,
+};
+
+/// Decode an `SdsSecretConfig`. The source defaults to the ADS stream and any
+/// explicit non-ADS source is rejected.
+fn sdsSecretConfig(bytes: []const u8, limits: Limits) Error![]const u8 {
+    var name: []const u8 = "";
+    var source: ?[]const u8 = null;
+    var reader: pb.Reader = .{ .bytes = bytes };
+    while (try reader.next()) |field| {
+        if (field.number == 1 and field.wire_type == 2) {
+            name = try pb.text(&reader, limits.max_text_bytes);
+        } else if (field.number == 2 and field.wire_type == 2) {
+            source = try reader.bytesValue();
+        } else try reader.skip(field);
+    }
+    if (name.len == 0) return error.InvalidCdsResource;
+    if (source) |value| {
+        const kind = @import("../config_source.zig").decode(value) catch |err| return switch (err) {
+            error.UnsupportedConfigSource => error.UnsupportedCdsFeature,
+            else => error.InvalidCdsResource,
+        };
+        if (kind != .ads) return error.UnsupportedCdsFeature;
+    }
+    return name;
+}
+
+fn commonTlsContext(arena: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!CommonTls {
+    var result = CommonTls{};
     var reader: pb.Reader = .{ .bytes = bytes };
     while (try reader.next()) |field| {
         if (field.number == 1 and field.wire_type == 2) {
             const params = try tlsParameters(arena, try reader.bytesValue(), limits);
-            result.version_policy = params.version_policy;
-            result.tls12_cipher_suites = params.tls12_cipher_suites;
+            result.config.version_policy = params.version_policy;
+            result.config.tls12_cipher_suites = params.tls12_cipher_suites;
         } else if (field.number == 2 and field.wire_type == 2) {
-            if (result.certificate_chain.len != 0) return error.UnsupportedCdsFeature;
+            if (result.config.certificate_chain.len != 0 or result.sds.certificate != null) return error.UnsupportedCdsFeature;
             const certificate = try tlsCertificate(try reader.bytesValue(), limits);
-            result.certificate_chain = certificate.chain;
-            result.private_key = certificate.key;
+            result.config.certificate_chain = certificate.chain;
+            result.config.private_key = certificate.key;
         } else if (field.number == 3 and field.wire_type == 2) {
+            if (result.config.trusted_ca.len != 0 or result.sds.validation != null) return error.UnsupportedCdsFeature;
             const validation = try validationContext(arena, try reader.bytesValue(), limits);
-            result.trusted_ca = validation.trusted_ca;
-            result.san_matchers = validation.san_matchers;
+            result.config.trusted_ca = validation.trusted_ca;
+            result.config.san_matchers = validation.san_matchers;
         } else if (field.number == 4 and field.wire_type == 2) {
             _ = try reader.bytesValue();
-        } else if (field.number >= 6 and field.number <= 15 and field.wire_type == 2) return error.UnsupportedCdsFeature else try reader.skip(field);
+        } else if (field.number == 6 and field.wire_type == 2) {
+            if (result.config.certificate_chain.len != 0 or result.sds.certificate != null) return error.UnsupportedCdsFeature;
+            result.sds.certificate = try sdsSecretConfig(try reader.bytesValue(), limits);
+        } else if (field.number == 7 and field.wire_type == 2) {
+            if (result.config.trusted_ca.len != 0 or result.sds.validation != null) return error.UnsupportedCdsFeature;
+            result.sds.validation = try sdsSecretConfig(try reader.bytesValue(), limits);
+        } else if (field.number >= 5 and field.number <= 15 and field.wire_type == 2) return error.UnsupportedCdsFeature else try reader.skip(field);
     }
     return result;
 }
 
-fn upstreamTlsContext(arena: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!tls_material.Config {
+fn upstreamTlsContext(arena: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!TlsResult {
     var result: tls_material.Config = .{};
+    var sds = TlsSds{};
     var reader: pb.Reader = .{ .bytes = bytes };
     while (try reader.next()) |field| {
         if (field.number == 1 and field.wire_type == 2) {
             const common = try commonTlsContext(arena, try reader.bytesValue(), limits);
-            result.trusted_ca = common.trusted_ca;
-            result.certificate_chain = common.certificate_chain;
-            result.private_key = common.private_key;
-            result.version_policy = common.version_policy;
-            result.tls12_cipher_suites = common.tls12_cipher_suites;
-            result.san_matchers = common.san_matchers;
+            result.trusted_ca = common.config.trusted_ca;
+            result.certificate_chain = common.config.certificate_chain;
+            result.private_key = common.config.private_key;
+            result.version_policy = common.config.version_policy;
+            result.tls12_cipher_suites = common.config.tls12_cipher_suites;
+            result.san_matchers = common.config.san_matchers;
+            sds = common.sds;
         } else if (field.number == 2 and field.wire_type == 2) {
             const value = try pb.text(&reader, 255);
             result.server_name = value;
@@ -400,10 +453,13 @@ fn upstreamTlsContext(arena: std.mem.Allocator, bytes: []const u8, limits: Limit
             if (try pb.u32Value(&reader) != 0) return error.UnsupportedCdsFeature;
         } else try reader.skip(field);
     }
-    return result;
+    return .{
+        .config = result,
+        .sds = if (sds.certificate != null or sds.validation != null) sds else null,
+    };
 }
 
-fn transportSocket(arena: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!tls_material.Config {
+fn transportSocket(arena: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!TlsResult {
     var name: []const u8 = "";
     var typed: ?[]const u8 = null;
     var reader: pb.Reader = .{ .bytes = bytes };
@@ -820,7 +876,10 @@ pub fn decode(gpa: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!O
         .aggregate => {},
         else => return error.UnsupportedCdsFeature,
     }
-    const tls: ?tls_material.Config = if (transport) |raw| try transportSocket(arena, raw, limits) else null;
+    const tls_result = if (transport) |raw| try transportSocket(arena, raw, limits) else null;
+    const tls: ?tls_material.Config = if (tls_result) |value| value.config else null;
+    const tls_sds: ?TlsSds = if (tls_result) |value| value.sds else null;
+    if (tls_sds != null and !limits.allow_sds) return error.UnsupportedCdsFeature;
     const lrs_propagation: LrsPropagation = .{
         .cpu_utilization = lrs_cpu,
         .memory_utilization = lrs_memory,
@@ -840,7 +899,7 @@ pub fn decode(gpa: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!O
             .{ cluster_policy.child_json, outlier_json },
         );
     }
-    result.value = .{ .name = name, .eds_service_name = service, .discovery = discovery, .inline_assignment = inline_assignment, .host_endpoints = host_endpoints, .tls = tls, .http2_limits = http2, .max_concurrent_requests = if (breaker) |raw| try circuit(raw, limits.max_thresholds) else 1024, .lrs_propagation = lrs_propagation, .aggregate_clusters = aggregate_clusters, .policy = cluster_policy };
+    result.value = .{ .name = name, .eds_service_name = service, .discovery = discovery, .inline_assignment = inline_assignment, .host_endpoints = host_endpoints, .tls = tls, .tls_sds = tls_sds, .http2_limits = http2, .max_concurrent_requests = if (breaker) |raw| try circuit(raw, limits.max_thresholds) else 1024, .lrs_propagation = lrs_propagation, .aggregate_clusters = aggregate_clusters, .policy = cluster_policy };
     // Converted policies must satisfy the same configuration parser/runtime
     // contract as direct callers, including complete range validation.
     const json = try std.fmt.allocPrint(arena, "{{\"loadBalancingConfig\":{s}}}", .{result.value.policy.child_json});

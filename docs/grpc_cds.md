@@ -106,9 +106,12 @@ GCM/ChaCha suites, and `match_subject_alt_names` exact/prefix/suffix/contains
 matchers (case-sensitive or insensitive). SAN matching requires inline
 `trusted_ca` and replaces SNI hostname verification with the configured matcher
 set. EDS, STATIC and DNS endpoints become TLS targets; without
-`trusted_ca` the platform roots are used. SDS secret configs, certificate
-providers, ECDH curve lists, regex/custom SAN matchers, file/environment data
-sources and other transport sockets are explicitly rejected.
+`trusted_ca` the platform roots are used. SDS certificate and validation
+references are exposed as `Cluster.tls_sds` when `Limits.allow_sds` is set and
+are resolved by the runtime controller; direct CDS consumers that leave the
+option unset keep rejecting them. Certificate providers, ECDH curve lists,
+regex/custom SAN matchers, file/environment data sources and other transport
+sockets are explicitly rejected. See [SDS](grpc_sds.md).
 `transport_socket_matches` and `lrs_server` are also rejected. Cluster
 `upstream_config` accepts `HttpProtocolOptions.http2_protocol_options` and maps
 `hpack_table_size`, `max_concurrent_streams`, `initial_stream_window_size` and
@@ -127,8 +130,8 @@ This slice handles EDS-backed, STATIC, STRICT_DNS and LOGICAL_DNS clusters.
 Typed delta CDS/EDS publication is available through the automatic runtime;
 delta CDS/EDS TTL expiry is covered. Bootstrap parsing and control-plane
 failover are available. LDS/RDS routing, certificate providers and automatic
-refresh scheduling, authority-specific control planes, controller-owned LRS
-scheduling and full security integration remain open.
+refresh scheduling, authority-specific control planes and full security
+integration remain open.
 
 `zig build interop-grpc-cds --summary all` compares valid fixture policies and
 limits with the actual grpc-js-xds CDS parser and uses official Envoy schemas

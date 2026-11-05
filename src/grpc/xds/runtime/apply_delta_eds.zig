@@ -52,6 +52,11 @@ pub fn apply(self: *ctl.Controller, client: *delta.Client, update: delta.Update,
         } else null;
         if (selected) |candidate| {
             const wire = candidate.resource.wire;
+            if (cluster.sdsPending()) {
+                try cluster.setPendingEds(wire);
+                item.eds_seen = false;
+                continue;
+            }
             const eds_deadline = try delta.codec.ttlDeadline(client.sender.state.io, candidate.ttl);
             if (item.snapshot) |old| if (std.mem.eql(u8, old.resource.wire, wire)) {
                 const seen_changed = !item.eds_seen;
@@ -68,6 +73,11 @@ pub fn apply(self: *ctl.Controller, client: *delta.Client, update: delta.Update,
             item.eds_seen = true;
             item.eds_deadline = eds_deadline;
         } else if (removedName(response.removed, name)) {
+            if (cluster.sdsPending()) {
+                cluster.clearPendingEds();
+                item.eds_seen = false;
+                continue;
+            }
             // An explicit removal resolves the assignment to an empty one;
             // it is not the same as an initial omission.
             const empty = try self.emptyEds(client.sender.state.io, cluster);

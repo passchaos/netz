@@ -150,4 +150,26 @@ pub const Plan = struct {
         names.shrinkRetainingCapacity(count);
         return names.toOwnedSlice(self.allocator);
     }
+    /// Secret names referenced by the retained CDS resources.
+    pub fn sdsNames(self: *Plan) std.mem.Allocator.Error![]const []const u8 {
+        var names: std.ArrayList([]const u8) = .empty;
+        for (self.entries.items) |item| if (item.cluster) |cluster| {
+            const refs = cluster.resource.value.tls_sds orelse continue;
+            if (refs.certificate) |name| try names.append(self.allocator, name);
+            if (refs.validation) |name| try names.append(self.allocator, name);
+        };
+        std.mem.sort([]const u8, names.items, {}, struct {
+            fn less(_: void, a: []const u8, b: []const u8) bool {
+                return std.mem.order(u8, a, b) == .lt;
+            }
+        }.less);
+        var count: usize = 0;
+        for (names.items) |name| {
+            if (count != 0 and std.mem.eql(u8, names.items[count - 1], name)) continue;
+            names.items[count] = name;
+            count += 1;
+        }
+        names.shrinkRetainingCapacity(count);
+        return names.toOwnedSlice(self.allocator);
+    }
 };

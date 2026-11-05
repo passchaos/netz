@@ -8,6 +8,7 @@ pub const Limits = struct {
     lds: @import("../lds.zig").resource.Limits = .{},
     cds: @import("../cds.zig").resource.Limits = .{},
     eds: eds.resource.Limits = .{},
+    sds: @import("../sds.zig").Limits = .{},
     max_clusters: usize = 4096,
     max_projections: usize = 4096,
     max_storage_bytes: usize = 64 * 1024 * 1024,

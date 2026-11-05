@@ -85,6 +85,13 @@ is joined by `Controller.deinit`. Its LRS control plane must be dedicated to
 the runner, and the destination channel must enable LRS statistics; see
 [LRS](grpc_lrs.md#controller-owned-runner).
 
+CDS clusters may reference SDS certificate and validation secrets. The
+controller subscribes to those names, caches the decoded `Secret` resources,
+and keeps a referencing cluster pending until every secret is available. A
+resolved cluster publishes its endpoints with the secret material; secret
+rotation reprojects it, and removal makes it pending again instead of falling
+back to cleartext. See [SDS](grpc_sds.md).
+
 `zig build interop-grpc-xds-runtime --summary all` starts with an empty
 application data plane and receives official LDS → RDS → CDS → EDS resources
 from an independent grpc-js ADS server. Two grpc-js backends verify pending
@@ -105,15 +112,17 @@ and `initial_resource_versions` replay, and this controller has matching
 `startDeltaWithDeadline`, `synchronizeDeltaWithDeadline` and
 `applyDeltaWithDeadline` entry points for typed incremental LDS/RDS/CDS/EDS
 publication. `nextDeltaExpiry` and `expireDeltaWithDeadline` enforce
-`Resource.ttl` for all four types, refresh timers from payload-free heartbeats
-and forget expired accepted versions. The
+`Resource.ttl` for LDS/RDS/CDS/EDS, refresh timers from payload-free heartbeats
+and forget expired accepted versions. Delta SDS is supported without TTL
+expiry. The
 [bootstrap parser and control-plane failover](grpc_bootstrap.md)
 select `http://` servers, retry refused servers and rebind the same delta client
 with `initial_resource_versions` replay. Bootstrap `refresh_interval` exposes a
 TLS reload schedule checked by `reloadIfDue`; certificate providers and
 authority-specific control planes, other custom CDS extensions (STATIC, DNS and
 `envoy.clusters.aggregate` clusters are supported), full security (inline
-upstream TLS is supported), non-router filters and capture/rewriting remain open.
+upstream TLS and SDS-provided certificate/validation material are supported),
+non-router filters and capture/rewriting remain open.
 Aggregate clusters subscribe to their ordered leaf clusters and publish an
 ordered `priority_experimental` child policy over the live leaf policies. The
 aggregate name remains a manager selection key rather than an endpoint path

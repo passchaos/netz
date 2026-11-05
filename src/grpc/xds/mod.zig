@@ -8,6 +8,7 @@ pub const config_source = @import("config_source.zig");
 pub const bootstrap = @import("bootstrap.zig");
 pub const control_plane = @import("control_plane.zig");
 pub const lrs = @import("lrs.zig");
+pub const sds = @import("sds.zig");
 pub const runtime = @import("runtime.zig");
 pub const ads = @import("ads.zig");
 test {
@@ -21,6 +22,7 @@ test {
     _ = bootstrap;
     _ = control_plane;
     _ = lrs;
+    _ = sds;
     _ = runtime;
     _ = @import("sotw_tests.zig");
     _ = @import("bootstrap_tests.zig");

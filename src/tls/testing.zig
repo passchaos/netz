@@ -15,6 +15,17 @@ pub const certificate_base64 =
     "MIIBMDCB1qADAgECAgISNDAKBggqhkjOPQQDAjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwHhcNMjYwMTAxMDAwMDAwWhcNMzYwMTAxMDAwMDAwWjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAARawLjuCeZXZ7tsfTRAu+FcuRLUr+ELbhoX/6Hs0fLlSZe0NNZYPUqZa65oYGMMs9Ud19Qc/RZMzn4vZv5+EakUoxgwFjAUBgNVHREEDTALgglsb2NhbGhvc3QwCgYIKoZIzj0EAwIDSQAwRgIhAJFAj+UlV/FOGaVRnB/9l7wXgSet0zn4CdgFIckqC1hEAiEApPR1fJT2M9PVNn3fwdZBboKEoWrUYLVy6sMvbrhNjKU=";
 pub const certificate_der_len: usize = 308;
 
+/// PEM form of `certificate_base64`, matching `serverKeyPair`.
+pub const certificate_pem =
+    "-----BEGIN CERTIFICATE-----\n" ++ certificate_base64 ++ "\n-----END CERTIFICATE-----\n";
+
+/// PKCS#8 PEM for the deterministic P-256 key in `serverKeyPair`.
+pub const private_key_pem =
+    "-----BEGIN PRIVATE KEY-----\n" ++
+    "MEECAQAwEwYHKoZIzj0CAQYIKoZIzj0DAQcEJzAlAgEBBCASNFZ4mrze\n" ++
+    "8SNFZ4mrze8SNFZ4mrze8SNFZ4mrze8SNA==\n" ++
+    "-----END PRIVATE KEY-----\n";
+
 pub fn serverKeyPair() !EcdsaP256Sha256.KeyPair {
     const secret = try EcdsaP256Sha256.SecretKey.fromBytes(.{
         0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf1,

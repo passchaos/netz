@@ -22,15 +22,18 @@ pub fn apply(self: *ctl.Controller, client: *delta.Client, update: delta.Update,
         candidates.deinit(self.allocator);
     }
     var storage: usize = 0;
+    var limits = self.options.limits.cds;
+    limits.allow_sds = true;
     for (response.resources) |raw| {
         const any = raw.resource orelse continue;
-        var owned = try cds.decode(self.allocator, any.value, self.options.limits.cds);
+        var owned = try cds.decode(self.allocator, any.value, limits);
         const resource = entry.Cluster.create(self.allocator, owned) catch |err| {
             owned.deinit();
             return err;
         };
         errdefer resource.release();
         if (!std.mem.eql(u8, resource.resource.value.name, raw.name)) return error.InvalidDiscoveryMessage;
+        try self.resolveClusterTls(resource);
         storage = std.math.add(usize, storage, owned.arena.queryCapacity()) catch return error.XdsLimitExceeded;
         if (storage > self.options.limits.max_storage_bytes) return error.XdsLimitExceeded;
         try candidates.append(self.allocator, .{ .name = raw.name, .resource = resource, .ttl = raw.ttl });
@@ -62,6 +65,7 @@ pub fn apply(self: *ctl.Controller, client: *delta.Client, update: delta.Update,
             } else false;
             const same_config = if (item.cluster) |old| blk: {
                 const before = old.resource.value;
+                if (after.tls != null or after.tls_sds != null or before.tls != null or before.tls_sds != null) break :blk false;
                 break :blk same_identity and before.max_concurrent_requests == after.max_concurrent_requests and before.policy.locality_weighted == after.policy.locality_weighted and std.mem.eql(u8, before.policy.child_json, after.policy.child_json);
             } else false;
             if (same_config and item.snapshot != null and item.cds_seen and entry.sameDeadline(item.cds_deadline, cds_deadline)) {
@@ -77,6 +81,8 @@ pub fn apply(self: *ctl.Controller, client: *delta.Client, update: delta.Update,
             else if (after.isEds())
                 try self.emptyEds(client.sender.state.io, resource)
             else if (after.isDns())
+                null
+            else if (resource.sdsPending())
                 null
             else
                 try self.project(client.sender.state.io, resource, after.inline_assignment);

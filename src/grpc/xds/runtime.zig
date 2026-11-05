@@ -11,4 +11,5 @@ test {
     _ = @import("runtime/delta_tests.zig");
     _ = @import("runtime/delta_ttl_tests.zig");
     _ = @import("runtime/lrs_tests.zig");
+    _ = @import("runtime/sds_tests.zig");
 }

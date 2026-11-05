@@ -36,6 +36,13 @@ pub fn apply(self: *ctl.Controller, client: *ads.Client, update: ads.Update, des
         const selected = for (resources.items) |resource| {
             if (std.mem.eql(u8, resource.value.cluster_name, cluster.resource.value.edsName())) break resource.wire;
         } else continue;
+        // Endpoints cannot be published before the cluster's SDS material is
+        // resolved. Retain the payload so it can be projected on resolution.
+        if (cluster.sdsPending()) {
+            try cluster.setPendingEds(selected);
+            item.eds_seen = false;
+            continue;
+        }
         // EDS SotW can carry a subset. Missing children retain their exact
         // snapshot and discovery state; a new assignment stays pending.
         if (item.snapshot) |old| if (std.mem.eql(u8, old.resource.wire, selected)) {
