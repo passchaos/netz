@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "date": "2026-11-05",
+  "head": "working-tree",
+  "subject": "LRS scheduler overall deadline bounds the report wait",
+  "change": "Scheduler.run now caps its socket wait at the caller's overall deadline as well as the server's next report boundary. A long server-advertised report interval can no longer make runWithTimeout/runWithControlPlaneTimeout overrun the application budget. The focused loopback test advertises a 10-second interval, gives the scheduler 100 ms, and asserts error.Timeout within one second.",
+  "tests": {
+    "unit": "src/grpc/xds/lrs/scheduler_tests.zig 'gRPC LRS scheduler timeout bounds a long report interval' uses a real LRS duplex peer, a 10-second advertised interval and a 100 ms scheduler budget.",
+    "focused_gate": {
+      "command": "zig build test-lib -Dtest-filter='LRS' --summary all",
+      "passed": 190,
+      "total": 190,
+      "failed": 0
+    },
+    "compile": {
+      "command": "zig build test-compile",
+      "status": "passed"
+    }
+  },
+  "source_sha256": {
+    "src/grpc/xds/lrs/scheduler.zig": "0f591ea82e93514d23b16c051c852e9052f5dde4bdfda209c0255249436106c1",
+    "src/grpc/xds/lrs/scheduler_tests.zig": "313202257995e6cacb7e1b378b40c4fca106eabd2961ab7067f59888e7b862ad",
+    "docs/grpc_lrs.md": "b587571b469afd35e7cb65934b6c0e75b79b740e8196f4c796a8b0c324329a84"
+  },
+  "notes": "This makes the scheduler deadline-correct for a future controller-owned background runner. Automatic LRS scheduling and authority-specific control planes remain open."
+}

@@ -36,7 +36,12 @@ pub const Scheduler = struct {
             const now = std.Io.Clock.Timestamp.now(io, .awake);
             if (deadline.raw.nanoseconds <= now.raw.nanoseconds) return error.Timeout;
             const report_at = self.reporter.nextDeadline();
-            const wait_until = if (report_at.raw.nanoseconds <= now.raw.nanoseconds) now else report_at;
+            const wait_until = if (report_at.raw.nanoseconds <= now.raw.nanoseconds)
+                now
+            else if (report_at.raw.nanoseconds < deadline.raw.nanoseconds)
+                report_at
+            else
+                deadline;
             var event = self.client.nextWithDeadline(wait_until) catch |err| switch (err) {
                 error.Timeout => {
                     const after = std.Io.Clock.Timestamp.now(io, .awake);

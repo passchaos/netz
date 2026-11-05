@@ -358,3 +358,93 @@ test "gRPC LRS scheduler fails over after a terminal stream" {
     try second_task.await(io);
     try destination_task.await(io);
 }
+
+const IdlePeer = struct {
+    fn run(io: std.Io, listener: *grpc.runtime.Server, ready: *std.Io.Event) !void {
+        var connection = try listener.acceptWithTimeout(.fromSeconds(3));
+        defer connection.deinit();
+        var duplex = try connection.acceptDuplexWithTimeout(.fromSeconds(3));
+        defer duplex.deinit();
+        var initial = try request(&duplex);
+        defer initial.deinit();
+        try duplex.startResponse(.{});
+        try send(&duplex, .{
+            .clusters = &.{"a"},
+            .interval_ns = 10 * std.time.ns_per_s,
+        });
+        ready.set(io);
+        var collector: Collector = .{};
+        defer if (collector.request) |*value| value.deinit();
+        while (true) {
+            var event = duplex.readRequestEventWithTimeout(
+                .fromSeconds(3),
+                &collector,
+                Collector.consume,
+            ) catch |err| switch (err) {
+                error.Timeout => return,
+                else => return err,
+            };
+            defer event.deinit();
+            if (event == .finished or event == .reset) return;
+        }
+    }
+};
+
+test "gRPC LRS scheduler timeout bounds a long report interval" {
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var control = try grpc.runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+        4096,
+    );
+    defer control.deinit();
+    var ready: std.Io.Event = .unset;
+    var peer_task = io.async(IdlePeer.run, .{ io, &control, &ready });
+    defer _ = peer_task.cancel(io) catch {};
+    const path = [_][]const u8{"cluster:a"};
+    const endpoint: @import("../../channel.zig").Endpoint = .{ .cleartext_ip = .{
+        .address = control.address(),
+        .hierarchical_path = &path,
+    } };
+    var source = try grpc.SharedChannel.init(
+        allocator,
+        io,
+        .{ .resolved = .{ .endpoints = &.{endpoint} } },
+        .{ .enable_lrs_stats = true },
+    );
+    defer source.deinit();
+    var control_channel = try grpc.SharedChannel.init(
+        allocator,
+        io,
+        .{ .cleartext_ip = .{ .address = control.address() } },
+        .{},
+    );
+    defer control_channel.deinit();
+    var sender = control_channel.sender();
+    defer sender.deinit();
+    var client = try lrs.Client.init(allocator, sender, .{
+        .node = .{ .id = "node-1" },
+    });
+    defer client.deinit();
+    try client.connectWithDeadline(deadline(io));
+    var scheduler = lrs.Scheduler.init(allocator, &client, source, .{
+        .interval_ns = std.time.ns_per_s,
+    });
+    defer scheduler.deinit();
+    try ready.waitTimeout(io, .{ .duration = .{
+        .raw = .fromSeconds(2),
+        .clock = .awake,
+    } });
+    const start = std.Io.Clock.Timestamp.now(io, .awake);
+    try std.testing.expectError(
+        error.Timeout,
+        scheduler.runWithTimeout(.fromMilliseconds(100)),
+    );
+    const elapsed = start.durationFromNow(io).raw.nanoseconds;
+    try std.testing.expect(elapsed < std.time.ns_per_s);
+    _ = peer_task.cancel(io) catch {};
+}

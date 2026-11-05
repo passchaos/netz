@@ -139,14 +139,18 @@ scheduler.runWithTimeout(timeout) catch |err| switch (err) {
 };
 ```
 
-`run` waits for the next response or the current report deadline, whichever
-comes first. A response updates the interval, cluster filter and endpoint
-granularity; when the deadline arrives the scheduler writes a due report and
-returns to waiting. A terminal stream surfaces `error.LrsTerminal`; the overall
-deadline surfaces `error.Timeout`. Run the scheduler in a background task and
-cancel it when discovery stops. A real loopback test drives a unary call,
-receives an interval response, observes one report with exact
-issued/successful counters, and then a terminal.
+`run` waits for the next response, the current report deadline, or the overall
+deadline, whichever comes first. The overall deadline bounds the socket wait
+even when the server's report interval is longer, so a timeout returns promptly
+instead of waiting for the next report. A response updates the interval,
+cluster filter and endpoint granularity; when the deadline arrives the scheduler
+writes a due report and returns to waiting. A terminal stream surfaces
+`error.LrsTerminal`; the overall deadline surfaces `error.Timeout`. Run the
+scheduler in a background task and cancel it when discovery stops. A real
+loopback test drives a unary call, receives an interval response, observes one
+report with exact issued/successful counters, and then a terminal. A focused
+test also gives the scheduler a 100 ms budget while the server advertises a
+10-second report interval and asserts the call returns within one second.
 
 `runWithControlPlane` makes the loop recovery-aware. On a terminal it first
 calls `ControlPlane.reconnectLrsWithDeadline`, which reconnects the current
