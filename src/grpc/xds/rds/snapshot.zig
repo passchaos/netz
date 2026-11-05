@@ -14,6 +14,7 @@ pub const Selection = struct {
     duration: ?std.Io.Duration,
     retry: ?@import("../../call.zig").RetryPolicy,
     path_rewrite: ?@import("../../call.zig").PathRewrite = null,
+    host_rewrite: ?@import("../../call.zig").HostRewrite = null,
     authority: ?[]const u8 = null,
     request_header_mutations: []const @import("../../call.zig").HeaderMutation = &.{},
     request_header_removals: []const []const u8 = &.{},
@@ -136,11 +137,32 @@ pub const Snapshot = struct {
                 }
             }
             var authority: ?[]const u8 = null;
+            var host_rewrite: ?@import("../../call.zig").HostRewrite = null;
             var auto_host_rewrite = false;
             if (forward.host_rewrite) |rewrite| switch (rewrite) {
                 .literal => |value| authority = value,
                 .header => |name| authority = firstHeader(request, name),
                 .auto => auto_host_rewrite = true,
+                .path_regex => |value| {
+                    const stripped = path_rewrite_mod.stripQueryAndFragment(
+                        request.path,
+                    );
+                    const output_len = path_rewrite_mod.outputLen(
+                        gpa,
+                        value,
+                        stripped,
+                    ) catch |err| switch (err) {
+                        error.OutOfMemory => return error.OutOfMemory,
+                        error.RegexLimitExceeded => return error.RouteMetadataLimitExceeded,
+                    };
+                    if (output_len > request.max_header_bytes) {
+                        return error.RouteMetadataLimitExceeded;
+                    }
+                    host_rewrite = .{ .regex = .{
+                        .rewrite = value,
+                        .output_len = output_len,
+                    } };
+                },
             };
             if (authority) |value| {
                 if (value.len > request.max_header_bytes) {
@@ -196,6 +218,7 @@ pub const Snapshot = struct {
                 .duration = forward.max_stream_duration orelse self.options.default_max_stream_duration,
                 .retry = forward.retry_policy,
                 .path_rewrite = path_rewrite,
+                .host_rewrite = host_rewrite,
                 .authority = authority,
                 .request_header_mutations = route.request_headers_to_add,
                 .request_header_removals = route.request_headers_to_remove,
@@ -217,6 +240,7 @@ pub const Snapshot = struct {
         selected.xds_cluster = selection.cluster;
         selected.request_hash = selection.hash;
         selected.xds_path_rewrite = selection.path_rewrite;
+        selected.xds_host_rewrite = selection.host_rewrite;
         if (selection.authority) |authority| selected.authority = authority;
         selected.xds_request_header_mutations = selection.request_header_mutations;
         selected.xds_request_header_removals = selection.request_header_removals;

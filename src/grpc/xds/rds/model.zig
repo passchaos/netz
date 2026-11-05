@@ -45,6 +45,8 @@ pub const HostRewrite = union(enum) {
     header: []const u8,
     /// Use the selected endpoint's authority.
     auto,
+    /// Apply an RE2-style replacement to the path (query/fragment removed).
+    path_regex: *const RegexRewrite,
 };
 pub const Forward = struct {
     clusters: []const Weighted,

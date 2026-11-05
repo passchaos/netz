@@ -41,6 +41,8 @@ pub const RequestOptions = struct {
     xds_cluster: ?[]const u8 = null,
     /// Internal xDS route path rewrite applied when request inputs are copied.
     xds_path_rewrite: ?call.PathRewrite = null,
+    /// Internal xDS host rewrite applied when request inputs are copied.
+    xds_host_rewrite: ?call.HostRewrite = null,
     /// Internal xDS request-header additions applied when request inputs are
     /// copied. The slices remain borrowed from the selector snapshot.
     xds_request_header_mutations: []const call.HeaderMutation = &.{},

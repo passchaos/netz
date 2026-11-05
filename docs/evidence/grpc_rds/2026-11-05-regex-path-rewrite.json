@@ -2,14 +2,16 @@
   "schema": 1,
   "date": "2026-11-05",
   "head": "working-tree",
-  "subject": "RDS regex path and header-hash rewrites",
-  "change": "RouteAction.regex_rewrite (field 32) and HashPolicy.Header.regex_rewrite now decode RegexMatchAndSubstitute, compile the pattern with the bounded xDS safe-regex parser, validate RE2-style \\0..\\9 substitution references, and apply leftmost-first global replacement. Path rewrites run while copying owned request inputs; header hash rewrites transform the joined header value before XXH64. Greedy and lazy quantifiers keep their priority semantics. Replacement runs on an explicit backtracking stack with hard step, choice and capture-trail budgets; the selector precomputes the exact rewritten path length so the existing single-allocation request-input copy and max_header_bytes check remain unchanged.",
+  "subject": "RDS regex path, header-hash and host-path rewrites",
+  "change": "RouteAction.regex_rewrite (field 32), HashPolicy.Header.regex_rewrite and RouteAction.host_rewrite_path_regex (field 35) now decode RegexMatchAndSubstitute, compile the pattern with the bounded xDS safe-regex parser, validate RE2-style \\0..\\9 substitution references, and apply leftmost-first global replacement. Path rewrites run while copying owned request inputs; header hash rewrites transform the joined header value before XXH64; host path rewrites evaluate the path with query and fragment removed and use the result as :authority. Greedy and lazy quantifiers keep their priority semantics. Replacement runs on an explicit backtracking stack with hard step, choice and capture-trail budgets; the selector precomputes exact output lengths so the existing single-allocation request-input copy and max_header_bytes checks remain unchanged.",
   "tests": {
     "unit": [
       "src/grpc/xds/routing/regex/replace_tests.zig covers numbered groups, global replacement, lazy quantifiers, inline case folding, \\0 and \\\\, unmatched groups, Unicode captures, unknown group references and the backtracking budget.",
       "src/grpc/xds/rds/tests.zig 'gRPC RDS applies regex rewrites and rejects format rewrites' decodes a route with ^/service/([^/]+)(/.*)$ -> \\2/instance/\\1, asserts the selected output length and rewritten path, and rejects empty rewrites, unknown capture references, malformed patterns and format path_rewrite.",
       "src/grpc/channel/shared/request_inputs_tests.zig applies the selected regex rewrite through the production owned-input copy and verifies the rewritten path, authority and header mutation layout.",
-      "src/grpc/xds/rds/tests.zig 'gRPC RDS applies header hash regex rewrites' decodes a terminal HashPolicy.Header with ^tenant-(\\d+)$ -> \\1 and asserts the selected hash is XXH64 of the rewritten value."
+      "src/grpc/xds/rds/tests.zig 'gRPC RDS applies header hash regex rewrites' decodes a terminal HashPolicy.Header with ^tenant-(\\d+)$ -> \\1 and asserts the selected hash is XXH64 of the rewritten value.",
+      "src/grpc/xds/rds/tests.zig 'gRPC RDS applies host rewrite path regex' decodes host_rewrite_path_regex, strips query and fragment, and asserts the selected authority rewrite and output length.",
+      "src/grpc/channel/shared/request_inputs_tests.zig 'shared request inputs apply host rewrite path regex' verifies the production owned-input copy writes the rewritten authority into the same allocation as the path and header mutations."
     ],
     "focused_gates": {
       "regex": {
@@ -20,14 +22,14 @@
       },
       "rds": {
         "command": "zig build test-lib -Dtest-filter='gRPC RDS' --summary all",
-        "passed": 180,
-        "total": 180,
+        "passed": 181,
+        "total": 181,
         "failed": 0
       },
       "request_inputs": {
         "command": "zig build test-lib -Dtest-filter='shared request inputs' --summary all",
-        "passed": 157,
-        "total": 157,
+        "passed": 158,
+        "total": 158,
         "failed": 0
       },
       "package": {
@@ -50,7 +52,7 @@
         "command": "zig build test-lib",
         "status": "passed",
         "exit_code": 0,
-        "note": "The full library suite passed after the header hash rewrite. The focused RDS gate separately covers the final output-size limit and non-matching-rewrite assertions."
+        "note": "The full library suite passed after the header hash rewrite. For this host-path slice, the focused RDS (181/181) and request-input (158/158) gates pass; a full-suite rerun was still running under heavy host load when this evidence was recorded."
       }
     }
   },
@@ -62,16 +64,17 @@
     "src/grpc/xds/routing/regex/replace.zig": "62c25016a93993218acb0789edacd6db4211745effbfec8ee87d0c22acb876b7",
     "src/grpc/xds/routing/regex/replace_tests.zig": "bd46676f0d88c685502064e0178c0d785d06a707a07c99e952b2edbe2c3ef408",
     "src/grpc/xds/routing/regex.zig": "7afd9a93b6d46cdeaa203811f805a333b10c9e48be883b4e6fdc14a948ca6e2a",
-    "src/grpc/path_rewrite.zig": "c130531a9f483179d6fe67765fda89f2aebd749a10e0642ef52da60e1609f5f2",
-    "src/grpc/call.zig": "32230b7fc09477bcbce00d9620f7dc0d19c76d9924aace073d2e1b32673a2495",
-    "src/grpc/channel/shared/request_inputs.zig": "0bc74df9110963bc8454dbb74eaa8f633625a7b369949d70e58683d88fd4a851",
-    "src/grpc/channel/shared/request_inputs_tests.zig": "bf3cada204eb8fdf4e30f07a460f9663c4f862dc9f8e0b2ce77332c7e42ac0d8",
-    "src/grpc/xds/rds/model.zig": "c0b77ce780b32751f34f2465ad57b62da3fc7c401201a595c7f284b9d68b23c2",
-    "src/grpc/xds/rds/action.zig": "bd066aebe3a872445c53b1ad04cc42729ec946933ff39a010a88708db5970708",
-    "src/grpc/xds/rds/snapshot.zig": "02bbbaa0670f655f031c0caa1099e97f8e594823e720270026f8517ebab1ea9e",
-    "src/grpc/xds/rds/tests.zig": "36fd7c21ef8ad4d10f755c43c547337915a8d174cbc38aa3918f97baf7da8d81",
-    "docs/grpc_rds.md": "cfe04e37970817b6284a7def2f492939d7d02367683d9dd4ac3f732de65ba543",
-    "docs/grpc_parity.md": "29ae70a5ff483df7fe0cd05223e531897f649d3c2b6dd173bb12f32631f01af5",
+    "src/grpc/path_rewrite.zig": "5738417ae9e9660b808097480016b5234a82d3b6d53bd57e3dcf5340f7bee17a",
+    "src/grpc/call.zig": "93dcf3ae928050fcbb72dc502eeb1b0f4b9af93409d3c17a5880da0ab53c31c7",
+    "src/grpc/stream/runtime.zig": "b4a9037a374b7e81a43f4cba00428f4e45e485dcc4aa45a9009b31a4873abaa4",
+    "src/grpc/channel/shared/request_inputs.zig": "251542c647089520f0a58dfc2a7d8d913413a685d66b005bd32d2cf6ce6de3b5",
+    "src/grpc/channel/shared/request_inputs_tests.zig": "864dddcf2287ef01c8e2f2f8e537f4207f0454e8783a747eb83a8b4a5b378684",
+    "src/grpc/xds/rds/model.zig": "0b95312427c81813b825f855851fa8ff4c87d49eac50858f13343bf32fe2d45f",
+    "src/grpc/xds/rds/action.zig": "9dc8e0ae030549757085abf3069e743eab6d9802cfc164180c88d03014aef129",
+    "src/grpc/xds/rds/snapshot.zig": "9ef1a9bf945fcc51d1c94bedbe1d8cd93fe71220cf04c5eba39643f7a6d780c5",
+    "src/grpc/xds/rds/tests.zig": "ec0d35bb44b3c31f0046758c76b66cc8ca80ea47a1be10c07dc55e8d4a81646d",
+    "docs/grpc_rds.md": "ae0f01a642a5e7115bb4470f1ce99686fb0e6e54789261fff14bd33676237e3f",
+    "docs/grpc_parity.md": "2aadf7a26455d09cd58ff76e138dcca73f5e1fb50ec596e10f244e01a1037778",
     "docs/grpc_xds_routing.md": "a669495d5aa15fdd4dbc686a5c04786f1163b949523eef017a5b3c788c39ee3c",
     "tools/interop/grpc_xds_matching/regex_client.zig": "425b85cea2c62642a05d2a13fb0e3cbed9b4c5b9cd739d9acb9414eba41d404b",
     "tools/interop/grpc_xds_matching/regex_peer.js": "7b70373bd09514cd9bd80e167460dc54d39f61adcd5d0bd7dd25f7964ba89100",

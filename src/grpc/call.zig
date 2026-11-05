@@ -279,6 +279,37 @@ pub const PathRewrite = union(enum) {
     }
 };
 
+/// Internal xDS host rewrite. The regex form evaluates the path with query and
+/// fragment removed, matching Envoy's `host_rewrite_path_regex`.
+pub const HostRewrite = union(enum) {
+    regex: struct {
+        rewrite: *const RegexRewrite,
+        output_len: usize,
+    },
+
+    pub fn outputLen(self: HostRewrite) usize {
+        return switch (self) {
+            .regex => |value| value.output_len,
+        };
+    }
+
+    pub fn write(
+        self: HostRewrite,
+        allocator: std.mem.Allocator,
+        path: []const u8,
+        output: []u8,
+    ) std.mem.Allocator.Error![]const u8 {
+        return switch (self) {
+            .regex => |value| path_rewrite.apply(
+                allocator,
+                value.rewrite,
+                path_rewrite.stripQueryAndFragment(path),
+                output,
+            ),
+        };
+    }
+};
+
 pub const UnaryCallOptions = struct {
     path: []const u8,
     authority: ?[]const u8 = null,
@@ -303,6 +334,8 @@ pub const UnaryCallOptions = struct {
     xds_cluster: ?[]const u8 = null,
     /// Internal xDS route path rewrite applied when request inputs are copied.
     xds_path_rewrite: ?PathRewrite = null,
+    /// Internal xDS host rewrite applied when request inputs are copied.
+    xds_host_rewrite: ?HostRewrite = null,
     /// Internal xDS request-header additions applied when request inputs are
     /// copied. The slices remain borrowed from the selector snapshot.
     xds_request_header_mutations: []const HeaderMutation = &.{},

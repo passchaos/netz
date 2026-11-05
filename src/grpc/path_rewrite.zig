@@ -10,6 +10,13 @@ pub const RegexRewrite = struct {
     limits: regex.Limits,
 };
 
+/// Envoy's `host_rewrite_path_regex` evaluates the path with query and
+/// fragment removed.
+pub fn stripQueryAndFragment(input: []const u8) []const u8 {
+    const end = std.mem.indexOfAny(u8, input, "?#") orelse input.len;
+    return input[0..end];
+}
+
 /// Compute the exact rewritten length for `input`. A bounded-work failure is
 /// reported separately so route selection can reject the request locally.
 pub fn outputLen(

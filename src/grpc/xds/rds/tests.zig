@@ -344,3 +344,36 @@ test "gRPC RDS applies header hash regex rewrites" {
         unmatched.hash,
     );
 }
+test "gRPC RDS applies host rewrite path regex" {
+    var matcher = fixture.Builder{ .allocator = gpa };
+    defer matcher.deinit();
+    try matcher.bytes(2, "^/([^/]+)/.*$");
+    var rewrite = fixture.Builder{ .allocator = gpa };
+    defer rewrite.deinit();
+    try rewrite.bytes(1, matcher.data.items);
+    try rewrite.bytes(2, "\\1");
+    var action = fixture.Builder{ .allocator = gpa };
+    defer action.deinit();
+    try action.bytes(35, rewrite.data.items);
+    const bytes = try fixture.encode(gpa, "routes", &.{"backend.test"}, &.{.{ .prefix = "/", .action_extra = action.data.items }}, null);
+    defer gpa.free(bytes);
+    const snapshot = try rds.Snapshot.create(gpa, bytes, .{}, .{ .authority = "backend.test" });
+    defer snapshot.release();
+    var prng = random();
+    const path = "/envoyproxy.io/some/path?x=1#frag";
+    const selected = try snapshot.selectWith(gpa, .{
+        .path = path,
+        .authority = "backend.test",
+    }, 1, prng.random());
+    try std.testing.expect(selected.authority == null);
+    try std.testing.expect(selected.host_rewrite != null);
+    try std.testing.expectEqual(
+        @as(usize, "envoyproxy.io".len),
+        selected.host_rewrite.?.outputLen(),
+    );
+    var rewritten: [64]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "envoyproxy.io",
+        try selected.host_rewrite.?.write(gpa, path, &rewritten),
+    );
+}

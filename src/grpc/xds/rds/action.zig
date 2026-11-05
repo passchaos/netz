@@ -176,7 +176,10 @@ pub fn decode(p: anytype, bytes: []const u8) pb.Error!?model.Forward {
         } else if (field.number == 32 and field.wire_type == 2) {
             if (path_rewrite != null) return error.InvalidRdsResource;
             path_rewrite = .{ .regex = try regexRewrite(p, try reader.bytesValue()) };
-        } else if (field.number == 35 or field.number == 41 or
+        } else if (field.number == 35 and field.wire_type == 2) {
+            if (host_rewrite != null) return error.InvalidRdsResource;
+            host_rewrite = .{ .path_regex = try regexRewrite(p, try reader.bytesValue()) };
+        } else if (field.number == 41 or
             field.number == 23 or field.number == 28 or
             field.number == 11)
         {

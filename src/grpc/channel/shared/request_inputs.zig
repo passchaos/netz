@@ -26,9 +26,15 @@ pub fn clone(allocator: std.mem.Allocator, source: anytype) std.mem.Allocator.Er
         rewrite.outputLen(source.path.len)
     else
         source.path.len;
+    const host_len = if (source.xds_host_rewrite) |rewrite|
+        rewrite.outputLen()
+    else if (source.authority) |value|
+        value.len
+    else
+        0;
     const metadata_capacity = try addValue(source.metadata.len, source.xds_request_header_mutations.len);
     var size = path_len;
-    if (source.authority) |value| try add(&size, value.len);
+    try add(&size, host_len);
     if (source.scheme) |value| try add(&size, value.len);
     if (source.xds_cluster) |value| try add(&size, value.len);
     for (source.metadata) |field| {
@@ -77,10 +83,19 @@ pub fn clone(allocator: std.mem.Allocator, source: anytype) std.mem.Allocator.Er
         offset += path_len;
         break :blk rewritten;
     } else copy(storage, &offset, source.path);
-    options.authority = if (source.authority) |value| copy(storage, &offset, value) else null;
+    options.authority = if (source.xds_host_rewrite) |rewrite| blk: {
+        const rewritten = try rewrite.write(
+            allocator,
+            source.path,
+            storage[offset..][0..host_len],
+        );
+        offset += host_len;
+        break :blk rewritten;
+    } else if (source.authority) |value| copy(storage, &offset, value) else null;
     options.scheme = if (source.scheme) |value| copy(storage, &offset, value) else null;
     options.xds_cluster = if (source.xds_cluster) |value| copy(storage, &offset, value) else null;
     options.xds_path_rewrite = null;
+    options.xds_host_rewrite = null;
     var metadata_count: usize = 0;
     for (source.metadata) |field| {
         metadata[metadata_count] = .{
