@@ -49,7 +49,7 @@ pub const Controller = struct {
             self.local_json = try self.arena.allocator().dupe(u8, json);
             self.local_captured = true;
         }
-        self.listener = try lds.Controller.init(gpa, .{ .listener_name = options.listener_name, .authority = self.options.target.authority, .max_header_bytes = options.max_header_bytes, .limits = options.limits.lds, .publisher = .{ .context = self, .publish_fn = publishHook }, .delta_publisher = .{ .context = self, .publish_fn = publishDeltaHook } });
+        self.listener = try lds.Controller.init(gpa, .{ .listener_name = options.listener_name, .authority = self.options.target.authority, .max_header_bytes = options.max_header_bytes, .limits = options.limits.lds, .ignore_resource_deletion = options.ignore_resource_deletion, .publisher = .{ .context = self, .publish_fn = publishHook }, .delta_publisher = .{ .context = self, .publish_fn = publishDeltaHook } });
         return self;
     }
     pub fn deinit(self: *Controller) void {

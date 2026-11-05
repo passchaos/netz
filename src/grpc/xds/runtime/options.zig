@@ -31,6 +31,9 @@ pub const Options = struct {
     /// Null captures the destination's initial service-config JSON at start.
     local_service_config_json: ?[]const u8 = null,
     limits: Limits = .{},
+    /// gRPC xDS `ignore_resource_deletion` server feature: retain resources
+    /// omitted from SotW responses or listed in delta removals.
+    ignore_resource_deletion: bool = false,
     /// Optional controller-owned LRS reporting. The destination channel must
     /// have LRS statistics enabled.
     lrs: ?LrsOptions = null,

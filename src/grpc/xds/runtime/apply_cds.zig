@@ -79,6 +79,10 @@ pub fn apply(self: *ctl.Controller, client: *ads.Client, update: ads.Update, des
             // Delete only a previously received cluster, preserving pending
             // siblings when a full-type response predates their subscription.
             if (item.cluster == null) continue;
+            if (self.options.ignore_resource_deletion) {
+                item.cds_seen = true;
+                continue;
+            }
             changed = true;
             if (item.cluster) |old| old.release();
             if (item.snapshot) |old| old.release();

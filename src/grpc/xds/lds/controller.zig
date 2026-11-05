@@ -15,7 +15,16 @@ pub const DeltaPublisher = struct {
     context: *anyopaque,
     publish_fn: *const fn (*anyopaque, *delta.Client, *@import("projection.zig").Projection, shared.SharedChannel, std.Io.Clock.Timestamp) @import("../runtime/errors.zig").PublishError!u64,
 };
-pub const Options = struct { listener_name: []const u8, authority: []const u8, max_header_bytes: usize = 65536, limits: model.Limits = .{}, publisher: ?Publisher = null, delta_publisher: ?DeltaPublisher = null };
+pub const Options = struct {
+    listener_name: []const u8,
+    authority: []const u8,
+    max_header_bytes: usize = 65536,
+    limits: model.Limits = .{},
+    publisher: ?Publisher = null,
+    delta_publisher: ?DeltaPublisher = null,
+    /// gRPC `ignore_resource_deletion`: retain resources omitted or removed.
+    ignore_resource_deletion: bool = false,
+};
 pub const Controller = struct {
     allocator: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,

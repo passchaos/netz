@@ -98,6 +98,10 @@ pub fn apply(self: *ctl.Controller, client: *delta.Client, update: delta.Update,
             // Explicit removal of a resource the client never accepted is a
             // no-op; removal of an accepted cluster resolves it as not found.
             if (item.cluster == null) continue;
+            if (self.options.ignore_resource_deletion) {
+                item.cds_seen = true;
+                continue;
+            }
             changed = true;
             if (item.cluster) |old| old.release();
             if (item.snapshot) |old| old.release();

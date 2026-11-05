@@ -73,6 +73,7 @@ pub fn apply(self: *ctl.Controller, client: *delta.Client, update: delta.Update,
             item.eds_seen = true;
             item.eds_deadline = eds_deadline;
         } else if (removedName(response.removed, name)) {
+            if (self.options.ignore_resource_deletion) continue;
             if (cluster.sdsPending()) {
                 cluster.clearPendingEds();
                 item.eds_seen = false;

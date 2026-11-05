@@ -48,6 +48,9 @@ pub fn applyListener(self: *ctl.Controller, client: *delta.Client, update: delta
     }
     if (hasName(response.removed, self.options.listener_name)) {
         if (self.listener == null) return try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
+        if (self.options.ignore_resource_deletion) {
+            return try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
+        }
         var subscription = try client.subscriptions.prepare(rds.type_url, &.{});
         defer subscription.deinit();
         const empty = try self.empty("_");
@@ -155,6 +158,9 @@ pub fn applyRoutes(self: *ctl.Controller, client: *delta.Client, update: delta.U
     }
     if (hasName(response.removed, name)) {
         if (!self.routes_accepted or self.routes == null) return try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
+        if (self.options.ignore_resource_deletion) {
+            return try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
+        }
         const empty = try self.empty(name);
         defer empty.release();
         const projection = try Projection.create(self.allocator, empty, listener.value.hcm.max_stream_duration);

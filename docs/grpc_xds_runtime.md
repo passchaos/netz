@@ -92,6 +92,12 @@ resolved cluster publishes its endpoints with the secret material; secret
 rotation reprojects it, and removal makes it pending again instead of falling
 back to cleartext. See [SDS](grpc_sds.md).
 
+`Options.ignore_resource_deletion` implements the gRPC xDS server feature of
+the same name. When set, a SotW omission or a delta `removed_resources` entry
+retains the accepted listener, route, cluster or endpoint assignment instead
+of deleting it. The default remains deletion for LDS/CDS and state retention
+for RDS/EDS as before.
+
 `zig build interop-grpc-xds-runtime --summary all` starts with an empty
 application data plane and receives official LDS → RDS → CDS → EDS resources
 from an independent grpc-js ADS server. Two grpc-js backends verify pending
