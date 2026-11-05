@@ -36,12 +36,16 @@ CDS child orchestration remains separate work.
 
 Virtual-host selection uses case-insensitive exact, suffix, prefix and universe
 domain precedence. Routes are evaluated in received order using full safe
-regex or literal exact/prefix matching, all header predicates and optional
-runtime fraction. Binary metadata is absent from the routing view, repeated
-ASCII header values are joined with commas and missing value predicates fail
-before inversion as in grpc-core. Non-gRPC exact/prefix paths and query/CONNECT
-routes are skipped. Unsupported path extensions and metadata/TLS matchers are
-rejected. Matching inappropriate/non-forwarding actions return a local unary
+regex, literal exact/prefix or path-separated-prefix matching, all header
+predicates and optional runtime fraction. `path_separated_prefix` compares the
+path with query and fragment removed, matching either the prefix itself or the
+prefix followed by `/`; `/demo.Service` therefore matches
+`/demo.Service/Get` but not `/demo.ServiceX/Get`. Binary metadata is absent from
+the routing view, repeated ASCII header values are joined with commas and
+missing value predicates fail before inversion as in grpc-core. Non-gRPC
+exact/prefix/path-separated-prefix paths and query/CONNECT routes are skipped.
+Unsupported path-match policies and metadata/TLS matchers are rejected.
+Matching inappropriate/non-forwarding actions return a local unary
 UNAVAILABLE without transport or a streaming `InvalidRouteAction` error;
 missing routes similarly return local UNAVAILABLE or `NoMatchingRoute`.
 These are configuration errors and are separate from EDS/circuit drops.

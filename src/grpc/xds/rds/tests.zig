@@ -377,3 +377,43 @@ test "gRPC RDS applies host rewrite path regex" {
         try selected.host_rewrite.?.write(gpa, path, &rewritten),
     );
 }
+test "gRPC RDS matches path-separated prefixes" {
+    var extra = fixture.Builder{ .allocator = gpa };
+    defer extra.deinit();
+    try extra.bytes(14, "/demo.Service");
+    const bytes = try fixture.encode(gpa, "routes", &.{"backend.test"}, &.{.{ .match_extra = extra.data.items }}, null);
+    defer gpa.free(bytes);
+    const snapshot = try rds.Snapshot.create(gpa, bytes, .{}, .{ .authority = "backend.test" });
+    defer snapshot.release();
+    var prng = random();
+    for ([_][]const u8{
+        "/demo.Service",
+        "/demo.Service/Get",
+        "/demo.Service/Get?x=1",
+    }) |path| {
+        const selected = try snapshot.selectWith(gpa, .{
+            .path = path,
+            .authority = "backend.test",
+        }, 1, prng.random());
+        try std.testing.expectEqualStrings("cluster:a", selected.cluster);
+    }
+    try std.testing.expectError(
+        error.NoMatchingRoute,
+        snapshot.selectWith(gpa, .{
+            .path = "/demo.ServiceX/Get",
+            .authority = "backend.test",
+        }, 1, prng.random()),
+    );
+
+    var invalid = fixture.Builder{ .allocator = gpa };
+    defer invalid.deinit();
+    try invalid.bytes(14, "/demo.Service/");
+    const invalid_bytes = try fixture.encode(gpa, "routes", &.{"backend.test"}, &.{.{ .match_extra = invalid.data.items }}, null);
+    defer gpa.free(invalid_bytes);
+    var invalid_owned = try rds.decode(gpa, invalid_bytes, .{});
+    defer invalid_owned.deinit();
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        invalid_owned.value.virtual_hosts[0].routes.len,
+    );
+}

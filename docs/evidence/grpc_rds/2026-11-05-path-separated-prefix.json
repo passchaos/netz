@@ -1,0 +1,39 @@
+{
+  "schema": 1,
+  "date": "2026-11-05",
+  "head": "working-tree",
+  "subject": "RDS path-separated prefix matching",
+  "change": "RouteMatch.path_separated_prefix (field 14) is now decoded and matched. The matcher compares the path with query and fragment removed, accepting either the exact prefix or the prefix followed by '/', so a gRPC service prefix such as /demo.Service matches /demo.Service/Get but not /demo.ServiceX/Get. Non-gRPC prefixes are skipped like other non-gRPC route paths, and invalid prefixes ending in '/' or containing '?'/'#' are rejected.",
+  "tests": {
+    "unit": [
+      "src/grpc/xds/routing/tests.zig 'gRPC xDS routing path-separated prefixes stop at segment boundaries' covers exact, slash, query, fragment, case-insensitive and non-boundary cases.",
+      "src/grpc/xds/rds/tests.zig 'gRPC RDS matches path-separated prefixes' decodes field 14, selects /demo.Service/Get and /demo.Service/Get?x=1, rejects /demo.ServiceX/Get, and verifies an invalid trailing-slash prefix is skipped."
+    ],
+    "focused_gates": {
+      "routing": {
+        "command": "zig build test-lib -Dtest-filter='path-separated' --summary all",
+        "passed": 157,
+        "total": 157,
+        "failed": 0
+      },
+      "rds": {
+        "command": "zig build test-lib -Dtest-filter='gRPC RDS' --summary all",
+        "passed": 182,
+        "total": 182,
+        "failed": 0
+      },
+      "compile": {
+        "command": "zig build test-compile",
+        "status": "passed"
+      }
+    }
+  },
+  "source_sha256": {
+    "src/grpc/xds/routing/string.zig": "ef5cfbf54ac1f3ba81239e529f16d7715f46962e2f13d8b7e69dcea3f0090ba2",
+    "src/grpc/xds/routing/tests.zig": "08e2f4592c376ca7fb3509a7298e63b66b55da07aff9f6918586477eec55b20e",
+    "src/grpc/xds/rds/match.zig": "76205570363d61c553d852ef710ec0e451d646f89b28c84449c5ef32b7bcefbc",
+    "src/grpc/xds/rds/tests.zig": "67f0be9608de26700264bfffdc99cd15e6ceb367dd7c8a744d11fb20428f7ad1",
+    "docs/grpc_rds.md": "826c295e8cb79d2c4eb8e83d606099df8e8b415bdcd5550bf191d98f978ce54d"
+  },
+  "notes": "This covers the literal path-separated prefix matcher. URI template path_match_policy and path_rewrite_policy remain open."
+}

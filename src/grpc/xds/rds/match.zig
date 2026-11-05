@@ -10,6 +10,7 @@ fn literal(kind: u32, text: []const u8, ignore: bool) routing.string.Match {
         1 => .{ .exact = value },
         2 => .{ .prefix = value },
         3 => .{ .suffix = value },
+        14 => .{ .path_separated_prefix = value },
         else => .{ .contains = value },
     };
 }
@@ -20,7 +21,10 @@ fn string(p: anytype, bytes: []const u8) pb.Error!routing.string.Match {
     var ignore = false;
     var regex_bytes: ?[]const u8 = null;
     while (try reader.next()) |field| {
-        if ((field.number == 1 or field.number == 2 or field.number == 3 or field.number == 7) and field.wire_type == 2) {
+        if ((field.number == 1 or field.number == 2 or field.number == 3 or
+            field.number == 7 or field.number == 14) and
+            field.wire_type == 2)
+        {
             specifier = field.number;
             text = try pb.text(&reader, p.limits.max_text_bytes);
             regex_bytes = null;
@@ -32,6 +36,13 @@ fn string(p: anytype, bytes: []const u8) pb.Error!routing.string.Match {
     const kind = specifier orelse return error.InvalidRdsResource;
     if (kind == 5) return p.regex(regex_bytes.?);
     if (kind != 1 and text.len == 0) return error.InvalidRdsResource;
+    if (kind == 14) {
+        if (text.len < 2 or text[text.len - 1] == '/' or
+            std.mem.indexOfAny(u8, text, "?#") != null)
+        {
+            return error.InvalidRdsResource;
+        }
+    }
     return literal(kind, text, ignore);
 }
 fn range(bytes: []const u8) pb.Error!struct { start: i64, end: i64 } {
@@ -102,7 +113,7 @@ pub fn decode(p: anytype, bytes: []const u8) pb.Error!?Result {
     var headers: std.ArrayList(routing.header.Match) = .empty;
     defer headers.deinit(p.allocator);
     while (try reader.next()) |field| {
-        if ((field.number == 1 or field.number == 2) and field.wire_type == 2) {
+        if ((field.number == 1 or field.number == 2 or field.number == 14) and field.wire_type == 2) {
             kind = field.number;
             path = try pb.text(&reader, p.limits.max_text_bytes);
             regex_bytes = null;
@@ -115,7 +126,7 @@ pub fn decode(p: anytype, bytes: []const u8) pb.Error!?Result {
         } else if ((field.number == 7 or field.number == 12) and field.wire_type == 2) {
             _ = try reader.bytesValue();
             skipped = true; // query/CONNECT routes do not match gRPC requests
-        } else if ((field.number == 11 or field.number == 13 or field.number == 14 or field.number == 15) and field.wire_type == 2) return error.UnsupportedRdsFeature else try reader.skip(field);
+        } else if ((field.number == 11 or field.number == 13 or field.number == 15) and field.wire_type == 2) return error.UnsupportedRdsFeature else try reader.skip(field);
     }
     if (skipped) return null;
     const specifier = kind orelse return error.InvalidRdsResource;
@@ -125,6 +136,18 @@ pub fn decode(p: anytype, bytes: []const u8) pb.Error!?Result {
         if (path.len == 0 or path[0] != '/') return null;
         const slash = std.mem.indexOfScalarPos(u8, path, 1, '/') orelse return null;
         if (slash == 1 or slash + 1 == path.len or std.mem.indexOfScalar(u8, path[slash + 1 ..], '/') != null) return null;
+    } else if (specifier == 14) {
+        if (path.len < 2 or path[0] != '/' or path[path.len - 1] == '/' or
+            std.mem.indexOfAny(u8, path, "?#") != null or
+            std.mem.count(u8, path, "/") > 1)
+        {
+            return null;
+        }
     }
-    return .{ .path = if (specifier == 10) try p.regex(regex_bytes.?) else literal(if (specifier == 1) 2 else 1, path, !sensitive), .headers = try headers.toOwnedSlice(p.allocator), .fraction = portion };
+    const literal_kind: u32 = switch (specifier) {
+        1 => 2,
+        14 => 14,
+        else => 1,
+    };
+    return .{ .path = if (specifier == 10) try p.regex(regex_bytes.?) else literal(literal_kind, path, !sensitive), .headers = try headers.toOwnedSlice(p.allocator), .fraction = portion };
 }

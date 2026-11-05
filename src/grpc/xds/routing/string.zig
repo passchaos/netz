@@ -6,10 +6,22 @@ pub const Match = union(enum) {
     prefix: Literal,
     suffix: Literal,
     contains: Literal,
+    /// Envoy `path_separated_prefix`: exact or prefix followed by `/`,
+    /// evaluated against the path without query or fragment.
+    path_separated_prefix: Literal,
     safe_regex: @import("regex/compile.zig").Program,
     pub const Literal = struct { text: []const u8, ignore_case: bool = false };
     fn equal(a: []const u8, b: []const u8, ignore_case: bool) bool {
         return if (ignore_case) std.ascii.eqlIgnoreCase(a, b) else std.mem.eql(u8, a, b);
+    }
+    fn separatedPrefix(value: []const u8, literal: Literal) bool {
+        const end = std.mem.indexOfAny(u8, value, "?#") orelse value.len;
+        const path = value[0..end];
+        if (path.len < literal.text.len) return false;
+        if (!equal(path[0..literal.text.len], literal.text, literal.ignore_case)) {
+            return false;
+        }
+        return path.len == literal.text.len or path[literal.text.len] == '/';
     }
     /// The caller's arena owns the compiled program/sets until all users leave.
     pub fn compileRegex(arena: std.mem.Allocator, pattern: []const u8, limits: regex.Limits) regex.Error!Match {
@@ -26,6 +38,7 @@ pub const Match = union(enum) {
                 for (0..value.len - literal.text.len + 1) |start| if (equal(value[start..][0..literal.text.len], literal.text, literal.ignore_case)) break :blk true;
                 break :blk false;
             },
+            .path_separated_prefix => |literal| separatedPrefix(value, literal),
             .safe_regex => |program| blk: {
                 var workspace = try regex.Workspace.init(gpa, program);
                 defer workspace.deinit();

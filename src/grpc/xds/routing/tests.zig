@@ -57,3 +57,23 @@ test "gRPC xDS routing strings use ASCII case folding and bounded RE2 full match
     try std.testing.expect(try matcher.matches(gpa, "/demo.Service/Get"));
     try std.testing.expect(!try matcher.matches(gpa, "prefix/demo.Service/Get"));
 }
+test "gRPC xDS routing path-separated prefixes stop at segment boundaries" {
+    const matcher = String{ .path_separated_prefix = .{ .text = "/api/dev" } };
+    for ([_][]const u8{
+        "/api/dev",
+        "/api/dev/",
+        "/api/dev/v1",
+        "/api/dev?x=1",
+        "/api/dev#frag",
+    }) |value| {
+        try std.testing.expect(try matcher.matches(gpa, value));
+    }
+    for ([_][]const u8{ "/api/developer", "/api/de", "/api/devx" }) |value| {
+        try std.testing.expect(!try matcher.matches(gpa, value));
+    }
+    const folded = String{ .path_separated_prefix = .{
+        .text = "/API/DEV",
+        .ignore_case = true,
+    } };
+    try std.testing.expect(try folded.matches(gpa, "/api/dev/v1"));
+}
