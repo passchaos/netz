@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "date": "2026-11-05",
+  "head": "working-tree",
+  "subject": "xDS certificate SPKI pinning",
+  "change": "CertificateValidationContext.verify_certificate_spki is now decoded from SDS secrets and inline CDS transport sockets as base64 SHA-256 SPKI pins. tls_material extracts each peer-chain certificate's DER SubjectPublicKeyInfo, hashes it, and requires a match after normal chain verification. The runtime SDS resolution copies SPKI pins into the cluster TLS override.",
+  "tests": {
+    "unit": "src/grpc/xds/tls_material.zig verifies matching and mismatching SPKI pins against the deterministic test certificate. src/grpc/xds/sds/secret_tests.zig covers SPKI decoding and invalid base64. src/grpc/xds/cds/tests.zig covers inline SPKI decoding. src/grpc/xds/runtime/sds_tests.zig asserts the resolved cluster carries the SDS SPKI pin.",
+    "focused_gate": {
+      "command": "zig build test-lib -Dtest-filter='xDS runtime' -Dtest-filter='gRPC CDS' -Dtest-filter='gRPC LDS' -Dtest-filter='LRS' -Dtest-filter='SDS' --summary all",
+      "passed": 235,
+      "total": 235,
+      "failed": 0
+    },
+    "compile": {
+      "command": "zig build test-compile",
+      "status": "passed"
+    },
+    "full_library": {
+      "command": "zig build test-lib",
+      "status": "passed",
+      "exit_code": 0,
+      "passed": 6493,
+      "total": 6493,
+      "failed": 0,
+      "notes": "An earlier full run failed two unrelated timing/reload cases (weighted-target least request and control-plane TLS reload); both passed in isolation and the rerun passed with no failures."
+    }
+  },
+  "source_sha256": {
+    "src/grpc/xds/tls_material.zig": "66eaa20132228394a26391425d4a279f7cc39c4c8983bec70fe46e8220be272d",
+    "src/grpc/xds/sds/secret.zig": "bb186b619c234501d37695aac24197f6626d3ee8e684cbb2b83c115cb6a8068d",
+    "src/grpc/xds/sds/testing.zig": "a2005862d6590ef54460057d3e9bd7d306ebd3e4ca5319db591afdb876e4163a",
+    "src/grpc/xds/sds/secret_tests.zig": "17672ae4c8e4d2e694695ac5811b4f22bbb6cd4c78efd56d61992b692bdc67d3",
+    "src/grpc/xds/cds/decode.zig": "d2da8184c28e8ec37b6ff5675513b358fa066405f3b4d83f3ff195ebae83684d",
+    "src/grpc/xds/cds/tests.zig": "0d9428821604f07e7f9bc0b1ddbef6d3a7b1486203bcc540c97ab88906466352",
+    "src/grpc/xds/runtime/entry.zig": "ce98320d1b757c785ef8956e5e6394ca3074354eb38022b5764bf22c0415a97d",
+    "src/grpc/xds/runtime/sds_tests.zig": "e2e09fc5c16d311d5d6025e71a71769948759af828e90844822375d1e753099f",
+    "docs/grpc_sds.md": "9b1da58b5b0d47c655cc9e2f27ec99c2da59bf1a4186b755573c875a0199e68c",
+    "docs/grpc_cds.md": "3b26066c8c74a6234db7a453dcf7f1f60d267a854aa95b9650b383fd3ad03761"
+  },
+  "notes": "Pins require trusted_ca and are additional to normal chain verification. Hash-only and SPKI-only validation contexts are not accepted yet."
+}
