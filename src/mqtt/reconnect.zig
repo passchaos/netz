@@ -1982,6 +1982,19 @@ pub const Client = struct {
         return self.outgoing.stats(self.outgoing_handle);
     }
 
+    /// Discard outgoing PUBLISH entries whose Message Expiry Interval has
+    /// elapsed, including one currently awaiting an acknowledgement.
+    /// Returns true when at least one transmission was released.
+    pub fn pruneExpiredOutgoing(
+        self: *Client,
+        now: std.Io.Timestamp,
+    ) Error!bool {
+        return self.outgoing.pruneExpiredOutgoing(
+            self.outgoing_handle,
+            now,
+        );
+    }
+
     pub fn outgoingQoSState(
         self: *Client,
         packet_id: u16,
@@ -2949,6 +2962,7 @@ pub const Client = struct {
         pub const retryable = retryableConnectError;
         pub const retireAfterError = Client.retireConnectionAfterOperationError;
         pub const nextDeadline = Client.nextPollDeadline;
+        pub const pruneExpired = Client.pruneExpiredOutgoing;
         pub const diagnose = Client.disconnectForPeerProtocolViolation;
         pub const apply = Client.applyPacketEvent;
     });

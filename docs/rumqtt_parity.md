@@ -856,7 +856,11 @@ source broker.
 Target MQTT 5 negative PUBACK reasons are propagated to the source Session.
 Message Expiry is never renewed: reconnect replay uses the target Session
 store's remaining lifetime, while a fresh target Session receives a newly
-published copy only if the source delivery still has time remaining.
+published copy only if the source delivery still has time remaining. A target
+QoS 1 PUBLISH still awaiting PUBACK is released from the target Session when
+its Message Expiry Interval elapses, even if the target keeps the connection
+open and never acknowledges; the bridge then completes the source with success
+instead of waiting for an acknowledgement that can no longer arrive.
 After QoS 1 target completion, one bounded in-memory fingerprint suppresses an
 identical source DUP when its PUBACK was lost and rejects a changed retry; it is
 retired on fresh source Session or legal non-DUP identifier reuse. This narrows

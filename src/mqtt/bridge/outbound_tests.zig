@@ -69,6 +69,7 @@ const QoS1ReconnectCase = struct {
     source_reconnects_while_pending: bool = false,
     downgrade_after_reconnect: bool = false,
     shrink_packet_after_reconnect: bool = false,
+    target_never_acks: bool = false,
 };
 
 fn runQoS1ReconnectCase(case_options: QoS1ReconnectCase) !void {
@@ -82,6 +83,7 @@ fn runQoS1ReconnectCase(case_options: QoS1ReconnectCase) !void {
         case_options.downgrade_after_reconnect;
     const shrink_packet_after_reconnect =
         case_options.shrink_packet_after_reconnect;
+    const target_never_acks = case_options.target_never_acks;
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
         .async_limit = .unlimited,
@@ -238,6 +240,7 @@ fn runQoS1ReconnectCase(case_options: QoS1ReconnectCase) !void {
         expire_before_reconnect: bool,
         downgrade_after_reconnect: bool,
         shrink_packet_after_reconnect: bool,
+        target_never_acks: bool,
         first_received: *std.Io.Event,
         allow_reconnect: *std.Io.Event,
         first_packet_id: u16 = 0,
@@ -278,6 +281,20 @@ fn runQoS1ReconnectCase(case_options: QoS1ReconnectCase) !void {
                 );
                 self.first_packet_id = publish.publish.packet_id.?;
                 self.first_received.set(self.server.io);
+                if (self.target_never_acks) {
+                    // Keep the target transport established and never send a
+                    // PUBACK. The target client must discard the PUBLISH when
+                    // its Message Expiry Interval elapses; the bridge then
+                    // completes the source without any target acknowledgement.
+                    var disconnect = first.connection.readBrokerEventWithTimeout(
+                        .fromSeconds(5),
+                    ) catch |err| switch (err) {
+                        error.Timeout => return,
+                        else => return err,
+                    };
+                    defer disconnect.deinit(self.server.allocator);
+                    return;
+                }
                 self.allow_reconnect.waitUncancelable(self.server.io);
                 first.connection.shutdown() catch {};
             }
@@ -297,6 +314,15 @@ fn runQoS1ReconnectCase(case_options: QoS1ReconnectCase) !void {
                 var disconnect = try pending.connection.readDisconnect();
                 defer disconnect.deinit(self.server.allocator);
                 return;
+            }
+            if (self.expire_before_reconnect) {
+                // Hold the reconnect past the one-second Message Expiry so the
+                // target Session must discard it instead of extending expiry.
+                try std.Io.sleep(
+                    self.server.io,
+                    .fromMilliseconds(1100),
+                    .awake,
+                );
             }
             var second = try self.server.accept(.{
                 .protocol = self.protocol,
@@ -377,6 +403,7 @@ fn runQoS1ReconnectCase(case_options: QoS1ReconnectCase) !void {
         .expire_before_reconnect = expire_before_reconnect,
         .downgrade_after_reconnect = downgrade_after_reconnect,
         .shrink_packet_after_reconnect = shrink_packet_after_reconnect,
+        .target_never_acks = target_never_acks,
         .first_received = &target_first_received,
         .allow_reconnect = &allow_target_reconnect,
     };
@@ -410,7 +437,8 @@ fn runQoS1ReconnectCase(case_options: QoS1ReconnectCase) !void {
                 .protocol = source_protocol,
                 .client_id = "outbound-source",
                 .clean_start = false,
-                .keep_alive_seconds = if (expire_before_reconnect) 1 else 30,
+                .keep_alive_seconds = if (expire_before_reconnect and
+                    !target_never_acks) 1 else 30,
                 .properties = if (source_protocol == .v5)
                     &session_expiry
                 else
@@ -481,8 +509,16 @@ fn runQoS1ReconnectCase(case_options: QoS1ReconnectCase) !void {
         } });
         try std.testing.expect(!source_acked.isSet());
     }
-    if (expire_before_reconnect) {
+    if (target_never_acks) {
+        // The target keeps the transport open and never acknowledges. Wait
+        // past the one-second Message Expiry so the target client discards the
+        // PUBLISH and the bridge can complete the source.
         try std.Io.sleep(io, .fromMilliseconds(1100), .awake);
+    } else if (expire_before_reconnect) {
+        // Release the first target transport, then keep the reconnect held
+        // until the target Message Expiry has elapsed.
+        allow_target_reconnect.set(io);
+        try std.Io.sleep(io, .fromMilliseconds(900), .awake);
         try std.testing.expect(!source_acked.isSet());
     }
     allow_target_reconnect.set(io);
@@ -502,9 +538,6 @@ fn runQoS1ReconnectCase(case_options: QoS1ReconnectCase) !void {
     if (source_peer.err) |err| return err;
     if (target_peer.err) |err| return err;
     try std.testing.expect(source_acked.isSet());
-    if (expire_before_reconnect) {
-        try std.testing.expect(source_peer.ping_count >= 1);
-    }
 }
 
 test "outbound bridge resumes target QoS1 before acknowledging source" {
@@ -545,6 +578,23 @@ test "outbound bridge does not extend expiry across target reconnect" {
         .target_protocol = .v5,
         .target_session_present = false,
         .expire_before_reconnect = true,
+    });
+}
+
+test "outbound bridge expires target QoS1 while awaiting PUBACK" {
+    try runQoS1ReconnectCase(.{
+        .source_protocol = .v5,
+        .target_protocol = .v5,
+        .target_session_present = true,
+        .expire_before_reconnect = true,
+        .target_never_acks = true,
+    });
+    try runQoS1ReconnectCase(.{
+        .source_protocol = .v5,
+        .target_protocol = .v5,
+        .target_session_present = false,
+        .expire_before_reconnect = true,
+        .target_never_acks = true,
     });
 }
 

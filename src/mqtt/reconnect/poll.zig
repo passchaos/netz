@@ -33,6 +33,11 @@ pub fn Controller(comptime Context: type) type {
 
                 const now = std.Io.Clock.awake.now(self.io);
                 if (now.nanoseconds >= call_deadline.nanoseconds) return null;
+                // Message Expiry is independent of peer traffic. Discarding a
+                // due outgoing PUBLISH wakes the owner with a null event so a
+                // bridge can finish its source acknowledgement without waiting
+                // for an acknowledgement the target will never send.
+                if (try Context.pruneExpired(self, now)) return null;
                 if (self.ping_response_deadline) |deadline| {
                     if (now.nanoseconds >= deadline.nanoseconds) {
                         self.disconnectTransport();

@@ -2313,6 +2313,18 @@ pub const Store = struct {
         return publishRemainingExpiryNs(inflight.publish, now.nanoseconds) == 0;
     }
 
+    /// Discard queued or inflight PUBLISH entries whose Message Expiry
+    /// Interval has elapsed. Accepted QoS 2 PUBREL/PUBCOMP state is retained.
+    /// Returns true when at least one transmission was released.
+    pub fn pruneExpiredOutgoing(
+        self: *Store,
+        handle: Handle,
+        now: std.Io.Timestamp,
+    ) Error!bool {
+        const session = try self.getSession(handle);
+        return self.pruneExpiredPublishes(session, now.nanoseconds);
+    }
+
     /// Emit all pending retransmissions that fit `out`, then move unsent
     /// queued messages into the available Receive Maximum window.
     pub fn drainInto(

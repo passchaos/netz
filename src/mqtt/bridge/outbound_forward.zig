@@ -181,31 +181,12 @@ pub fn Operations(comptime Self: type) type {
                                 target_packet_id = target_result.published orelse
                                     return error.UnexpectedPacket;
                             } else {
-                                const stats = try self.target.outgoingStats();
-                                if (stats.queued_count == 0 and
-                                    stats.inflight_count == 0)
-                                {
-                                    const reason_code = blk: {
-                                        if (!self.target_delivery.completed) {
-                                            break :blk @as(u8, 0);
-                                        }
-                                        if (self.target_delivery.packet_id !=
-                                            target_packet_id)
-                                        {
-                                            return error.TargetAcknowledgementMismatch;
-                                        }
-                                        const reason =
-                                            self.target_delivery.reason_code;
-                                        self.target_delivery.reset();
-                                        break :blk reason;
-                                    };
-                                    self.completeSource(
-                                        source_publish,
-                                        source_epoch,
-                                        reason_code,
-                                    );
-                                    return;
-                                }
+                                if (try @This().completeWaitingSource(
+                                    self,
+                                    source_publish,
+                                    source_epoch,
+                                    target_packet_id,
+                                )) return;
                             }
                         },
                         .puback => |owned| {
@@ -234,11 +215,46 @@ pub fn Operations(comptime Self: type) type {
                         },
                     }
                 }
+                if (maybe_target_event == null and
+                    try @This().completeWaitingSource(
+                        self,
+                        source_publish,
+                        source_epoch,
+                        target_packet_id,
+                    )) return;
                 try self.serviceSourceWhileWaiting(
                     source_publish,
                     fair_source_poll,
                 );
             }
+        }
+
+        /// Complete the source once the target client has no queued or inflight
+        /// PUBLISH left. This also covers a message the target pruned because
+        /// its Message Expiry Interval elapsed while no target event arrived.
+        fn completeWaitingSource(
+            self: *Self,
+            source_publish: *const mqtt.Publish,
+            source_epoch: u64,
+            target_packet_id: u16,
+        ) Error!bool {
+            const stats = try self.target.outgoingStats();
+            if (stats.queued_count != 0 or stats.inflight_count != 0) {
+                return false;
+            }
+            const reason_code = blk: {
+                if (!self.target_delivery.completed) {
+                    break :blk @as(u8, 0);
+                }
+                if (self.target_delivery.packet_id != target_packet_id) {
+                    return error.TargetAcknowledgementMismatch;
+                }
+                const reason = self.target_delivery.reason_code;
+                self.target_delivery.reset();
+                break :blk reason;
+            };
+            self.completeSource(source_publish, source_epoch, reason_code);
+            return true;
         }
 
         pub fn publishTarget(
