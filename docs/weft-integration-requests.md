@@ -5,8 +5,8 @@ capabilities weft still needs in order to reach its target feature set. They are
 filed here because the netz optimization work is active and weft must not
 duplicate HTTP framing, TLS, QUIC, or codec logic.
 
-Source consumer: `/home/passchaos/project-z/weft` (currently 108/108 tests green
-in Debug and ReleaseFast at `6bfdd7c`).
+Source consumer: `/home/passchaos/project-z/weft` (currently 162/162 tests green
+in Debug and ReleaseFast at `2ef066f`).
 
 ## 1. HTTP/3 concurrent request bodies (delivered)
 
@@ -136,7 +136,7 @@ Covered by `HTTP/2 concurrent oversize declared body stays stream-scoped` in
 Weft verification: `package: HTTP/2 server body limit returns 413 and keeps
 the connection` sends a 2 KiB body against a 1 KiB server budget, asserts
 `413`, then reuses the same client connection for a normal GET and asserts
-`200`. Weft's Debug and ReleaseFast suites are 152/152.
+`200`. Weft's Debug and ReleaseFast suites are 162/162.
 
 Original reproduction: an HTTP/2 server with `Limits.max_body_bytes = 1024`
 received a POST whose declared `Content-Length` was 2048; the concurrent
