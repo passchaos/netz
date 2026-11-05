@@ -41,6 +41,9 @@ pub const Options = struct {
     /// gRPC xDS `ignore_resource_deletion` server feature: retain resources
     /// omitted from SotW responses or listed in delta removals.
     ignore_resource_deletion: bool = false,
+    /// gRPC xDS `fail_on_data_errors` server feature: drop the cached resource
+    /// when a response resource fails to decode, then NACK the response.
+    fail_on_data_errors: bool = false,
     /// Optional controller-owned LRS reporting. The destination channel must
     /// have LRS statistics enabled.
     lrs: ?LrsOptions = null,

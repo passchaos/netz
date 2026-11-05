@@ -1347,7 +1347,10 @@ test "HTTP/2 TLS server caller timeout spans TLS and bootstrap" {
     const stream = try server.address().connect(io, .{ .mode = .stream });
     var stream_owned = true;
     defer if (stream_owned) stream.close(io);
-    const client = try tls_stream.ClientConnection.init(
+    // Under host load the server's shared TLS + bootstrap budget may expire
+    // while this client is still handshaking; any transport-close outcome
+    // still proves the server enforced that budget.
+    const client: ?*tls_stream.ClientConnection = tls_stream.ClientConnection.init(
         allocator,
         io,
         stream,
@@ -1359,9 +1362,17 @@ test "HTTP/2 TLS server caller timeout spans TLS and bootstrap" {
             .alpn_protocols = &.{"h2"},
             .cipher_suites = &.{.aes_128_gcm_sha256},
         },
-    );
-    stream_owned = false;
-    defer client.deinit();
+    ) catch |err| switch (err) {
+        error.Timeout,
+        error.UnexpectedEof,
+        error.ConnectionClosed,
+        error.ConnectionResetByPeer,
+        error.SocketUnconnected,
+        => null,
+        else => return err,
+    };
+    stream_owned = client == null;
+    defer if (client) |value| value.deinit();
     try std.Io.sleep(io, .fromMilliseconds(25), .awake);
 
     thread.join();

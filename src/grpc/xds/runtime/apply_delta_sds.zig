@@ -17,6 +17,9 @@ pub fn apply(self: *ctl.Controller, client: *delta.Client, update: delta.Update,
     defer self.allocator.free(owned);
     var count: usize = 0;
     var storage: usize = 0;
+    var invalid: std.ArrayList([]const u8) = .empty;
+    defer invalid.deinit(self.allocator);
+    var first_error: ?sds.Error = null;
     defer for (decoded[0..count], owned[0..count]) |value, keep| {
         if (!keep) continue;
         value.owned.deinit();
@@ -24,7 +27,13 @@ pub fn apply(self: *ctl.Controller, client: *delta.Client, update: delta.Update,
     };
     for (response.resources) |raw| {
         const any = raw.resource orelse continue;
-        var value = try sds.decode(self.allocator, any.value, self.options.limits.sds);
+        var value = sds.decode(self.allocator, any.value, self.options.limits.sds) catch |err| {
+            if (!self.options.fail_on_data_errors) return err;
+            if (raw.name.len == 0) return err;
+            try invalid.append(self.allocator, raw.name);
+            if (first_error == null) first_error = err;
+            continue;
+        };
         const pointer = self.allocator.create(ctl.CachedSecret) catch |err| {
             value.deinit();
             return err;
@@ -80,6 +89,15 @@ pub fn apply(self: *ctl.Controller, client: *delta.Client, update: delta.Update,
             changed = true;
         }
     }
+    // fail_on_data_errors: an invalid secret drops its cached entry while the
+    // response is still NACKed.
+    for (invalid.items) |name| {
+        if (self.sds_secrets.fetchRemove(name)) |removed| {
+            removed.value.owned.deinit();
+            self.allocator.destroy(removed.value);
+            changed = true;
+        }
+    }
     if (!changed) {
         // Still validate and resolve referenced clusters so a wrong-kind
         // reference keeps failing instead of being accepted on retry.
@@ -88,6 +106,7 @@ pub fn apply(self: *ctl.Controller, client: *delta.Client, update: delta.Update,
             if (cluster.resource.value.tls_sds == null) continue;
             try self.resolveClusterTls(cluster);
         }
+        if (first_error) |err| return err;
         return try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
     }
     for (self.entries.items) |*item| {
@@ -103,5 +122,7 @@ pub fn apply(self: *ctl.Controller, client: *delta.Client, update: delta.Update,
         if (cluster.resource.value.tls_sds == null) continue;
         try self.reproject(io, item);
     }
-    return self.publishDelta(client, &plan, self.latest.?, false, destination, deadline);
+    _ = try self.publishDelta(client, &plan, self.latest.?, false, destination, deadline);
+    if (first_error) |err| return err;
+    return @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
 }

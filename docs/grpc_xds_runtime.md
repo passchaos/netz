@@ -98,6 +98,14 @@ retains the accepted listener, route, cluster or endpoint assignment instead
 of deleting it. The default remains deletion for LDS/CDS and state retention
 for RDS/EDS as before.
 
+`Options.fail_on_data_errors` implements the gRPC xDS server feature of the
+same name. When a SotW or delta resource fails typed validation, its cached
+listener/cluster/assignment/secret is dropped and the change is published, then
+the response is still NACKed so the control plane can correct it. Without the
+option the previous cached resource is retained, matching the default
+fail-safe behavior. The invalid resource's name is recovered leniently from
+field 1 when the payload is truncated after it.
+
 `Options.authority` and `Options.additional_authorities` enable `xdstp://`
 resource names for one or more authorities served by the controller's control
 plane. The listener, route, cluster, endpoint-assignment and secret names are

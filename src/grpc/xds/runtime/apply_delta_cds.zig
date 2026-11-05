@@ -24,9 +24,18 @@ pub fn apply(self: *ctl.Controller, client: *delta.Client, update: delta.Update,
     var storage: usize = 0;
     var limits = self.options.limits.cds;
     limits.allow_sds = true;
+    var invalid: std.ArrayList([]const u8) = .empty;
+    defer invalid.deinit(self.allocator);
+    var first_error: ?cds.resource.Error = null;
     for (response.resources) |raw| {
         const any = raw.resource orelse continue;
-        var owned = try cds.decode(self.allocator, any.value, limits);
+        var owned = cds.decode(self.allocator, any.value, limits) catch |err| {
+            if (!self.options.fail_on_data_errors) return err;
+            if (raw.name.len == 0) return err;
+            try invalid.append(self.allocator, raw.name);
+            if (first_error == null) first_error = err;
+            continue;
+        };
         const resource = entry.Cluster.create(self.allocator, owned) catch |err| {
             owned.deinit();
             return err;
@@ -94,6 +103,18 @@ pub fn apply(self: *ctl.Controller, client: *delta.Client, update: delta.Update,
             item.eds_seen = !after.isEds() or (same_identity and item.eds_seen);
             item.cds_seen = true;
             item.cds_deadline = cds_deadline;
+        } else if (removedName(invalid.items, item.identity.name)) {
+            // fail_on_data_errors: drop the cached resource while the response
+            // is still NACKed.
+            if (item.cluster == null) continue;
+            changed = true;
+            if (item.cluster) |old| old.release();
+            if (item.snapshot) |old| old.release();
+            item.cluster = null;
+            item.snapshot = null;
+            item.cds_seen = true;
+            item.eds_seen = false;
+            item.cds_deadline = null;
         } else if (removedName(response.removed, item.identity.name)) {
             // Explicit removal of a resource the client never accepted is a
             // no-op; removal of an accepted cluster resolves it as not found.
@@ -112,6 +133,11 @@ pub fn apply(self: *ctl.Controller, client: *delta.Client, update: delta.Update,
             item.cds_deadline = null;
         }
     }
-    if (!changed) return try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
-    return self.publishDelta(client, &plan, self.latest.?, false, destination, deadline);
+    if (!changed) {
+        if (first_error) |err| return err;
+        return try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
+    }
+    _ = try self.publishDelta(client, &plan, self.latest.?, false, destination, deadline);
+    if (first_error) |err| return err;
+    return @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
 }

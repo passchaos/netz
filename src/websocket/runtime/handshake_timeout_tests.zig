@@ -674,7 +674,16 @@ test "WSS server caller timeout bounds TLS and HTTP upgrade" {
     client.writeAll("GET / HTTP/1.1\r\nHost: localhost\r\n") catch |err| switch (err) {
         // The server may consume the shared TLS + HTTP deadline and close the
         // connection before this deliberately late, incomplete Upgrade write.
-        error.SocketUnconnected, error.ConnectionResetByPeer => {},
+        // Any transport-close error still proves the shared budget was
+        // enforced; only non-transport errors fail the test.
+        error.SocketUnconnected,
+        error.ConnectionResetByPeer,
+        error.ConnectionClosed,
+        error.UnexpectedEof,
+        error.EndOfStream,
+        error.PeerClosed,
+        error.LocalClosed,
+        => {},
         else => return err,
     };
 

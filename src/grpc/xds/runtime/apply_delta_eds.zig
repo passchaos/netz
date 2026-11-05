@@ -22,9 +22,18 @@ pub fn apply(self: *ctl.Controller, client: *delta.Client, update: delta.Update,
         resources.deinit(self.allocator);
     }
     var storage: usize = 0;
+    var invalid: std.ArrayList([]const u8) = .empty;
+    defer invalid.deinit(self.allocator);
+    var first_error: ?eds.resource.Error = null;
     for (response.resources) |raw| {
         const any = raw.resource orelse continue;
-        var resource = try eds.decode(self.allocator, any.value, self.options.limits.eds);
+        var resource = eds.decode(self.allocator, any.value, self.options.limits.eds) catch |err| {
+            if (!self.options.fail_on_data_errors) return err;
+            if (raw.name.len == 0) return err;
+            try invalid.append(self.allocator, raw.name);
+            if (first_error == null) first_error = err;
+            continue;
+        };
         errdefer resource.deinit();
         if (!std.mem.eql(u8, resource.value.cluster_name, raw.name)) return error.InvalidDiscoveryMessage;
         storage = std.math.add(usize, storage, resource.arena.queryCapacity()) catch return error.XdsLimitExceeded;
@@ -47,6 +56,21 @@ pub fn apply(self: *ctl.Controller, client: *delta.Client, update: delta.Update,
     for (plan.entries.items) |*item| {
         const cluster = item.cluster orelse continue;
         const name = cluster.resource.value.edsName();
+        if (removedName(invalid.items, name)) {
+            // fail_on_data_errors: drop the cached assignment while the response
+            // is still NACKed.
+            const empty = try self.emptyEds(client.sender.state.io, cluster);
+            item.eds_deadline = null;
+            if (item.snapshot) |old| if (std.mem.eql(u8, old.resource.wire, empty.resource.wire) and item.eds_seen) {
+                empty.release();
+                continue;
+            };
+            changed = true;
+            if (item.snapshot) |old| old.release();
+            item.snapshot = empty;
+            item.eds_seen = true;
+            continue;
+        }
         const selected = for (resources.items) |*candidate| {
             if (std.mem.eql(u8, candidate.resource.value.cluster_name, name)) break candidate;
         } else null;
@@ -93,6 +117,11 @@ pub fn apply(self: *ctl.Controller, client: *delta.Client, update: delta.Update,
             item.eds_seen = true;
         }
     }
-    if (!changed) return try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
-    return self.publishDelta(client, &plan, self.latest.?, false, destination, deadline);
+    if (!changed) {
+        if (first_error) |err| return err;
+        return try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
+    }
+    _ = try self.publishDelta(client, &plan, self.latest.?, false, destination, deadline);
+    if (first_error) |err| return err;
+    return @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
 }

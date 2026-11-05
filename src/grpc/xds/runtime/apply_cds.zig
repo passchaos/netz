@@ -5,6 +5,7 @@ const entry = @import("entry.zig");
 const cds = @import("../cds.zig");
 const ads = @import("../ads.zig");
 const shared = @import("../../channel/shared.zig");
+const raw_name = @import("../raw_name.zig");
 const Plan = @import("plan.zig").Plan;
 pub fn apply(self: *ctl.Controller, client: *ads.Client, update: ads.Update, destination: shared.SharedChannel, deadline: std.Io.Clock.Timestamp) ctl.Error!u64 {
     var resources: std.ArrayList(*entry.Cluster) = .empty;
@@ -15,8 +16,14 @@ pub fn apply(self: *ctl.Controller, client: *ads.Client, update: ads.Update, des
     var storage: usize = 0;
     var limits = self.options.limits.cds;
     limits.allow_sds = true;
+    var first_error: ?cds.resource.Error = null;
     for (update.response.value.resources) |raw| {
-        var owned = try cds.decode(self.allocator, raw.value, limits);
+        var owned = cds.decode(self.allocator, raw.value, limits) catch |err| {
+            if (!self.options.fail_on_data_errors) return err;
+            if (raw_name.first(raw.value, 1) == null) return err;
+            if (first_error == null) first_error = err;
+            continue;
+        };
         const resource = entry.Cluster.create(self.allocator, owned) catch |err| {
             owned.deinit();
             return err;
@@ -92,6 +99,11 @@ pub fn apply(self: *ctl.Controller, client: *ads.Client, update: ads.Update, des
         }
         item.cds_seen = true;
     }
-    if (!changed) return try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
-    return self.publish(client, &plan, self.latest.?, false, destination, deadline);
+    if (!changed) {
+        if (first_error) |err| return err;
+        return try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
+    }
+    _ = try self.publish(client, &plan, self.latest.?, false, destination, deadline);
+    if (first_error) |err| return err;
+    return @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
 }
