@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "date": "2026-11-06",
+  "gate": "interop-grpc-xds-runtime",
+  "command": "zig build interop-grpc-xds-runtime --summary all",
+  "status": "passed",
+  "grpc_js": "1.14.7",
+  "checks": {
+    "automatic_chain": true,
+    "pending_discovery": true,
+    "cluster_isolation": true,
+    "drop_isolation": true,
+    "service_name_switch": true,
+    "nack_preserved": true,
+    "listener_deleted": true,
+    "initial_cds_omission_pending": true,
+    "rds_omission_retained": true,
+    "eds_omission_retained": true,
+    "partial_eds_preserved_sibling": true,
+    "client_sha256": "94c672621ad19a9c138ad7abadac77663a94bf29697a1ece6467651506b522c4"
+  },
+  "sessions": [
+    1,
+    1
+  ],
+  "wire_call_count": 10,
+  "notes": "Fresh independent grpc-js 1.14.7 ADS peer run; the gate starts with no static child map or backend endpoints and verifies pending discovery, cluster/drop isolation, EDS service-name switching, NACK rollback, RDS/EDS omission retention, partial EDS sibling retention and listener deletion."
+}
