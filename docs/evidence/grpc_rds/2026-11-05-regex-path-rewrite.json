@@ -49,10 +49,11 @@
         "corpus_sha256": "e1c3658163569ab8e0cf262f49c297c52efe947ab802675984c769b552f26abf"
       },
       "full_library": {
-        "command": "zig build test-lib",
-        "status": "passed",
-        "exit_code": 0,
-        "note": "The full library suite passed after the header hash rewrite. For this host-path slice, the focused RDS (181/181) and request-input (158/158) gates pass; a full-suite rerun was still running under heavy host load when this evidence was recorded."
+        "command": "direct test binary from zig build test-lib",
+        "passed": 6456,
+        "total": 6457,
+        "failed": 1,
+        "note": "The single failure was 'unified HTTP pool global budget rebalances TCP and HTTP3 idle' under concurrent host load; it passed when rerun in isolation (166/166 filtered). The focused RDS (181/181) and request-input (158/158) gates cover this slice."
       }
     }
   },
