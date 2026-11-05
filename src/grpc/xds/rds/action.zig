@@ -3,6 +3,19 @@ const std = @import("std");
 const pb = @import("protobuf.zig");
 const model = @import("model.zig");
 const routing = @import("../routing/mod.zig");
+const match_mod = @import("match.zig");
+const uri_template_rewrite_type =
+    "type.googleapis.com/envoy.extensions.path.rewrite.uri_template.v3.UriTemplateRewriteConfig";
+fn templateRewriteText(p: anytype, bytes: []const u8) pb.Error![]const u8 {
+    var reader = pb.Reader{ .bytes = bytes };
+    var text: ?[]const u8 = null;
+    while (try reader.next()) |field| {
+        if (field.number == 1 and field.wire_type == 2) {
+            text = try pb.text(&reader, p.limits.max_text_bytes);
+        } else try reader.skip(field);
+    }
+    return text orelse error.InvalidRdsResource;
+}
 fn weighted(p: anytype, bytes: []const u8) pb.Error![]const model.Weighted {
     var reader = pb.Reader{ .bytes = bytes };
     var values: std.ArrayList(model.Weighted) = .empty;
@@ -111,7 +124,7 @@ fn regexRewrite(p: anytype, bytes: []const u8) pb.Error!*const model.RegexRewrit
     };
     return rewrite;
 }
-pub fn decode(p: anytype, bytes: []const u8) pb.Error!?model.Forward {
+pub fn decode(p: anytype, bytes: []const u8, match: routing.string.Match) pb.Error!?model.Forward {
     var reader = pb.Reader{ .bytes = bytes };
     var specifier: ?u32 = null;
     var name: []const u8 = "";
@@ -179,8 +192,32 @@ pub fn decode(p: anytype, bytes: []const u8) pb.Error!?model.Forward {
         } else if (field.number == 35 and field.wire_type == 2) {
             if (host_rewrite != null) return error.InvalidRdsResource;
             host_rewrite = .{ .path_regex = try regexRewrite(p, try reader.bytesValue()) };
-        } else if (field.number == 41 or
-            field.number == 23 or field.number == 28 or
+        } else if (field.number == 41 and field.wire_type == 2) {
+            if (path_rewrite != null) return error.InvalidRdsResource;
+            const value = (try match_mod.typedConfigValue(
+                p,
+                try reader.bytesValue(),
+                uri_template_rewrite_type,
+            )) orelse return error.UnsupportedRdsFeature;
+            const match_template = match.templateMatch() orelse
+                return error.InvalidRdsResource;
+            const rewrite_text = try templateRewriteText(p, value);
+            const rewrite = try p.allocator.create(routing.template.Rewrite);
+            rewrite.* = try routing.template.Rewrite.compile(
+                p.allocator,
+                rewrite_text,
+                match.templateVariables(),
+                p.limits.template,
+            );
+            const template_rewrite = try p.allocator.create(
+                model.TemplateRewrite,
+            );
+            template_rewrite.* = .{
+                .match = match_template,
+                .rewrite = rewrite,
+            };
+            path_rewrite = .{ .template = template_rewrite };
+        } else if (field.number == 23 or field.number == 28 or
             field.number == 11)
         {
             return error.UnsupportedRdsFeature;

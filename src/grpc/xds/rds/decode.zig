@@ -157,7 +157,7 @@ const Parser = struct {
         const match = (try @import("match.zig").decode(self, raw_match orelse return error.InvalidRdsResource)) orelse return null;
         var action: @FieldType(model.Route, "action") = .inappropriate;
         if (raw_action) |raw| {
-            var forward = (try @import("action.zig").decode(self, raw)) orelse return null;
+            var forward = (try @import("action.zig").decode(self, raw, match.path)) orelse return null;
             if (!forward.retry_present) forward.retry_policy = inherited;
             action = .{ .forward = forward };
         }

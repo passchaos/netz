@@ -89,8 +89,16 @@ explicit endpoint authority for IP endpoints). Rewritten paths and authorities
 are bounded by the selector's `max_header_bytes` before any copy. The rewrite
 descriptor is internal: it is consumed by unary, streaming and retry input
 ownership and never becomes application metadata. `path_rewrite`/`host_rewrite`
-values containing format specifiers, `path_rewrite_policy` and unsupported
-rewrite variants fail validation instead of being ignored.
+values containing format specifiers and unsupported rewrite variants fail
+validation instead of being ignored.
+
+`path_match_policy` and `path_rewrite_policy` (`TypedExtensionConfig`) support
+the Envoy URI-template extensions. The match policy compiles a bounded template
+(`*`, `**`, `{name}`, `{name=*}`, `{name=**}`, `{name=videos/*}` and embedded
+segment variables such as `{file}.vtt`), matches the path with query and
+fragment removed, and captures named values. The rewrite policy substitutes
+those values into the rewritten path; only names declared by the match template
+may appear in the rewrite. Unsupported extension type URLs fail validation.
 
 Route-level `request_headers_to_add` and `request_headers_to_remove` are
 applied to non-binary application metadata when request inputs are copied.

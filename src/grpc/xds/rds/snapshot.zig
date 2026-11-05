@@ -96,7 +96,23 @@ pub const Snapshot = struct {
         if (request.path.len > request.max_header_bytes or request.authority.len > request.max_header_bytes) return error.RouteMetadataLimitExceeded;
         const host = self.virtual_host orelse return error.NoMatchingRoute;
         for (self.resource.value.virtual_hosts[host].routes) |route| {
-            if (!try route.path.matchesWithBudget(gpa, request.path, request.budget)) continue;
+            if (request.budget) |budget| try budget.check();
+            var captures: routing.template.Captures = .{};
+            const matched = switch (route.path) {
+                .path_template => |matcher| matcher.match(
+                    request.path,
+                    &captures,
+                ) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return error.RouteMetadataLimitExceeded,
+                },
+                else => try route.path.matchesWithBudget(
+                    gpa,
+                    request.path,
+                    request.budget,
+                ),
+            };
+            if (!matched) continue;
             var match = true;
             for (route.headers) |header| if (!try header.matches(gpa, request)) {
                 match = false;
@@ -124,9 +140,23 @@ pub const Snapshot = struct {
                             request.path,
                         ) catch |err| switch (err) {
                             error.OutOfMemory => return error.OutOfMemory,
-                            error.RegexLimitExceeded => return error.RouteMetadataLimitExceeded,
+                            else => return error.RouteMetadataLimitExceeded,
                         };
                         break :blk .{ .regex = .{
+                            .rewrite = value,
+                            .output_len = output_len,
+                        } };
+                    },
+                    .template => |value| blk: {
+                        const output_len = path_rewrite_mod.templateOutputLen(
+                            gpa,
+                            value,
+                            request.path,
+                        ) catch |err| switch (err) {
+                            error.OutOfMemory => return error.OutOfMemory,
+                            else => return error.RouteMetadataLimitExceeded,
+                        };
+                        break :blk .{ .template = .{
                             .rewrite = value,
                             .output_len = output_len,
                         } };
@@ -153,7 +183,7 @@ pub const Snapshot = struct {
                         stripped,
                     ) catch |err| switch (err) {
                         error.OutOfMemory => return error.OutOfMemory,
-                        error.RegexLimitExceeded => return error.RouteMetadataLimitExceeded,
+                        else => return error.RouteMetadataLimitExceeded,
                     };
                     if (output_len > request.max_header_bytes) {
                         return error.RouteMetadataLimitExceeded;
@@ -189,7 +219,7 @@ pub const Snapshot = struct {
                                 value,
                             ) catch |err| switch (err) {
                                 error.OutOfMemory => return error.OutOfMemory,
-                                error.RegexLimitExceeded => return error.RouteMetadataLimitExceeded,
+                                else => return error.RouteMetadataLimitExceeded,
                             };
                             if (output_len > request.max_header_bytes) {
                                 return error.RouteMetadataLimitExceeded;

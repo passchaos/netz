@@ -239,6 +239,11 @@ pub const PathRewrite = union(enum) {
         rewrite: *const RegexRewrite,
         output_len: usize,
     },
+    /// Apply a URI-template replacement using the route match variables.
+    template: struct {
+        rewrite: *const path_rewrite.TemplateRewrite,
+        output_len: usize,
+    },
 
     pub fn outputLen(self: PathRewrite, original_len: usize) usize {
         return switch (self) {
@@ -246,6 +251,7 @@ pub const PathRewrite = union(enum) {
             .prefix => |value| value.replacement.len +
                 (original_len - @min(value.matched, original_len)),
             .regex => |value| value.output_len,
+            .template => |value| value.output_len,
         };
     }
 
@@ -270,6 +276,12 @@ pub const PathRewrite = union(enum) {
                 break :blk output[0 .. value.replacement.len + original.len - matched];
             },
             .regex => |value| path_rewrite.apply(
+                allocator,
+                value.rewrite,
+                original,
+                output,
+            ),
+            .template => |value| path_rewrite.templateApply(
                 allocator,
                 value.rewrite,
                 original,

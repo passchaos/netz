@@ -1,13 +1,23 @@
-//! Capture-aware regex path rewriting shared by xDS resources and gRPC inputs.
+//! Capture-aware regex and URI-template path rewriting shared by xDS and gRPC.
 const std = @import("std");
 const regex = @import("xds/routing/regex.zig");
+const template = @import("xds/routing/template.zig");
 
-pub const Error = std.mem.Allocator.Error || error{RegexLimitExceeded};
+pub const Error = std.mem.Allocator.Error || error{
+    RegexLimitExceeded,
+    InvalidTemplate,
+    TemplateLimitExceeded,
+};
 
 pub const RegexRewrite = struct {
     program: regex.Program,
     substitution: []const u8,
     limits: regex.Limits,
+};
+
+pub const TemplateRewrite = struct {
+    match: *const template.Match,
+    rewrite: *const template.Rewrite,
 };
 
 /// Envoy's `host_rewrite_path_regex` evaluates the path with query and
@@ -55,4 +65,32 @@ pub fn apply(
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.OutOfMemory,
     };
+}
+
+/// Compute the exact URI-template rewrite length. The route matcher has
+/// already accepted the same path, so a non-match here is an invalid template.
+pub fn templateOutputLen(
+    allocator: std.mem.Allocator,
+    rewrite: *const TemplateRewrite,
+    input: []const u8,
+) Error!usize {
+    _ = allocator;
+    var captures: template.Captures = .{};
+    if (!try rewrite.match.match(input, &captures)) return error.InvalidTemplate;
+    return rewrite.rewrite.outputLen(&captures);
+}
+
+/// Write a URI-template rewrite into caller storage. Selection has already
+/// matched the same input and computed the exact length.
+pub fn templateApply(
+    allocator: std.mem.Allocator,
+    rewrite: *const TemplateRewrite,
+    input: []const u8,
+    output: []u8,
+) std.mem.Allocator.Error![]const u8 {
+    _ = allocator;
+    var captures: template.Captures = .{};
+    const matched = rewrite.match.match(input, &captures) catch return error.OutOfMemory;
+    if (!matched) return error.OutOfMemory;
+    return rewrite.rewrite.write(&captures, output) catch return error.OutOfMemory;
 }

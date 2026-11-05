@@ -417,3 +417,63 @@ test "gRPC RDS matches path-separated prefixes" {
         invalid_owned.value.virtual_hosts[0].routes.len,
     );
 }
+test "gRPC RDS applies URI template path rewrites" {
+    var match_config = fixture.Builder{ .allocator = gpa };
+    defer match_config.deinit();
+    try match_config.bytes(1, "/{one}/{two}");
+    var match_any = fixture.Builder{ .allocator = gpa };
+    defer match_any.deinit();
+    try match_any.bytes(1, "type.googleapis.com/envoy.extensions.path.match.uri_template.v3.UriTemplateMatchConfig");
+    try match_any.bytes(2, match_config.data.items);
+    var match_policy = fixture.Builder{ .allocator = gpa };
+    defer match_policy.deinit();
+    try match_policy.bytes(1, "envoy.path.match.uri_template.uri_template_matcher");
+    try match_policy.bytes(2, match_any.data.items);
+
+    var rewrite_config = fixture.Builder{ .allocator = gpa };
+    defer rewrite_config.deinit();
+    try rewrite_config.bytes(1, "/{two}/{one}");
+    var rewrite_any = fixture.Builder{ .allocator = gpa };
+    defer rewrite_any.deinit();
+    try rewrite_any.bytes(1, "type.googleapis.com/envoy.extensions.path.rewrite.uri_template.v3.UriTemplateRewriteConfig");
+    try rewrite_any.bytes(2, rewrite_config.data.items);
+    var rewrite_policy = fixture.Builder{ .allocator = gpa };
+    defer rewrite_policy.deinit();
+    try rewrite_policy.bytes(1, "envoy.path.rewrite.uri_template.uri_template_rewriter");
+    try rewrite_policy.bytes(2, rewrite_any.data.items);
+
+    var match_extra = fixture.Builder{ .allocator = gpa };
+    defer match_extra.deinit();
+    try match_extra.bytes(15, match_policy.data.items);
+    var action_extra = fixture.Builder{ .allocator = gpa };
+    defer action_extra.deinit();
+    try action_extra.bytes(41, rewrite_policy.data.items);
+
+    const bytes = try fixture.encode(gpa, "routes", &.{"backend.test"}, &.{.{
+        .match_extra = match_extra.data.items,
+        .action_extra = action_extra.data.items,
+    }}, null);
+    defer gpa.free(bytes);
+    var owned = try rds.decode(gpa, bytes, .{});
+    defer owned.deinit();
+    const route = owned.value.virtual_hosts[0].routes[0];
+    try std.testing.expect(route.path == .path_template);
+    try std.testing.expectEqual(@as(usize, 2), route.path.templateVariables().len);
+    const snapshot = try rds.Snapshot.create(gpa, bytes, .{}, .{ .authority = "backend.test" });
+    defer snapshot.release();
+    var prng = random();
+    const selected = try snapshot.selectWith(gpa, .{
+        .path = "/cat/dog",
+        .authority = "backend.test",
+    }, 1, prng.random());
+    try std.testing.expect(selected.path_rewrite != null);
+    try std.testing.expectEqual(
+        @as(usize, "/dog/cat".len),
+        selected.path_rewrite.?.outputLen("/cat/dog".len),
+    );
+    var rewritten: [32]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "/dog/cat",
+        try selected.path_rewrite.?.write(gpa, "/cat/dog", &rewritten),
+    );
+}

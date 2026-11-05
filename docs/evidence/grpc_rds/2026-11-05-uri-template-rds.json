@@ -1,0 +1,47 @@
+{
+  "schema": 1,
+  "date": "2026-11-05",
+  "head": "working-tree",
+  "subject": "RDS URI-template path matching and rewriting",
+  "change": "RouteMatch.path_match_policy (field 15) and RouteAction.path_rewrite_policy (field 41) now decode their TypedExtensionConfig/Any envelopes and use the URI-template engine. The match policy compiles the bounded template and captures named variables while matching the path with query and fragment removed; the rewrite policy substitutes those variables into the owned request path. Rewrites without a template match policy, unknown extension type URLs and rewrite placeholders not declared by the match template fail validation.",
+  "tests": {
+    "unit": [
+      "src/grpc/xds/routing/template_tests.zig covers the URI-template engine, including the Envoy documentation examples and malformed templates.",
+      "src/grpc/xds/rds/tests.zig 'gRPC RDS applies URI template path rewrites' decodes path_match_policy and path_rewrite_policy, asserts the route uses a path template, selects /cat/dog, and verifies the rewritten path /dog/cat through call.PathRewrite.write."
+    ],
+    "focused_gates": {
+      "rds": {
+        "command": "zig build test-lib -Dtest-filter='gRPC RDS' --summary all",
+        "passed": 184,
+        "total": 184,
+        "failed": 0
+      },
+      "template": {
+        "command": "zig build test-lib -Dtest-filter='URI template' --summary all",
+        "passed": 163,
+        "total": 163,
+        "failed": 0
+      },
+      "compile": {
+        "command": "zig build test-compile",
+        "status": "passed"
+      }
+    }
+  },
+  "source_sha256": {
+    "src/grpc/xds/routing/string.zig": "8d8e3b6dba94f543e55e5cc74c2a757de758cf31cb9dbf5c71c297eee29104e3",
+    "src/grpc/xds/routing/template.zig": "7417b5f512f6bc1d05b840b7d4626a26f22c29f8f98691a3e3f2f7a649ee72d6",
+    "src/grpc/xds/routing/template_tests.zig": "47edab8b5bd99f5293127466fa794c8a671fbb65cee0b5db4b8c2957672dd79f",
+    "src/grpc/xds/rds/match.zig": "b71aacb6c0176830282f3ce54566c1811033b66743617fbd76cac78dd3cad912",
+    "src/grpc/xds/rds/action.zig": "e4ebb2644fb69ef424fd357970e1be9b33f48f6fe1ae11b3e32a5a576fe6e999",
+    "src/grpc/xds/rds/decode.zig": "b84bb05124a7463cf4eca56f392ffe0aa0c16f2dd401f11b66029e0298748711",
+    "src/grpc/xds/rds/snapshot.zig": "39d508e5b4648dc80587c1a3963bd061b7794fae36647cdf287b7e45601b807e",
+    "src/grpc/xds/rds/model.zig": "310a920aa16b05c427db295cbacb4f29745c681f4ea00fc53b68f60fd5034690",
+    "src/grpc/xds/rds/tests.zig": "f152fe36110127ed29bbb393f5e10b8f24c7cdb19aca077f2c6bbf2b94470b97",
+    "src/grpc/path_rewrite.zig": "323853dc52ccc37a05a0b5440e58b2b286f5b6bb6f38e052d641be8290f53701",
+    "src/grpc/call.zig": "54d1a1fe8b7e332bf02907d20727da199ca01ffce484cd6e10353c4d1fb66f4d",
+    "docs/grpc_rds.md": "372ce7d422420830a3259d0abce65cbe9751759383144182a5955c890708036e",
+    "docs/grpc_parity.md": "1ba9e32acee029de6785d3efda8b5c92e82b94638276cab3897b2d56d4a3a2e5"
+  },
+  "notes": "Non-router HTTP filters and broader control-plane orchestration remain open."
+}

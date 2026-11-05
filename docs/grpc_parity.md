@@ -3694,10 +3694,9 @@ See [RDS behavior and boundaries](grpc_rds.md) and
 `docs/evidence/grpc_rds/2026-11-03.json`.
 
 LDS/HCM/bootstrap and automatic CDS/EDS child orchestration, expiry, failover,
-Delta xDS, LRS, HTTP filters, `path_rewrite_policy` format rewrites, host path
-regex rewrites and non-router filters remain required work for complete xDS
-integration. Current RDS publication uses the application's existing
-cluster-manager topology.
+Delta xDS, LRS, HTTP filters and non-router filters remain required work for
+complete xDS integration. Current RDS publication uses the application's
+existing cluster-manager topology.
 
 
 ## Client LDS/HCM and listener-driven RDS

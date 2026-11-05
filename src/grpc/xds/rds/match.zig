@@ -102,11 +102,57 @@ fn fraction(bytes: []const u8) pb.Error!?u32 {
     if (numerator > 1000000 / scale) return error.InvalidRdsResource;
     return numerator * scale;
 }
+const uri_template_match_type =
+    "type.googleapis.com/envoy.extensions.path.match.uri_template.v3.UriTemplateMatchConfig";
+
+pub fn typedConfigValue(
+    p: anytype,
+    bytes: []const u8,
+    expected_type: []const u8,
+) pb.Error!?[]const u8 {
+    var reader = pb.Reader{ .bytes = bytes };
+    var type_url: []const u8 = "";
+    var value: ?[]const u8 = null;
+    while (try reader.next()) |field| {
+        if (field.number == 1 and field.wire_type == 2) {
+            _ = try pb.text(&reader, p.limits.max_text_bytes);
+        } else if (field.number == 2 and field.wire_type == 2) {
+            var any = pb.Reader{ .bytes = try reader.bytesValue() };
+            while (try any.next()) |any_field| {
+                if (any_field.number == 1 and any_field.wire_type == 2) {
+                    type_url = try pb.text(&any, p.limits.max_text_bytes);
+                } else if (any_field.number == 2 and any_field.wire_type == 2) {
+                    value = try any.bytesValue();
+                } else try any.skip(any_field);
+            }
+        } else try reader.skip(field);
+    }
+    if (!std.mem.eql(u8, type_url, expected_type)) return null;
+    return value orelse error.InvalidRdsResource;
+}
+
+fn templateMatch(p: anytype, bytes: []const u8) pb.Error!routing.string.Match {
+    var reader = pb.Reader{ .bytes = bytes };
+    var text: ?[]const u8 = null;
+    while (try reader.next()) |field| {
+        if (field.number == 1 and field.wire_type == 2) {
+            text = try pb.text(&reader, p.limits.max_text_bytes);
+        } else try reader.skip(field);
+    }
+    const value = text orelse return error.InvalidRdsResource;
+    return routing.string.Match.compileTemplate(
+        p.allocator,
+        value,
+        p.limits.template,
+    );
+}
+
 pub fn decode(p: anytype, bytes: []const u8) pb.Error!?Result {
     var reader = pb.Reader{ .bytes = bytes };
     var kind: ?u32 = null;
     var path: []const u8 = "";
     var regex_bytes: ?[]const u8 = null;
+    var template: ?routing.string.Match = null;
     var sensitive = true;
     var skipped = false;
     var portion: ?u32 = null;
@@ -126,7 +172,15 @@ pub fn decode(p: anytype, bytes: []const u8) pb.Error!?Result {
         } else if ((field.number == 7 or field.number == 12) and field.wire_type == 2) {
             _ = try reader.bytesValue();
             skipped = true; // query/CONNECT routes do not match gRPC requests
-        } else if ((field.number == 11 or field.number == 13 or field.number == 15) and field.wire_type == 2) return error.UnsupportedRdsFeature else try reader.skip(field);
+        } else if (field.number == 15 and field.wire_type == 2) {
+            const value = (try typedConfigValue(
+                p,
+                try reader.bytesValue(),
+                uri_template_match_type,
+            )) orelse return error.UnsupportedRdsFeature;
+            kind = 15;
+            template = try templateMatch(p, value);
+        } else if ((field.number == 11 or field.number == 13) and field.wire_type == 2) return error.UnsupportedRdsFeature else try reader.skip(field);
     }
     if (skipped) return null;
     const specifier = kind orelse return error.InvalidRdsResource;
@@ -149,5 +203,11 @@ pub fn decode(p: anytype, bytes: []const u8) pb.Error!?Result {
         14 => 14,
         else => 1,
     };
-    return .{ .path = if (specifier == 10) try p.regex(regex_bytes.?) else literal(literal_kind, path, !sensitive), .headers = try headers.toOwnedSlice(p.allocator), .fraction = portion };
+    const path_match = if (specifier == 10)
+        try p.regex(regex_bytes.?)
+    else if (specifier == 15)
+        template.?
+    else
+        literal(literal_kind, path, !sensitive);
+    return .{ .path = path_match, .headers = try headers.toOwnedSlice(p.allocator), .fraction = portion };
 }
