@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "date": "2026-11-05",
+  "head": "working-tree",
+  "subject": "Bounded Envoy URI-template path matching and rewriting engine",
+  "change": "Added a self-contained URI-template engine under src/grpc/xds/routing/template.zig. It compiles bounded match templates with *, **, {name}, {name=*}, {name=**}, {name=videos/*} and embedded variables such as {file}.vtt, matches the path with query and fragment removed, and captures named values without allocation. A companion rewrite compiler validates placeholders against the match variables and computes exact output lengths before writing into caller storage.",
+  "tests": {
+    "unit": [
+      "src/grpc/xds/routing/template_tests.zig covers the three Envoy documentation examples, suffix ** captures, query/fragment stripping, embedded filename suffixes, duplicate/malformed template rejection, unknown rewrite variables, case sensitivity and the root path."
+    ],
+    "focused_gate": {
+      "command": "zig build test-lib -Dtest-filter='URI template' --summary all",
+      "passed": 162,
+      "total": 162,
+      "failed": 0
+    },
+    "compile": {
+      "command": "zig build test-compile",
+      "status": "passed"
+    }
+  },
+  "source_sha256": {
+    "src/grpc/xds/routing/template.zig": "7417b5f512f6bc1d05b840b7d4626a26f22c29f8f98691a3e3f2f7a649ee72d6",
+    "src/grpc/xds/routing/template_tests.zig": "47edab8b5bd99f5293127466fa794c8a671fbb65cee0b5db4b8c2957672dd79f",
+    "src/grpc/xds/routing/mod.zig": "7ea6a2269fa426a876e91a8525221cfe8c6c3ec69f4317b5ecaaa5d6b13364ca"
+  },
+  "notes": "The engine is not yet wired to RouteMatch.path_match_policy or RouteAction.path_rewrite_policy; that integration remains open."
+}
