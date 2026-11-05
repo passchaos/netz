@@ -290,3 +290,17 @@ test "runtime backend zio std.Io drains queued UDP datagrams in one batch" {
         try std.testing.expect(message.from.eql(&sender.address));
     }
 }
+
+test "runtime backend accepts an explicit executor count" {
+    var backend = try Backend.initWithExecutors(std.testing.allocator, 2);
+    defer backend.deinit();
+    const io = backend.io();
+    try std.testing.expect(io.userdata != null);
+    var task = try io.concurrent(struct {
+        fn run(value: std.Io) !void {
+            try std.Io.sleep(value, .fromMilliseconds(10), .awake);
+        }
+    }.run, .{io});
+    try task.await(io);
+    try std.testing.expectError(error.InvalidExecutorCount, Backend.initWithExecutors(std.testing.allocator, 0));
+}
