@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "date": "2026-11-06",
+  "head": "working-tree",
+  "subject": "MQTT $SYS accepted-socket EWMA load rates",
+  "change": "The broker load tracker now feeds its existing 1/5/15-minute exponentially weighted rate estimator with the cumulative sockets_accepted counter. Counters and Rates gained a sockets field, the inline per-field rate update propagates it into all three windows, and Broker.stats() exposes the resulting rates. The retained $SYS snapshot publishes $SYS/broker/load/sockets/1min, /5min and /15min, and Prometheus exposition adds mqtt_broker_load_sockets{window=\"1m|5m|15m\"}. This completes the Mosquitto load/sockets/* family alongside the previously published load/connections, load/messages, load/publish, load/drop and load/bytes families.",
+  "tests": {
+    "unit": "src/mqtt/broker.zig asserts the three new topic strings. src/mqtt/broker/prometheus.zig asserts the new gauge family type and all three window lines.",
+    "focused_gate": {
+      "command": "zig build test-lib -Dtest-filter='Prometheus exposition' -Dtest-filter='coherent retained system statistics' -Dtest-filter='load metrics' -Dtest-filter='SYS version and client aliases' --summary all",
+      "passed": 165,
+      "total": 165,
+      "failed": 0
+    },
+    "compile": {
+      "command": "zig build test-compile",
+      "status": "passed"
+    },
+    "full_library": {
+      "command": "zig build test-lib",
+      "status": "passed",
+      "exit_code": 0,
+      "passed": 6543,
+      "total": 6543,
+      "failed": 0
+    }
+  },
+  "source_sha256": {
+    "src/mqtt/broker.zig": "44f9839b62281cd27e85940e701b10cd665d35f60272ff4d128d4aa1b402fb6d",
+    "src/mqtt/broker/load_metrics.zig": "c0fb5c74b6434a2b32af71427059a3bc775f1ef89d4ca2797d4ccf1373203d59",
+    "src/mqtt/broker/prometheus.zig": "6f48a8dd55062c42daddd97fd4ba8e9ee6747f9fa3608eaf09427ba156cfaaa4",
+    "docs/rumqtt_parity.md": "163d7cdb6a2dd5d83245e7956c9129965bbabe5b4c94460e315cea3a77b57f04"
+  },
+  "notes": "The rate is derived from the cumulative sockets_accepted counter, so it counts transports that reached the broker accept path exactly once, including peers later refused; pre-broker TLS handshake failures remain excluded, matching the socket-count metric. The estimator is the same one used by the other load families, so all windows share one sampling cadence and EWMA definition. The previous full run failed only on the known load-sensitive HTTP pool flake, which passed in isolation; this run passed the complete suite."
+}

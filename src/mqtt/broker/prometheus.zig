@@ -351,6 +351,11 @@ const load_families = [_]struct {
         .field = "connections",
     },
     .{
+        .metric = "mqtt_broker_load_sockets",
+        .help = "Exponentially weighted accepted-socket rate per minute.",
+        .field = "sockets",
+    },
+    .{
         .metric = "mqtt_broker_load_messages_received",
         .help = "Exponentially weighted received control-packet rate per minute.",
         .field = "messages_received",
@@ -502,6 +507,10 @@ test "MQTT Prometheus exposition renders stable counter and gauge families" {
         "mqtt_broker_load_connections{window=\"1m\"} 1.5",
         "mqtt_broker_load_connections{window=\"5m\"} 0",
         "mqtt_broker_load_connections{window=\"15m\"} 0",
+        "# TYPE mqtt_broker_load_sockets gauge",
+        "mqtt_broker_load_sockets{window=\"1m\"} 0",
+        "mqtt_broker_load_sockets{window=\"5m\"} 0",
+        "mqtt_broker_load_sockets{window=\"15m\"} 0",
         "mqtt_broker_load_messages_sent{window=\"1m\"} 8",
     };
     for (expected_lines) |line| {

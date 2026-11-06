@@ -8,6 +8,7 @@ const std = @import("std");
 
 pub const Counters = struct {
     connections: u64 = 0,
+    sockets: u64 = 0,
     messages_received: u64 = 0,
     messages_sent: u64 = 0,
     publish_messages_dropped: u64 = 0,
@@ -19,6 +20,7 @@ pub const Counters = struct {
 
 pub const Rates = struct {
     connections: f64 = 0,
+    sockets: f64 = 0,
     messages_received: f64 = 0,
     messages_sent: f64 = 0,
     publish_messages_dropped: f64 = 0,

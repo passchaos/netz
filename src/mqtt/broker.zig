@@ -1998,6 +1998,9 @@ pub const SystemMetric = enum {
     load_connections_1min,
     load_connections_5min,
     load_connections_15min,
+    load_sockets_1min,
+    load_sockets_5min,
+    load_sockets_15min,
 
     pub fn topic(self: SystemMetric) []const u8 {
         return switch (self) {
@@ -2062,6 +2065,9 @@ pub const SystemMetric = enum {
             .load_connections_1min => "$SYS/broker/load/connections/1min",
             .load_connections_5min => "$SYS/broker/load/connections/5min",
             .load_connections_15min => "$SYS/broker/load/connections/15min",
+            .load_sockets_1min => "$SYS/broker/load/sockets/1min",
+            .load_sockets_5min => "$SYS/broker/load/sockets/5min",
+            .load_sockets_15min => "$SYS/broker/load/sockets/15min",
         };
     }
 };
@@ -2312,6 +2318,9 @@ pub const system_metrics = [_]SystemMetric{
     .load_connections_1min,
     .load_connections_5min,
     .load_connections_15min,
+    .load_sockets_1min,
+    .load_sockets_5min,
+    .load_sockets_15min,
 };
 
 /// A bounded broker core with an optional compatibility TCP listener.
@@ -10394,6 +10403,7 @@ fn uptimeSeconds(started_at_ns: i96, now_ns: i96) u64 {
 fn loadCounters(stats_value: Stats) load_metrics.Counters {
     return .{
         .connections = stats_value.connections_received,
+        .sockets = stats_value.sockets_accepted,
         .messages_received = stats_value.messages_received,
         .messages_sent = stats_value.messages_sent,
         .publish_messages_dropped = @intCast(stats_value.publish_messages_dropped),
@@ -10458,6 +10468,9 @@ fn systemMetricLoadValue(
         .load_connections_1min => stats_value.load.one_minute.connections,
         .load_connections_5min => stats_value.load.five_minutes.connections,
         .load_connections_15min => stats_value.load.fifteen_minutes.connections,
+        .load_sockets_1min => stats_value.load.one_minute.sockets,
+        .load_sockets_5min => stats_value.load.five_minutes.sockets,
+        .load_sockets_15min => stats_value.load.fifteen_minutes.sockets,
         else => null,
     };
 }
@@ -10526,6 +10539,9 @@ fn systemMetricValue(stats_value: Stats, metric: SystemMetric) u64 {
         .load_connections_1min,
         .load_connections_5min,
         .load_connections_15min,
+        .load_sockets_1min,
+        .load_sockets_5min,
+        .load_sockets_15min,
         => unreachable,
     };
 }
@@ -10742,6 +10758,9 @@ test "MQTT broker $SYS version and client aliases match Mosquitto" {
     try std.testing.expectEqualStrings("$SYS/broker/packet/out/count", SystemMetric.packet_out_count.topic());
     try std.testing.expectEqualStrings("$SYS/broker/packet/out/bytes", SystemMetric.packet_out_bytes.topic());
     try std.testing.expectEqualStrings("$SYS/broker/connections/socket/count", SystemMetric.connections_socket_count.topic());
+    try std.testing.expectEqualStrings("$SYS/broker/load/sockets/1min", SystemMetric.load_sockets_1min.topic());
+    try std.testing.expectEqualStrings("$SYS/broker/load/sockets/5min", SystemMetric.load_sockets_5min.topic());
+    try std.testing.expectEqualStrings("$SYS/broker/load/sockets/15min", SystemMetric.load_sockets_15min.topic());
     var buffer: [64]u8 = undefined;
     try std.testing.expectEqualStrings(
         "netz version 0.1.0",
