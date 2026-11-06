@@ -91,7 +91,9 @@ instead of extending past it. Fault injection runs per unary attempt (including
 retries and hedging) and once before a streaming open; an aborted stream opens
 with an immediately readable terminal event and no backend connection. Listener
 RBAC is evaluated before fault injection, and a fault filter placed before RBAC
-is rejected rather than silently reordering the chain. `upstream_cluster`,
+is rejected rather than silently reordering the chain. `upstream_cluster`
+restricts injection to requests routed to that xDS cluster; a request routed to
+another cluster, or one without a selected xDS cluster, is not faulted. Fault
 `headers`, `downstream_nodes`, and `response_rate_limit` change which requests
 or bytes are affected and are rejected as unsupported.
 

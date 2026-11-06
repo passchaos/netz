@@ -72,7 +72,7 @@ pub fn validate(
             rbac_index = index;
         } else if (std.mem.eql(u8, value.type_name, model.fault_type)) {
             if (fault_config != null) return error.InvalidLdsResource;
-            _ = try fault.decode(value.config, .{});
+            _ = try fault.decode(arena, value.config, .{ .max_text_bytes = limits.max_text_bytes });
             fault_config = value.config;
             fault_index = index;
         }

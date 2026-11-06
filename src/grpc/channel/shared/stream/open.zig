@@ -28,7 +28,12 @@ pub fn openUntil(state: anytype, options: streaming.RequestOptions, entered: std
     // publication cannot invalidate borrowed method-policy strings.
     const opening_deadline = @import("../../../../internal/deadline.zig").earlier(deadline, admission);
     if (resolved.options.fault_policy) |policy| {
-        var decision = policy.evaluate(state.io, resolved.options.metadata);
+        var decision = policy.evaluate(state.io, .{
+            .path = resolved.options.path,
+            .authority = resolved.options.authority orelse "",
+            .scheme = resolved.options.scheme,
+            .metadata = resolved.options.metadata,
+        }, if (resolved.options.xds_cluster) |name| @import("../lrs_stats.zig").stripCluster(name) else null);
         defer decision.release(policy);
         if (decision.delay) |delay| {
             try @import("../../../fault.zig").sleepBounded(state.io, delay, opening_deadline);

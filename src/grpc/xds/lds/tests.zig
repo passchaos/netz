@@ -200,7 +200,7 @@ test "gRPC LDS rejects malformed and unsupported fault filters" {
 
     var unsupported = fixture.Builder{ .allocator = gpa };
     defer unsupported.deinit();
-    try unsupported.bytes(3, "cluster");
+    try unsupported.bytes(4, "x");
     const unsupported_bytes = try fixture.encode(gpa, .{ .filters = &.{
         .{ .name = "fault", .type_name = lds.resource.fault_type, .value = unsupported.data.items },
         .{},

@@ -3,21 +3,21 @@
   "date": "2026-11-06",
   "head": "working-tree",
   "subject": "gRPC xDS HCM HTTP fault injection",
-  "change": "HCM listener filter chains now decode and enforce envoy.extensions.filters.http.fault.v3.HTTPFault on the client path. The supported subset covers fixed grpc_status and http_status aborts, header_abort, fixed_delay and header_delay, FractionalPercent, and max_active_faults. Percentages are required for abort and delay, matching grpc-js-xds validation, and numerators above the denominator are capped. HTTP abort statuses use the response-trailer fallback mapping; HTTP 200 and gRPC OK never abort. Header aborts read x-envoy-fault-abort-grpc-request, x-envoy-fault-abort-request and x-envoy-fault-abort-request-percentage; header delays read x-envoy-fault-delay-request and x-envoy-fault-delay-request-percentage. Fixed delays above the 24-hour bound are rejected and header delays are clamped. Unary attempts, retries, hedging and streaming opens evaluate the policy; aborts return the configured status with message 'Fault injected' without a backend, and delays sleep only up to the attempt/open deadline. RBAC runs before fault injection, and fault-before-RBAC, upstream_cluster, header matchers, downstream_nodes and response_rate_limit are rejected.",
+  "change": "HCM listener filter chains now decode and enforce envoy.extensions.filters.http.fault.v3.HTTPFault on the client path. The supported subset covers fixed grpc_status and http_status aborts, header_abort, fixed_delay and header_delay, FractionalPercent, max_active_faults and upstream_cluster scoping. Percentages are required for abort and delay, matching grpc-js-xds validation, and numerators above the denominator are capped. HTTP abort statuses use the response-trailer fallback mapping; HTTP 200 and gRPC OK never abort. Header aborts read x-envoy-fault-abort-grpc-request, x-envoy-fault-abort-request and x-envoy-fault-abort-request-percentage; header delays read x-envoy-fault-delay-request and x-envoy-fault-delay-request-percentage. Fixed delays above the 24-hour bound are rejected and header delays are clamped. Unary attempts, retries, hedging and streaming opens evaluate the policy; aborts return the configured status with message 'Fault injected' without a backend, and delays sleep only up to the attempt/open deadline. upstream_cluster restricts injection to the selected cluster and manager-prefixed cluster keys are normalized before comparison. RBAC runs before fault injection, and fault-before-RBAC, fault header matchers, downstream_nodes and response_rate_limit are rejected.",
   "tests": {
-    "unit": "src/grpc/fault.zig covers fixed gRPC/HTTP aborts, OK/200 no-abort cases, header abort and percentage overrides, fixed/header delays, max_active_faults, missing percentages, multiple abort kinds, unsupported top-level fields, oversized delays and deadline-bounded sleep.",
+    "unit": "src/grpc/fault.zig covers fixed gRPC/HTTP aborts, OK/200 no-abort cases, header abort and percentage overrides, fixed/header delays, max_active_faults, upstream_cluster matching and non-matching clusters, missing percentages, multiple abort kinds, unsupported top-level fields, oversized delays and deadline-bounded sleep.",
     "lds": "src/grpc/xds/lds/tests.zig accepts fault filters, requires RBAC-before-fault ordering, and rejects duplicate fault filters, malformed percentages and unsupported fault fields. src/grpc/xds/lds/controller_tests.zig publishes a 100% UNAVAILABLE abort listener and requires both a unary response and a duplex terminal event with 'Fault injected' before any connection.",
     "focused_gate": {
       "command": "zig build test-lib -Dtest-filter='fault ' --summary all",
-      "passed": 201,
-      "total": 201,
+      "passed": 211,
+      "total": 211,
       "failed": 0
     },
     "full_library": {
       "command": "zig build test-lib",
       "status": "passed",
-      "passed": 6558,
-      "total": 6558,
+      "passed": 6559,
+      "total": 6559,
       "failed": 0
     },
     "interop": {
@@ -44,32 +44,33 @@
         "http_status_header_abort": true,
         "percentage_zero_routes": true,
         "header_delay_observed": true,
-        "aborted_backend_calls": 0
+        "aborted_backend_calls": 0,
+        "upstream_cluster_match": true
       }
     }
   },
   "source_sha256": {
-    "src/grpc/fault.zig": "742802b2a720d80f90a2657453606538b9e81afc5ee8dc3583cd3eb9ca36a5d7",
+    "src/grpc/fault.zig": "b23fbaf47e5317bef7edda2b58a91c697052d39fac674857c41fc0a2f65d07f3",
     "src/grpc/call.zig": "198596a1577ebf9de8a8c051fdc43eb49c7ca9d38993ba62e2eab6b1c4e0f9fe",
     "src/grpc/stream/runtime.zig": "ae27768e340fbc4e9dd7caf57450186a5ea796915981c3257c82b99a390b9d74",
     "src/grpc/channel/call_selector.zig": "1170112f4bb60419da45a066206440e7c3cfecd79751e4c0fd1c214b1902a8eb",
-    "src/grpc/channel/shared/state.zig": "a9bf4fef955ef414e8ff1dc43edf9339f17e8e0e510f4160ec7da4b2b0705766",
-    "src/grpc/channel/shared/stream/open.zig": "5ad1158b2f9166d0848210437f08f3e84afa01500d5bfc3d5e53a62cca6abc9d",
+    "src/grpc/channel/shared/state.zig": "0f949b9c4541ba46bb525efe09106c8a7ca25fd0948ab4562182b39ccee7c62b",
+    "src/grpc/channel/shared/stream/open.zig": "bfe18c5fb71ecefb21a1e31edaf303368bea2cc1e8283af3f3a7d2a27646ebf2",
     "src/grpc/xds/lds/model.zig": "a0c03a8df1cc22f1e4ea52b67522453bce925896d30b715f71a8f3562ddbd36a",
-    "src/grpc/xds/lds/filter.zig": "20303611838fa7ba3d4f9be68fcd001557f435a0b991a3400f8f48aa6d38a2b7",
+    "src/grpc/xds/lds/filter.zig": "943bc248e46793b4f3249efe791227c7ab4037c9d4c82688a7f36eac933db5f2",
     "src/grpc/xds/lds/hcm.zig": "cce50caa5fbe1b32f065f8f0dcaf3f7ab60e64c26e39f077dc8673f872ce032d",
-    "src/grpc/xds/lds/projection.zig": "ab8e26c6ae564ced48ff1b45581a9765934c0dce37523e17468ed04556045e4f",
+    "src/grpc/xds/lds/projection.zig": "922b5441c8fbf247c7b33ccd97fc365ab55796decf04b6bba8e2e6d3e8c8c7a7",
     "src/grpc/xds/lds/controller.zig": "04e50bc5608c46f0397b0f0e8befa9618b63e9cc79bf37ad7cede3fae4e23e6b",
     "src/grpc/xds/lds/apply_listener.zig": "2d58809f57675e1278111fa7de1b0f350056fca84969ff8c961e442372b42637",
     "src/grpc/xds/lds/apply_routes.zig": "de91e7f446fd44353e803ecc959ec7b713ce65047b5ec7bd53b7dd1bba5ca70b",
     "src/grpc/xds/lds/apply_delta.zig": "28779374978df5a604614905573f80534c3f9f4ca0abbd7e1454c8aca6b40099",
-    "src/grpc/xds/lds/tests.zig": "b178ab4606a264afa82fbe4378172ebc485d9bcc1a1e15e25e225824e4de542d",
+    "src/grpc/xds/lds/tests.zig": "1ab02cfa8682fc2c85f99bfde2089d751b8959dfb71578669fa74b5374544008",
     "src/grpc/xds/lds/controller_tests.zig": "e91a2a685ed2a0650e1544dc50ad1a4d5b34b7f1320ea4f174c970f4538c7d01",
     "src/grpc/xds/runtime/controller.zig": "979c446e7da3317e168062e376602b0f23f36d24d8ce6fb6055353b10990c68e",
     "tools/interop/grpc_lds/client.zig": "e166873afbba776f4022af14f9befa12832ff60863ddce359621d3c4a6a69c0a",
-    "tools/interop/grpc_lds/peer.js": "3a8ed4a8563c02f62a8081d6320e77608d7aee1828fdc8525dd08a9e9bd48d30",
-    "docs/grpc_lds.md": "1a1ee1814fb93afc8050d6dc3fa7de4b739b75f1a9acc7cdc1a5073013021d99",
-    "docs/grpc_parity.md": "31b3e129e2663aa5e43fbc6150a7db0f211cbdf126109c7350e89d9e6f299428"
+    "tools/interop/grpc_lds/peer.js": "6e774764e4fa42cf4f51d0176ff0cb0a14284f413d0c29a4b6fce4c5e4214261",
+    "docs/grpc_lds.md": "0943f55d451ca72dab8218c032ef785752fece277cfd00b1be0ce2236bb7710a",
+    "docs/grpc_parity.md": "5985281cd1dd9b2f90df2cdc4a4ab0d269f847e3b8468b9c33b05df86f817671"
   },
   "notes": "The interop peer validates the fault fixture with grpc-js-xds's own HTTPFault parser and Listener validator. Aborts triggered by x-envoy-fault-abort-grpc-request and x-envoy-fault-abort-request never increment backend counters. A zero abort-percentage header re-allows the same request, and a 40 ms header delay is observed before the backend response. Streaming abort returns a terminal event from the pre-opened stream without a connection."
 }

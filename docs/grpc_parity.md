@@ -3810,13 +3810,14 @@ listener without RBAC replaces the policy. Authenticated/IP/metadata/
 requested-server-name principals, destination IP/port/metadata permissions,
 CEL conditions and route/vhost overrides remain open.
 `envoy.filters.http.fault` is decoded and enforced client-side for fixed and
-header-driven abort/delay, `FractionalPercent` and `max_active_faults`. Unary
-attempts, retries, hedging and streaming opens observe the same policy; aborts
-return the configured status without a backend and delays are bounded by the
-attempt deadline. The official-schema interop gate aborts on gRPC and HTTP
+header-driven abort/delay, `FractionalPercent`, `max_active_faults` and
+`upstream_cluster` scoping. Unary attempts, retries, hedging and streaming
+opens observe the same policy; aborts return the configured status without a
+backend and delays are bounded by the attempt deadline. The official-schema
+interop gate carries a matching `upstream_cluster`, aborts on gRPC and HTTP
 status headers, verifies a zero-percent header override routes normally, and
 measures a real header delay before backend delivery. Fault filters placed
-before RBAC and `upstream_cluster`/header/downstream/rate-limit fields are
+before RBAC and fault header-matcher/downstream-node/rate-limit fields are
 rejected; other non-router filters remain open.
 
 ## SotW resource omission and initial discovery

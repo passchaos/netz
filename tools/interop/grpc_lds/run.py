@@ -24,7 +24,7 @@ def main():
     report = json.loads(result.stdout)
     assert report["status"] == "passed"
     repo = directory.parents[2]
-    files = ["src/grpc/channel.zig", "src/grpc/channel/tree_query.zig", "src/grpc/channel/shared/layout.zig", "build.zig", "src/grpc/channel/ring_hash.zig", "src/grpc/channel/shared/source.zig", "src/grpc/channel/shared/state.zig", "src/grpc/channel/shared/target_lifetime.zig", "src/grpc/channel/shared/update.zig", "src/grpc/channel/shared/update/prepare.zig", "src/grpc/channel/shared/update/publish.zig", "src/grpc/channel/shared/weighted_target.zig", "src/grpc/channel/shared/cluster_dispatch.zig", "src/grpc/channel/shared/weighted_target/selection_tests.zig"]
+    files = ["src/grpc/fault.zig", "src/grpc/channel.zig", "src/grpc/channel/tree_query.zig", "src/grpc/channel/shared/layout.zig", "build.zig", "src/grpc/channel/ring_hash.zig", "src/grpc/channel/shared/source.zig", "src/grpc/channel/shared/state.zig", "src/grpc/channel/shared/target_lifetime.zig", "src/grpc/channel/shared/update.zig", "src/grpc/channel/shared/update/prepare.zig", "src/grpc/channel/shared/update/publish.zig", "src/grpc/channel/shared/weighted_target.zig", "src/grpc/channel/shared/cluster_dispatch.zig", "src/grpc/channel/shared/weighted_target/selection_tests.zig"]
     files += [str(path.relative_to(repo)) for path in sorted((repo / "src/grpc/xds").rglob("*.zig")) if "runtime" not in path.relative_to(repo).parts and path.name != "prepared_batch.zig"]
     files += ["src/grpc/channel/" + name for name in ("call_selector.zig", "shared/config_storage.zig", "shared/config_generation.zig", "shared/selector.zig", "shared/stream/open.zig", "shared/init.zig")]
     files += ["tools/interop/grpc_lds/" + name for name in ("client.zig", "peer.js", "run.py")]

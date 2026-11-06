@@ -38,7 +38,7 @@ pub const Projection = struct {
             self.rbac = policy;
         }
         if (fault_config) |bytes| {
-            self.fault = try fault.decode(bytes, .{});
+            self.fault = try fault.decode(self.arena.allocator(), bytes, .{});
         }
         return self;
     }

@@ -34,6 +34,7 @@ const faultHeader=()=>({
     value:encode(faultType,{
       abort:{header_abort:{},percentage:{numerator:100,denominator:0}},
       delay:{header_delay:{},percentage:{numerator:100,denominator:0}},
+      upstream_cluster:'b',
     }),
   },
 });

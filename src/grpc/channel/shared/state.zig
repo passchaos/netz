@@ -1103,7 +1103,12 @@ pub const State = struct {
         var attempt_options = options;
         attempt_options.timeout = timeout_header;
         if (attempt_options.fault_policy) |policy| {
-            var decision = policy.evaluate(self.io, attempt_options.metadata);
+            var decision = policy.evaluate(self.io, .{
+                .path = attempt_options.path,
+                .authority = attempt_options.authority orelse "",
+                .scheme = attempt_options.scheme,
+                .metadata = attempt_options.metadata,
+            }, if (attempt_options.xds_cluster) |name| lrs_stats.stripCluster(name) else null);
             defer decision.release(policy);
             if (decision.delay) |delay| {
                 try @import("../../fault.zig").sleepBounded(self.io, delay, deadline);

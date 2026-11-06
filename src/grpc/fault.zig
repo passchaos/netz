@@ -10,15 +10,17 @@ const std = @import("std");
 const http2 = @import("../http2/mod.zig");
 const wire = @import("wire.zig");
 const response_metadata = @import("response_metadata.zig");
+const routing = @import("xds/routing/mod.zig");
 const pb = @import("protobuf.zig");
 
-pub const Error = pb.Error || error{
+pub const Error = std.mem.Allocator.Error || pb.Error || error{
     InvalidFaultResource,
     UnsupportedFaultFeature,
     FaultLimitExceeded,
 };
 
 pub const Limits = struct {
+    max_text_bytes: usize = 4096,
     /// A fixed delay above this bound is rejected and a header delay is
     /// clamped. The default prevents an unbounded sleep from a hostile
     /// control plane when the RPC has no deadline.
@@ -45,20 +47,28 @@ pub const Policy = struct {
     abort: ?AbortConfig = null,
     delay: ?DelayConfig = null,
     max_active_faults: ?u32 = null,
+    /// Restrict injection to requests routed to this xDS cluster. Borrowed
+    /// from the projection arena that decoded the policy.
+    upstream_cluster: ?[]const u8 = null,
     max_delay: std.Io.Duration = .fromSeconds(86400),
     active: std.atomic.Value(u32) = .init(0),
 
-    pub fn evaluate(self: *Policy, io: std.Io, metadata: []const http2.Hpack.HeaderField) Decision {
+    pub fn evaluate(self: *Policy, io: std.Io, request: routing.header.Request, cluster: ?[]const u8) Decision {
         var seed: u64 = undefined;
         io.random(std.mem.asBytes(&seed));
         var prng = std.Random.DefaultPrng.init(seed);
-        return self.evaluateWith(metadata, prng.random());
+        return self.evaluateWith(request, cluster, prng.random());
     }
 
-    pub fn evaluateWith(self: *Policy, metadata: []const http2.Hpack.HeaderField, random: std.Random) Decision {
+    pub fn evaluateWith(self: *Policy, request: routing.header.Request, cluster: ?[]const u8, random: std.Random) Decision {
         if (self.abort == null and self.delay == null) return .{};
+        if (self.upstream_cluster) |required| {
+            const selected = cluster orelse return .{};
+            if (!std.mem.eql(u8, required, selected)) return .{};
+        }
         const maximum = self.max_active_faults orelse std.math.maxInt(u32);
         if (self.active.load(.acquire) >= maximum) return .{};
+        const metadata = request.metadata;
 
         var delay: ?std.Io.Duration = null;
         if (self.delay) |config| {
@@ -174,7 +184,7 @@ fn under(random: std.Random, numerator: u32, denominator: u32) bool {
 }
 
 /// Decode `envoy.extensions.filters.http.fault.v3.HTTPFault`.
-pub fn decode(bytes: []const u8, limits: Limits) Error!Policy {
+pub fn decode(arena: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!Policy {
     var reader = pb.Reader{ .bytes = bytes };
     var policy = Policy{ .max_delay = limits.max_delay };
     var delay_seen = false;
@@ -191,10 +201,15 @@ pub fn decode(bytes: []const u8, limits: Limits) Error!Policy {
                 abort_seen = true;
                 policy.abort = try decodeAbort(try reader.bytesValue());
             } else try reader.skip(field),
-            // upstream_cluster, header matchers, downstream nodes and response
-            // rate limiting change which requests or bytes are affected. They
-            // are rejected instead of silently applying a broader fault.
-            3, 4, 5, 7 => return error.UnsupportedFaultFeature,
+            3 => if (field.wire_type == 2) {
+                const value = try text(&reader, limits.max_text_bytes);
+                if (value.len == 0) return error.InvalidFaultResource;
+                policy.upstream_cluster = try arena.dupe(u8, value);
+            } else try reader.skip(field),
+            // Header matchers, downstream nodes and response rate limiting
+            // change which requests or bytes are affected. They are rejected
+            // instead of silently applying a broader fault.
+            4, 5, 7 => return error.UnsupportedFaultFeature,
             6 => if (field.wire_type == 2) {
                 policy.max_active_faults = try uint32Wrapper(try reader.bytesValue());
             } else try reader.skip(field),
@@ -203,6 +218,12 @@ pub fn decode(bytes: []const u8, limits: Limits) Error!Policy {
     }
     if (!delay_seen and !abort_seen) return error.InvalidFaultResource;
     return policy;
+}
+
+fn text(reader: *pb.Reader, limit: usize) Error![]const u8 {
+    const value = try reader.string();
+    if (value.len > limit) return error.FaultLimitExceeded;
+    return value;
 }
 
 fn decodeAbort(bytes: []const u8) Error!AbortConfig {
@@ -391,42 +412,50 @@ fn faultBytes(abort: ?[]const u8, delay: ?[]const u8, max_active: ?u32) ![]u8 {
     return fault.data.toOwnedSlice(std.testing.allocator);
 }
 
+fn testRequest(metadata: []const http2.Hpack.HeaderField) routing.header.Request {
+    return .{ .path = "/demo.Service/Get", .authority = "backend.test", .metadata = metadata };
+}
+
 test "fault decodes a fixed gRPC abort and evaluates it" {
     const abort = try abortBytes(5, 14, 100);
     defer std.testing.allocator.free(abort);
     const bytes = try faultBytes(abort, null, null);
     defer std.testing.allocator.free(bytes);
-    var policy = try decode(bytes, .{});
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var policy = try decode(arena.allocator(), bytes, .{});
     var prng = std.Random.DefaultPrng.init(7);
-    const decision = policy.evaluateWith(&.{}, prng.random());
+    const decision = policy.evaluateWith(testRequest(&.{}), null, prng.random());
     try std.testing.expect(decision.delay == null);
     try std.testing.expectEqual(wire.Status.unavailable, decision.abort.?.status);
     try std.testing.expectEqualStrings("Fault injected", decision.abort.?.message);
 }
 
 test "fault fixed HTTP status maps through the gRPC fallback" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
     const abort = try abortBytes(2, 403, 100);
     defer std.testing.allocator.free(abort);
     const bytes = try faultBytes(abort, null, null);
     defer std.testing.allocator.free(bytes);
-    var policy = try decode(bytes, .{});
+    var policy = try decode(arena.allocator(), bytes, .{});
     var prng = std.Random.DefaultPrng.init(7);
-    try std.testing.expectEqual(wire.Status.permission_denied, policy.evaluateWith(&.{}, prng.random()).abort.?.status);
+    try std.testing.expectEqual(wire.Status.permission_denied, policy.evaluateWith(testRequest(&.{}), null, prng.random()).abort.?.status);
 
     // HTTP 200 and gRPC OK are success codes and never abort.
     const ok_http = try abortBytes(2, 200, 100);
     defer std.testing.allocator.free(ok_http);
     const ok_bytes = try faultBytes(ok_http, null, null);
     defer std.testing.allocator.free(ok_bytes);
-    var ok_policy = try decode(ok_bytes, .{});
-    try std.testing.expect(ok_policy.evaluateWith(&.{}, prng.random()).abort == null);
+    var ok_policy = try decode(arena.allocator(), ok_bytes, .{});
+    try std.testing.expect(ok_policy.evaluateWith(testRequest(&.{}), null, prng.random()).abort == null);
 
     const ok_grpc = try abortBytes(5, 0, 100);
     defer std.testing.allocator.free(ok_grpc);
     const ok_grpc_bytes = try faultBytes(ok_grpc, null, null);
     defer std.testing.allocator.free(ok_grpc_bytes);
-    var ok_grpc_policy = try decode(ok_grpc_bytes, .{});
-    try std.testing.expect(ok_grpc_policy.evaluateWith(&.{}, prng.random()).abort == null);
+    var ok_grpc_policy = try decode(arena.allocator(), ok_grpc_bytes, .{});
+    try std.testing.expect(ok_grpc_policy.evaluateWith(testRequest(&.{}), null, prng.random()).abort == null);
 }
 
 test "fault header abort honors gRPC, HTTP and percentage headers" {
@@ -434,24 +463,50 @@ test "fault header abort honors gRPC, HTTP and percentage headers" {
     defer std.testing.allocator.free(abort);
     const bytes = try faultBytes(abort, null, null);
     defer std.testing.allocator.free(bytes);
-    var policy = try decode(bytes, .{});
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var policy = try decode(arena.allocator(), bytes, .{});
     var prng = std.Random.DefaultPrng.init(9);
     const grpc_headers = [_]http2.Hpack.HeaderField{.{ .name = abort_grpc_header, .value = "7" }};
-    try std.testing.expectEqual(wire.Status.permission_denied, policy.evaluateWith(&grpc_headers, prng.random()).abort.?.status);
+    try std.testing.expectEqual(wire.Status.permission_denied, policy.evaluateWith(testRequest(&grpc_headers), null, prng.random()).abort.?.status);
 
     const http_headers = [_]http2.Hpack.HeaderField{.{ .name = abort_http_header, .value = "503" }};
-    try std.testing.expectEqual(wire.Status.unavailable, policy.evaluateWith(&http_headers, prng.random()).abort.?.status);
+    try std.testing.expectEqual(wire.Status.unavailable, policy.evaluateWith(testRequest(&http_headers), null, prng.random()).abort.?.status);
 
     const zero_percent = [_]http2.Hpack.HeaderField{
         .{ .name = abort_grpc_header, .value = "14" },
         .{ .name = abort_percentage_header, .value = "0" },
     };
-    try std.testing.expect(policy.evaluateWith(&zero_percent, prng.random()).abort == null);
+    try std.testing.expect(policy.evaluateWith(testRequest(&zero_percent), null, prng.random()).abort == null);
 
     const invalid_code = [_]http2.Hpack.HeaderField{.{ .name = abort_grpc_header, .value = "99" }};
-    try std.testing.expectEqual(wire.Status.unknown, policy.evaluateWith(&invalid_code, prng.random()).abort.?.status);
+    try std.testing.expectEqual(wire.Status.unknown, policy.evaluateWith(testRequest(&invalid_code), null, prng.random()).abort.?.status);
 
-    try std.testing.expect(policy.evaluateWith(&.{}, prng.random()).abort == null);
+    try std.testing.expect(policy.evaluateWith(testRequest(&.{}), null, prng.random()).abort == null);
+}
+
+test "fault upstream_cluster scopes injection to the selected cluster" {
+    const abort = try abortBytes(5, 14, 100);
+    defer std.testing.allocator.free(abort);
+    var fault = TestBuilder{};
+    defer fault.deinit();
+    try fault.bytes(2, abort);
+    try fault.bytes(3, "cluster:a");
+    const bytes = try fault.data.toOwnedSlice(std.testing.allocator);
+    defer std.testing.allocator.free(bytes);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var policy = try decode(arena.allocator(), bytes, .{});
+    var prng = std.Random.DefaultPrng.init(5);
+    try std.testing.expectEqual(wire.Status.unavailable, policy.evaluateWith(testRequest(&.{}), "cluster:a", prng.random()).abort.?.status);
+    try std.testing.expect(policy.evaluateWith(testRequest(&.{}), "cluster:b", prng.random()).abort == null);
+    try std.testing.expect(policy.evaluateWith(testRequest(&.{}), null, prng.random()).abort == null);
+
+    var empty = TestBuilder{};
+    defer empty.deinit();
+    try empty.bytes(2, abort);
+    try empty.bytes(3, "");
+    try std.testing.expectError(error.InvalidFaultResource, decode(arena.allocator(), empty.data.items, .{}));
 }
 
 test "fault fixed delay and max_active_faults bound concurrent faults" {
@@ -467,16 +522,18 @@ test "fault fixed delay and max_active_faults bound concurrent faults" {
 
     const bytes = try faultBytes(null, delay.data.items, 1);
     defer std.testing.allocator.free(bytes);
-    var policy = try decode(bytes, .{});
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var policy = try decode(arena.allocator(), bytes, .{});
     var prng = std.Random.DefaultPrng.init(11);
 
-    var first = policy.evaluateWith(&.{}, prng.random());
+    var first = policy.evaluateWith(testRequest(&.{}), null, prng.random());
     defer first.release(&policy);
     try std.testing.expectEqual(@as(i96, 25 * std.time.ns_per_ms), first.delay.?.nanoseconds);
     try std.testing.expect(first.counted);
-    try std.testing.expect(policy.evaluateWith(&.{}, prng.random()).delay == null);
+    try std.testing.expect(policy.evaluateWith(testRequest(&.{}), null, prng.random()).delay == null);
     first.release(&policy);
-    try std.testing.expect(policy.evaluateWith(&.{}, prng.random()).delay.?.nanoseconds == 25 * std.time.ns_per_ms);
+    try std.testing.expect(policy.evaluateWith(testRequest(&.{}), null, prng.random()).delay.?.nanoseconds == 25 * std.time.ns_per_ms);
 }
 
 test "fault header delay uses the delay and percentage headers" {
@@ -491,14 +548,16 @@ test "fault header delay uses the delay and percentage headers" {
 
     const bytes = try faultBytes(null, delay.data.items, null);
     defer std.testing.allocator.free(bytes);
-    var policy = try decode(bytes, .{});
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var policy = try decode(arena.allocator(), bytes, .{});
     var prng = std.Random.DefaultPrng.init(13);
 
     const headers = [_]http2.Hpack.HeaderField{
         .{ .name = delay_header, .value = "25" },
         .{ .name = delay_percentage_header, .value = "100" },
     };
-    var decision = policy.evaluateWith(&headers, prng.random());
+    var decision = policy.evaluateWith(testRequest(&headers), null, prng.random());
     defer decision.release(&policy);
     try std.testing.expectEqual(@as(i96, 25 * std.time.ns_per_ms), decision.delay.?.nanoseconds);
 
@@ -506,8 +565,8 @@ test "fault header delay uses the delay and percentage headers" {
         .{ .name = delay_header, .value = "25" },
         .{ .name = delay_percentage_header, .value = "0" },
     };
-    try std.testing.expect(policy.evaluateWith(&disabled, prng.random()).delay == null);
-    try std.testing.expect(policy.evaluateWith(&.{}, prng.random()).delay == null);
+    try std.testing.expect(policy.evaluateWith(testRequest(&disabled), null, prng.random()).delay == null);
+    try std.testing.expect(policy.evaluateWith(testRequest(&.{}), null, prng.random()).delay == null);
 }
 
 test "fault rejects missing percentages, multiple abort kinds and unsupported fields" {
@@ -516,7 +575,7 @@ test "fault rejects missing percentages, multiple abort kinds and unsupported fi
     try abort.number(5, 14);
     const bytes = try faultBytes(abort.data.items, null, null);
     defer std.testing.allocator.free(bytes);
-    try std.testing.expectError(error.InvalidFaultResource, decode(bytes, .{}));
+    try std.testing.expectError(error.InvalidFaultResource, decode(std.testing.allocator, bytes, .{}));
 
     var both = TestBuilder{};
     defer both.deinit();
@@ -527,16 +586,16 @@ test "fault rejects missing percentages, multiple abort kinds and unsupported fi
     try both.bytes(3, percentage);
     const both_bytes = try faultBytes(both.data.items, null, null);
     defer std.testing.allocator.free(both_bytes);
-    try std.testing.expectError(error.InvalidFaultResource, decode(both_bytes, .{}));
+    try std.testing.expectError(error.InvalidFaultResource, decode(std.testing.allocator, both_bytes, .{}));
 
     var unsupported = TestBuilder{};
     defer unsupported.deinit();
-    try unsupported.bytes(3, "cluster");
-    try std.testing.expectError(error.UnsupportedFaultFeature, decode(unsupported.data.items, .{}));
+    try unsupported.bytes(4, "x");
+    try std.testing.expectError(error.UnsupportedFaultFeature, decode(std.testing.allocator, unsupported.data.items, .{}));
 
     const empty = try faultBytes(null, null, null);
     defer std.testing.allocator.free(empty);
-    try std.testing.expectError(error.InvalidFaultResource, decode(empty, .{}));
+    try std.testing.expectError(error.InvalidFaultResource, decode(std.testing.allocator, empty, .{}));
 }
 
 test "fault rejects a fixed delay above the configured bound" {
@@ -551,7 +610,7 @@ test "fault rejects a fixed delay above the configured bound" {
     try delay.bytes(4, percentage);
     const bytes = try faultBytes(null, delay.data.items, null);
     defer std.testing.allocator.free(bytes);
-    try std.testing.expectError(error.FaultLimitExceeded, decode(bytes, .{ .max_delay = .fromSeconds(3600) }));
+    try std.testing.expectError(error.FaultLimitExceeded, decode(std.testing.allocator, bytes, .{ .max_delay = .fromSeconds(3600) }));
 }
 
 test "fault bounded sleep returns timeout instead of sleeping past the deadline" {
