@@ -130,3 +130,45 @@ test "gRPC LDS controller applies auto host rewrite only for a trusted server" {
         try std.testing.expectEqualStrings("cluster:a", resolved.options.xds_cluster.?);
     }
 }
+
+fn resolveWith(
+    channel: grpc.SharedChannel,
+    io: std.Io,
+    metadata: []const @import("../../../http2/mod.zig").Hpack.HeaderField,
+) !@import("../../service_config.zig").ResolvedUnary {
+    const generation = channel.state.retainConfig().?;
+    defer generation.release();
+    const selected = generation.call_selector.?;
+    return selected.unary_fn(selected.context, .{ .allocator = gpa, .io = io, .deadline = null, .channel_id = 42 }, .{ .options = .{ .path = "/demo.Service/Get", .message = "request", .metadata = metadata }, .retry_policy = null, .hedging_policy = null, .wait_for_ready = false });
+}
+
+test "gRPC LDS RBAC denies a matching request and allows others" {
+    var threaded = std.Io.Threaded.init(gpa, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var channel = try grpc.SharedChannel.init(gpa, io, .{ .resolved = .{ .endpoints = &.{ .{ .cleartext_ip = .{ .address = .{ .ip4 = .loopback(1) }, .hierarchical_path = &.{"cluster:a"} } }, .{ .cleartext_ip = .{ .address = .{ .ip4 = .loopback(2) }, .hierarchical_path = &.{"cluster:b"} } } } } }, .{ .service_config_json = manager });
+    defer channel.deinit();
+    var sender = channel.sender();
+    defer sender.deinit();
+    var client = try ads.Client.init(gpa, sender, .{ .node = .{ .id = "test" } });
+    defer client.deinit();
+    var controller = try lds.Controller.init(gpa, .{ .listener_name = "frontend", .authority = "backend.test" });
+    defer controller.deinit();
+    try controller.subscribe(&client);
+    const routes = try route_fixture.encode(gpa, "inline", &.{"backend.test"}, &.{.{ .prefix = "/", .cluster = "a" }}, null);
+    defer gpa.free(routes);
+    // DENY when the x-deny header is present; every other request is allowed.
+    const rbac_value = "\x08\x00\x12\x17\x0a\x01p\x12\x12\x0a\x0c\x22\x0a\x0a\x06x-deny\x38\x01\x12\x02\x18\x01";
+    const listener = try fixture.encode(gpa, .{ .inline_rds = routes, .filters = &.{
+        .{ .name = "rbac", .type_name = lds.resource.rbac_type, .value = rbac_value },
+        .{},
+    } });
+    defer gpa.free(listener);
+    try apply(&controller, &client, channel, io, lds.type_url, "l1", listener);
+    const allowed = try resolve(channel, io);
+    try std.testing.expectEqualStrings("cluster:a", allowed.options.xds_cluster.?);
+    try std.testing.expectError(
+        error.PermissionDenied,
+        resolveWith(channel, io, &.{.{ .name = "x-deny", .value = "1" }}),
+    );
+}

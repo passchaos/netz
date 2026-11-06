@@ -1,7 +1,8 @@
-//! Required router terminal and ordered optional unsupported filter handling.
+//! Required router terminal, optional unsupported filters, and RBAC.
 const std = @import("std");
 const model = @import("model.zig");
 const pb = @import("protobuf.zig");
+const rbac = @import("rbac.zig");
 fn router(bytes: []const u8) pb.Error!void {
     var reader = pb.Reader{ .bytes = bytes };
     while (try reader.next()) |field| {
@@ -26,16 +27,38 @@ pub fn decode(bytes: []const u8, limit: usize) pb.Error!model.Filter {
     if (std.mem.eql(u8, typed.type_name, model.router_type)) {
         if (disabled) return error.InvalidLdsResource;
         try router(typed.value);
+    } else if (std.mem.eql(u8, typed.type_name, model.rbac_type)) {
+        if (disabled) return .{ .name = name, .type_name = typed.type_name, .optional = optional };
     } else if (!optional) return error.UnsupportedLdsFeature;
-    return .{ .name = name, .type_name = typed.type_name, .optional = optional };
+    return .{
+        .name = name,
+        .type_name = typed.type_name,
+        .optional = optional,
+        .config = typed.value,
+    };
 }
-pub fn validate(values: []const model.Filter) pb.Error!void {
+/// Validate ordering and compile the RBAC policy into the listener arena.
+/// Returns the raw RBAC config the listener must recompile per projection.
+pub fn validate(
+    values: []const model.Filter,
+    arena: std.mem.Allocator,
+    limits: model.Limits,
+) (pb.Error || rbac.Error)!?[]const u8 {
     var routers: usize = 0;
+    var rbac_config: ?[]const u8 = null;
     for (values, 0..) |value, index| {
         for (values[0..index]) |previous| if (std.mem.eql(u8, previous.name, value.name)) return error.InvalidLdsResource;
-        if (std.mem.eql(u8, value.type_name, model.router_type)) routers += 1;
+        if (std.mem.eql(u8, value.type_name, model.router_type)) {
+            routers += 1;
+        } else if (std.mem.eql(u8, value.type_name, model.rbac_type)) {
+            if (rbac_config != null) return error.InvalidLdsResource;
+            _ = try rbac.decode(arena, value.config, .{
+                .max_text_bytes = limits.max_text_bytes,
+            });
+            rbac_config = value.config;
+        }
     }
-    // Every supported filter is a terminal router. Unsupported optional
-    // filters are removed before checking effective terminal ordering.
+    // Every supported filter is terminal (router) or an ordered RBAC filter.
     if (routers != 1) return error.InvalidLdsResource;
+    return rbac_config;
 }

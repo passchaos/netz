@@ -1,6 +1,8 @@
-//! Immutable HCM timeout projection over an already parsed route snapshot.
+//! Immutable HCM timeout and RBAC projection over parsed route state.
 const std = @import("std");
 const rds = @import("../rds.zig");
+const rbac = @import("rbac.zig");
+const routing = @import("../routing/mod.zig");
 const selector = @import("../../channel/call_selector.zig");
 const service = @import("../../service_config.zig");
 pub const Projection = struct {
@@ -8,10 +10,30 @@ pub const Projection = struct {
     refs: std.atomic.Value(usize) = .init(1),
     source: *rds.Snapshot,
     maximum: ?std.Io.Duration,
-    pub fn create(gpa: std.mem.Allocator, source: *rds.Snapshot, maximum: ?std.Io.Duration) std.mem.Allocator.Error!*Projection {
+    arena: std.heap.ArenaAllocator,
+    rbac: ?*rbac.Policy = null,
+    pub fn create(
+        gpa: std.mem.Allocator,
+        source: *rds.Snapshot,
+        maximum: ?std.Io.Duration,
+        rbac_config: ?[]const u8,
+    ) (std.mem.Allocator.Error || rbac.Error)!*Projection {
         const self = try gpa.create(Projection);
+        errdefer gpa.destroy(self);
         source.retain();
-        self.* = .{ .allocator = gpa, .source = source, .maximum = maximum };
+        errdefer source.release();
+        self.* = .{
+            .allocator = gpa,
+            .source = source,
+            .maximum = maximum,
+            .arena = .init(gpa),
+        };
+        errdefer self.arena.deinit();
+        if (rbac_config) |bytes| {
+            const policy = try self.arena.allocator().create(rbac.Policy);
+            policy.* = try rbac.decode(self.arena.allocator(), bytes, .{});
+            self.rbac = policy;
+        }
         return self;
     }
     pub fn retain(self: *Projection) void {
@@ -20,6 +42,7 @@ pub const Projection = struct {
     pub fn release(self: *Projection) void {
         if (self.refs.fetchSub(1, .acq_rel) != 1) return;
         self.source.release();
+        self.arena.deinit();
         self.allocator.destroy(self);
     }
     fn view(self: *Projection) rds.Snapshot {
@@ -28,6 +51,21 @@ pub const Projection = struct {
         var snapshot = rds.Snapshot{ .allocator = self.source.allocator, .resource = self.source.resource, .authority = self.source.authority, .virtual_host = self.source.virtual_host, .required_clusters = self.source.required_clusters, .options = self.source.options };
         snapshot.options.default_max_stream_duration = self.maximum;
         return snapshot;
+    }
+    fn authorize(self: *Projection, active: selector.Context, options: anytype) selector.Error!void {
+        const policy = self.rbac orelse return;
+        const request = routing.header.Request{
+            .path = options.path,
+            .authority = options.authority orelse self.source.authority,
+            .scheme = options.scheme,
+            .metadata = options.metadata,
+            .max_header_bytes = self.source.options.max_header_bytes,
+        };
+        const allowed = rbac.evaluate(policy, active.allocator, request) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.PermissionDenied,
+        };
+        if (!allowed) return error.PermissionDenied;
     }
     fn retainContext(context: *anyopaque) void {
         const self: *Projection = @ptrCast(@alignCast(context));
@@ -39,11 +77,13 @@ pub const Projection = struct {
     }
     fn unary(context: *anyopaque, active: selector.Context, base: service.ResolvedUnary) selector.Error!service.ResolvedUnary {
         const self: *Projection = @ptrCast(@alignCast(context));
+        try self.authorize(active, base.options);
         var snapshot = self.view();
         return snapshot.resolveUnary(active, base);
     }
     fn streaming(context: *anyopaque, active: selector.Context, base: service.ResolvedStreaming) selector.Error!service.ResolvedStreaming {
         const self: *Projection = @ptrCast(@alignCast(context));
+        try self.authorize(active, base.options);
         var snapshot = self.view();
         return snapshot.resolveStreaming(active, base);
     }

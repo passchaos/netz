@@ -2,7 +2,7 @@
 const std = @import("std");
 const call = @import("../call.zig");
 const service = @import("../service_config.zig");
-pub const Error = call.Error || service.Error || error{ NoMatchingRoute, InvalidRouteAction, RouteMetadataLimitExceeded };
+pub const Error = call.Error || service.Error || error{ NoMatchingRoute, InvalidRouteAction, RouteMetadataLimitExceeded, PermissionDenied };
 pub const Context = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -32,4 +32,7 @@ pub const Selector = struct {
 };
 pub fn unavailable(gpa: std.mem.Allocator, err: Error) std.mem.Allocator.Error!call.UnaryResponse {
     return .{ .allocator = gpa, .transport = null, .status = .unavailable, .status_message = try gpa.dupe(u8, if (err == error.NoMatchingRoute) "No matching route found in xDS route config" else "Matching route has inappropriate action"), .message = null, .was_compressed = false, .encoding = null, .owned_message = null };
+}
+pub fn permissionDenied(gpa: std.mem.Allocator) std.mem.Allocator.Error!call.UnaryResponse {
+    return .{ .allocator = gpa, .transport = null, .status = .permission_denied, .status_message = try gpa.dupe(u8, "RBAC policy denied the request"), .message = null, .was_compressed = false, .encoding = null, .owned_message = null };
 }

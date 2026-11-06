@@ -42,6 +42,18 @@ router does not change effective order. Router payload framing, BoolValue and
 string fields are checked. Filter-specific deployment options beyond client
 routing are not claimed as implemented.
 
+`envoy.filters.http.rbac.v3.RBAC` is decoded and enforced. The supported
+grpc-core request-side subset covers `any`, header, URL-path and
+`and`/`or`/`not` principals and permissions with ALLOW and DENY policies; one
+RBAC filter per HCM is accepted. Authenticated, source/direct/remote IP,
+metadata and requested-server-name principals or permissions, destination
+IP/port and metadata permissions, and CEL `condition`/`checked_condition`
+fields are rejected at decode so an unsupported policy never silently allows
+traffic. Evaluation runs before route selection: a denied unary call returns
+PERMISSION_DENIED without touching a backend, and a denied streaming open
+returns `error.PermissionDenied`. Route/vhost `typed_per_filter_config`
+overrides remain unsupported with the existing RDS rejection.
+
 HCM selects inline route_config or RDS through ADS/SELF ConfigSource. AUTO API
 version follows the ADS session's v3 type URL; explicit V2 and unsupported
 versions fail validation. The same source decoder is used for EDS-backed CDS.

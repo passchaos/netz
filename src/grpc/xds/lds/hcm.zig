@@ -35,6 +35,11 @@ pub fn decode(gpa: std.mem.Allocator, bytes: []const u8, limits: model.Limits) p
             if (try reader.varint() != 0) return error.InvalidLdsResource;
         } else if (field.number == 46 and field.wire_type == 2) return error.InvalidLdsResource else try reader.skip(field);
     }
-    try @import("filter.zig").validate(filters.items);
-    return .{ .route_source = selected orelse return error.InvalidLdsResource, .max_stream_duration = maximum, .filters = try filters.toOwnedSlice(gpa) };
+    const rbac_config = try @import("filter.zig").validate(filters.items, gpa, limits);
+    return .{
+        .route_source = selected orelse return error.InvalidLdsResource,
+        .max_stream_duration = maximum,
+        .filters = try filters.toOwnedSlice(gpa),
+        .rbac_config = rbac_config,
+    };
 }

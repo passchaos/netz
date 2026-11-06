@@ -1,0 +1,53 @@
+{
+  "schema": 1,
+  "date": "2026-11-06",
+  "head": "working-tree",
+  "subject": "gRPC xDS HCM RBAC filter",
+  "change": "HCM listener filter chains now decode and enforce envoy.filters.http.rbac.v3.RBAC. The supported grpc-core request-side subset covers any, header, URL-path and and/or/not principals and permissions with ALLOW and DENY policies; one RBAC filter per HCM is accepted. Authenticated/IP/metadata/requested-server-name principals or permissions, destination IP/port/metadata permissions and CEL condition fields are rejected at decode. The listener stores the raw policy, each projection compiles it into its own arena, and evaluation runs before route selection: a denied unary call returns PERMISSION_DENIED without a backend, and a denied streaming open returns error.PermissionDenied.",
+  "tests": {
+    "unit": "src/grpc/xds/lds/rbac.zig covers ALLOW/DENY any-any policies, header and URL-path matching, and rejection of authenticated principals, destination-IP permissions and CEL conditions. src/grpc/xds/lds/tests.zig accepts an RBAC filter before the terminal router and rejects an unsupported principal. src/grpc/xds/lds/controller_tests.zig publishes an inline-RDS listener whose RBAC filter denies requests carrying x-deny and verifies the matching request returns PermissionDenied while an ordinary request still resolves to cluster:a.",
+    "focused_gate": {
+      "command": "zig build test-lib -Dtest-filter='RBAC' -Dtest-filter='gRPC LDS' --summary all",
+      "passed": 180,
+      "total": 180,
+      "failed": 0
+    },
+    "interop": {
+      "command": "zig build interop-grpc-lds --summary all",
+      "status": "passed"
+    },
+    "compile": {
+      "command": "zig build test-compile",
+      "status": "passed"
+    },
+    "full_library": {
+      "command": "zig build test-lib",
+      "status": "passed",
+      "exit_code": 0,
+      "passed": 6543,
+      "total": 6543,
+      "failed": 0
+    }
+  },
+  "source_sha256": {
+    "src/grpc/xds/lds/rbac.zig": "064266dde9f26b6f33cbefb871bad12054964161600c24cae1311976959d54c1",
+    "src/grpc/xds/lds/filter.zig": "11118f207cea2eb39d43d1d2c7c9c6938868dc4899a0d27a29d7269dedfa1fd0",
+    "src/grpc/xds/lds/model.zig": "6fbeacbfe48216fb58d8e69a53b59a40b830d8b6858cf4c80cb212c80ae87a32",
+    "src/grpc/xds/lds/hcm.zig": "c71d9c5534bdf218e6b06e19ab8b2cabface1b349312a5317d91f1e5aac55211",
+    "src/grpc/xds/lds/projection.zig": "69c2fe52fbb82b75596e21f93f330bd074f85e5bf27b725f5bf417fd7981787b",
+    "src/grpc/xds/lds/controller.zig": "8fb011296064d5f0e76c1a7d4c334dd3a8ff48aefebc538f14f251f3f95c4dc7",
+    "src/grpc/xds/lds/apply_listener.zig": "0505dec7ed94415f6cbf078d9ffc559dc4bc2fc7cae6c402a9806a656141ce3a",
+    "src/grpc/xds/lds/apply_routes.zig": "c730f6a9392c3d14e7bcb0ddbc088db0a6b3ae3084d949c9b2d83b484d26f58e",
+    "src/grpc/xds/lds/apply_delta.zig": "07ffd840f0a5ec8b288dfcd939596ed56b7985e46e2b13a6f20b8a2351af3ee7",
+    "src/grpc/xds/lds.zig": "38bfae63f0f710769a825aa9912811a4cd7e84293de3d832fa80dab6297a120a",
+    "src/grpc/xds/lds/tests.zig": "dcc36671fda5613ca2e1af9ec2f49215c2ce406eb8e3fcfccd2446da0da4eb60",
+    "src/grpc/xds/lds/controller_tests.zig": "751e6573e59e13401aef3f86f0ef6d880ec4113c797d4f49ca68e200c1e9cfa9",
+    "src/grpc/xds/routing/header.zig": "dfe11c762f5eb06a4a078c84b43e8a82600904ff6fe104cc7835ced45ee49513",
+    "src/grpc/channel/call_selector.zig": "c2b9a09f2e3cb65b8e538cfdc0970883b304a3fb1ed2b245b39deb4b1476dbfd",
+    "src/grpc/channel/shared/state.zig": "16a4180bd12a4871337b2ec5a9c3a71fdb1b146e2275fc73d22d106418ae97d2",
+    "src/grpc/xds/runtime/controller.zig": "5c9c2b05def6bef9437235e5a10bb9d7b6248e0b578d23829318b51b6fa8baaf",
+    "docs/grpc_lds.md": "6c85e1e5b81faea6a155649e2bf0bdd06e43ae3fcae561308c83307c3e3c022d",
+    "docs/grpc_parity.md": "e9285204f5a7986cfa55a33a508bac8ad08db3026ee59a2f348d6d379e99ec91"
+  },
+  "notes": "Evaluation runs before route selection, matching Envoy's filter order. Header matchers use visible request metadata (including pseudo-headers) and URL-path matchers strip query/fragment through the shared routing matcher. Route/vhost typed_per_filter_config overrides, authenticated/IP/metadata principals, destination IP/port/metadata permissions, requested server names and CEL conditions remain unsupported and are rejected rather than silently allowed. Streaming callers observe error.PermissionDenied on open."
+}

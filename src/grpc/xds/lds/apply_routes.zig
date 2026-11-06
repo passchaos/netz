@@ -50,7 +50,7 @@ pub fn apply(self: *ctl.Controller, client: *ads.Client, update: ads.Update, des
     if (failed_name) |invalid| if (std.mem.eql(u8, invalid, name)) {
         const empty = try self.empty(name);
         defer empty.release();
-        const projection = try Projection.create(self.allocator, empty, listener.value.hcm.max_stream_duration);
+        const projection = try Projection.create(self.allocator, empty, listener.value.hcm.max_stream_duration, self.rbac_config);
         defer projection.release();
         _ = try self.publish(client, projection, destination, deadline);
         empty.retain();
@@ -69,7 +69,7 @@ pub fn apply(self: *ctl.Controller, client: *ads.Client, update: ads.Update, des
         if (first_error) |err| return err;
         return try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
     };
-    const projection = try Projection.create(self.allocator, snapshot, listener.value.hcm.max_stream_duration);
+    const projection = try Projection.create(self.allocator, snapshot, listener.value.hcm.max_stream_duration, self.rbac_config);
     defer projection.release();
     const revision = try self.publish(client, projection, destination, deadline);
     snapshot.retain();

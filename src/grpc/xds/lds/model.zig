@@ -4,7 +4,15 @@ const rds = @import("../rds.zig");
 pub const type_url = "type.googleapis.com/envoy.config.listener.v3.Listener";
 pub const hcm_type = "envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager";
 pub const router_type = "envoy.extensions.filters.http.router.v3.Router";
-pub const Error = rds.resource.Error || error{ InvalidLdsResource, LdsLimitExceeded, UnsupportedLdsFeature };
+pub const rbac_type = "envoy.extensions.filters.http.rbac.v3.RBAC";
+pub const Error = rds.resource.Error || error{
+    InvalidLdsResource,
+    LdsLimitExceeded,
+    UnsupportedLdsFeature,
+    InvalidRbacResource,
+    RbacLimitExceeded,
+    UnsupportedRbacFeature,
+};
 pub const Limits = struct {
     max_bytes: usize = 8 * 1024 * 1024,
     max_text_bytes: usize = 4096,
@@ -12,11 +20,19 @@ pub const Limits = struct {
     max_storage_bytes: usize = 64 * 1024 * 1024,
     rds: rds.resource.Limits = .{},
 };
-pub const Filter = struct { name: []const u8, type_name: []const u8, optional: bool };
+pub const Filter = struct {
+    name: []const u8,
+    type_name: []const u8,
+    optional: bool,
+    /// Raw typed config bytes for supported non-router filters.
+    config: []const u8 = "",
+};
 pub const Hcm = struct {
     route_source: union(enum) { rds: []const u8, inline_rds: []const u8 },
     max_stream_duration: ?std.Io.Duration,
     filters: []const Filter,
+    /// Raw `envoy.filters.http.rbac.v3.RBAC` config, when present.
+    rbac_config: ?[]const u8 = null,
 };
 pub const Listener = struct { name: []const u8, hcm: Hcm };
 pub const Owned = struct {

@@ -54,9 +54,17 @@ pub const Request = struct {
         return result;
     }
 };
+pub const Range = struct { start: i64, end: i64 };
+
+pub const Condition = union(enum) {
+    string: String,
+    present: bool,
+    range: Range,
+};
+
 pub const Match = struct {
     name: []const u8,
-    condition: union(enum) { string: String, present: bool, range: struct { start: i64, end: i64 } },
+    condition: Condition,
     invert: bool = false,
     pub fn matches(self: Match, gpa: std.mem.Allocator, request: Request) Error!bool {
         var header = try request.header(gpa, self.name);

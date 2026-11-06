@@ -81,3 +81,25 @@ test "gRPC LDS rejects unsupported sources scoped routes forwarding state and bo
     try std.testing.expectError(error.InvalidLdsResource, lds.decode(gpa, "", .{}));
     _ = rds;
 }
+
+test "gRPC LDS accepts an RBAC filter before the terminal router" {
+    const rbac_value = "\x08\x01\x12\x0d\x0a\x01p\x12\x08\x0a\x02\x18\x01\x12\x02\x18\x01";
+    const bytes = try fixture.encode(gpa, .{ .filters = &.{
+        .{ .name = "rbac", .type_name = lds.resource.rbac_type, .value = rbac_value },
+        .{},
+    } });
+    defer gpa.free(bytes);
+    var owned = try lds.decode(gpa, bytes, .{});
+    defer owned.deinit();
+    try std.testing.expect(owned.value.hcm.rbac_config != null);
+}
+
+test "gRPC LDS rejects an unsupported RBAC principal" {
+    const rbac_value = "\x08\x01\x12\x0d\x0a\x01p\x12\x08\x0a\x02\x18\x01\x12\x02\x22\x00";
+    const bytes = try fixture.encode(gpa, .{ .filters = &.{
+        .{ .name = "rbac", .type_name = lds.resource.rbac_type, .value = rbac_value },
+        .{},
+    } });
+    defer gpa.free(bytes);
+    try std.testing.expectError(error.UnsupportedRbacFeature, lds.decode(gpa, bytes, .{}));
+}

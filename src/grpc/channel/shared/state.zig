@@ -1135,6 +1135,7 @@ pub const State = struct {
             if (config.call_selector) |selected| {
                 resolved = @import("selector.zig").unary(self, selected, resolved, entered, &config.config) catch |err| switch (err) {
                     error.NoMatchingRoute, error.InvalidRouteAction => return call_selector.unavailable(self.allocator, if (err == error.NoMatchingRoute) error.NoMatchingRoute else error.InvalidRouteAction),
+                    error.PermissionDenied => return call_selector.permissionDenied(self.allocator),
                     else => return err,
                 };
             }
