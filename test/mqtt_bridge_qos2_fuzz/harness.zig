@@ -11,6 +11,8 @@ const runtime = mqtt.runtime;
 
 const BrokerRunner = struct {
     broker: *Broker,
+    input: []const u8,
+    tls: bool,
     shutdown: std.Io.Event = .unset,
     err: ?anyerror = null,
 
@@ -20,9 +22,18 @@ const BrokerRunner = struct {
             .accept_concurrency = 2,
         }}, .{
             .shutdown = &self.shutdown,
+            .error_observer = .{ .context = self, .observe = observeError },
         }) catch |err| {
             self.err = err;
         };
+    }
+
+    fn observeError(context: *anyopaque, event: mqtt.broker.ListenerErrorEvent) void {
+        const self: *BrokerRunner = @ptrCast(@alignCast(context));
+        std.debug.print(
+            "MQTT bridge QoS2 local error: tls={} sequence={x} listener={} stage={s} error={s}\n",
+            .{ self.tls, self.input, event.listener_index, @tagName(event.stage), @errorName(event.err) },
+        );
     }
 
     fn stop(self: *@This(), io: std.Io, thread: std.Thread) ?anyerror {
@@ -76,7 +87,7 @@ fn runSequenceWithTransport(
     );
     defer local.deinit();
     try local.createCommitLog(tmp.dir, "bridge-qos2.log", .{});
-    var local_runner = BrokerRunner{ .broker = &local };
+    var local_runner = BrokerRunner{ .broker = &local, .input = sequence, .tls = tls };
     const local_thread = try std.Thread.spawn(
         .{},
         BrokerRunner.run,
