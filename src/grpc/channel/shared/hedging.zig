@@ -5,6 +5,9 @@ const call = @import("../../call.zig");
 const retry = @import("../../call/retry.zig");
 const wire = @import("../../wire.zig");
 const stats = @import("hedging/stats.zig");
+const control_mod = @import("hedging/control.zig");
+const Control = control_mod.Control;
+const transparent = @import("../../call/transparent_retry.zig");
 
 pub fn run(
     state: anytype,
@@ -21,11 +24,13 @@ pub fn run(
     const TimerOutcome = struct {
         generation: u64,
         deadline: bool,
+        committed: bool = false,
     };
     const TimerResult = std.Io.Cancelable!TimerOutcome;
     const Wake = union(enum) {
         attempt: AttemptOutcome,
         timer: TimerResult,
+        commit: std.Io.Cancelable!u8,
     };
     const Attempt = struct {
         fn execute(
@@ -33,9 +38,10 @@ pub fn run(
             request: call.UnaryCallOptions,
             overall: ?std.Io.Clock.Timestamp,
             index: u8,
+            control: *Control,
         ) AttemptOutcome {
-            var transparent: retry.TransparentRetry = .{ .enabled = request.transparent_retry };
             while (true) {
+                if (control.isLoser(index)) return .{ .index = index, .result = error.Canceled };
                 const timeout_header: ?wire.Timeout = if (overall) |absolute| blk: {
                     const remaining = absolute.durationFromNow(owner.io).raw;
                     if (remaining.nanoseconds <= 0) {
@@ -47,21 +53,27 @@ pub fn run(
                 if (overall != null and timeout_header == null) {
                     return .{ .index = index, .result = error.Timeout };
                 }
-                var response = owner.attempt(
-                    owner.allocator,
+                var response = owner.attemptHedged(
                     request,
                     overall,
-                    overall,
                     timeout_header,
-                    if (index == 0) null else index,
+                    index,
+                    control,
                 ) catch |err| {
-                    if (transparent.replayError(err)) continue;
+                    if (control.isLoser(index)) return .{ .index = index, .result = error.Canceled };
+                    if (transparent.replayableError(err) and control.takeTransparent(request.transparent_retry)) continue;
+                    if (control.errorIsFatal(err)) owner.commitHedge(control, index);
                     return .{ .index = index, .result = err };
                 };
-                if (transparent.replayResponse(response)) {
+                if (control.isLoser(index)) {
+                    response.deinit();
+                    return .{ .index = index, .result = error.Canceled };
+                }
+                if (transparent.replayableResponse(response) and control.takeTransparent(request.transparent_retry)) {
                     response.deinit();
                     continue;
                 }
+                if (control.responseIsFatal(response)) owner.commitHedge(control, index);
                 return .{ .index = index, .result = response };
             }
         }
@@ -72,6 +84,7 @@ pub fn run(
             delay: std.Io.Duration,
             overall: ?std.Io.Clock.Timestamp,
             generation: u64,
+            control: *Control,
         ) TimerResult {
             var target = std.Io.Clock.Timestamp.fromNow(io, .{
                 .raw = delay,
@@ -84,17 +97,31 @@ pub fn run(
                     is_deadline = true;
                 }
             }
-            try target.wait(io);
+            while (control.winner() == null) {
+                control.committed.waitTimeout(io, .{ .deadline = target }) catch |err| {
+                    if (err == error.Canceled) return error.Canceled;
+                    if (target.durationFromNow(io).raw.nanoseconds > 0) continue;
+                    return .{ .generation = generation, .deadline = is_deadline };
+                };
+            }
             return .{
                 .generation = generation,
-                .deadline = is_deadline,
+                .deadline = false,
+                .committed = true,
             };
+        }
+    };
+    const Commitment = struct {
+        fn wait(control: *Control) std.Io.Cancelable!u8 {
+            try control.committed.wait(control.io);
+            return control.winner().?;
         }
     };
     const Scheduler = struct {
         fn launch(
             select: *std.Io.Select(Wake),
             owner: *State,
+            control: *Control,
             request: call.UnaryCallOptions,
             overall: ?std.Io.Clock.Timestamp,
             launched: *u8,
@@ -102,11 +129,12 @@ pub fn run(
             counters: *stats.Counters,
             reason: stats.Launch,
         ) State.Failure!void {
+            if (control.winner() != null) return;
             const index = launched.*;
             try select.concurrent(
                 .attempt,
                 Attempt.execute,
-                .{ owner, request, overall, index },
+                .{ owner, request, overall, index, control },
             );
             launched.* += 1;
             active.* += 1;
@@ -116,6 +144,7 @@ pub fn run(
         fn timer(
             select: *std.Io.Select(Wake),
             io: std.Io,
+            control: *Control,
             delay: std.Io.Duration,
             overall: ?std.Io.Clock.Timestamp,
             generation: *u64,
@@ -125,7 +154,7 @@ pub fn run(
             try select.concurrent(
                 .timer,
                 Timer.wait,
-                .{ io, delay, overall, generation.* },
+                .{ io, delay, overall, generation.*, control },
             );
             pending.* = true;
         }
@@ -151,6 +180,7 @@ pub fn run(
                     }
                 },
                 .timer => |result| _ = result catch {},
+                .commit => |result| _ = result catch {},
             };
         }
     };
@@ -158,9 +188,12 @@ pub fn run(
     try policy.validate();
     const counters = &state.hedging_counters;
     counters.recordCall();
+    const control = try Control.create(state.allocator, state.io, policy);
+    defer control.release();
     var storage: [12]Wake = undefined;
     var select: std.Io.Select(Wake) = .init(state.io, &storage);
     defer Scheduler.drain(&select, counters);
+    try select.concurrent(.commit, Commitment.wait, .{control});
     var launched: u8 = 0;
     var active: u8 = 0;
     var timer_generation: u64 = 0;
@@ -173,6 +206,7 @@ pub fn run(
     try Scheduler.launch(
         &select,
         state,
+        control,
         options,
         deadline,
         &launched,
@@ -184,6 +218,7 @@ pub fn run(
         try Scheduler.timer(
             &select,
             state.io,
+            control,
             policy.hedging_delay,
             deadline,
             &timer_generation,
@@ -195,6 +230,10 @@ pub fn run(
     }
 
     while (true) {
+        if (control.winner() != null and !scheduling_stopped) {
+            scheduling_stopped = true;
+            Scheduler.invalidate(&timer_generation, &timer_pending);
+        }
         if (active == 0 and
             (scheduling_stopped or launched >= policy.max_attempts) and
             !timer_pending)
@@ -214,8 +253,18 @@ pub fn run(
             error.Canceled => return error.Canceled,
         };
         switch (wake) {
+            .commit => |result| {
+                _ = try result;
+                scheduling_stopped = true;
+                Scheduler.invalidate(&timer_generation, &timer_pending);
+            },
             .timer => |result| {
                 const timer = try result;
+                if (timer.committed or control.winner() != null) {
+                    scheduling_stopped = true;
+                    Scheduler.invalidate(&timer_generation, &timer_pending);
+                    continue;
+                }
                 if (timer.generation != timer_generation) continue;
                 timer_pending = false;
                 if (timer.deadline) {
@@ -234,6 +283,7 @@ pub fn run(
                 try Scheduler.launch(
                     &select,
                     state,
+                    control,
                     options,
                     deadline,
                     &launched,
@@ -245,6 +295,7 @@ pub fn run(
                     try Scheduler.timer(
                         &select,
                         state.io,
+                        control,
                         policy.hedging_delay,
                         deadline,
                         &timer_generation,
@@ -257,11 +308,16 @@ pub fn run(
             .attempt => |outcome| {
                 std.debug.assert(active != 0);
                 active -= 1;
+                if (control.isLoser(outcome.index)) {
+                    if (outcome.result) |value| {
+                        var discarded = value;
+                        discarded.deinit();
+                    } else |err| if (err == error.Canceled) counters.recordCanceledLoser();
+                    continue;
+                }
                 const response = outcome.result catch |err| {
                     if (err == error.Timeout) counters.recordDeadline();
-                    if (!policy.isNonFatal(.unavailable) or
-                        !hedgeableAttemptError(err))
-                    {
+                    if (control.winner() == outcome.index or control.errorIsFatal(err)) {
                         return @errorCast(err);
                     }
                     counters.recordBackendFailure();
@@ -279,6 +335,7 @@ pub fn run(
                     try Scheduler.launch(
                         &select,
                         state,
+                        control,
                         options,
                         deadline,
                         &launched,
@@ -290,6 +347,7 @@ pub fn run(
                         try Scheduler.timer(
                             &select,
                             state.io,
+                            control,
                             policy.hedging_delay,
                             deadline,
                             &timer_generation,
@@ -300,15 +358,18 @@ pub fn run(
                     }
                     continue;
                 };
-                if (response.was_dropped or response.status == .ok or
-                    !policy.isNonFatal(response.status))
-                {
+                if (control.winner() == outcome.index or control.responseIsFatal(response)) {
                     if (response.status == .ok) {
                         counters.recordOkWinner();
                         if (policy.throttler) |throttler| {
                             throttler.recordSuccess();
                         }
-                    } else counters.recordFatalWinner();
+                    } else {
+                        counters.recordFatalWinner();
+                        if (!response.was_dropped and policy.isNonFatal(response.status)) {
+                            if (policy.throttler) |throttler| _ = throttler.recordFailure();
+                        }
+                    }
                     return response;
                 }
 
@@ -335,6 +396,7 @@ pub fn run(
                         try Scheduler.timer(
                             &select,
                             state.io,
+                            control,
                             delay,
                             deadline,
                             &timer_generation,
@@ -345,6 +407,7 @@ pub fn run(
                         try Scheduler.launch(
                             &select,
                             state,
+                            control,
                             options,
                             deadline,
                             &launched,
@@ -356,6 +419,7 @@ pub fn run(
                             try Scheduler.timer(
                                 &select,
                                 state.io,
+                                control,
                                 policy.hedging_delay,
                                 deadline,
                                 &timer_generation,
@@ -377,26 +441,7 @@ fn hedgingAllowed(policy: call.HedgingPolicy) bool {
 }
 
 fn hedgeableAttemptError(err: anyerror) bool {
-    return switch (err) {
-        error.AddressUnavailable,
-        error.BrokenPipe,
-        error.ConnectionClosed,
-        error.ConnectionRefused,
-        error.ConnectionResetByPeer,
-        error.ConnectionUnavailable,
-        error.HostUnreachable,
-        error.NameServerFailure,
-        error.NetworkDown,
-        error.NetworkUnreachable,
-        error.NoAddressReturned,
-        error.ReadFailed,
-        error.SocketUnconnected,
-        error.UnexpectedEof,
-        error.UnknownHostName,
-        error.WriteFailed,
-        => true,
-        else => false,
-    };
+    return control_mod.canHedgeError(err);
 }
 
 test "gRPC hedging classifies backend-local attempt errors" {

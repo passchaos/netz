@@ -19,6 +19,7 @@ const orca_config = @import("orca/config.zig");
 pub const orca_tracker = @import("orca/tracker.zig");
 const lrs_stats = @import("lrs_stats.zig");
 const Job = @import("job.zig").Job;
+const HedgeControl = @import("hedging/control.zig").Control;
 const call_selector = @import("../call_selector.zig");
 var next_channel_id: std.atomic.Value(u64) = .init(1);
 pub const Options = @import("options.zig").Options;
@@ -306,6 +307,21 @@ pub const State = struct {
     pub fn wakeAllLocked(self: *State) void {
         for (self.workers.items) |worker| worker.wake.set(self.io);
         for (self.sources) |source| source.wake.set(self.io);
+    }
+    pub fn commitHedge(self: *State, control: *HedgeControl, index: u8) void {
+        self.lock();
+        defer self.unlock();
+        if (!control.commit(index)) return;
+        var cursor = self.head;
+        while (cursor) |job| {
+            const next = job.next;
+            if (job.hedging_control == control and job.hedgeIndex() != index) {
+                self.removeQueuedLocked(job);
+                self.finishLocked(job, null, error.Canceled);
+            }
+            cursor = next;
+        }
+        self.wakeAllLocked();
     }
     pub fn isClosed(self: *State) bool {
         self.lock();
@@ -964,6 +980,12 @@ pub const State = struct {
         self.lock();
         defer self.unlock();
         if (self.closed or worker.retired or worker.source.suspended or worker.pending_settings != null or self.head == null) return null;
+        while (self.head) |job| {
+            if (!job.canceled()) break;
+            self.removeQueuedLocked(job);
+            self.finishLocked(job, null, error.Canceled);
+        }
+        if (self.head == null) return null;
         if (self.circuit) |policy| if (policy.saturated()) {
             self.recomputeLocked();
             return null;
@@ -984,6 +1006,10 @@ pub const State = struct {
     }
     fn claimJobLocked(self: *State, worker: *Worker, job: *Job) ?*Job {
         self.removeQueuedLocked(job);
+        if (job.canceled()) {
+            self.finishLocked(job, null, error.Canceled);
+            return null;
+        }
         if (!(@import("circuit_admission.zig").acquire(self, job) catch |err| {
             self.finishLocked(job, null, err);
             return null;
@@ -1027,6 +1053,10 @@ pub const State = struct {
         if (self.closed) {
             self.unlock();
             return error.SharedChannelClosed;
+        }
+        if (job.canceled()) {
+            self.unlock();
+            return error.Canceled;
         }
         if (self.drop.categories.len != 0 or self.circuit != null) self.io.checkCancel() catch |err| {
             self.unlock();
@@ -1100,6 +1130,13 @@ pub const State = struct {
         if (job.err) |err| return @errorCast(err);
     }
     pub fn attempt(self: *State, _: std.mem.Allocator, options: call.UnaryCallOptions, deadline: ?std.Io.Clock.Timestamp, rpc_deadline: ?std.Io.Clock.Timestamp, timeout_header: ?@import("../../wire.zig").Timeout, previous: ?u8) Error!call.UnaryResponse {
+        return self.attemptControlled(options, deadline, rpc_deadline, timeout_header, previous, null);
+    }
+    pub fn attemptHedged(self: *State, options: call.UnaryCallOptions, deadline: ?std.Io.Clock.Timestamp, timeout_header: ?@import("../../wire.zig").Timeout, index: u8, control: *HedgeControl) Error!call.UnaryResponse {
+        return self.attemptControlled(options, deadline, deadline, timeout_header, if (index == 0) null else index, control);
+    }
+    fn attemptControlled(self: *State, options: call.UnaryCallOptions, deadline: ?std.Io.Clock.Timestamp, rpc_deadline: ?std.Io.Clock.Timestamp, timeout_header: ?@import("../../wire.zig").Timeout, previous: ?u8, control: ?*HedgeControl) Error!call.UnaryResponse {
+        if (control) |hedging| if (hedging.isLoser(previous orelse 0)) return error.Canceled;
         var attempt_options = options;
         attempt_options.timeout = timeout_header;
         if (attempt_options.fault_policy) |policy| {
@@ -1111,7 +1148,10 @@ pub const State = struct {
             }, if (attempt_options.xds_cluster) |name| lrs_stats.stripCluster(name) else null);
             defer decision.release(policy);
             if (decision.delay) |delay| {
-                try @import("../../fault.zig").sleepBounded(self.io, delay, deadline);
+                if (control) |hedging|
+                    try self.hedgedFaultDelay(hedging, previous orelse 0, delay, deadline)
+                else
+                    try @import("../../fault.zig").sleepBounded(self.io, delay, deadline);
                 if (deadline) |until| {
                     const remaining = until.durationFromNow(self.io).raw;
                     if (remaining.nanoseconds <= 0) return error.Timeout;
@@ -1131,9 +1171,33 @@ pub const State = struct {
             previous,
         );
         defer job.release();
+        if (control) |hedging| job.setHedgingControl(hedging);
         try self.enqueue(job);
         try self.awaitJob(job);
         return job.takeResult();
+    }
+    fn hedgedFaultDelay(self: *State, control: *HedgeControl, index: u8, delay: std.Io.Duration, deadline: ?std.Io.Clock.Timestamp) Error!void {
+        var target = std.Io.Clock.Timestamp.fromNow(self.io, .{ .raw = delay, .clock = .awake });
+        var limited = false;
+        if (deadline) |until| if (std.Io.Clock.Timestamp.compare(until, .lte, target)) {
+            target = until;
+            limited = true;
+        };
+        while (true) {
+            if (control.isLoser(index)) return error.Canceled;
+            if (target.durationFromNow(self.io).raw.nanoseconds <= 0) {
+                if (limited) return error.Timeout;
+                return;
+            }
+            control.committed.waitTimeout(self.io, .{ .deadline = target }) catch |err| {
+                if (err == error.Timeout) continue;
+                return err;
+            };
+            // Fault delay precedes wire admission, so any other attempt's
+            // commitment terminates this delay without consuming its budget.
+            if (control.isLoser(index)) return error.Canceled;
+            try target.wait(self.io);
+        }
     }
     fn waitForJob(self: *State, job: *Job, deadline: ?std.Io.Clock.Timestamp) std.Io.Event.WaitTimeoutError!void {
         const until = deadline orelse return job.done.wait(self.io);

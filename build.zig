@@ -2180,6 +2180,21 @@ pub fn build(b: *std.Build) void {
     const grpc_lds_step = b.step("interop-grpc-lds", "Verify official client LDS/HCM through inline/dynamic RDS and immutable RPC timeout/routing publication");
     grpc_lds_step.dependOn(&grpc_lds.step);
 
+    const grpc_hedging_commit_client = b.addExecutable(.{
+        .name = "netz-grpc-hedging-commit-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/interop/grpc_hedging_commit/client.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const grpc_hedging_commit = b.addSystemCommand(&.{ "python3", "tools/interop/grpc_hedging_commit/run.py" });
+    grpc_hedging_commit.addArtifactArg(grpc_hedging_commit_client);
+    if (b.args) |args| grpc_hedging_commit.addArgs(args);
+    b.step("interop-grpc-hedging-commit", "Verify A6 response-head commitment, immediate hedge cancellation and call-wide transparent recovery").dependOn(&grpc_hedging_commit.step);
+    test_step.dependOn(&grpc_hedging_commit.step);
+
     const grpc_rds_client = b.addExecutable(.{
         .name = "netz-grpc-rds-client",
         .root_module = b.createModule(.{

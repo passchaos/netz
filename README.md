@@ -173,6 +173,9 @@ Use `zig build test-lib` for the complete in-process library suite without
 external interoperability and release-tool checks; `zig build test` remains
 the complete repository gate. Both accept `-Doptimize` and repeatable
 `-Dtest-filter` options.
+The complete gate includes the independent Node.js HTTP/2 A6 hedging runner;
+it checks response-head commitment and observes loser CANCEL before the
+winner emits its body. The in-process `test-lib` gate remains self-contained.
 
 Current protocol coverage includes:
 

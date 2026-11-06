@@ -2931,9 +2931,13 @@ supplies every replay's remaining timeout. A contradictory GOAWAY after a
 final or informational response head is fatal before the scheduler can launch
 another attempt. See [GOAWAY recovery](grpc_goaway_recovery.md).
 
-The first OK or fatal response wins. Returning it cancels and joins every
-outstanding job, which drives SharedChannel's existing stream-scoped CANCEL
-cleanup before application ownership resumes. A non-fatal response launches
+Ordinary initial response metadata commits the RPC immediately to that hedge.
+Queued losers are removed, active losers receive stream-scoped CANCEL and
+scheduled hedges stop while the winner continues. Its eventual nonfatal status
+cannot launch another attempt. Informational heads do not select a winner.
+Fatal statuses, policy drops and OK results also commit; returning the selected
+result joins every outstanding task before application ownership resumes.
+A trailers-only non-fatal response launches
 the next pending hedge immediately, unless positive pushback replaces that
 timer or malformed/negative pushback permanently stops new attempts. Already
 running attempts remain eligible to win. When every attempt returns non-fatal,
@@ -2946,13 +2950,18 @@ runs, later timer or accelerated launches require a balance above half, each
 non-fatal completion debits one token, and an OK winner replenishes the
 configured ratio. One logical deadline caps running attempts and pending
 pushback timers; no per-attempt completion or timer can renew it.
+The transparent REFUSED_STREAM/GOAWAY budget is call-wide across logical hedges.
+See [response-head commitment](grpc_hedging_commitment.md) for the independent
+HTTP/2 cancellation-before-body gate and current native lifecycle evidence.
 
 `SharedChannel.hedgingStats()` exposes a lock-free, monotonic snapshot of
-logical calls, physical attempts, delayed and accelerated launches, throttled
+logical calls, logical attempts, delayed and accelerated launches, throttled
 attempts, pushback delays/stops, OK and fatal winners, exhausted non-fatal
 calls, backend failures, deadline expirations, and canceled losers. Counters
 advance at the scheduler ownership boundary rather than inferred transport
 events, so retries, stale timers and cleanup races cannot double-count them.
+Transparent transport replays remain part of the same logical attempt; the
+independent HTTP/2 transcript counts each physical request.
 Channels without hedged calls pay no scheduler or allocation cost.
 
 The policy is deliberately unary-only because arbitrary client streams lack a

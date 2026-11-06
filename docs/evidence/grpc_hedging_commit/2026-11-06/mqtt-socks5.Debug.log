@@ -1,0 +1,12 @@
+MQTT SOCKS5 interoperability passed: remote_dns=true no_auth=true auth_fallback=true rfc1929=true auth_failure=true timeout=true mqtt=true mqtt_tls13=true reconnect=true tls_reconnect=true tls_hostname=true client_io=zio-std-io peer_io=python-socket
+Build Summary: 8/8 steps succeeded
+interop-mqtt-socks5 success
++- run python3 success 691ms
+   +- compile exe netz-mqtt-socks5-client Debug native cached 39ms MaxRSS:40M
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 8ms MaxRSS:36M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 8ms MaxRSS:36M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options cached

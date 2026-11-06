@@ -1,0 +1,22 @@
+Run 1/1
+fuzz-mqtt-tls-bridge-qos2
++- run test 1 pass, 2 fail (3 total)
+error: 'mqtt_tls_bridge_qos2_fuzz_test.test.structured TLS durable MQTT bridge reaches recovery states' failed:
+       MQTT bridge QoS2 failure: tls=true sequence=0b04131a09 operation=5 phase=retained probe error=Timeout peer_error=none
+error: 'mqtt_tls_bridge_qos2_fuzz_test.test.fuzz bounded TLS durable MQTT bridge QoS2 ordering' failed without output
+failed command: ./.zig-cache/o/b76e7229feab10ac68fd0eb1fe8e4086/test --cache-dir=./.zig-cache --seed=0x4a337f0d --listen=-
+
+Build Summary: 6/8 steps succeeded (1 failed); 1/3 tests passed (2 failed)
+fuzz-mqtt-tls-bridge-qos2 transitive failure
++- run test 1 pass, 2 fail (3 total)
+   +- compile test Debug native success 33s MaxRSS:2G
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 6ms MaxRSS:36M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 7ms MaxRSS:36M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options cached
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/bac267e61d8e6c005ce658072262be16/build /home/passchaos/Temp/zig-x86_64-linux-0.16.0/zig /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib /home/passchaos/project-z/netz .zig-cache /home/passchaos/.cache/zig --seed 0x4a337f0d -Z6b0bad224ba14b83 fuzz-mqtt-tls-bridge-qos2 --summary all

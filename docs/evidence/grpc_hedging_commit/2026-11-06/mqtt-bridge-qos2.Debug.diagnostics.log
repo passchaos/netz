@@ -1,0 +1,68 @@
+Run 1/5, command=['zig', 'build', 'fuzz-mqtt-bridge-qos2', '--seed', '0x4a337f20', '--summary', 'all']
+Build Summary: 8/8 steps succeeded; 3/3 tests passed
+fuzz-mqtt-bridge-qos2 success
++- run test 3 pass (3 total) 3s MaxRSS:21M
+   +- compile test Debug native success 1s MaxRSS:481M
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 7ms MaxRSS:35M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 7ms MaxRSS:35M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options cached
+
+
+Run 2/5, command=['zig', 'build', 'fuzz-mqtt-bridge-qos2', '--seed', '0x4a337f21', '--summary', 'all']
+Build Summary: 8/8 steps succeeded; 3/3 tests passed
+fuzz-mqtt-bridge-qos2 success
++- run test 3 pass (3 total) 3s MaxRSS:21M
+   +- compile test Debug native cached 30ms MaxRSS:40M
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 6ms MaxRSS:39M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 7ms MaxRSS:39M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options cached
+
+
+Run 3/5, command=['zig', 'build', 'fuzz-mqtt-bridge-qos2', '--seed', '0x4a337f22', '--summary', 'all']
+Build Summary: 8/8 steps succeeded; 3/3 tests passed
+fuzz-mqtt-bridge-qos2 success
++- run test 3 pass (3 total) 3s MaxRSS:21M
+   +- compile test Debug native cached 41ms MaxRSS:41M
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 6ms MaxRSS:37M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 5ms MaxRSS:38M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options cached
+
+
+Run 4/5, command=['zig', 'build', 'fuzz-mqtt-bridge-qos2', '--seed', '0x4a337f23', '--summary', 'all']
+Build Summary: 8/8 steps succeeded; 3/3 tests passed
+fuzz-mqtt-bridge-qos2 success
++- run test 3 pass (3 total) 3s MaxRSS:21M
+   +- compile test Debug native cached 38ms MaxRSS:40M
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 7ms MaxRSS:35M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 7ms MaxRSS:35M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options cached
+
+
+Run 5/5, command=['zig', 'build', 'fuzz-mqtt-bridge-qos2', '--seed', '0x4a337f24', '--summary', 'all']
+Build Summary: 8/8 steps succeeded; 3/3 tests passed
+fuzz-mqtt-bridge-qos2 success
++- run test 3 pass (3 total) 3s MaxRSS:21M
+   +- compile test Debug native cached 41ms MaxRSS:40M
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 6ms MaxRSS:38M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 7ms MaxRSS:38M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options cached

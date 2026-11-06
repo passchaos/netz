@@ -4,6 +4,7 @@ const inputs = @import("request_inputs.zig");
 const Wake = @import("wake.zig").Wake;
 const State = @import("state.zig").State;
 const ring_hash = @import("../ring_hash.zig");
+const HedgeControl = @import("hedging/control.zig").Control;
 
 pub const Job = struct {
     pub const Completion = enum(u32) { waiting, completed, abandoned };
@@ -32,6 +33,8 @@ pub const Job = struct {
     done: std.Io.Event = .unset,
     /// Set by the worker after the unary stream opens; completion then reports LRS stats.
     lrs_started: bool = false,
+    /// Retained beyond an interrupted caller until this physical job retires.
+    hedging_control: ?*HedgeControl = null,
 
     pub fn create(
         parent: *State,
@@ -81,6 +84,7 @@ pub const Job = struct {
         if (self.result) |*result| result.deinit();
         self.releaseMessage();
         if (self.owned_inputs) |*owned| owned.deinit();
+        if (self.hedging_control) |control| control.release();
         if (self.stream) |stream| stream.release();
         if (self.owner_wake.load(.acquire)) |wake| wake.release();
         parent.allocator.destroy(self);
@@ -111,7 +115,16 @@ pub const Job = struct {
         return self.completion.cmpxchgStrong(.waiting, .abandoned, .acq_rel, .acquire) == null;
     }
     pub fn canceled(self: *const Job) bool {
-        return self.completion.load(.acquire) == .abandoned;
+        return self.completion.load(.acquire) == .abandoned or
+            if (self.hedging_control) |control| control.isLoser(self.hedgeIndex()) else false;
+    }
+    pub fn hedgeIndex(self: *const Job) u8 {
+        return self.previous_attempts orelse 0;
+    }
+    pub fn setHedgingControl(self: *Job, control: *HedgeControl) void {
+        std.debug.assert(self.hedging_control == null);
+        control.retain();
+        self.hedging_control = control;
     }
     pub fn takeResult(self: *Job) call.UnaryResponse {
         const result = self.result.?;

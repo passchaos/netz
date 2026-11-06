@@ -1,0 +1,603 @@
+{
+  "status": "passed",
+  "scope": "A6 unary hedging response-header commitment, prompt loser cancellation, retained control lifetime and call-wide transparent replay",
+  "base_commit": "8a19c2d1ddce70dfe1f587d3498c2a8d8467e02a",
+  "recorded_at_utc": "2026-11-06T21:16:59.605313+00:00",
+  "architecture": "x86_64",
+  "zig_version": "0.16.0",
+  "gates": [
+    {
+      "name": "grpc.Debug",
+      "command": [
+        "zig",
+        "build",
+        "test-lib",
+        "-Dtest-filter=gRPC",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 83.248,
+      "summary": "8/8 steps succeeded; 837/837 tests passed",
+      "log": "docs/evidence/grpc_hedging_commit/2026-11-06/grpc.Debug.log"
+    },
+    {
+      "name": "grpc.ReleaseSafe",
+      "command": [
+        "zig",
+        "build",
+        "test-lib",
+        "-Doptimize=ReleaseSafe",
+        "-Dtest-filter=gRPC",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 343.175,
+      "summary": "8/8 steps succeeded; 837/837 tests passed",
+      "log": "docs/evidence/grpc_hedging_commit/2026-11-06/grpc.ReleaseSafe.log"
+    },
+    {
+      "name": "interop.Debug",
+      "command": [
+        "zig",
+        "build",
+        "interop-grpc-hedging-commit",
+        "--summary",
+        "all",
+        "--",
+        "--output",
+        "docs/evidence/grpc_hedging_commit/2026-11-06.Debug.json"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 33.56,
+      "summary": "8/8 steps succeeded",
+      "log": "docs/evidence/grpc_hedging_commit/2026-11-06/interop.Debug.log"
+    },
+    {
+      "name": "interop.ReleaseSafe",
+      "command": [
+        "zig",
+        "build",
+        "interop-grpc-hedging-commit",
+        "-Doptimize=ReleaseSafe",
+        "--summary",
+        "all",
+        "--",
+        "--output",
+        "docs/evidence/grpc_hedging_commit/2026-11-06.ReleaseSafe.json"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 133.47,
+      "summary": "8/8 steps succeeded",
+      "log": "docs/evidence/grpc_hedging_commit/2026-11-06/interop.ReleaseSafe.log"
+    },
+    {
+      "name": "mqtt-socks5.Debug",
+      "command": [
+        "zig",
+        "build",
+        "interop-mqtt-socks5",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 0.832,
+      "summary": "8/8 steps succeeded",
+      "log": "docs/evidence/grpc_hedging_commit/2026-11-06/mqtt-socks5.Debug.log"
+    },
+    {
+      "name": "format",
+      "command": [
+        "zig",
+        "fmt",
+        "--check",
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "test",
+        "examples",
+        "benchmarks",
+        "tools"
+      ],
+      "exit_code": 0,
+      "summary": "Repository Zig formatting passed"
+    },
+    {
+      "name": "mqtt-bridge-qos2.Debug.seed-4a337f0d",
+      "command": [
+        "zig",
+        "build",
+        "fuzz-mqtt-bridge-qos2",
+        "--seed",
+        "0x4a337f0d",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 7.217,
+      "summary": "8/8 steps succeeded; 3/3 tests passed",
+      "log": "docs/evidence/grpc_hedging_commit/2026-11-06/mqtt-bridge-qos2.Debug.seed-4a337f0d.log"
+    },
+    {
+      "name": "mqtt-bridge-qos2.Debug.diagnostics",
+      "command": [
+        "zig",
+        "build",
+        "fuzz-mqtt-bridge-qos2",
+        "--seed",
+        "0x4a337f20",
+        "--summary",
+        "all"
+      ],
+      "commands": [
+        [
+          "zig",
+          "build",
+          "fuzz-mqtt-bridge-qos2",
+          "--seed",
+          "0x4a337f20",
+          "--summary",
+          "all"
+        ],
+        [
+          "zig",
+          "build",
+          "fuzz-mqtt-bridge-qos2",
+          "--seed",
+          "0x4a337f21",
+          "--summary",
+          "all"
+        ],
+        [
+          "zig",
+          "build",
+          "fuzz-mqtt-bridge-qos2",
+          "--seed",
+          "0x4a337f22",
+          "--summary",
+          "all"
+        ],
+        [
+          "zig",
+          "build",
+          "fuzz-mqtt-bridge-qos2",
+          "--seed",
+          "0x4a337f23",
+          "--summary",
+          "all"
+        ],
+        [
+          "zig",
+          "build",
+          "fuzz-mqtt-bridge-qos2",
+          "--seed",
+          "0x4a337f24",
+          "--summary",
+          "all"
+        ]
+      ],
+      "runs": 5,
+      "exit_code": 0,
+      "elapsed_seconds": 21.7,
+      "summary": "5 fresh run(s): 8/8 steps succeeded; 3/3 tests passed",
+      "log": "docs/evidence/grpc_hedging_commit/2026-11-06/mqtt-bridge-qos2.Debug.diagnostics.log"
+    },
+    {
+      "name": "mqtt-tls-bridge-qos2.Debug.diagnostics",
+      "command": [
+        "zig",
+        "build",
+        "fuzz-mqtt-tls-bridge-qos2",
+        "--seed",
+        "0x4a337f30",
+        "--summary",
+        "all"
+      ],
+      "commands": [
+        [
+          "zig",
+          "build",
+          "fuzz-mqtt-tls-bridge-qos2",
+          "--seed",
+          "0x4a337f30",
+          "--summary",
+          "all"
+        ],
+        [
+          "zig",
+          "build",
+          "fuzz-mqtt-tls-bridge-qos2",
+          "--seed",
+          "0x4a337f31",
+          "--summary",
+          "all"
+        ],
+        [
+          "zig",
+          "build",
+          "fuzz-mqtt-tls-bridge-qos2",
+          "--seed",
+          "0x4a337f32",
+          "--summary",
+          "all"
+        ]
+      ],
+      "runs": 3,
+      "exit_code": 0,
+      "elapsed_seconds": 23.077,
+      "summary": "3 fresh run(s): 8/8 steps succeeded; 3/3 tests passed",
+      "log": "docs/evidence/grpc_hedging_commit/2026-11-06/mqtt-tls-bridge-qos2.Debug.diagnostics.log"
+    },
+    {
+      "name": "repository.Debug",
+      "command": [
+        "zig",
+        "build",
+        "test",
+        "-j1",
+        "--seed",
+        "0x4a337f0d",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 249.019,
+      "summary": "189/189 steps succeeded; 3/3 tests passed",
+      "log": "docs/evidence/grpc_hedging_commit/2026-11-06/repository.Debug.log",
+      "cache_policy": "Reuse successful test steps with the same runner seed; fresh TCP/TLS bridge replays are recorded separately"
+    }
+  ],
+  "independent_http2": {
+    "Debug": {
+      "path": "docs/evidence/grpc_hedging_commit/2026-11-06.Debug.json",
+      "cases": [
+        {
+          "name": "head_cancels_loser",
+          "backend_counts": {
+            "A": 1,
+            "B": 1
+          },
+          "native": {
+            "name": "head_cancels_loser",
+            "status_code": 0,
+            "body": "b-committed",
+            "reset_code": -1,
+            "response_committed": true,
+            "milli_tokens": 4000,
+            "attempts_started": 2,
+            "delayed_attempts": 1,
+            "accelerated_attempts": 0,
+            "canceled_losers": 1,
+            "throttled_attempts": 0,
+            "ok_winners": 1,
+            "fatal_winners": 0,
+            "exhausted_non_fatal": 0,
+            "backend_failures": 0,
+            "deadline_expirations": 0
+          }
+        },
+        {
+          "name": "head_suppresses_later",
+          "backend_counts": {
+            "A": 1,
+            "B": 0
+          },
+          "native": {
+            "name": "head_suppresses_later",
+            "status_code": 0,
+            "body": "a-held",
+            "reset_code": -1,
+            "response_committed": true,
+            "milli_tokens": 4000,
+            "attempts_started": 1,
+            "delayed_attempts": 0,
+            "accelerated_attempts": 0,
+            "canceled_losers": 0,
+            "throttled_attempts": 0,
+            "ok_winners": 1,
+            "fatal_winners": 0,
+            "exhausted_non_fatal": 0,
+            "backend_failures": 0,
+            "deadline_expirations": 0
+          }
+        },
+        {
+          "name": "head_unavailable_wins",
+          "backend_counts": {
+            "A": 1,
+            "B": 0
+          },
+          "native": {
+            "name": "head_unavailable_wins",
+            "status_code": 14,
+            "body": "",
+            "reset_code": -1,
+            "response_committed": true,
+            "milli_tokens": 3000,
+            "attempts_started": 1,
+            "delayed_attempts": 0,
+            "accelerated_attempts": 0,
+            "canceled_losers": 0,
+            "throttled_attempts": 0,
+            "ok_winners": 0,
+            "fatal_winners": 1,
+            "exhausted_non_fatal": 0,
+            "backend_failures": 0,
+            "deadline_expirations": 0
+          }
+        },
+        {
+          "name": "trailers_only_accelerates",
+          "backend_counts": {
+            "A": 1,
+            "B": 1
+          },
+          "native": {
+            "name": "trailers_only_accelerates",
+            "status_code": 0,
+            "body": "b-accelerated",
+            "reset_code": -1,
+            "response_committed": true,
+            "milli_tokens": 4000,
+            "attempts_started": 2,
+            "delayed_attempts": 0,
+            "accelerated_attempts": 1,
+            "canceled_losers": 0,
+            "throttled_attempts": 0,
+            "ok_winners": 1,
+            "fatal_winners": 0,
+            "exhausted_non_fatal": 0,
+            "backend_failures": 0,
+            "deadline_expirations": 0
+          }
+        },
+        {
+          "name": "informational_does_not_commit",
+          "backend_counts": {
+            "A": 1,
+            "B": 1
+          },
+          "native": {
+            "name": "informational_does_not_commit",
+            "status_code": 0,
+            "body": "b-informational",
+            "reset_code": -1,
+            "response_committed": true,
+            "milli_tokens": 4000,
+            "attempts_started": 2,
+            "delayed_attempts": 1,
+            "accelerated_attempts": 0,
+            "canceled_losers": 1,
+            "throttled_attempts": 0,
+            "ok_winners": 1,
+            "fatal_winners": 0,
+            "exhausted_non_fatal": 0,
+            "backend_failures": 0,
+            "deadline_expirations": 0
+          }
+        },
+        {
+          "name": "call_wide_transparent_budget",
+          "backend_counts": {
+            "A": 2,
+            "B": 1
+          },
+          "native": {
+            "name": "call_wide_transparent_budget",
+            "status_code": 14,
+            "body": "",
+            "reset_code": 7,
+            "response_committed": false,
+            "milli_tokens": 2000,
+            "attempts_started": 2,
+            "delayed_attempts": 0,
+            "accelerated_attempts": 1,
+            "canceled_losers": 0,
+            "throttled_attempts": 1,
+            "ok_winners": 0,
+            "fatal_winners": 0,
+            "exhausted_non_fatal": 1,
+            "backend_failures": 0,
+            "deadline_expirations": 0
+          }
+        }
+      ]
+    },
+    "ReleaseSafe": {
+      "path": "docs/evidence/grpc_hedging_commit/2026-11-06.ReleaseSafe.json",
+      "cases": [
+        {
+          "name": "head_cancels_loser",
+          "backend_counts": {
+            "A": 1,
+            "B": 1
+          },
+          "native": {
+            "name": "head_cancels_loser",
+            "status_code": 0,
+            "body": "b-committed",
+            "reset_code": -1,
+            "response_committed": true,
+            "milli_tokens": 4000,
+            "attempts_started": 2,
+            "delayed_attempts": 1,
+            "accelerated_attempts": 0,
+            "canceled_losers": 1,
+            "throttled_attempts": 0,
+            "ok_winners": 1,
+            "fatal_winners": 0,
+            "exhausted_non_fatal": 0,
+            "backend_failures": 0,
+            "deadline_expirations": 0
+          }
+        },
+        {
+          "name": "head_suppresses_later",
+          "backend_counts": {
+            "A": 1,
+            "B": 0
+          },
+          "native": {
+            "name": "head_suppresses_later",
+            "status_code": 0,
+            "body": "a-held",
+            "reset_code": -1,
+            "response_committed": true,
+            "milli_tokens": 4000,
+            "attempts_started": 1,
+            "delayed_attempts": 0,
+            "accelerated_attempts": 0,
+            "canceled_losers": 0,
+            "throttled_attempts": 0,
+            "ok_winners": 1,
+            "fatal_winners": 0,
+            "exhausted_non_fatal": 0,
+            "backend_failures": 0,
+            "deadline_expirations": 0
+          }
+        },
+        {
+          "name": "head_unavailable_wins",
+          "backend_counts": {
+            "A": 1,
+            "B": 0
+          },
+          "native": {
+            "name": "head_unavailable_wins",
+            "status_code": 14,
+            "body": "",
+            "reset_code": -1,
+            "response_committed": true,
+            "milli_tokens": 3000,
+            "attempts_started": 1,
+            "delayed_attempts": 0,
+            "accelerated_attempts": 0,
+            "canceled_losers": 0,
+            "throttled_attempts": 0,
+            "ok_winners": 0,
+            "fatal_winners": 1,
+            "exhausted_non_fatal": 0,
+            "backend_failures": 0,
+            "deadline_expirations": 0
+          }
+        },
+        {
+          "name": "trailers_only_accelerates",
+          "backend_counts": {
+            "A": 1,
+            "B": 1
+          },
+          "native": {
+            "name": "trailers_only_accelerates",
+            "status_code": 0,
+            "body": "b-accelerated",
+            "reset_code": -1,
+            "response_committed": true,
+            "milli_tokens": 4000,
+            "attempts_started": 2,
+            "delayed_attempts": 0,
+            "accelerated_attempts": 1,
+            "canceled_losers": 0,
+            "throttled_attempts": 0,
+            "ok_winners": 1,
+            "fatal_winners": 0,
+            "exhausted_non_fatal": 0,
+            "backend_failures": 0,
+            "deadline_expirations": 0
+          }
+        },
+        {
+          "name": "informational_does_not_commit",
+          "backend_counts": {
+            "A": 1,
+            "B": 1
+          },
+          "native": {
+            "name": "informational_does_not_commit",
+            "status_code": 0,
+            "body": "b-informational",
+            "reset_code": -1,
+            "response_committed": true,
+            "milli_tokens": 4000,
+            "attempts_started": 2,
+            "delayed_attempts": 1,
+            "accelerated_attempts": 0,
+            "canceled_losers": 1,
+            "throttled_attempts": 0,
+            "ok_winners": 1,
+            "fatal_winners": 0,
+            "exhausted_non_fatal": 0,
+            "backend_failures": 0,
+            "deadline_expirations": 0
+          }
+        },
+        {
+          "name": "call_wide_transparent_budget",
+          "backend_counts": {
+            "A": 2,
+            "B": 1
+          },
+          "native": {
+            "name": "call_wide_transparent_budget",
+            "status_code": 14,
+            "body": "",
+            "reset_code": 7,
+            "response_committed": false,
+            "milli_tokens": 2000,
+            "attempts_started": 2,
+            "delayed_attempts": 0,
+            "accelerated_attempts": 1,
+            "canceled_losers": 0,
+            "throttled_attempts": 1,
+            "ok_winners": 0,
+            "fatal_winners": 0,
+            "exhausted_non_fatal": 1,
+            "backend_failures": 0,
+            "deadline_expirations": 0
+          }
+        }
+      ]
+    }
+  },
+  "source_sha256": {
+    "README.md": "17b2c1a90befbfc0ef001c27a70f0373969d1d33885f6ddacb67d99e2e6ae8d7",
+    "build.zig": "abbfa1623585dc0dbcad6a5509e692064b46cae7bf49c31d0ca32099be61bd6a",
+    "docs/evidence/grpc_hedging_commit/README.md": "8080f2dbf3b3feb516e67e5b793f69fcd86a9826fdcb44609350d8f7593af006",
+    "docs/grpc_hedging_commitment.md": "e767a68ddb4c6f871ddebf815c83bdce9a4f469496772c36269c73ca0a415148",
+    "docs/grpc_parity.md": "8677fad4e40697258417db37f1352b6ee4c169b489ca9fc85008d6cf58ca1bba",
+    "src/grpc/call/transparent_retry.zig": "54f4fefc13c749a66aad52a32fae61ca60b0c40661f5af5c2148cd021a6a6bf8",
+    "src/grpc/channel/shared.zig": "d29bf0566129fc7fdaf8f463227f544cba8ae9f012fac6ddbf2fb9a50421822c",
+    "src/grpc/channel/shared/hedging.zig": "60b5fa2ba4be9759683526aca95120e2eb5a51192317075945bba1ca0a36a009",
+    "src/grpc/channel/shared/hedging/control.zig": "10a985a34a69522a99ab2dd1d0f23e422bb7b98d5ca7c92297c9212b49464efe",
+    "src/grpc/channel/shared/hedging/lifecycle_tests.zig": "606fbe539f920d12110b41092b0c5d8e0cbd08e32161c97bf904a20db194f465",
+    "src/grpc/channel/shared/job.zig": "641fa7536123853368179d018351508a8902bdededc78f4eea026d25f708c08b",
+    "src/grpc/channel/shared/state.zig": "26f999d40a256200b37968f719624f7bd6344ff5bfe28be5cc66e307b5c131a2",
+    "src/grpc/channel/shared/worker.zig": "0fca20374263c506f21f353712520398dbc7269b650ed2356628f12df563af91",
+    "test/mqtt_bridge_qos2_fuzz/harness.zig": "8bac513d6160e723009c21b3de344226f946fe910982abc9fb5162fbf8ee262a",
+    "tools/interop/grpc_hedging_commit/README.md": "4e5213fa9737991c1b4900ce4763607c0e228d4ae3f674f509f13c858dda8689",
+    "tools/interop/grpc_hedging_commit/client.zig": "11ff6af4215520f7c6c3067675a99c88b5ffe20bbbb40c828bae6ad8528b3c2d",
+    "tools/interop/grpc_hedging_commit/peer.js": "b3a1606339ccfd6166a71fdb4ea45d5a546df951f6835474860327129015078a",
+    "tools/interop/grpc_hedging_commit/run.py": "7080fe88587fcdb92165a41d762aea00d971c036e83dcbee5b25dd74b3b0c5cc",
+    "tools/interop/mqtt_broker_config.py": "a47b356b117ac7c56059ce80d718e89c628bc2b3d739ca187afbf6c4765e0d70",
+    "tools/interop/mqtt_socks5.py": "2dc2b9e17368695108bf023c7c6070a9090bf5bb6fcc2e151cff5d2235bbdde5",
+    "tools/interop/mqtt_socks5_client.zig": "6a43a4ccda1a50ed63ae2b0e5025db44a05f3c8492a16f9a882b8d6391bb2327"
+  },
+  "references": {
+    "a6": "https://github.com/grpc/proposal/blob/master/A6-client-retries.md",
+    "core_throttling": "/home/passchaos/Work/grpc/src/core/client_channel/retry_filter_legacy_call_data.cc",
+    "java_hedging": "https://github.com/grpc/grpc-java/blob/master/core/src/main/java/io/grpc/internal/RetriableStream.java"
+  },
+  "validation_cache_policy": "Final repository gate reuses successful same-seed Zig test steps; five fresh TCP and three fresh TLS bridge QoS2 replays are recorded separately",
+  "known_validation_uncertainties": [
+    {
+      "topic": "Intermittent MQTT bridge QoS2 timeout",
+      "status": "Root cause remains unconfirmed; deadlines and delivery assertions were preserved",
+      "logs": [
+        "docs/evidence/grpc_hedging_commit/2026-11-06/repository.Debug.serial-bridge-qos2-uncertain.log",
+        "docs/evidence/grpc_hedging_commit/2026-11-06/mqtt-tls-bridge-qos2.Debug.diagnostics.initial-timeout.log"
+      ]
+    }
+  ],
+  "overall_goal_status": "active"
+}

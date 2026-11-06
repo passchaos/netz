@@ -1,0 +1,243 @@
+[
+  {
+    "name": "grpc.Debug",
+    "command": [
+      "zig",
+      "build",
+      "test-lib",
+      "-Dtest-filter=gRPC",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 83.248,
+    "summary": "8/8 steps succeeded; 837/837 tests passed",
+    "log": "docs/evidence/grpc_hedging_commit/2026-11-06/grpc.Debug.log"
+  },
+  {
+    "name": "grpc.ReleaseSafe",
+    "command": [
+      "zig",
+      "build",
+      "test-lib",
+      "-Doptimize=ReleaseSafe",
+      "-Dtest-filter=gRPC",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 343.175,
+    "summary": "8/8 steps succeeded; 837/837 tests passed",
+    "log": "docs/evidence/grpc_hedging_commit/2026-11-06/grpc.ReleaseSafe.log"
+  },
+  {
+    "name": "interop.Debug",
+    "command": [
+      "zig",
+      "build",
+      "interop-grpc-hedging-commit",
+      "--summary",
+      "all",
+      "--",
+      "--output",
+      "docs/evidence/grpc_hedging_commit/2026-11-06.Debug.json"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 33.56,
+    "summary": "8/8 steps succeeded",
+    "log": "docs/evidence/grpc_hedging_commit/2026-11-06/interop.Debug.log"
+  },
+  {
+    "name": "interop.ReleaseSafe",
+    "command": [
+      "zig",
+      "build",
+      "interop-grpc-hedging-commit",
+      "-Doptimize=ReleaseSafe",
+      "--summary",
+      "all",
+      "--",
+      "--output",
+      "docs/evidence/grpc_hedging_commit/2026-11-06.ReleaseSafe.json"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 133.47,
+    "summary": "8/8 steps succeeded",
+    "log": "docs/evidence/grpc_hedging_commit/2026-11-06/interop.ReleaseSafe.log"
+  },
+  {
+    "name": "mqtt-socks5.Debug",
+    "command": [
+      "zig",
+      "build",
+      "interop-mqtt-socks5",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 0.832,
+    "summary": "8/8 steps succeeded",
+    "log": "docs/evidence/grpc_hedging_commit/2026-11-06/mqtt-socks5.Debug.log"
+  },
+  {
+    "name": "format",
+    "command": [
+      "zig",
+      "fmt",
+      "--check",
+      "build.zig",
+      "build.zig.zon",
+      "src",
+      "test",
+      "examples",
+      "benchmarks",
+      "tools"
+    ],
+    "exit_code": 0,
+    "summary": "Repository Zig formatting passed"
+  },
+  {
+    "name": "mqtt-bridge-qos2.Debug.seed-4a337f0d",
+    "command": [
+      "zig",
+      "build",
+      "fuzz-mqtt-bridge-qos2",
+      "--seed",
+      "0x4a337f0d",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 7.217,
+    "summary": "8/8 steps succeeded; 3/3 tests passed",
+    "log": "docs/evidence/grpc_hedging_commit/2026-11-06/mqtt-bridge-qos2.Debug.seed-4a337f0d.log"
+  },
+  {
+    "name": "mqtt-bridge-qos2.Debug.diagnostics",
+    "command": [
+      "zig",
+      "build",
+      "fuzz-mqtt-bridge-qos2",
+      "--seed",
+      "0x4a337f20",
+      "--summary",
+      "all"
+    ],
+    "commands": [
+      [
+        "zig",
+        "build",
+        "fuzz-mqtt-bridge-qos2",
+        "--seed",
+        "0x4a337f20",
+        "--summary",
+        "all"
+      ],
+      [
+        "zig",
+        "build",
+        "fuzz-mqtt-bridge-qos2",
+        "--seed",
+        "0x4a337f21",
+        "--summary",
+        "all"
+      ],
+      [
+        "zig",
+        "build",
+        "fuzz-mqtt-bridge-qos2",
+        "--seed",
+        "0x4a337f22",
+        "--summary",
+        "all"
+      ],
+      [
+        "zig",
+        "build",
+        "fuzz-mqtt-bridge-qos2",
+        "--seed",
+        "0x4a337f23",
+        "--summary",
+        "all"
+      ],
+      [
+        "zig",
+        "build",
+        "fuzz-mqtt-bridge-qos2",
+        "--seed",
+        "0x4a337f24",
+        "--summary",
+        "all"
+      ]
+    ],
+    "runs": 5,
+    "exit_code": 0,
+    "elapsed_seconds": 21.7,
+    "summary": "5 fresh run(s): 8/8 steps succeeded; 3/3 tests passed",
+    "log": "docs/evidence/grpc_hedging_commit/2026-11-06/mqtt-bridge-qos2.Debug.diagnostics.log"
+  },
+  {
+    "name": "mqtt-tls-bridge-qos2.Debug.diagnostics",
+    "command": [
+      "zig",
+      "build",
+      "fuzz-mqtt-tls-bridge-qos2",
+      "--seed",
+      "0x4a337f30",
+      "--summary",
+      "all"
+    ],
+    "commands": [
+      [
+        "zig",
+        "build",
+        "fuzz-mqtt-tls-bridge-qos2",
+        "--seed",
+        "0x4a337f30",
+        "--summary",
+        "all"
+      ],
+      [
+        "zig",
+        "build",
+        "fuzz-mqtt-tls-bridge-qos2",
+        "--seed",
+        "0x4a337f31",
+        "--summary",
+        "all"
+      ],
+      [
+        "zig",
+        "build",
+        "fuzz-mqtt-tls-bridge-qos2",
+        "--seed",
+        "0x4a337f32",
+        "--summary",
+        "all"
+      ]
+    ],
+    "runs": 3,
+    "exit_code": 0,
+    "elapsed_seconds": 23.077,
+    "summary": "3 fresh run(s): 8/8 steps succeeded; 3/3 tests passed",
+    "log": "docs/evidence/grpc_hedging_commit/2026-11-06/mqtt-tls-bridge-qos2.Debug.diagnostics.log"
+  },
+  {
+    "name": "repository.Debug",
+    "command": [
+      "zig",
+      "build",
+      "test",
+      "-j1",
+      "--seed",
+      "0x4a337f0d",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 249.019,
+    "summary": "189/189 steps succeeded; 3/3 tests passed",
+    "log": "docs/evidence/grpc_hedging_commit/2026-11-06/repository.Debug.log",
+    "cache_policy": "Reuse successful test steps with the same runner seed; fresh TCP/TLS bridge replays are recorded separately"
+  }
+]

@@ -16,6 +16,7 @@ const weighted_round_robin = @import("../weighted_round_robin.zig");
 const outlier_detection = @import("../outlier_detection.zig");
 const Settings = @import("worker_settings.zig").Settings;
 const lrs_stats = @import("lrs_stats.zig");
+const transparent = @import("../../call/transparent_retry.zig");
 
 pub fn Worker(comptime State: type) type {
     return struct {
@@ -213,6 +214,8 @@ pub fn Worker(comptime State: type) type {
             const job = self.active.items[index].job;
             const item = &self.active.items[index];
             const failure = attemptFailure(item.stream.transport.connection, item.stream.transport.stream_id, item.observed_head, err);
+            if (job.hedging_control) |control| if (control.errorIsFatal(failure) and
+                !(job.options.transparent_retry and transparent.replayableError(failure))) self.parent.commitHedge(control, job.hedgeIndex());
             self.active.items[index].stream.cancel() catch {};
             self.active.items[index].deinit();
             _ = self.active.swapRemove(index);
@@ -431,13 +434,19 @@ pub fn Worker(comptime State: type) type {
                                 continue;
                             };
                             const job = item.job;
+                            if (job.hedging_control) |control| if (control.responseIsFatal(result) and
+                                !(job.options.transparent_retry and transparent.replayableResponse(result))) self.parent.commitHedge(control, job.hedgeIndex());
                             item.deinit();
                             _ = self.active.swapRemove(i);
                             self.parent.finishAttempt(self, job, result, null);
                             progress = true;
                             continue;
                         },
-                        .initial_metadata, .informational => item.observed_head = true,
+                        .initial_metadata => {
+                            item.observed_head = true;
+                            if (item.job.hedging_control) |control| self.parent.commitHedge(control, item.job.hedgeIndex());
+                        },
+                        .informational => item.observed_head = true,
                         .messages => {},
                     }
                     event.deinit(self.parent.allocator);
@@ -459,6 +468,10 @@ pub fn Worker(comptime State: type) type {
             self.publish();
             while (self.parent.claim(self)) |job| {
                 progress = true;
+                if (self.parent.canceled(job)) {
+                    self.parent.finishAttempt(self, job, null, error.Canceled);
+                    continue;
+                }
                 if (job.stream != null) {
                     StreamOwner.open(self, job, self.outputDeadline()) catch |err| {
                         self.parent.finishAttempt(self, job, null, err);
