@@ -33,4 +33,17 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(base64);
     _ = std.base64.standard.Encoder.encode(base64, encoded);
     std.debug.print("{s}\n", .{base64});
+
+    // A request with exclude_resource_contents=true keeps metadata but drops
+    // the resource wire bytes.
+    const request = try netz.grpc.xds.csds.decodeRequest("\x18\x01");
+    const excluded = try netz.grpc.xds.csds.encodeResponse(allocator, &resources, .{
+        .node = "\x0a\x06node-1",
+        .exclude_resource_contents = request.exclude_resource_contents,
+    });
+    defer allocator.free(excluded);
+    const excluded_base64 = try allocator.alloc(u8, std.base64.standard.Encoder.calcSize(excluded.len));
+    defer allocator.free(excluded_base64);
+    _ = std.base64.standard.Encoder.encode(excluded_base64, excluded);
+    std.debug.print("{s}\n", .{excluded_base64});
 }

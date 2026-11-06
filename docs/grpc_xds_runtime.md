@@ -187,11 +187,16 @@ service from its own gRPC server and returns these response bytes; netz does not
 own an admin listener, and the request's node matchers are ignored because the
 response describes this client.
 
+`Controller.fetchClientStatus(client, allocator, request_bytes, options)` serves
+one `FetchClientStatus` request body directly: it validates and decodes the
+request, ignores node matchers, and honors `exclude_resource_contents` by
+omitting resource wire bytes while keeping type, name, version and status.
+
 ```zig
 const node = try netz.grpc.xds.ads.codec.encodeNode(allocator, configuration.adsNode());
 defer allocator.free(node);
-const response = try controller.encodeClientStatus(
-    discovery, allocator, .{ .node = node },
+const response = try controller.fetchClientStatus(
+    discovery, allocator, request_bytes, .{ .node = node },
 );
 ```
 

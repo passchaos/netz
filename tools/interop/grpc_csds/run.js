@@ -30,11 +30,12 @@ if (run.status !== 0) {
   console.error(run.stderr || run.stdout);
   process.exit(run.status ?? 1);
 }
-const base64 = (run.stdout + run.stderr).trim().split('\n').filter(Boolean).pop();
-if (!base64) {
-  console.error('emitter produced no response');
+const lines = (run.stdout + run.stderr).trim().split('\n').filter(Boolean);
+if (lines.length < 2) {
+  console.error('emitter produced fewer than two responses');
   process.exit(1);
 }
+const [base64, excludedBase64] = lines.slice(-2);
 
 const schema = new protobuf.Root();
 schema.resolvePath = (_origin, target) => {
@@ -47,10 +48,14 @@ schema.resolvePath = (_origin, target) => {
 schema.loadSync('envoy/service/status/v3/csds.proto', { keepCase: true });
 schema.resolveAll();
 const Response = schema.lookupType('envoy.service.status.v3.ClientStatusResponse');
-const response = Response.toObject(
-  Response.decode(Buffer.from(base64, 'base64')),
-  { enums: String, longs: String, defaults: true },
-);
+const decode = (bytes) =>
+  Response.toObject(Response.decode(Buffer.from(bytes, 'base64')), {
+    enums: String,
+    longs: String,
+    defaults: true,
+  });
+const response = decode(base64);
+const excludedResponse = decode(excludedBase64);
 
 function fail(message) {
   console.error(`CSDS_RESULT {"status":"failed","error":${JSON.stringify(message)}}`);
@@ -108,6 +113,25 @@ for (const want of expected) {
   }
 }
 
+// exclude_resource_contents keeps type/name/version/status but removes wire.
+const excludedClient = excludedResponse.config[0];
+if (excludedClient.generic_xds_configs.length !== 3) {
+  fail(`excluded config count ${excludedClient.generic_xds_configs.length}`);
+}
+for (const want of expected) {
+  const got = excludedClient.generic_xds_configs.find(
+    (entry) => entry.type_url === want.type_url && entry.name === want.name,
+  );
+  if (!got) fail(`excluded missing ${want.type_url} ${want.name}`);
+  if ((got.version_info ?? '') !== want.version_info) {
+    fail(`excluded ${want.name} version ${JSON.stringify(got.version_info)}`);
+  }
+  if (got.client_status !== want.client_status) {
+    fail(`excluded ${want.name} status ${JSON.stringify(got.client_status)}`);
+  }
+  if (got.xds_config != null) fail(`excluded ${want.name} kept xds_config`);
+}
+
 console.log(
-  `CSDS_RESULT {"status":"passed","configs":${client.generic_xds_configs.length},"node":${JSON.stringify(client.node.id)},"scope":${JSON.stringify(client.client_scope)}}`,
+  `CSDS_RESULT {"status":"passed","configs":${client.generic_xds_configs.length},"excluded":${excludedClient.generic_xds_configs.length},"node":${JSON.stringify(client.node.id)},"scope":${JSON.stringify(client.client_scope)}}`,
 );

@@ -15,7 +15,7 @@ const entries = @import("entry.zig");
 const Plan = @import("plan.zig").Plan;
 const Target = @import("target.zig").Target;
 pub const Options = @import("options.zig").Options;
-pub const Error = @import("errors.zig").PublishError || lds.Error || cds.Error || eds.Error || tls_material.Error || lrs.RunnerError || sds.Error || error{ InvalidXdsOptions, XdsNotStarted, DuplicateSdsResource, InvalidXdsResourceName };
+pub const Error = @import("errors.zig").PublishError || lds.Error || cds.Error || eds.Error || tls_material.Error || lrs.RunnerError || sds.Error || @import("../csds.zig").Error || error{ InvalidXdsOptions, XdsNotStarted, DuplicateSdsResource, InvalidXdsResourceName };
 pub const CachedSecret = struct {
     owned: sds.Owned,
     /// Delta `Resource.ttl` deadline; null means no timer.
@@ -680,6 +680,22 @@ pub const Controller = struct {
     /// wire bytes and the version the client accepted. SotW reports the type's
     /// accepted version for every resource; delta reports the per-resource
     /// accepted version.
+    /// Serve one `FetchClientStatus` request body. Node matchers and the
+    /// request node are ignored; `exclude_resource_contents` suppresses
+    /// resource wire bytes while keeping type, name, version and status.
+    pub fn fetchClientStatus(
+        self: *Controller,
+        client: anytype,
+        allocator: std.mem.Allocator,
+        request_bytes: []const u8,
+        options: @import("../csds.zig").Options,
+    ) Error![]u8 {
+        const csds = @import("../csds.zig");
+        const request = try csds.decodeRequest(request_bytes);
+        var effective = options;
+        effective.exclude_resource_contents = request.exclude_resource_contents;
+        return self.encodeClientStatus(client, allocator, effective);
+    }
     pub fn encodeClientStatus(
         self: *Controller,
         client: anytype,

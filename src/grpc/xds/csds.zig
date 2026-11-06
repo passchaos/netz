@@ -8,6 +8,8 @@
 
 const std = @import("std");
 
+pub const Error = std.mem.Allocator.Error || error{InvalidRequest};
+
 /// `envoy.admin.v3.ClientResourceStatus`.
 pub const ClientStatus = enum(u32) {
     unknown = 0,
@@ -33,7 +35,81 @@ pub const Options = struct {
     node: []const u8 = "",
     /// `ClientConfig.client_scope`; "grpc" identifies a gRPC data-plane client.
     client_scope: []const u8 = "grpc",
+    /// `ClientStatusRequest.exclude_resource_contents`: omit every
+    /// `GenericXdsConfig.xds_config` while keeping status and version.
+    exclude_resource_contents: bool = false,
 };
+
+pub const Request = struct {
+    exclude_resource_contents: bool = false,
+};
+
+const Field = struct { number: u32, wire_type: u3 };
+
+const Reader = struct {
+    bytes: []const u8,
+    offset: usize = 0,
+
+    fn varint(self: *Reader) Error!u64 {
+        var shift: u6 = 0;
+        var value: u64 = 0;
+        while (true) {
+            if (self.offset == self.bytes.len) return error.InvalidRequest;
+            const byte = self.bytes[self.offset];
+            self.offset += 1;
+            value |= @as(u64, byte & 0x7f) << shift;
+            if (byte & 0x80 == 0) return value;
+            if (shift >= 63) return error.InvalidRequest;
+            shift += 7;
+        }
+    }
+
+    fn next(self: *Reader) Error!?Field {
+        if (self.offset == self.bytes.len) return null;
+        const value = try self.varint();
+        const number: u32 = @intCast(value >> 3);
+        const wire_type: u3 = @intCast(value & 7);
+        if (number == 0) return error.InvalidRequest;
+        return .{ .number = number, .wire_type = wire_type };
+    }
+
+    fn skip(self: *Reader, field: Field) Error!void {
+        switch (field.wire_type) {
+            0 => _ = try self.varint(),
+            1 => {
+                if (self.bytes.len - self.offset < 8) return error.InvalidRequest;
+                self.offset += 8;
+            },
+            2 => {
+                const length = try self.varint();
+                if (length > self.bytes.len - self.offset) return error.InvalidRequest;
+                self.offset += @intCast(length);
+            },
+            5 => {
+                if (self.bytes.len - self.offset < 4) return error.InvalidRequest;
+                self.offset += 4;
+            },
+            else => return error.InvalidRequest,
+        }
+    }
+};
+
+/// Decode the fields of a `ClientStatusRequest` that affect this client-side
+/// response. Node matchers and the request node are ignored because the
+/// response describes the local client.
+pub fn decodeRequest(bytes: []const u8) Error!Request {
+    if (bytes.len > 1024 * 1024) return error.InvalidRequest;
+    var reader = Reader{ .bytes = bytes };
+    var request: Request = .{};
+    while (try reader.next()) |field| {
+        switch (field.number) {
+            1, 2 => try reader.skip(field),
+            3 => request.exclude_resource_contents = (try reader.varint()) != 0,
+            else => try reader.skip(field),
+        }
+    }
+    return request;
+}
 
 fn varint(out: *std.ArrayList(u8), allocator: std.mem.Allocator, value: u64) !void {
     var remaining = value;
@@ -62,13 +138,14 @@ fn varintField(out: *std.ArrayList(u8), allocator: std.mem.Allocator, field: u32
 fn encodeGeneric(
     allocator: std.mem.Allocator,
     resource: Resource,
+    exclude_resource_contents: bool,
 ) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
     try bytesField(&out, allocator, 1, resource.type_url);
     try bytesField(&out, allocator, 2, resource.name);
     if (resource.version.len != 0) try bytesField(&out, allocator, 3, resource.version);
-    if (resource.wire.len != 0) {
+    if (resource.wire.len != 0 and !exclude_resource_contents) {
         var any: std.ArrayList(u8) = .empty;
         defer any.deinit(allocator);
         try bytesField(&any, allocator, 1, resource.type_url);
@@ -102,7 +179,7 @@ pub fn encodeResponse(
     defer client.deinit(allocator);
     if (options.node.len != 0) try bytesField(&client, allocator, 1, options.node);
     for (resources) |resource| {
-        const generic = try encodeGeneric(allocator, resource);
+        const generic = try encodeGeneric(allocator, resource, options.exclude_resource_contents);
         defer allocator.free(generic);
         try bytesField(&client, allocator, 3, generic);
     }

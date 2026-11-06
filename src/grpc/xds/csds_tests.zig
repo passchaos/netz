@@ -43,6 +43,7 @@ const Info = struct {
     name: []const u8 = "",
     version: []const u8 = "",
     status: u64 = 0,
+    has_config: bool = false,
 };
 
 fn collect(allocator: std.mem.Allocator, encoded: []const u8) ![]Info {
@@ -67,6 +68,10 @@ fn collect(allocator: std.mem.Allocator, encoded: []const u8) ![]Info {
                     1 => info.type_url = try generic.string(),
                     2 => info.name = try generic.string(),
                     3 => info.version = try generic.string(),
+                    4 => {
+                        info.has_config = true;
+                        try generic.skip(generic_field);
+                    },
                     7 => info.status = try generic.varint(),
                     else => try generic.skip(generic_field),
                 }
@@ -180,4 +185,22 @@ test "gRPC SotW xDS CSDS dump reports the accepted type version" {
     const pending = find(configs, cds.type_url, "a") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("", pending.version);
     try std.testing.expectEqual(@as(u64, 1), pending.status); // REQUESTED
+    try std.testing.expect(listener_info.has_config);
+    try std.testing.expect(!pending.has_config);
+
+    // exclude_resource_contents (ClientStatusRequest field 3) removes wire
+    // bytes but keeps the accepted type, name, version and status.
+    const excluded = try controller.fetchClientStatus(&client, gpa, "\x18\x01", .{});
+    defer gpa.free(excluded);
+    const excluded_configs = try collect(gpa, excluded);
+    defer gpa.free(excluded_configs);
+    const excluded_listener = find(excluded_configs, lds.type_url, "frontend") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("v1", excluded_listener.version);
+    try std.testing.expectEqual(@as(u64, 3), excluded_listener.status);
+    try std.testing.expect(!excluded_listener.has_config);
+
+    // Node matchers are ignored, and malformed request bytes are rejected.
+    const with_matcher = try controller.fetchClientStatus(&client, gpa, "\x0a\x02\x08\x01", .{});
+    defer gpa.free(with_matcher);
+    try std.testing.expectError(error.InvalidRequest, controller.fetchClientStatus(&client, gpa, "\x0f", .{}));
 }
