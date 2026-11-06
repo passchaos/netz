@@ -23,6 +23,11 @@
       "passed": 6533,
       "total": 6533,
       "failed": 0
+    },
+    "interop": {
+      "command": "zig build interop-grpc-csds --summary all",
+      "status": "passed",
+      "result": "the emitted response decoded with the official Envoy csds.proto schema: one client config, node id node-1, scope grpc, three resources with exact type/name/version/status and accepted Any bytes"
     }
   },
   "source_sha256": {
@@ -30,7 +35,10 @@
     "src/grpc/xds/csds_tests.zig": "d0615dba1f94d3a58b01d71e178a6bfe4f56b2f5ae5371a683d1f7593cafb094",
     "src/grpc/xds/runtime/controller.zig": "06fb7a34e5c2135777112a6ed3598a1f5158dcb9582aae6ac73155a30643a956",
     "src/grpc/xds/mod.zig": "aa7efa52021418c61259c78735bd70847ebc2bf21ba9d0c3b229fccd05defabc",
-    "docs/grpc_xds_runtime.md": "09b5906c7aa746cf9f13499a657326ef383bba7a1a872bfbfcef9dcb6b16f03a"
+    "docs/grpc_xds_runtime.md": "668a0f9c64101eb16994f3071318c5f511ccd13d3d1cce160b98fd7ae90e97db",
+    "tools/interop/grpc_csds/emit.zig": "3e9ca469ba74e7237a7d8e539384316dc92ea436eb81bf04d1c3a8b2edc60496",
+    "tools/interop/grpc_csds/run.js": "d89e56d43cc7eb4140d56b02ac2f1d6c513e5f7e12c5f2010c62db50b7d02f08",
+    "build.zig": "0d4ad54c13e206d43c765c364228b430d542a8df4ba1ea8d0187a418e0f5f7cf"
   },
-  "notes": "The request's node matchers are ignored because the response describes the local client. Resource status maps requested to REQUESTED, does_not_exist to DOES_NOT_EXIST, a transient timeout to REQUESTED, and a delivered resource to ACKED. The encoder emits proto3 defaults by omission and encodes each accepted resource as a google.protobuf.Any with the resource type URL."
+  "notes": "The request's node matchers are ignored because the response describes the local client. Resource status maps requested to REQUESTED, does_not_exist to DOES_NOT_EXIST, a transient timeout to REQUESTED, and a delivered resource to ACKED. The encoder emits proto3 defaults by omission and encodes each accepted resource as a google.protobuf.Any with the resource type URL. The interop gate decodes the response with protobufjs against the official Envoy proto shipped in the pinned grpc-js-xds dependency."
 }

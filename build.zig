@@ -2195,6 +2195,20 @@ pub fn build(b: *std.Build) void {
     const grpc_rds_step = b.step("interop-grpc-rds", "Verify official RDS resources through ADS, immutable selectors and automatic unary/stream cluster dispatch");
     grpc_rds_step.dependOn(&grpc_rds.step);
 
+    const grpc_csds_emit = b.addExecutable(.{
+        .name = "netz-grpc-csds-emit",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/interop/grpc_csds/emit.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const grpc_csds = b.addSystemCommand(&.{ "node", "tools/interop/grpc_csds/run.js" });
+    grpc_csds.addArtifactArg(grpc_csds_emit);
+    const grpc_csds_step = b.step("interop-grpc-csds", "Decode a netz CSDS ClientStatusResponse with the official Envoy schema");
+    grpc_csds_step.dependOn(&grpc_csds.step);
+
     const grpc_cds_client = b.addExecutable(.{
         .name = "netz-grpc-cds-client",
         .root_module = b.createModule(.{

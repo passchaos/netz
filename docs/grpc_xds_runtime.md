@@ -195,5 +195,10 @@ const response = try controller.encodeClientStatus(
 );
 ```
 
+`zig build interop-grpc-csds` emits one response and decodes it with the
+official Envoy `csds.proto` schema shipped by the pinned grpc-js-xds
+dependency, checking the node, scope, every resource type/name/version/status
+and the accepted `google.protobuf.Any` bytes.
+
 Unsupported resource features continue to fail typed validation rather than
 claim deployment support.
