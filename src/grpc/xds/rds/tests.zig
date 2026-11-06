@@ -120,16 +120,25 @@ test "gRPC RDS rewrites matched prefixes and literal or header authorities" {
     try std.testing.expectEqualStrings("literal.example", literal.authority.?);
     try std.testing.expectEqualStrings("/literal.Service/Get", literal.path_rewrite.?.whole);
 }
-test "gRPC RDS marks auto host rewrite for endpoint selection" {
+test "gRPC RDS honors auto host rewrite only for a trusted server" {
     var action = fixture.Builder{ .allocator = gpa };
     defer action.deinit();
     try action.wrapper(7, 1);
     const bytes = try fixture.encode(gpa, "routes", &.{"backend.test"}, &.{.{ .prefix = "/", .action_extra = action.data.items }}, null);
     defer gpa.free(bytes);
-    const snapshot = try rds.Snapshot.create(gpa, bytes, .{}, .{ .authority = "backend.test" });
-    defer snapshot.release();
     var prng = random();
-    const selected = try snapshot.selectWith(gpa, .{ .path = "/demo.Service/Get", .authority = "backend.test" }, 1, prng.random());
+
+    // An untrusted control plane may not redirect the request authority.
+    const untrusted = try rds.Snapshot.create(gpa, bytes, .{}, .{ .authority = "backend.test" });
+    defer untrusted.release();
+    const ignored = try untrusted.selectWith(gpa, .{ .path = "/demo.Service/Get", .authority = "backend.test" }, 1, prng.random());
+    try std.testing.expect(!ignored.auto_host_rewrite);
+    try std.testing.expect(ignored.authority == null);
+
+    // The bootstrap `trusted_xds_server` feature enables the grpc-core behavior.
+    const trusted = try rds.Snapshot.create(gpa, bytes, .{}, .{ .authority = "backend.test", .trusted_xds_server = true });
+    defer trusted.release();
+    const selected = try trusted.selectWith(gpa, .{ .path = "/demo.Service/Get", .authority = "backend.test" }, 1, prng.random());
     try std.testing.expect(selected.auto_host_rewrite);
     try std.testing.expect(selected.authority == null);
 }

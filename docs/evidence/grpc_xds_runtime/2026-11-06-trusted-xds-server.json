@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "date": "2026-11-06",
+  "head": "working-tree",
+  "subject": "gRPC xDS trusted_xds_server",
+  "change": "runtime.Options.trusted_xds_server implements the gRPC xDS server feature of the same name. RDS automatic host rewriting is honored only when the control plane is trusted; an untrusted server's auto_host_rewrite is ignored instead of replacing the request :authority, matching grpc-core. The bootstrap parser already exposed the flag per server; the runtime and LDS controller now forward it into route selection.",
+  "tests": {
+    "unit": "src/grpc/xds/rds/tests.zig checks that the same auto_host_rewrite resource is ignored for an untrusted snapshot and applied for a trusted one. src/grpc/xds/lds/controller_tests.zig drives inline RDS through the public LDS controller for both option values and inspects the resolved request options. src/grpc/xds/rds/transport_tests.zig keeps the wire-level auto rewrite case on a trusted server. src/grpc/xds/bootstrap_tests.zig covers the server_features flag.",
+    "focused_gate": {
+      "command": "zig build test-lib -Dtest-filter='gRPC RDS' -Dtest-filter='gRPC LDS' -Dtest-filter='xDS runtime' -Dtest-filter='bootstrap' --summary all",
+      "passed": 244,
+      "total": 244,
+      "failed": 0
+    },
+    "compile": {
+      "command": "zig build test-compile",
+      "status": "passed"
+    },
+    "full_library": {
+      "command": "zig build test-lib",
+      "status": "passed",
+      "exit_code": 0,
+      "passed": 6524,
+      "total": 6524,
+      "failed": 0
+    },
+    "interop": {
+      "command": "zig build interop-grpc-rds --summary all",
+      "status": "passed"
+    }
+  },
+  "source_sha256": {
+    "src/grpc/xds/rds/snapshot.zig": "bd0c768ae0edf3b4a5cef94444869a731eac859141f516972b2ba30568c1b5de",
+    "src/grpc/xds/lds/controller.zig": "413d0fd3982f675d58aefabe0d506d77a14ef827a2645225e43b100cdc4d6581",
+    "src/grpc/xds/runtime/options.zig": "b5536b48f85d11d01c84eb0539ccc6909a0267c754228b7eedf9807ee32605c5",
+    "src/grpc/xds/runtime/controller.zig": "c77fa45815691e457d05c166c75eaddef7cb28ec60dc5d36a65b69ca12978cc6",
+    "src/grpc/xds/rds/tests.zig": "1395f7fdb9ef93951b7bf58518bc8874f80ad24366df1811d44800b693c493e6",
+    "src/grpc/xds/rds/transport_tests.zig": "fdfd1443577e290e67d456280b1ad401cce76a88e2ee506010cd1ace477202a9",
+    "src/grpc/xds/lds/controller_tests.zig": "f951c559e3e7cfe2ae072fd9ee3869fc342c4ae2cba8f38088321674ea92409c",
+    "src/grpc/xds/bootstrap_tests.zig": "d345e06fba91f5077dcb344a7f3bf6fa78439957393d84419815d8dba2540fa9",
+    "docs/grpc_rds.md": "c13d88168712746884493a390e31b478a7d200108e0fb61a37e49563c28c10ae",
+    "docs/grpc_xds_runtime.md": "6b8d75a2f1b1c0f414d3e6f88696b20751e3086786acce50cff0c736a2b56ef9",
+    "docs/grpc_parity.md": "69ba77f5301ab7fa0876d36931dbdf0c633738912940076e0ffed3bd9c1b6cc6"
+  },
+  "notes": "The feature is opt-in, matching grpc-core: a control plane must be declared trusted before RDS auto_host_rewrite may change :authority. grpc-core also uses the flag to accept google_grpc service credentials; netz does not implement google_grpc services, so that arm has no local counterpart."
+}

@@ -98,3 +98,35 @@ test "gRPC LDS controller reprojections cached RDS and prevents restoration afte
     try std.testing.expectEqual(removed, channel.configurationRevision());
     try std.testing.expectError(error.NoMatchingRoute, resolve(channel, io));
 }
+
+test "gRPC LDS controller applies auto host rewrite only for a trusted server" {
+    var threaded = std.Io.Threaded.init(gpa, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    inline for (.{ false, true }) |trusted| {
+        var channel = try grpc.SharedChannel.init(gpa, io, .{ .resolved = .{ .endpoints = &.{ .{ .cleartext_ip = .{ .address = .{ .ip4 = .loopback(1) }, .hierarchical_path = &.{"cluster:a"} } }, .{ .cleartext_ip = .{ .address = .{ .ip4 = .loopback(2) }, .hierarchical_path = &.{"cluster:b"} } } } } }, .{ .service_config_json = manager });
+        defer channel.deinit();
+        var sender = channel.sender();
+        defer sender.deinit();
+        var client = try ads.Client.init(gpa, sender, .{ .node = .{ .id = "test" } });
+        defer client.deinit();
+        var controller = try lds.Controller.init(gpa, .{
+            .listener_name = "frontend",
+            .authority = "backend.test",
+            .trusted_xds_server = trusted,
+        });
+        defer controller.deinit();
+        try controller.subscribe(&client);
+        var action = route_fixture.Builder{ .allocator = gpa };
+        defer action.deinit();
+        try action.wrapper(7, 1);
+        const routes = try route_fixture.encode(gpa, "inline", &.{"backend.test"}, &.{.{ .prefix = "/", .action_extra = action.data.items }}, null);
+        defer gpa.free(routes);
+        const listener = try fixture.encode(gpa, .{ .inline_rds = routes });
+        defer gpa.free(listener);
+        try apply(&controller, &client, channel, io, lds.type_url, "l1", listener);
+        const resolved = try resolve(channel, io);
+        try std.testing.expectEqual(trusted, resolved.options.xds_auto_host_rewrite);
+        try std.testing.expectEqualStrings("cluster:a", resolved.options.xds_cluster.?);
+    }
+}

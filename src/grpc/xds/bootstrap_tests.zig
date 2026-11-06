@@ -8,7 +8,7 @@ const valid =
     \\  "xds_servers": [
     \\    {"server_uri": "http://127.0.0.1:8080", "channel_creds": [{"type": "insecure"}]},
     \\    {"server_uri": "https://control.example", "channel_creds": [{"type": "tls", "config": {"ca_certificate_file": "/ca.pem"}}],
-    \\     "server_features": ["ignore_resource_deletion", "fail_on_data_errors", "unknown_feature"]}
+    \\     "server_features": ["ignore_resource_deletion", "fail_on_data_errors", "trusted_xds_server", "unknown_feature"]}
     \\  ],
     \\  "node": {"id": "node-1", "cluster": "cluster-1",
     \\    "locality": {"region": "r", "zone": "z", "sub_zone": "s"},
@@ -35,6 +35,7 @@ test "gRPC xDS bootstrap parses servers node authorities and metadata" {
     try std.testing.expect(parsed.servers[1].hasTlsCreds());
     try std.testing.expect(parsed.servers[1].ignore_resource_deletion);
     try std.testing.expect(parsed.servers[1].fail_on_data_errors);
+    try std.testing.expect(parsed.servers[1].trusted_xds_server);
     try std.testing.expect(!parsed.servers[1].resource_timer_is_transient_error);
     try std.testing.expectEqualStrings("{\"ca_certificate_file\":\"/ca.pem\"}", parsed.servers[1].channel_creds[0].config_json.?);
     try std.testing.expectEqualStrings("/ca.pem", parsed.servers[1].tlsConfig().?.ca_certificate_file);

@@ -27,6 +27,9 @@ pub const Options = struct {
     /// gRPC `fail_on_data_errors`: drop the cached listener/routes when the
     /// resource fails typed validation, then NACK the response.
     fail_on_data_errors: bool = false,
+    /// gRPC `trusted_xds_server`: allow this control plane to request
+    /// automatic host rewriting from the selected endpoint.
+    trusted_xds_server: bool = false,
 };
 pub const Controller = struct {
     allocator: std.mem.Allocator,
@@ -60,7 +63,11 @@ pub const Controller = struct {
         try client.setSubscription(model.type_url, &.{self.options.listener_name});
     }
     pub fn routeOptions(self: *const Controller) rds.Options {
-        return .{ .authority = self.options.authority, .max_header_bytes = self.options.max_header_bytes };
+        return .{
+            .authority = self.options.authority,
+            .max_header_bytes = self.options.max_header_bytes,
+            .trusted_xds_server = self.options.trusted_xds_server,
+        };
     }
     pub fn publish(self: *Controller, client: *ads.Client, projection: *@import("projection.zig").Projection, destination: shared.SharedChannel, deadline: std.Io.Clock.Timestamp) Error!u64 {
         if (self.options.publisher) |publisher| return publisher.publish_fn(publisher.context, client, projection, destination, deadline);

@@ -44,6 +44,9 @@ pub const Options = struct {
     /// gRPC xDS `fail_on_data_errors` server feature: drop the cached resource
     /// when a response resource fails to decode, then NACK the response.
     fail_on_data_errors: bool = false,
+    /// gRPC xDS `trusted_xds_server` server feature: permit this control plane
+    /// to request automatic host rewriting from the selected endpoint.
+    trusted_xds_server: bool = false,
     /// Optional controller-owned LRS reporting. The destination channel must
     /// have LRS statistics enabled.
     lrs: ?LrsOptions = null,

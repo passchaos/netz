@@ -85,7 +85,10 @@ evaluates the request path with query and fragment removed and uses the
 capture-aware replacement result as `:authority`. `auto_host_rewrite`
 is resolved after endpoint selection: the worker replaces `:authority` with the
 selected endpoint's configured authority (host authority for host endpoints,
-explicit endpoint authority for IP endpoints). Rewritten paths and authorities
+explicit endpoint authority for IP endpoints). Like grpc-core, automatic host
+rewriting is honored only when the control plane is configured with
+`trusted_xds_server`; an untrusted server's `auto_host_rewrite` is ignored
+rather than allowed to redirect the request authority. Rewritten paths and authorities
 are bounded by the selector's `max_header_bytes` before any copy. The rewrite
 descriptor is internal: it is consumed by unary, streaming and retry input
 ownership and never becomes application metadata. `path_rewrite`/`host_rewrite`

@@ -7,7 +7,15 @@ const selector = @import("../../channel/call_selector.zig");
 const service = @import("../../service_config.zig");
 const wire = @import("../../wire.zig");
 pub const Error = model.Error || selector.Error || error{InvalidRdsOptions};
-pub const Options = struct { authority: []const u8, max_header_bytes: usize = 65536, default_max_stream_duration: ?std.Io.Duration = null };
+pub const Options = struct {
+    authority: []const u8,
+    max_header_bytes: usize = 65536,
+    default_max_stream_duration: ?std.Io.Duration = null,
+    /// gRPC `trusted_xds_server` feature. Only a trusted control plane may
+    /// request automatic host rewriting from the selected endpoint; an
+    /// untrusted server's `auto_host_rewrite` is ignored like grpc-core.
+    trusted_xds_server: bool = false,
+};
 pub const Selection = struct {
     cluster: []const u8,
     hash: u64,
@@ -172,7 +180,7 @@ pub const Snapshot = struct {
             if (forward.host_rewrite) |rewrite| switch (rewrite) {
                 .literal => |value| authority = value,
                 .header => |name| authority = firstHeader(request, name),
-                .auto => auto_host_rewrite = true,
+                .auto => auto_host_rewrite = self.options.trusted_xds_server,
                 .path_regex => |value| {
                     const stripped = path_rewrite_mod.stripQueryAndFragment(
                         request.path,

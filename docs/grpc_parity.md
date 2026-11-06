@@ -3798,7 +3798,7 @@ local method/retry defaults and resource-budget precedence. See
 `docs/evidence/grpc_xds_runtime/2026-11-03.json`. Bootstrap, retry/failover,
 expiry/Delta/LRS, security and aggregate/DNS discovery are covered. RDS
 `prefix_rewrite`, literal `path_rewrite`, `regex_rewrite`, literal/header/
-automatic host rewrites, `host_rewrite_path_regex`, header hash regex rewrites,
+trusted-server automatic host rewrites, `host_rewrite_path_regex`, header hash regex rewrites,
 and literal request/response header additions/removals are applied to the owned
 unary and streaming request/response inputs; `path_rewrite_policy` format
 rewrites and non-router filters remain open for the full library/control-plane

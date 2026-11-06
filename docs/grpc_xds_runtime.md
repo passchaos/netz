@@ -106,6 +106,12 @@ option the previous cached resource is retained, matching the default
 fail-safe behavior. The invalid resource's name is recovered leniently from
 field 1 when the payload is truncated after it.
 
+`Options.trusted_xds_server` implements the gRPC xDS server feature of the same
+name. It is required before an RDS `auto_host_rewrite` may replace the request
+`:authority` with the selected endpoint's authority; without it the field is
+ignored, matching grpc-core's refusal to let an untrusted control plane
+redirect requests. Bootstrap already exposes the parsed flag on each server.
+
 `Options.authority` and `Options.additional_authorities` enable `xdstp://`
 resource names for one or more authorities served by the controller's control
 plane. The listener, route, cluster, endpoint-assignment and secret names are

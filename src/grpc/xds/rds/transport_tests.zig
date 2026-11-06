@@ -192,7 +192,7 @@ test "gRPC RDS rewrites path and authority on the wire" {
         null,
     );
     defer gpa.free(auto_bytes);
-    const auto_snapshot = try rds.Snapshot.create(gpa, auto_bytes, .{}, .{ .authority = "backend.test" });
+    const auto_snapshot = try rds.Snapshot.create(gpa, auto_bytes, .{}, .{ .authority = "backend.test", .trusted_xds_server = true });
     _ = try auto_snapshot.publishWithDeadline(
         client,
         .fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(3) }),
