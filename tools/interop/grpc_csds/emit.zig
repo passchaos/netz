@@ -11,6 +11,8 @@ pub fn main(init: std.process.Init) !void {
             .version = "v1",
             .wire = "\x0a\x08frontend",
             .status = .acked,
+            .last_updated_seconds = 1760000000,
+            .last_updated_nanos = 123456789,
         },
         .{
             .type_url = "type.googleapis.com/envoy.config.cluster.v3.Cluster",

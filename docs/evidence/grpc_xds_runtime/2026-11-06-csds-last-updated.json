@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "date": "2026-11-06",
+  "head": "working-tree",
+  "subject": "gRPC xDS CSDS last_updated timestamps",
+  "change": "Accepted resources now carry a wall-clock acceptance time. The SotW subscription entry records when its accepted version was committed, and each delta per-resource Version records its own acceptance time through markAccepted after decide. Controller.encodeClientStatus maps that time to GenericXdsConfig.last_updated seconds/nanos; pending resources remain without a timestamp. The CSDS interop gate also decodes the official Timestamp field.",
+  "tests": {
+    "unit": "src/grpc/xds/csds_tests.zig asserts a positive last_updated for every accepted delta resource and for the accepted SotW listener, and no timestamp for the pending CDS subscription.",
+    "focused_gate": {
+      "command": "zig build test-lib -Dtest-filter='CSDS' --summary all",
+      "passed": 170,
+      "total": 170,
+      "failed": 0
+    },
+    "interop": {
+      "command": "zig build interop-grpc-csds --summary all",
+      "status": "passed",
+      "result": "the official csds.proto decode checks the emitted last_updated seconds/nanos and that the exclude_resource_contents response keeps the timestamp"
+    },
+    "compile": {
+      "command": "zig build test-compile",
+      "status": "passed"
+    },
+    "full_library": {
+      "command": "zig build test-lib",
+      "status": "passed",
+      "exit_code": 0,
+      "passed": 6536,
+      "total": 6536,
+      "failed": 0
+    }
+  },
+  "source_sha256": {
+    "src/grpc/xds/ads/subscriptions.zig": "58a934accd1352ca5caad4a5677224da0875049bb7bd4462da47cf18885de2e7",
+    "src/grpc/xds/ads/delta_subscriptions.zig": "0351b020c2a46fc71c4ee856fc8176d281c00945ae70018f7b58c3cd7ea5009d",
+    "src/grpc/xds/ads/client.zig": "44ed7f604c9eb1b1173742648d804e927d15791259516277a626559a6e753cf4",
+    "src/grpc/xds/ads/delta_client.zig": "6184eeb0313d4b02b5959a11bcacca2c025d59bfe53abd3d73b2884fa11c5e77",
+    "src/grpc/xds/runtime/controller.zig": "cdf2d5bc10e7e52bb8accb9471d9c1619506576972e60c33553f091b4672440d",
+    "src/grpc/xds/csds_tests.zig": "c9fd22c63ca92274be13cdb633614a3135d66a5ede9a9d70a2599386ec38d7ef",
+    "docs/grpc_xds_runtime.md": "521f5233b91c85bf7749ec5a36ebf59ac6aa77260de4fa52a69be7d1ac2396de",
+    "tools/interop/grpc_csds/emit.zig": "4d6f7fb71990f8ef5b63fa7abde1c6c5f7b4fc2f296d808679531cef2b4e732a",
+    "tools/interop/grpc_csds/run.js": "74766f28cf501e33df40e5cc7ef8a62d9782c1843bcbdd3315501a114b2576a9"
+  },
+  "notes": "SotW shares one acceptance time across every resource of a response because the whole response is accepted together; delta records each resource's own version acceptance time. Times come from the real clock (std.Io.Timestamp.now(io, .real)) and are process-local, so a controller recreation starts without historical timestamps."
+}

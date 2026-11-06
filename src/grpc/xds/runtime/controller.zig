@@ -675,11 +675,36 @@ pub const Controller = struct {
         }
         return entry.version;
     }
-    /// Encode one `ClientStatusDiscoveryService` `ClientStatusResponse` for
-    /// this controller. Accepted LDS/RDS/CDS/EDS/SDS resources carry their raw
-    /// wire bytes and the version the client accepted. SotW reports the type's
-    /// accepted version for every resource; delta reports the per-resource
-    /// accepted version.
+    const LastUpdated = struct { seconds: i64, nanos: u32 };
+    fn resourceLastUpdated(client: anytype, type_url: []const u8, name: []const u8) ?LastUpdated {
+        const entry = client.subscriptions.find(type_url) orelse return null;
+        const ns: i128 = if (@TypeOf(client) == *delta.Client) blk: {
+            for (entry.versions) |version| {
+                if (std.mem.eql(u8, version.name, name)) break :blk version.accepted_ns;
+            }
+            break :blk 0;
+        } else entry.accepted_ns;
+        if (ns == 0) return null;
+        return .{
+            .seconds = @intCast(@divTrunc(ns, std.time.ns_per_s)),
+            .nanos = @intCast(@mod(ns, std.time.ns_per_s)),
+        };
+    }
+    fn appendResource(
+        self: *Controller,
+        allocator: std.mem.Allocator,
+        resources: *std.ArrayList(@import("../csds.zig").Resource),
+        client: anytype,
+        base: @import("../csds.zig").Resource,
+    ) Error!void {
+        _ = self;
+        var resource = base;
+        if (resourceLastUpdated(client, base.type_url, base.name)) |value| {
+            resource.last_updated_seconds = value.seconds;
+            resource.last_updated_nanos = value.nanos;
+        }
+        try resources.append(allocator, resource);
+    }
     /// Serve one `FetchClientStatus` request body. Node matchers and the
     /// request node are ignored; `exclude_resource_contents` suppresses
     /// resource wire bytes while keeping type, name, version and status.
@@ -696,6 +721,11 @@ pub const Controller = struct {
         effective.exclude_resource_contents = request.exclude_resource_contents;
         return self.encodeClientStatus(client, allocator, effective);
     }
+    /// Encode one `ClientStatusDiscoveryService` `ClientStatusResponse` for
+    /// this controller. Accepted LDS/RDS/CDS/EDS/SDS resources carry their raw
+    /// wire bytes, the version and acceptance time. SotW reports the type's
+    /// accepted version and time for every resource; delta reports the
+    /// per-resource values.
     pub fn encodeClientStatus(
         self: *Controller,
         client: anytype,
@@ -708,7 +738,7 @@ pub const Controller = struct {
         defer resources.deinit(allocator);
         if (self.listener) |*listener| {
             if (listener.listener) |*owned| {
-                try resources.append(allocator, .{
+                try self.appendResource(allocator, &resources, client, .{
                     .type_url = lds.type_url,
                     .name = owned.value.name,
                     .wire = owned.wire,
@@ -718,7 +748,7 @@ pub const Controller = struct {
             }
             if (listener.routes_accepted) {
                 if (listener.routes) |routes| {
-                    try resources.append(allocator, .{
+                    try self.appendResource(allocator, &resources, client, .{
                         .type_url = rds.type_url,
                         .name = routes.resource.value.name,
                         .wire = routes.resource.wire,
@@ -731,7 +761,7 @@ pub const Controller = struct {
         for (self.entries.items) |entry| {
             if (entry.cds_seen) {
                 if (entry.cluster) |cluster| {
-                    try resources.append(allocator, .{
+                    try self.appendResource(allocator, &resources, client, .{
                         .type_url = cds.type_url,
                         .name = entry.identity.name,
                         .wire = cluster.resource.wire,
@@ -744,7 +774,7 @@ pub const Controller = struct {
                 if (entry.snapshot) |snapshot| {
                     const cluster = entry.cluster orelse continue;
                     const name = cluster.resource.value.edsName();
-                    try resources.append(allocator, .{
+                    try self.appendResource(allocator, &resources, client, .{
                         .type_url = eds.type_url,
                         .name = name,
                         .wire = snapshot.resource.wire,
@@ -756,7 +786,7 @@ pub const Controller = struct {
         }
         var secrets = self.sds_secrets.iterator();
         while (secrets.next()) |item| {
-            try resources.append(allocator, .{
+            try self.appendResource(allocator, &resources, client, .{
                 .type_url = sds.type_url,
                 .name = item.key_ptr.*,
                 .wire = item.value_ptr.*.owned.wire,
@@ -766,7 +796,7 @@ pub const Controller = struct {
         }
         for (self.resource_timers.items) |timer| {
             if (self.cachedResource(timer.type_url, timer.name)) continue;
-            try resources.append(allocator, .{
+            try self.appendResource(allocator, &resources, client, .{
                 .type_url = timer.type_url,
                 .name = timer.name,
                 .status = self.csdsResourceStatus(timer.type_url, timer.name),

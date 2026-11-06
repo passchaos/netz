@@ -12,6 +12,9 @@ pub const Entry = struct {
     names: [][]const u8,
     names_storage: []u8,
     version: []u8,
+    /// Wall-clock nanoseconds since the epoch when the accepted version was
+    /// committed. Shared by every resource of this type in a SotW response.
+    accepted_ns: i128 = 0,
     nonce: []u8,
     candidate: ?[]u8 = null,
     pending_sequence: ?u64 = null,

@@ -77,6 +77,7 @@ const expected = [
     version_info: 'v1',
     client_status: 'ACKED',
     wire: Buffer.from('\x0a\x08frontend').toString('hex'),
+    updated: { seconds: '1760000000', nanos: 123456789 },
   },
   {
     type_url: 'type.googleapis.com/envoy.config.cluster.v3.Cluster',
@@ -111,6 +112,15 @@ for (const want of expected) {
   if (want.wire !== null && got.xds_config.type_url !== want.type_url) {
     fail(`${want.name} any type ${JSON.stringify(got.xds_config.type_url)}`);
   }
+  if (want.updated) {
+    const ts = got.last_updated;
+    if (ts == null) fail(`${want.name} missing last_updated`);
+    if (String(ts.seconds) !== want.updated.seconds || ts.nanos !== want.updated.nanos) {
+      fail(`${want.name} last_updated ${JSON.stringify(ts)}`);
+    }
+  } else if (got.last_updated != null) {
+    fail(`${want.name} unexpected last_updated`);
+  }
 }
 
 // exclude_resource_contents keeps type/name/version/status but removes wire.
@@ -130,6 +140,9 @@ for (const want of expected) {
     fail(`excluded ${want.name} status ${JSON.stringify(got.client_status)}`);
   }
   if (got.xds_config != null) fail(`excluded ${want.name} kept xds_config`);
+  if (want.updated && got.last_updated == null) {
+    fail(`excluded ${want.name} lost last_updated`);
+  }
 }
 
 console.log(

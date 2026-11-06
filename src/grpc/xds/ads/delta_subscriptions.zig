@@ -10,7 +10,12 @@ pub const Token = struct { owner_id: u64, epoch: u64, sequence: u64 };
 pub const Subscription = struct { type_url: []const u8, names: []const []const u8 };
 var next_owner_id: std.atomic.Value(u64) = .init(1);
 
-pub const Version = struct { name: []u8, version: []u8 };
+pub const Version = struct {
+    name: []u8,
+    version: []u8,
+    /// Wall-clock nanoseconds since the epoch when this version was accepted.
+    accepted_ns: i128 = 0,
+};
 
 pub const Entry = struct {
     type_url: []u8,
@@ -192,7 +197,7 @@ pub const State = struct {
                 const value_copy = version_storage[used..][0..version.version.len];
                 used += version.version.len;
                 @memcpy(value_copy, version.version);
-                versions[index] = .{ .name = name_copy, .version = value_copy };
+                versions[index] = .{ .name = name_copy, .version = value_copy, .accepted_ns = version.accepted_ns };
                 index += 1;
             }
             staged.versions = versions;
@@ -336,7 +341,11 @@ pub const State = struct {
             const value_copy = storage[used..][0..updated.len];
             used += updated.len;
             @memcpy(value_copy, updated);
-            versions[index] = .{ .name = name_copy, .version = value_copy };
+            versions[index] = .{
+                .name = name_copy,
+                .version = value_copy,
+                .accepted_ns = version.accepted_ns,
+            };
             index += 1;
         }
         for (response.resources) |resource| {
@@ -368,6 +377,19 @@ pub const State = struct {
         return entry;
     }
 
+    /// Record the acceptance time for every resource present in the applied
+    /// response. Call after `decide` commits the response.
+    pub fn markAccepted(entry: *Entry, response: codec.Response, now_ns: i128) void {
+        for (entry.versions) |*version| {
+            for (response.resources) |resource| {
+                if (std.mem.eql(u8, resource.name, version.name)) {
+                    version.accepted_ns = now_ns;
+                    break;
+                }
+            }
+        }
+    }
+
     /// Drop an accepted resource version after the application expires a TTL
     /// resource. The desired name remains subscribed; a reconnect must not
     /// advertise the expired version as present.
@@ -396,7 +418,7 @@ pub const State = struct {
             const value_copy = storage[used..][0..version.version.len];
             used += version.version.len;
             @memcpy(value_copy, version.version);
-            versions[index] = .{ .name = name_copy, .version = value_copy };
+            versions[index] = .{ .name = name_copy, .version = value_copy, .accepted_ns = version.accepted_ns };
             index += 1;
         }
         std.debug.assert(index == count and used == bytes);

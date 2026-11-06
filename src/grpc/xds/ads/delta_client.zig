@@ -9,6 +9,11 @@ const sotw = @import("codec.zig");
 const subscriptions = @import("delta_subscriptions.zig");
 pub const path = "/envoy.service.discovery.v3.AggregatedDiscoveryService/DeltaAggregatedResources";
 pub const Error = shared.Error || subscriptions.Error || error{ AdsNotConnected, InvalidAdsOptions };
+
+/// Wall-clock nanoseconds since the epoch for CSDS `last_updated`.
+fn acceptedNow(io: std.Io) i128 {
+    return @intCast(std.Io.Timestamp.now(io, .real).toNanoseconds());
+}
 pub const Options = struct {
     node: codec.Node,
     subscriptions: subscriptions.Options = .{},
@@ -195,13 +200,15 @@ pub const Client = struct {
     }
     pub fn acceptAppliedUpdate(self: *Client, update: Update) Error!void {
         try self.validateUpdate(update);
-        _ = try self.subscriptions.decide(update.response.value.type_url, update.token, null, update.response.value);
+        const entry = try self.subscriptions.decide(update.response.value.type_url, update.token, null, update.response.value);
+        subscriptions.State.markAccepted(entry, update.response.value, acceptedNow(self.sender.state.io));
     }
     pub fn acknowledgeWithDeadline(self: *Client, update: Update, deadline: std.Io.Clock.Timestamp) Error!void {
         _ = try deadline_policy.usableAwake(self.sender.state.io, deadline);
         try self.sender.state.io.checkCancel();
         try self.validateUpdate(update);
         const entry = try self.subscriptions.decide(update.response.value.type_url, update.token, null, update.response.value);
+        subscriptions.State.markAccepted(entry, update.response.value, acceptedNow(self.sender.state.io));
         try self.send(entry, deadline);
     }
     pub fn rejectWithDeadline(self: *Client, update: Update, nack: codec.Nack, deadline: std.Io.Clock.Timestamp) Error!void {

@@ -44,6 +44,7 @@ const Info = struct {
     version: []const u8 = "",
     status: u64 = 0,
     has_config: bool = false,
+    updated_seconds: ?u64 = null,
 };
 
 fn collect(allocator: std.mem.Allocator, encoded: []const u8) ![]Info {
@@ -71,6 +72,14 @@ fn collect(allocator: std.mem.Allocator, encoded: []const u8) ![]Info {
                     4 => {
                         info.has_config = true;
                         try generic.skip(generic_field);
+                    },
+                    5 => {
+                        var timestamp = pb.Reader{ .bytes = try generic.bytesValue() };
+                        while (try timestamp.next()) |timestamp_field| {
+                            if (timestamp_field.number == 1 and timestamp_field.wire_type == 0) {
+                                info.updated_seconds = try timestamp.varint();
+                            } else try timestamp.skip(timestamp_field);
+                        }
                     },
                     7 => info.status = try generic.varint(),
                     else => try generic.skip(generic_field),
@@ -144,6 +153,8 @@ test "gRPC delta xDS CSDS dump reports accepted LDS RDS CDS and EDS resources" {
         const info = find(configs, expected[0], expected[1]) orelse return error.TestUnexpectedResult;
         try std.testing.expectEqualStrings("v1", info.version);
         try std.testing.expectEqual(@as(u64, 3), info.status); // ACKED
+        try std.testing.expect(info.updated_seconds != null);
+        try std.testing.expect(info.updated_seconds.? > 0);
     }
 }
 
@@ -187,6 +198,8 @@ test "gRPC SotW xDS CSDS dump reports the accepted type version" {
     try std.testing.expectEqual(@as(u64, 1), pending.status); // REQUESTED
     try std.testing.expect(listener_info.has_config);
     try std.testing.expect(!pending.has_config);
+    try std.testing.expect(listener_info.updated_seconds != null);
+    try std.testing.expect(pending.updated_seconds == null);
 
     // exclude_resource_contents (ClientStatusRequest field 3) removes wire
     // bytes but keeps the accepted type, name, version and status.
