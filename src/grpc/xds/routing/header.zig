@@ -144,6 +144,7 @@ pub fn decode(arena: std.mem.Allocator, bytes: []const u8, limits: DecodeLimits)
     var name: []const u8 = "";
     var condition: ?Condition = null;
     var invert = false;
+    var treat_missing_header_as_empty = false;
     while (try reader.next()) |field| {
         switch (field.number) {
             1 => if (field.wire_type == 2) {
@@ -176,11 +177,19 @@ pub fn decode(arena: std.mem.Allocator, bytes: []const u8, limits: DecodeLimits)
             13 => if (field.wire_type == 2) {
                 condition = .{ .string = try decodeStringMatcher(arena, try reader.bytesValue(), limits) };
             } else try reader.skip(field),
+            14 => if (field.wire_type == 0) {
+                treat_missing_header_as_empty = (try reader.varint()) != 0;
+            } else try reader.skip(field),
             else => try reader.skip(field),
         }
     }
     if (name.len == 0) return error.InvalidHeaderMatcher;
-    return .{ .name = name, .condition = condition orelse return error.InvalidHeaderMatcher, .invert = invert };
+    return .{
+        .name = name,
+        .condition = condition orelse return error.InvalidHeaderMatcher,
+        .invert = invert,
+        .treat_missing_header_as_empty = treat_missing_header_as_empty,
+    };
 }
 
 pub const Condition = union(enum) {
@@ -193,15 +202,18 @@ pub const Match = struct {
     name: []const u8,
     condition: Condition,
     invert: bool = false,
+    /// A missing header becomes a present empty value before matching.
+    treat_missing_header_as_empty: bool = false,
     pub fn matches(self: Match, gpa: std.mem.Allocator, request: Request) Error!bool {
         var header = try request.header(gpa, self.name);
         defer header.deinit();
+        const value: ?[]const u8 = if (self.treat_missing_header_as_empty) header.value orelse "" else header.value;
         const result = switch (self.condition) {
-            .present => |wanted| (header.value != null) == wanted,
-            .string => |matcher| try matcher.matchesWithBudget(gpa, header.value orelse return false, request.budget),
+            .present => |wanted| (value != null) == wanted,
+            .string => |matcher| try matcher.matchesWithBudget(gpa, value orelse return false, request.budget),
             .range => |range| blk: {
-                const value = integer(header.value orelse return false) orelse break :blk false;
-                break :blk value >= range.start and value < range.end;
+                const number = integer(value orelse return false) orelse break :blk false;
+                break :blk number >= range.start and number < range.end;
             },
         };
         return result != self.invert;

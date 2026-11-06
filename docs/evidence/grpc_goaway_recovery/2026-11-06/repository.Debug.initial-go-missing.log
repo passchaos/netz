@@ -1,0 +1,1081 @@
+......
+----------------------------------------------------------------------
+Ran 6 tests in 0.000s
+
+OK
+.........
+----------------------------------------------------------------------
+Ran 9 tests in 3.259s
+
+OK
+........................
+----------------------------------------------------------------------
+Ran 24 tests in 0.006s
+
+OK
+...........
+----------------------------------------------------------------------
+Ran 11 tests in 0.003s
+
+OK
+.....
+----------------------------------------------------------------------
+Ran 5 tests in 0.001s
+
+OK
+........
+----------------------------------------------------------------------
+Ran 8 tests in 2.118s
+
+OK
+protocol=quic-v1 mode=handshake role_pair=netz-client+quic-go-server samples=3 warmup=2 iterations=3 p50_ns=103 p99_ns=104 client_io=zio-std-io server_io=quic-go-netpoll median_total_elapsed_ns=309 connects_per_second_from_timed_sum=9708737.9 median_connect_tx_datagrams=2 median_connect_tx_bytes=1300 median_connect_rx_datagrams=1 median_connect_rx_bytes=1200 certificate_verify=fresh-p256 median_pre_trust_ns=40 median_trust_ns=30 median_post_trust_ns=33 checksum=10 complete=true
+protocol=quic-v1 mode=handshake role_pair=quic-go-client+quic-go-server samples=3 warmup=2 iterations=3 p50_ns=103 p99_ns=104 client_io=quic-go-netpoll server_io=quic-go-netpoll median_total_elapsed_ns=309 connects_per_second_from_timed_sum=9708737.9 checksum=10 complete=true
+protocol=quic-v1 mode=handshake role_pair=quic-go-client+netz-server samples=3 warmup=2 iterations=3 p50_ns=103 p99_ns=104 client_io=quic-go-netpoll server_io=zio-std-io median_total_elapsed_ns=309 connects_per_second_from_timed_sum=9708737.9 checksum=10 complete=true
+protocol=quic-v1 mode=handshake role_pair=netz-client+netz-server samples=3 warmup=2 iterations=3 p50_ns=103 p99_ns=104 client_io=zio-std-io server_io=zio-std-io median_total_elapsed_ns=309 connects_per_second_from_timed_sum=9708737.9 median_connect_tx_datagrams=2 median_connect_tx_bytes=1300 median_connect_rx_datagrams=1 median_connect_rx_bytes=1200 certificate_verify=fresh-p256 median_pre_trust_ns=40 median_trust_ns=30 median_post_trust_ns=33 checksum=10 complete=true
+protocol=quic-v1 mode=handshake role_pair=netz-client+quinn-server samples=3 warmup=2 iterations=3 p50_ns=103 p99_ns=104 client_io=zio-std-io server_io=quinn-tokio-rustls median_total_elapsed_ns=309 connects_per_second_from_timed_sum=9708737.9 median_connect_tx_datagrams=2 median_connect_tx_bytes=1300 median_connect_rx_datagrams=1 median_connect_rx_bytes=1200 certificate_verify=fresh-p256 median_pre_trust_ns=40 median_trust_ns=30 median_post_trust_ns=33 checksum=10 complete=true
+protocol=quic-v1 mode=handshake role_pair=quinn-client+quinn-server samples=3 warmup=2 iterations=3 p50_ns=103 p99_ns=104 client_io=quinn-tokio-rustls server_io=quinn-tokio-rustls median_total_elapsed_ns=309 connects_per_second_from_timed_sum=9708737.9 median_connect_tx_datagrams=2 median_connect_tx_bytes=1300 median_connect_rx_datagrams=1 median_connect_rx_bytes=1200 checksum=10 complete=true
+protocol=quic-v1 mode=handshake role_pair=quinn-client+netz-server samples=3 warmup=2 iterations=3 p50_ns=103 p99_ns=104 client_io=quinn-tokio-rustls server_io=zio-std-io median_total_elapsed_ns=309 connects_per_second_from_timed_sum=9708737.9 median_connect_tx_datagrams=2 median_connect_tx_bytes=1300 median_connect_rx_datagrams=1 median_connect_rx_bytes=1200 checksum=10 complete=true
+..........
+----------------------------------------------------------------------
+Ran 10 tests in 0.003s
+
+OK
+.........
+----------------------------------------------------------------------
+Ran 9 tests in 1.913s
+
+OK
+protocol=websocket-h3 role_pair=netz-client+quic-go-server warmup=1 iterations=2 payload_bytes=16 checksum=3584 quic_version=1 client_io=zio-std-io server_io=quic-go-netpoll complete=true
+protocol=websocket-h3 role_pair=quic-go-client+netz-server warmup=1 iterations=2 payload_bytes=16 checksum=3584 quic_version=1 client_io=quic-go-netpoll server_io=zio-std-io complete=true
+protocol=websocket-h3 role_pair=netz-client+quic-go-server warmup=1 iterations=2 payload_bytes=16 checksum=3584 quic_version=1 client_io=zio-std-io server_io=quic-go-netpoll complete=true
+record=memory implementation=netz protocol=websocket-h3 transport=h3 mode=binary-echo role_pair=netz-client+quic-go-server endpoint_role=client client_io=zio-std-io server_io=quic-go-netpoll connection_scope=persistent warmup=1 iterations=2 payload_bytes=16 timeout_ms=30000 rss_scope=whole-process rss_source=busybox-time-maxrss process_peak_rss_kib=1024 quic_version=1 memory_scope=benchmark-run-after-argument-parse allocator_scope=netz-explicit alloc_count=1 free_count=1 resize_count=0 remap_count=0 total_allocated_bytes=64 live_bytes=0 peak_live_bytes=64 complete=true
+record=memory implementation=quic-go protocol=websocket-h3 transport=h3 mode=binary-echo role_pair=netz-client+quic-go-server endpoint_role=server client_io=zio-std-io server_io=quic-go-netpoll connection_scope=persistent warmup=1 iterations=2 payload_bytes=16 timeout_ms=30000 rss_scope=whole-process rss_source=busybox-time-maxrss process_peak_rss_kib=2048 quic_version=1 memory_scope=benchmark-run-after-argument-parse allocator_scope=go-runtime-heap alloc_count=1 free_count=0 total_allocated_bytes=64 heap_alloc_bytes_end=64 heap_sys_bytes_end=4096 runtime_sys_bytes_end=8192 gc_cycles=0 complete=true
+protocol=websocket-h3 role_pair=netz-client+quic-go-server warmup=1 iterations=2 payload_bytes=16 checksum=3584 quic_version=2 client_io=zio-std-io server_io=quic-go-netpoll complete=true
+.............
+----------------------------------------------------------------------
+Ran 13 tests in 0.036s
+
+OK
+..............
+----------------------------------------------------------------------
+Ran 14 tests in 0.648s
+
+OK
+....
+----------------------------------------------------------------------
+Ran 4 tests in 0.003s
+
+OK
+....
+----------------------------------------------------------------------
+Ran 4 tests in 0.000s
+
+OK
+........
+----------------------------------------------------------------------
+Ran 8 tests in 0.021s
+
+OK
+........
+----------------------------------------------------------------------
+Ran 8 tests in 0.007s
+
+OK
+protocol=quic-stream role_pair=quic-go-client+netz-server direction=upload samples=1 streams=4 bytes_per_stream=1024 client_io=quic-go-netpoll server_io=zio-std-io complete=true
+protocol=quic-stream role_pair=quic-go-client+netz-server direction=download samples=1 streams=4 bytes_per_stream=1024 client_io=quic-go-netpoll server_io=zio-std-io complete=true
+protocol=quic-stream role_pair=netz-client+netz-server direction=download samples=1 streams=4 bytes_per_stream=1024 client_io=zio-std-io server_io=zio-std-io complete=true
+........
+----------------------------------------------------------------------
+Ran 8 tests in 0.002s
+
+OK
+................
+----------------------------------------------------------------------
+Ran 16 tests in 0.488s
+
+OK
+verified WebTransport churn: fault=loss reset_seed=81985529216486895 streams=32 fin=17 reset=15 bytes=282368 checksum=36001920 reset_mask=0x00000000000000000000000000000000000000000000000000000000ac80f7c1 reset_code_sum=245990 client_io=zio-std-io server_io=wtransport-quinn-tokio considered=314 dropped=12
+verified WebTransport churn: fault=loss reset_seed=81985529216486895 streams=32 fin=17 reset=15 bytes=282368 checksum=36001920 reset_mask=0x00000000000000000000000000000000000000000000000000000000ac80f7c1 reset_code_sum=245990 client_io=wtransport-quinn-tokio server_io=zio-std-io considered=2 dropped=2
+.....
+----------------------------------------------------------------------
+Ran 5 tests in 0.010s
+
+OK
+........
+----------------------------------------------------------------------
+Ran 8 tests in 0.226s
+
+OK
+protocol=websocket-h2 role_pair=netz-client+hyper-server warmup=1 iterations=2 payload_bytes=16 checksum=3584 client_io=zio-std-io server_io=hyper-tokio complete=true
+protocol=websocket-h2 role_pair=hyper-client+netz-server warmup=1 iterations=2 payload_bytes=16 checksum=3584 client_io=hyper-tokio server_io=zio-std-io complete=true
+protocol=websocket-h2 role_pair=netz-client+hyper-server warmup=1 iterations=2 payload_bytes=16 checksum=3584 client_io=zio-std-io server_io=hyper-tokio complete=true
+record=memory implementation=netz protocol=websocket-h2 transport=h2c mode=binary-echo role_pair=netz-client+hyper-server endpoint_role=client client_io=zio-std-io server_io=hyper-tokio connection_scope=persistent warmup=1 iterations=2 payload_bytes=16 timeout_ms=30000 rss_scope=whole-process rss_source=busybox-time-maxrss process_peak_rss_kib=1024 memory_scope=benchmark-run-after-argument-parse allocator_scope=netz-explicit alloc_count=1 free_count=1 resize_count=0 remap_count=0 total_allocated_bytes=64 live_bytes=0 peak_live_bytes=64 complete=true
+record=memory implementation=hyper protocol=websocket-h2 transport=h2c mode=binary-echo role_pair=netz-client+hyper-server endpoint_role=server client_io=zio-std-io server_io=hyper-tokio connection_scope=persistent warmup=1 iterations=2 payload_bytes=16 timeout_ms=30000 rss_scope=whole-process rss_source=busybox-time-maxrss process_peak_rss_kib=2048 memory_scope=process-start-through-runtime-teardown allocator_scope=rust-system-requested alloc_count=1 free_count=0 realloc_count=0 total_allocated_bytes=64 total_freed_bytes=0 live_bytes_end=64 peak_live_bytes=64 complete=true
+.....
+----------------------------------------------------------------------
+Ran 5 tests in 0.006s
+
+OK
+............
+----------------------------------------------------------------------
+Ran 12 tests in 0.128s
+
+OK
+......
+----------------------------------------------------------------------
+Ran 6 tests in 0.003s
+
+OK
+protocol=http2 workload=cancellation-race server=hyper samples=1 warmup=1 iterations=2 netz_median_total_ns=100 hyper_median_total_ns=100 netz_median_ns_per_batch=50 hyper_median_ns_per_batch=50 hyper_over_netz=1.000 netz_peak_live_median_bytes=160 hyper_peak_live_median_bytes=160 netz_process_peak_rss_median_kib=1000 hyper_process_peak_rss_median_kib=1000 rss_source=gnu-time-maxrss cancellation_observation=server-body-drop-gated-sibling sibling_reuse=true complete=true
+..........
+----------------------------------------------------------------------
+Ran 10 tests in 0.347s
+
+OK
+......
+----------------------------------------------------------------------
+Ran 6 tests in 0.001s
+
+OK
+........
+----------------------------------------------------------------------
+Ran 8 tests in 0.691s
+
+OK
+.......
+----------------------------------------------------------------------
+Ran 7 tests in 0.000s
+
+OK
+...
+----------------------------------------------------------------------
+Ran 3 tests in 0.001s
+
+OK
+.......
+----------------------------------------------------------------------
+Ran 7 tests in 0.001s
+
+OK
+......
+----------------------------------------------------------------------
+Ran 6 tests in 0.002s
+
+OK
+protocol=websocket-h2 samples=1 parts=8 warmup=1 iterations=5 payload_bytes=4096 checksum=1275 contiguous_ns=100 slices_ns=100 slices_over_contiguous=1.000 client_io=zio-std-io server_io=zio-std-io complete=true
+......
+----------------------------------------------------------------------
+Ran 6 tests in 0.002s
+
+OK
+..........
+----------------------------------------------------------------------
+Ran 10 tests in 0.151s
+
+OK
+verified raw QUIC churn: role_pair=netz-client+quic-go-server sender=client fault=reorder streams=32 client_io=zio-std-io server_io=quic-go-netpoll fin=16 reset=16 bytes=266240 checksum=33945600 reset_mask=0x00000000aaaaaaaa reset_code_sum=262400 reordered=2
+verified raw QUIC churn: role_pair=quic-go-client+netz-server sender=client fault=loss streams=32 client_io=quic-go-netpoll server_io=zio-std-io fin=16 reset=16 bytes=266240 checksum=33945600 reset_mask=0x00000000aaaaaaaa reset_code_sum=262400 dropped=2
+.....
+----------------------------------------------------------------------
+Ran 5 tests in 0.003s
+
+OK
+...
+----------------------------------------------------------------------
+Ran 3 tests in 0.169s
+
+OK
+.............
+----------------------------------------------------------------------
+Ran 13 tests in 0.010s
+
+OK
+protocol=http3 role_pair=netz-client+netz-server mode=download samples=1 streams=4 body_bytes=1024 total_bytes=4096 checksum=522240 per_stream_verified=true netz_max_pacing_rate_bytes_per_second=0 quic_version=2 client_io=zio-std-io server_io=zio-std-io complete=true
+protocol=http3 role_pair=quic-go-client+netz-server mode=download samples=1 streams=4 body_bytes=1024 total_bytes=4096 checksum=522240 per_stream_verified=true netz_max_pacing_rate_bytes_per_second=0 quic_version=2 client_io=quic-go-netpoll server_io=zio-std-io complete=true
+protocol=http3 role_pair=quic-go-client+netz-server mode=download samples=1 streams=4 body_bytes=1024 total_bytes=4096 checksum=522240 per_stream_verified=true netz_max_pacing_rate_bytes_per_second=0 quic_version=2 client_io=quic-go-netpoll server_io=zio-std-io complete=true
+protocol=http3 role_pair=quic-go-client+netz-server mode=download samples=1 streams=4 body_bytes=1024 total_bytes=4096 checksum=522240 per_stream_verified=true netz_max_pacing_rate_bytes_per_second=0 quic_version=2 client_io=quic-go-netpoll server_io=zio-std-io complete=true
+.....
+----------------------------------------------------------------------
+Ran 5 tests in 0.003s
+
+OK
+protocol=websocket-h1 workload=mostly-idle-buffer-retention samples=1 connections=4 active_connections=2 idle_connections=2 warmup=1 iterations=2 payload_bytes=4096 netz_live_median_bytes=100 reference_live_median_bytes=200 reference_over_netz_live=2.000 netz_peak_median_bytes=120 reference_peak_median_bytes=220 reference_over_netz_peak=1.833 netz_process_peak_rss_median_kib=1000 reference_process_peak_rss_median_kib=1000 reference_over_netz_rss=1.000 rss_source=gnu-time-maxrss rss_scope=whole-process-lifetime memory_stage=connections-live-after-workload allocator_scope=explicit-library-and-harness complete=true
+.........
+----------------------------------------------------------------------
+Ran 9 tests in 0.005s
+
+OK
+..................
+----------------------------------------------------------------------
+Ran 18 tests in 0.006s
+
+OK
+OpenSSL/netz TLS 1.2 matching/unmatched CertificateRequest selection passed
+OpenSSL/netz TLS 1.3 matching/unmatched CertificateRequest selection passed
+HTTP WebSocket SOCKS5 interoperability passed: http=true https=true ws=true wss=true mqtt_ws=true mqtt_wss=true remote_dns=true tls13=true tls_hostname=true deadline=true client_io=zio-std-io peer_io=python-socket
+WebTransport SOCKS5 interoperability passed: associations=2 remote_dns=true rejection=404 connect=true datagram=true bidi=true uni=true reset=73 stop=74 recovery=true reuse=true peer_close=true client_io=zio-std-io server_io=wtransport-quinn-tokio
+Traceback (most recent call last):
+  File "/home/passchaos/project-z/netz/tools/interop/websocket_h3_socks5.py", line 186, in <module>
+    main()
+  File "/home/passchaos/project-z/netz/tools/interop/websocket_h3_socks5.py", line 79, in main
+    go = find_go()
+         ^^^^^^^^^
+  File "/home/passchaos/project-z/netz/tools/interop/http3_socks5_pool.py", line 269, in find_go
+    raise RuntimeError("Go 1.24 or newer not found")
+RuntimeError: Go 1.24 or newer not found
+test
++- run python3 failure
+error: process exited with error code 1
+failed command: python3 tools/interop/websocket_h3_socks5.py ./.zig-cache/o/27dc161792bc4cd376681db2da2f8b8c/netz-websocket-h3-quic-go-client
+
+OpenSSL/netz TLS 1.3 session-ticket interop passed in both endpoint roles
+OpenSSL/netz TLS 1.2 session-ticket interop passed in both endpoint roles
+HTTP SOCKS5 interoperability passed: redirects=1 http1=true http2=true http2_direct=true alpn=h2 pool_requests=2 pool_tunnels=1 total_tunnels=5 remote_dns=true credentials_isolated=true tls13=true tls_hostname=true deadline=true client_io=zio-std-io peer_io=python-socket
+MQTT SOCKS5 interoperability passed: remote_dns=true no_auth=true auth_fallback=true rfc1929=true auth_failure=true timeout=true mqtt=true mqtt_tls13=true reconnect=true tls_reconnect=true tls_hostname=true client_io=zio-std-io peer_io=python-socket
+Autobahn zio smoke passed: transport=cleartext concurrent=8 fragmented_control=true compression_no_context=true compression_context=true compression_client_window=9 compression_server_window=9 protocol_error=isolated utf8_error=1007 recovery_connections=2 workers=64 server_io=zio-std-io
+Autobahn zio smoke passed: transport=tls concurrent=8 fragmented_control=true compression_no_context=true compression_context=true compression_client_window=9 compression_server_window=9 protocol_error=isolated utf8_error=1007 recovery_connections=2 workers=64 server_io=zio-std-io
+MQTT broker config integration passed: missing-root exit=3, CRLF mqttv311+mqttv5, strict authentication, source-locked linear CONNECT User Property processing, Mosquitto hashes, packet/message/retain/inflight/queue limits, hard heap memory limit with live SIGHUP reload, locked crash-recoverable PID-file lifecycle, source-locked Unix listener lifecycle, source-locked mTLS CN/Subject SIGHUP continuity, source-locked change-count autosave and restore, source-locked global/listener anonymous policy precedence and multi-policy listener SIGHUP reload, source-locked MQTT 3.1/3.1.1/5 username-or-anonymous policy, source-locked authentication-before-Client-ID-takeover ordering, empty password-file named-user deny-all generation with live revocation, source-locked empty ACL default-deny policy, listener protocol/PROXY/Topic Alias/Origin and WebSocket header limits, default dual-family, named-interface, and IPv4/IPv6-only TCP/TLS/WS/WSS listeners, global client-session plus global/listener live-connection capacity, persistent-client and retained-message expiration, periodic $SYS policy, atomic $SYS/retained scheduling, and message-size/offline-QoS0/QoS-upgrade/session-cap/retained-source SIGHUP reload plus Retain Available admission reload with restart-required global rollback and live-client continuity, zero-length and MQTT 3.1 Client ID bounds, global/listener auto-ID prefixes, atomic required Client ID prefix SIGHUP reload with rollback, and outgoing QoS policy, ordered include_dir and global/per-listener security files, configured cleartext/TLS inbound/outbound bridge prefix mapping, source-locked bridge CONNACK QoS/Retain/Protocol notification-Will adaptation, source-locked immediate/lazy SIGHUP bridge reload with cross-subsystem rollback and client continuity, mTLS, single-Session bidirectional bridge mapping, MQTT 3.1/3.1.1/5 bridge receive/alias/packet limits and outgoing RETAIN, persistent remote-subscription cleanup with interleaved delivery, private-bridge negotiation with standard MQTT 3.1/3.1.1 fallback, TLS 1.3 bridge cipher-suite selection, explicit bridge hostname-verification opt-out with retained CA trust, TLS 1.2 P-384/P-521 bridge and listener key exchange, required TLS 1.3 bridge OCSP stapling, local Client ID and clean-Session restart isolation, cleartext/TLS bridge source-address binding and traced TCP keepalive/TCP_USER_TIMEOUT, QoS 1/2, lazy threshold/idle lifecycle with restart recovery, target-offline persistent outbound queue recovery, decorrelated-jitter reconnect with stable-period reset, round-robin failover, primary failback, reconnect, and retained local/remote state notifications with Last Will plus disabled one-shot lifecycle, mixed anonymous policy, shared TCP/WebSocket state, ACL read/write/deny/pattern policy, mount point, listener policies, P-256/P-384/P-521/Ed25519/RSA and encrypted PKCS#8 TLS with OpenSSL verification, optional/required client certificates, bounded listener/bridge capath trust, certificate CN/full-Subject identity mapping, source-locked good/revoked client-CRL behavior plus P-256/P-384/RSA/Ed25519 signed CRL revocation, strict TLS key/CA/EKU/identity/CRL rejection, retained-source ACL replay, atomic global/per-listener password/ACL path and content reload with selective live credential revocation, durable queued-delivery reauthorization, and TLS/WSS identity/key-password/CA/capath/CRL path and content reload plus per-listener anonymous/zero-ID/assigned-prefix/protocol/QoS/Keep-Alive/Topic-Alias admission SIGHUP reload with topology rollback, source-locked outgoing/property/expiry restart behavior plus dynamic persistence target enable/disable/path and time/change/disabled autosave SIGHUP reload with failed-target rollback, SIGUSR1 checkpoint routing, QoS2 journal guard, snapshot ACL reauthorization, retained MQTT 5 property-bundle restore, MQTT 3.1.1/5 Clean Start snapshot cleanup, subscription/UNSUBSCRIBE restore, shared queued/retained downtime expiry, connection-scoped Maximum Packet Size, outgoing QoS2 DUP/PUBREL recovery, and restore client_io=python-socket server_io=zio-std-io mosquitto_process_sources=0
+configured MQTT TLS/WSS TLSv1.3 RFC 8446 resumption passed
+configured MQTT TLS/WSS TLSv1.2 RFC 5077 resumption passed
+HTTP/1 OpenSSL TLS 1.2/1.3 OCSP good/missing/revoked interop passed
+debug(zio): Spawning thread 0
+WebTransport HTTP2 EndpointClient dropped cleanup passed: canceled=1 slot_reused=true
+WebTransport HTTP2 EndpointClient queue passed: connect+datagram+receive owned_results=true reuse_after_error=true
+WebTransport HTTP2 client passed: rejected=429 streams=4 flow_control=true reset=42 reliable_size=6 stop=4294967295 drain=true close=17 invalid_reset=StreamStateError reuse_after_error=true client_io=zio-std-io
+debug(zio): Removing thread 0
+debug(zio): Spawning thread 0
+WebTransport HTTP2 EndpointServer pending cleanup passed: canceled=1 slot_reused=true queue=true
+WebTransport HTTP2 server passed: rejected=429 streams=4 flow_control=true reset=42 reliable_size=6 stop=4294967295 drain=true close=17 invalid_reset=StreamStateError reuse_after_error=true client_io=zio-std-io
+debug(zio): Removing thread 0
+debug(zio): Spawning thread 0
+WebTransport HTTP2 EndpointListener passed: accepted=true stream=true datagram=true close=19
+debug(zio): Removing thread 0
+{
+  "alpn": "h2",
+  "driver_sha256": "64e558ec3e71ca96d9b83d8bc2390a307e333a5c96f06a2fd61703259552d903",
+  "native_client_dropped_cleanup": {
+    "reset_code": 8,
+    "slot_reused": true
+  },
+  "native_client_endpoint_queue": {
+    "connect": true,
+    "datagram": true,
+    "owned_results": true,
+    "receive": true,
+    "reuse_after_error": true
+  },
+  "native_listener": {
+    "accepted": true,
+    "capsule_data_fragmentation": true,
+    "close_code": 19,
+    "connection_admission": {
+      "accept_workers": 1,
+      "connection_timeout_ms": 250,
+      "max_connections": 1,
+      "partial_preface_closed": true,
+      "silent_http2_closed": true,
+      "silent_tls_closed": true
+    },
+    "datagram": true,
+    "http2_stream": 1,
+    "stream": true
+  },
+  "native_server_pending_cleanup": {
+    "queue": true,
+    "reset_code": 8,
+    "slot_reused": true
+  },
+  "protocol": "draft-ietf-webtrans-http2-15",
+  "python_packages": {
+    "h2": "4.3.0",
+    "hpack": "4.1.0",
+    "hyperframe": "6.1.0"
+  },
+  "source_sha256": {
+    "driver.zig": "05cc273728458b59f36f59daccd74b7393d2371d3fe6df82116b0be3c5b477d6",
+    "peer.py": "a1017443068ddb5948a26ffa53b399cbc8a53fecc2e3002b0ef4baee82ab8afa",
+    "run.py": "7a14de0f9d4db7ad0d3a00d9d4f501c57873b0665b95a9f2a0828ff58f7d3834",
+    "wire.py": "a05b6e736b3fff89fdd497656f66b7727b30318b50f9f14578c7727f62ac9698"
+  },
+  "status": "passed",
+  "tls": "TLSv1.3",
+  "traces": [
+    {
+      "capsule_data_fragmentation": true,
+      "connect_fin": true,
+      "connect_requests": 5,
+      "dropped_connect_cleanup": true,
+      "dropped_reset_code": 8,
+      "http2_stream": 3,
+      "invalid_reset_scoped": true,
+      "reliable_size": 6,
+      "reuse_after_error": true,
+      "role": "server",
+      "steps": [
+        "bidi",
+        "credit",
+        "datagram",
+        "drain",
+        "peer-streams",
+        "reset",
+        "stop"
+      ],
+      "stop_code": 4294967295
+    },
+    {
+      "capsule_data_fragmentation": true,
+      "connect_fin": true,
+      "connect_requests": 5,
+      "dropped_pending_cleanup": true,
+      "dropped_reset_code": 8,
+      "http2_stream": 3,
+      "invalid_reset_scoped": true,
+      "reliable_size": 6,
+      "reuse_after_error": true,
+      "role": "client",
+      "steps": [
+        "bidi",
+        "credit",
+        "datagram",
+        "drain",
+        "peer-streams",
+        "reset",
+        "stop"
+      ],
+      "stop_code": 4294967295
+    }
+  ]
+}
+WebTransport HTTP2 Python interoperability passed: directions=2 rejected=429 independent_capsules=true
+Traceback (most recent call last):
+  File "/home/passchaos/project-z/netz/tools/interop/http3_socks5_pool.py", line 484, in <module>
+    main()
+  File "/home/passchaos/project-z/netz/tools/interop/http3_socks5_pool.py", line 276, in main
+    go = find_go()
+         ^^^^^^^^^
+  File "/home/passchaos/project-z/netz/tools/interop/http3_socks5_pool.py", line 269, in find_go
+    raise RuntimeError("Go 1.24 or newer not found")
+RuntimeError: Go 1.24 or newer not found
+test
++- run python3 failure
+error: process exited with error code 1
+failed command: python3 tools/interop/http3_socks5_pool.py ./.zig-cache/o/6e4626624a688c5bba03f43a28c394c0/netz-http3-socks5-pool-client
+
+SOCKS5 UDP interoperability passed: command=udp-associate auth=rfc1929 remote_dns=true wildcard_reply=true fragments=rejected control_lifetime=true quic_endpoint=true ecn_gso_gro=fallback client_io=zio-std-io peer_io=python-socket
+debug(zio): Spawning thread 0
+HTTP digest h1 passed: requests=8 compressed=true trailers=true errors=4 streaming=true generated=true reuse=true io=zio-std-io
+HTTP digest h2 passed: requests=8 compressed=true trailers=true errors=4 streaming=true generated=true reuse=true io=zio-std-io
+debug(zio): Removing thread 0
+{
+  "driver_sha256": "1e0afc153a646931422e1340ee5a4ba8e0d9e781a7fc2691ac0a601a5456b2ad",
+  "python_packages": {
+    "h2": "4.3.0",
+    "hpack": "4.1.0",
+    "http-sfv": "0.9.9",
+    "hyperframe": "6.1.0"
+  },
+  "source_sha256": {
+    "driver.zig": "d7017c9482396e09804069b4c2f10bd53c97d9022a1d4dc1933e6b57abe42342",
+    "peer.py": "36083965fb5bb4a43eb9d0b4acaca320c969b3bdeb330d4d1a679affb1d92f72",
+    "run.py": "d70a3eda14f90ce97a2c651f37816448bea66a7a563f76bfaa67e5c441f1f539"
+  },
+  "standard": "RFC9530",
+  "status": "passed",
+  "traces": [
+    {
+      "generated_verified": true,
+      "paths": [
+        "/header",
+        "/trailer",
+        "/corrupt",
+        "/missing",
+        "/unsupported",
+        "/malformed",
+        "/stream",
+        "/generated"
+      ],
+      "protocol": "http1",
+      "requests": 8,
+      "tls": "TLSv1.3"
+    },
+    {
+      "alpn": "h2",
+      "generated_verified": true,
+      "paths": [
+        "/header",
+        "/trailer",
+        "/corrupt",
+        "/missing",
+        "/unsupported",
+        "/malformed",
+        "/stream",
+        "/generated"
+      ],
+      "protocol": "http2",
+      "requests": 8,
+      "tls": "TLSv1.3"
+    }
+  ]
+}
+HTTP digest Python interoperability passed: protocols=2 requests=16 independent_hashlib=true independent_sfv=true
+WebSocket SOCKS5 redirect interoperability passed: ws_redirects=1 mqtt_reconnect_chains=2 fresh_tunnels=6 remote_dns=true credentials_isolated=true tls13=true tls_hostname=true deadline=true client_io=zio-std-io peer_io=python-socket
+Build Summary: 184/187 steps succeeded (2 failed); 6782/6782 tests passed
+test transitive failure
++- run test 6588 pass (6588 total) 7m MaxRSS:1G
+|  +- compile test Debug native success 51s MaxRSS:2G
+|     +- WriteFile cached
+|     +- compile obj vort-br-record-optimal Debug native cached 4ms MaxRSS:39M
+|     +- WriteFile cached
+|     +- compile obj vort-zstd-huffman-x2 Debug native cached 5ms MaxRSS:39M
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options cached
++- run test 26 pass (26 total) 30ms MaxRSS:30M
+|  +- compile test Debug native success 41s MaxRSS:1G
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run test 2 pass (2 total) 352ms MaxRSS:28M
+|  +- compile test Debug native success 924ms MaxRSS:395M
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run test 2 pass (2 total) 1s MaxRSS:48M
+|  +- compile test Debug native success 858ms MaxRSS:397M
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run test 3 pass (3 total) 1s MaxRSS:49M
+|  +- compile test Debug native success 1s MaxRSS:471M
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run test 3 pass (3 total) 4s MaxRSS:44M
+|  +- compile test Debug native success 32s MaxRSS:1G
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run test 4 pass (4 total) 1s MaxRSS:52M
+|  +- compile test Debug native success 1s MaxRSS:465M
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run test 4 pass (4 total) 7s MaxRSS:36M
+|  +- compile test Debug native success 33s MaxRSS:2G
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run test 4 pass (4 total) 7s MaxRSS:40M
+|  +- compile test Debug native success 36s MaxRSS:2G
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run test 3 pass (3 total) 1s MaxRSS:20M
+|  +- compile test Debug native success 1s MaxRSS:476M
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run test 3 pass (3 total) 2s MaxRSS:39M
+|  +- compile test Debug native success 35s MaxRSS:2G
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run test 3 pass (3 total) 3s MaxRSS:35M
+|  +- compile test Debug native success 1s MaxRSS:482M
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run test 3 pass (3 total) 20s MaxRSS:46M
+|  +- compile test Debug native success 34s MaxRSS:2G
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run test 3 pass (3 total) 12s MaxRSS:17M
+|  +- compile test Debug native success 1s MaxRSS:470M
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run test 3 pass (3 total) 10s MaxRSS:50M
+|  +- compile test Debug native success 32s MaxRSS:2G
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run test 3 pass (3 total) 42s MaxRSS:32M
+|  +- compile test Debug native success 1s MaxRSS:480M
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run test 3 pass (3 total) 38s MaxRSS:58M
+|  +- compile test Debug native success 39s MaxRSS:2G
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run test 3 pass (3 total) 1s MaxRSS:24M
+|  +- compile test Debug native success 1s MaxRSS:439M
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run test 3 pass (3 total) 11s MaxRSS:35M
+|  +- compile test Debug native success 32s MaxRSS:1G
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run test 3 pass (3 total) 1s MaxRSS:47M
+|  +- compile test Debug native success 1s MaxRSS:449M
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run test 3 pass (3 total) 9s MaxRSS:38M
+|  +- compile test Debug native success 38s MaxRSS:1G
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run test 3 pass (3 total) 2s MaxRSS:39M
+|  +- compile test Debug native success 25s MaxRSS:1G
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run test 3 pass (3 total) 5s MaxRSS:37M
+|  +- compile test Debug native success 24s MaxRSS:1G
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run test 2 pass (2 total) 74ms MaxRSS:45M
+|  +- compile test Debug native success 797ms MaxRSS:393M
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run test 2 pass (2 total) 226ms MaxRSS:41M
+|  +- compile test Debug native success 1s MaxRSS:425M
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run test 3 pass (3 total) 117ms MaxRSS:34M
+|  +- compile test Debug native success 673ms MaxRSS:387M
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run test 3 pass (3 total) 1s MaxRSS:16M
+|  +- compile test Debug native success 1s MaxRSS:453M
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run test 3 pass (3 total) 6s MaxRSS:34M
+|  +- compile test Debug native success 37s MaxRSS:2G
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run test 3 pass (3 total) 1s MaxRSS:43M
+|  +- compile test Debug native success 1s MaxRSS:462M
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run test 3 pass (3 total) 5s MaxRSS:50M
+|  +- compile test Debug native success 34s MaxRSS:2G
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run test 3 pass (3 total) 3s MaxRSS:30M
+|  +- compile test Debug native success 28s MaxRSS:1G
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run test 3 pass (3 total) 20ms MaxRSS:43M
+|  +- compile test Debug native success 863ms MaxRSS:384M
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run test 3 pass (3 total) 388ms MaxRSS:33M
+|  +- compile test Debug native success 609ms MaxRSS:389M
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run test 3 pass (3 total) 478ms MaxRSS:34M
+|  +- compile test Debug native success 785ms MaxRSS:405M
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run test 3 pass (3 total) 107ms MaxRSS:23M
+|  +- compile test Debug native success 895ms MaxRSS:403M
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run test 4 pass (4 total) 8s MaxRSS:37M
+|  +- compile test Debug native success 26s MaxRSS:1G
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run test 3 pass (3 total) 2s MaxRSS:28M
+|  +- compile test Debug native success 26s MaxRSS:1G
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run test 1 pass (1 total) 2s MaxRSS:32M
+|  +- compile test Debug native success 23s MaxRSS:1G
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run test 3 pass (3 total) 88ms MaxRSS:52M
+|  +- compile test Debug native success 789ms MaxRSS:392M
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run test 3 pass (3 total) 12ms MaxRSS:45M
+|  +- compile test Debug native success 825ms MaxRSS:384M
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run test 3 pass (3 total) 15ms MaxRSS:17M
+|  +- compile test Debug native success 641ms MaxRSS:382M
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run test 7 pass (7 total) 12ms MaxRSS:41M
+|  +- compile test Debug native success 1s MaxRSS:380M
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run test 1 pass (1 total) 13ms MaxRSS:44M
+|  +- compile test Debug native success 700ms MaxRSS:382M
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run test 1 pass (1 total) 10ms MaxRSS:31M
+|  +- compile test Debug native success 831ms MaxRSS:385M
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run test 1 pass (1 total) 6ms MaxRSS:14M
+|  +- compile test Debug native cached 13ms MaxRSS:39M
++- run test 2 pass (2 total) 234ms MaxRSS:13M
+|  +- compile test Debug native cached 8ms MaxRSS:39M
++- run test 4 pass (4 total) 10ms MaxRSS:13M
+|  +- compile test Debug native cached 23ms MaxRSS:39M
++- run test 5 pass (5 total) 101ms MaxRSS:49M
+|  +- compile test Debug native success 23s MaxRSS:1G
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run test 3 pass (3 total) 10ms MaxRSS:48M
+|  +- compile test Debug native success 1s MaxRSS:383M
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run test 1 pass (1 total) 61ms MaxRSS:15M
+|  +- compile test Debug native success 23s MaxRSS:1G
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run test 19 pass (19 total) 420ms MaxRSS:42M
+|  +- compile test Debug native success 37s MaxRSS:2G
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run test 1 pass (1 total) 12ms MaxRSS:27M
+|  +- compile test Debug native success 681ms MaxRSS:382M
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run test 3 pass (3 total) 10ms MaxRSS:54M
+|  +- compile test Debug native success 626ms MaxRSS:380M
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run test 2 pass (2 total) 5ms MaxRSS:13M
+|  +- compile test Debug native cached 8ms MaxRSS:39M
++- run python3 success 73ms
++- run python3 success 701ms
++- run python3 success 58ms
++- run python3 success 57ms
++- run python3 success 214ms
++- run python3 success 195ms
++- run python3 success 2s
++- run python3 success 68ms
++- run python3 success 57ms
++- run python3 success 50ms
++- run python3 success 78ms
++- run python3 success 3s
++- run python3 success 53ms
++- run python3 success 301ms
++- run python3 success 49ms
++- run python3 success 53ms
++- run python3 success 50ms
++- run python3 success 47ms
++- run python3 success 54ms
++- run python3 success 46ms
++- run python3 success 186ms
++- run python3 success 78ms
++- run python3 success 107ms
++- run python3 success 49ms
++- run python3 success 44ms
++- run python3 success 58ms
++- run python3 success 113ms
++- run python3 success 1s
++- run python3 success 400ms
++- run python3 success 535ms
++- run python3 success 50ms
++- run python3 success 765ms
++- run python3 success 51ms
++- run test 3 pass (3 total) 9ms MaxRSS:43M
+|  +- compile test Debug native success 800ms MaxRSS:380M
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run python3 success 668ms
+|  +- compile exe netz-mqtt-socks5-client Debug native success 36s MaxRSS:1G
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run python3 success 976ms
+|  +- compile exe netz-http-websocket-socks5-client Debug native success 37s MaxRSS:1G
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run python3 success 907ms
+|  +- compile exe netz-websocket-socks5-redirect-client Debug native success 34s MaxRSS:2G
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run uv success 2s
+|  +- compile exe netz-webtransport-h2-interop Debug native success 32s MaxRSS:1G
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run uv success 874ms
+|  +- compile exe netz-http-digest-interop Debug native success 33s MaxRSS:1G
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run python3 success 518ms
+|  +- compile exe netz-http-socks5-client Debug native success 35s MaxRSS:2G
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run python3 success 53ms
+|  +- compile exe netz-socks5-udp-client Debug native success 936ms MaxRSS:412M
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run python3 failure
+|  +- compile exe netz-http3-socks5-pool-client Debug native success 32s MaxRSS:2G
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run python3 success 3m
+|  +- compile exe netz-mqtt-vector-broker Debug native success 38s MaxRSS:1G
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run python3 success 56ms
++- run python3 success 63ms
++- run python3 success 68ms
++- run python3 success 364ms
+|  +- compile exe netz-mqtt-vector-broker Debug native (+7 more reused dependencies)
++- run python3 success 296ms
+|  +- compile exe netz-mqtt-vector-broker Debug native (+7 more reused dependencies)
++- run python3 success 1s
+|  +- compile exe netz-websocket-autobahn-server Debug native success 38s MaxRSS:1G
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run python3 failure
+|  +- compile exe netz-websocket-h3-quic-go-client Debug native success 23s MaxRSS:1G
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run python3 success 2s
+|  +- compile exe netz-http1-ocsp-client Debug native success 33s MaxRSS:1G
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run tools/interop/tls12_ticket_openssl.sh success 279ms
+|  +- compile exe netz-tls12-ticket-server Debug native success 35s MaxRSS:1G
+|  |  +- WriteFile (reused)
+|  |  +- compile obj vort-br-record-optimal Debug native (reused)
+|  |  +- WriteFile (reused)
+|  |  +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|  |  +- compile obj vort-br-record-optimal Debug native (reused)
+|  |  +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|  |  +- options (reused)
+|  +- compile exe netz-tls12-ticket-client Debug native success 34s MaxRSS:1G
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run tools/interop/tls12_client_auth_openssl.sh success 695ms
+|  +- compile exe netz-tls12-client-auth-client Debug native success 33s MaxRSS:1G
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- run tools/interop/tls12_client_auth_openssl.sh success 887ms
+|  +- compile exe netz-tls12-client-auth-client Debug native (+7 more reused dependencies)
++- run tools/interop/tls12_ticket_openssl.sh success 248ms
+|  +- compile exe netz-tls12-ticket-server Debug native (+7 more reused dependencies)
+|  +- compile exe netz-tls12-ticket-client Debug native (+7 more reused dependencies)
++- run python3 success 4s
+   +- compile exe netz-webtransport-wtransport-client Debug native success 25s MaxRSS:1G
+      +- WriteFile (reused)
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- WriteFile (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options (reused)
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/1d0164f8b05d238ce00f0a0d1c629b58/build /home/passchaos/Temp/zig-x86_64-linux-0.16.0/zig /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib /home/passchaos/project-z/netz .zig-cache /home/passchaos/.cache/zig --seed 0x9b0c505a -Z4fcfa1ed36f50e33 test -j4 --summary all

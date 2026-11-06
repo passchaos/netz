@@ -1,4 +1,4 @@
-//! Unary retry lifecycle: one transparent refusal, explicit replay, and budget.
+//! Unary retry lifecycle: transparent transport recovery, explicit replay, and budget.
 const std = @import("std");
 const http2 = @import("../../http2/mod.zig");
 const call = @import("../call.zig");
@@ -6,6 +6,7 @@ const Timeout = @import("../wire.zig").Timeout;
 const Error = call.Error;
 const UnaryResponse = call.UnaryResponse;
 const RetryPolicy = call.RetryPolicy;
+pub const TransparentRetry = @import("transparent_retry.zig").Budget;
 
 pub fn run(connection: *http2.runtime.Connection, allocator: std.mem.Allocator, options: call.UnaryCallOptions, policy: ?RetryPolicy, comptime attempt: anytype) Error!UnaryResponse {
     const deadline: ?std.Io.Clock.Timestamp = if (options.timeout) |timeout|
@@ -25,7 +26,7 @@ pub fn run(connection: *http2.runtime.Connection, allocator: std.mem.Allocator, 
 pub fn runWithDeadline(connection: anytype, allocator: std.mem.Allocator, options: call.UnaryCallOptions, policy: ?RetryPolicy, deadline: ?std.Io.Clock.Timestamp, comptime attempt: anytype) @TypeOf(attempt(connection, allocator, options, deadline, deadline, @as(?Timeout, null), @as(?u8, null))) {
     if (policy) |configured| try configured.validate();
     var attempts: u8 = 0;
-    var transparent_used = false;
+    var transparent: TransparentRetry = .{ .enabled = options.transparent_retry };
     var backoff = if (policy) |configured| cappedBackoff(configured.initial_backoff, configured.max_backoff) else std.Io.Duration.zero;
     while (true) {
         const timeout_header: ?Timeout = if (deadline) |absolute| blk: {
@@ -47,13 +48,9 @@ pub fn runWithDeadline(connection: anytype, allocator: std.mem.Allocator, option
             timeout_header,
             if (attempts == 0) null else attempts,
         ) catch |err| {
-            // A GOAWAY above this stream's ID means the peer never processed
-            // it, so one transparent replay is safe just like REFUSED_STREAM.
-            const any_err: anyerror = err;
-            if (any_err == error.ConnectionGoAway and options.transparent_retry and !transparent_used) {
-                transparent_used = true;
-                continue;
-            }
+            // ConnectionGoAway identifies a stream above the peer's accepted
+            // boundary. The transport rejects contradictory response evidence.
+            if (transparent.replayError(err)) continue;
             if (err != error.Timeout or !attempt_boundary.limited) return err;
             attempts += 1;
             const configured = policy.?;
@@ -91,10 +88,7 @@ pub fn runWithDeadline(connection: anytype, allocator: std.mem.Allocator, option
             continue;
         }
         if (response.was_dropped) return response;
-        if (options.transparent_retry and !transparent_used and !response.response_committed and
-            response.reset != null and response.reset.?.error_code == .refused_stream)
-        {
-            transparent_used = true;
+        if (transparent.replayResponse(response)) {
             response.deinit();
             continue;
         }

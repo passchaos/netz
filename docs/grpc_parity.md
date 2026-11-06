@@ -116,8 +116,13 @@ existing HTTP/2 runtime:
   the remaining timeout on the retry. The caller can disable this recovery
   through `UnaryCallOptions.transparent_retry`. Any observed response head,
   including informational evidence, prevents this transparent replay; a second
-  refusal or GOAWAY remains visible unless an explicit policy permits another
-  uncommitted attempt,
+  refusal can still consume a configured retry; a second GOAWAY remains visible.
+  Final or informational response heads followed by a contradictory GOAWAY
+  below the stream are rejected with `InvalidFrame` before replay. Aggregate
+  HTTP/2 upload/response readers and shared unary owners retain this evidence,
+  and require an actual peer unprocessed-stream boundary. Local GOAWAY caused
+  by flow-control or receive/reset limits never supplies transparent replay
+  permission,
 - explicit opt-in unary retry policies for replay-safe methods, with at most
   five configured attempts plus the independent transparent recovery,
   configured retryable status codes, exponential jittered
@@ -2918,8 +2923,13 @@ timers. The original attempt starts immediately. A current timer launches the
 next copy after `hedgingDelay`; stale timers created before non-fatal
 acceleration or server pushback are generation-invalidated and later ignored.
 Every physical attempt advertises the remaining overall `grpc-timeout` and
-adds `grpc-previous-rpc-attempts`; one uncommitted REFUSED_STREAM recovery
-remains transparent and does not consume a configured hedge.
+adds `grpc-previous-rpc-attempts` for later logical hedges. One uncommitted
+REFUSED_STREAM or GOAWAY-unprocessed recovery remains transparent: it shares
+one replay budget, preserves the logical hedge index, and consumes neither a
+configured hedge nor retry-throttle tokens. The original absolute deadline
+supplies every replay's remaining timeout. A contradictory GOAWAY after a
+final or informational response head is fatal before the scheduler can launch
+another attempt. See [GOAWAY recovery](grpc_goaway_recovery.md).
 
 The first OK or fatal response wins. Returning it cancels and joins every
 outstanding job, which drives SharedChannel's existing stream-scoped CANCEL
@@ -3724,7 +3734,7 @@ limits bound decoding, while sorted resource names preserve complete-response
 validation before publication.
 
 The independent official LDS/HCM/RDS/ADS and grpc-js-xds validator gate counts
-31 RPCs against two grpc-js backends. It checks inline/dynamic and duplex
+38 backend RPCs against two grpc-js backends. It checks inline/dynamic and duplex
 routing, inherited HCM caps, explicit route zero override, cached reprojection,
 name replacement, late RDS, NACK rollback and deletion. An old 300 ms RPC
 finishes normally after a new 20 ms default applies to new calls. Both backend
@@ -3811,9 +3821,16 @@ The official-schema interop gate denies unary and duplex probes carrying
 `x-deny` without reaching either backend and re-allows the same header after a
 listener without RBAC replaces the policy. Route and virtual-host
 `typed_per_filter_config` overrides replace or disable RBAC and fault policies
-per route, with route scope winning. Authenticated/IP/metadata/
+per route, with route scope winning. The official `RBACPerRoute.rbac` HTTP
+filter wrapper and default ALLOW action are decoded; absent enforcing rules
+disable the filter, while present empty ALLOW rules deny all requests.
+Canonical official-schema interop verifies all five forms. Authenticated/IP/metadata/
 requested-server-name principals, destination IP/port/metadata permissions,
 CEL conditions and other filters' route overrides remain open.
+The shared RBAC/fault HeaderMatcher and RDS decoder also honor Envoy's
+`treat_missing_header_as_empty` across string, range and presence conditions,
+then apply inversion. Native wire tables cover omitted, false and true flags,
+actual empty/nonempty values, DENY enforcement and existing regex/header limits.
 `envoy.filters.http.fault` is decoded and enforced client-side for fixed and
 header-driven abort/delay, `FractionalPercent`, `max_active_faults` and
 `upstream_cluster` scoping. Unary attempts, retries, hedging and streaming

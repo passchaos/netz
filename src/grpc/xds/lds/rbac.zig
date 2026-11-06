@@ -187,7 +187,8 @@ fn decodeRule(context: *Context, bytes: []const u8) Error!Rule {
 /// Decode an `envoy.config.rbac.v3.RBAC` policy into arena-owned nodes.
 fn decodePolicy(arena: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!Policy {
     var reader = pb.Reader{ .bytes = bytes };
-    var action: ?Action = null;
+    // Action is a proto3 scalar: omitted ALLOW (0) is the default.
+    var action: Action = .allow;
     var rules: std.ArrayList(Rule) = .empty;
     var node_count: usize = 0;
     var context = Context{ .arena = arena, .limits = limits, .nodes = &node_count };
@@ -218,17 +219,16 @@ fn decodePolicy(arena: std.mem.Allocator, bytes: []const u8, limits: Limits) Err
             else => try reader.skip(field),
         }
     }
-    return .{ .action = action orelse return error.InvalidRbacResource, .rules = try rules.toOwnedSlice(arena) };
+    return .{ .action = action, .rules = try rules.toOwnedSlice(arena) };
 }
 
-/// Decode an `envoy.extensions.filters.http.rbac.v3.RBAC` filter config.
-/// Decode a bare `envoy.config.rbac.v3.RBAC` policy, as carried by an
-/// `RBACPerRoute` override.
+/// Decode a bare `envoy.config.rbac.v3.RBAC` policy.
 pub fn decodePolicyBytes(arena: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!Policy {
     return decodePolicy(arena, bytes, limits);
 }
 
-/// The enforcing policy is the nested `rules` message (field 1).
+/// Decode an `envoy.extensions.filters.http.rbac.v3.RBAC` filter config.
+/// Absent `rules` (field 1) disables enforcement; present empty rules deny all.
 pub fn decode(arena: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!Policy {
     var reader = pb.Reader{ .bytes = bytes };
     var policy: ?[]const u8 = null;
@@ -245,7 +245,8 @@ pub fn decode(arena: std.mem.Allocator, bytes: []const u8, limits: Limits) Error
             else => try reader.skip(field),
         }
     }
-    return decodePolicy(arena, policy orelse return error.InvalidRbacResource, limits);
+    const bytes_value = policy orelse return .{ .action = .deny, .rules = &.{} };
+    return decodePolicy(arena, bytes_value, limits);
 }
 
 fn anyNode(nodes: []const Node, gpa: std.mem.Allocator, request: routing.header.Request) (std.mem.Allocator.Error || routing.header.Error)!bool {
@@ -336,6 +337,65 @@ fn evaluateBytes(rbac_bytes: []const u8, request: routing.header.Request) !bool 
     return evaluate(&policy, std.testing.allocator, request);
 }
 
+test "RBAC omitted proto3 action allows only matching policies" {
+    // Canonical RBAC policy bytes omit action = ALLOW (0). The permission
+    // requires x-deny to be present and the principal is any.
+    const policy_bytes = "\x12\x17\x0a\x01p\x12\x12\x0a\x0c\x22\x0a\x0a\x06x-deny\x38\x01\x12\x02\x18\x01";
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const policy = try decodePolicyBytes(arena.allocator(), policy_bytes, .{});
+    try std.testing.expectEqual(Action.allow, policy.action);
+    try std.testing.expectEqual(@as(usize, 1), policy.rules.len);
+    const matching = routing.header.Request{
+        .path = "/x",
+        .authority = "a",
+        .metadata = &.{.{ .name = "x-deny", .value = "1" }},
+    };
+    const nonmatching = routing.header.Request{ .path = "/x", .authority = "a" };
+    try std.testing.expect(try evaluate(&policy, std.testing.allocator, matching));
+    try std.testing.expect(!try evaluate(&policy, std.testing.allocator, nonmatching));
+    // The HTTP filter adds its own rules wrapper around the same policy.
+    try std.testing.expect(try evaluateBytes("\x0a\x19" ++ policy_bytes, matching));
+    try std.testing.expect(!try evaluateBytes("\x0a\x19" ++ policy_bytes, nonmatching));
+}
+
+test "RBAC absent HTTP rules disable enforcement and present empty rules deny all" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const policy = try decodePolicyBytes(arena.allocator(), "", .{});
+    try std.testing.expectEqual(Action.allow, policy.action);
+    try std.testing.expectEqual(@as(usize, 0), policy.rules.len);
+    const request = routing.header.Request{ .path = "/x", .authority = "a" };
+    try std.testing.expect(!try evaluate(&policy, std.testing.allocator, request));
+    try std.testing.expect(!try evaluateBytes("\x0a\x00", request));
+    try std.testing.expect(try evaluateBytes("", request));
+    // Shadow rules do not introduce enforcing rules.
+    try std.testing.expect(try evaluateBytes("\x12\x00", request));
+}
+
+test "RBAC explicit DENY reverses matching and rejects unsupported or invalid actions" {
+    const policy_bytes = "\x08\x01\x12\x17\x0a\x01p\x12\x12\x0a\x0c\x22\x0a\x0a\x06x-deny\x38\x01\x12\x02\x18\x01";
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const policy = try decodePolicyBytes(arena.allocator(), policy_bytes, .{});
+    try std.testing.expectEqual(Action.deny, policy.action);
+    const matching = routing.header.Request{
+        .path = "/x",
+        .authority = "a",
+        .metadata = &.{.{ .name = "x-deny", .value = "1" }},
+    };
+    const nonmatching = routing.header.Request{ .path = "/x", .authority = "a" };
+    try std.testing.expect(!try evaluate(&policy, std.testing.allocator, matching));
+    try std.testing.expect(try evaluate(&policy, std.testing.allocator, nonmatching));
+    try std.testing.expect(!try evaluateBytes("\x0a\x1b" ++ policy_bytes, matching));
+    try std.testing.expect(try evaluateBytes("\x0a\x1b" ++ policy_bytes, nonmatching));
+    try std.testing.expect(try evaluateBytes("\x0a\x02\x08\x01", matching));
+    try std.testing.expectError(error.UnsupportedRbacFeature, decodePolicyBytes(arena.allocator(), "\x08\x02", .{}));
+    try std.testing.expectError(error.InvalidRbacResource, decodePolicyBytes(arena.allocator(), "\x08\x03", .{}));
+    try std.testing.expectError(error.UnsupportedRbacFeature, decode(arena.allocator(), "\x0a\x02\x08\x02", .{}));
+    try std.testing.expectError(error.InvalidRbacResource, decode(arena.allocator(), "\x0a\x02\x08\x03", .{}));
+}
+
 test "RBAC allows and denies any-any policies" {
     var any = TestBuilder{};
     defer any.deinit();
@@ -373,6 +433,26 @@ test "RBAC matches header principals and permissions" {
     };
     try std.testing.expect(try evaluateBytes(rbac_bytes, matching));
     try std.testing.expect(!try evaluateBytes(rbac_bytes, .{ .path = "/x", .authority = "a" }));
+}
+
+test "RBAC DENY treats missing headers as empty only when configured" {
+    const cases = [_]struct { header_bytes: []const u8, deny_missing: bool }{
+        .{ .header_bytes = "\x0a\x01x\x22\x00", .deny_missing = false },
+        .{ .header_bytes = "\x0a\x01x\x22\x00\x70\x00", .deny_missing = false },
+        .{ .header_bytes = "\x0a\x01x\x22\x00\x70\x01", .deny_missing = true },
+    };
+    for (cases) |case| {
+        var permission = TestBuilder{};
+        defer permission.deinit();
+        try permission.bytes(4, case.header_bytes);
+        const policy = try buildPolicy(permission.data.items, "\x18\x01");
+        defer std.testing.allocator.free(policy);
+        const rbac_bytes = try buildRbac(1, policy);
+        defer std.testing.allocator.free(rbac_bytes);
+        try std.testing.expectEqual(!case.deny_missing, try evaluateBytes(rbac_bytes, .{ .path = "/x", .authority = "a" }));
+        try std.testing.expect(!try evaluateBytes(rbac_bytes, .{ .path = "/x", .authority = "a", .metadata = &.{.{ .name = "x", .value = "" }} }));
+        try std.testing.expect(try evaluateBytes(rbac_bytes, .{ .path = "/x", .authority = "a", .metadata = &.{.{ .name = "x", .value = "value" }} }));
+    }
 }
 
 test "RBAC matches URL path permissions" {

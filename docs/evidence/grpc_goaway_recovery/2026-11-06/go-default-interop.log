@@ -1,0 +1,23 @@
+RFC 9220 SOCKS5 interoperability passed: extended_connect=true remote_dns=true tls_verified=true fragmented_text=true permessage_deflate=true ping_pong=true close=1000/done client_io=zio-std-io server_io=quic-go-netpoll
+HTTP/3 SOCKS5 interoperability passed: origins=3 discovery=http1 h3_requests=4 tcp_tunnels=3 udp_associations=1 active_quic_connections=2 total_quic_connections=4 domain_route_limit=2 route_churn=true remote_dns=true shared_endpoint=true tls13=true close_deadline=complete client_io=zio-std-io server_io=quic-go-netpoll
+Build Summary: 11/11 steps succeeded
+interop-http3-socks5-pool success
++- run python3 success 1s
+   +- compile exe netz-http3-socks5-pool-client Debug native cached 45ms MaxRSS:39M
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 8ms MaxRSS:35M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 8ms MaxRSS:34M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options cached
+interop-websocket-h3-socks5 success
++- run python3 success 914ms
+   +- compile exe netz-websocket-h3-quic-go-client Debug native cached 45ms MaxRSS:39M
+      +- WriteFile (reused)
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- WriteFile (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options (reused)

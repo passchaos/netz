@@ -1,0 +1,119 @@
+[
+  {
+    "name": "targeted.Debug",
+    "command": [
+      "zig",
+      "build",
+      "test-lib",
+      "-Dtest-filter=HTTP/2",
+      "-Dtest-filter=RBAC",
+      "-Dtest-filter=gRPC RDS",
+      "-Dtest-filter=gRPC LDS",
+      "-Dtest-filter=hedging",
+      "-Dtest-filter=gRPC retry",
+      "-Dtest-filter=gRPC xDS routing",
+      "-Dtest-filter=GOAWAY recovery",
+      "-Dtest-filter=aggregate GOAWAY",
+      "-Dtest-filter=HeaderMatcher",
+      "-Dtest-filter=header matcher",
+      "-Dtest-filter=fault",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 124.802,
+    "summary": "8/8 steps succeeded; 1142/1142 tests passed",
+    "log": "docs/evidence/grpc_goaway_recovery/2026-11-06/targeted.Debug.log"
+  },
+  {
+    "name": "targeted.ReleaseSafe",
+    "command": [
+      "zig",
+      "build",
+      "test-lib",
+      "-Doptimize=ReleaseSafe",
+      "-Dtest-filter=RBAC",
+      "-Dtest-filter=gRPC RDS",
+      "-Dtest-filter=gRPC LDS",
+      "-Dtest-filter=hedging",
+      "-Dtest-filter=gRPC retry",
+      "-Dtest-filter=gRPC xDS routing",
+      "-Dtest-filter=GOAWAY recovery",
+      "-Dtest-filter=aggregate GOAWAY",
+      "-Dtest-filter=HeaderMatcher",
+      "-Dtest-filter=header matcher",
+      "-Dtest-filter=fault",
+      "-Dtest-filter=HTTP/2 h2c runtime client and server exchange over TCP",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 245.451,
+    "summary": "8/8 steps succeeded; 332/332 tests passed",
+    "log": "docs/evidence/grpc_goaway_recovery/2026-11-06/targeted.ReleaseSafe.log"
+  },
+  {
+    "name": "interop.Debug",
+    "command": [
+      "zig",
+      "build",
+      "interop-grpc-lds",
+      "--summary",
+      "all",
+      "--",
+      "--output",
+      "docs/evidence/grpc_lds/2026-11-06-rbac-route-interop.json"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 35.156,
+    "summary": "8/8 steps succeeded",
+    "log": "docs/evidence/grpc_goaway_recovery/2026-11-06/interop.Debug.log"
+  },
+  {
+    "name": "go-discovery",
+    "command": [
+      "python3",
+      "tools/interop/http3_socks5_pool_go_test.py"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 0.356,
+    "summary": "---------------------------------------------------------------------- Ran 7 tests in 0.278s  OK",
+    "log": "docs/evidence/grpc_goaway_recovery/2026-11-06/go-discovery.log"
+  },
+  {
+    "name": "go-default-interop",
+    "command": [
+      "env",
+      "-u",
+      "GO_BIN",
+      "zig",
+      "build",
+      "interop-http3-socks5-pool",
+      "interop-websocket-h3-socks5",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 2.711,
+    "summary": "11/11 steps succeeded",
+    "log": "docs/evidence/grpc_goaway_recovery/2026-11-06/go-default-interop.log"
+  },
+  {
+    "name": "repository.Debug",
+    "command": [
+      "env",
+      "-u",
+      "GO_BIN",
+      "zig",
+      "build",
+      "test",
+      "-j4",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 754.894,
+    "summary": "187/187 steps succeeded; 6782/6782 tests passed",
+    "log": "docs/evidence/grpc_goaway_recovery/2026-11-06/repository.Debug.log"
+  }
+]

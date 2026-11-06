@@ -34,11 +34,13 @@ const Parser = struct {
     fn rbacPerRoute(self: *Parser, bytes: []const u8) pb.Error!model.Override {
         _ = self;
         var reader = pb.Reader{ .bytes = bytes };
-        var policy: ?[]const u8 = null;
+        // RBACPerRoute.rbac is the HTTP RBAC filter message, whose rules
+        // field contains the enforcing envoy.config.rbac.v3.RBAC policy.
+        var filter: ?[]const u8 = null;
         while (try reader.next()) |field| {
-            if (field.number == 2 and field.wire_type == 2) policy = try reader.bytesValue() else try reader.skip(field);
+            if (field.number == 2 and field.wire_type == 2) filter = try reader.bytesValue() else try reader.skip(field);
         }
-        return if (policy) |value|
+        return if (filter) |value|
             .{ .kind = .rbac, .config = value }
         else
             .{ .kind = .rbac, .disabled = true };

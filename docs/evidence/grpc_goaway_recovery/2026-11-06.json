@@ -1,0 +1,177 @@
+{
+  "status": "passed",
+  "scope": "HTTP/2 aggregate ownership and gRPC transparent recovery, Envoy RBAC defaults/route wrappers and shared missing-header semantics",
+  "recorded_at_utc": "2026-11-06T15:03:59.770591+00:00",
+  "base_commit": "400b96ee9f017b81aa4253557a0d98c7f236cae0",
+  "architecture": "x86_64",
+  "zig_version": "0.16.0",
+  "gates": [
+    {
+      "name": "targeted.Debug",
+      "command": [
+        "zig",
+        "build",
+        "test-lib",
+        "-Dtest-filter=HTTP/2",
+        "-Dtest-filter=RBAC",
+        "-Dtest-filter=gRPC RDS",
+        "-Dtest-filter=gRPC LDS",
+        "-Dtest-filter=hedging",
+        "-Dtest-filter=gRPC retry",
+        "-Dtest-filter=gRPC xDS routing",
+        "-Dtest-filter=GOAWAY recovery",
+        "-Dtest-filter=aggregate GOAWAY",
+        "-Dtest-filter=HeaderMatcher",
+        "-Dtest-filter=header matcher",
+        "-Dtest-filter=fault",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 124.802,
+      "summary": "8/8 steps succeeded; 1142/1142 tests passed",
+      "log": "docs/evidence/grpc_goaway_recovery/2026-11-06/targeted.Debug.log"
+    },
+    {
+      "name": "targeted.ReleaseSafe",
+      "command": [
+        "zig",
+        "build",
+        "test-lib",
+        "-Doptimize=ReleaseSafe",
+        "-Dtest-filter=RBAC",
+        "-Dtest-filter=gRPC RDS",
+        "-Dtest-filter=gRPC LDS",
+        "-Dtest-filter=hedging",
+        "-Dtest-filter=gRPC retry",
+        "-Dtest-filter=gRPC xDS routing",
+        "-Dtest-filter=GOAWAY recovery",
+        "-Dtest-filter=aggregate GOAWAY",
+        "-Dtest-filter=HeaderMatcher",
+        "-Dtest-filter=header matcher",
+        "-Dtest-filter=fault",
+        "-Dtest-filter=HTTP/2 h2c runtime client and server exchange over TCP",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 245.451,
+      "summary": "8/8 steps succeeded; 332/332 tests passed",
+      "log": "docs/evidence/grpc_goaway_recovery/2026-11-06/targeted.ReleaseSafe.log"
+    },
+    {
+      "name": "interop.Debug",
+      "command": [
+        "zig",
+        "build",
+        "interop-grpc-lds",
+        "--summary",
+        "all",
+        "--",
+        "--output",
+        "docs/evidence/grpc_lds/2026-11-06-rbac-route-interop.json"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 35.156,
+      "summary": "8/8 steps succeeded",
+      "log": "docs/evidence/grpc_goaway_recovery/2026-11-06/interop.Debug.log"
+    },
+    {
+      "name": "go-discovery",
+      "command": [
+        "python3",
+        "tools/interop/http3_socks5_pool_go_test.py"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 0.356,
+      "summary": "---------------------------------------------------------------------- Ran 7 tests in 0.278s  OK",
+      "log": "docs/evidence/grpc_goaway_recovery/2026-11-06/go-discovery.log"
+    },
+    {
+      "name": "go-default-interop",
+      "command": [
+        "env",
+        "-u",
+        "GO_BIN",
+        "zig",
+        "build",
+        "interop-http3-socks5-pool",
+        "interop-websocket-h3-socks5",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 2.711,
+      "summary": "11/11 steps succeeded",
+      "log": "docs/evidence/grpc_goaway_recovery/2026-11-06/go-default-interop.log"
+    },
+    {
+      "name": "repository.Debug",
+      "command": [
+        "env",
+        "-u",
+        "GO_BIN",
+        "zig",
+        "build",
+        "test",
+        "-j4",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 754.894,
+      "summary": "187/187 steps succeeded; 6782/6782 tests passed",
+      "log": "docs/evidence/grpc_goaway_recovery/2026-11-06/repository.Debug.log"
+    }
+  ],
+  "source_sha256": {
+    "build.zig": "0d4ad54c13e206d43c765c364228b430d542a8df4ba1ea8d0187a418e0f5f7cf",
+    "build.zig.zon": "e7be92a4961ae730f43e621e402855e744a18779c62b56a227e1f0ead2604fd1",
+    "src/grpc/call/retry.zig": "40bda42266b7dd0fbff2f1392489f849200cbb4c83720adbc1176b13bf743db4",
+    "src/grpc/call/transparent_retry.zig": "afe45d3d33f37ed3801dcddcfe50d824d2dce2694debb45b8c6b08d95ee22617",
+    "src/grpc/channel/shared.zig": "b8dfbcbf84819b7f6206332f76167ae93e818eb9d491ae3b9d75311919e8c605",
+    "src/grpc/channel/shared/hedging.zig": "a7f8626055313fe5a8750cde701718a094ad7f1d63d279fe6c1dce0f370d0176",
+    "src/grpc/channel/shared/hedging/recovery_tests.zig": "1c74826685e88556c6ebc3836e90dfcb4c75b5632fb6cd00752b22789af050e5",
+    "src/grpc/channel/shared/worker.zig": "83dbfe1022ecc87e9f965f5df2bd3748053395fbfb139e709c5f128831c3364e",
+    "src/grpc/fault.zig": "5d95bccc05c0eb950ec261df53ed4ba4c767c0f04bf40b6a6b0a167a12192084",
+    "src/grpc/xds/lds/controller_tests.zig": "06545dced580ab73ddf3dc23ad89b295e0e91cb537a1aec9bb93332303555d84",
+    "src/grpc/xds/lds/projection.zig": "9dc8efb229e44d5e62c6f332124d520aff1e6d0d281eb3a9263fd798ce8dbe17",
+    "src/grpc/xds/lds/rbac.zig": "781d9baef310175c216f78796735d6bbf049c0093b77aafc6154870a18889ad2",
+    "src/grpc/xds/rds/decode.zig": "c883ecdb7a5c0fd9423bf52ecc040e47bb6db5a5b611ad93478e5d9064eca513",
+    "src/grpc/xds/rds/match.zig": "5793927e40b30ac297edce7ca5cc679a776975d0b83890b82b8d2c755bffdf81",
+    "src/grpc/xds/rds/model.zig": "b7a48e5a6f74ef5e389fc5bd4526559c0e654a10ed9bd30be115034b67b0a4d8",
+    "src/grpc/xds/rds/tests.zig": "19df02b1ef6f0a3547448dc5c5e6c401b3f8cf74c6133e011fd9f2862f962e60",
+    "src/grpc/xds/routing/header.zig": "f0b9fa646dd5cbc0cffa6be39a4eb86bf36242b9c06cdcf68c5516f27ee0e2fe",
+    "src/grpc/xds/routing/tests.zig": "6045dae47fcf59cd2edbda1b63aa43e9c31e2eaad833f01b7f6e8e1341e98751",
+    "src/http2/runtime.zig": "0575b01e2a2bbcfe070d19c1c796506b2b43a32ac219b0f4b9e4de07c0b0124b",
+    "src/http2/runtime/response/goaway_commitment_tests.zig": "25a351707d5f93564a2b8ef4c45f181b305d3f69aadef31af8bac634da87179a",
+    "tools/interop/grpc_lds/client.zig": "63ce11fcf26affd11572351c9caaeab9c33ad6b00cbfc793f99c41ff47ec09e8",
+    "tools/interop/grpc_lds/peer.js": "4339f9a50412d690028622efc62110613534d3d20b599c9332c6f44d7825d50b",
+    "tools/interop/grpc_lds/run.py": "2e5abd1f790ee486c646f8dfc5e6b8c09fe3cb3054c5af60992c32fb2f21f6a3",
+    "tools/interop/http3_socks5_pool.py": "77e5fd9113d51af0a81bd503be7aa3cbccce3a3ac222f027e8ce543e7776a025",
+    "tools/interop/http3_socks5_pool_go_test.py": "b55ebbcdaf93efa24a68c60746488471adf186d9863a7bdfaa31636c9d04d8cf"
+  },
+  "interop_report": "docs/evidence/grpc_lds/2026-11-06-rbac-route-interop.json",
+  "interop_backend_calls": 38,
+  "interop_sessions": [
+    1,
+    1
+  ],
+  "interop_rbac_cases": {
+    "rbac_route_allow_default": true,
+    "rbac_route_deny": true,
+    "rbac_route_absent_disabled": true,
+    "rbac_route_empty_disabled": true,
+    "rbac_route_empty_rules_denied": true
+  },
+  "interop_limitations": [
+    "grpc-js-xds 1.14.2 rejects the two canonical disabling RBAC route overrides; the peer asserts its exact rejection and validates the remaining listener while native wire probes exercise all five official-schema forms."
+  ],
+  "repository_skip_output": [],
+  "references": {
+    "grpc_http2": "/home/passchaos/Work/grpc/doc/PROTOCOL-HTTP2.md",
+    "envoy_presence_matcher": "https://github.com/envoyproxy/envoy/blob/main/source/common/http/header_utility.h#L75-L105"
+  },
+  "overall_goal_status": "active",
+  "overall_goal_completion_claimed": false
+}

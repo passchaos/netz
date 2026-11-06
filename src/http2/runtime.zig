@@ -53,6 +53,7 @@ test {
     _ = @import("runtime/request/upload_tests.zig");
     _ = @import("runtime/response/output_deadline_tests.zig");
     _ = @import("runtime/response/stream_roundtrip_tests.zig");
+    _ = @import("runtime/response/goaway_commitment_tests.zig");
     _ = @import("runtime/stream/termination_tests.zig");
     _ = @import("runtime/stream/peer_termination_tests.zig");
     _ = client_duplex_owner;
@@ -5396,6 +5397,11 @@ pub const Connection = struct {
                     if (reset.stream_id == requested_stream_id and self.next_client_stream_id > requested_stream_id) self.last_peer_reset_response_started = false;
                 }
             }
+            // A blocked initial upload can observe a local protocol failure
+            // before creating PendingResponse. Only peer unprocessed-stream
+            // evidence may escape to the unary transparent replay driver.
+            if (err == error.ConnectionGoAway and
+                (self.aggregate_timeout_unusable or self.goAwayRetryDisposition(requested_stream_id) != .safe_to_retry)) return error.InvalidFrame;
             return err;
         };
     }
@@ -16803,13 +16809,38 @@ pub const Connection = struct {
         deadline: ?std.Io.Clock.Timestamp,
         upload_value: ?complete_upload.Upload,
     ) Error!OwnedResponse {
+        return self.readResponseAndUploadInnerUntil(stream_id, request_method, extended_connect, informational, deadline, upload_value) catch |err| {
+            // Local protocol/policy failures also emit ConnectionGoAway.
+            // Only a peer boundary excluding this stream proves that an
+            // aggregate caller may transparently replay the request.
+            if (err == error.ConnectionGoAway and
+                (self.aggregate_timeout_unusable or self.goAwayRetryDisposition(stream_id) != .safe_to_retry)) return error.InvalidFrame;
+            return @as(Error!OwnedResponse, err);
+        };
+    }
+
+    fn readResponseAndUploadInnerUntil(
+        self: *Connection,
+        stream_id: u31,
+        request_method: []const u8,
+        extended_connect: bool,
+        informational: ?InformationalObserver,
+        deadline: ?std.Io.Clock.Timestamp,
+        upload_value: ?complete_upload.Upload,
+    ) Error!OwnedResponse {
         if (self.callback_reader_active) return error.UnexpectedFrame;
         if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
         self.serve_read_connection_error = null;
         self.serve_read_stream_error = null;
         var upload = upload_value;
         var cleanup_before: ?std.Io.Clock.Timestamp = null;
-        defer self.releaseLocalStream(stream_id);
+        // This aggregate operation destroys its stream owner on every exit.
+        // GOAWAY can release concurrency before error reporting, and ordinary
+        // completion need not send a reset; neither may retain flow windows.
+        defer {
+            self.releaseLocalStream(stream_id);
+            self.forgetStreamWindows(stream_id);
+        }
         errdefer |err| if (err != error.Timeout) {
             self.sendResponseReadError(stream_id, err);
         };
@@ -16847,6 +16878,10 @@ pub const Connection = struct {
         while (true) {
             if (upload) |*remaining| self.resumeCompleteUploadUntil(remaining, stream_id, deadline) catch |err| {
                 if (err == error.StreamReset) self.last_peer_reset_response_started = headers != null or informational_count != 0;
+                // A received response head contradicts GOAWAY's claim that
+                // this stream was never processed, including when a blocked
+                // upload reads the GOAWAY while waiting for flow credit.
+                if (err == error.ConnectionGoAway and (headers != null or informational_count != 0)) return error.InvalidFrame;
                 return @as(Error!OwnedResponse, err);
             };
             var pending_owned: ?OwnedFrame = null;
@@ -16861,7 +16896,10 @@ pub const Connection = struct {
             if (try self.handleConnectionFrameUntil(frame, deadline)) continue;
             if (frame.header.frame_type == .goaway) {
                 const goaway = try http2.GoAwayPayload.parse(frame);
-                try self.handleGoAwayForStream(stream_id, goaway);
+                self.handleGoAwayForStream(stream_id, goaway) catch |err| {
+                    if (err == error.ConnectionGoAway and (headers != null or informational_count != 0)) return error.InvalidFrame;
+                    return @as(Error!OwnedResponse, err);
+                };
                 continue;
             }
             if (frame.header.stream_id != stream_id) return error.UnexpectedFrame;
@@ -16920,10 +16958,13 @@ pub const Connection = struct {
                             if (traditional_connect and (lookup.content_length orelse 0) != 0) return error.InvalidContentLength;
                             if ((statusIsInformational(status) or status == 204) and lookup.content_length != null) return error.InvalidContentLength;
                             if (!traditional_connect and (frame.header.flags & flag_end_stream) == 0) {
-                                try self.consumeForbiddenResponseBodyUntil(
+                                self.consumeForbiddenResponseBodyUntil(
                                     stream_id,
                                     deadline,
-                                );
+                                ) catch |err| {
+                                    if (err == error.ConnectionGoAway) return error.InvalidFrame;
+                                    return @as(Error!OwnedResponse, err);
+                                };
                             }
                             break;
                         }
@@ -23947,6 +23988,10 @@ pub const testing = struct {
         return connection.readOwnedFrame();
     }
 
+    pub fn readOwnedServerDuplexFrameWithDeadline(connection: *Connection, stream_id: u31, deadline: std.Io.Clock.Timestamp) Error!RetainedFrame {
+        return connection.readOwnedServerDuplexFrameWithDeadline(stream_id, deadline);
+    }
+
     pub fn copyBorrowedFrame(connection: *Connection, borrowed: frame_io.BorrowedFrame) Error!OwnedFrame {
         return connection.copyBorrowedFrame(borrowed);
     }
@@ -25087,13 +25132,10 @@ test "HTTP/2 h2c runtime client and server exchange over TCP" {
     try std.testing.expectEqual(@as(u31, 1), stream_window.window_update.stream_id);
     try std.testing.expectEqual(@as(u31, 1024), stream_window.window_update.increment);
     // The response closed stream 1 before this late WINDOW_UPDATE arrived.
-    // Return the frame to the explicit observer, but do not mutate the
-    // retained closed-stream window. RFC 9113 permits ignoring this race.
-    try std.testing.expect(client.send_stream_window_index.contains(1));
-    try std.testing.expectEqual(
-        @as(i64, default_flow_window - "ping".len),
-        (try client.sendStreamWindow(1)).value,
-    );
+    // Return the frame to the explicit observer without recreating the
+    // retired stream's window. RFC 9113 permits ignoring this race.
+    try std.testing.expectEqual(@as(usize, 0), client.send_stream_window_index.count());
+    try std.testing.expectEqual(@as(usize, 0), client.send_stream_windows.items.len);
     var goaway = try client.readGoAway();
     defer goaway.deinit(allocator);
     try std.testing.expectEqual(http2.ErrorCode.no_error, goaway.goaway.error_code);

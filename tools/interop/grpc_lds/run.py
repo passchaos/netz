@@ -32,7 +32,7 @@ def main():
     digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
     report["source_sha256"] = {file: digest(repo / file) for file in files}
     proto_root = deps / "node_modules/@grpc/grpc-js-xds/deps/envoy-api"
-    report["reference_proto_sha256"] = {file: digest(proto_root / file) for file in ("envoy/config/listener/v3/listener.proto", "envoy/config/listener/v3/api_listener.proto", "envoy/extensions/filters/network/http_connection_manager/v3/http_connection_manager.proto", "envoy/config/core/v3/config_source.proto", "envoy/config/core/v3/protocol.proto", "envoy/config/route/v3/route.proto", "envoy/config/route/v3/route_components.proto", "envoy/type/matcher/v3/string.proto", "envoy/type/matcher/v3/regex.proto")}
+    report["reference_proto_sha256"] = {file: digest(proto_root / file) for file in ("envoy/config/listener/v3/listener.proto", "envoy/config/listener/v3/api_listener.proto", "envoy/extensions/filters/network/http_connection_manager/v3/http_connection_manager.proto", "envoy/config/core/v3/config_source.proto", "envoy/config/core/v3/protocol.proto", "envoy/config/route/v3/route.proto", "envoy/config/route/v3/route_components.proto", "envoy/type/matcher/v3/string.proto", "envoy/type/matcher/v3/regex.proto", "envoy/config/rbac/v3/rbac.proto", "envoy/extensions/filters/http/rbac/v3/rbac.proto")}
     report["client_sha256"] = digest(args.client)
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)

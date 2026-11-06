@@ -71,7 +71,7 @@ pub const Override = struct {
     name: []const u8 = "",
     kind: ?OverrideKind = null,
     disabled: bool = false,
-    /// `envoy.config.rbac.v3.RBAC` for RBAC or HTTPFault for fault.
+    /// HTTP `envoy.extensions.filters.http.rbac.v3.RBAC` or HTTPFault.
     config: []const u8 = "",
 };
 pub const Route = struct {

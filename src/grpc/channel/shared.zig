@@ -291,5 +291,6 @@ test {
     _ = @import("shared/outlier_detection_tests.zig");
     _ = @import("shared/weighted_round_robin_tests.zig");
     _ = @import("shared/hedging_tests.zig");
+    _ = @import("shared/hedging/recovery_tests.zig");
     _ = @import("shared/lrs_stats_tests.zig");
 }

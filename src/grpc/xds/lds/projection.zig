@@ -96,7 +96,7 @@ pub const Projection = struct {
                     compiled.rbac = .disabled;
                 } else {
                     const policy = try self.arena.allocator().create(rbac.Policy);
-                    policy.* = try rbac.decodePolicyBytes(self.arena.allocator(), entry.config, .{});
+                    policy.* = try rbac.decode(self.arena.allocator(), entry.config, .{});
                     compiled.rbac = .{ .policy = policy };
                 }
             }

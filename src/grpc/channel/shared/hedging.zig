@@ -34,7 +34,7 @@ pub fn run(
             overall: ?std.Io.Clock.Timestamp,
             index: u8,
         ) AttemptOutcome {
-            var transparent_used = false;
+            var transparent: retry.TransparentRetry = .{ .enabled = request.transparent_retry };
             while (true) {
                 const timeout_header: ?wire.Timeout = if (overall) |absolute| blk: {
                     const remaining = absolute.durationFromNow(owner.io).raw;
@@ -54,12 +54,11 @@ pub fn run(
                     overall,
                     timeout_header,
                     if (index == 0) null else index,
-                ) catch |err| return .{ .index = index, .result = err };
-                if (request.transparent_retry and !transparent_used and
-                    !response.response_committed and response.reset != null and
-                    response.reset.?.error_code == .refused_stream)
-                {
-                    transparent_used = true;
+                ) catch |err| {
+                    if (transparent.replayError(err)) continue;
+                    return .{ .index = index, .result = err };
+                };
+                if (transparent.replayResponse(response)) {
                     response.deinit();
                     continue;
                 }

@@ -7,6 +7,7 @@ import argparse
 import glob
 import os
 from pathlib import Path
+import re
 import select
 import shutil
 import socket
@@ -248,22 +249,42 @@ def find_go() -> str:
     candidates = [os.environ.get("GO_BIN"), shutil.which("go"), "/tmp/go/bin/go"]
     candidates.extend(sorted(glob.glob("/nav_env/Temp/go*/bin/go"), reverse=True))
     candidates.extend(sorted(glob.glob("/tmp/netz-h2spec.*/go/bin/go"), reverse=True))
+    gopath = os.environ.get("GOPATH") or str(Path.home() / "go")
+    for root in gopath.split(os.pathsep):
+        if root:
+            candidates.extend(
+                str(path)
+                for path in sorted(
+                    Path(root).expanduser().glob(
+                        "pkg/mod/golang.org/toolchain@v0.0.1-go*/bin/go"
+                    ),
+                    reverse=True,
+                )
+            )
     seen: set[str] = set()
     for candidate in candidates:
-        if candidate is None or candidate in seen or not os.access(candidate, os.X_OK):
+        if not candidate:
+            continue
+        candidate = os.path.realpath(os.path.expanduser(candidate))
+        if candidate in seen or not Path(candidate).is_file() or not os.access(candidate, os.X_OK):
             continue
         seen.add(candidate)
-        version = subprocess.run(
-            (candidate, "env", "GOVERSION"),
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        ).stdout.strip()
         try:
-            major, minor = (int(value) for value in version.removeprefix("go").split(".")[:2])
-        except (ValueError, IndexError):
+            result = subprocess.run(
+                (candidate, "env", "GOVERSION"),
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                env={**os.environ, "GOTOOLCHAIN": "local"},
+                check=False,
+                timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired):
             continue
+        version = re.fullmatch(r"go(\d+)\.(\d+)(?:\.\d+)?", result.stdout.strip())
+        if result.returncode != 0 or version is None:
+            continue
+        major, minor = (int(value) for value in version.groups())
         if (major, minor) >= (1, 24):
             return candidate
     raise RuntimeError("Go 1.24 or newer not found")

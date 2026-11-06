@@ -555,6 +555,43 @@ test "fault header matchers gate injection" {
     try std.testing.expect((try policy.evaluateWith(std.testing.allocator, testRequest(&.{}), null, prng.random())).abort == null);
 }
 
+test "fault decoded empty header matching honors missing-as-empty flags" {
+    // A fixed 100% abort makes header matching the only injection condition.
+    const abort = try abortBytes(5, 14, 100);
+    defer std.testing.allocator.free(abort);
+    const flags = [_]?bool{ null, false, true };
+    const values = [_]?[]const u8{ null, "", "nonempty" };
+    for (flags) |as_empty| {
+        var matcher = TestBuilder{};
+        defer matcher.deinit();
+        try matcher.bytes(1, "x-fault");
+        try matcher.bytes(4, ""); // exact_match is a present empty oneof value.
+        if (as_empty) |enabled| try matcher.number(14, @intFromBool(enabled));
+        var fault = TestBuilder{};
+        defer fault.deinit();
+        try fault.bytes(2, abort);
+        try fault.bytes(4, matcher.data.items);
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var policy = try decode(arena.allocator(), fault.data.items, .{});
+        try std.testing.expectEqual(@as(usize, 1), policy.headers.len);
+        try std.testing.expectEqual(as_empty orelse false, policy.headers[0].treat_missing_header_as_empty);
+        var prng = std.Random.DefaultPrng.init(3);
+        for (values) |value| {
+            const metadata = [_]http2.Hpack.HeaderField{.{ .name = "x-fault", .value = value orelse "" }};
+            const request = testRequest(if (value != null) &metadata else &.{});
+            const decision = try policy.evaluateWith(std.testing.allocator, request, null, prng.random());
+            const should_abort = if (value) |text_value| text_value.len == 0 else as_empty orelse false;
+            try std.testing.expectEqual(should_abort, decision.abort != null);
+            if (decision.abort) |injected| {
+                try std.testing.expectEqual(wire.Status.unavailable, injected.status);
+                try std.testing.expectEqualStrings("Fault injected", injected.message);
+            }
+            try std.testing.expect(decision.delay == null and !decision.counted);
+        }
+    }
+}
+
 test "fault fixed delay and max_active_faults bound concurrent faults" {
     var delay = TestBuilder{};
     defer delay.deinit();

@@ -41,8 +41,12 @@ predicates and optional runtime fraction. `path_separated_prefix` compares the
 path with query and fragment removed, matching either the prefix itself or the
 prefix followed by `/`; `/demo.Service` therefore matches
 `/demo.Service/Get` but not `/demo.ServiceX/Get`. Binary metadata is absent from
-the routing view, repeated ASCII header values are joined with commas and
-missing value predicates fail before inversion as in grpc-core. Non-gRPC
+the routing view and repeated ASCII header values are joined with commas.
+Missing value predicates fail before inversion by default. Envoy's explicit
+`treat_missing_header_as_empty` instead evaluates absence as a present empty
+value for string, range and presence conditions before applying inversion;
+RBAC and fault filters share that matcher. Regex execution budgets and header
+count/text limits apply to both forms. Non-gRPC
 exact/prefix/path-separated-prefix paths and query/CONNECT routes are skipped.
 Unsupported path-match policies and metadata/TLS matchers are rejected.
 Matching inappropriate/non-forwarding actions return a local unary

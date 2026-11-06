@@ -57,6 +57,30 @@ fn deniedUnary(sender: grpc.SharedChannelSender) !void {
 fn deniedStream(sender: grpc.SharedChannelSender) !void {
     try std.testing.expectError(error.PermissionDenied, sender.startDuplex(.{ .path = "/fixture.Lds/Stream", .authority = "backend.test", .wait_for_ready = true, .timeout = .{ .value = 3, .unit = .second }, .metadata = &.{.{ .name = "x-deny", .value = "1" }} }));
 }
+fn rbacRouteStatus(sender: grpc.SharedChannelSender, path: []const u8, metadata: []const netz.http2.Hpack.HeaderField, expected: grpc.Status) !void {
+    var response = try sender.unary(.{ .path = path, .authority = "backend.test", .message = "request", .wait_for_ready = true, .timeout = .{ .value = 3, .unit = .second }, .metadata = metadata });
+    defer response.deinit();
+    try std.testing.expectEqual(expected, response.status);
+    try std.testing.expect(!response.was_dropped);
+    if (expected == .ok) {
+        try std.testing.expect(response.transport != null and response.message != null);
+        try std.testing.expectEqualStrings("a", response.message.?.payload);
+    } else {
+        try std.testing.expect(response.message == null and response.transport == null);
+    }
+}
+fn rbacRouteOverrides(sender: grpc.SharedChannelSender) !void {
+    // Matching ALLOW and nonmatching DENY replace the listener's x-deny rule.
+    try rbacRouteStatus(sender, "/fixture.Lds/RbacAllow", &.{ .{ .name = "x-allow", .value = "1" }, .{ .name = "x-deny", .value = "1" } }, .ok);
+    try rbacRouteStatus(sender, "/fixture.Lds/RbacAllow", &.{}, .permission_denied);
+    try rbacRouteStatus(sender, "/fixture.Lds/RbacDeny", &.{.{ .name = "x-block", .value = "1" }}, .permission_denied);
+    try rbacRouteStatus(sender, "/fixture.Lds/RbacDeny", &.{.{ .name = "x-deny", .value = "1" }}, .ok);
+    try rbacRouteStatus(sender, "/fixture.Lds/RbacAbsent", &.{.{ .name = "x-deny", .value = "1" }}, .ok);
+    try rbacRouteStatus(sender, "/fixture.Lds/RbacEmpty", &.{.{ .name = "x-deny", .value = "1" }}, .ok);
+    // Empty rules retain default ALLOW action with no matching policies.
+    try rbacRouteStatus(sender, "/fixture.Lds/RbacEmptyRules", &.{}, .permission_denied);
+    try rbacRouteStatus(sender, "/fixture.Lds/RbacEmptyRules", &.{ .{ .name = "x-allow", .value = "1" }, .{ .name = "x-deny", .value = "1" } }, .permission_denied);
+}
 fn headerAllowed(sender: grpc.SharedChannelSender, label: []const u8) !void {
     var response = try sender.unary(.{ .path = "/fixture.Lds/Fast", .authority = "backend.test", .message = "request", .wait_for_ready = true, .timeout = .{ .value = 3, .unit = .second }, .metadata = &.{.{ .name = "x-deny", .value = "1" }} });
     defer response.deinit();
@@ -149,6 +173,7 @@ pub fn main(init: std.process.Init) !void {
     try fast(sender, "a");
     try deniedUnary(sender);
     try deniedStream(sender);
+    try rbacRouteOverrides(sender);
     try stream(sender, "a");
     try timeout(sender, io, 150);
     var uncapped = try call(sender, "/fixture.Lds/NoCap");
@@ -206,5 +231,5 @@ pub fn main(init: std.process.Init) !void {
     var terminal = try client.nextWithDeadline(until(io));
     defer terminal.deinit();
     try std.testing.expectEqual(grpc.Status.ok, terminal.terminal.status);
-    std.debug.print("LDS_RESULT {{\"status\":\"passed\",\"inline\":true,\"dynamic\":true,\"cached_projection\":true,\"zero_override\":true,\"old_deadline_preserved\":true,\"name_change_cleared\":true,\"late_rds_ignored\":true,\"deleted\":true,\"rbac_denied\":true,\"rbac_stream_denied\":true,\"rbac_header_scope\":true,\"fault_abort\":true,\"fault_delay\":true,\"fault_percentage\":true,\"fault_route_override\":true,\"nacks\":3}}\n", .{});
+    std.debug.print("LDS_RESULT {{\"status\":\"passed\",\"inline\":true,\"dynamic\":true,\"cached_projection\":true,\"zero_override\":true,\"old_deadline_preserved\":true,\"name_change_cleared\":true,\"late_rds_ignored\":true,\"deleted\":true,\"rbac_denied\":true,\"rbac_stream_denied\":true,\"rbac_header_scope\":true,\"rbac_route_allow_default\":true,\"rbac_route_deny\":true,\"rbac_route_absent_disabled\":true,\"rbac_route_empty_disabled\":true,\"rbac_route_empty_rules_denied\":true,\"fault_abort\":true,\"fault_delay\":true,\"fault_percentage\":true,\"fault_route_override\":true,\"nacks\":3}}\n", .{});
 }

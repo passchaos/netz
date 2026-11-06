@@ -196,12 +196,27 @@ pub fn Worker(comptime State: type) type {
             self.local_state = .idle;
             self.parent.publish(self, .idle, 0);
         }
+        fn attemptFailure(connection: *http2.runtime.Connection, id: u31, observed_head: bool, err: anyerror) anyerror {
+            // Local protocol failures also report ConnectionGoAway. Replay
+            // requires the peer's unprocessed-stream boundary and no response
+            // evidence, checked before duplex cleanup destroys its head.
+            if (err == error.ConnectionGoAway and
+                (observed_head or connection.aggregate_timeout_unusable or
+                    connection.goAwayRetryDisposition(id) != .safe_to_retry)) return error.InvalidFrame;
+            // A later poll can observe only ConnectionClosed after the local
+            // GOAWAY made this transport unusable. Preserve its fatal origin.
+            if (err == error.ConnectionClosed and connection.aggregate_timeout_unusable and
+                connection.local_goaway_last_stream_id != null) return error.InvalidFrame;
+            return err;
+        }
         fn failActive(self: *Self, index: usize, err: anyerror) void {
             const job = self.active.items[index].job;
+            const item = &self.active.items[index];
+            const failure = attemptFailure(item.stream.transport.connection, item.stream.transport.stream_id, item.observed_head, err);
             self.active.items[index].stream.cancel() catch {};
             self.active.items[index].deinit();
             _ = self.active.swapRemove(index);
-            self.parent.finishAttempt(self, job, null, err);
+            self.parent.finishAttempt(self, job, null, failure);
         }
         fn publish(self: *Self) void {
             const connection = self.connection orelse {
@@ -474,6 +489,7 @@ pub fn Worker(comptime State: type) type {
                     .max_response_message_size = job.options.max_response_message_size,
                     .previous_attempts = job.previous_attempts,
                 };
+                const reserved_id = connection.next_client_stream_id;
                 var stream = duplex.startDuplexWithRetryDeadlines(
                     connection,
                     self.parent.allocator,
@@ -482,7 +498,8 @@ pub fn Worker(comptime State: type) type {
                     job.deadline,
                     minimum(job.deadline, self.outputDeadline()).?,
                 ) catch |err| {
-                    self.parent.finishAttempt(self, job, null, err);
+                    const failure = attemptFailure(connection, reserved_id, false, err);
+                    self.parent.finishAttempt(self, job, null, failure);
                     if (connection.aggregate_timeout_unusable) return err;
                     continue;
                 };
@@ -498,8 +515,9 @@ pub fn Worker(comptime State: type) type {
                     .{},
                     true,
                 ) catch |err| {
+                    const failure = attemptFailure(connection, stream.transport.stream_id, false, err);
                     stream.deinit();
-                    self.parent.finishAttempt(self, job, null, err);
+                    self.parent.finishAttempt(self, job, null, failure);
                     continue;
                 };
                 if (transferred) {

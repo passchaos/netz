@@ -37,6 +37,87 @@ test "gRPC RDS owns regex header cluster identities and selects ordered routes" 
     defer gpa.free(image);
     try std.testing.checkAllAllocationFailures(gpa, Harness.run, .{image});
 }
+test "gRPC RDS selects routes with missing-header empty values and inversion" {
+    const Case = struct { config: []const u8, clusters: [4][]const u8 };
+    const a = "cluster:a";
+    const b = "cluster:b";
+    // HeaderMatcher fields: exact_match = 4, invert_match = 8,
+    // treat_missing_header_as_empty = 14. Requests are absent, empty, beta, 5.
+    const cases = [_]Case{
+        .{ .config = "\x22\x00", .clusters = .{ a, b, a, a } },
+        .{ .config = "\x22\x00\x40\x01", .clusters = .{ a, a, b, b } },
+        .{ .config = "\x22\x00\x70\x00", .clusters = .{ a, b, a, a } },
+        .{ .config = "\x22\x00\x40\x01\x70\x00", .clusters = .{ a, a, b, b } },
+        .{ .config = "\x22\x00\x70\x01", .clusters = .{ b, b, a, a } },
+        .{ .config = "\x22\x00\x40\x01\x70\x01", .clusters = .{ a, a, b, b } },
+        .{ .config = "\x22\x04beta", .clusters = .{ a, a, b, a } },
+        .{ .config = "\x22\x04beta\x40\x01", .clusters = .{ a, b, a, b } },
+        .{ .config = "\x22\x04beta\x70\x00", .clusters = .{ a, a, b, a } },
+        .{ .config = "\x22\x04beta\x40\x01\x70\x00", .clusters = .{ a, b, a, b } },
+        .{ .config = "\x22\x04beta\x70\x01", .clusters = .{ a, a, b, a } },
+        .{ .config = "\x22\x04beta\x40\x01\x70\x01", .clusters = .{ b, b, a, b } },
+        // safe_regex_match = 11, with RegexMatcher.regex = 2 (the empty value).
+        .{ .config = "\x5a\x04\x12\x02^$\x70\x01", .clusters = .{ b, b, a, a } },
+        .{ .config = "\x5a\x04\x12\x02^$\x40\x01\x70\x01", .clusters = .{ a, a, b, b } },
+        // range_match = 6: [0, 10). Empty values fail numeric parsing.
+        .{ .config = "\x32\x02\x10\x0a\x70\x01", .clusters = .{ a, a, a, b } },
+        .{ .config = "\x32\x02\x10\x0a\x40\x01\x70\x01", .clusters = .{ b, b, b, a } },
+        // present_match = 7: flag true substitutes a present empty value.
+        .{ .config = "\x38\x01", .clusters = .{ a, b, b, b } },
+        .{ .config = "\x38\x01\x40\x01", .clusters = .{ b, a, a, a } },
+        .{ .config = "\x38\x01\x70\x00", .clusters = .{ a, b, b, b } },
+        .{ .config = "\x38\x01\x40\x01\x70\x00", .clusters = .{ b, a, a, a } },
+        .{ .config = "\x38\x01\x70\x01", .clusters = .{ b, b, b, b } },
+        .{ .config = "\x38\x01\x40\x01\x70\x01", .clusters = .{ a, a, a, a } },
+        .{ .config = "\x38\x00", .clusters = .{ b, a, a, a } },
+        .{ .config = "\x38\x00\x40\x01", .clusters = .{ a, b, b, b } },
+        .{ .config = "\x38\x00\x70\x00", .clusters = .{ b, a, a, a } },
+        .{ .config = "\x38\x00\x40\x01\x70\x00", .clusters = .{ a, b, b, b } },
+        .{ .config = "\x38\x00\x70\x01", .clusters = .{ a, a, a, a } },
+        .{ .config = "\x38\x00\x40\x01\x70\x01", .clusters = .{ b, b, b, b } },
+    };
+    const values = [_]?[]const u8{ null, "", "beta", "5" };
+    for (cases) |case| {
+        var header = fixture.Builder{ .allocator = gpa };
+        defer header.deinit();
+        try header.bytes(1, "x-tenant");
+        try header.data.appendSlice(gpa, case.config);
+        var match = fixture.Builder{ .allocator = gpa };
+        defer match.deinit();
+        try match.bytes(6, header.data.items);
+        const bytes = try fixture.encode(gpa, "routes", &.{"backend.test"}, &.{ .{ .prefix = "/", .cluster = "b", .match_extra = match.data.items }, .{ .prefix = "/", .cluster = "a" } }, null);
+        defer gpa.free(bytes);
+        const snapshot = try rds.Snapshot.create(gpa, bytes, .{}, .{ .authority = "backend.test" });
+        defer snapshot.release();
+        var prng = random();
+        for (values, case.clusters) |value, expected_cluster| {
+            const metadata = [_]@import("../../../http2/mod.zig").Hpack.HeaderField{.{ .name = "x-tenant", .value = value orelse "" }};
+            const selected = try snapshot.selectWith(gpa, .{
+                .path = "/demo.Service/Get",
+                .authority = "backend.test",
+                .metadata = if (value != null) &metadata else &.{},
+            }, 1, prng.random());
+            try std.testing.expectEqualStrings(expected_cluster, selected.cluster);
+        }
+    }
+}
+test "gRPC RDS missing-header regex matching preserves parser limits" {
+    var regex = fixture.Builder{ .allocator = gpa };
+    defer regex.deinit();
+    try regex.bytes(2, "^$");
+    var header = fixture.Builder{ .allocator = gpa };
+    defer header.deinit();
+    try header.bytes(1, "x-tenant");
+    try header.bytes(11, regex.data.items);
+    try header.number(14, 1);
+    var match = fixture.Builder{ .allocator = gpa };
+    defer match.deinit();
+    try match.bytes(6, header.data.items);
+    const bytes = try fixture.encode(gpa, "routes", &.{"backend.test"}, &.{.{ .prefix = "/", .match_extra = match.data.items }}, null);
+    defer gpa.free(bytes);
+    try std.testing.expectError(error.RdsLimitExceeded, rds.decode(gpa, bytes, .{ .max_total_regex_instructions = 0 }));
+    try std.testing.expectError(error.RdsLimitExceeded, rds.decode(gpa, bytes, .{ .max_headers_per_route = 0 }));
+}
 test "gRPC RDS skips non-gRPC route matches and enforces regex resource bounds" {
     const bytes = try fixture.encode(gpa, "routes", &.{"backend.test"}, &.{ .{ .prefix = "not-a-path", .cluster = "wrong" }, .{ .exact = "/service", .cluster = "wrong" }, .{ .prefix = "/", .cluster = "right" } }, null);
     defer gpa.free(bytes);
@@ -502,10 +583,11 @@ fn overrideEntry(allocator: std.mem.Allocator, name: []const u8, any_bytes: []co
     return entry.data.toOwnedSlice(allocator);
 }
 test "gRPC RDS decodes route and virtual-host per-filter overrides" {
-    const rbac_policy = "\x08\x00\x12\x0d\x0a\x01p\x12\x08\x0a\x02\x18\x01\x12\x02\x18\x01";
+    // RBACPerRoute.rbac wraps HTTP RBAC, whose rules use default ALLOW.
+    const rbac_filter = "\x0a\x0f\x12\x0d\x0a\x01p\x12\x08\x0a\x02\x18\x01\x12\x02\x18\x01";
     var per_route = fixture.Builder{ .allocator = gpa };
     defer per_route.deinit();
-    try per_route.bytes(2, rbac_policy);
+    try per_route.bytes(2, rbac_filter);
     const rbac_any = try anyBytes(gpa, "type.googleapis.com/envoy.extensions.filters.http.rbac.v3.RBACPerRoute", per_route.data.items);
     defer gpa.free(rbac_any);
     const route_entry = try overrideEntry(gpa, "rbac", rbac_any);
@@ -548,5 +630,5 @@ test "gRPC RDS decodes route and virtual-host per-filter overrides" {
     try std.testing.expectEqual(@as(usize, 1), route.overrides.len);
     try std.testing.expectEqual(rds.resource.OverrideKind.rbac, route.overrides[0].kind.?);
     try std.testing.expectEqualStrings("rbac", route.overrides[0].name);
-    try std.testing.expectEqualStrings(rbac_policy, route.overrides[0].config);
+    try std.testing.expectEqualStrings(rbac_filter, route.overrides[0].config);
 }

@@ -59,6 +59,7 @@ fn header(p: anytype, bytes: []const u8) pb.Error!routing.header.Match {
     var reader = pb.Reader{ .bytes = bytes };
     var name: []const u8 = "";
     var invert = false;
+    var treat_missing_header_as_empty = false;
     var condition: ?@FieldType(routing.header.Match, "condition") = null;
     while (try reader.next()) |field| {
         if (field.number == 1 and field.wire_type == 2) name = try pb.text(&reader, p.limits.max_text_bytes) else if (field.number == 8 and field.wire_type == 0) invert = try reader.varint() != 0 else if (field.number == 7 and field.wire_type == 0) condition = .{ .present = try reader.varint() != 0 } else if (field.number == 6 and field.wire_type == 2) {
@@ -74,11 +75,11 @@ fn header(p: anytype, bytes: []const u8) pb.Error!routing.header.Match {
                 else => 7,
             }, text, false) };
         } else if (field.number == 14 and field.wire_type == 0) {
-            if (try reader.varint() != 0) return error.UnsupportedRdsFeature;
+            treat_missing_header_as_empty = try reader.varint() != 0;
         } else try reader.skip(field);
     }
     if (name.len == 0) return error.InvalidRdsResource;
-    return .{ .name = name, .condition = condition orelse return error.InvalidRdsResource, .invert = invert };
+    return .{ .name = name, .condition = condition orelse return error.InvalidRdsResource, .invert = invert, .treat_missing_header_as_empty = treat_missing_header_as_empty };
 }
 fn fraction(bytes: []const u8) pb.Error!?u32 {
     var reader = pb.Reader{ .bytes = bytes };
