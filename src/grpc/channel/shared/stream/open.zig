@@ -28,7 +28,7 @@ pub fn openUntil(state: anytype, options: streaming.RequestOptions, entered: std
     // publication cannot invalidate borrowed method-policy strings.
     const opening_deadline = @import("../../../../internal/deadline.zig").earlier(deadline, admission);
     if (resolved.options.fault_policy) |policy| {
-        var decision = policy.evaluate(state.io, .{
+        var decision = try policy.evaluate(state.allocator, state.io, .{
             .path = resolved.options.path,
             .authority = resolved.options.authority orelse "",
             .scheme = resolved.options.scheme,

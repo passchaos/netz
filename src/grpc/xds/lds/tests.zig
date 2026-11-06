@@ -162,6 +162,27 @@ test "gRPC LDS accepts a fault filter and orders it after RBAC" {
     try std.testing.expect(owned_disabled.value.hcm.fault_config == null);
 }
 
+test "gRPC LDS accepts fault header matchers" {
+    const fault_value = try headerAbort(gpa, 100);
+    defer gpa.free(fault_value);
+    var matcher = fixture.Builder{ .allocator = gpa };
+    defer matcher.deinit();
+    try matcher.bytes(1, "x-fault");
+    try matcher.number(7, 1);
+    var fault = fixture.Builder{ .allocator = gpa };
+    defer fault.deinit();
+    try fault.bytes(2, fault_value);
+    try fault.bytes(4, matcher.data.items);
+    const bytes = try fixture.encode(gpa, .{ .filters = &.{
+        .{ .name = "fault", .type_name = lds.resource.fault_type, .value = fault.data.items },
+        .{},
+    } });
+    defer gpa.free(bytes);
+    var owned = try lds.decode(gpa, bytes, .{});
+    defer owned.deinit();
+    try std.testing.expect(owned.value.hcm.fault_config != null);
+}
+
 test "gRPC LDS rejects duplicate fault filters and fault-before-RBAC ordering" {
     const fault_value = try headerAbort(gpa, 100);
     defer gpa.free(fault_value);
@@ -200,7 +221,7 @@ test "gRPC LDS rejects malformed and unsupported fault filters" {
 
     var unsupported = fixture.Builder{ .allocator = gpa };
     defer unsupported.deinit();
-    try unsupported.bytes(4, "x");
+    try unsupported.bytes(5, "x");
     const unsupported_bytes = try fixture.encode(gpa, .{ .filters = &.{
         .{ .name = "fault", .type_name = lds.resource.fault_type, .value = unsupported.data.items },
         .{},

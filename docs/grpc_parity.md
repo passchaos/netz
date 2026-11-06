@@ -3816,9 +3816,10 @@ opens observe the same policy; aborts return the configured status without a
 backend and delays are bounded by the attempt deadline. The official-schema
 interop gate carries a matching `upstream_cluster`, aborts on gRPC and HTTP
 status headers, verifies a zero-percent header override routes normally, and
-measures a real header delay before backend delivery. Fault filters placed
-before RBAC and fault header-matcher/downstream-node/rate-limit fields are
-rejected; other non-router filters remain open.
+measures a real header delay before backend delivery. Fault header matchers
+gate injection and are shared with RBAC's HeaderMatcher decoder. Fault filters
+placed before RBAC and fault downstream-node/rate-limit fields are rejected;
+other non-router filters remain open.
 
 ## SotW resource omission and initial discovery
 

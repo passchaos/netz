@@ -47,114 +47,16 @@ pub const Node = union(enum) {
     negate: *const Node,
 };
 
-fn literal(kind: u32, text: []const u8, ignore_case: bool) routing.string.Match {
-    const value = routing.string.Match.Literal{ .text = text, .ignore_case = ignore_case };
-    return switch (kind) {
-        1 => .{ .exact = value },
-        2 => .{ .prefix = value },
-        3 => .{ .suffix = value },
-        14 => .{ .path_separated_prefix = value },
-        else => .{ .contains = value },
-    };
-}
-
-fn regexMatcher(arena: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!routing.string.Match {
-    var reader = pb.Reader{ .bytes = bytes };
-    var pattern: ?[]const u8 = null;
-    while (try reader.next()) |field| {
-        // Envoy RegexMatcher: google_re2 engine = 1, regex pattern = 2.
-        if (field.number == 2 and field.wire_type == 2) {
-            pattern = try pb.text(&reader, limits.max_text_bytes);
-        } else try reader.skip(field);
-    }
-    return routing.string.Match.compileRegex(arena, pattern orelse return error.InvalidRbacResource, limits.regex);
-}
-
-fn stringMatcher(arena: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!routing.string.Match {
-    var reader = pb.Reader{ .bytes = bytes };
-    var kind: ?u32 = null;
-    var text: []const u8 = "";
-    var ignore_case = false;
-    var regex_bytes: ?[]const u8 = null;
-    while (try reader.next()) |field| {
-        // Envoy StringMatcher: exact = 1, prefix = 2, suffix = 3,
-        // safe_regex = 5, contains = 7; ignore_case = 6.
-        if ((field.number == 1 or field.number == 2 or field.number == 3 or
-            field.number == 7) and field.wire_type == 2)
-        {
-            kind = field.number;
-            text = try pb.text(&reader, limits.max_text_bytes);
-            regex_bytes = null;
-        } else if (field.number == 5 and field.wire_type == 2) {
-            kind = 5;
-            regex_bytes = try reader.bytesValue();
-        } else if (field.number == 6 and field.wire_type == 0) {
-            ignore_case = (try reader.varint()) != 0;
-        } else try reader.skip(field);
-    }
-    const value = kind orelse return error.InvalidRbacResource;
-    if (value == 5) return regexMatcher(arena, regex_bytes.?, limits);
-    if (text.len == 0 and value != 1) return error.InvalidRbacResource;
-    return literal(value, text, ignore_case);
-}
-
-fn rangeMatcher(bytes: []const u8) Error!routing.header.Range {
-    var reader = pb.Reader{ .bytes = bytes };
-    var start: i64 = 0;
-    var end: i64 = 0;
-    while (try reader.next()) |field| {
-        if (field.number == 1 and field.wire_type == 0) {
-            start = @bitCast(try reader.varint());
-        } else if (field.number == 2 and field.wire_type == 0) {
-            end = @bitCast(try reader.varint());
-        } else try reader.skip(field);
-    }
-    if (end < start) return error.InvalidRbacResource;
-    return .{ .start = start, .end = end };
-}
-
 fn headerMatcher(arena: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!routing.header.Match {
-    var reader = pb.Reader{ .bytes = bytes };
-    var name: []const u8 = "";
-    var condition: ?routing.header.Condition = null;
-    var invert = false;
-    while (try reader.next()) |field| {
-        switch (field.number) {
-            1 => if (field.wire_type == 2) {
-                name = try pb.text(&reader, limits.max_text_bytes);
-            } else try reader.skip(field),
-            4 => if (field.wire_type == 2) {
-                condition = .{ .string = literal(1, try pb.text(&reader, limits.max_text_bytes), false) };
-            } else try reader.skip(field),
-            11 => if (field.wire_type == 2) {
-                condition = .{ .string = try regexMatcher(arena, try reader.bytesValue(), limits) };
-            } else try reader.skip(field),
-            6 => if (field.wire_type == 2) {
-                condition = .{ .range = try rangeMatcher(try reader.bytesValue()) };
-            } else try reader.skip(field),
-            7 => if (field.wire_type == 0) {
-                condition = .{ .present = (try reader.varint()) != 0 };
-            } else try reader.skip(field),
-            8 => if (field.wire_type == 0) {
-                invert = (try reader.varint()) != 0;
-            } else try reader.skip(field),
-            9 => if (field.wire_type == 2) {
-                condition = .{ .string = literal(2, try pb.text(&reader, limits.max_text_bytes), false) };
-            } else try reader.skip(field),
-            10 => if (field.wire_type == 2) {
-                condition = .{ .string = literal(3, try pb.text(&reader, limits.max_text_bytes), false) };
-            } else try reader.skip(field),
-            12 => if (field.wire_type == 2) {
-                condition = .{ .string = literal(7, try pb.text(&reader, limits.max_text_bytes), false) };
-            } else try reader.skip(field),
-            13 => if (field.wire_type == 2) {
-                condition = .{ .string = try stringMatcher(arena, try reader.bytesValue(), limits) };
-            } else try reader.skip(field),
-            else => try reader.skip(field),
-        }
-    }
-    if (name.len == 0) return error.InvalidRbacResource;
-    return .{ .name = name, .condition = condition orelse return error.InvalidRbacResource, .invert = invert };
+    return routing.header.decode(arena, bytes, .{
+        .max_text_bytes = limits.max_text_bytes,
+        .regex = limits.regex,
+    }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.HeaderMatcherLimitExceeded => return error.RbacLimitExceeded,
+        error.InvalidHeaderMatcher => return error.InvalidRbacResource,
+        else => return @errorCast(err),
+    };
 }
 
 fn pathMatcher(arena: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!routing.string.Match {
@@ -162,7 +64,15 @@ fn pathMatcher(arena: std.mem.Allocator, bytes: []const u8, limits: Limits) Erro
     var matcher: ?routing.string.Match = null;
     while (try reader.next()) |field| {
         if (field.number == 1 and field.wire_type == 2) {
-            matcher = try stringMatcher(arena, try reader.bytesValue(), limits);
+            matcher = routing.header.decodeStringMatcher(arena, try reader.bytesValue(), .{
+                .max_text_bytes = limits.max_text_bytes,
+                .regex = limits.regex,
+            }) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.HeaderMatcherLimitExceeded => return error.RbacLimitExceeded,
+                error.InvalidHeaderMatcher => return error.InvalidRbacResource,
+                else => return @errorCast(err),
+            };
         } else try reader.skip(field);
     }
     return matcher orelse error.InvalidRbacResource;

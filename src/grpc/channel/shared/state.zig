@@ -1103,7 +1103,7 @@ pub const State = struct {
         var attempt_options = options;
         attempt_options.timeout = timeout_header;
         if (attempt_options.fault_policy) |policy| {
-            var decision = policy.evaluate(self.io, .{
+            var decision = try policy.evaluate(self.allocator, self.io, .{
                 .path = attempt_options.path,
                 .authority = attempt_options.authority orelse "",
                 .scheme = attempt_options.scheme,

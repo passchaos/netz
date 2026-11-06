@@ -56,6 +56,133 @@ pub const Request = struct {
 };
 pub const Range = struct { start: i64, end: i64 };
 
+pub const DecodeLimits = struct {
+    max_text_bytes: usize = 4096,
+    regex: @import("regex.zig").Limits = .{},
+};
+
+pub const DecodeError = std.mem.Allocator.Error || @import("../../protobuf.zig").Error || @import("regex.zig").Error || error{
+    InvalidHeaderMatcher,
+    HeaderMatcherLimitExceeded,
+};
+
+fn literal(kind: u32, text: []const u8, ignore_case: bool) String {
+    const value = String.Literal{ .text = text, .ignore_case = ignore_case };
+    return switch (kind) {
+        1 => .{ .exact = value },
+        2 => .{ .prefix = value },
+        3 => .{ .suffix = value },
+        14 => .{ .path_separated_prefix = value },
+        else => .{ .contains = value },
+    };
+}
+
+fn readText(reader: *@import("../../protobuf.zig").Reader, limit: usize) DecodeError![]const u8 {
+    const value = try reader.string();
+    if (value.len > limit) return error.HeaderMatcherLimitExceeded;
+    return value;
+}
+
+fn regexMatcher(arena: std.mem.Allocator, bytes: []const u8, limits: DecodeLimits) DecodeError!String {
+    var reader = @import("../../protobuf.zig").Reader{ .bytes = bytes };
+    var pattern: ?[]const u8 = null;
+    while (try reader.next()) |field| {
+        // Envoy RegexMatcher: google_re2 engine = 1, regex pattern = 2.
+        if (field.number == 2 and field.wire_type == 2) {
+            pattern = try readText(&reader, limits.max_text_bytes);
+        } else try reader.skip(field);
+    }
+    return String.compileRegex(arena, pattern orelse return error.InvalidHeaderMatcher, limits.regex);
+}
+
+pub fn decodeStringMatcher(arena: std.mem.Allocator, bytes: []const u8, limits: DecodeLimits) DecodeError!String {
+    var reader = @import("../../protobuf.zig").Reader{ .bytes = bytes };
+    var kind: ?u32 = null;
+    var value_text: []const u8 = "";
+    var ignore_case = false;
+    var regex_bytes: ?[]const u8 = null;
+    while (try reader.next()) |field| {
+        // Envoy StringMatcher: exact = 1, prefix = 2, suffix = 3,
+        // safe_regex = 5, contains = 7; ignore_case = 6.
+        if ((field.number == 1 or field.number == 2 or field.number == 3 or
+            field.number == 7) and field.wire_type == 2)
+        {
+            kind = field.number;
+            value_text = try readText(&reader, limits.max_text_bytes);
+            regex_bytes = null;
+        } else if (field.number == 5 and field.wire_type == 2) {
+            kind = 5;
+            regex_bytes = try reader.bytesValue();
+        } else if (field.number == 6 and field.wire_type == 0) {
+            ignore_case = (try reader.varint()) != 0;
+        } else try reader.skip(field);
+    }
+    const selected = kind orelse return error.InvalidHeaderMatcher;
+    if (selected == 5) return regexMatcher(arena, regex_bytes.?, limits);
+    if (value_text.len == 0 and selected != 1) return error.InvalidHeaderMatcher;
+    return literal(selected, value_text, ignore_case);
+}
+
+fn rangeMatcher(bytes: []const u8) DecodeError!Range {
+    var reader = @import("../../protobuf.zig").Reader{ .bytes = bytes };
+    var start: i64 = 0;
+    var end: i64 = 0;
+    while (try reader.next()) |field| {
+        if (field.number == 1 and field.wire_type == 0) {
+            start = @bitCast(try reader.varint());
+        } else if (field.number == 2 and field.wire_type == 0) {
+            end = @bitCast(try reader.varint());
+        } else try reader.skip(field);
+    }
+    if (end < start) return error.InvalidHeaderMatcher;
+    return .{ .start = start, .end = end };
+}
+
+/// Decode an `envoy.config.route.v3.HeaderMatcher`.
+pub fn decode(arena: std.mem.Allocator, bytes: []const u8, limits: DecodeLimits) DecodeError!Match {
+    var reader = @import("../../protobuf.zig").Reader{ .bytes = bytes };
+    var name: []const u8 = "";
+    var condition: ?Condition = null;
+    var invert = false;
+    while (try reader.next()) |field| {
+        switch (field.number) {
+            1 => if (field.wire_type == 2) {
+                name = try readText(&reader, limits.max_text_bytes);
+            } else try reader.skip(field),
+            4 => if (field.wire_type == 2) {
+                condition = .{ .string = literal(1, try readText(&reader, limits.max_text_bytes), false) };
+            } else try reader.skip(field),
+            11 => if (field.wire_type == 2) {
+                condition = .{ .string = try regexMatcher(arena, try reader.bytesValue(), limits) };
+            } else try reader.skip(field),
+            6 => if (field.wire_type == 2) {
+                condition = .{ .range = try rangeMatcher(try reader.bytesValue()) };
+            } else try reader.skip(field),
+            7 => if (field.wire_type == 0) {
+                condition = .{ .present = (try reader.varint()) != 0 };
+            } else try reader.skip(field),
+            8 => if (field.wire_type == 0) {
+                invert = (try reader.varint()) != 0;
+            } else try reader.skip(field),
+            9 => if (field.wire_type == 2) {
+                condition = .{ .string = literal(2, try readText(&reader, limits.max_text_bytes), false) };
+            } else try reader.skip(field),
+            10 => if (field.wire_type == 2) {
+                condition = .{ .string = literal(3, try readText(&reader, limits.max_text_bytes), false) };
+            } else try reader.skip(field),
+            12 => if (field.wire_type == 2) {
+                condition = .{ .string = literal(7, try readText(&reader, limits.max_text_bytes), false) };
+            } else try reader.skip(field),
+            13 => if (field.wire_type == 2) {
+                condition = .{ .string = try decodeStringMatcher(arena, try reader.bytesValue(), limits) };
+            } else try reader.skip(field),
+            else => try reader.skip(field),
+        }
+    }
+    if (name.len == 0) return error.InvalidHeaderMatcher;
+    return .{ .name = name, .condition = condition orelse return error.InvalidHeaderMatcher, .invert = invert };
+}
+
 pub const Condition = union(enum) {
     string: String,
     present: bool,

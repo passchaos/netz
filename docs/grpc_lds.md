@@ -93,9 +93,12 @@ with an immediately readable terminal event and no backend connection. Listener
 RBAC is evaluated before fault injection, and a fault filter placed before RBAC
 is rejected rather than silently reordering the chain. `upstream_cluster`
 restricts injection to requests routed to that xDS cluster; a request routed to
-another cluster, or one without a selected xDS cluster, is not faulted. Fault
-`headers`, `downstream_nodes`, and `response_rate_limit` change which requests
-or bytes are affected and are rejected as unsupported.
+another cluster, or one without a selected xDS cluster, is not faulted. Every
+configured fault `headers` matcher must match before injection; the shared
+HeaderMatcher grammar covers presence, exact/prefix/suffix/contains, range,
+inverted, regex, and string matchers. `downstream_nodes` and
+`response_rate_limit` change which requests or bytes are affected and remain
+rejected as unsupported.
 
 HCM selects inline route_config or RDS through ADS/SELF ConfigSource. AUTO API
 version follows the ADS session's v3 type URL; explicit V2 and unsupported

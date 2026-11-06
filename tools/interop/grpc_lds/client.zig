@@ -63,7 +63,7 @@ fn headerAllowed(sender: grpc.SharedChannelSender, label: []const u8) !void {
     try std.testing.expectEqualStrings(label, response.message.?.payload);
 }
 fn faultAbort(sender: grpc.SharedChannelSender, name: []const u8, value: []const u8) !void {
-    var response = try sender.unary(.{ .path = "/fixture.Lds/Fast", .authority = "backend.test", .message = "request", .wait_for_ready = true, .timeout = .{ .value = 3, .unit = .second }, .metadata = &.{.{ .name = name, .value = value }} });
+    var response = try sender.unary(.{ .path = "/fixture.Lds/Fast", .authority = "backend.test", .message = "request", .wait_for_ready = true, .timeout = .{ .value = 3, .unit = .second }, .metadata = &.{ .{ .name = "x-fault", .value = "1" }, .{ .name = name, .value = value } } });
     defer response.deinit();
     try std.testing.expectEqual(grpc.Status.unavailable, response.status);
     try std.testing.expectEqualStrings("Fault injected", response.status_message);
@@ -76,7 +76,7 @@ fn faultAllowed(sender: grpc.SharedChannelSender, label: []const u8, metadata: [
 }
 fn faultDelay(sender: grpc.SharedChannelSender, io: std.Io, label: []const u8) !void {
     const started = std.Io.Clock.awake.now(io);
-    var response = try sender.unary(.{ .path = "/fixture.Lds/Fast", .authority = "backend.test", .message = "request", .wait_for_ready = true, .timeout = .{ .value = 3, .unit = .second }, .metadata = &.{.{ .name = "x-envoy-fault-delay-request", .value = "40" }} });
+    var response = try sender.unary(.{ .path = "/fixture.Lds/Fast", .authority = "backend.test", .message = "request", .wait_for_ready = true, .timeout = .{ .value = 3, .unit = .second }, .metadata = &.{ .{ .name = "x-fault", .value = "1" }, .{ .name = "x-envoy-fault-delay-request", .value = "40" } } });
     defer response.deinit();
     try std.testing.expectEqualStrings(label, response.message.?.payload);
     try std.testing.expect(started.durationTo(std.Io.Clock.awake.now(io)).nanoseconds >= 30 * std.time.ns_per_ms);
@@ -179,6 +179,7 @@ pub fn main(init: std.process.Init) !void {
     try faultAbort(sender, "x-envoy-fault-abort-grpc-request", "14");
     try faultAbort(sender, "x-envoy-fault-abort-request", "503");
     try faultAllowed(sender, "b", &.{
+        .{ .name = "x-fault", .value = "1" },
         .{ .name = "x-envoy-fault-abort-grpc-request", .value = "14" },
         .{ .name = "x-envoy-fault-abort-request-percentage", .value = "0" },
     });
