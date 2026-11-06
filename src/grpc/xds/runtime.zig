@@ -12,6 +12,7 @@ test {
     _ = @import("runtime/delta_tests.zig");
     _ = @import("runtime/delta_ttl_tests.zig");
     _ = @import("runtime/lrs_tests.zig");
+    _ = @import("runtime/lrs_selection_tests.zig");
     _ = @import("runtime/sds_tests.zig");
     _ = @import("runtime/ignore_deletion_tests.zig");
     _ = @import("runtime/authority_tests.zig");

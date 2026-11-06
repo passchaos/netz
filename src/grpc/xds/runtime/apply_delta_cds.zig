@@ -77,7 +77,8 @@ pub fn apply(self: *ctl.Controller, client: *delta.Client, update: delta.Update,
                 if (after.tls != null or after.tls_sds != null or before.tls != null or before.tls_sds != null) break :blk false;
                 break :blk same_identity and before.max_concurrent_requests == after.max_concurrent_requests and before.policy.locality_weighted == after.policy.locality_weighted and std.mem.eql(u8, before.policy.child_json, after.policy.child_json);
             } else false;
-            if (same_config and item.snapshot != null and item.cds_seen and entry.sameDeadline(item.cds_deadline, cds_deadline)) {
+            const same_reporting = if (item.cluster) |old| entry.sameReporting(old.resource.value, after) else false;
+            if (same_config and same_reporting and item.snapshot != null and item.cds_seen and entry.sameDeadline(item.cds_deadline, cds_deadline)) {
                 item.cds_deadline = cds_deadline;
                 continue;
             }

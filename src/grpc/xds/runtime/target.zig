@@ -98,6 +98,7 @@ pub const Target = struct {
     /// Entries are applied on publish; an empty selection clears any stale
     /// propagation for a cluster that remains in the inventory.
     propagations: []const PropagationEntry = &.{},
+    lrs_selection: ?*lrs_stats.Selection = null,
     json: []const u8 = "",
     const PropagationEntry = struct {
         cluster: []const u8,
@@ -117,6 +118,7 @@ pub const Target = struct {
         }) = .empty;
         var endpoints: std.ArrayList(channel.Endpoint) = .empty;
         var propagations: std.ArrayList(PropagationEntry) = .empty;
+        var registrations: std.ArrayList(lrs_stats.Identity) = .empty;
         for (entries) |value| {
             var implementation = object();
             try field(arena, &implementation, "clusterName", string(value.identity.name));
@@ -133,6 +135,15 @@ pub const Target = struct {
                     .named_metrics = resource.lrs_propagation.named_metrics,
                 } else .{},
             });
+            if (cluster) |resource| if (resource.lrs_self) {
+                try registrations.append(arena, .{ .cluster = value.identity.name, .service_name = resource.edsName(), .propagation = .{
+                    .cpu_utilization = resource.lrs_propagation.cpu_utilization,
+                    .memory_utilization = resource.lrs_propagation.memory_utilization,
+                    .application_utilization = resource.lrs_propagation.application_utilization,
+                    .named_metrics_all = resource.lrs_propagation.named_metrics_all,
+                    .named_metrics = resource.lrs_propagation.named_metrics,
+                } });
+            };
             try field(arena, &implementation, "edsServiceName", string(if (cluster) |resource| resource.edsName() else ""));
             try field(arena, &implementation, "maxConcurrentRequests", .{ .integer = if (cluster) |resource| resource.max_concurrent_requests else 1024 });
             try field(arena, &implementation, "discoveryPending", .{ .bool = value.pending() });
@@ -232,6 +243,7 @@ pub const Target = struct {
         self.json = try std.json.Stringify.valueAlloc(arena, config, .{});
         self.endpoints = try endpoints.toOwnedSlice(arena);
         self.propagations = try propagations.toOwnedSlice(arena);
+        self.lrs_selection = try lrs_stats.Selection.create(gpa, registrations.items);
         return self;
     }
     pub fn retain(self: *Target) void {
@@ -243,6 +255,7 @@ pub const Target = struct {
         self.snapshots.deinit(self.allocator);
         for (self.tls_materials.items) |material| material.deinit();
         self.tls_materials.deinit(self.allocator);
+        if (self.lrs_selection) |value| value.release();
         self.arena.deinit();
         self.allocator.destroy(self);
     }
@@ -258,7 +271,7 @@ pub const Target = struct {
         return .{ .context = self, .retain_fn = retainContext, .release_fn = releaseContext };
     }
     pub fn publish(self: *Target, destination: shared.SharedChannel, selector: @import("../../channel/call_selector.zig").Selector, deadline: std.Io.Clock.Timestamp) shared.Error!u64 {
-        const revision = try destination.updateWithDeadline(.{ .target = .{ .resolved = .{ .endpoints = self.endpoints } }, .target_lifetime = self.lifetime(), .service_config = .{ .replace = self.json }, .call_selector = .{ .replace = selector } }, deadline);
+        const revision = try destination.updateWithDeadline(.{ .target = .{ .resolved = .{ .endpoints = self.endpoints } }, .target_lifetime = self.lifetime(), .service_config = .{ .replace = self.json }, .call_selector = .{ .replace = selector }, .lrs_selection = .{ .replace = self.lrs_selection } }, deadline);
         for (self.propagations) |value| destination.setLrsPropagation(value.cluster, value.propagation);
         return revision;
     }

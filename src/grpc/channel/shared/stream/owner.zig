@@ -7,11 +7,6 @@ const Job = @import("../job.zig").Job;
 const lrs_stats = @import("../lrs_stats.zig");
 const orca = @import("../../../orca.zig");
 
-fn lrsCluster(worker: anytype) ?[]const u8 {
-    if (comptime !@hasField(@TypeOf(worker.*), "source")) return null;
-    return lrs_stats.clusterName(worker.source.endpoint);
-}
-
 fn lrsEndpoint(worker: anytype) ?std.Io.net.IpAddress {
     if (comptime !@hasField(@TypeOf(worker.*), "source")) return null;
     return lrs_stats.endpointAddress(worker.source.endpoint);
@@ -40,6 +35,11 @@ pub fn Owner(comptime State: type) type {
                 worker.connection.?.limits.initial_window_size;
             if (maximum > state.options.max_buffered_stream_bytes) return error.InvalidSharedOptions;
             call.bytes = try state.allocator.alloc(u8, @max(maximum, 1));
+            call.lrs_registration = state.captureLrs(worker);
+            errdefer if (call.lrs_registration) |registration| {
+                registration.release();
+                call.lrs_registration = null;
+            };
             var stream = try duplex.startDuplexWithDeadlines(worker.connection.?, state.allocator, call.options, call.deadline, earlier(job.deadline, earlier(call.deadline, output)));
             errdefer stream.deinit();
             try stream.transport.deferResponseStreamCredit();
@@ -48,8 +48,8 @@ pub fn Owner(comptime State: type) type {
             worker.streams.appendAssumeCapacity(.{ .call = call, .stream = stream });
             call.circuit_permit = job.circuit_permit;
             job.circuit_permit = null;
+            if (call.lrs_registration) |registration| state.lrs_stats.start(state.io, registration, lrsEndpoint(worker));
             state.finish(job, null, null);
-            if (lrsCluster(worker)) |cluster| state.lrs_stats.recordStarted(state.io, cluster, state.lrsServiceName(cluster), lrsEndpoint(worker));
         }
         pub fn fail(worker: anytype, index: usize, err: anyerror) void {
             const state = worker.parent;
@@ -62,7 +62,7 @@ pub fn Owner(comptime State: type) type {
             call.circuit_permit = null;
             state.finishOutstandingLocked(worker);
             state.observeOutlierLocked(worker, false);
-            if (lrsCluster(worker)) |cluster| state.lrs_stats.recordCompletion(state.io, cluster, state.lrsServiceName(cluster), lrsEndpoint(worker), false);
+            if (call.lrs_registration) |registration| state.lrs_stats.complete(state.io, registration, lrsEndpoint(worker), false);
             call.retireLocked(if (state.closed) error.SharedChannelClosed else err);
             state.unlock();
             call.release();
@@ -77,14 +77,14 @@ pub fn Owner(comptime State: type) type {
             call.circuit_permit = null;
             state.finishOutstandingLocked(worker);
             state.observeOutlierLocked(worker, response.status == .ok);
-            if (lrsCluster(worker)) |cluster| {
-                state.lrs_stats.recordCompletion(state.io, cluster, state.lrsServiceName(cluster), lrsEndpoint(worker), response.status == .ok);
+            if (call.lrs_registration) |registration| {
+                state.lrs_stats.complete(state.io, registration, lrsEndpoint(worker), response.status == .ok);
                 const trailers = response.trailers orelse &.{};
                 if (orca.fromMetadataAlloc(state.allocator, &.{}, trailers)) |owned| {
                     if (owned) |value| {
                         var report = value;
                         defer report.deinit();
-                        state.lrs_stats.recordOrca(state.io, cluster, report.report);
+                        state.lrs_stats.recordRegisteredOrca(state.io, registration, report.report);
                     }
                 } else |_| {}
             }

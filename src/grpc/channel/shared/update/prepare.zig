@@ -13,6 +13,7 @@ pub const Prepared = struct {
     drop: channel.drop_policy.Policy = .{},
     circuit: ?channel.circuit_breaker.Policy = null,
     endpoints: []channel.Endpoint,
+    lrs_selection: ?*@import("../lrs_stats.zig").Selection = null,
     target_lifetime: ?@import("../target_lifetime.zig").Lifetime = null,
     sources: []*State.Source = &.{},
     policy: channel.SelectionPolicy,
@@ -83,6 +84,7 @@ pub const Prepared = struct {
     }
 
     pub fn deinit(self: *Prepared) void {
+        if (self.lrs_selection) |value| value.release();
         self.drop.deinit();
         if (self.circuit) |*policy| policy.deinit();
         State.Retention.destroyList(self.retired_children);

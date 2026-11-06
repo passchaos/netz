@@ -294,4 +294,6 @@ test {
     _ = @import("shared/hedging/recovery_tests.zig");
     _ = @import("shared/hedging/lifecycle_tests.zig");
     _ = @import("shared/lrs_stats_tests.zig");
+    _ = @import("shared/lrs_stats_registration_tests.zig");
+    _ = @import("shared/lrs_stats_lookup_tests.zig");
 }

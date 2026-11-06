@@ -165,3 +165,15 @@ pub fn sameDeadline(a: ?std.Io.Clock.Timestamp, b: ?std.Io.Clock.Timestamp) bool
     if (a == null or b == null) return false;
     return a.?.raw.nanoseconds == b.?.raw.nanoseconds;
 }
+
+/// Reporting-only CDS changes still replace the accepted registration image.
+pub fn sameReporting(a: cds.resource.Cluster, b: cds.resource.Cluster) bool {
+    if (a.lrs_self != b.lrs_self) return false;
+    const before = a.lrs_propagation;
+    const after = b.lrs_propagation;
+    if (before.cpu_utilization != after.cpu_utilization or before.memory_utilization != after.memory_utilization or
+        before.application_utilization != after.application_utilization or before.named_metrics_all != after.named_metrics_all or
+        before.named_metrics.len != after.named_metrics.len) return false;
+    for (before.named_metrics, after.named_metrics) |left, right| if (!std.mem.eql(u8, left, right)) return false;
+    return true;
+}

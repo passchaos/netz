@@ -1,0 +1,278 @@
+[
+  {
+    "name": "original-counterexample",
+    "base_commit": "f726c898f15f80ca160dccd7c90df64aa3d09c99",
+    "expected": "FAIL (Timeout)",
+    "exit_code": 1,
+    "elapsed_seconds": 0.392,
+    "log": "docs/evidence/stream_read_deadline/2026-11-07/original-early-timeout.log"
+  },
+  {
+    "name": "unit.Debug",
+    "command": [
+      "zig",
+      "test",
+      "src/.netz_stream_read_test.zig",
+      "-lc",
+      "--test-filter",
+      "stream timed reader"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 0.397,
+    "log": "docs/evidence/stream_read_deadline/2026-11-07/unit.Debug.log"
+  },
+  {
+    "name": "unit.ReleaseSafe",
+    "command": [
+      "zig",
+      "test",
+      "src/.netz_stream_read_test.zig",
+      "-lc",
+      "-OReleaseSafe",
+      "--test-filter",
+      "stream timed reader"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 11.582,
+    "log": "docs/evidence/stream_read_deadline/2026-11-07/unit.ReleaseSafe.log"
+  },
+  {
+    "name": "unit.Windows.compile",
+    "command": [
+      "zig",
+      "test",
+      "src/.netz_stream_read_test.zig",
+      "-lc",
+      "-target",
+      "x86_64-windows-gnu",
+      "--test-no-exec",
+      "-fno-emit-bin"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 0.677,
+    "log": "docs/evidence/stream_read_deadline/2026-11-07/unit.Windows.compile.log"
+  },
+  {
+    "name": "mqtt-bridge-qos2.Debug",
+    "commands": [
+      [
+        "zig",
+        "build",
+        "fuzz-mqtt-bridge-qos2",
+        "--seed",
+        "0x4a337f0d",
+        "--summary",
+        "all"
+      ],
+      [
+        "zig",
+        "build",
+        "fuzz-mqtt-bridge-qos2",
+        "--seed",
+        "0x11070501",
+        "--summary",
+        "all"
+      ]
+    ],
+    "exit_code": 0,
+    "runs": 2,
+    "elapsed_seconds": 11.237,
+    "log": "docs/evidence/stream_read_deadline/2026-11-07/mqtt-bridge-qos2.Debug.log"
+  },
+  {
+    "name": "mqtt-tls-bridge-qos2.Debug",
+    "commands": [
+      [
+        "zig",
+        "build",
+        "fuzz-mqtt-tls-bridge-qos2",
+        "--seed",
+        "0x4a337f0d",
+        "--summary",
+        "all"
+      ],
+      [
+        "zig",
+        "build",
+        "fuzz-mqtt-tls-bridge-qos2",
+        "--seed",
+        "0x11070511",
+        "--summary",
+        "all"
+      ]
+    ],
+    "exit_code": 0,
+    "runs": 2,
+    "elapsed_seconds": 80.011,
+    "log": "docs/evidence/stream_read_deadline/2026-11-07/mqtt-tls-bridge-qos2.Debug.log"
+  },
+  {
+    "name": "library.Debug",
+    "command": [
+      "zig",
+      "build",
+      "test-lib",
+      "-Dtest-filter=LRS",
+      "-Dtest-filter=stream timed reader",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 39.921,
+    "log": "docs/evidence/stream_read_deadline/2026-11-07/library.Debug.log",
+    "summary": "8/8 steps succeeded; 215/215 tests passed"
+  },
+  {
+    "name": "library.ReleaseSafe",
+    "command": [
+      "zig",
+      "build",
+      "test-lib",
+      "-Doptimize=ReleaseSafe",
+      "-Dtest-filter=LRS",
+      "-Dtest-filter=stream timed reader",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 199.845,
+    "log": "docs/evidence/stream_read_deadline/2026-11-07/library.ReleaseSafe.log",
+    "summary": "8/8 steps succeeded; 215/215 tests passed"
+  },
+  {
+    "name": "read-interruptions.Debug",
+    "command": [
+      "zig",
+      "build",
+      "test-lib",
+      "-Dtest-filter=read interruption",
+      "-Dtest-filter=stream timed",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 46.999,
+    "log": "docs/evidence/stream_read_deadline/2026-11-07/read-interruptions.Debug.log",
+    "summary": "8/8 steps succeeded; 196/196 tests passed"
+  },
+  {
+    "name": "interop-lrs.Debug",
+    "command": [
+      "zig",
+      "build",
+      "interop-grpc-lrs",
+      "--summary",
+      "all",
+      "--",
+      "--output",
+      "docs/evidence/grpc_lrs_registration/2026-11-07.Debug.json"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 37.004,
+    "log": "docs/evidence/stream_read_deadline/2026-11-07/interop-lrs.Debug.log",
+    "summary": "8/8 steps succeeded"
+  },
+  {
+    "name": "interop-lrs.ReleaseSafe",
+    "command": [
+      "zig",
+      "build",
+      "interop-grpc-lrs",
+      "-Doptimize=ReleaseSafe",
+      "--summary",
+      "all",
+      "--",
+      "--output",
+      "docs/evidence/grpc_lrs_registration/2026-11-07.ReleaseSafe.json"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 158.846,
+    "log": "docs/evidence/stream_read_deadline/2026-11-07/interop-lrs.ReleaseSafe.log",
+    "summary": "8/8 steps succeeded"
+  },
+  {
+    "name": "format",
+    "command": [
+      "zig",
+      "fmt",
+      "--check",
+      "build.zig",
+      "build.zig.zon",
+      "src",
+      "test",
+      "examples",
+      "benchmarks",
+      "tools"
+    ],
+    "exit_code": 0,
+    "summary": "Repository Zig formatting passed"
+  },
+  {
+    "name": "interop-a6.Debug",
+    "command": [
+      "zig",
+      "build",
+      "interop-grpc-hedging-commit",
+      "--summary",
+      "all",
+      "--",
+      "--output",
+      "docs/evidence/grpc_hedging_commit/2026-11-07.Debug.json"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 33.831,
+    "log": "docs/evidence/stream_read_deadline/2026-11-07/interop-a6.Debug.log",
+    "summary": "8/8 steps succeeded"
+  },
+  {
+    "name": "interop-a6.ReleaseSafe",
+    "command": [
+      "zig",
+      "build",
+      "interop-grpc-hedging-commit",
+      "-Doptimize=ReleaseSafe",
+      "--summary",
+      "all",
+      "--",
+      "--output",
+      "docs/evidence/grpc_hedging_commit/2026-11-07.ReleaseSafe.json"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 136.597,
+    "log": "docs/evidence/stream_read_deadline/2026-11-07/interop-a6.ReleaseSafe.log",
+    "summary": "8/8 steps succeeded"
+  },
+  {
+    "name": "mqtt-shared-properties.Debug",
+    "command": [
+      "zig",
+      "build",
+      "interop-mqtt-shared-properties",
+      "--summary",
+      "all"
+    ],
+    "runs": 20,
+    "exit_code": 0,
+    "elapsed_seconds": 30.532,
+    "summary": "20 actual QoS1/QoS2 three-generation replays; bounded30s durable completion",
+    "log": "docs/evidence/stream_read_deadline/2026-11-07/mqtt-shared-properties.Debug.log"
+  },
+  {
+    "name": "repository.Debug",
+    "command": [
+      "zig",
+      "build",
+      "test",
+      "-j1",
+      "--seed",
+      "0x4a337f0d",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 217.245,
+    "log": "docs/evidence/stream_read_deadline/2026-11-07/repository.Debug.log",
+    "summary": "189/189 steps succeeded",
+    "cache_policy": "Reuse successful same-seed native steps from the recorded 6802/6802 full run; updated persistence fixtures run again"
+  }
+]

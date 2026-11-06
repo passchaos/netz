@@ -1,0 +1,7 @@
+src/internal/stream_io/timed_read_tests.zig:134:38: error: expected type '*anyopaque', found 'comptime_int'
+    return .{ .socket = .{ .handle = 0, .address = .{ .ip4 = .loopback(0) } } };
+                                     ^
+referenced by:
+    test.stream timed reader keeps one pending operation across early timeouts: src/internal/stream_io/timed_read_tests.zig:146:38
+    test_0: src/internal/stream_io/timed_read.zig:12:17
+    1 reference(s) hidden; use '-freference-trace=3' to see all references

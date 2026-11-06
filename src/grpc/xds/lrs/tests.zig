@@ -97,6 +97,64 @@ test "gRPC LRS envelopes reject malformed, duplicate and over-limit input" {
     try std.testing.expectError(error.InvalidLoadReport, codec.decodeResponse(allocator, "\x12\x0b\x08\xff\xff\xff\xff\xff\xff\xff\xff\xff\x01", .{}));
 }
 
+test "gRPC LRS request identity includes the EDS service name" {
+    const encoded = try codec.encodeRequest(allocator, .{ .clusters = &.{
+        .{ .name = "a", .service_name = "eds-old" },
+        .{ .name = "a", .service_name = "eds-new" },
+    } }, .{});
+    defer allocator.free(encoded);
+    var decoded = try codec.decodeRequest(allocator, encoded, .{});
+    defer decoded.deinit();
+    try std.testing.expectEqual(@as(usize, 2), decoded.value.clusters.len);
+    try std.testing.expectEqualStrings("eds-old", decoded.value.clusters[0].service_name);
+    try std.testing.expectEqualStrings("eds-new", decoded.value.clusters[1].service_name);
+    const duplicate = try codec.encodeRequest(allocator, .{ .clusters = &.{
+        .{ .name = "a", .service_name = "eds" },
+        .{ .name = "a", .service_name = "eds" },
+    } }, .{});
+    defer allocator.free(duplicate);
+    try std.testing.expectError(error.InvalidLoadReport, codec.decodeRequest(allocator, duplicate, .{}));
+}
+
+test "gRPC LRS request decoder retains bounded utilization and named metrics" {
+    const encoded = try codec.encodeRequest(allocator, .{ .clusters = &.{.{ .name = "a", .localities = &.{.{
+        .cpu_utilization = .{ .count = 1, .value = 0.5 },
+        .memory_utilization = .{ .count = 2, .value = 0.25 },
+        .application_utilization = .{ .count = 3, .value = 1.0 },
+        .load_metrics = &.{ .{ .name = "load", .count = 4, .value = 2.0 }, .{ .name = "other", .count = 1, .value = 3.0 } },
+        .endpoints = &.{.{ .host = "127.0.0.1", .port = 1001 }},
+    }} }} }, .{});
+    defer allocator.free(encoded);
+    const Scenario = struct {
+        fn run(gpa: std.mem.Allocator, bytes: []const u8) !void {
+            var decoded = try codec.decodeRequest(gpa, bytes, .{});
+            defer decoded.deinit();
+            const locality = decoded.value.clusters[0].localities[0];
+            const cpu = locality.cpu_utilization orelse return error.MissingCpuMetric;
+            const memory = locality.memory_utilization orelse return error.MissingMemoryMetric;
+            const application = locality.application_utilization orelse return error.MissingApplicationMetric;
+            try std.testing.expectEqual(@as(u64, 1), cpu.count);
+            try std.testing.expectEqual(@as(f64, 0.5), cpu.value);
+            try std.testing.expectEqual(@as(u64, 2), memory.count);
+            try std.testing.expectEqual(@as(f64, 0.25), memory.value);
+            try std.testing.expectEqual(@as(u64, 3), application.count);
+            try std.testing.expectEqual(@as(f64, 1.0), application.value);
+            try std.testing.expectEqual(@as(usize, 2), locality.load_metrics.len);
+            try std.testing.expectEqualStrings("load", locality.load_metrics[0].name);
+            try std.testing.expectEqual(@as(u64, 4), locality.load_metrics[0].count);
+            try std.testing.expectEqual(@as(f64, 2.0), locality.load_metrics[0].value);
+            try std.testing.expectEqualStrings("other", locality.load_metrics[1].name);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(allocator, Scenario.run, .{encoded});
+    try std.testing.expectError(error.LoadReportLimitExceeded, codec.decodeRequest(allocator, encoded, .{ .max_metrics = 1 }));
+    try std.testing.expectError(error.TruncatedMessage, codec.decodeRequest(allocator, "\x12\x09\x0a\x01a\x12\x04\x62\x02\x11\x00", .{}));
+    var owned = try codec.decodeRequest(allocator, encoded, .{});
+    defer owned.deinit();
+    @memset(encoded, 0);
+    try std.testing.expectEqualStrings("load", owned.value.clusters[0].localities[0].load_metrics[0].name);
+}
+
 test "gRPC LRS integration converts channel counters into cluster reports" {
     const storage = try allocator.alloc(u8, 24);
     const entries = try allocator.alloc(lrs_stats.Entry, 2);

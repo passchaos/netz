@@ -36,7 +36,7 @@ pub const Client = struct {
     send_all_clusters_supported: bool = false,
 
     pub fn init(gpa: std.mem.Allocator, sender: shared.Sender, options: Options) Error!Client {
-        if (options.limits.max_message_bytes == 0 or options.limits.max_clusters == 0 or options.limits.max_localities == 0 or options.limits.max_dropped == 0 or options.limits.max_text_bytes == 0) return error.InvalidLrsOptions;
+        if (options.limits.max_message_bytes == 0 or options.limits.max_clusters == 0 or options.limits.max_localities == 0 or options.limits.max_dropped == 0 or options.limits.max_metrics == 0 or options.limits.max_text_bytes == 0) return error.InvalidLrsOptions;
         const node = try ads.codec.encodeNode(gpa, options.node);
         errdefer gpa.free(node);
         if (node.len > options.limits.max_message_bytes) return error.LoadReportLimitExceeded;

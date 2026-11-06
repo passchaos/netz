@@ -1,0 +1,67 @@
+test-lib
++- run test 212 pass, 2 crash (214 total)
+error: 'grpc.xds.runtime.lrs_selection_tests.test.gRPC SotW CDS LRS selection controls encoded reports and retains admitted identities' terminated with signal ABRT with stderr:
+       thread 3165597 panic: attempt to use null value
+       error return context:
+       /home/passchaos/project-z/netz/src/internal/stream_io/timed_read.zig:68:17: 0x170bb3f in result (root.zig)
+               else => return @errorCast(err),
+                       ^
+       /home/passchaos/project-z/netz/src/internal/stream_io/timed_read.zig:55:40: 0x170b460 in readSomeWithDeadline (root.zig)
+               if (batch.next()) |completion| return result(completion.result, &incoming);
+                                              ^
+
+       stack trace:
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/lrs_selection_tests.zig:224:97: 0x3220ac4 in runSelection__anon_10888685 (root.zig)
+           const utilization = (try cluster(metrics.value, "a", "eds-a")).localities[0].cpu_utilization.?;
+                                                                                                       ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/lrs_selection_tests.zig:324:21: 0x322996c in test.gRPC SotW CDS LRS selection controls encoded reports and retains admitted identities (root.zig)
+           try runSelection(.sotw);
+                           ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/compiler/test_runner.zig:140:68: 0x13a82ac in mainServer (test_runner.zig)
+                       const status: TestResults.Status = if (test_fn.func()) |v| s: {
+                                                                          ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/compiler/test_runner.zig:71:26: 0x13a909d in main (test_runner.zig)
+               return mainServer(init) catch |err| panic("internal test runner failure: {t}", .{err});
+                                ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/std/start.zig:699:88: 0x13a5e3e in callMain (std.zig)
+           if (fn_info.params[0].type.? == std.process.Init.Minimal) return wrapMain(root.main(.{
+                                                                                              ^
+       ../sysdeps/nptl/libc_start_call_main.h:58:16: 0x798f3782a1c9 in __libc_start_call_main (../sysdeps/x86/libc-start.c)
+       ../csu/libc-start.c:360:3: 0x798f3782a28a in __libc_start_main_impl (../sysdeps/x86/libc-start.c)
+       ???:?:?: 0x3236b94 in ??? (???)
+error: 'grpc.xds.runtime.lrs_selection_tests.test.gRPC delta CDS LRS selection controls encoded reports and retains admitted identities' terminated with signal ABRT with stderr:
+       thread 3166069 panic: attempt to use null value
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/lrs_selection_tests.zig:224:97: 0x3214514 in runSelection__anon_10888594 (root.zig)
+           const utilization = (try cluster(metrics.value, "a", "eds-a")).localities[0].cpu_utilization.?;
+                                                                                                       ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/lrs_selection_tests.zig:327:21: 0x321d3bc in test.gRPC delta CDS LRS selection controls encoded reports and retains admitted identities (root.zig)
+           try runSelection(.delta);
+                           ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/compiler/test_runner.zig:140:68: 0x13a82ac in mainServer (test_runner.zig)
+                       const status: TestResults.Status = if (test_fn.func()) |v| s: {
+                                                                          ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/compiler/test_runner.zig:71:26: 0x13a909d in main (test_runner.zig)
+               return mainServer(init) catch |err| panic("internal test runner failure: {t}", .{err});
+                                ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/std/start.zig:699:88: 0x13a5e3e in callMain (std.zig)
+           if (fn_info.params[0].type.? == std.process.Init.Minimal) return wrapMain(root.main(.{
+                                                                                              ^
+       ../sysdeps/nptl/libc_start_call_main.h:58:16: 0x7d69e822a1c9 in __libc_start_call_main (../sysdeps/x86/libc-start.c)
+       ../csu/libc-start.c:360:3: 0x7d69e822a28a in __libc_start_main_impl (../sysdeps/x86/libc-start.c)
+       ???:?:?: 0x3236b94 in ??? (???)
+failed command: ./.zig-cache/o/a92d6bd3ccfc41de6227d4940a2c30c4/test --cache-dir=./.zig-cache --seed=0x136603e2 --listen=-
+
+Build Summary: 6/8 steps succeeded (1 failed); 212/214 tests passed (2 crashed)
+test-lib transitive failure
++- run test 212 pass, 2 crash (214 total)
+   +- compile test Debug native success 32s MaxRSS:2G
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 5ms MaxRSS:38M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 6ms MaxRSS:38M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options cached
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/bac267e61d8e6c005ce658072262be16/build /home/passchaos/Temp/zig-x86_64-linux-0.16.0/zig /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib /home/passchaos/project-z/netz .zig-cache /home/passchaos/.cache/zig --seed 0x136603e2 -Z4004e80772dd78ea test-lib -Dtest-filter=LRS -Dtest-filter=stream timed reader --summary all

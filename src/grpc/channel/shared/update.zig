@@ -22,6 +22,9 @@ pub const Update = struct {
     circuit_breaker: union(enum) { keep, replace: ?channel.circuit_breaker.Options } = .keep,
     drop_categories: union(enum) { keep, replace: []const channel.drop_policy.Category } = .keep,
     service_config: union(enum) { keep, replace: ?[]const u8 } = .keep,
+    /// Copied CDS registrations, retained and committed with the topology.
+    /// Null replacement restores standalone collect-all behavior.
+    lrs_selection: union(enum) { keep, replace: ?*@import("lrs_stats.zig").Selection } = .keep,
     /// Immutable per-RPC selector, retained with the service-config epoch.
     call_selector: union(enum) { keep, replace: ?@import("../call_selector.zig").Selector } = .keep,
 };
@@ -63,6 +66,11 @@ fn snapshot(state: *State, update: Update, deadline: ?std.Io.Clock.Timestamp) St
         .replace => |options_value| if (options_value) |policy| try channel.circuit_breaker.Policy.init(policy) else null,
     };
     errdefer if (circuit) |*policy| policy.deinit();
+    var lrs_selection = switch (update.lrs_selection) {
+        .keep => state.lrs_stats.retainSelection(state.io),
+        .replace => |value| if (value) |selected| selected.retain() else null,
+    };
+    errdefer if (lrs_selection) |value| value.release();
     const old_config = state.retainConfig();
     defer if (old_config) |config| config.release();
     const resolver_policy = if (update.target) |target| if (target == .resolved) target.resolved.policy else channel.SelectionPolicy.pick_first else state.resolver_policy;
@@ -125,5 +133,8 @@ fn snapshot(state: *State, update: Update, deadline: ?std.Io.Clock.Timestamp) St
     drop = .{};
     const owned_circuit = circuit;
     circuit = null;
-    return Prepared.create(state.allocator, state.io, owned_endpoints, resolver_policy, options, owned_config, owned_orca, owned_lifetime, owned_drop, owned_circuit);
+    var prepared = try Prepared.create(state.allocator, state.io, owned_endpoints, resolver_policy, options, owned_config, owned_orca, owned_lifetime, owned_drop, owned_circuit);
+    prepared.lrs_selection = lrs_selection;
+    lrs_selection = null;
+    return prepared;
 }

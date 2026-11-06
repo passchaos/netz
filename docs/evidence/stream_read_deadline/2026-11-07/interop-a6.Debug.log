@@ -1,0 +1,637 @@
+{
+  "status": "passed",
+  "oracle": "node:http2",
+  "runtime": "zio",
+  "node_version": "v26.4.0",
+  "hold_milliseconds": 350,
+  "cancellation_gate": "peer-observed RST_STREAM(CANCEL) before winner DATA/trailers",
+  "cases": [
+    {
+      "name": "head_cancels_loser",
+      "native": {
+        "name": "head_cancels_loser",
+        "status_code": 0,
+        "body": "b-committed",
+        "reset_code": -1,
+        "response_committed": true,
+        "milli_tokens": 4000,
+        "attempts_started": 2,
+        "delayed_attempts": 1,
+        "accelerated_attempts": 0,
+        "canceled_losers": 1,
+        "throttled_attempts": 0,
+        "ok_winners": 1,
+        "fatal_winners": 0,
+        "exhausted_non_fatal": 0,
+        "backend_failures": 0,
+        "deadline_expirations": 0
+      },
+      "backend_counts": {
+        "A": 1,
+        "B": 1
+      },
+      "requests": [
+        {
+          "backend": "A",
+          "ordinal": 1,
+          "previous_attempts": null,
+          "preserved_metadata": "preserved",
+          "timeout": "4999933u",
+          "reset_sent": null,
+          "reset_observed": 8,
+          "status_code": null,
+          "body": "",
+          "request_complete": true,
+          "request_payload": "head_cancels_loser"
+        },
+        {
+          "backend": "B",
+          "ordinal": 1,
+          "previous_attempts": "1",
+          "preserved_metadata": "preserved",
+          "timeout": "4924762u",
+          "reset_sent": null,
+          "reset_observed": 0,
+          "status_code": 0,
+          "body": "b-committed",
+          "request_complete": true,
+          "request_payload": "head_cancels_loser"
+        }
+      ],
+      "events": [
+        {
+          "order": 0,
+          "event": "request",
+          "backend": "A",
+          "request": 1
+        },
+        {
+          "order": 1,
+          "event": "request",
+          "backend": "B",
+          "request": 1
+        },
+        {
+          "order": 2,
+          "event": "initial_headers",
+          "backend": "B",
+          "request": 1
+        },
+        {
+          "order": 3,
+          "event": "stream_closed",
+          "backend": "A",
+          "request": 1,
+          "code": 8
+        },
+        {
+          "order": 4,
+          "event": "body",
+          "backend": "B",
+          "request": 1,
+          "body": "b-committed"
+        },
+        {
+          "order": 5,
+          "event": "trailers",
+          "backend": "B",
+          "request": 1,
+          "status_code": 0
+        },
+        {
+          "order": 6,
+          "event": "stream_closed",
+          "backend": "B",
+          "request": 1,
+          "code": 0
+        }
+      ]
+    },
+    {
+      "name": "head_suppresses_later",
+      "native": {
+        "name": "head_suppresses_later",
+        "status_code": 0,
+        "body": "a-held",
+        "reset_code": -1,
+        "response_committed": true,
+        "milli_tokens": 4000,
+        "attempts_started": 1,
+        "delayed_attempts": 0,
+        "accelerated_attempts": 0,
+        "canceled_losers": 0,
+        "throttled_attempts": 0,
+        "ok_winners": 1,
+        "fatal_winners": 0,
+        "exhausted_non_fatal": 0,
+        "backend_failures": 0,
+        "deadline_expirations": 0
+      },
+      "backend_counts": {
+        "A": 1,
+        "B": 0
+      },
+      "requests": [
+        {
+          "backend": "A",
+          "ordinal": 1,
+          "previous_attempts": null,
+          "preserved_metadata": "preserved",
+          "timeout": "4999968u",
+          "reset_sent": null,
+          "reset_observed": 0,
+          "status_code": 0,
+          "body": "a-held",
+          "request_complete": true,
+          "request_payload": "head_suppresses_later"
+        }
+      ],
+      "events": [
+        {
+          "order": 0,
+          "event": "request",
+          "backend": "A",
+          "request": 1
+        },
+        {
+          "order": 1,
+          "event": "initial_headers",
+          "backend": "A",
+          "request": 1
+        },
+        {
+          "order": 2,
+          "event": "body",
+          "backend": "A",
+          "request": 1,
+          "body": "a-held"
+        },
+        {
+          "order": 3,
+          "event": "trailers",
+          "backend": "A",
+          "request": 1,
+          "status_code": 0
+        },
+        {
+          "order": 4,
+          "event": "stream_closed",
+          "backend": "A",
+          "request": 1,
+          "code": 0
+        }
+      ]
+    },
+    {
+      "name": "head_unavailable_wins",
+      "native": {
+        "name": "head_unavailable_wins",
+        "status_code": 14,
+        "body": "",
+        "reset_code": -1,
+        "response_committed": true,
+        "milli_tokens": 3000,
+        "attempts_started": 1,
+        "delayed_attempts": 0,
+        "accelerated_attempts": 0,
+        "canceled_losers": 0,
+        "throttled_attempts": 0,
+        "ok_winners": 0,
+        "fatal_winners": 1,
+        "exhausted_non_fatal": 0,
+        "backend_failures": 0,
+        "deadline_expirations": 0
+      },
+      "backend_counts": {
+        "A": 1,
+        "B": 0
+      },
+      "requests": [
+        {
+          "backend": "A",
+          "ordinal": 1,
+          "previous_attempts": null,
+          "preserved_metadata": "preserved",
+          "timeout": "4999968u",
+          "reset_sent": null,
+          "reset_observed": 0,
+          "status_code": 14,
+          "body": "",
+          "request_complete": true,
+          "request_payload": "head_unavailable_wins"
+        }
+      ],
+      "events": [
+        {
+          "order": 0,
+          "event": "request",
+          "backend": "A",
+          "request": 1
+        },
+        {
+          "order": 1,
+          "event": "initial_headers",
+          "backend": "A",
+          "request": 1
+        },
+        {
+          "order": 2,
+          "event": "body",
+          "backend": "A",
+          "request": 1,
+          "body": ""
+        },
+        {
+          "order": 3,
+          "event": "trailers",
+          "backend": "A",
+          "request": 1,
+          "status_code": 14
+        },
+        {
+          "order": 4,
+          "event": "stream_closed",
+          "backend": "A",
+          "request": 1,
+          "code": 0
+        }
+      ]
+    },
+    {
+      "name": "trailers_only_accelerates",
+      "native": {
+        "name": "trailers_only_accelerates",
+        "status_code": 0,
+        "body": "b-accelerated",
+        "reset_code": -1,
+        "response_committed": true,
+        "milli_tokens": 4000,
+        "attempts_started": 2,
+        "delayed_attempts": 0,
+        "accelerated_attempts": 1,
+        "canceled_losers": 0,
+        "throttled_attempts": 0,
+        "ok_winners": 1,
+        "fatal_winners": 0,
+        "exhausted_non_fatal": 0,
+        "backend_failures": 0,
+        "deadline_expirations": 0
+      },
+      "backend_counts": {
+        "A": 1,
+        "B": 1
+      },
+      "requests": [
+        {
+          "backend": "A",
+          "ordinal": 1,
+          "previous_attempts": null,
+          "preserved_metadata": "preserved",
+          "timeout": "4999959u",
+          "reset_sent": null,
+          "reset_observed": 0,
+          "status_code": 14,
+          "body": "",
+          "request_complete": true,
+          "request_payload": "trailers_only_accelerates"
+        },
+        {
+          "backend": "B",
+          "ordinal": 1,
+          "previous_attempts": "1",
+          "preserved_metadata": "preserved",
+          "timeout": "4999227u",
+          "reset_sent": null,
+          "reset_observed": 0,
+          "status_code": 0,
+          "body": "b-accelerated",
+          "request_complete": true,
+          "request_payload": "trailers_only_accelerates"
+        }
+      ],
+      "events": [
+        {
+          "order": 0,
+          "event": "request",
+          "backend": "A",
+          "request": 1
+        },
+        {
+          "order": 1,
+          "event": "trailers_only",
+          "backend": "A",
+          "request": 1,
+          "status_code": 14
+        },
+        {
+          "order": 2,
+          "event": "stream_closed",
+          "backend": "A",
+          "request": 1,
+          "code": 0
+        },
+        {
+          "order": 3,
+          "event": "request",
+          "backend": "B",
+          "request": 1
+        },
+        {
+          "order": 4,
+          "event": "initial_headers",
+          "backend": "B",
+          "request": 1
+        },
+        {
+          "order": 5,
+          "event": "body",
+          "backend": "B",
+          "request": 1,
+          "body": "b-accelerated"
+        },
+        {
+          "order": 6,
+          "event": "trailers",
+          "backend": "B",
+          "request": 1,
+          "status_code": 0
+        },
+        {
+          "order": 7,
+          "event": "stream_closed",
+          "backend": "B",
+          "request": 1,
+          "code": 0
+        }
+      ]
+    },
+    {
+      "name": "informational_does_not_commit",
+      "native": {
+        "name": "informational_does_not_commit",
+        "status_code": 0,
+        "body": "b-informational",
+        "reset_code": -1,
+        "response_committed": true,
+        "milli_tokens": 4000,
+        "attempts_started": 2,
+        "delayed_attempts": 1,
+        "accelerated_attempts": 0,
+        "canceled_losers": 1,
+        "throttled_attempts": 0,
+        "ok_winners": 1,
+        "fatal_winners": 0,
+        "exhausted_non_fatal": 0,
+        "backend_failures": 0,
+        "deadline_expirations": 0
+      },
+      "backend_counts": {
+        "A": 1,
+        "B": 1
+      },
+      "requests": [
+        {
+          "backend": "A",
+          "ordinal": 1,
+          "previous_attempts": null,
+          "preserved_metadata": "preserved",
+          "timeout": "4999977u",
+          "reset_sent": null,
+          "reset_observed": 8,
+          "status_code": null,
+          "body": "",
+          "request_complete": true,
+          "request_payload": "informational_does_not_commit"
+        },
+        {
+          "backend": "B",
+          "ordinal": 1,
+          "previous_attempts": "1",
+          "preserved_metadata": "preserved",
+          "timeout": "4924863u",
+          "reset_sent": null,
+          "reset_observed": 0,
+          "status_code": 0,
+          "body": "b-informational",
+          "request_complete": true,
+          "request_payload": "informational_does_not_commit"
+        }
+      ],
+      "events": [
+        {
+          "order": 0,
+          "event": "request",
+          "backend": "A",
+          "request": 1
+        },
+        {
+          "order": 1,
+          "event": "informational_headers",
+          "backend": "A",
+          "request": 1,
+          "status_code": 103
+        },
+        {
+          "order": 2,
+          "event": "request",
+          "backend": "B",
+          "request": 1
+        },
+        {
+          "order": 3,
+          "event": "initial_headers",
+          "backend": "B",
+          "request": 1
+        },
+        {
+          "order": 4,
+          "event": "stream_closed",
+          "backend": "A",
+          "request": 1,
+          "code": 8
+        },
+        {
+          "order": 5,
+          "event": "body",
+          "backend": "B",
+          "request": 1,
+          "body": "b-informational"
+        },
+        {
+          "order": 6,
+          "event": "trailers",
+          "backend": "B",
+          "request": 1,
+          "status_code": 0
+        },
+        {
+          "order": 7,
+          "event": "stream_closed",
+          "backend": "B",
+          "request": 1,
+          "code": 0
+        }
+      ]
+    },
+    {
+      "name": "call_wide_transparent_budget",
+      "native": {
+        "name": "call_wide_transparent_budget",
+        "status_code": 14,
+        "body": "",
+        "reset_code": 7,
+        "response_committed": false,
+        "milli_tokens": 2000,
+        "attempts_started": 2,
+        "delayed_attempts": 0,
+        "accelerated_attempts": 1,
+        "canceled_losers": 0,
+        "throttled_attempts": 1,
+        "ok_winners": 0,
+        "fatal_winners": 0,
+        "exhausted_non_fatal": 1,
+        "backend_failures": 0,
+        "deadline_expirations": 0
+      },
+      "backend_counts": {
+        "A": 2,
+        "B": 1
+      },
+      "requests": [
+        {
+          "backend": "A",
+          "ordinal": 1,
+          "previous_attempts": null,
+          "preserved_metadata": "preserved",
+          "timeout": "4999975u",
+          "reset_sent": 7,
+          "reset_observed": 7,
+          "status_code": null,
+          "body": "",
+          "request_complete": true,
+          "request_payload": "call_wide_transparent_budget"
+        },
+        {
+          "backend": "A",
+          "ordinal": 2,
+          "previous_attempts": "1",
+          "preserved_metadata": "preserved",
+          "timeout": "4997105u",
+          "reset_sent": 7,
+          "reset_observed": 7,
+          "status_code": null,
+          "body": "",
+          "request_complete": true,
+          "request_payload": "call_wide_transparent_budget"
+        },
+        {
+          "backend": "B",
+          "ordinal": 1,
+          "previous_attempts": null,
+          "preserved_metadata": "preserved",
+          "timeout": "4998528u",
+          "reset_sent": null,
+          "reset_observed": 0,
+          "status_code": 14,
+          "body": "",
+          "request_complete": true,
+          "request_payload": "call_wide_transparent_budget"
+        }
+      ],
+      "events": [
+        {
+          "order": 0,
+          "event": "request",
+          "backend": "A",
+          "request": 1
+        },
+        {
+          "order": 1,
+          "event": "refused_stream",
+          "backend": "A",
+          "request": 1,
+          "code": 7
+        },
+        {
+          "order": 2,
+          "event": "stream_closed",
+          "backend": "A",
+          "request": 1,
+          "code": 7
+        },
+        {
+          "order": 3,
+          "event": "request",
+          "backend": "B",
+          "request": 1
+        },
+        {
+          "order": 4,
+          "event": "trailers_only",
+          "backend": "B",
+          "request": 1,
+          "status_code": 14
+        },
+        {
+          "order": 5,
+          "event": "stream_closed",
+          "backend": "B",
+          "request": 1,
+          "code": 0
+        },
+        {
+          "order": 6,
+          "event": "request",
+          "backend": "A",
+          "request": 2
+        },
+        {
+          "order": 7,
+          "event": "refused_stream",
+          "backend": "A",
+          "request": 2,
+          "code": 7
+        },
+        {
+          "order": 8,
+          "event": "stream_closed",
+          "backend": "A",
+          "request": 2,
+          "code": 7
+        }
+      ]
+    }
+  ],
+  "source_sha256": {
+    "build.zig": "abbfa1623585dc0dbcad6a5509e692064b46cae7bf49c31d0ca32099be61bd6a",
+    "src/runtime.zig": "38674f1922fa837c126a05895234b3f944d519f67b5018add734e98599f81002",
+    "src/grpc/mod.zig": "76b169d8190152692b4fa0724f2cf8807d64b1de7c72d5b2c233c646973c029f",
+    "src/grpc/call.zig": "198596a1577ebf9de8a8c051fdc43eb49c7ca9d38993ba62e2eab6b1c4e0f9fe",
+    "src/grpc/call/retry.zig": "40bda42266b7dd0fbff2f1392489f849200cbb4c83720adbc1176b13bf743db4",
+    "src/grpc/channel.zig": "617287f161c9d8232ad0eb12a1435e5318e75fddd68d88905efaa42e66da3a54",
+    "src/grpc/channel/shared.zig": "d2ac12432f7fee0a4e26c6ed808396aeef157bc09556489f005e172cc0c2381a",
+    "src/grpc/channel/shared/state.zig": "0334a97e9a3b4cfb71921eed41c2f7370e5393abbdcdd31e74cd4f2d4f910646",
+    "src/grpc/channel/shared/job.zig": "b296e19aa82c65cb9e3f1af98a2664931a6d2206dafa8ba5621b6446cb498d54",
+    "src/grpc/channel/shared/worker.zig": "c23f17340b3953d455647cbd96dcf12215a2a0e190ccd6082226b3245951e194",
+    "src/grpc/channel/shared/hedging.zig": "60b5fa2ba4be9759683526aca95120e2eb5a51192317075945bba1ca0a36a009",
+    "src/grpc/channel/shared/hedging/control.zig": "10a985a34a69522a99ab2dd1d0f23e422bb7b98d5ca7c92297c9212b49464efe",
+    "src/grpc/channel/shared/hedging/stats.zig": "60b4c36c353cdb6da755ba9392ce948d6fe57585ba3a320da77d018cd6d19f6a",
+    "src/http2/runtime.zig": "0575b01e2a2bbcfe070d19c1c796506b2b43a32ac219b0f4b9e4de07c0b0124b",
+    "tools/interop/grpc_hedging_commit/README.md": "4e5213fa9737991c1b4900ce4763607c0e228d4ae3f674f509f13c858dda8689",
+    "tools/interop/grpc_hedging_commit/client.zig": "11ff6af4215520f7c6c3067675a99c88b5ffe20bbbb40c828bae6ad8528b3c2d",
+    "tools/interop/grpc_hedging_commit/peer.js": "b3a1606339ccfd6166a71fdb4ea45d5a546df951f6835474860327129015078a",
+    "tools/interop/grpc_hedging_commit/run.py": "7080fe88587fcdb92165a41d762aea00d971c036e83dcbee5b25dd74b3b0c5cc"
+  },
+  "client_sha256": "69e1cee4ed93988f03e6a33ee4995c2a18aa4349a3e1fc6c516bc4ef733ca42d"
+}
+Build Summary: 8/8 steps succeeded
+interop-grpc-hedging-commit success
++- run python3 success 1s
+   +- compile exe netz-grpc-hedging-commit-client Debug native success 32s MaxRSS:2G
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 7ms MaxRSS:36M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 5ms MaxRSS:37M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options cached

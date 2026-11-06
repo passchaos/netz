@@ -1,0 +1,371 @@
+{
+  "status": "passed",
+  "initial_subscription": true,
+  "report_counters": true,
+  "send_all": true,
+  "clean_terminal": true,
+  "request_decoder": true,
+  "request_encoder": true,
+  "utilization_metrics": true,
+  "named_metrics": true,
+  "distinct_service_identities": true,
+  "report_cluster_count": 2,
+  "named_metrics_per_locality": 2,
+  "endpoint_granularity": true,
+  "transcript": [
+    {
+      "step": 0,
+      "node": "netz-lrs",
+      "features": [
+        "envoy.lrs.supports_send_all_clusters"
+      ],
+      "clusters": []
+    },
+    {
+      "step": 1,
+      "node": "",
+      "features": [],
+      "clusters": [
+        {
+          "cluster_name": "a",
+          "cluster_service_name": "eds-a"
+        },
+        {
+          "cluster_name": "a",
+          "cluster_service_name": "eds-other"
+        }
+      ]
+    }
+  ],
+  "decoder_fixture": {
+    "byte_count": 339,
+    "sha256": "5f0e4bbcb63951251a8b5bb541e00bc6a195010330f701a3229c54715fc41abf",
+    "cluster_identities": [
+      {
+        "cluster_name": "a",
+        "cluster_service_name": "eds-a"
+      },
+      {
+        "cluster_name": "a",
+        "cluster_service_name": "eds-other"
+      }
+    ],
+    "utilization_fields": {
+      "cpu_utilization": 12,
+      "mem_utilization": 13,
+      "application_utilization": 14
+    },
+    "named_metric_field": 5,
+    "request": {
+      "cluster_stats": [
+        {
+          "cluster_name": "a",
+          "cluster_service_name": "eds-a",
+          "total_dropped_requests": "1",
+          "dropped_requests": [
+            {
+              "category": "throttle",
+              "dropped_count": "1"
+            }
+          ],
+          "load_report_interval": {
+            "seconds": "0",
+            "nanos": 100000000
+          },
+          "upstream_locality_stats": [
+            {
+              "locality": {
+                "region": "r",
+                "zone": "z",
+                "sub_zone": ""
+              },
+              "total_successful_requests": "1",
+              "total_requests_in_progress": "0",
+              "total_error_requests": "1",
+              "total_issued_requests": "1",
+              "cpu_utilization": {
+                "num_requests_finished_with_metric": "1",
+                "total_metric_value": 0.5
+              },
+              "mem_utilization": {
+                "num_requests_finished_with_metric": "2",
+                "total_metric_value": 0.25
+              },
+              "application_utilization": {
+                "num_requests_finished_with_metric": "3",
+                "total_metric_value": 1
+              },
+              "load_metric_stats": [
+                {
+                  "metric_name": "load",
+                  "num_requests_finished_with_metric": "4",
+                  "total_metric_value": 2
+                },
+                {
+                  "metric_name": "other",
+                  "num_requests_finished_with_metric": "1",
+                  "total_metric_value": 3
+                }
+              ],
+              "upstream_endpoint_stats": [
+                {
+                  "address": {
+                    "socket_address": {
+                      "address": "127.0.0.1",
+                      "port_value": 1001
+                    }
+                  },
+                  "total_successful_requests": "1",
+                  "total_requests_in_progress": "0",
+                  "total_error_requests": "0",
+                  "total_issued_requests": "1"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "cluster_name": "a",
+          "cluster_service_name": "eds-other",
+          "total_dropped_requests": "2",
+          "dropped_requests": [
+            {
+              "category": "circuit",
+              "dropped_count": "2"
+            }
+          ],
+          "load_report_interval": {
+            "seconds": "0",
+            "nanos": 200000000
+          },
+          "upstream_locality_stats": [
+            {
+              "locality": {
+                "region": "r",
+                "zone": "z-alt",
+                "sub_zone": "sub"
+              },
+              "total_successful_requests": "2",
+              "total_requests_in_progress": "1",
+              "total_error_requests": "2",
+              "total_issued_requests": "4",
+              "cpu_utilization": {
+                "num_requests_finished_with_metric": "5",
+                "total_metric_value": 1.25
+              },
+              "mem_utilization": {
+                "num_requests_finished_with_metric": "6",
+                "total_metric_value": 1.5
+              },
+              "application_utilization": {
+                "num_requests_finished_with_metric": "7",
+                "total_metric_value": 3.5
+              },
+              "load_metric_stats": [
+                {
+                  "metric_name": "load",
+                  "num_requests_finished_with_metric": "8",
+                  "total_metric_value": 4.5
+                },
+                {
+                  "metric_name": "other",
+                  "num_requests_finished_with_metric": "9",
+                  "total_metric_value": 5.5
+                }
+              ],
+              "upstream_endpoint_stats": [
+                {
+                  "address": {
+                    "socket_address": {
+                      "address": "127.0.0.2",
+                      "port_value": 1002
+                    }
+                  },
+                  "total_successful_requests": "2",
+                  "total_requests_in_progress": "1",
+                  "total_error_requests": "2",
+                  "total_issued_requests": "4"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "outbound_report": {
+    "cluster_stats": [
+      {
+        "upstream_locality_stats": [
+          {
+            "load_metric_stats": [
+              {
+                "metric_name": "load",
+                "num_requests_finished_with_metric": "4",
+                "total_metric_value": 2
+              },
+              {
+                "metric_name": "other",
+                "num_requests_finished_with_metric": "1",
+                "total_metric_value": 3
+              }
+            ],
+            "upstream_endpoint_stats": [
+              {
+                "load_metric_stats": [],
+                "address": {
+                  "socket_address": {
+                    "protocol": "TCP",
+                    "address": "127.0.0.1",
+                    "resolver_name": "",
+                    "ipv4_compat": false,
+                    "port_value": 1001
+                  }
+                },
+                "total_successful_requests": "1",
+                "total_requests_in_progress": "0",
+                "total_error_requests": "0",
+                "metadata": null,
+                "total_issued_requests": "1"
+              }
+            ],
+            "locality": {
+              "region": "r",
+              "zone": "z",
+              "sub_zone": ""
+            },
+            "total_successful_requests": "1",
+            "total_requests_in_progress": "0",
+            "total_error_requests": "1",
+            "priority": 0,
+            "total_issued_requests": "1",
+            "total_active_connections": "0",
+            "total_new_connections": "0",
+            "total_fail_connections": "0",
+            "cpu_utilization": {
+              "num_requests_finished_with_metric": "1",
+              "total_metric_value": 0.5
+            },
+            "mem_utilization": {
+              "num_requests_finished_with_metric": "2",
+              "total_metric_value": 0.25
+            },
+            "application_utilization": {
+              "num_requests_finished_with_metric": "3",
+              "total_metric_value": 1
+            }
+          }
+        ],
+        "dropped_requests": [
+          {
+            "category": "throttle",
+            "dropped_count": "1"
+          }
+        ],
+        "cluster_name": "a",
+        "total_dropped_requests": "1",
+        "load_report_interval": {
+          "seconds": "0",
+          "nanos": 100000000
+        },
+        "cluster_service_name": "eds-a"
+      },
+      {
+        "upstream_locality_stats": [
+          {
+            "load_metric_stats": [
+              {
+                "metric_name": "load",
+                "num_requests_finished_with_metric": "8",
+                "total_metric_value": 4.5
+              },
+              {
+                "metric_name": "other",
+                "num_requests_finished_with_metric": "9",
+                "total_metric_value": 5.5
+              }
+            ],
+            "upstream_endpoint_stats": [
+              {
+                "load_metric_stats": [],
+                "address": {
+                  "socket_address": {
+                    "protocol": "TCP",
+                    "address": "127.0.0.2",
+                    "resolver_name": "",
+                    "ipv4_compat": false,
+                    "port_value": 1002
+                  }
+                },
+                "total_successful_requests": "2",
+                "total_requests_in_progress": "1",
+                "total_error_requests": "2",
+                "metadata": null,
+                "total_issued_requests": "4"
+              }
+            ],
+            "locality": {
+              "region": "r",
+              "zone": "z-alt",
+              "sub_zone": "sub"
+            },
+            "total_successful_requests": "2",
+            "total_requests_in_progress": "1",
+            "total_error_requests": "2",
+            "priority": 0,
+            "total_issued_requests": "4",
+            "total_active_connections": "0",
+            "total_new_connections": "0",
+            "total_fail_connections": "0",
+            "cpu_utilization": {
+              "num_requests_finished_with_metric": "5",
+              "total_metric_value": 1.25
+            },
+            "mem_utilization": {
+              "num_requests_finished_with_metric": "6",
+              "total_metric_value": 1.5
+            },
+            "application_utilization": {
+              "num_requests_finished_with_metric": "7",
+              "total_metric_value": 3.5
+            }
+          }
+        ],
+        "dropped_requests": [
+          {
+            "category": "circuit",
+            "dropped_count": "2"
+          }
+        ],
+        "cluster_name": "a",
+        "total_dropped_requests": "2",
+        "load_report_interval": {
+          "seconds": "0",
+          "nanos": 200000000
+        },
+        "cluster_service_name": "eds-other"
+      }
+    ],
+    "node": null
+  },
+  "grpc_js": "1.14.7",
+  "source_sha256": {
+    "build.zig": "abbfa1623585dc0dbcad6a5509e692064b46cae7bf49c31d0ca32099be61bd6a",
+    "src/runtime.zig": "38674f1922fa837c126a05895234b3f944d519f67b5018add734e98599f81002",
+    "src/grpc/protobuf.zig": "7140156bfd8522253ad2b67fcfdb191f8ec0553872bfc81ef0a9ff040cf1d543",
+    "src/grpc/xds/lrs.zig": "6d8d59172278cd9e2f99d807301805e3fffa2b32a3275a1d06c1474b7face89c",
+    "src/grpc/xds/lrs/codec.zig": "ffb35262db13c94bd78e681169d00798e2b2adf426df7c6990e3c1f390d784c7",
+    "src/grpc/xds/lrs/client.zig": "feea9671ede9ffe120b9f3ce781b937b04f20ca7fe7cdd8bbf07b32d7a2797b4",
+    "tools/interop/grpc_lrs/client.zig": "42845521db09af1dbe1dfbef56f0a5f6890c3d4e0cac10b233e12522636cfd63",
+    "tools/interop/grpc_lrs/peer.js": "099f02ba62822997e76ea29624fa4f0e99ea7518335cd8915554bf68ae598dc1",
+    "tools/interop/grpc_lrs/run.py": "97ff857c8604c6050b4993437256d1c424a2c7b9a45544e3dde63b293187018c",
+    "tools/interop/grpc_lrs/README.md": "767d32e0e3a28f12d88293b15899a6c37bb83506d60c41d91a1b5946ab776698",
+    "tools/interop/grpc_locality/package.json": "8db54803ab44c882d2063b5e271764ea3b4901da17c3d065d5036e6a36c7ef53",
+    "tools/interop/grpc_locality/package-lock.json": "9cae21a36a38e30b732bfb139abca82bf77ea326fd9ce981f22867c7c01ccb2b"
+  },
+  "reference_proto_sha256": {
+    "envoy/service/load_stats/v3/lrs.proto": "f3ec006ea4b739ccbc9976c5f092952d8b8b2d1cfe8684c09512eb0515c10611",
+    "envoy/config/endpoint/v3/load_report.proto": "f0981c753710fe83f845c09d0e06d217c713c5799508c9c17766fa7bbc3482b0"
+  },
+  "client_sha256": "70c0b2e9badea5b1124c96591f72f994e76486abf0e7ba22a88486c71d945b86"
+}

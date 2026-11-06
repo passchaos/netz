@@ -1,0 +1,20 @@
+1/2 timed_read.test_0...OK
+2/2 timed_read_tests.test.stream timed reader keeps one pending operation across early timeouts...FAIL (Timeout)
+/tmp/netz-read-deadline-red-4928r23n/timed_read_tests.zig:73:17: 0x1233cd7 in awaitConcurrent (timed_read.zig)
+                return error.Timeout;
+                ^
+/home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/std/Io.zig:592:9: 0x1150ae6 in awaitConcurrent (std.zig)
+        return io.vtable.batchAwaitConcurrent(io.userdata, batch, timeout);
+        ^
+/home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/std/Io.zig:463:5: 0x1150287 in operateTimeout (std.zig)
+    try batch.awaitConcurrent(io, timeout);
+    ^
+/tmp/netz-read-deadline-red-4928r23n/timed_read.zig:32:20: 0x1238012 in readSomeWithDeadline (timed_read.zig)
+    const result = try io.operateTimeout(
+                   ^
+/tmp/netz-read-deadline-red-4928r23n/timed_read_tests.zig:146:19: 0x12323e9 in test.stream timed reader keeps one pending operation across early timeouts (timed_read.zig)
+    const count = try read(io, socket(), &buffer, deadline(backend));
+                  ^
+1 passed; 0 skipped; 1 failed.
+error: the following test command failed with exit code 1:
+.zig-cache/o/c3a2376afac093946ed2d7a5bdf01866/test --seed=0xeae7cd11

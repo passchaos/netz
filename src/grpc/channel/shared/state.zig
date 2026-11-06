@@ -380,6 +380,12 @@ pub const State = struct {
     fn lrsCluster(worker: *Worker) ?[]const u8 {
         return lrs_stats.clusterName(worker.source.endpoint);
     }
+    pub fn captureLrs(self: *State, worker: *Worker) ?lrs_stats.Registration {
+        const cluster = lrsCluster(worker) orelse return null;
+        self.lock();
+        defer self.unlock();
+        return self.lrs_stats.capture(self.io, cluster, self.lrsServiceName(cluster));
+    }
     pub fn lrsServiceName(self: *State, cluster: []const u8) []const u8 {
         const runtime = if (self.weighted_target) |*value| value else return "";
         const policy = @import("../cluster_impl.zig").forCluster(runtime.root, cluster) catch return "";
@@ -399,18 +405,18 @@ pub const State = struct {
             response.status == .ok
         else
             err == null);
-        if (job.lrs_started) if (lrsCluster(worker)) |cluster| {
-            self.lrs_stats.recordCompletion(self.io, cluster, self.lrsServiceName(cluster), lrs_stats.endpointAddress(worker.source.endpoint), if (result) |response| response.status == .ok else err == null);
+        if (job.lrs_registration) |registration| {
+            self.lrs_stats.complete(self.io, registration, lrs_stats.endpointAddress(worker.source.endpoint), if (result) |response| response.status == .ok else err == null);
             if (result) |response| if (response.transport) |transport| {
                 if (orca.fromMetadataAlloc(self.allocator, transport.headers, transport.trailers)) |owned| {
                     if (owned) |value| {
                         var report = value;
                         defer report.deinit();
-                        self.lrs_stats.recordOrca(self.io, cluster, report.report);
+                        self.lrs_stats.recordRegisteredOrca(self.io, registration, report.report);
                     }
                 } else |_| {}
             };
-        };
+        }
         self.finishLocked(job, result, err);
         self.wakeAllLocked();
     }

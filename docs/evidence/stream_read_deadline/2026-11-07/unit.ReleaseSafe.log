@@ -1,0 +1,12 @@
+1/11 .netz_stream_read_test.test_0...OK
+2/11 internal.stream_io.timed_read.test_0...OK
+3/11 internal.stream_io.timed_read_tests.test.stream timed reader keeps one pending operation across early timeouts...OK
+4/11 internal.stream_io.timed_read_tests.test.stream timed reader consumes a completion accompanying early Timeout...OK
+5/11 internal.stream_io.timed_read_tests.test.stream timed reader expires without renewing its original deadline...OK
+6/11 internal.stream_io.timed_read_tests.test.stream timed reader keeps bytes completing during timeout cancellation...OK
+7/11 internal.stream_io.timed_read_tests.test.stream timed reader rearms cancellation after consumed bytes...OK
+8/11 internal.stream_io.timed_read_tests.test.stream timed reader joins interrupted operation without progress...OK
+9/11 internal.stream_io.timed_read_tests.test.stream timed reader preserves EOF and nested operation errors...OK
+10/11 internal.stream_io.timed_read_tests.test.stream timed reader Threaded timeout preserves late socket bytes for reuse...OK
+11/11 internal.stream_io.timed_read_tests.test.stream timed reader rejects expired and foreign clock deadlines before submission...OK
+All 11 tests passed.

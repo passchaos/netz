@@ -18,22 +18,36 @@ def main():
     deps = directory.parent / "grpc_locality"
     if not (deps / "node_modules/@grpc/grpc-js-xds").exists():
         subprocess.run(["npm", "ci", "--prefix", str(deps), "--ignore-scripts", "--no-audit", "--no-fund"], check=True, timeout=120)
-    result = subprocess.run(["node", str(directory / "peer.js"), str(args.client.resolve())], capture_output=True, text=True, timeout=45)
+    repo = directory.parents[2]
+    files = ["build.zig", "src/runtime.zig", "src/grpc/protobuf.zig", "src/grpc/xds/lrs.zig", "src/grpc/xds/lrs/codec.zig", "src/grpc/xds/lrs/client.zig"]
+    files += ["tools/interop/grpc_lrs/" + name for name in ("client.zig", "peer.js", "run.py", "README.md")]
+    files += ["tools/interop/grpc_locality/" + name for name in ("package.json", "package-lock.json")]
+    digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+    source_hashes = {file: digest(repo / file) for file in files}
+    executable = args.client.resolve(strict=True)
+    executable_hash = digest(executable)
+    result = subprocess.run(["node", str(directory / "peer.js"), str(executable)], capture_output=True, text=True, timeout=45)
     if result.returncode:
         raise RuntimeError(result.stdout + result.stderr)
     report = json.loads(result.stdout)
     assert report["status"] == "passed"
-    for contract in ("initial_subscription", "report_counters", "send_all", "endpoint_granularity"):
+    for contract in ("initial_subscription", "report_counters", "send_all", "endpoint_granularity", "clean_terminal", "request_decoder", "request_encoder", "utilization_metrics", "named_metrics", "distinct_service_identities"):
         assert report[contract] is True
-    repo = directory.parents[2]
-    files = ["src/grpc/xds/lrs.zig", "src/grpc/xds/lrs/codec.zig", "src/grpc/xds/lrs/client.zig"]
-    files += ["tools/interop/grpc_lrs/" + name for name in ("client.zig", "peer.js", "run.py")]
-    files += ["tools/interop/grpc_locality/" + name for name in ("package.json", "package-lock.json")]
-    digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
-    report["source_sha256"] = {file: digest(repo / file) for file in files}
+    assert report["report_cluster_count"] == 2
+    assert report["named_metrics_per_locality"] == 2
+    assert report["decoder_fixture"]["cluster_identities"] == [
+        {"cluster_name": "a", "cluster_service_name": "eds-a"},
+        {"cluster_name": "a", "cluster_service_name": "eds-other"},
+    ]
+    assert report["decoder_fixture"]["utilization_fields"] == {"cpu_utilization": 12, "mem_utilization": 13, "application_utilization": 14}
+    assert report["decoder_fixture"]["named_metric_field"] == 5
+    assert len(report["outbound_report"]["cluster_stats"]) == 2
+    if source_hashes != {file: digest(repo / file) for file in files} or executable_hash != digest(executable):
+        raise RuntimeError("LRS interop sources or executable changed during the gate")
+    report["source_sha256"] = source_hashes
     proto_root = deps / "node_modules/@grpc/grpc-js-xds/deps/envoy-api"
     report["reference_proto_sha256"] = {file: digest(proto_root / file) for file in ("envoy/service/load_stats/v3/lrs.proto", "envoy/config/endpoint/v3/load_report.proto")}
-    report["client_sha256"] = digest(args.client)
+    report["client_sha256"] = executable_hash
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(report, indent=2) + "\n")

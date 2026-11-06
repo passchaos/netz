@@ -120,6 +120,7 @@ pub fn publish(state: *State, prepared: *Prepared, deadline: ?std.Io.Clock.Times
     if (deadline) |until| _ = try @import("../../../../internal/deadline.zig").usableAwake(state.io, until);
     // No fallible operation follows this boundary. Task owners cannot proceed
     // until activation is signaled after the complete snapshot is installed.
+    prepared.lrs_selection = state.lrs_stats.swapSelection(state.io, prepared.lrs_selection);
     retention.commit(prepared);
     const previous_sources = state.sources;
     for (previous_sources) |source| {

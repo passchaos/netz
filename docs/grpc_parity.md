@@ -3601,8 +3601,11 @@ LRS itself is implemented: `src/grpc/xds/lrs/` provides the v3 codec,
 per-cluster/locality/endpoint reports built from SharedChannel counters, an
 interval scheduler that emits deltas and skips all-zero intervals, and
 reconnect plus control-plane failover (`lrs/tests.zig`,
-`lrs/scheduler_tests.zig`, `lrs/transport_tests.zig`). Applications run the
-scheduler with `io.concurrent`; the runtime Controller does not own one yet.
+`lrs/scheduler_tests.zig`, `lrs/transport_tests.zig`). The runtime Controller
+owns an optional runner through `Options.lrs` for both SotW and delta discovery.
+Accepted CDS reporting registrations now control collection and retain each
+call's admitted identity through completion; see
+[CDS-controlled LRS registrations](grpc_lrs_registration.md).
 
 
 ## Typed CDS and transactional CDS/EDS application
@@ -3636,12 +3639,12 @@ allocation rollback, checked weight multiplication and accepted-version
 retention when ACK has no active stream. See [CDS behavior](grpc_cds.md) and
 `docs/evidence/grpc_cds/2026-11-03.json`.
 
-This covers one explicitly selected EDS-backed cluster. Full bootstrap and
-LDS/RDS route selection, resource expiry, control-plane failover/retry,
-Delta xDS and per-child cluster management remain open. CDS transport
-security, outlier, per-cluster LRS server and upstream configuration fields are
-rejected; the standalone LRS client and scheduler are implemented as described
-above.
+The selected-cluster CDS/EDS gate above is complemented by the multi-cluster
+runtime Controller and its SotW/delta publication paths described below.
+CDS `lrs_server: self` controls per-cluster collection in the configured LRS
+runner. Other LRS config sources are rejected. Reporting-only delta changes
+publish, and old admitted calls retain their EDS identity and propagation until
+completion. See [CDS-controlled LRS registrations](grpc_lrs_registration.md).
 LOGICAL_DNS clusters are decoded and expanded into a priority tree whose child
 policy carries `ignoreReresolutionRequests: true`, i.e. addresses resolve once
 when the CDS resource is applied. STRICT_DNS sets that flag to `false`, so a

@@ -1,0 +1,90 @@
+test-lib
++- run test 207 pass, 3 fail (210 total)
+error: 'grpc.xds.runtime.lrs_selection_tests.test.gRPC SotW CDS LRS selection controls encoded reports and retains admitted identities' failed:
+       /home/passchaos/project-z/netz/src/internal/stream_io/timed_read.zig:68:17: 0x16e5f3f in result (root.zig)
+               else => return @errorCast(err),
+                       ^
+       /home/passchaos/project-z/netz/src/internal/stream_io/timed_read.zig:55:40: 0x16e5860 in readSomeWithDeadline (root.zig)
+               if (batch.next()) |completion| return result(completion.result, &incoming);
+                                              ^
+       /home/passchaos/project-z/netz/src/grpc/xds/lrs/codec.zig:420:129: 0x2bd16d0 in decodeRequest (root.zig)
+               if (index != 0) for (clusters.items[0..index]) |previous| if (std.mem.eql(u8, previous.value.name, cluster.value.name)) return error.InvalidLoadReport;
+                                                                                                                                       ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/lrs_selection_tests.zig:140:13: 0x2f1bcce in report (root.zig)
+                   return lrs.codec.decodeRequest(gpa, encoded, .{});
+                   ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/lrs_selection_tests.zig:232:22: 0x31ff786 in runSelection__anon_10888468 (root.zig)
+           var identities = try h.report(.{ .send_all_clusters = true, .report_endpoint_granularity = true });
+                            ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/lrs_selection_tests.zig:305:5: 0x3203987 in test.gRPC SotW CDS LRS selection controls encoded reports and retains admitted identities (root.zig)
+           try runSelection(.sotw);
+           ^
+error: 'grpc.xds.runtime.lrs_selection_tests.test.gRPC delta CDS LRS selection controls encoded reports and retains admitted identities' failed:
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/lrs_selection_tests.zig:102:13: 0x2f2a600 in begin (root.zig)
+                   return self.channel.state.lrs_stats.begin(self.io, cluster_name, service, .{ .ip4 = .loopback(1001) }) orelse error.CollectionDisabled;
+                   ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/lrs_selection_tests.zig:110:34: 0x2f2a7ae in call (root.zig)
+                   const registration = try self.begin(cluster_name, service);
+                                        ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/lrs_selection_tests.zig:187:5: 0x31f2cbe in runSelection__anon_10888388 (root.zig)
+           try h.call("a", "eds-a");
+           ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/lrs_selection_tests.zig:308:5: 0x31fab97 in test.gRPC delta CDS LRS selection controls encoded reports and retains admitted identities (root.zig)
+           try runSelection(.delta);
+           ^
+error: 'grpc.xds.runtime.lrs_selection_tests.test.gRPC CDS LRS selection rolls back NACKs and controller or channel allocation failures' failed:
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/std/mem/Allocator.zig:300:82: 0x1221923 in allocBytesWithAlignment__anon_8642 (std.zig)
+           const byte_ptr = self.rawAlloc(byte_count, alignment, return_address) orelse return error.OutOfMemory;
+                                                                                        ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/std/mem/Allocator.zig:286:5: 0x122178e in allocWithSizeAndAlignment__anon_8541 (std.zig)
+           return self.allocBytesWithAlignment(alignment, byte_count, return_address);
+           ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/std/mem/Allocator.zig:274:55: 0x1221443 in allocAdvancedWithRetAddr (std.zig)
+           const ptr: [*]align(a.toByteUnits()) T = @ptrCast(try self.allocWithSizeAndAlignment(@sizeOf(T), a, n, return_address));
+                                                             ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/std/mem/Allocator.zig:198:5: 0x122151e in alloc__anon_8507 (std.zig)
+           return self.allocAdvancedWithRetAddr(T, null, n, @returnAddress());
+           ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/std/mem/Allocator.zig:454:21: 0x1221b26 in dupe__anon_8500 (std.zig)
+           const new_buf = try allocator.alloc(T, m.len);
+                           ^
+       /home/passchaos/project-z/netz/src/grpc/xds/cds/decode.zig:895:19: 0x310e1b1 in decode (root.zig)
+           const image = try arena.dupe(u8, bytes);
+                         ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/apply_delta_cds.zig:33:52: 0x305bafc in apply (root.zig)
+                   if (!self.options.fail_on_data_errors) return err;
+                                                          ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/controller.zig:519:13: 0x2f388ce in applyDeltaWithDeadline (root.zig)
+                   try @import("apply_delta_cds.zig").apply(self, client, update, destination, deadline)
+                   ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/lrs_selection_tests.zig:76:13: 0x2f29524 in applyUpdate (root.zig)
+                   return if (mode == .sotw)
+                   ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/std/testing.zig:615:14: 0x2c3d019 in expect (std.zig)
+           if (!ok) return error.TestUnexpectedResult;
+                    ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/lrs_selection_tests.zig:118:13: 0x2f2ab67 in disabled (root.zig)
+                   try std.testing.expect(registration == null);
+                   ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/lrs_selection_tests.zig:296:5: 0x2f2f605 in runRollback__anon_10876768 (root.zig)
+           try h.disabled("a", "eds-a");
+           ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/lrs_selection_tests.zig:312:9: 0x2f36caa in test.gRPC CDS LRS selection rolls back NACKs and controller or channel allocation failures (root.zig)
+               try runRollback(mode, true);
+               ^
+failed command: ./.zig-cache/o/e01a5a46153add298130fa8a47f79c45/test --cache-dir=./.zig-cache --seed=0x953c787e --listen=-
+
+Build Summary: 6/8 steps succeeded (1 failed); 207/210 tests passed (3 failed)
+test-lib transitive failure
++- run test 207 pass, 3 fail (210 total)
+   +- compile test Debug native success 31s MaxRSS:2G
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 5ms MaxRSS:39M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 5ms MaxRSS:38M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options cached
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/bac267e61d8e6c005ce658072262be16/build /home/passchaos/Temp/zig-x86_64-linux-0.16.0/zig /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib /home/passchaos/project-z/netz .zig-cache /home/passchaos/.cache/zig --seed 0x953c787e -Z8700966109fbc31b test-lib -Dtest-filter=LRS -Dtest-filter=stream timed reader --summary all

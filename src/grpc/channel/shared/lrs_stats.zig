@@ -1,6 +1,10 @@
 //! Per-cluster call counters for xDS Load Reporting Service.
 const std = @import("std");
 const orca = @import("../../orca.zig");
+const selection = @import("lrs_stats_selection.zig");
+const key_lookup = @import("lrs_stats_key.zig");
+pub const Selection = selection.Selection;
+pub const Identity = selection.Identity;
 pub const max_clusters: usize = 4096;
 pub const max_categories: usize = 256;
 pub const max_endpoints: usize = 4096;
@@ -96,7 +100,9 @@ const Accum = struct {
 };
 
 const Counter = struct {
+    cluster: []const u8,
     service_name: []const u8 = "",
+    leases: std.atomic.Value(usize) = .init(0),
     issued: u64 = 0,
     successful: u64 = 0,
     error_requests: u64 = 0,
@@ -114,7 +120,6 @@ const Counter = struct {
     endpoints: std.StringHashMapUnmanaged(EndpointCounter) = .empty,
 
     fn deinit(self: *Counter, gpa: std.mem.Allocator) void {
-        if (self.service_name.len != 0) gpa.free(self.service_name);
         var metric_iterator = self.named_metrics.iterator();
         while (metric_iterator.next()) |entry| gpa.free(entry.key_ptr.*);
         self.named_metrics.deinit(gpa);
@@ -127,19 +132,28 @@ const Counter = struct {
     }
 };
 
-pub const Propagation = struct {
-    cpu_utilization: bool = false,
-    memory_utilization: bool = false,
-    application_utilization: bool = false,
-    named_metrics_all: bool = false,
-    named_metrics: []const []const u8 = &.{},
+pub const Propagation = selection.Propagation;
+
+/// A physical call keeps its admitted identity and propagation through completion.
+/// Counter storage belongs to Stats; the owning Job/StreamCall retains its State.
+pub const Registration = struct {
+    counter: *Counter,
+    selection: ?*Selection,
+    propagation: ?Propagation,
+
+    pub fn release(self: Registration) void {
+        if (self.selection) |value| value.release();
+        std.debug.assert(self.counter.leases.fetchSub(1, .acq_rel) != 0);
+    }
 };
 
 pub const Stats = struct {
     /// Null in test-only State literals; real channels set it during init.
     allocator: ?std.mem.Allocator = null,
     mutex: std.Io.Mutex = .init,
-    map: std.StringHashMapUnmanaged(Counter) = .empty,
+    map: std.StringHashMapUnmanaged(*Counter) = .empty,
+    /// Null preserves standalone collection; an empty selection disables new calls.
+    selection: ?*Selection = null,
     propagation: std.StringHashMapUnmanaged(StoredPropagation) = .empty,
 
     const StoredPropagation = struct {
@@ -152,29 +166,45 @@ pub const Stats = struct {
 
     const Update = enum { issued_success, issued_error, started, aborted, issued, success, error_request, dropped };
 
+    pub fn retainSelection(self: *Stats, io: std.Io) ?*Selection {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        return if (self.selection) |value| value.retain() else null;
+    }
+
+    /// Transfer ownership without allocation at the channel commit boundary.
+    pub fn swapSelection(self: *Stats, io: std.Io, value: ?*Selection) ?*Selection {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        const previous = self.selection;
+        self.selection = value;
+        return previous;
+    }
+
     fn entryLocked(self: *Stats, cluster: []const u8, service_name: []const u8) ?*Counter {
         const gpa = self.allocator orelse return null;
         if (cluster.len == 0) return null;
-        if (self.map.count() >= max_clusters) {
-            if (self.map.get(cluster) == null) return null;
-        }
-        const gop = self.map.getOrPut(gpa, cluster) catch return null;
-        if (!gop.found_existing) {
-            const owned = gpa.dupe(u8, cluster) catch {
-                _ = self.map.remove(cluster);
-                return null;
-            };
-            const owned_service = if (service_name.len == 0) &.{} else gpa.dupe(u8, service_name) catch {
-                gpa.free(owned);
-                _ = self.map.remove(cluster);
-                return null;
-            };
-            gop.key_ptr.* = owned;
-            gop.value_ptr.* = .{ .service_name = owned_service };
-        } else if (gop.value_ptr.service_name.len == 0 and service_name.len != 0) {
-            gop.value_ptr.service_name = gpa.dupe(u8, service_name) catch return gop.value_ptr;
-        }
-        return gop.value_ptr;
+        if (self.selection) |selected| if (selected.find(cluster, service_name) == null) return null;
+        if (self.map.getAdapted(key_lookup.Borrowed{ .cluster = cluster, .service_name = service_name }, key_lookup.Adapted{})) |value| return value;
+        if (self.map.count() >= max_clusters) return null;
+        // A length prefix makes the cluster/EDS pair unambiguous, including NULs.
+        const text_len = std.math.add(usize, cluster.len, service_name.len) catch return null;
+        const key_len = std.math.add(usize, 8, text_len) catch return null;
+        const key = gpa.alloc(u8, key_len) catch return null;
+        std.mem.writeInt(u64, key[0..8], @intCast(cluster.len), .little);
+        @memcpy(key[8..][0..cluster.len], cluster);
+        @memcpy(key[8 + cluster.len ..], service_name);
+        const value = gpa.create(Counter) catch {
+            gpa.free(key);
+            return null;
+        };
+        value.* = .{ .cluster = key[8..][0..cluster.len], .service_name = key[8 + cluster.len ..] };
+        self.map.put(gpa, key, value) catch {
+            gpa.destroy(value);
+            gpa.free(key);
+            return null;
+        };
+        return value;
     }
 
     fn apply(value: anytype, kind: Update) void {
@@ -211,7 +241,13 @@ pub const Stats = struct {
     }
     fn endpointUpdate(self: *Stats, counter: *Counter, address: std.Io.net.IpAddress, kind: Update) void {
         const gpa = self.allocator orelse return;
-        const key = std.fmt.allocPrint(gpa, "{f}", .{address}) catch return;
+        var buffer: [128]u8 = undefined;
+        const borrowed = std.fmt.bufPrint(&buffer, "{f}", .{address}) catch return;
+        if (counter.endpoints.getPtr(borrowed)) |value| {
+            apply(value, kind);
+            return;
+        }
+        const key = gpa.dupe(u8, borrowed) catch return;
         const gop = counter.endpoints.getOrPut(gpa, key) catch {
             gpa.free(key);
             return;
@@ -240,12 +276,46 @@ pub const Stats = struct {
     pub fn recordIssued(self: *Stats, io: std.Io, cluster: []const u8, service_name: []const u8) void {
         self.update(io, cluster, service_name, .issued);
     }
-    pub fn recordStarted(self: *Stats, io: std.Io, cluster: []const u8, service_name: []const u8, endpoint: ?std.Io.net.IpAddress) void {
+    fn captureLocked(self: *Stats, cluster: []const u8, service_name: []const u8) ?Registration {
+        const value = self.entryLocked(cluster, service_name) orelse return null;
+        _ = value.leases.fetchAdd(1, .monotonic);
+        const selected = self.selection;
+        return .{ .counter = value, .selection = if (selected) |owner| owner.retain() else null, .propagation = if (selected) |owner| owner.find(cluster, service_name).?.propagation else null };
+    }
+
+    /// Pin admission before HEADERS without publishing issued/in-progress counts.
+    /// Failed opening releases this capture; a successful opening calls start once.
+    pub fn capture(self: *Stats, io: std.Io, cluster: []const u8, service_name: []const u8) ?Registration {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
-        const value = self.entryLocked(cluster, service_name) orelse return;
-        apply(value, .started);
-        if (endpoint) |address| self.endpointUpdate(value, address, .started);
+        return self.captureLocked(cluster, service_name);
+    }
+
+    pub fn start(self: *Stats, io: std.Io, registration: Registration, endpoint: ?std.Io.net.IpAddress) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        apply(registration.counter, .started);
+        if (endpoint) |address| self.endpointUpdate(registration.counter, address, .started);
+    }
+
+    /// Standalone convenience: capture and start accounting in one locked step.
+    pub fn begin(self: *Stats, io: std.Io, cluster: []const u8, service_name: []const u8, endpoint: ?std.Io.net.IpAddress) ?Registration {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        const registration = self.captureLocked(cluster, service_name) orelse return null;
+        apply(registration.counter, .started);
+        if (endpoint) |address| self.endpointUpdate(registration.counter, address, .started);
+        return registration;
+    }
+    pub fn complete(self: *Stats, io: std.Io, registration: Registration, endpoint: ?std.Io.net.IpAddress, success: bool) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        const kind: Update = if (success) .success else .error_request;
+        apply(registration.counter, kind);
+        if (endpoint) |address| self.endpointUpdate(registration.counter, address, kind);
+    }
+    pub fn recordStarted(self: *Stats, io: std.Io, cluster: []const u8, service_name: []const u8, endpoint: ?std.Io.net.IpAddress) void {
+        if (self.begin(io, cluster, service_name, endpoint)) |registration| registration.release();
     }
     pub fn recordAborted(self: *Stats, io: std.Io, cluster: []const u8, service_name: []const u8, endpoint: ?std.Io.net.IpAddress) void {
         self.mutex.lockUncancelable(io);
@@ -288,7 +358,27 @@ pub const Stats = struct {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
         const propagation = self.propagation.get(cluster) orelse return;
-        const value = self.entryLocked(cluster, "") orelse return;
+        var iterator = self.map.iterator();
+        const value = while (iterator.next()) |entry| {
+            const counter = entry.value_ptr.*;
+            if (!std.mem.eql(u8, counter.cluster, cluster)) continue;
+            if (self.selection) |selected| if (selected.find(cluster, counter.service_name) == null) continue;
+            break counter;
+        } else self.entryLocked(cluster, "") orelse return;
+        self.metricsLocked(value, propagation, report);
+    }
+
+    pub fn recordRegisteredOrca(self: *Stats, io: std.Io, registration: Registration, report: orca.LoadReport) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        const propagation = registration.propagation orelse blk: {
+            const stored = self.propagation.get(registration.counter.cluster) orelse return;
+            break :blk Propagation{ .cpu_utilization = stored.cpu_utilization, .memory_utilization = stored.memory_utilization, .application_utilization = stored.application_utilization, .named_metrics_all = stored.named_metrics_all, .named_metrics = stored.named_metrics };
+        };
+        self.metricsLocked(registration.counter, propagation, report);
+    }
+
+    fn metricsLocked(self: *Stats, value: *Counter, propagation: anytype, report: orca.LoadReport) void {
         if (propagation.cpu_utilization) accumulate(&value.cpu_utilization, report.cpu_utilization);
         if (propagation.memory_utilization) accumulate(&value.memory_utilization, report.memory_utilization);
         if (propagation.application_utilization) accumulate(&value.application_utilization, report.application_utilization);
@@ -369,145 +459,36 @@ pub const Stats = struct {
         value.count +%= 1;
     }
 
-    fn utilization(value: Accum, delta: bool) Utilization {
-        if (!delta) return .{ .sum = value.sum, .count = value.count };
-        return .{ .sum = value.sum - value.reported_sum, .count = value.count -| value.reported_count };
-    }
-
-    fn markReported(value: *Accum) void {
-        value.reported_sum = value.sum;
-        value.reported_count = value.count;
-    }
-
     fn takeSnapshot(self: *Stats, gpa: std.mem.Allocator, io: std.Io, comptime delta: bool) std.mem.Allocator.Error!Snapshot {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
-        var storage_bytes: usize = 0;
-        var category_count: usize = 0;
-        var endpoint_count: usize = 0;
-        var metric_count: usize = 0;
-        var iterator = self.map.iterator();
-        while (iterator.next()) |entry| {
-            storage_bytes += entry.key_ptr.*.len + entry.value_ptr.service_name.len;
-            category_count += entry.value_ptr.dropped_categories.count();
-            endpoint_count += entry.value_ptr.endpoints.count();
-            metric_count += entry.value_ptr.named_metrics.count();
-            var categories = entry.value_ptr.dropped_categories.iterator();
-            while (categories.next()) |category| storage_bytes += category.key_ptr.*.len;
-            var endpoints = entry.value_ptr.endpoints.iterator();
-            while (endpoints.next()) |endpoint| storage_bytes += endpoint.value_ptr.host.len;
-            var metrics = entry.value_ptr.named_metrics.iterator();
-            while (metrics.next()) |metric| storage_bytes += metric.key_ptr.*.len;
+        if (delta) self.pruneReportedLocked();
+        return @import("lrs_stats_snapshot.zig").takeLocked(self, gpa, delta);
+    }
+
+    /// Retired identities stay reportable through their last admitted call and
+    /// final delta. Reclaim them only after a snapshot consumed that delta.
+    fn pruneReportedLocked(self: *Stats) void {
+        const selected = self.selection orelse return;
+        const gpa = self.allocator orelse return;
+        while (true) {
+            var iterator = self.map.iterator();
+            const removed = while (iterator.next()) |entry| {
+                const value = entry.value_ptr.*;
+                if (selected.find(value.cluster, value.service_name) != null or value.leases.load(.acquire) != 0 or value.in_progress != 0) continue;
+                if (value.issued > value.reported_issued or value.successful > value.reported_successful or value.error_requests > value.reported_error_requests or value.dropped > value.reported_dropped) continue;
+                if (value.cpu_utilization.count > value.cpu_utilization.reported_count or value.memory_utilization.count > value.memory_utilization.reported_count or value.application_utilization.count > value.application_utilization.reported_count) continue;
+                var metrics = value.named_metrics.iterator();
+                const pending = while (metrics.next()) |metric| {
+                    if (metric.value_ptr.count > metric.value_ptr.reported_count) break true;
+                } else false;
+                if (pending) continue;
+                break self.map.fetchRemove(entry.key_ptr.*).?;
+            } else return;
+            removed.value.deinit(gpa);
+            gpa.destroy(removed.value);
+            gpa.free(removed.key);
         }
-        const entries = try gpa.alloc(Entry, self.map.count());
-        errdefer gpa.free(entries);
-        const categories = try gpa.alloc(CategoryCount, category_count);
-        errdefer gpa.free(categories);
-        const endpoints = try gpa.alloc(EndpointEntry, endpoint_count);
-        errdefer gpa.free(endpoints);
-        const metrics = try gpa.alloc(NamedMetric, metric_count);
-        errdefer gpa.free(metrics);
-        const storage = try gpa.alloc(u8, storage_bytes);
-        errdefer gpa.free(storage);
-        var offset: usize = 0;
-        var index: usize = 0;
-        var category_index: usize = 0;
-        var endpoint_index: usize = 0;
-        var metric_index: usize = 0;
-        iterator = self.map.iterator();
-        while (iterator.next()) |entry| {
-            const name = entry.key_ptr.*;
-            const copy = storage[offset..][0..name.len];
-            @memcpy(copy, name);
-            offset += name.len;
-            const service_name = entry.value_ptr.service_name;
-            const service_copy = storage[offset..][0..service_name.len];
-            @memcpy(service_copy, service_name);
-            offset += service_name.len;
-            const category_start = category_index;
-            var category_iterator = entry.value_ptr.dropped_categories.iterator();
-            while (category_iterator.next()) |category| {
-                const category_name = category.key_ptr.*;
-                const category_copy = storage[offset..][0..category_name.len];
-                @memcpy(category_copy, category_name);
-                offset += category_name.len;
-                const count = if (delta) category.value_ptr.count -| category.value_ptr.reported else category.value_ptr.count;
-                categories[category_index] = .{ .category = category_copy, .count = count };
-                if (delta) category.value_ptr.reported = category.value_ptr.count;
-                category_index += 1;
-            }
-            const endpoint_start = endpoint_index;
-            var endpoint_iterator = entry.value_ptr.endpoints.iterator();
-            while (endpoint_iterator.next()) |endpoint| {
-                const host = endpoint.value_ptr.host;
-                const host_copy = storage[offset..][0..host.len];
-                @memcpy(host_copy, host);
-                offset += host.len;
-                const issued = if (delta) endpoint.value_ptr.issued -| endpoint.value_ptr.reported_issued else endpoint.value_ptr.issued;
-                const successful = if (delta) endpoint.value_ptr.successful -| endpoint.value_ptr.reported_successful else endpoint.value_ptr.successful;
-                const error_requests = if (delta) endpoint.value_ptr.error_requests -| endpoint.value_ptr.reported_error_requests else endpoint.value_ptr.error_requests;
-                endpoints[endpoint_index] = .{
-                    .host = host_copy,
-                    .port = endpoint.value_ptr.port,
-                    .ipv6 = endpoint.value_ptr.ipv6,
-                    .issued = issued,
-                    .successful = successful,
-                    .error_requests = error_requests,
-                    .in_progress = endpoint.value_ptr.in_progress,
-                };
-                if (delta) {
-                    endpoint.value_ptr.reported_issued = endpoint.value_ptr.issued;
-                    endpoint.value_ptr.reported_successful = endpoint.value_ptr.successful;
-                    endpoint.value_ptr.reported_error_requests = endpoint.value_ptr.error_requests;
-                }
-                endpoint_index += 1;
-            }
-            const metric_start = metric_index;
-            var metric_iterator = entry.value_ptr.named_metrics.iterator();
-            while (metric_iterator.next()) |metric| {
-                const metric_name = metric.key_ptr.*;
-                const metric_copy = storage[offset..][0..metric_name.len];
-                @memcpy(metric_copy, metric_name);
-                offset += metric_name.len;
-                const output = utilization(metric.value_ptr.*, delta);
-                metrics[metric_index] = .{ .name = metric_copy, .sum = output.sum, .count = output.count };
-                if (delta) markReported(metric.value_ptr);
-                metric_index += 1;
-            }
-            const issued = if (delta) entry.value_ptr.issued -| entry.value_ptr.reported_issued else entry.value_ptr.issued;
-            const successful = if (delta) entry.value_ptr.successful -| entry.value_ptr.reported_successful else entry.value_ptr.successful;
-            const error_requests = if (delta) entry.value_ptr.error_requests -| entry.value_ptr.reported_error_requests else entry.value_ptr.error_requests;
-            const dropped = if (delta) entry.value_ptr.dropped -| entry.value_ptr.reported_dropped else entry.value_ptr.dropped;
-            const cpu = utilization(entry.value_ptr.cpu_utilization, delta);
-            const memory = utilization(entry.value_ptr.memory_utilization, delta);
-            const application = utilization(entry.value_ptr.application_utilization, delta);
-            entries[index] = .{
-                .cluster = copy,
-                .service_name = service_copy,
-                .issued = issued,
-                .successful = successful,
-                .error_requests = error_requests,
-                .dropped = dropped,
-                .in_progress = entry.value_ptr.in_progress,
-                .cpu_utilization = cpu,
-                .memory_utilization = memory,
-                .application_utilization = application,
-                .load_metrics = metrics[metric_start..][0 .. metric_index - metric_start],
-                .categories = categories[category_start..][0 .. category_index - category_start],
-                .endpoints = endpoints[endpoint_start..][0 .. endpoint_index - endpoint_start],
-            };
-            if (delta) {
-                entry.value_ptr.reported_issued = entry.value_ptr.issued;
-                entry.value_ptr.reported_successful = entry.value_ptr.successful;
-                entry.value_ptr.reported_error_requests = entry.value_ptr.error_requests;
-                entry.value_ptr.reported_dropped = entry.value_ptr.dropped;
-                markReported(&entry.value_ptr.cpu_utilization);
-                markReported(&entry.value_ptr.memory_utilization);
-                markReported(&entry.value_ptr.application_utilization);
-            }
-            index += 1;
-        }
-        return .{ .allocator = gpa, .storage = storage, .entries = entries, .categories = categories, .endpoints = endpoints, .metrics = metrics };
     }
 
     /// Cumulative counters since channel creation.
@@ -522,11 +503,13 @@ pub const Stats = struct {
     }
 
     pub fn deinit(self: *Stats) void {
+        if (self.selection) |value| value.release();
         const gpa = self.allocator orelse return;
         var iterator = self.map.iterator();
         while (iterator.next()) |entry| {
+            entry.value_ptr.*.deinit(gpa);
+            gpa.destroy(entry.value_ptr.*);
             gpa.free(entry.key_ptr.*);
-            entry.value_ptr.deinit(gpa);
         }
         self.map.deinit(gpa);
         var propagation_iterator = self.propagation.iterator();

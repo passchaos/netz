@@ -288,6 +288,7 @@ pub const Controller = struct {
         const target = try Target.create(self.allocator, destination.state.io, plan.entries.items, self.local_json);
         defer target.release();
         var storage = std.math.add(usize, plan.route_storage, target.arena.queryCapacity()) catch return error.XdsLimitExceeded;
+        if (target.lrs_selection) |selection| storage = std.math.add(usize, storage, selection.arena.queryCapacity()) catch return error.XdsLimitExceeded;
         for (plan.entries.items) |entry| {
             if (entry.cluster) |cluster| storage = std.math.add(usize, storage, cluster.resource.arena.queryCapacity()) catch return error.XdsLimitExceeded;
             if (entry.snapshot) |snapshot| storage = std.math.add(usize, storage, snapshot.resource.arena.queryCapacity()) catch return error.XdsLimitExceeded;

@@ -1,0 +1,398 @@
+{
+  "status": "passed",
+  "scope": [
+    "Retained stream read batches, absolute deadline expiry and joined cancellation",
+    "Accepted CDS-controlled LRS registrations, admitted call lifetime and metric decoding"
+  ],
+  "base_commit": "f726c898f15f80ca160dccd7c90df64aa3d09c99",
+  "recorded_at_utc": "2026-11-06T22:45:55.599546+00:00",
+  "zig_version": "0.16.0",
+  "gates": [
+    {
+      "name": "original-counterexample",
+      "base_commit": "f726c898f15f80ca160dccd7c90df64aa3d09c99",
+      "expected": "FAIL (Timeout)",
+      "exit_code": 1,
+      "elapsed_seconds": 0.392,
+      "log": "docs/evidence/stream_read_deadline/2026-11-07/original-early-timeout.log"
+    },
+    {
+      "name": "unit.Debug",
+      "command": [
+        "zig",
+        "test",
+        "src/.netz_stream_read_test.zig",
+        "-lc",
+        "--test-filter",
+        "stream timed reader"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 0.397,
+      "log": "docs/evidence/stream_read_deadline/2026-11-07/unit.Debug.log"
+    },
+    {
+      "name": "unit.ReleaseSafe",
+      "command": [
+        "zig",
+        "test",
+        "src/.netz_stream_read_test.zig",
+        "-lc",
+        "-OReleaseSafe",
+        "--test-filter",
+        "stream timed reader"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 11.582,
+      "log": "docs/evidence/stream_read_deadline/2026-11-07/unit.ReleaseSafe.log"
+    },
+    {
+      "name": "unit.Windows.compile",
+      "command": [
+        "zig",
+        "test",
+        "src/.netz_stream_read_test.zig",
+        "-lc",
+        "-target",
+        "x86_64-windows-gnu",
+        "--test-no-exec",
+        "-fno-emit-bin"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 0.677,
+      "log": "docs/evidence/stream_read_deadline/2026-11-07/unit.Windows.compile.log"
+    },
+    {
+      "name": "mqtt-bridge-qos2.Debug",
+      "commands": [
+        [
+          "zig",
+          "build",
+          "fuzz-mqtt-bridge-qos2",
+          "--seed",
+          "0x4a337f0d",
+          "--summary",
+          "all"
+        ],
+        [
+          "zig",
+          "build",
+          "fuzz-mqtt-bridge-qos2",
+          "--seed",
+          "0x11070501",
+          "--summary",
+          "all"
+        ]
+      ],
+      "exit_code": 0,
+      "runs": 2,
+      "elapsed_seconds": 11.237,
+      "log": "docs/evidence/stream_read_deadline/2026-11-07/mqtt-bridge-qos2.Debug.log"
+    },
+    {
+      "name": "mqtt-tls-bridge-qos2.Debug",
+      "commands": [
+        [
+          "zig",
+          "build",
+          "fuzz-mqtt-tls-bridge-qos2",
+          "--seed",
+          "0x4a337f0d",
+          "--summary",
+          "all"
+        ],
+        [
+          "zig",
+          "build",
+          "fuzz-mqtt-tls-bridge-qos2",
+          "--seed",
+          "0x11070511",
+          "--summary",
+          "all"
+        ]
+      ],
+      "exit_code": 0,
+      "runs": 2,
+      "elapsed_seconds": 80.011,
+      "log": "docs/evidence/stream_read_deadline/2026-11-07/mqtt-tls-bridge-qos2.Debug.log"
+    },
+    {
+      "name": "library.Debug",
+      "command": [
+        "zig",
+        "build",
+        "test-lib",
+        "-Dtest-filter=LRS",
+        "-Dtest-filter=stream timed reader",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 39.921,
+      "log": "docs/evidence/stream_read_deadline/2026-11-07/library.Debug.log",
+      "summary": "8/8 steps succeeded; 215/215 tests passed"
+    },
+    {
+      "name": "library.ReleaseSafe",
+      "command": [
+        "zig",
+        "build",
+        "test-lib",
+        "-Doptimize=ReleaseSafe",
+        "-Dtest-filter=LRS",
+        "-Dtest-filter=stream timed reader",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 199.845,
+      "log": "docs/evidence/stream_read_deadline/2026-11-07/library.ReleaseSafe.log",
+      "summary": "8/8 steps succeeded; 215/215 tests passed"
+    },
+    {
+      "name": "read-interruptions.Debug",
+      "command": [
+        "zig",
+        "build",
+        "test-lib",
+        "-Dtest-filter=read interruption",
+        "-Dtest-filter=stream timed",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 46.999,
+      "log": "docs/evidence/stream_read_deadline/2026-11-07/read-interruptions.Debug.log",
+      "summary": "8/8 steps succeeded; 196/196 tests passed"
+    },
+    {
+      "name": "interop-lrs.Debug",
+      "command": [
+        "zig",
+        "build",
+        "interop-grpc-lrs",
+        "--summary",
+        "all",
+        "--",
+        "--output",
+        "docs/evidence/grpc_lrs_registration/2026-11-07.Debug.json"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 37.004,
+      "log": "docs/evidence/stream_read_deadline/2026-11-07/interop-lrs.Debug.log",
+      "summary": "8/8 steps succeeded"
+    },
+    {
+      "name": "interop-lrs.ReleaseSafe",
+      "command": [
+        "zig",
+        "build",
+        "interop-grpc-lrs",
+        "-Doptimize=ReleaseSafe",
+        "--summary",
+        "all",
+        "--",
+        "--output",
+        "docs/evidence/grpc_lrs_registration/2026-11-07.ReleaseSafe.json"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 158.846,
+      "log": "docs/evidence/stream_read_deadline/2026-11-07/interop-lrs.ReleaseSafe.log",
+      "summary": "8/8 steps succeeded"
+    },
+    {
+      "name": "format",
+      "command": [
+        "zig",
+        "fmt",
+        "--check",
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "test",
+        "examples",
+        "benchmarks",
+        "tools"
+      ],
+      "exit_code": 0,
+      "summary": "Repository Zig formatting passed"
+    },
+    {
+      "name": "interop-a6.Debug",
+      "command": [
+        "zig",
+        "build",
+        "interop-grpc-hedging-commit",
+        "--summary",
+        "all",
+        "--",
+        "--output",
+        "docs/evidence/grpc_hedging_commit/2026-11-07.Debug.json"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 33.831,
+      "log": "docs/evidence/stream_read_deadline/2026-11-07/interop-a6.Debug.log",
+      "summary": "8/8 steps succeeded"
+    },
+    {
+      "name": "interop-a6.ReleaseSafe",
+      "command": [
+        "zig",
+        "build",
+        "interop-grpc-hedging-commit",
+        "-Doptimize=ReleaseSafe",
+        "--summary",
+        "all",
+        "--",
+        "--output",
+        "docs/evidence/grpc_hedging_commit/2026-11-07.ReleaseSafe.json"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 136.597,
+      "log": "docs/evidence/stream_read_deadline/2026-11-07/interop-a6.ReleaseSafe.log",
+      "summary": "8/8 steps succeeded"
+    },
+    {
+      "name": "mqtt-shared-properties.Debug",
+      "command": [
+        "zig",
+        "build",
+        "interop-mqtt-shared-properties",
+        "--summary",
+        "all"
+      ],
+      "runs": 20,
+      "exit_code": 0,
+      "elapsed_seconds": 30.532,
+      "summary": "20 actual QoS1/QoS2 three-generation replays; bounded30s durable completion",
+      "log": "docs/evidence/stream_read_deadline/2026-11-07/mqtt-shared-properties.Debug.log"
+    },
+    {
+      "name": "repository.Debug",
+      "command": [
+        "zig",
+        "build",
+        "test",
+        "-j1",
+        "--seed",
+        "0x4a337f0d",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 217.245,
+      "log": "docs/evidence/stream_read_deadline/2026-11-07/repository.Debug.log",
+      "summary": "189/189 steps succeeded",
+      "cache_policy": "Reuse successful same-seed native steps from the recorded 6802/6802 full run; updated persistence fixtures run again"
+    }
+  ],
+  "independent_envoy_and_http2": {
+    "Debug": {
+      "path": "docs/evidence/grpc_lrs_registration/2026-11-07.Debug.json",
+      "contracts": {
+        "initial_subscription": true,
+        "report_counters": true,
+        "send_all": true,
+        "clean_terminal": true,
+        "request_decoder": true,
+        "request_encoder": true,
+        "utilization_metrics": true,
+        "named_metrics": true,
+        "distinct_service_identities": true,
+        "endpoint_granularity": true
+      },
+      "a6_path": "docs/evidence/grpc_hedging_commit/2026-11-07.Debug.json"
+    },
+    "ReleaseSafe": {
+      "path": "docs/evidence/grpc_lrs_registration/2026-11-07.ReleaseSafe.json",
+      "contracts": {
+        "initial_subscription": true,
+        "report_counters": true,
+        "send_all": true,
+        "clean_terminal": true,
+        "request_decoder": true,
+        "request_encoder": true,
+        "utilization_metrics": true,
+        "named_metrics": true,
+        "distinct_service_identities": true,
+        "endpoint_granularity": true
+      },
+      "a6_path": "docs/evidence/grpc_hedging_commit/2026-11-07.ReleaseSafe.json"
+    }
+  },
+  "source_sha256": {
+    "docs/evidence/stream_read_deadline/README.md": "77df6f72350e360392e14de38559728cbf315990371b41fb642d509a19ff804b",
+    "docs/grpc_lrs_registration.md": "df90715ad244b5a9d4dea22035ead6c0ccad5086146787916a89fdef22fd1fd3",
+    "docs/grpc_parity.md": "800443fe421e048a5529120f5e30f9049d415a0a311fa382a41a4716c7ff82e5",
+    "docs/stream_read_deadlines.md": "204648b1113551efda5788f8510a30d09f7a9b3f33b44e22ff618e7a71214a01",
+    "src/grpc/channel/shared.zig": "d2ac12432f7fee0a4e26c6ed808396aeef157bc09556489f005e172cc0c2381a",
+    "src/grpc/channel/shared/job.zig": "b296e19aa82c65cb9e3f1af98a2664931a6d2206dafa8ba5621b6446cb498d54",
+    "src/grpc/channel/shared/lrs_stats.zig": "8c218e9ef3f28f92d87bd09f322f56e9602c8bced377a52362b98756eb2c2349",
+    "src/grpc/channel/shared/lrs_stats_key.zig": "de4ffb8e7ef1b56a197073bb1c44fd449d20c9c5705bb0f436a74092f3ac1c52",
+    "src/grpc/channel/shared/lrs_stats_lookup_tests.zig": "96eb8bbccd291d29a4ddfa259f74a271ff7adc20eb56b26293edfd6ee0aa76ec",
+    "src/grpc/channel/shared/lrs_stats_registration_tests.zig": "c36a7ba533cd9a99decdcdfaf1189869f7b76005fb37576cbba605daa439a104",
+    "src/grpc/channel/shared/lrs_stats_selection.zig": "65218465c9aa2227afbae9a94aaa90acc12134825080a6ad5d2a7f0ffdc0be7f",
+    "src/grpc/channel/shared/lrs_stats_snapshot.zig": "016c55c72302ea11dac2355176b49f4323b6cd84146e757871e1be4385cfda86",
+    "src/grpc/channel/shared/state.zig": "0334a97e9a3b4cfb71921eed41c2f7370e5393abbdcdd31e74cd4f2d4f910646",
+    "src/grpc/channel/shared/stream/call.zig": "49f322e7183a7ef5fc3c57df5e37561622dd745e6aef288e61e230db1d5ce247",
+    "src/grpc/channel/shared/stream/owner.zig": "317835462dd9da16284cc8012380a17206330847570b9cc27594f97c5e49561a",
+    "src/grpc/channel/shared/update.zig": "2de2552daf8643f8ab54389c9a53a6fe3b16eb2b83dbe34810a4079fb0b39e58",
+    "src/grpc/channel/shared/update/prepare.zig": "676656890d6ad02d24406f021df082529824d0e0a81393db86fd4d5646615812",
+    "src/grpc/channel/shared/update/publish.zig": "5234c96933e84539b84cc9ced249177c6a7f7d4b58b419063be8bacc23290ac7",
+    "src/grpc/channel/shared/worker.zig": "c23f17340b3953d455647cbd96dcf12215a2a0e190ccd6082226b3245951e194",
+    "src/grpc/xds/lrs/client.zig": "feea9671ede9ffe120b9f3ce781b937b04f20ca7fe7cdd8bbf07b32d7a2797b4",
+    "src/grpc/xds/lrs/codec.zig": "ffb35262db13c94bd78e681169d00798e2b2adf426df7c6990e3c1f390d784c7",
+    "src/grpc/xds/lrs/tests.zig": "e873bb7d4addd85047770bc7242055140a34cca152044aca595957b7a9689530",
+    "src/grpc/xds/runtime.zig": "12ae7c88142cfecec38a02eb817a9560c52d9f49a1ef533a0615817fbfa55529",
+    "src/grpc/xds/runtime/apply_delta_cds.zig": "e4168a8f60eb15ea628d858cbbf281960cb43dd183b8113728321bdcdd4e3cf6",
+    "src/grpc/xds/runtime/controller.zig": "46891c670aab70ce220e9978de2c5c767c288ecfc621fcd55abe524a231554ba",
+    "src/grpc/xds/runtime/entry.zig": "54fcf71557d734141ff1decb2b7b13fb309294b743fd1d03eeb8c2cef6df95b7",
+    "src/grpc/xds/runtime/lrs_selection_tests.zig": "9718c08a11978a69f519a4dc33ebf9f54dc9fabfd66d65b84c24cfde9da488ef",
+    "src/grpc/xds/runtime/target.zig": "64af9fd28cb0ebe848f4e78baaf644f44d7ca0cfa93f64ddd260c4afbfa7bc05",
+    "src/internal/stream_io.zig": "7b382dae6dca051b0cfd60a41d54dfffba262c46608f2847e9ffa58f617b9129",
+    "src/internal/stream_io/timed_read.zig": "5d66d3fda592b55ca142eeead6550452d76aabe7a772653c4db56cd67be92592",
+    "src/internal/stream_io/timed_read_tests.zig": "7c12a14d1da02b14adec91b9536d9daeaf860ec5c0c2aeae5e2c9a54d44f39d7",
+    "test/mqtt_bridge_qos2_fuzz/harness.zig": "2ce16dd02a359c5785bfe8fae460373bcf0a79eac682386b3ae112a1a13e5bd9",
+    "tools/interop/grpc_lrs/README.md": "767d32e0e3a28f12d88293b15899a6c37bb83506d60c41d91a1b5946ab776698",
+    "tools/interop/grpc_lrs/client.zig": "42845521db09af1dbe1dfbef56f0a5f6890c3d4e0cac10b233e12522636cfd63",
+    "tools/interop/grpc_lrs/peer.js": "099f02ba62822997e76ea29624fa4f0e99ea7518335cd8915554bf68ae598dc1",
+    "tools/interop/grpc_lrs/run.py": "97ff857c8604c6050b4993437256d1c424a2c7b9a45544e3dde63b293187018c",
+    "tools/interop/mqtt_broker_config_expiry_persistence.py": "df8c35a0596e0b87fd2457232ce9c750486fd90c91e2c8cc03611eb40a66ff8a",
+    "tools/interop/mqtt_broker_config_inflight_persistence.py": "167904c8f689ea4842af16c0a02d746fa40a6e2f1de6a42a628f26d8d297da89",
+    "tools/interop/mqtt_broker_config_packet_size_persistence.py": "0336e30909312f6f1f5c4b393da711c523520b5a718f36548d829ae8aa992b9a",
+    "tools/interop/mqtt_broker_config_persistence_support.py": "4fec2a896d382ae962596f1b8a9acc5796d91ab8e28cdcc6d6268be7dc9c1779",
+    "tools/interop/mqtt_broker_config_retained.py": "6fa11a0eb8ac158fb5dbf00820312404069a167fbed2f5ca7924034dd3d0f241",
+    "tools/interop/mqtt_broker_config_session_persistence.py": "d12128a92407b0e2df9b977778cfb7fd6bf5dcd131ad362a540f18d7eff2e758",
+    "tools/interop/mqtt_broker_config_subscription_persistence.py": "92d2516b0097dc733909e596ec217b36ce6436191a52508f846eeb46ce8a591a",
+    "tools/interop/mqtt_scenarios/session_expiry_restart.py": "d8c604c85f883f46a6097edb6cc3aeb6652edf2b13408f6e6ab6e08f7500e693",
+    "tools/interop/mqtt_scenarios/shared_properties.py": "401f184dd208572266998a7d3aeca7812a3f7d26601da01ede2e211f4304fa97",
+    "tools/interop/mqtt_scenarios/subscription_lifecycle.py": "46aac3c7f511727d2e8594a812d39b537feb76a7e120d8d20711f844716bff1d"
+  },
+  "isolated_unit_root": {
+    "temporary_path": "src/.netz_stream_read_test.zig",
+    "contents": "test {\n    _ = @import(\"internal/stream_io/timed_read.zig\");\n}\n",
+    "purpose": "Compile only the retained reader while gRPC files were edited independently; removed after the ordinary library gate passed"
+  },
+  "references": {
+    "threaded_poll": "/home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/std/Io/Threaded.zig",
+    "core_lrs_identity": "/home/passchaos/Work/grpc/src/core/xds/xds_client/lrs_client.cc",
+    "core_cds_lrs": "/home/passchaos/Work/grpc/src/core/xds/grpc/xds_cluster_parser.cc"
+  },
+  "successful_native_full_run": {
+    "tests": "6802/6802 passed",
+    "log": "docs/evidence/stream_read_deadline/2026-11-07/repository.Debug.initial-shared-properties-shutdown.log"
+  },
+  "persistence_shutdown": {
+    "observed_waits": [
+      "io_cqring_wait",
+      "jbd2_log_wait_commit"
+    ],
+    "reproduction_log": "docs/evidence/stream_read_deadline/2026-11-07/mqtt-shared-properties.Debug.ext4-fsync-timeout.log",
+    "ordinary_guard_seconds": 5,
+    "durable_guard_seconds": 30,
+    "fresh_shared_property_replays": 20
+  },
+  "known_validation_uncertainties": [
+    "The deterministic early scheduling Timeout is fixed. Original and fresh MQTT QoS2 seeds pass; these results do not establish that the earlier intermittent retained-probe Timeout had this cause."
+  ],
+  "overall_goal_status": "active"
+}

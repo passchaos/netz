@@ -32,7 +32,7 @@ pub const Job = struct {
     err: ?anyerror = null,
     done: std.Io.Event = .unset,
     /// Set by the worker after the unary stream opens; completion then reports LRS stats.
-    lrs_started: bool = false,
+    lrs_registration: ?@import("lrs_stats.zig").Registration = null,
     /// Retained beyond an interrupted caller until this physical job retires.
     hedging_control: ?*HedgeControl = null,
 
@@ -84,6 +84,7 @@ pub const Job = struct {
         if (self.result) |*result| result.deinit();
         self.releaseMessage();
         if (self.owned_inputs) |*owned| owned.deinit();
+        if (self.lrs_registration) |registration| registration.release();
         if (self.hedging_control) |control| control.release();
         if (self.stream) |stream| stream.release();
         if (self.owner_wake.load(.acquire)) |wake| wake.release();

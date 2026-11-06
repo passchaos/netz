@@ -15,7 +15,6 @@ const keepalive = @import("keepalive.zig");
 const weighted_round_robin = @import("../weighted_round_robin.zig");
 const outlier_detection = @import("../outlier_detection.zig");
 const Settings = @import("worker_settings.zig").Settings;
-const lrs_stats = @import("lrs_stats.zig");
 const transparent = @import("../../call/transparent_retry.zig");
 
 pub fn Worker(comptime State: type) type {
@@ -502,6 +501,7 @@ pub fn Worker(comptime State: type) type {
                     .max_response_message_size = job.options.max_response_message_size,
                     .previous_attempts = job.previous_attempts,
                 };
+                job.lrs_registration = self.parent.captureLrs(self);
                 const reserved_id = connection.next_client_stream_id;
                 var stream = duplex.startDuplexWithRetryDeadlines(
                     connection,
@@ -511,13 +511,16 @@ pub fn Worker(comptime State: type) type {
                     job.deadline,
                     minimum(job.deadline, self.outputDeadline()).?,
                 ) catch |err| {
+                    if (job.lrs_registration) |registration| {
+                        registration.release();
+                        job.lrs_registration = null;
+                    }
                     const failure = attemptFailure(connection, reserved_id, false, err);
                     self.parent.finishAttempt(self, job, null, failure);
                     if (connection.aggregate_timeout_unusable) return err;
                     continue;
                 };
-                job.lrs_started = true;
-                if (lrs_stats.clusterName(self.source.endpoint)) |cluster| self.parent.lrs_stats.recordStarted(self.parent.io, cluster, self.parent.lrsServiceName(cluster), lrs_stats.endpointAddress(self.source.endpoint));
+                if (job.lrs_registration) |registration| self.parent.lrs_stats.start(self.parent.io, registration, @import("lrs_stats.zig").endpointAddress(self.source.endpoint));
                 const storage = job.owned_message orelse {
                     stream.deinit();
                     self.parent.finishAttempt(self, job, null, error.InvalidStreamState);
