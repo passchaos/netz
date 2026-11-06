@@ -42,12 +42,18 @@ router does not change effective order. Router payload framing, BoolValue and
 string fields are checked. Filter-specific deployment options beyond client
 routing are not claimed as implemented.
 
-`envoy.filters.http.rbac.v3.RBAC` is decoded and enforced. The supported
-grpc-core request-side subset covers `any`, header, URL-path and
-`and`/`or`/`not` principals and permissions with ALLOW and DENY policies; one
-RBAC filter per HCM is accepted. Authenticated, source/direct/remote IP,
-metadata and requested-server-name principals or permissions, destination
-IP/port and metadata permissions, and CEL `condition`/`checked_condition`
+`envoy.filters.http.rbac.v3.RBAC` is decoded and enforced. The decoder consumes
+the filter config, unwraps its nested `rules` policy, and uses Envoy's v3 field
+numbers and enum values (`ALLOW = 0`, `DENY = 1`; principal `header = 6`,
+`not_id = 8`, `url_path = 9`; permission `header = 4`, `not_rule = 8`,
+`url_path = 10`; header `safe_regex_match = 11`, `contains_match = 12`,
+`string_match = 13`; regex `regex = 2`). `shadow_rules` are audit-only and are
+consumed without enforcement. The supported grpc-core request-side subset
+covers `any`, header, URL-path and `and`/`or`/`not` principals and permissions
+with ALLOW and DENY policies; one RBAC filter per HCM is accepted. Authenticated,
+source/direct/remote IP, metadata and requested-server-name principals or
+permissions, destination IP/port and metadata permissions, the `LOG` action and
+the action-based matcher filter forms, and CEL `condition`/`checked_condition`
 fields are rejected at decode so an unsupported policy never silently allows
 traffic. Evaluation runs before route selection: a denied unary call returns
 PERMISSION_DENIED without touching a backend, and a denied streaming open

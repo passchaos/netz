@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "date": "2026-11-06",
+  "head": "working-tree",
+  "subject": "gRPC xDS HCM RBAC proto field alignment",
+  "change": "The RBAC decoder now consumes the real envoy.extensions.filters.http.rbac.v3.RBAC filter config and unwraps its nested rules policy (field 1), instead of treating the filter config as an envoy.config.rbac.v3.RBAC policy. Field numbers and enum values now match Envoy's v3 protos: Action ALLOW=0 and DENY=1; Principal header=6, not_id=8, url_path=9; Permission header=4, not_rule=8, url_path=10; HeaderMatcher exact=4, range=6, present=7, invert=8, prefix=9, suffix=10, safe_regex_match=11, contains_match=12, string_match=13; RegexMatcher regex=2. shadow_rules are consumed but ignored because they affect audit logging only, never enforcement. The LOG action and the action-based matcher filter forms remain rejected as unsupported.",
+  "tests": {
+    "unit": "src/grpc/xds/lds/rbac.zig now encodes ALLOW as action 0 and DENY as action 1, wraps policies in the HTTP filter rules field, uses principal header field 6, permission url-path field 10, and destination-IP field 5. New tests cover not_id/not_rule negation, HeaderMatcher safe_regex_match with RegexMatcher field 2, and HeaderMatcher string_match. src/grpc/xds/lds/tests.zig and controller_tests.zig fixtures now use the HTTP filter wrapper and DENY action 1.",
+    "focused_gate": {
+      "command": "zig build test-lib -Dtest-filter='RBAC' -Dtest-filter='gRPC LDS' --summary all",
+      "passed": 183,
+      "total": 183,
+      "failed": 0
+    },
+    "compile": {
+      "command": "zig build test-compile",
+      "status": "passed"
+    },
+    "full_library": {
+      "command": "zig build test-lib",
+      "status": "passed",
+      "exit_code": 0,
+      "passed": 6546,
+      "total": 6546,
+      "failed": 0,
+      "note": "The first full run reported 6545/6546 with an unrelated WebTransport HTTP/2 reconnecting-client test failing under host load; that test passed 164/164 in isolation and the complete rerun passed 6546/6546."
+    }
+  },
+  "source_sha256": {
+    "src/grpc/xds/lds/rbac.zig": "ae78888de2a3eced762269d2c6c97b47a1cd81bf4b339c7e09f0e5f8a876339b",
+    "src/grpc/xds/lds/tests.zig": "5b7c58eb24a1e885934ed82039f41745df16c2bdd6a684819759d8b26829450f",
+    "src/grpc/xds/lds/controller_tests.zig": "cd71cde61813510e5a6c9484839433f2ffe9b64bb5b7c5a5022062b237433019"
+  },
+  "notes": "Field numbers were taken from gRPC's vendored Envoy v3 upb definitions (envoy/config/rbac/v3/rbac.upb.h, envoy/type/matcher/v3/string.upb.h, envoy/type/matcher/v3/regex.upb.h, envoy/config/route/v3/route_components.upb.h, envoy/extensions/filters/http/rbac/v3/rbac.upb.h). The previous decoder used non-Envoy numbers, so a real control-plane config with a header principal, URL-path permission, not_id/not_rule, safe-regex, or string_match would have been rejected or mis-evaluated. This correction keeps the fail-closed boundary for unsupported principals and permissions while making the supported subset interoperable with official xDS output."
+}

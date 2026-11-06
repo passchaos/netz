@@ -158,7 +158,8 @@ test "gRPC LDS RBAC denies a matching request and allows others" {
     const routes = try route_fixture.encode(gpa, "inline", &.{"backend.test"}, &.{.{ .prefix = "/", .cluster = "a" }}, null);
     defer gpa.free(routes);
     // DENY when the x-deny header is present; every other request is allowed.
-    const rbac_value = "\x08\x00\x12\x17\x0a\x01p\x12\x12\x0a\x0c\x22\x0a\x0a\x06x-deny\x38\x01\x12\x02\x18\x01";
+    // HTTP RBAC filter config: DENY (action 1) inside the `rules` field.
+    const rbac_value = "\x0a\x1b\x08\x01\x12\x17\x0a\x01p\x12\x12\x0a\x0c\x22\x0a\x0a\x06x-deny\x38\x01\x12\x02\x18\x01";
     const listener = try fixture.encode(gpa, .{ .inline_rds = routes, .filters = &.{
         .{ .name = "rbac", .type_name = lds.resource.rbac_type, .value = rbac_value },
         .{},
