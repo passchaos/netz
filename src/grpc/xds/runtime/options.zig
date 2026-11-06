@@ -47,6 +47,14 @@ pub const Options = struct {
     /// gRPC xDS `trusted_xds_server` server feature: permit this control plane
     /// to request automatic host rewriting from the selected endpoint.
     trusted_xds_server: bool = false,
+    /// gRPC xDS `resource_timer_is_transient_error` server feature: a
+    /// subscribed resource that is not delivered within the resource timer
+    /// reports a transient timeout instead of a permanent does-not-exist.
+    /// grpc-core also extends the default budget from 15 s to 30 s.
+    resource_timer_is_transient_error: bool = false,
+    /// Initial resource-fetch budget. Null derives grpc-core's 15 s, or 30 s
+    /// with `resource_timer_is_transient_error`. Callers may shorten it.
+    resource_timer_timeout: ?std.Io.Duration = null,
     /// Optional controller-owned LRS reporting. The destination channel must
     /// have LRS statistics enabled.
     lrs: ?LrsOptions = null,

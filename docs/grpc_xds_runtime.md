@@ -112,6 +112,17 @@ name. It is required before an RDS `auto_host_rewrite` may replace the request
 ignored, matching grpc-core's refusal to let an untrusted control plane
 redirect requests. Bootstrap already exposes the parsed flag on each server.
 
+`Options.resource_timer_is_transient_error` implements the gRPC xDS server
+feature of the same name together with the initial resource-fetch timer.
+`Controller.nextResourceTimerExpiry` and `pollResourceTimers` arm a timer for
+every subscribed but undelivered LDS/RDS/CDS/EDS/SDS resource (15 s by
+default, or 30 s with the feature), and `resourceStatus` reports `requested`,
+`acked`, `does_not_exist` or `timeout`. Without the feature an expired timer
+reports `does_not_exist`; with it the same resource reports a transient
+`timeout`, matching grpc-core. A delivered resource clears its timer and
+reports `acked`. `Options.resource_timer_timeout` may shorten the budget, for
+example in deterministic tests.
+
 `Options.authority` and `Options.additional_authorities` enable `xdstp://`
 resource names for one or more authorities served by the controller's control
 plane. The listener, route, cluster, endpoint-assignment and secret names are

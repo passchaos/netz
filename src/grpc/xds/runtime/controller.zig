@@ -20,6 +20,17 @@ pub const CachedSecret = struct {
     /// Delta `Resource.ttl` deadline; null means no timer.
     deadline: ?std.Io.Clock.Timestamp = null,
 };
+/// State of a resource from the controller's point of view. A resource that
+/// has not been delivered yet is `requested`; its initial-fetch timer moves it
+/// to `does_not_exist` or, with `resource_timer_is_transient_error`, to
+/// `timeout`. Delivery replaces the timer with `acked`.
+pub const ResourceStatus = enum { requested, acked, does_not_exist, timeout };
+const ResourceTimer = struct {
+    type_url: []u8,
+    name: []u8,
+    deadline: std.Io.Clock.Timestamp,
+    status: ResourceStatus = .requested,
+};
 pub const Controller = struct {
     allocator: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
@@ -36,10 +47,15 @@ pub const Controller = struct {
     /// SotW/delta SDS cache keyed by secret name. Secrets are copied into each
     /// referencing cluster, so cache entries can be replaced independently.
     sds_secrets: std.StringHashMapUnmanaged(*CachedSecret) = .empty,
+    /// Owned initial-fetch timers, refreshed from the client's desired names.
+    resource_timers: std.ArrayList(ResourceTimer) = .empty,
     pub fn create(gpa: std.mem.Allocator, options: Options) Error!*Controller {
         if (options.limits.max_clusters == 0 or options.limits.max_projections == 0 or options.limits.max_storage_bytes == 0 or options.target.authority.len == 0 or options.target.attempt_delay.nanoseconds <= 0) return error.InvalidXdsOptions;
         if (options.lrs) |value| {
             if (value.poll_interval.nanoseconds <= 0 or value.connect_timeout.nanoseconds <= 0) return error.InvalidXdsOptions;
+        }
+        if (options.resource_timer_timeout) |value| {
+            if (value.nanoseconds <= 0) return error.InvalidXdsOptions;
         }
         const self = try gpa.create(Controller);
         self.* = .{ .allocator = gpa, .arena = .init(gpa), .options = options };
@@ -87,6 +103,11 @@ pub const Controller = struct {
         self.projections.deinit(self.allocator);
         for (self.entries.items) |*value| value.deinit();
         self.entries.deinit(self.allocator);
+        for (self.resource_timers.items) |*timer| {
+            self.allocator.free(timer.type_url);
+            self.allocator.free(timer.name);
+        }
+        self.resource_timers.deinit(self.allocator);
         self.arena.deinit();
         self.allocator.destroy(self);
     }
@@ -506,6 +527,120 @@ pub const Controller = struct {
             }
         }
         return earliest;
+    }
+    fn resourceTimerBudget(self: *const Controller) std.Io.Duration {
+        if (self.options.resource_timer_timeout) |value| return value;
+        return if (self.options.resource_timer_is_transient_error) .fromSeconds(30) else .fromSeconds(15);
+    }
+    fn cachedResource(self: *const Controller, type_url: []const u8, name: []const u8) bool {
+        if (std.mem.eql(u8, type_url, lds.type_url)) {
+            const listener = self.listener orelse return false;
+            return listener.listener != null and std.mem.eql(u8, listener.options.listener_name, name);
+        }
+        if (std.mem.eql(u8, type_url, rds.type_url)) {
+            const listener = self.listener orelse return false;
+            if (!listener.routes_accepted) return false;
+            const routes = listener.routes orelse return false;
+            return std.mem.eql(u8, routes.resource.value.name, name);
+        }
+        if (std.mem.eql(u8, type_url, cds.type_url)) {
+            for (self.entries.items) |entry| {
+                if (std.mem.eql(u8, entry.identity.name, name)) return entry.cds_seen and entry.cluster != null;
+            }
+            return false;
+        }
+        if (std.mem.eql(u8, type_url, eds.type_url)) {
+            for (self.entries.items) |entry| {
+                const cluster = entry.cluster orelse continue;
+                if (std.mem.eql(u8, cluster.resource.value.edsName(), name)) return entry.eds_seen and entry.snapshot != null;
+            }
+            return false;
+        }
+        if (std.mem.eql(u8, type_url, sds.type_url)) return self.sds_secrets.contains(name);
+        return false;
+    }
+    fn findResourceTimer(self: *Controller, type_url: []const u8, name: []const u8) ?usize {
+        for (self.resource_timers.items, 0..) |timer, index| {
+            if (std.mem.eql(u8, timer.type_url, type_url) and std.mem.eql(u8, timer.name, name)) return index;
+        }
+        return null;
+    }
+    fn resourceTimerDesired(client: anytype, type_url: []const u8, name: []const u8) bool {
+        const entry = client.subscriptions.find(type_url) orelse return false;
+        for (entry.names) |candidate| if (std.mem.eql(u8, candidate, name)) return true;
+        return false;
+    }
+    /// Reconcile the initial-fetch timers with the client's current desired
+    /// names and the controller's accepted state. Callers should invoke the
+    /// public timer methods after every discovery step.
+    fn refreshResourceTimers(self: *Controller, client: anytype) std.mem.Allocator.Error!void {
+        var index: usize = 0;
+        while (index < self.resource_timers.items.len) {
+            const timer = self.resource_timers.items[index];
+            if (!resourceTimerDesired(client, timer.type_url, timer.name) or
+                self.cachedResource(timer.type_url, timer.name))
+            {
+                self.allocator.free(timer.type_url);
+                self.allocator.free(timer.name);
+                _ = self.resource_timers.swapRemove(index);
+                continue;
+            }
+            index += 1;
+        }
+        const io = client.sender.state.io;
+        const now = std.Io.Clock.Timestamp.now(io, .awake);
+        const budget = self.resourceTimerBudget();
+        const types = [_][]const u8{ lds.type_url, rds.type_url, cds.type_url, eds.type_url, sds.type_url };
+        for (types) |type_url| {
+            const entry = client.subscriptions.find(type_url) orelse continue;
+            for (entry.names) |name| {
+                if (self.cachedResource(type_url, name)) continue;
+                if (self.findResourceTimer(type_url, name) != null) continue;
+                const owned_type = try self.allocator.dupe(u8, type_url);
+                errdefer self.allocator.free(owned_type);
+                const owned_name = try self.allocator.dupe(u8, name);
+                errdefer self.allocator.free(owned_name);
+                try self.resource_timers.append(self.allocator, .{
+                    .type_url = owned_type,
+                    .name = owned_name,
+                    .deadline = .{
+                        .clock = .awake,
+                        .raw = .fromNanoseconds(now.raw.nanoseconds + budget.nanoseconds),
+                    },
+                });
+            }
+        }
+    }
+    /// Expire due initial-fetch timers. The resource remains subscribed; the
+    /// status surface reports the grpc-core outcome without changing cached
+    /// configuration, because a timed-out resource has never been cached.
+    pub fn pollResourceTimers(self: *Controller, client: anytype) Error!void {
+        try self.refreshResourceTimers(client);
+        const now = std.Io.Clock.Timestamp.now(client.sender.state.io, .awake);
+        const expired: ResourceStatus = if (self.options.resource_timer_is_transient_error) .timeout else .does_not_exist;
+        for (self.resource_timers.items) |*timer| {
+            if (timer.status != .requested) continue;
+            if (timer.deadline.raw.nanoseconds > now.raw.nanoseconds) continue;
+            timer.status = expired;
+        }
+    }
+    /// Earliest armed initial-fetch timer, or null when none is pending.
+    pub fn nextResourceTimerExpiry(self: *Controller, client: anytype) Error!?std.Io.Clock.Timestamp {
+        try self.refreshResourceTimers(client);
+        var earliest: ?std.Io.Clock.Timestamp = null;
+        for (self.resource_timers.items) |timer| {
+            if (timer.status != .requested) continue;
+            if (earliest == null or timer.deadline.raw.nanoseconds < earliest.?.raw.nanoseconds) earliest = timer.deadline;
+        }
+        return earliest;
+    }
+    /// Current resource status, or null when the controller has never observed
+    /// this resource and no timer is pending. Call a timer method first so
+    /// newly desired names are registered.
+    pub fn resourceStatus(self: *Controller, type_url: []const u8, name: []const u8) ?ResourceStatus {
+        if (self.cachedResource(type_url, name)) return .acked;
+        if (self.findResourceTimer(type_url, name)) |index| return self.resource_timers.items[index].status;
+        return null;
     }
     /// Remove cached secrets whose delta TTL has expired and forget their
     /// accepted versions. Returns true when at least one secret expired.
