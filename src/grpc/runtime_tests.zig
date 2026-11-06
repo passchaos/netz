@@ -2832,11 +2832,8 @@ test "gRPC owned unary response reuses prefix-reserved storage" {
                 return;
             };
             defer connection.deinit();
-            var request = connection.readUnary() catch |err| {
-                self.err = err;
-                return;
-            };
-            defer request.deinit();
+            // One prefix-reserved buffer serves both responses; the writer
+            // borrows it for each synchronous write.
             var message = grpc.OwnedResponseMessage.init(
                 std.testing.allocator,
                 self.payload.len,
@@ -2846,15 +2843,20 @@ test "gRPC owned unary response reuses prefix-reserved storage" {
             };
             defer message.deinit();
             @memcpy(message.payload(), self.payload);
-            connection.writeUnary(request.request.stream_id, .{
-                .owned_message = &message,
-            }) catch |err| {
-                self.err = err;
-                return;
-            };
-            // Successful submission transfers the prefix-reserved storage, so
-            // the caller's deferred deinit has nothing left to free.
-            if (message.hasValue()) self.err = error.TestUnexpectedResult;
+            for (0..2) |_| {
+                var request = connection.readUnary() catch |err| {
+                    self.err = err;
+                    return;
+                };
+                defer request.deinit();
+                connection.writeUnary(request.request.stream_id, .{
+                    .owned_message = &message,
+                }) catch |err| {
+                    self.err = err;
+                    return;
+                };
+                if (!message.hasValue()) self.err = error.TestUnexpectedResult;
+            }
         }
     };
     var shared = Shared{ .server = &server, .payload = payload };
@@ -2869,14 +2871,16 @@ test "gRPC owned unary response reuses prefix-reserved storage" {
         .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
     );
     defer client.deinit();
-    var response = try client.unary(.{
-        .path = "/demo.Echo/Owned",
-        .authority = "localhost",
-        .message = "request",
-    });
-    defer response.deinit();
-    try std.testing.expectEqual(grpc.Status.ok, response.status);
-    try std.testing.expectEqualStrings(payload, response.message.?.payload);
+    for (0..2) |_| {
+        var response = try client.unary(.{
+            .path = "/demo.Echo/Owned",
+            .authority = "localhost",
+            .message = "request",
+        });
+        defer response.deinit();
+        try std.testing.expectEqual(grpc.Status.ok, response.status);
+        try std.testing.expectEqualStrings(payload, response.message.?.payload);
+    }
 
     thread.join();
     joined = true;

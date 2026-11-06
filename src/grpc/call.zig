@@ -803,15 +803,17 @@ pub fn unaryCallAttempt(
 
 /// Prefix-reserved server response storage: allocate through
 /// `OwnedResponseMessage.init`, serialize into `payload()`, and submit it here.
-/// Identity responses hand the exact allocation to the HTTP/2 writer without
-/// another copy; the caller's deferred `deinit` sees a consumed message.
+/// The buffer is borrowed for the synchronous write, so the caller retains
+/// ownership and may reuse it for the next response; an identity response
+/// reaches the HTTP/2 writer without another copy.
 pub const OwnedResponseMessage = outbound_ownership.OwnedMessage;
 
 pub const UnaryResponseOptions = struct {
     status: Status = .ok,
     message: ?[]const u8 = null,
-    /// Mutually exclusive with `message`. On success the message's storage is
-    /// consumed and transferred to the response writer.
+    /// Mutually exclusive with `message`. The storage is borrowed for the
+    /// synchronous write and remains owned by the caller, so one buffer can
+    /// serve consecutive responses.
     owned_message: ?*OwnedResponseMessage = null,
     /// Requested response encoding. The message remains uncompressed unless
     /// the request advertised support for this algorithm.
@@ -877,8 +879,6 @@ pub fn writeUnaryResponse(
     defer framed.deinit(allocator);
     var encoded_message: ?compression_mod.EncodedPayload = null;
     defer if (encoded_message) |*encoded| encoded.deinit(allocator);
-    var owned_storage: ?[]u8 = null;
-    defer if (owned_storage) |storage| allocator.free(storage);
     var compressed_frame: ?[]u8 = null;
     defer if (compressed_frame) |bytes| allocator.free(bytes);
     var framed_bytes: []const u8 = &.{};
@@ -891,11 +891,11 @@ pub fn writeUnaryResponse(
         else
             .identity;
     if (options.owned_message) |owned| {
-        // Take the prefix-reserved storage so an identity response reaches the
-        // HTTP/2 writer as the caller's exact allocation, without a staging
-        // copy. Compression still falls back to a separate framed buffer.
-        const storage = try owned.takeFor(allocator);
-        owned_storage = storage;
+        // Borrow the prefix-reserved storage for this synchronous write so an
+        // identity response reaches the HTTP/2 writer without a staging copy.
+        // The caller keeps ownership and may reuse the buffer for the next
+        // response. Compression still falls back to a separate framed buffer.
+        const storage = try owned.storageFor(allocator);
         const encoder = codec.Encoder{
             .allocator = allocator,
             .algorithm = response_algorithm,

@@ -8,6 +8,9 @@ const Options = struct {
     cached_allocator: bool = false,
     shared: bool = false,
     validate: bool = true,
+    /// Server responses use the prefix-reserved owned buffer. Pass
+    /// --borrowed-response for the staged borrowed path.
+    owned_response: bool = true,
 };
 
 fn parse(init: std.process.Init) !Options {
@@ -25,6 +28,8 @@ fn parse(init: std.process.Init) !Options {
             options.shared = true;
         } else if (std.mem.eql(u8, arg, "--no-validate")) {
             options.validate = false;
+        } else if (std.mem.eql(u8, arg, "--borrowed-response")) {
+            options.owned_response = false;
         } else if (std.mem.startsWith(u8, arg, "--payload=")) {
             options.payload_bytes = try std.fmt.parseInt(
                 usize,
@@ -70,6 +75,13 @@ pub fn main(init: std.process.Init) !void {
     defer backing.free(response);
     @memset(request, 'a');
     @memset(response, 'b');
+    // The server reuses one prefix-reserved response buffer for every call.
+    var response_message = try netz.grpc.OwnedResponseMessage.init(
+        backing,
+        options.payload_bytes,
+    );
+    defer response_message.deinit();
+    @memcpy(response_message.payload(), response);
 
     var backend = try netz.runtime.Backend.init(backing);
     defer backend.deinit();
@@ -90,6 +102,8 @@ pub fn main(init: std.process.Init) !void {
         .server = &server,
         .allocator = backing,
         .response = response,
+        .message = response_message,
+        .owned_response = options.owned_response,
         .calls = options.warmup + options.iterations,
     };
     var peer_result: anyerror!void = {};
@@ -213,6 +227,9 @@ const Peer = struct {
     server: *netz.http2.runtime.Server,
     allocator: std.mem.Allocator,
     response: []const u8,
+    /// One prefix-reserved buffer serves every response; the writer borrows it.
+    message: netz.grpc.OwnedResponseMessage,
+    owned_response: bool,
     calls: usize,
     calls_seen: usize = 0,
 
@@ -236,7 +253,10 @@ const Peer = struct {
                 &connection,
                 self.allocator,
                 call.stream_id,
-                .{ .message = self.response },
+                if (self.owned_response)
+                    .{ .owned_message = &self.message }
+                else
+                    .{ .message = self.response },
             );
         }
     }

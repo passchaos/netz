@@ -341,7 +341,17 @@ identity response hands that exact allocation to the HTTP/2 writer without the
 `framed` staging copy; compressed responses still allocate a separate framed
 buffer. The borrowed `message` field keeps the existing staging path, so
 callers that serialize directly into the owned payload avoid one full
-response-sized copy.
+response-sized copy. The buffer is borrowed for the synchronous write and
+remains caller-owned, so a persistent server reuses one allocation across
+responses.
+
+`zig build bench-grpc-unary -Doptimize=ReleaseFast -- --payload=262144
+--iterations=200 --warmup=20` selects the owned path by default and accepts
+`--borrowed-response` for the staged path. Eight CPU-0 order-interleaved pairs
+on 2026-11-06 measured a 404.664 us median round trip for the owned path versus
+467.346 us for the borrowed path, a 13.4% reduction with the owned arm faster
+in 8/8 pairs. Every arm validated the full 262,144-byte response and completed
+200 measured round trips after 20 warmups.
 
 [Complete timing and allocation records](evidence/grpc_shared/2026-10-28-deadline-scatter.json)
 retain 128 validated result/peer-completion pairs plus source and executable
