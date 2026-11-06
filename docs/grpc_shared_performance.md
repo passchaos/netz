@@ -335,6 +335,14 @@ samples. Allocation counts varied; no per-roundtrip allocation-count reduction
 is established. This change removes a retained staging buffer and its copy, while the
 main large-message throughput gap remains open.
 
+Server unary responses now also accept `grpc.OwnedResponseMessage`
+prefix-reserved storage through `UnaryResponseOptions.owned_message`. An
+identity response hands that exact allocation to the HTTP/2 writer without the
+`framed` staging copy; compressed responses still allocate a separate framed
+buffer. The borrowed `message` field keeps the existing staging path, so
+callers that serialize directly into the owned payload avoid one full
+response-sized copy.
+
 [Complete timing and allocation records](evidence/grpc_shared/2026-10-28-deadline-scatter.json)
 retain 128 validated result/peer-completion pairs plus source and executable
 fingerprints. They do not replace the independent grpc-cpp comparison.

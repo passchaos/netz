@@ -10,6 +10,8 @@ const details_mod = @import("status_details.zig");
 const response_metadata = @import("response_metadata.zig");
 const retry = @import("call/retry.zig");
 const wire = @import("wire.zig");
+const codec = @import("stream/codec.zig");
+const outbound_ownership = @import("stream/duplex/outbound_ownership.zig");
 
 pub const Error = wire.Error || metadata_mod.Error ||
     compression_mod.Error || details_mod.Error ||
@@ -20,6 +22,7 @@ pub const Error = wire.Error || metadata_mod.Error ||
     InvalidMetadata,
     InvalidMessageCount,
     InvalidRetryPolicy,
+    InvalidStreamState,
 };
 
 const Status = wire.Status;
@@ -798,9 +801,18 @@ pub fn unaryCallAttempt(
     );
 }
 
+/// Prefix-reserved server response storage: allocate through
+/// `OwnedResponseMessage.init`, serialize into `payload()`, and submit it here.
+/// Identity responses hand the exact allocation to the HTTP/2 writer without
+/// another copy; the caller's deferred `deinit` sees a consumed message.
+pub const OwnedResponseMessage = outbound_ownership.OwnedMessage;
+
 pub const UnaryResponseOptions = struct {
     status: Status = .ok,
     message: ?[]const u8 = null,
+    /// Mutually exclusive with `message`. On success the message's storage is
+    /// consumed and transferred to the response writer.
+    owned_message: ?*OwnedResponseMessage = null,
     /// Requested response encoding. The message remains uncompressed unless
     /// the request advertised support for this algorithm.
     compression: Algorithm = .identity,
@@ -850,10 +862,14 @@ pub fn writeUnaryResponse(
         options.trailing_binary_metadata,
     );
     defer trailing_binary.deinit();
-    if (options.status == .ok and options.message == null) {
+    if (options.message != null and options.owned_message != null) {
         return error.InvalidMessageCount;
     }
-    if (options.trailers_only and options.message != null) {
+    const has_message = options.message != null or options.owned_message != null;
+    if (options.status == .ok and !has_message) {
+        return error.InvalidMessageCount;
+    }
+    if (options.trailers_only and has_message) {
         return error.InvalidMessageCount;
     }
 
@@ -861,15 +877,34 @@ pub fn writeUnaryResponse(
     defer framed.deinit(allocator);
     var encoded_message: ?compression_mod.EncodedPayload = null;
     defer if (encoded_message) |*encoded| encoded.deinit(allocator);
+    var owned_storage: ?[]u8 = null;
+    defer if (owned_storage) |storage| allocator.free(storage);
+    var compressed_frame: ?[]u8 = null;
+    defer if (compressed_frame) |bytes| allocator.free(bytes);
+    var framed_bytes: []const u8 = &.{};
     const response_algorithm: Algorithm =
-        if (options.message != null and
+        if (has_message and
         options.request_accepted_encodings.contains(
             options.compression,
         ))
             options.compression
         else
             .identity;
-    if (options.message) |message| {
+    if (options.owned_message) |owned| {
+        // Take the prefix-reserved storage so an identity response reaches the
+        // HTTP/2 writer as the caller's exact allocation, without a staging
+        // copy. Compression still falls back to a separate framed buffer.
+        const storage = try owned.takeFor(allocator);
+        owned_storage = storage;
+        const encoder = codec.Encoder{
+            .allocator = allocator,
+            .algorithm = response_algorithm,
+            .compression_level = options.compression_level,
+        };
+        const encoded = try outbound_ownership.encode(allocator, encoder, storage, .{});
+        framed_bytes = encoded.bytes;
+        if (!encoded.input_transferred) compressed_frame = encoded.bytes;
+    } else if (options.message) |message| {
         // A server must not use a response encoding absent from the client's
         // last grpc-accept-encoding advertisement. Falling back to identity
         // is required even when the application requested compression.
@@ -885,6 +920,7 @@ pub fn writeUnaryResponse(
             encoded_message.?.bytes,
             encoded_message.?.compressed,
         );
+        framed_bytes = framed.items;
     }
     var status_buffer: [2]u8 = undefined;
     const status_value = std.fmt.bufPrint(
@@ -1003,7 +1039,7 @@ pub fn writeUnaryResponse(
     }
     return connection.writeResponse(stream_id, .{
         .headers = initial.items,
-        .body = framed.items,
+        .body = framed_bytes,
         .trailers = trailing.items,
     });
 }

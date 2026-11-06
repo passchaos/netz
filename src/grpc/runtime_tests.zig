@@ -2806,6 +2806,83 @@ test "gRPC TLS runtime serves reflection v1" {
     if (shared.err) |err| return err;
 }
 
+test "gRPC owned unary response reuses prefix-reserved storage" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try grpc.runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+        1024,
+    );
+    defer server.deinit();
+
+    const payload = "owned-response-payload";
+    const Shared = struct {
+        server: *grpc.runtime.Server,
+        payload: []const u8,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var connection = self.server.accept() catch |err| {
+                self.err = err;
+                return;
+            };
+            defer connection.deinit();
+            var request = connection.readUnary() catch |err| {
+                self.err = err;
+                return;
+            };
+            defer request.deinit();
+            var message = grpc.OwnedResponseMessage.init(
+                std.testing.allocator,
+                self.payload.len,
+            ) catch |err| {
+                self.err = err;
+                return;
+            };
+            defer message.deinit();
+            @memcpy(message.payload(), self.payload);
+            connection.writeUnary(request.request.stream_id, .{
+                .owned_message = &message,
+            }) catch |err| {
+                self.err = err;
+                return;
+            };
+            // Successful submission transfers the prefix-reserved storage, so
+            // the caller's deferred deinit has nothing left to free.
+            if (message.hasValue()) self.err = error.TestUnexpectedResult;
+        }
+    };
+    var shared = Shared{ .server = &server, .payload = payload };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try grpc.runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer client.deinit();
+    var response = try client.unary(.{
+        .path = "/demo.Echo/Owned",
+        .authority = "localhost",
+        .message = "request",
+    });
+    defer response.deinit();
+    try std.testing.expectEqual(grpc.Status.ok, response.status);
+    try std.testing.expectEqualStrings(payload, response.message.?.payload);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test {
     _ = @import("web/runtime_tests.zig");
 }

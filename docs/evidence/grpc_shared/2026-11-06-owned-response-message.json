@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "date": "2026-11-06",
+  "head": "working-tree",
+  "subject": "gRPC owned unary response message",
+  "change": "UnaryResponseOptions gains owned_message backed by grpc.OwnedResponseMessage, prefix-reserved storage that a handler serializes into directly. An identity unary response hands that exact allocation to the HTTP/2 writer, removing the framed staging copy of the whole response; compressed responses still allocate a separate framed buffer, and the borrowed message field keeps the existing staging path. The caller's deferred deinit is safe because successful submission consumes the storage.",
+  "tests": {
+    "unit": "src/grpc/runtime_tests.zig runs a real h2c server that fills an OwnedResponseMessage payload, submits it through writeUnary, and verifies the client receives the exact payload while the caller's message no longer holds storage.",
+    "focused_gate": {
+      "command": "zig build test-lib -Dtest-filter='owned unary response' --summary all",
+      "passed": 161,
+      "total": 161,
+      "failed": 0
+    },
+    "compile": {
+      "command": "zig build test-compile",
+      "status": "passed"
+    },
+    "full_library": {
+      "command": "zig build test-lib",
+      "status": "passed",
+      "exit_code": 0,
+      "passed": 6535,
+      "total": 6535,
+      "failed": 0
+    }
+  },
+  "source_sha256": {
+    "src/grpc/call.zig": "e797baa082d057ea186d0a1956e1a22fef3fb169bbc01c62d497eab52aea9bef",
+    "src/grpc/mod.zig": "76b169d8190152692b4fa0724f2cf8807d64b1de7c72d5b2c233c646973c029f",
+    "src/grpc/runtime_tests.zig": "67d54f762e827e11661184cb16351bf34bd8f55c0e69f4391e6cb00486a7b61f",
+    "docs/grpc_shared_performance.md": "f847c63934b6c336bca8e1fc67ca5d610316e31267ade32cbc1b528675d606de"
+  },
+  "notes": "The borrowed message path remains the default and still stages prefix plus payload. Only callers that serialize into OwnedResponseMessage.payload() avoid the response-sized copy, matching the existing client-side owned-write API. A response with both message and owned_message is rejected as InvalidMessageCount."
+}
