@@ -43,7 +43,15 @@ pub fn runTlsSequence(input: []const u8) !model.Summary {
 fn runSequenceWithTransport(
     input: []const u8,
     comptime tls: bool,
-) !model.Summary {
+) anyerror!model.Summary {
+    const sequence = input[0..@min(input.len, model.max_operations)];
+    var phase: []const u8 = "local broker setup";
+    var operation_index: usize = 0;
+    var failure_reported = false;
+    errdefer |err| if (!failure_reported) std.debug.print(
+        "MQTT bridge QoS2 failure: tls={} sequence={x} operation={} phase={s} error={s}\n",
+        .{ tls, sequence, operation_index, phase, @errorName(err) },
+    );
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -80,6 +88,7 @@ fn runSequenceWithTransport(
         local_thread.join();
     };
 
+    phase = "subscriber connect";
     var subscriber = try runtime.Client.connectWithTimeout(
         allocator,
         io,
@@ -92,6 +101,7 @@ fn runSequenceWithTransport(
         model.packet_timeout,
     );
     defer subscriber.close();
+    phase = "subscriber subscribe";
     var suback = try subscriber.subscribe(&.{.{
         .topic_filter = "mirror/#",
         .qos = .exactly_once,
@@ -104,6 +114,7 @@ fn runSequenceWithTransport(
         suback.suback.reason_codes,
     );
 
+    phase = "remote peer setup";
     var certificate_der: [netz.tls.testing.certificate_der_len]u8 = undefined;
     try std.base64.standard.Decoder.decode(
         &certificate_der,
@@ -121,7 +132,6 @@ fn runSequenceWithTransport(
     );
     var remote_open = true;
     defer if (remote_open) remote.deinit();
-    const sequence = input[0..@min(input.len, model.max_operations)];
     const PeerState = peer.State(transport.Server(tls), tls);
     var peer_state = PeerState{
         .server = &remote,
@@ -148,7 +158,7 @@ fn runSequenceWithTransport(
         peer_thread.join();
         remote.deinit();
         remote_open = false;
-        return err;
+        return @as(anyerror!model.Summary, err);
     };
     defer if (bridge) |*value| value.deinit();
     defer if (!peer_joined) {
@@ -162,6 +172,21 @@ fn runSequenceWithTransport(
         remote.deinit();
         remote_open = false;
     };
+    phase = "initial bridge connect";
+    errdefer |err| {
+        failure_reported = true;
+        std.debug.print(
+            "MQTT bridge QoS2 failure: tls={} sequence={x} operation={} phase={s} error={s} peer_error={s}\n",
+            .{
+                tls,
+                sequence,
+                operation_index,
+                phase,
+                @errorName(err),
+                if (peer_state.failed.load(.acquire)) @errorName(peer_state.err.?) else "none",
+            },
+        );
+    }
     const initial = try bridge.?.connect();
     try std.testing.expect(!initial.session_present);
     if (tls) try transport.validateBridge(&bridge.?, &certificate_der);
@@ -169,8 +194,11 @@ fn runSequenceWithTransport(
     var state = model.State{};
     var summary = model.Summary{};
     for (sequence, 0..) |operation, index| {
+        operation_index = index;
+        phase = "stage incoming PUBLISH";
         const kind = operation & 0x03;
         try std.testing.expect(try stepBridge(&bridge.?, &peer_state));
+        phase = "pending journal and publication count";
         try std.testing.expectEqual(
             summary.released,
             local.stats().publish_messages_received,
@@ -181,8 +209,10 @@ fn runSequenceWithTransport(
             bridge.?.session_epoch,
             1,
         );
+        phase = "subscriber before PUBREL";
         try drainSubscriber(&subscriber, null);
 
+        phase = "recover and complete PUBREL";
         switch (kind) {
             0 => {
                 try std.testing.expect(try stepBridge(&bridge.?, &peer_state));
@@ -232,6 +262,7 @@ fn runSequenceWithTransport(
         summary.released += 1;
         summary.duplicate_inputs += @intFromBool(operation & 0x10 != 0);
         summary.retained_writes += @intFromBool(operation & 0x08 != 0);
+        phase = "subscriber released delivery";
         try drainSubscriber(
             &subscriber,
             .{
@@ -240,6 +271,7 @@ fn runSequenceWithTransport(
                 .retained = operation & 0x08 != 0,
             },
         );
+        phase = "completed journal and publication count";
         try std.testing.expectEqual(
             summary.released,
             local.stats().publish_messages_received,
@@ -252,17 +284,23 @@ fn runSequenceWithTransport(
         );
     }
 
+    operation_index = sequence.len;
+    phase = "bridge disconnect";
     try bridge.?.disconnect(0);
+    phase = "peer shutdown";
     peer_thread.join();
     peer_joined = true;
-    if (peer_state.err) |err| return err;
+    if (peer_state.err) |err| return @as(anyerror!model.Summary, err);
     summary.subscription_replays = peer_state.summary.subscription_replays;
 
-    try verifyRetainedState(allocator, io, local, state, &summary);
+    phase = "retained probe";
+    try verifyRetainedState(allocator, io, local, state, &summary, &phase);
+    phase = "subscriber disconnect";
     try subscriber.disconnect(0);
+    phase = "broker shutdown";
     const local_error = local_runner.stop(io, local_thread);
     local_joined = true;
-    if (local_error) |err| return err;
+    if (local_error) |err| return @as(anyerror!model.Summary, err);
     return summary;
 }
 
@@ -443,7 +481,9 @@ fn verifyRetainedState(
     local: Broker,
     state: model.State,
     summary: *model.Summary,
+    phase: *[]const u8,
 ) !void {
+    phase.* = "retained probe connect";
     var probe = try runtime.Client.connectWithTimeout(
         allocator,
         io,
@@ -457,12 +497,14 @@ fn verifyRetainedState(
     );
     defer probe.close();
     for (model.local_topics, 0..) |topic, topic_index| {
+        phase.* = "retained probe subscribe";
         var suback = try probe.subscribe(&.{.{
             .topic_filter = topic,
             .qos = .exactly_once,
             .retain_as_published = true,
         }}, .{});
         defer suback.deinit(allocator);
+        phase.* = "retained probe delivery fence";
         if (state.retained[topic_index]) |retained| {
             try drainSubscriber(
                 &probe,
@@ -477,5 +519,6 @@ fn verifyRetainedState(
             try drainSubscriber(&probe, null);
         }
     }
+    phase.* = "retained probe disconnect";
     try probe.disconnect(0);
 }

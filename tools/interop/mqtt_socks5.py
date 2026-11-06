@@ -116,16 +116,26 @@ def read_greeting(stream: socket.socket) -> tuple[int, ...]:
     return tuple(recv_exact(stream, count))
 
 
+def delay_no_auth_reply(client: socket.socket) -> None:
+    try:
+        methods = read_greeting(client)
+    except EOFError:
+        # The whole-connect deadline can expire before the greeting is complete.
+        # Normal connections below independently validate the complete handshake.
+        return
+    if 0 not in methods:
+        raise AssertionError("timeout client omitted no-auth method")
+    time.sleep(0.15)
+    try:
+        client.sendall(bytes((5, 0)))
+    except OSError:
+        pass
+
+
 def serve_no_auth(proxy: socket.socket, target_port: int) -> None:
     delayed, _ = proxy.accept()
     with delayed:
-        if 0 not in read_greeting(delayed):
-            raise AssertionError("timeout client omitted no-auth method")
-        time.sleep(0.15)
-        try:
-            delayed.sendall(bytes((5, 0)))
-        except OSError:
-            pass
+        delay_no_auth_reply(delayed)
 
     for _ in range(3):
         client, _ = proxy.accept()

@@ -560,6 +560,20 @@ def puback_reason(packet: bytes, packet_id: int) -> int:
     return acknowledgment_reason(packet, 0x40, packet_id)
 
 
+def expect_disconnect_eof(client: socket.socket, label: str) -> None:
+    # Broker.handleDisconnect retires the persistent Session and writer before
+    # its orderly socket close. Waiting for EOF makes a later publication an
+    # offline queue insertion, rather than a possible unacknowledged live send.
+    try:
+        trailing = client.recv(1)
+    except TimeoutError as error:
+        raise AssertionError(f"{label}: broker did not complete DISCONNECT") from error
+    if trailing:
+        raise AssertionError(
+            f"{label}: unexpected data before DISCONNECT EOF: {trailing.hex()}"
+        )
+
+
 def expect_v311_qos1_delivery(
     client: socket.socket,
     expected_topic: str,
@@ -3538,6 +3552,7 @@ def run_security_reload_case(broker: Path, directory: Path) -> None:
         if read_mqtt_packet(durable) != bytes.fromhex("9003000601"):
             raise AssertionError("security reload durable SUBACK mismatch")
         durable.sendall(bytes.fromhex("e000"))
+        expect_disconnect_eof(durable, "security reload durable subscriber")
         durable.close()
         clients.remove(durable)
 
@@ -4921,6 +4936,7 @@ def run_persistence_acl_restart_case(
         if read_mqtt_packet(subscriber) != bytes.fromhex("9003000101"):
             raise AssertionError("persistence ACL initial SUBACK mismatch")
         subscriber.sendall(bytes.fromhex("e000"))
+        expect_disconnect_eof(subscriber, "persistence ACL offline subscriber")
     finally:
         subscriber.close()
 

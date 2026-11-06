@@ -169,7 +169,7 @@ pub fn main(init: std.process.Init) !void {
     try tls_reconnect.connection.disconnect(0);
 
     std.debug.print(
-            "MQTT SOCKS5 client passed: remote_dns=true no_auth=true " ++
+        "MQTT SOCKS5 client passed: remote_dns=true no_auth=true " ++
             "auth_fallback=true " ++
             "auth=true auth_failure=true timeout=true reconnect=true " ++
             "tls_reconnect=true tls_verified=true " ++
