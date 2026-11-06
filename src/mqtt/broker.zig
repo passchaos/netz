@@ -1935,10 +1935,13 @@ pub const Stats = struct {
 /// expose the same snapshot through another telemetry backend without parsing
 /// topic strings.
 pub const SystemMetric = enum {
+    version,
     uptime,
     clients_connected,
+    clients_active,
     clients_maximum,
     clients_disconnected,
+    clients_inactive,
     clients_expired,
     clients_total,
     messages_received,
@@ -1990,10 +1993,13 @@ pub const SystemMetric = enum {
 
     pub fn topic(self: SystemMetric) []const u8 {
         return switch (self) {
+            .version => "$SYS/broker/version",
             .uptime => "$SYS/broker/uptime",
             .clients_connected => "$SYS/broker/clients/connected",
+            .clients_active => "$SYS/broker/clients/active",
             .clients_maximum => "$SYS/broker/clients/maximum",
             .clients_disconnected => "$SYS/broker/clients/disconnected",
+            .clients_inactive => "$SYS/broker/clients/inactive",
             .clients_expired => "$SYS/broker/clients/expired",
             .clients_total => "$SYS/broker/clients/total",
             .messages_received => "$SYS/broker/messages/received",
@@ -2231,10 +2237,13 @@ pub const ServeListenersUntilOptions = struct {
 };
 
 pub const system_metrics = [_]SystemMetric{
+    .version,
     .uptime,
     .clients_connected,
+    .clients_active,
     .clients_maximum,
     .clients_disconnected,
+    .clients_inactive,
     .clients_expired,
     .clients_total,
     .messages_received,
@@ -10376,6 +10385,9 @@ fn formatSystemMetric(
     stats_value: Stats,
     metric: SystemMetric,
 ) []const u8 {
+    if (metric == .version) {
+        return std.fmt.bufPrint(buffer, "netz version 0.1.0", .{}) catch unreachable;
+    }
     if (metric == .uptime) {
         return std.fmt.bufPrint(
             buffer,
@@ -10433,9 +10445,10 @@ fn minQos(a: mqtt.QoS, b: mqtt.QoS) mqtt.QoS {
 fn systemMetricValue(stats_value: Stats, metric: SystemMetric) u64 {
     return switch (metric) {
         .uptime => stats_value.uptime_seconds,
-        .clients_connected => @intCast(stats_value.active_connections),
+        .version => 0,
+        .clients_connected, .clients_active => @intCast(stats_value.active_connections),
         .clients_maximum => @intCast(stats_value.maximum_active_connections),
-        .clients_disconnected => @intCast(stats_value.disconnected_sessions),
+        .clients_disconnected, .clients_inactive => @intCast(stats_value.disconnected_sessions),
         .clients_expired => @intCast(stats_value.expired_sessions),
         .clients_total => @intCast(stats_value.sessions),
         .messages_received => stats_value.messages_received,
@@ -10687,5 +10700,16 @@ test "broker retained expiry scan persists physical removal" {
     try std.testing.expectEqual(
         @as(usize, 0),
         snapshot_restored.stats().retained_messages,
+    );
+}
+
+test "MQTT broker $SYS version and client aliases match Mosquitto" {
+    try std.testing.expectEqualStrings("$SYS/broker/version", SystemMetric.version.topic());
+    try std.testing.expectEqualStrings("$SYS/broker/clients/active", SystemMetric.clients_active.topic());
+    try std.testing.expectEqualStrings("$SYS/broker/clients/inactive", SystemMetric.clients_inactive.topic());
+    var buffer: [64]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "netz version 0.1.0",
+        formatSystemMetric(&buffer, undefined, .version),
     );
 }

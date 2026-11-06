@@ -1,0 +1,34 @@
+{
+  "schema": 1,
+  "date": "2026-11-06",
+  "head": "working-tree",
+  "subject": "MQTT $SYS version and client aliases",
+  "change": "Broker system statistics now publish $SYS/broker/version (\"netz version 0.1.0\") and Mosquitto's $SYS/broker/clients/active and $SYS/broker/clients/inactive aliases next to the existing connected/disconnected topics. The aliases read the same live-connection and disconnected-session gauges, and periodic retained publication includes them through the normal $SYS routing and ACL path.",
+  "tests": {
+    "unit": "src/mqtt/broker.zig checks the three topic strings and the version payload. src/mqtt/broker_tests.zig extends the coherent retained statistics test to read seven $SYS/broker/clients/# messages and updates the following sent-message and sent-PUBLISH counts to include the two new retained publications.",
+    "focused_gate": {
+      "command": "zig build test-lib -Dtest-filter='coherent retained system statistics' -Dtest-filter='SYS version and client aliases' --summary all",
+      "passed": 161,
+      "total": 161,
+      "failed": 0
+    },
+    "compile": {
+      "command": "zig build test-compile",
+      "status": "passed"
+    },
+    "full_library": {
+      "command": "zig build test-lib",
+      "status": "passed",
+      "exit_code": 0,
+      "passed": 6536,
+      "total": 6536,
+      "failed": 0
+    }
+  },
+  "source_sha256": {
+    "src/mqtt/broker.zig": "70579e2fe964952b63b444534a5f39a3f0711cab3078666bb37ec042d9ee1a76",
+    "src/mqtt/broker_tests.zig": "1ffee3338dfdc25ad97e56e78c7ea279856b647c5f2c0f4c9f6d6d5dd0e4389c",
+    "docs/rumqtt_parity.md": "f20a354b53abe0e90c94c46d7fc200c10ce4b983f74a54550dd1833139b378d5"
+  },
+  "notes": "The version string is a static package-version payload like Mosquitto's build version topic; the aliases are exact duplicates of the connected and disconnected gauges, matching Mosquitto's $SYS tree. They are retained QoS 0 messages published through system_stats_interval."
+}

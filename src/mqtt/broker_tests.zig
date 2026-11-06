@@ -1767,7 +1767,7 @@ test "broker publishes coherent retained system statistics" {
 
     try broker.publishSystemStats();
     var received: usize = 0;
-    while (received < 5) : (received += 1) {
+    while (received < 7) : (received += 1) {
         var publish = try subscriber.readPublish();
         defer publish.deinit(allocator);
         // Live subscribers follow normal MQTT routing semantics: retained
@@ -1780,6 +1780,18 @@ test "broker publishes coherent retained system statistics" {
             "$SYS/broker/clients/connected",
         )) {
             try std.testing.expectEqualStrings("1", publish.publish.payload);
+        } else if (std.mem.eql(
+            u8,
+            publish.publish.topic,
+            "$SYS/broker/clients/active",
+        )) {
+            try std.testing.expectEqualStrings("1", publish.publish.payload);
+        } else if (std.mem.eql(
+            u8,
+            publish.publish.topic,
+            "$SYS/broker/clients/inactive",
+        )) {
+            try std.testing.expectEqualStrings("0", publish.publish.payload);
         } else if (std.mem.eql(
             u8,
             publish.publish.topic,
@@ -1858,17 +1870,17 @@ test "broker publishes coherent retained system statistics" {
             // SUBSCRIBE. It then sent DISCONNECT, so the second snapshot sees
             // all three complete inbound packets.
             .messages_received => "3",
-            // CONNACK, SUBACK, and five selected client metric PUBLISH packets
-            // were complete before this second snapshot was captured.
-            .messages_sent => "7",
+            // CONNACK, SUBACK, and seven selected client metric PUBLISH
+            // packets were complete before this second snapshot was captured.
+            .messages_sent => "9",
             .publish_messages_received,
             .publish_messages_dropped,
             .publish_bytes_received,
             => "0",
-            // The first snapshot delivered five selected client metrics to
+            // The first snapshot delivered seven selected client metrics to
             // this subscriber. Those real wire PUBLISH packets contribute to
             // the following sent count/byte snapshot, as they do in Mosquitto.
-            .publish_messages_sent, .publish_bytes_sent => "5",
+            .publish_messages_sent, .publish_bytes_sent => "7",
             .bytes_received, .bytes_sent => {
                 try std.testing.expect(try std.fmt.parseInt(
                     u64,
