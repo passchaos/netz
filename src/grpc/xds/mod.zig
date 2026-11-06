@@ -13,6 +13,7 @@ pub const sds = @import("sds.zig");
 pub const runtime = @import("runtime.zig");
 pub const ads = @import("ads.zig");
 pub const csds = @import("csds.zig");
+pub const csds_service = @import("csds_service.zig");
 test {
     _ = ads;
     _ = @import("tls_material.zig");
@@ -32,4 +33,5 @@ test {
     _ = @import("bootstrap_tests.zig");
     _ = @import("control_plane_tests.zig");
     _ = @import("csds_tests.zig");
+    _ = @import("csds_service_tests.zig");
 }

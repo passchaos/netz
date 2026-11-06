@@ -200,6 +200,12 @@ const response = try controller.fetchClientStatus(
 );
 ```
 
+`grpc.xds.csds_service.respondFetch(connection, request, controller, client,
+allocator, node)` answers an already-read unary request whose path is
+`/envoy.service.status.v3.ClientStatusDiscoveryService/FetchClientStatus`. It
+returns false for other paths without writing, so the application's dispatcher
+can route the same request normally.
+
 `zig build interop-grpc-csds` emits one response and decodes it with the
 official Envoy `csds.proto` schema shipped by the pinned grpc-js-xds
 dependency, checking the node, scope, every resource type/name/version/status
