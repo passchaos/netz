@@ -9,7 +9,7 @@ from mqtt_commit_log_support import (
     ack_packet, connect_client, free_port, mqtt_string, packet,
     publish_packet, read_packet, remaining_length,
 )
-from mqtt_broker_config_persistence_support import configured_broker, ping
+from mqtt_broker_config_persistence_support import configured_persistent_broker as configured_broker, ping
 
 
 _LOCAL_TOPIC = "subpub/local"

@@ -6,7 +6,7 @@ from pathlib import Path
 import socket
 
 from mqtt_broker_config_persistence_support import (
-    configured_broker,
+    configured_persistent_broker as configured_broker,
     disconnect,
     expect_packet,
     ping,

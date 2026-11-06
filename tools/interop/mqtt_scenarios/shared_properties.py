@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from mqtt_broker_config_persistence_support import configured_broker, expect_packet, ping
+from mqtt_broker_config_persistence_support import configured_persistent_broker as configured_broker, expect_packet, ping
 from mqtt_commit_log_support import (
     ack_packet, connect_client, free_port, mqtt_string, packet,
     remaining_length, subscribe_packet,
