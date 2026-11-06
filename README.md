@@ -1444,7 +1444,9 @@ Current protocol coverage includes:
   lock-free cumulative wire/PUBLISH counters for connection, Session,
   subscription, retained, queue, inflight, QoS 2 and Will state, with retained
   `$SYS` gauge publication through the normal routing/ACL
-  path, integrated into one live
+  path plus optional application-reported `$SYS/broker/heap/current` and
+  `$SYS/broker/heap/maximum` gauges sourced from a caller heap snapshot,
+  integrated into one live
   TCP and Unix-domain broker listeners that auto-detect MQTT 3.1/3.1.1/5 per connection, exposes
   opt-in bounded HAProxy PROXY protocol v1/v2 parsing before TCP, TLS, WS, or
   WSS application handshakes, with trusted source, destination, transport and

@@ -21,6 +21,9 @@ const Declaration = struct {
     kind: Kind,
     value: *const fn (stats: broker_mod.Stats) f64,
     labels: []const u8 = "",
+    /// Optional presence predicate. Families whose source is not configured
+    /// are omitted entirely instead of reporting a synthetic zero.
+    present: ?*const fn (stats: broker_mod.Stats) bool = null,
 };
 
 fn integer(value: anytype) f64 {
@@ -29,6 +32,15 @@ fn integer(value: anytype) f64 {
 
 fn uptime(stats: broker_mod.Stats) f64 {
     return integer(stats.uptime_seconds);
+}
+fn hasHeap(stats: broker_mod.Stats) bool {
+    return stats.heap_current_bytes != null and stats.heap_maximum_bytes != null;
+}
+fn heapCurrent(stats: broker_mod.Stats) f64 {
+    return integer(stats.heap_current_bytes orelse 0);
+}
+fn heapMaximum(stats: broker_mod.Stats) f64 {
+    return integer(stats.heap_maximum_bytes orelse 0);
 }
 fn clientsConnected(stats: broker_mod.Stats) f64 {
     return integer(stats.active_connections);
@@ -168,6 +180,20 @@ pub const declarations = [_]Declaration{
         .help = "Listener transports accepted, including peers later refused.",
         .kind = .counter,
         .value = socketsAccepted,
+    },
+    .{
+        .name = "mqtt_broker_heap_current_bytes",
+        .help = "Application-reported broker heap bytes currently live.",
+        .kind = .gauge,
+        .value = heapCurrent,
+        .present = hasHeap,
+    },
+    .{
+        .name = "mqtt_broker_heap_maximum_bytes",
+        .help = "Application-reported broker heap high-water mark.",
+        .kind = .gauge,
+        .value = heapMaximum,
+        .present = hasHeap,
     },
     .{
         .name = "mqtt_broker_messages_received_total",
@@ -404,6 +430,7 @@ pub fn render(
     errdefer out.deinit(allocator);
 
     for (declarations) |declaration| {
+        if (declaration.present) |present| if (!present(stats)) continue;
         try out.print(allocator, "# HELP {s} {s}\n", .{
             declaration.name,
             declaration.help,
@@ -518,6 +545,22 @@ test "MQTT Prometheus exposition renders stable counter and gauge families" {
             std.mem.indexOf(u8, document, line) != null,
         );
     }
+}
+
+test "MQTT Prometheus omits heap families without a heap source" {
+    const allocator = std.testing.allocator;
+    var stats: broker_mod.Stats = std.mem.zeroes(broker_mod.Stats);
+    const absent = try render(allocator, stats);
+    defer allocator.free(absent);
+    try std.testing.expect(std.mem.indexOf(u8, absent, "mqtt_broker_heap_current_bytes") == null);
+    try std.testing.expect(std.mem.indexOf(u8, absent, "mqtt_broker_heap_maximum_bytes") == null);
+
+    stats.heap_current_bytes = 1_536;
+    stats.heap_maximum_bytes = 4_096;
+    const present = try render(allocator, stats);
+    defer allocator.free(present);
+    try std.testing.expect(std.mem.indexOf(u8, present, "# TYPE mqtt_broker_heap_current_bytes gauge\nmqtt_broker_heap_current_bytes 1536\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, present, "# TYPE mqtt_broker_heap_maximum_bytes gauge\nmqtt_broker_heap_maximum_bytes 4096\n") != null);
 }
 
 test "MQTT Prometheus exposition stays byte identical for one snapshot" {

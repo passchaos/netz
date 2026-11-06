@@ -2324,6 +2324,89 @@ test "broker rejects zero persistent Session expiry cap" {
     );
 }
 
+test "MQTT broker publishes heap gauges only with a heap source" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    const Heap = struct {
+        current: usize = 1_536,
+        maximum: usize = 4_096,
+        fn snapshot(context: *anyopaque) broker_mod.HeapSnapshot {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            return .{
+                .current_bytes = self.current,
+                .maximum_bytes = self.maximum,
+            };
+        }
+    };
+    var heap = Heap{};
+    var broker = try Broker.init(allocator, io, .{
+        .limits = .{
+            .max_connections = 1,
+            .max_queued_deliveries_per_connection = 8,
+            .runtime = .{ .max_packet_size = 4096 },
+        },
+        .heap_source = .{
+            .context = &heap,
+            .snapshot_fn = Heap.snapshot,
+        },
+        .accept = .{ .max_outgoing_inflight = 64 },
+    });
+    defer broker.deinit();
+
+    const stats_value = broker.stats();
+    try std.testing.expectEqual(@as(?usize, 1_536), stats_value.heap_current_bytes);
+    try std.testing.expectEqual(@as(?usize, 4_096), stats_value.heap_maximum_bytes);
+
+    try broker.publishSystemStats();
+    var storage: [1]mqtt.retained.Match = undefined;
+    const current = try broker.retained.matchInto(
+        "$SYS/broker/heap/current",
+        std.Io.Clock.awake.now(io),
+        &storage,
+    );
+    try std.testing.expectEqual(@as(usize, 1), current.len);
+    try std.testing.expectEqualStrings("1536", current[0].payload);
+    const maximum = try broker.retained.matchInto(
+        "$SYS/broker/heap/maximum",
+        std.Io.Clock.awake.now(io),
+        &storage,
+    );
+    try std.testing.expectEqual(@as(usize, 1), maximum.len);
+    try std.testing.expectEqualStrings("4096", maximum[0].payload);
+
+    heap.current = 2_048;
+    heap.maximum = 8_192;
+    try broker.publishSystemStats();
+    const updated = try broker.retained.matchInto(
+        "$SYS/broker/heap/current",
+        std.Io.Clock.awake.now(io),
+        &storage,
+    );
+    try std.testing.expectEqualStrings("2048", updated[0].payload);
+
+    var plain = try Broker.init(allocator, io, .{
+        .limits = .{
+            .max_connections = 1,
+            .max_queued_deliveries_per_connection = 8,
+            .runtime = .{ .max_packet_size = 4096 },
+        },
+        .accept = .{ .max_outgoing_inflight = 64 },
+    });
+    defer plain.deinit();
+    try std.testing.expect(plain.stats().heap_current_bytes == null);
+    try plain.publishSystemStats();
+    const absent = try plain.retained.matchInto(
+        "$SYS/broker/heap/current",
+        std.Io.Clock.awake.now(io),
+        &storage,
+    );
+    try std.testing.expectEqual(@as(usize, 0), absent.len);
+}
+
 test {
     _ = @import("broker/admission_deadline_tests.zig");
     _ = @import("broker/connect_admission_tests.zig");

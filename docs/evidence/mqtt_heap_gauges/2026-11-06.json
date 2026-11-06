@@ -1,0 +1,43 @@
+{
+  "schema": 1,
+  "date": "2026-11-06",
+  "head": "working-tree",
+  "subject": "MQTT Mosquitto-compatible heap gauges",
+  "change": "Broker.Options.heap_source lets an application supply an allocation-free HeapSnapshot callback. When configured, Broker.stats() reports heap_current_bytes/heap_maximum_bytes, publishSystemStats emits retained $SYS/broker/heap/current and $SYS/broker/heap/maximum, and the Prometheus renderer emits mqtt_broker_heap_current_bytes/mqtt_broker_heap_maximum_bytes. Without a source the topics and families are omitted entirely, matching Mosquitto builds without WITH_MEMORY_TRACKING, and the existing $SYS payload loop skips absent metrics. The production Mosquitto-style config example wires its memory_limit MemoryLimiter snapshot (current live bytes and peak bytes) into the broker.",
+  "tests": {
+    "unit": "src/mqtt/broker_tests.zig verifies stats, retained $SYS values, live updates after a source change, and complete absence without a heap source. src/mqtt/broker/prometheus.zig covers conditional family emission and byte-stable output. src/mqtt/broker.zig covers topic names and null formatting.",
+    "focused_gate": {
+      "command": "zig build test-lib -Dtest-filter='heap' --summary all",
+      "passed": 173,
+      "total": 173,
+      "failed": 0
+    },
+    "full_library": {
+      "command": "zig build test-lib",
+      "status": "passed",
+      "passed": 6567,
+      "total": 6567,
+      "failed": 0
+    },
+    "complete_repository_gate": {
+      "command": "zig build test --summary all",
+      "status": "environmental_failures_only",
+      "build_steps": "184/187",
+      "tests_passed": 6761,
+      "tests_total": 6761,
+      "failed_steps": [
+        "websocket_h3_socks5 (Go 1.24 or newer not found)",
+        "http3_socks5_pool (Go 1.24 or newer not found)"
+      ]
+    }
+  },
+  "source_sha256": {
+    "src/mqtt/broker.zig": "59974c347c1e3506c5a283e8385857381ee89272f0eb5ca595b998e3553fb469",
+    "src/mqtt/broker/prometheus.zig": "0ca2a580e37ce36d1fda787624955c90fdb3990955ec588986b11bdc2c7bdc0b",
+    "src/mqtt/broker_tests.zig": "65148f3cb588239d8c35c35b3b39bd2d379df4241b1fc0b856ccc59d91332bf8",
+    "examples/mqtt_broker_config.zig": "99cb353e0f1ea1f0e503eb766e67a4952b69a502b701b48a1fb48d719510c087",
+    "docs/rumqtt_parity.md": "cb164543ae2df4a57f34a97cae271f72da2ebf839315d844558236b0ea52dd58",
+    "README.md": "5245f3a8ec8f6687eb2c989e8182410b9a0f8431489e00b95f982f3d84b100ee"
+  },
+  "notes": "The heap callback runs while the broker holds its state mutex, so the contract requires an allocation-free, non-reentrant implementation; the example's MemoryLimiter snapshot only performs atomic loads. Both interop failures in the complete gate are pre-existing environment limits (no Go toolchain), not test regressions."
+}

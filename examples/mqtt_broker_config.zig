@@ -27,6 +27,18 @@ const mqtt = netz.mqtt;
 var checkpoint_requested: std.c.sig_atomic_t = 0;
 var config_reload_requested: std.c.sig_atomic_t = 0;
 
+/// Publish the production example's Mosquitto-compatible `memory_limit`
+/// accounting as `$SYS/broker/heap/*`. The limiter's snapshot only performs
+/// atomic loads, so it is safe under the broker's state mutex.
+fn heapSnapshot(context: *anyopaque) mqtt.broker.HeapSnapshot {
+    const limiter: *MemoryLimiter = @ptrCast(@alignCast(context));
+    const value = limiter.snapshot();
+    return .{
+        .current_bytes = value.current_bytes,
+        .maximum_bytes = value.peak_bytes,
+    };
+}
+
 const CheckpointSignal = if (builtin.os.tag == .linux) struct {
     previous: std.posix.Sigaction,
 
@@ -758,6 +770,10 @@ pub fn run(
             .runtime = .{ .max_packet_size = config.max_packet_size },
         },
         .max_inflight_payload_bytes_per_connection = config.max_inflight_bytes,
+        .heap_source = .{
+            .context = &memory_limiter,
+            .snapshot_fn = heapSnapshot,
+        },
         .accept = base_accept,
         .client_id_prefix = config.client_id_prefixes,
         .upgrade_outgoing_qos = initial_delivery_policy.upgrade_outgoing_qos,

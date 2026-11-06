@@ -196,8 +196,31 @@ pub const PreparedRequiredClientIdPrefix = struct {
     }
 };
 
+/// One application-owned heap measurement. Mosquitto publishes the same pair
+/// as `$SYS/broker/heap/current` and `$SYS/broker/heap/maximum` when it is
+/// built with memory tracking.
+pub const HeapSnapshot = struct {
+    current_bytes: usize,
+    maximum_bytes: usize,
+};
+
+/// Optional application heap source. The broker calls it while holding its
+/// state mutex, so the callback must be allocation-free and must not re-enter
+/// the broker.
+pub const HeapSource = struct {
+    context: *anyopaque,
+    snapshot_fn: *const fn (*anyopaque) HeapSnapshot,
+
+    pub fn snapshot(self: HeapSource) HeapSnapshot {
+        return self.snapshot_fn(self.context);
+    }
+};
+
 pub const Options = struct {
     limits: Limits = .{},
+    /// Optional broker-heap measurement. Null omits the `$SYS/broker/heap/*`
+    /// topics entirely, matching Mosquitto builds without memory tracking.
+    heap_source: ?HeapSource = null,
     /// Maximum outgoing QoS 1/2 payload bytes held by each transient Network
     /// Connection; zero is unlimited. Durable Sessions use the corresponding
     /// `session.max_inflight_payload_bytes_per_session` option instead.
@@ -1885,6 +1908,10 @@ test "durable Session write scratch retains only bounded packets" {
 /// lock-free, independently sampled, and include each complete operation.
 pub const Stats = struct {
     uptime_seconds: u64,
+    /// Application-provided broker heap measurement. Null when
+    /// `Options.heap_source` is unset.
+    heap_current_bytes: ?usize = null,
+    heap_maximum_bytes: ?usize = null,
     /// Successfully parsed CONNECT packets admitted to the broker core.
     connections_received: u64,
     /// Cumulative transports accepted by a listener, including refused peers.
@@ -1946,6 +1973,8 @@ pub const SystemMetric = enum {
     clients_inactive,
     clients_expired,
     clients_total,
+    heap_current,
+    heap_maximum,
     messages_received,
     messages_sent,
     messages_stored,
@@ -2013,6 +2042,8 @@ pub const SystemMetric = enum {
             .clients_inactive => "$SYS/broker/clients/inactive",
             .clients_expired => "$SYS/broker/clients/expired",
             .clients_total => "$SYS/broker/clients/total",
+            .heap_current => "$SYS/broker/heap/current",
+            .heap_maximum => "$SYS/broker/heap/maximum",
             .messages_received => "$SYS/broker/messages/received",
             .messages_sent => "$SYS/broker/messages/sent",
             .messages_stored => "$SYS/broker/messages/stored",
@@ -2266,6 +2297,8 @@ pub const system_metrics = [_]SystemMetric{
     .clients_inactive,
     .clients_expired,
     .clients_total,
+    .heap_current,
+    .heap_maximum,
     .messages_received,
     .messages_sent,
     .messages_stored,
@@ -3385,11 +3418,14 @@ pub const Broker = struct {
             }
         }
         const publish = self.publish_counters.snapshot();
+        const heap = if (self.options.heap_source) |source| source.snapshot() else null;
         return .{
             .uptime_seconds = uptimeSeconds(
                 self.started_at_ns,
                 std.Io.Clock.awake.now(self.io).nanoseconds,
             ),
+            .heap_current_bytes = if (heap) |value| value.current_bytes else null,
+            .heap_maximum_bytes = if (heap) |value| value.maximum_bytes else null,
             .connections_received = self.connections_received,
             .sockets_accepted = self.sockets_accepted.load(.monotonic),
             .active_connections = active_connections,
@@ -3450,7 +3486,7 @@ pub const Broker = struct {
                 &payloads[index],
                 snapshot,
                 metric,
-            );
+            ) orelse continue;
             const plan = self.enqueuePublishLocked(
                 false,
                 null,
@@ -10418,7 +10454,7 @@ fn formatSystemMetric(
     buffer: []u8,
     stats_value: Stats,
     metric: SystemMetric,
-) []const u8 {
+) ?[]const u8 {
     if (metric == .version) {
         return std.fmt.bufPrint(buffer, "netz version 0.1.0", .{}) catch unreachable;
     }
@@ -10427,6 +10463,18 @@ fn formatSystemMetric(
             buffer,
             "{d} seconds",
             .{stats_value.uptime_seconds},
+        ) catch unreachable;
+    }
+    // Heap gauges exist only when the application supplied a heap source.
+    if (metric == .heap_current or metric == .heap_maximum) {
+        const value = if (metric == .heap_current)
+            stats_value.heap_current_bytes
+        else
+            stats_value.heap_maximum_bytes;
+        return std.fmt.bufPrint(
+            buffer,
+            "{d}",
+            .{value orelse return null},
         ) catch unreachable;
     }
     return if (systemMetricLoadValue(stats_value, metric)) |value|
@@ -10488,6 +10536,9 @@ fn systemMetricValue(stats_value: Stats, metric: SystemMetric) u64 {
         .clients_disconnected, .clients_inactive => @intCast(stats_value.disconnected_sessions),
         .clients_expired => @intCast(stats_value.expired_sessions),
         .clients_total => @intCast(stats_value.sessions),
+        // Heap gauges are formatted before this function because they are
+        // optional; unreachable keeps the exhaustive switch honest.
+        .heap_current, .heap_maximum => unreachable,
         .messages_received => stats_value.messages_received,
         .messages_sent => stats_value.messages_sent,
         .messages_stored, .store_messages_count => @intCast(stats_value.session_queued_messages),
@@ -10764,6 +10815,16 @@ test "MQTT broker $SYS version and client aliases match Mosquitto" {
     var buffer: [64]u8 = undefined;
     try std.testing.expectEqualStrings(
         "netz version 0.1.0",
-        formatSystemMetric(&buffer, undefined, .version),
+        formatSystemMetric(&buffer, undefined, .version).?,
     );
+    // Heap gauges are omitted when no heap source is configured.
+    var heap_stats: Stats = std.mem.zeroes(Stats);
+    try std.testing.expect(formatSystemMetric(&buffer, heap_stats, .heap_current) == null);
+    try std.testing.expect(formatSystemMetric(&buffer, heap_stats, .heap_maximum) == null);
+    heap_stats.heap_current_bytes = 1_536;
+    heap_stats.heap_maximum_bytes = 4_096;
+    try std.testing.expectEqualStrings("1536", formatSystemMetric(&buffer, heap_stats, .heap_current).?);
+    try std.testing.expectEqualStrings("4096", formatSystemMetric(&buffer, heap_stats, .heap_maximum).?);
+    try std.testing.expectEqualStrings("$SYS/broker/heap/current", SystemMetric.heap_current.topic());
+    try std.testing.expectEqualStrings("$SYS/broker/heap/maximum", SystemMetric.heap_maximum.topic());
 }
