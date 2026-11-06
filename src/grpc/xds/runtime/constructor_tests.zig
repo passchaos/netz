@@ -62,10 +62,11 @@ test "gRPC xDS runtime preserves local service config and enforces cache memory 
 test "gRPC xDS bootstrap server features populate runtime options" {
     const bootstrap = @import("../bootstrap.zig");
     const json =
-        \\{"xds_servers":[{"server_uri":"http://127.0.0.1:8080",
-        \\"channel_creds":[{"type":"insecure"}],
+        \\{"xds_servers":[
+        \\{"server_uri":"http://127.0.0.1:8080","channel_creds":[{"type":"insecure"}],
         \\"server_features":["ignore_resource_deletion","fail_on_data_errors",
-        \\"trusted_xds_server","resource_timer_is_transient_error"]}]}
+        \\"trusted_xds_server","resource_timer_is_transient_error"]},
+        \\{"server_uri":"http://127.0.0.1:8081","channel_creds":[{"type":"insecure"}]}]}
     ;
     const parsed = try bootstrap.parse(gpa, json, .{});
     defer parsed.deinit();
@@ -78,4 +79,21 @@ test "gRPC xDS bootstrap server features populate runtime options" {
     try std.testing.expect(options.fail_on_data_errors);
     try std.testing.expect(options.trusted_xds_server);
     try std.testing.expect(options.resource_timer_is_transient_error);
+
+    // A live controller reapplies the feature set, including after a failover
+    // that selects a server without any features.
+    const controller = try runtime.Controller.create(gpa, options);
+    defer controller.deinit();
+    controller.applyServerFeatures(parsed.servers[0]);
+    try std.testing.expect(controller.options.trusted_xds_server);
+    try std.testing.expect(controller.listener.?.options.trusted_xds_server);
+    try std.testing.expect(controller.listener.?.options.fail_on_data_errors);
+    controller.applyServerFeatures(parsed.servers[1]);
+    try std.testing.expect(!controller.options.ignore_resource_deletion);
+    try std.testing.expect(!controller.options.fail_on_data_errors);
+    try std.testing.expect(!controller.options.trusted_xds_server);
+    try std.testing.expect(!controller.options.resource_timer_is_transient_error);
+    try std.testing.expect(!controller.listener.?.options.ignore_resource_deletion);
+    try std.testing.expect(!controller.listener.?.options.fail_on_data_errors);
+    try std.testing.expect(!controller.listener.?.options.trusted_xds_server);
 }

@@ -69,10 +69,12 @@ Provider rotation still reloads through the same caller-driven reconnect
 schedule rather than updating live transports in place.
 `runtime.Options.applyServerFeatures(plane.server())` copies the selected
 server's `ignore_resource_deletion`, `fail_on_data_errors`,
-`trusted_xds_server` and `resource_timer_is_transient_error` booleans. Call it
-before `Controller.create`, which keeps the options it was created with. A
-failover to a server with a different feature set therefore requires the caller
-to recreate the controller or keep the options it owns in sync.
+`trusted_xds_server` and `resource_timer_is_transient_error` booleans before
+`Controller.create`. `Controller.applyServerFeatures(plane.server())` also
+updates a live controller's options and listener policy, so call it again after
+`failoverWithDeadline` selects a server with a different feature set. RDS
+snapshots created before the change keep the trust policy they were built with;
+later publications use the new one.
 
 `Options.authority` selects an authority's `xds_servers` (falling back to the
 top-level list when the authority has none); an unknown authority fails with

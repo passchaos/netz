@@ -3,6 +3,7 @@ const std = @import("std");
 const ads = @import("../ads.zig");
 const delta = @import("../ads/delta.zig");
 const lds = @import("../lds.zig");
+const bootstrap = @import("../bootstrap.zig");
 const rds = @import("../rds.zig");
 const cds = @import("../cds.zig");
 const eds = @import("../eds.zig");
@@ -98,6 +99,18 @@ pub const Controller = struct {
         }
         self.listener = try lds.Controller.init(gpa, .{ .listener_name = options.listener_name, .authority = self.options.target.authority, .max_header_bytes = options.max_header_bytes, .limits = options.limits.lds, .ignore_resource_deletion = options.ignore_resource_deletion, .fail_on_data_errors = options.fail_on_data_errors, .trusted_xds_server = options.trusted_xds_server, .publisher = .{ .context = self, .publish_fn = publishHook }, .delta_publisher = .{ .context = self, .publish_fn = publishDeltaHook } });
         return self;
+    }
+    /// Apply the current bootstrap server's feature set to this live
+    /// controller. Call it after creation and after a failover that selects a
+    /// server with different `server_features`; the listener policy is updated
+    /// alongside the controller options.
+    pub fn applyServerFeatures(self: *Controller, server: bootstrap.Server) void {
+        self.options.applyServerFeatures(server);
+        if (self.listener) |*listener| {
+            listener.options.ignore_resource_deletion = server.ignore_resource_deletion;
+            listener.options.fail_on_data_errors = server.fail_on_data_errors;
+            listener.options.trusted_xds_server = server.trusted_xds_server;
+        }
     }
     pub fn deinit(self: *Controller) void {
         if (self.lrs_runner) |runner| runner.deinit();
