@@ -3803,10 +3803,13 @@ and literal request/response header additions/removals are applied to the owned
 unary and streaming request/response inputs; `path_rewrite_policy` format
 rewrites remain open for the full library/control-plane objective.
 `envoy.filters.http.rbac` is decoded and enforced for `any`, header, URL-path
-and `and`/`or`/`not` principals and permissions with ALLOW/DENY policies;
-authenticated/IP/metadata/requested-server-name principals, destination
-IP/port/metadata permissions, CEL conditions and route/vhost overrides remain
-open. Other non-router filters remain open.
+and `and`/`or`/`not` principals and permissions with ALLOW/DENY policies.
+The official-schema interop gate denies unary and duplex probes carrying
+`x-deny` without reaching either backend and re-allows the same header after a
+listener without RBAC replaces the policy. Authenticated/IP/metadata/
+requested-server-name principals, destination IP/port/metadata permissions,
+CEL conditions and route/vhost overrides remain open. Other non-router filters
+remain open.
 
 ## SotW resource omission and initial discovery
 

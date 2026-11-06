@@ -60,6 +60,18 @@ PERMISSION_DENIED without touching a backend, and a denied streaming open
 returns `error.PermissionDenied`. Route/vhost `typed_per_filter_config`
 overrides remain unsupported with the existing RDS rejection.
 
+The interop gate now carries RBAC through the official Envoy schema and
+grpc-js-xds's own Listener validation and policy parser. The inline listener
+DENIES requests carrying `x-deny`: a unary call returns trailers-only
+PERMISSION_DENIED and a duplex open fails with `error.PermissionDenied`, while
+the backend RPC counters stay unchanged, proving rejection happens before any
+connection or request reaches a cluster. The same `x-deny` header is routed
+normally after a later inline listener without RBAC replaces the listener,
+so the probe also proves the policy is scoped to its listener rather than to
+the channel. grpc-js-xds registers only a server-side RBAC constructor, so the
+fixture marks the filter `is_optional` to pass its client-side Listener
+validator; netz enforces supported optional filters instead of skipping them.
+
 HCM selects inline route_config or RDS through ADS/SELF ConfigSource. AUTO API
 version follows the ADS session's v3 type URL; explicit V2 and unsupported
 versions fail validation. The same source decoder is used for EDS-backed CDS.
@@ -107,13 +119,15 @@ and ADS schemas plus grpc-js-xds Listener validation, with two grpc-js
 application backends. It checks inline and dynamic routing, stream dispatch,
 HCM timeout inheritance, explicit route zero override, same-name cached
 projection, new-name admission clearing, late RDS handling, invalid filter/
-inline NACKs and listener deletion. A held old 300 ms RPC completes after a new
-20 ms HCM default starts rejecting slow new calls. The peer counts all 31 RPCs
-and requires one HTTP/2 session per application backend. Native tests cover
-codec/resource bounds, inline owned-resource transfer/allocation failure,
-effective terminal handling, subscription/cache/version rollback and stale or
-expired decisions. Evidence is in
-`docs/evidence/grpc_lds/2026-11-03.json`.
+inline NACKs, RBAC denial/scope and listener deletion. A held old 300 ms RPC
+completes after a new 20 ms HCM default starts rejecting slow new calls. The
+peer counts all 31 RPCs plus one allowed RBAC-scope probe, excludes denied
+probes from backend counters, and requires one HTTP/2 session per application
+backend. Native tests cover codec/resource bounds, inline owned-resource
+transfer/allocation failure, effective terminal handling,
+subscription/cache/version rollback and stale or expired decisions. Evidence is
+in `docs/evidence/grpc_lds/2026-11-03.json` and the RBAC interop report
+`docs/evidence/grpc_lds/2026-11-06-rbac-interop.json`.
 
 [Automatic typed discovery](grpc_xds_runtime.md) now derives cluster/service
 subscriptions and publishes CDS/EDS children from these listener/RDS snapshots.

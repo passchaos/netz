@@ -1,18 +1,30 @@
 'use strict';
+// grpc-js-xds gates RBAC parsing behind this flag; enable it before registration
+// so the official Envoy RBAC schema validates the fixture below.
+process.env.GRPC_XDS_EXPERIMENTAL_RBAC='true';
 const assert=require('node:assert/strict');const fs=require('node:fs');const path=require('node:path');const {spawn}=require('node:child_process');
 const grpc=require('../grpc_locality/node_modules/@grpc/grpc-js');const loader=require('../grpc_locality/node_modules/@grpc/proto-loader');const protobuf=require('../grpc_locality/node_modules/protobufjs');
 require('../grpc_locality/node_modules/@grpc/grpc-js-xds').register();
 const {ListenerResourceType}=require('../grpc_locality/node_modules/@grpc/grpc-js-xds/build/src/xds-resource-type/listener-resource-type');
 const deps=path.resolve(__dirname,'../grpc_locality/node_modules/@grpc/grpc-js-xds/deps');const includes=['envoy-api','xds','googleapis','protoc-gen-validate'].map(x=>path.join(deps,x));
+// Envoy annotation protos import google/protobuf/descriptor.proto, which the
+// xDS dependency trees do not ship. protobufjs bundles the canonical copy.
+includes.push(path.dirname(require.resolve('../grpc_locality/node_modules/protobufjs/package.json')));
 const definition=loader.loadSync('envoy/service/discovery/v3/ads.proto',{includeDirs:includes,keepCase:true,defaults:true,longs:String,enums:String});
 const service=grpc.loadPackageDefinition(definition).envoy.service.discovery.v3.AggregatedDiscoveryService.service;
 const root=new protobuf.Root();root.resolvePath=(_origin,target)=>includes.map(dir=>path.join(dir,target)).find(x=>fs.existsSync(x))??target;
-root.loadSync(['envoy/config/listener/v3/listener.proto','envoy/extensions/filters/network/http_connection_manager/v3/http_connection_manager.proto'],{keepCase:true});root.resolveAll();
+root.loadSync(['envoy/config/listener/v3/listener.proto','envoy/extensions/filters/network/http_connection_manager/v3/http_connection_manager.proto','envoy/extensions/filters/http/rbac/v3/rbac.proto'],{keepCase:true});root.resolveAll();
 const ldsUrl='type.googleapis.com/envoy.config.listener.v3.Listener';const rdsUrl='type.googleapis.com/envoy.config.route.v3.RouteConfiguration';
 const hcmUrl='type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager';const routerUrl='type.googleapis.com/envoy.extensions.filters.http.router.v3.Router';
 const listenerType=root.lookupType('envoy.config.listener.v3.Listener');const hcmType=root.lookupType('envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager');const routeType=root.lookupType('envoy.config.route.v3.RouteConfiguration');
+const rbacUrl='type.googleapis.com/envoy.extensions.filters.http.rbac.v3.RBAC';const rbacFilterType=root.lookupType('envoy.extensions.filters.http.rbac.v3.RBAC');
 const encode=(type,value)=>Buffer.from(type.encode(type.create(value)).finish());
 const router=name=>({name,typed_config:{type_url:routerUrl,value:Buffer.alloc(0)}});
+// Official Envoy schema: DENY (action 1) when the x-deny header is present.
+// grpc-js-xds registers only a server-side RBAC filter constructor, so its
+// client Listener validator requires is_optional here. netz enforces supported
+// optional filters rather than skipping them.
+const rbacDenyHeader=()=>({name:'rbac',is_optional:true,typed_config:{type_url:rbacUrl,value:encode(rbacFilterType,{rules:{action:1,policies:{p:{permissions:[{header:{name:'x-deny',present_match:true}}],principals:[{any:true}]}}}})}});
 const optional={name:'optional',is_optional:true,typed_config:{type_url:'type.googleapis.com/custom.Optional',value:Buffer.from('opaque')}};
 const routes=(name,cluster,zero=false)=>({name,virtual_hosts:[{name:'host',domains:['backend.test'],routes:[...(zero?[{match:{path:'/fixture.Lds/NoCap'},route:{cluster,max_stream_duration:{max_stream_duration:{}}}}]:[]),{match:{prefix:'/fixture.Lds/'},route:{cluster}}]}]});
 function listener(name,maximum,inline,extra={}){
@@ -20,7 +32,7 @@ function listener(name,maximum,inline,extra={}){
   const resource={type_url:ldsUrl,value:encode(listenerType,{name:'frontend',api_listener:{api_listener:{type_url:hcmUrl,value:encode(hcmType,hcm)}}})};
   return resource;
 }
-const inlineA=listener('inline-a',50,routes('inline-a','a',true));const dynamic=listener('routes-a',300);const capped=listener('routes-a',20);const renamed=listener('routes-b',100);const inlineB=listener('inline-b',0,routes('inline-b','b'));
+const inlineA=listener('inline-a',50,routes('inline-a','a',true),{http_filters:[optional,rbacDenyHeader(),router('router')]});const dynamic=listener('routes-a',300);const capped=listener('routes-a',20);const renamed=listener('routes-b',100);const inlineB=listener('inline-b',0,routes('inline-b','b'));
 for(const resource of [inlineA,dynamic,capped,renamed,inlineB])assert.equal(ListenerResourceType.get().decode({server:{},bootstrap:{}},resource).error,undefined);
 const assignment=(name,cluster)=>({type_url:rdsUrl,value:encode(routeType,routes(name,cluster))});
 const servers=[],sessions=[new Set(),new Set()],counts={Fast:0,Slow:0,NoCap:0,Stream:0},labels={a:0,b:0},transcript=[];
@@ -83,6 +95,6 @@ const method=name=>({path:'/fixture.Lds/'+name,requestStream:false,responseStrea
     child.stdout.on('data',b=>output+=b);child.stderr.on('data',b=>output+=b);child.on('error',e=>{clearTimeout(timer);reject(e);});child.on('exit',code=>{clearTimeout(timer);if(code!==0)return reject(new Error(output));const line=output.split('\n').find(x=>x.startsWith('LDS_RESULT '));if(!line)return reject(new Error(output));resolve(JSON.parse(line.slice(11)));});
   });
   assert.equal(step,21);assert(initialCanceled&&shortCanceled);assert(capSent&&!oldSlow);
-  assert.deepEqual(counts,{Fast:25,Slow:3,NoCap:1,Stream:2});assert.deepEqual(labels,{a:13,b:18});assert.deepEqual(sessions.map(x=>x.size),[1,1]);
+  assert.deepEqual(counts,{Fast:26,Slow:3,NoCap:1,Stream:2});assert.deepEqual(labels,{a:13,b:19});assert.deepEqual(sessions.map(x=>x.size),[1,1]);
   console.log(JSON.stringify({...result,wire_counts:counts,labels,sessions:sessions.map(x=>x.size),transcript,initial_canceled:initialCanceled,short_canceled:shortCanceled,grpc_js:require('../grpc_locality/node_modules/@grpc/grpc-js/package.json').version,grpc_js_xds:require('../grpc_locality/node_modules/@grpc/grpc-js-xds/package.json').version}));
 })().catch(error=>{console.error(error);process.exitCode=1;}).finally(()=>servers.forEach(server=>server.forceShutdown()));
