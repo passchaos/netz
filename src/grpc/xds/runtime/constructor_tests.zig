@@ -58,3 +58,24 @@ test "gRPC xDS runtime preserves local service config and enforces cache memory 
     try std.testing.expectError(error.Timeout, bounded.startWithDeadline(&client, channel, .fromNow(io, .{ .clock = .awake, .raw = .fromNanoseconds(-1) })));
     try std.testing.expectEqual(revision, channel.configurationRevision());
 }
+
+test "gRPC xDS bootstrap server features populate runtime options" {
+    const bootstrap = @import("../bootstrap.zig");
+    const json =
+        \\{"xds_servers":[{"server_uri":"http://127.0.0.1:8080",
+        \\"channel_creds":[{"type":"insecure"}],
+        \\"server_features":["ignore_resource_deletion","fail_on_data_errors",
+        \\"trusted_xds_server","resource_timer_is_transient_error"]}]}
+    ;
+    const parsed = try bootstrap.parse(gpa, json, .{});
+    defer parsed.deinit();
+    var options: runtime.Options = .{
+        .listener_name = "frontend",
+        .target = .{ .authority = "backend.test" },
+    };
+    options.applyServerFeatures(parsed.servers[0]);
+    try std.testing.expect(options.ignore_resource_deletion);
+    try std.testing.expect(options.fail_on_data_errors);
+    try std.testing.expect(options.trusted_xds_server);
+    try std.testing.expect(options.resource_timer_is_transient_error);
+}

@@ -67,6 +67,13 @@ reference `file_watcher` providers; their file paths and the shorter of the
 referenced refresh intervals are used for the control-plane TLS material.
 Provider rotation still reloads through the same caller-driven reconnect
 schedule rather than updating live transports in place.
+`runtime.Options.applyServerFeatures(plane.server())` copies the selected
+server's `ignore_resource_deletion`, `fail_on_data_errors`,
+`trusted_xds_server` and `resource_timer_is_transient_error` booleans. Call it
+before `Controller.create`, which keeps the options it was created with. A
+failover to a server with a different feature set therefore requires the caller
+to recreate the controller or keep the options it owns in sync.
+
 `Options.authority` selects an authority's `xds_servers` (falling back to the
 top-level list when the authority has none); an unknown authority fails with
 `InvalidControlPlaneOptions`. The bootstrap node is used unless `Options.node`

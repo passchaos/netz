@@ -4,6 +4,7 @@ const eds = @import("../eds.zig");
 const lrs = @import("../lrs.zig");
 const shared = @import("../../channel/shared.zig");
 const control_plane = @import("../control_plane.zig");
+const bootstrap = @import("../bootstrap.zig");
 pub const Limits = struct {
     lds: @import("../lds.zig").resource.Limits = .{},
     cds: @import("../cds.zig").resource.Limits = .{},
@@ -58,4 +59,15 @@ pub const Options = struct {
     /// Optional controller-owned LRS reporting. The destination channel must
     /// have LRS statistics enabled.
     lrs: ?LrsOptions = null,
+
+    /// Copy the bootstrap `server_features` booleans for the control plane's
+    /// current server. Call it after `ControlPlane.init`; `plane.server()`
+    /// returns the selected server. Keeping this explicit avoids silently
+    /// dropping a security-relevant feature such as `trusted_xds_server`.
+    pub fn applyServerFeatures(self: *Options, server: bootstrap.Server) void {
+        self.ignore_resource_deletion = server.ignore_resource_deletion;
+        self.fail_on_data_errors = server.fail_on_data_errors;
+        self.trusted_xds_server = server.trusted_xds_server;
+        self.resource_timer_is_transient_error = server.resource_timer_is_transient_error;
+    }
 };

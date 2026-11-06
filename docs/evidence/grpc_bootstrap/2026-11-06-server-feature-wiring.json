@@ -1,0 +1,34 @@
+{
+  "schema": 1,
+  "date": "2026-11-06",
+  "head": "working-tree",
+  "subject": "gRPC xDS bootstrap server feature wiring",
+  "change": "runtime.Options.applyServerFeatures copies the selected bootstrap server's four feature booleans into the controller options: ignore_resource_deletion, fail_on_data_errors, trusted_xds_server and resource_timer_is_transient_error. The helper makes the documented bootstrap-to-runtime flow explicit and avoids silently dropping a security-relevant feature such as trusted_xds_server.",
+  "tests": {
+    "unit": "src/grpc/xds/runtime/constructor_tests.zig parses a bootstrap document whose server_features name all four flags and checks that applyServerFeatures sets each runtime option.",
+    "focused_gate": {
+      "command": "zig build test-lib -Dtest-filter='bootstrap server features' -Dtest-filter='xDS runtime' -Dtest-filter='bootstrap' --summary all",
+      "passed": 219,
+      "total": 219,
+      "failed": 0
+    },
+    "compile": {
+      "command": "zig build test-compile",
+      "status": "passed"
+    },
+    "full_library": {
+      "command": "zig build test-lib",
+      "status": "passed",
+      "exit_code": 0,
+      "passed": 6530,
+      "total": 6530,
+      "failed": 0
+    }
+  },
+  "source_sha256": {
+    "src/grpc/xds/runtime/options.zig": "85b00f54cb5ea19ebfbcd424049bf4dffc5357dda5ce1e88ba8b096c4124f5a6",
+    "src/grpc/xds/runtime/constructor_tests.zig": "ba52ef3e8ce16a319c6b4abaecc8626a7891e0c12d4c499328da0537fb7b20e6",
+    "docs/grpc_bootstrap.md": "a2e9cb3cf1d4cb3459a1ee7150f1fc157127259dcecfa76943b31f4fa749a90b"
+  },
+  "notes": "ControlPlane.server() returns the selected bootstrap server. The controller keeps the options it was created with, so a failover to a server with a different feature set requires the caller to recreate the controller or keep its caller-owned options in sync."
+}
