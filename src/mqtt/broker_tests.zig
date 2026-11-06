@@ -1850,6 +1850,11 @@ test "broker publishes coherent retained system statistics" {
     const traffic_metrics = [_]broker_mod.SystemMetric{
         .messages_received,
         .messages_sent,
+        .messages_stored,
+        .store_messages_count,
+        .store_messages_bytes,
+        .packet_out_count,
+        .packet_out_bytes,
         .bytes_received,
         .bytes_sent,
         .publish_messages_received,
@@ -1872,7 +1877,12 @@ test "broker publishes coherent retained system statistics" {
             .messages_received => "3",
             // CONNACK, SUBACK, and seven selected client metric PUBLISH
             // packets were complete before this second snapshot was captured.
-            .messages_sent => "9",
+            .messages_sent, .packet_out_count => "9",
+            // The subscriber's transient Session leaves no durable message
+            // store behind after disconnect.
+            .messages_stored,
+            .store_messages_count,
+            .store_messages_bytes,
             .publish_messages_received,
             .publish_messages_dropped,
             .publish_bytes_received,
@@ -1881,7 +1891,7 @@ test "broker publishes coherent retained system statistics" {
             // this subscriber. Those real wire PUBLISH packets contribute to
             // the following sent count/byte snapshot, as they do in Mosquitto.
             .publish_messages_sent, .publish_bytes_sent => "7",
-            .bytes_received, .bytes_sent => {
+            .bytes_received, .bytes_sent, .packet_out_bytes => {
                 try std.testing.expect(try std.fmt.parseInt(
                     u64,
                     matched[0].payload,

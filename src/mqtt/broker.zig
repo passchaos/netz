@@ -1946,6 +1946,11 @@ pub const SystemMetric = enum {
     clients_total,
     messages_received,
     messages_sent,
+    messages_stored,
+    store_messages_count,
+    store_messages_bytes,
+    packet_out_count,
+    packet_out_bytes,
     bytes_received,
     bytes_sent,
     publish_messages_received,
@@ -2004,6 +2009,11 @@ pub const SystemMetric = enum {
             .clients_total => "$SYS/broker/clients/total",
             .messages_received => "$SYS/broker/messages/received",
             .messages_sent => "$SYS/broker/messages/sent",
+            .messages_stored => "$SYS/broker/messages/stored",
+            .store_messages_count => "$SYS/broker/store/messages/count",
+            .store_messages_bytes => "$SYS/broker/store/messages/bytes",
+            .packet_out_count => "$SYS/broker/packet/out/count",
+            .packet_out_bytes => "$SYS/broker/packet/out/bytes",
             .bytes_received => "$SYS/broker/bytes/received",
             .bytes_sent => "$SYS/broker/bytes/sent",
             .publish_messages_received => "$SYS/broker/publish/messages/received",
@@ -2248,6 +2258,11 @@ pub const system_metrics = [_]SystemMetric{
     .clients_total,
     .messages_received,
     .messages_sent,
+    .messages_stored,
+    .store_messages_count,
+    .store_messages_bytes,
+    .packet_out_count,
+    .packet_out_bytes,
     .bytes_received,
     .bytes_sent,
     .publish_messages_received,
@@ -10453,6 +10468,10 @@ fn systemMetricValue(stats_value: Stats, metric: SystemMetric) u64 {
         .clients_total => @intCast(stats_value.sessions),
         .messages_received => stats_value.messages_received,
         .messages_sent => stats_value.messages_sent,
+        .messages_stored, .store_messages_count => @intCast(stats_value.session_queued_messages),
+        .store_messages_bytes => @intCast(stats_value.session_queued_payload_bytes),
+        .packet_out_count => stats_value.messages_sent,
+        .packet_out_bytes => stats_value.bytes_sent,
         .bytes_received => stats_value.bytes_received,
         .bytes_sent => stats_value.bytes_sent,
         .publish_messages_received => @intCast(stats_value.publish_messages_received),
@@ -10707,6 +10726,11 @@ test "MQTT broker $SYS version and client aliases match Mosquitto" {
     try std.testing.expectEqualStrings("$SYS/broker/version", SystemMetric.version.topic());
     try std.testing.expectEqualStrings("$SYS/broker/clients/active", SystemMetric.clients_active.topic());
     try std.testing.expectEqualStrings("$SYS/broker/clients/inactive", SystemMetric.clients_inactive.topic());
+    try std.testing.expectEqualStrings("$SYS/broker/messages/stored", SystemMetric.messages_stored.topic());
+    try std.testing.expectEqualStrings("$SYS/broker/store/messages/count", SystemMetric.store_messages_count.topic());
+    try std.testing.expectEqualStrings("$SYS/broker/store/messages/bytes", SystemMetric.store_messages_bytes.topic());
+    try std.testing.expectEqualStrings("$SYS/broker/packet/out/count", SystemMetric.packet_out_count.topic());
+    try std.testing.expectEqualStrings("$SYS/broker/packet/out/bytes", SystemMetric.packet_out_bytes.topic());
     var buffer: [64]u8 = undefined;
     try std.testing.expectEqualStrings(
         "netz version 0.1.0",

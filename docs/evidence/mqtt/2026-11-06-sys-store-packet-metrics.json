@@ -1,0 +1,34 @@
+{
+  "schema": 1,
+  "date": "2026-11-06",
+  "head": "working-tree",
+  "subject": "MQTT $SYS store and outbound packet metrics",
+  "change": "Broker system statistics now publish $SYS/broker/messages/stored and its $SYS/broker/store/messages/count alias for the durable queued-message gauge, $SYS/broker/store/messages/bytes for queued payload bytes, and $SYS/broker/packet/out/count and $SYS/broker/packet/out/bytes aliases of the existing outbound MQTT control-packet counters. The periodic retained snapshot publishes them through the normal $SYS routing and ACL path.",
+  "tests": {
+    "unit": "src/mqtt/broker.zig checks every new topic string. src/mqtt/broker_tests.zig extends the coherent retained statistics test to 14 traffic metrics and verifies the empty durable store, the packet/out aliases matching the sent control-packet count, and positive outbound packet bytes.",
+    "focused_gate": {
+      "command": "zig build test-lib -Dtest-filter='coherent retained system statistics' -Dtest-filter='SYS version and client aliases' --summary all",
+      "passed": 161,
+      "total": 161,
+      "failed": 0
+    },
+    "compile": {
+      "command": "zig build test-compile",
+      "status": "passed"
+    },
+    "full_library": {
+      "command": "zig build test-lib",
+      "status": "passed",
+      "exit_code": 0,
+      "passed": 6536,
+      "total": 6536,
+      "failed": 0
+    }
+  },
+  "source_sha256": {
+    "src/mqtt/broker.zig": "5bdbeb72d8fbb6bf2aa2b38fbf4583d3b785421a300e1e8508726b75d069f145",
+    "src/mqtt/broker_tests.zig": "601ccc5c4d69c836edabd005cea0c694b48b16740f3d072400c6a05fb6f34e69",
+    "docs/rumqtt_parity.md": "c49e485efc0ebac3d7ff2d3177242b74c3a80f429b5fd3b6e8e664bbf57db861"
+  },
+  "notes": "messages/stored maps to netz's durable session queued-message gauge rather than Mosquitto's full database store, and store/messages/bytes counts queued payload bytes. packet/out/count and packet/out/bytes alias netz's complete outbound MQTT control-packet counters, which is the packet-level reading Mosquitto exposes under those topics. $SYS/broker/heap/* remains unavailable because the library broker does not own an accounting allocator; the example process can supply one separately."
+}
