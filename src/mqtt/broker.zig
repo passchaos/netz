@@ -1887,6 +1887,8 @@ pub const Stats = struct {
     uptime_seconds: u64,
     /// Successfully parsed CONNECT packets admitted to the broker core.
     connections_received: u64,
+    /// Cumulative transports accepted by a listener, including refused peers.
+    sockets_accepted: u64,
     active_connections: usize,
     maximum_active_connections: usize,
     expired_sessions: usize,
@@ -1951,6 +1953,7 @@ pub const SystemMetric = enum {
     store_messages_bytes,
     packet_out_count,
     packet_out_bytes,
+    connections_socket_count,
     bytes_received,
     bytes_sent,
     publish_messages_received,
@@ -2014,6 +2017,7 @@ pub const SystemMetric = enum {
             .store_messages_bytes => "$SYS/broker/store/messages/bytes",
             .packet_out_count => "$SYS/broker/packet/out/count",
             .packet_out_bytes => "$SYS/broker/packet/out/bytes",
+            .connections_socket_count => "$SYS/broker/connections/socket/count",
             .bytes_received => "$SYS/broker/bytes/received",
             .bytes_sent => "$SYS/broker/bytes/sent",
             .publish_messages_received => "$SYS/broker/publish/messages/received",
@@ -2263,6 +2267,7 @@ pub const system_metrics = [_]SystemMetric{
     .store_messages_bytes,
     .packet_out_count,
     .packet_out_bytes,
+    .connections_socket_count,
     .bytes_received,
     .bytes_sent,
     .publish_messages_received,
@@ -2362,6 +2367,9 @@ pub const Broker = struct {
     /// Mosquitto's `$SYS` counters and are not restored from snapshots.
     maximum_active_connections: usize = 0,
     connections_received: u64 = 0,
+    /// Cumulative transports accepted by a listener, including peers that are
+    /// later refused. Lock-free because listener tasks run outside the mutex.
+    sockets_accepted: std.atomic.Value(u64) = .init(0),
     expired_sessions: usize = 0,
     traffic: runtime.TrafficCounters = .{},
     publish_counters: publish_counters.Counters = .{},
@@ -3374,6 +3382,7 @@ pub const Broker = struct {
                 std.Io.Clock.awake.now(self.io).nanoseconds,
             ),
             .connections_received = self.connections_received,
+            .sockets_accepted = self.sockets_accepted.load(.monotonic),
             .active_connections = active_connections,
             .maximum_active_connections = self.maximum_active_connections,
             .expired_sessions = self.expired_sessions,
@@ -10472,6 +10481,7 @@ fn systemMetricValue(stats_value: Stats, metric: SystemMetric) u64 {
         .store_messages_bytes => @intCast(stats_value.session_queued_payload_bytes),
         .packet_out_count => stats_value.messages_sent,
         .packet_out_bytes => stats_value.bytes_sent,
+        .connections_socket_count => stats_value.sockets_accepted,
         .bytes_received => stats_value.bytes_received,
         .bytes_sent => stats_value.bytes_sent,
         .publish_messages_received => @intCast(stats_value.publish_messages_received),
@@ -10731,6 +10741,7 @@ test "MQTT broker $SYS version and client aliases match Mosquitto" {
     try std.testing.expectEqualStrings("$SYS/broker/store/messages/bytes", SystemMetric.store_messages_bytes.topic());
     try std.testing.expectEqualStrings("$SYS/broker/packet/out/count", SystemMetric.packet_out_count.topic());
     try std.testing.expectEqualStrings("$SYS/broker/packet/out/bytes", SystemMetric.packet_out_bytes.topic());
+    try std.testing.expectEqualStrings("$SYS/broker/connections/socket/count", SystemMetric.connections_socket_count.topic());
     var buffer: [64]u8 = undefined;
     try std.testing.expectEqualStrings(
         "netz version 0.1.0",

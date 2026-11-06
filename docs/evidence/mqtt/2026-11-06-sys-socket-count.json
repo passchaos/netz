@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "date": "2026-11-06",
+  "head": "working-tree",
+  "subject": "MQTT $SYS accepted socket count",
+  "change": "The broker now keeps a lock-free cumulative sockets_accepted counter, incremented once for every transport a listener hands to the broker before any policy, capacity or CONNECT outcome. Broker.stats() exposes it, the retained $SYS snapshot publishes $SYS/broker/connections/socket/count, and Prometheus exposition adds mqtt_broker_sockets_accepted_total. The counter is process-local and is not restored from snapshots, matching Mosquitto's cumulative socket-connection counter.",
+  "tests": {
+    "unit": "src/mqtt/broker.zig checks the topic string. src/mqtt/broker_tests.zig expects one accepted socket in the coherent retained statistics test. src/mqtt/broker/prometheus.zig checks the new counter family line.",
+    "focused_gate": {
+      "command": "zig build test-lib -Dtest-filter='Prometheus exposition' -Dtest-filter='coherent retained system statistics' -Dtest-filter='SYS version and client aliases' --summary all",
+      "passed": 161,
+      "total": 161,
+      "failed": 0
+    },
+    "compile": {
+      "command": "zig build test-compile",
+      "status": "passed"
+    },
+    "full_library": {
+      "command": "zig build test-lib",
+      "status": "passed",
+      "exit_code": 0,
+      "passed": 6536,
+      "total": 6536,
+      "failed": 0
+    }
+  },
+  "source_sha256": {
+    "src/mqtt/broker.zig": "d0f14f6742572b745edfdcc9af76672fc395ff4f9325c400afa47fae236764e4",
+    "src/mqtt/broker_tests.zig": "f1f2a7332e8cd483e431101bcac977a63e7d7e110d47c60bf768ede567dd9db6",
+    "src/mqtt/broker/prometheus.zig": "2213172d41ffc98c085ae0d0d8488634131b649e99165d4999314ce588ee6a1a",
+    "docs/rumqtt_parity.md": "76e5865d08f46163e475aa730cfad0c62d03a98c6616e18cfca18ae554555b45"
+  },
+  "notes": "sockets_accepted counts transports that reached the broker accept path, so TLS handshake failures before that boundary and capacity refusals before CONNECT are counted but pre-broker TLS failures are not. Mosquitto counts raw accepted sockets; the difference is limited to transports that never reach the broker. The counter is atomic because listener tasks run outside the state mutex."
+}

@@ -1878,6 +1878,8 @@ test "broker publishes coherent retained system statistics" {
             // CONNACK, SUBACK, and seven selected client metric PUBLISH
             // packets were complete before this second snapshot was captured.
             .messages_sent, .packet_out_count => "9",
+            // One subscriber transport was accepted by the listener.
+            .connections_socket_count => "1",
             // The subscriber's transient Session leaves no durable message
             // store behind after disconnect.
             .messages_stored,

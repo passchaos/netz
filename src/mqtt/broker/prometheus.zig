@@ -45,6 +45,9 @@ fn clientsExpired(stats: broker_mod.Stats) f64 {
 fn clientsTotal(stats: broker_mod.Stats) f64 {
     return integer(stats.connections_received);
 }
+fn socketsAccepted(stats: broker_mod.Stats) f64 {
+    return integer(stats.sockets_accepted);
+}
 fn messagesReceived(stats: broker_mod.Stats) f64 {
     return integer(stats.messages_received);
 }
@@ -159,6 +162,12 @@ pub const declarations = [_]Declaration{
         .help = "CONNECT packets admitted to the broker core.",
         .kind = .counter,
         .value = clientsTotal,
+    },
+    .{
+        .name = "mqtt_broker_sockets_accepted_total",
+        .help = "Listener transports accepted, including peers later refused.",
+        .kind = .counter,
+        .value = socketsAccepted,
     },
     .{
         .name = "mqtt_broker_messages_received_total",
@@ -434,6 +443,7 @@ test "MQTT Prometheus exposition renders stable counter and gauge families" {
     const stats = broker_mod.Stats{
         .uptime_seconds = 42,
         .connections_received = 7,
+        .sockets_accepted = 9,
         .active_connections = 3,
         .maximum_active_connections = 5,
         .expired_sessions = 1,
@@ -481,6 +491,8 @@ test "MQTT Prometheus exposition renders stable counter and gauge families" {
         "mqtt_broker_clients_expired_total 1",
         "# TYPE mqtt_broker_clients_expired_total counter",
         "mqtt_broker_clients_total 7",
+        "# TYPE mqtt_broker_sockets_accepted_total counter",
+        "mqtt_broker_sockets_accepted_total 9",
         "mqtt_broker_messages_received_total 100",
         "mqtt_broker_publish_messages_dropped_total 2",
         "mqtt_broker_sessions 6",
