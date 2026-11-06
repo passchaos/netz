@@ -120,8 +120,12 @@ default, or 30 s with the feature), and `resourceStatus` reports `requested`,
 `acked`, `does_not_exist` or `timeout`. Without the feature an expired timer
 reports `does_not_exist`; with it the same resource reports a transient
 `timeout`, matching grpc-core. A delivered resource clears its timer and
-reports `acked`. `Options.resource_timer_timeout` may shorten the budget, for
-example in deterministic tests.
+reports `acked`. `Controller.expireResourceTimersWithDeadline` additionally
+publishes the does-not-exist effect: a timed-out EDS resource becomes an empty
+assignment, while LDS/RDS/CDS/SDS were never cached and therefore already
+match the absent configuration. The transient-error mode publishes nothing.
+`Options.resource_timer_timeout` may shorten the budget, for example in
+deterministic tests.
 
 `Options.authority` and `Options.additional_authorities` enable `xdstp://`
 resource names for one or more authorities served by the controller's control

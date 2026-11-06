@@ -111,42 +111,53 @@ test "gRPC delta xDS endpoint timer expires independently of its cluster" {
     var threaded = std.Io.Threaded.init(gpa, .{ .async_limit = .unlimited });
     defer threaded.deinit();
     const io = threaded.io();
-    var channel = try grpc.SharedChannel.init(gpa, io, .{ .cleartext_ip = .{ .address = .{ .ip4 = .loopback(1) } } }, .{});
-    defer channel.deinit();
-    var sender = channel.sender();
-    defer sender.deinit();
-    var client = try delta.Client.init(gpa, sender, .{ .node = .{ .id = "test" } });
-    defer client.deinit();
-    const controller = try runtime.Controller.create(gpa, .{
-        .listener_name = "frontend",
-        .target = .{ .authority = "backend.test" },
-        .resource_timer_timeout = .fromMilliseconds(5),
-    });
-    defer controller.deinit();
-    _ = try controller.startDeltaWithDeadline(&client, channel, deadline(io));
+    inline for (.{ false, true }) |transient| {
+        var channel = try grpc.SharedChannel.init(gpa, io, .{ .cleartext_ip = .{ .address = .{ .ip4 = .loopback(1) } } }, .{});
+        defer channel.deinit();
+        var sender = channel.sender();
+        defer sender.deinit();
+        var client = try delta.Client.init(gpa, sender, .{ .node = .{ .id = "test" } });
+        defer client.deinit();
+        const controller = try runtime.Controller.create(gpa, .{
+            .listener_name = "frontend",
+            .target = .{ .authority = "backend.test" },
+            .resource_timer_timeout = .fromMilliseconds(5),
+            .resource_timer_is_transient_error = transient,
+        });
+        defer controller.deinit();
+        _ = try controller.startDeltaWithDeadline(&client, channel, deadline(io));
 
-    const routes = try rds_fixture.encode(gpa, "inline", &.{"backend.test"}, &.{.{ .prefix = "/", .cluster = "a" }}, null);
-    defer gpa.free(routes);
-    const listener = try lds_fixture.encode(gpa, .{ .inline_rds = routes });
-    defer gpa.free(listener);
-    var listener_update = try deltaUpdate(&client, lds.type_url, "l1", &.{deltaPayload(lds.type_url, "frontend", "v1", listener)});
-    defer listener_update.deinit();
-    try std.testing.expectError(error.AdsNotConnected, controller.applyDeltaWithDeadline(&client, listener_update, channel, deadline(io)));
+        const routes = try rds_fixture.encode(gpa, "inline", &.{"backend.test"}, &.{.{ .prefix = "/", .cluster = "a" }}, null);
+        defer gpa.free(routes);
+        const listener = try lds_fixture.encode(gpa, .{ .inline_rds = routes });
+        defer gpa.free(listener);
+        var listener_update = try deltaUpdate(&client, lds.type_url, "l1", &.{deltaPayload(lds.type_url, "frontend", "v1", listener)});
+        defer listener_update.deinit();
+        try std.testing.expectError(error.AdsNotConnected, controller.applyDeltaWithDeadline(&client, listener_update, channel, deadline(io)));
 
-    const cluster = try cds_fixture.cluster(gpa, "a", "eds-a", "");
-    defer gpa.free(cluster);
-    var cluster_update = try deltaUpdate(&client, cds.type_url, "c1", &.{deltaPayload(cds.type_url, "a", "v1", cluster)});
-    defer cluster_update.deinit();
-    try std.testing.expectError(error.AdsNotConnected, controller.applyDeltaWithDeadline(&client, cluster_update, channel, deadline(io)));
+        const cluster = try cds_fixture.cluster(gpa, "a", "eds-a", "");
+        defer gpa.free(cluster);
+        var cluster_update = try deltaUpdate(&client, cds.type_url, "c1", &.{deltaPayload(cds.type_url, "a", "v1", cluster)});
+        defer cluster_update.deinit();
+        try std.testing.expectError(error.AdsNotConnected, controller.applyDeltaWithDeadline(&client, cluster_update, channel, deadline(io)));
 
-    try controller.pollResourceTimers(&client);
-    try std.testing.expectEqual(runtime.ResourceStatus.acked, controller.resourceStatus(cds.type_url, "a").?);
-    try std.testing.expectEqual(runtime.ResourceStatus.requested, controller.resourceStatus(eds.type_url, "eds-a").?);
+        try controller.pollResourceTimers(&client);
+        try std.testing.expectEqual(runtime.ResourceStatus.acked, controller.resourceStatus(cds.type_url, "a").?);
+        try std.testing.expectEqual(runtime.ResourceStatus.requested, controller.resourceStatus(eds.type_url, "eds-a").?);
 
-    try std.Io.sleep(io, .fromMilliseconds(10), .awake);
-    try controller.pollResourceTimers(&client);
-    try std.testing.expectEqual(runtime.ResourceStatus.does_not_exist, controller.resourceStatus(eds.type_url, "eds-a").?);
-    try std.testing.expectEqual(runtime.ResourceStatus.acked, controller.resourceStatus(cds.type_url, "a").?);
+        try std.Io.sleep(io, .fromMilliseconds(10), .awake);
+        // The does-not-exist path publishes an empty EDS assignment; the
+        // transient-error feature leaves the endpoint set pending.
+        try std.testing.expectError(error.AdsNotConnected, controller.expireResourceTimersWithDeadline(&client, channel, deadline(io)));
+        const expected: runtime.ResourceStatus = if (transient) .timeout else .does_not_exist;
+        try std.testing.expectEqual(expected, controller.resourceStatus(eds.type_url, "eds-a").?);
+        try std.testing.expectEqual(runtime.ResourceStatus.acked, controller.resourceStatus(cds.type_url, "a").?);
+        var eds_seen = false;
+        for (controller.entries.items) |entry| {
+            if (std.mem.eql(u8, entry.identity.name, "a")) eds_seen = entry.eds_seen;
+        }
+        try std.testing.expectEqual(!transient, eds_seen);
+    }
 }
 
 test "gRPC SotW xDS resource timer uses the same status surface" {
@@ -182,4 +193,50 @@ test "gRPC SotW xDS resource timer uses the same status surface" {
     try std.testing.expectError(error.AdsNotConnected, controller.applyWithDeadline(&client, update, channel, deadline(io)));
     try controller.pollResourceTimers(&client);
     try std.testing.expectEqual(runtime.ResourceStatus.acked, controller.resourceStatus(lds.type_url, "frontend").?);
+}
+
+test "gRPC delta xDS real EDS delivery replaces a timed-out placeholder" {
+    var threaded = std.Io.Threaded.init(gpa, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var channel = try grpc.SharedChannel.init(gpa, io, .{ .cleartext_ip = .{ .address = .{ .ip4 = .loopback(1) } } }, .{});
+    defer channel.deinit();
+    var sender = channel.sender();
+    defer sender.deinit();
+    var client = try delta.Client.init(gpa, sender, .{ .node = .{ .id = "test" } });
+    defer client.deinit();
+    const controller = try runtime.Controller.create(gpa, .{
+        .listener_name = "frontend",
+        .target = .{ .authority = "backend.test" },
+        .resource_timer_timeout = .fromMilliseconds(5),
+    });
+    defer controller.deinit();
+    _ = try controller.startDeltaWithDeadline(&client, channel, deadline(io));
+
+    const routes = try rds_fixture.encode(gpa, "inline", &.{"backend.test"}, &.{.{ .prefix = "/", .cluster = "a" }}, null);
+    defer gpa.free(routes);
+    const listener = try lds_fixture.encode(gpa, .{ .inline_rds = routes });
+    defer gpa.free(listener);
+    var listener_update = try deltaUpdate(&client, lds.type_url, "l1", &.{deltaPayload(lds.type_url, "frontend", "v1", listener)});
+    defer listener_update.deinit();
+    try std.testing.expectError(error.AdsNotConnected, controller.applyDeltaWithDeadline(&client, listener_update, channel, deadline(io)));
+
+    const cluster = try cds_fixture.cluster(gpa, "a", "eds-a", "");
+    defer gpa.free(cluster);
+    var cluster_update = try deltaUpdate(&client, cds.type_url, "c1", &.{deltaPayload(cds.type_url, "a", "v1", cluster)});
+    defer cluster_update.deinit();
+    try std.testing.expectError(error.AdsNotConnected, controller.applyDeltaWithDeadline(&client, cluster_update, channel, deadline(io)));
+
+    try controller.pollResourceTimers(&client);
+    try std.Io.sleep(io, .fromMilliseconds(10), .awake);
+    try std.testing.expectError(error.AdsNotConnected, controller.expireResourceTimersWithDeadline(&client, channel, deadline(io)));
+    try std.testing.expectEqual(runtime.ResourceStatus.does_not_exist, controller.resourceStatus(eds.type_url, "eds-a").?);
+
+    const assignment = try cds_fixture.assignment(gpa, "eds-a", "127.0.0.1", 1001);
+    defer gpa.free(assignment);
+    var assignment_update = try deltaUpdate(&client, eds.type_url, "e1", &.{deltaPayload(eds.type_url, "eds-a", "v1", assignment)});
+    defer assignment_update.deinit();
+    try std.testing.expectError(error.AdsNotConnected, controller.applyDeltaWithDeadline(&client, assignment_update, channel, deadline(io)));
+    try controller.pollResourceTimers(&client);
+    try std.testing.expectEqual(runtime.ResourceStatus.acked, controller.resourceStatus(eds.type_url, "eds-a").?);
 }

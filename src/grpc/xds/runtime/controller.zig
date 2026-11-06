@@ -30,6 +30,15 @@ const ResourceTimer = struct {
     name: []u8,
     deadline: std.Io.Clock.Timestamp,
     status: ResourceStatus = .requested,
+    /// EDS wire published by the does-not-exist path. It distinguishes that
+    /// placeholder from a real delivery when the status is re-evaluated.
+    timeout_wire: ?[]u8 = null,
+    fn deinit(self: *ResourceTimer, allocator: std.mem.Allocator) void {
+        allocator.free(self.type_url);
+        allocator.free(self.name);
+        if (self.timeout_wire) |wire| allocator.free(wire);
+        self.* = undefined;
+    }
 };
 pub const Controller = struct {
     allocator: std.mem.Allocator,
@@ -103,10 +112,7 @@ pub const Controller = struct {
         self.projections.deinit(self.allocator);
         for (self.entries.items) |*value| value.deinit();
         self.entries.deinit(self.allocator);
-        for (self.resource_timers.items) |*timer| {
-            self.allocator.free(timer.type_url);
-            self.allocator.free(timer.name);
-        }
+        for (self.resource_timers.items) |*timer| timer.deinit(self.allocator);
         self.resource_timers.deinit(self.allocator);
         self.arena.deinit();
         self.allocator.destroy(self);
@@ -577,11 +583,11 @@ pub const Controller = struct {
         var index: usize = 0;
         while (index < self.resource_timers.items.len) {
             const timer = self.resource_timers.items[index];
+            const cached = self.cachedResource(timer.type_url, timer.name);
             if (!resourceTimerDesired(client, timer.type_url, timer.name) or
-                self.cachedResource(timer.type_url, timer.name))
+                (cached and !self.edsTimeoutPlaceholder(timer)))
             {
-                self.allocator.free(timer.type_url);
-                self.allocator.free(timer.name);
+                self.resource_timers.items[index].deinit(self.allocator);
                 _ = self.resource_timers.swapRemove(index);
                 continue;
             }
@@ -638,9 +644,78 @@ pub const Controller = struct {
     /// this resource and no timer is pending. Call a timer method first so
     /// newly desired names are registered.
     pub fn resourceStatus(self: *Controller, type_url: []const u8, name: []const u8) ?ResourceStatus {
+        if (self.findResourceTimer(type_url, name)) |index| {
+            const status = self.resource_timers.items[index].status;
+            if (status != .requested) return status;
+        }
         if (self.cachedResource(type_url, name)) return .acked;
         if (self.findResourceTimer(type_url, name)) |index| return self.resource_timers.items[index].status;
         return null;
+    }
+    /// True when an expired EDS timer still matches the empty assignment that
+    /// its own does-not-exist publication installed. A different wire means a
+    /// real delivery replaced the placeholder, so the timer can be dropped.
+    fn edsTimeoutPlaceholder(self: *const Controller, timer: ResourceTimer) bool {
+        if (timer.status == .requested) return false;
+        const wire = timer.timeout_wire orelse return false;
+        if (!std.mem.eql(u8, timer.type_url, eds.type_url)) return false;
+        for (self.entries.items) |entry| {
+            const cluster = entry.cluster orelse continue;
+            if (!std.mem.eql(u8, cluster.resource.value.edsName(), timer.name)) continue;
+            const snapshot = entry.snapshot orelse return false;
+            return std.mem.eql(u8, snapshot.resource.wire, wire);
+        }
+        return false;
+    }
+    fn resourceTimerDue(timer: ResourceTimer, now: std.Io.Clock.Timestamp) bool {
+        return timer.status == .requested and timer.deadline.raw.nanoseconds <= now.raw.nanoseconds;
+    }
+    /// Expire due initial-fetch timers and publish the does-not-exist effect.
+    /// grpc-core treats a timed-out EDS resource as absent, which netz models
+    /// as an empty assignment; LDS/RDS/CDS/SDS resources were never cached, so
+    /// their absent configuration already matches. With
+    /// `resource_timer_is_transient_error` the timer only reports `timeout`
+    /// and publishes nothing. Statuses change only after publication succeeds,
+    /// so a failed call can be retried.
+    pub fn expireResourceTimersWithDeadline(self: *Controller, client: anytype, destination: shared.SharedChannel, deadline: std.Io.Clock.Timestamp) Error!u64 {
+        if (self.latest == null) return error.XdsNotStarted;
+        _ = try @import("../../../internal/deadline.zig").usableAwake(client.sender.state.io, deadline);
+        try self.refreshResourceTimers(client);
+        const io = client.sender.state.io;
+        const now = std.Io.Clock.Timestamp.now(io, .awake);
+        const expired: ResourceStatus = if (self.options.resource_timer_is_transient_error) .timeout else .does_not_exist;
+        var plan = try Plan.create(self, null);
+        defer plan.deinit();
+        var changed = false;
+        if (expired == .does_not_exist) for (self.resource_timers.items) |*timer| {
+            if (!resourceTimerDue(timer.*, now)) continue;
+            if (!std.mem.eql(u8, timer.type_url, eds.type_url)) continue;
+            for (plan.entries.items) |*item| {
+                const cluster = item.cluster orelse continue;
+                if (!std.mem.eql(u8, cluster.resource.value.edsName(), timer.name)) continue;
+                const empty = try self.emptyEds(io, cluster);
+                const timeout_wire = try self.allocator.dupe(u8, empty.resource.wire);
+                if (timer.timeout_wire) |old| self.allocator.free(old);
+                timer.timeout_wire = timeout_wire;
+                if (item.snapshot) |old| old.release();
+                item.snapshot = empty;
+                item.eds_seen = true;
+                changed = true;
+            }
+        };
+        const revision = if (changed)
+            (if (@TypeOf(client) == *delta.Client)
+                try self.publishDelta(client, &plan, self.latest.?, false, destination, deadline)
+            else
+                try self.publish(client, &plan, self.latest.?, false, destination, deadline))
+        else
+            try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
+        for (self.resource_timers.items) |*timer| {
+            if (!resourceTimerDue(timer.*, now)) continue;
+            timer.status = expired;
+        }
+        _ = try client.flushWithDeadline(deadline);
+        return revision;
     }
     /// Remove cached secrets whose delta TTL has expired and forget their
     /// accepted versions. Returns true when at least one secret expired.

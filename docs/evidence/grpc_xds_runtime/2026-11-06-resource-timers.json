@@ -3,13 +3,13 @@
   "date": "2026-11-06",
   "head": "working-tree",
   "subject": "gRPC xDS initial resource timers",
-  "change": "runtime.Options.resource_timer_is_transient_error implements the gRPC xDS server feature of the same name together with the initial resource-fetch timer. Controller.nextResourceTimerExpiry and pollResourceTimers arm a timer for every subscribed but undelivered LDS/RDS/CDS/EDS/SDS resource, and resourceStatus reports requested, acked, does_not_exist or timeout. The default budget is 15 s, or 30 s with the feature; an expired timer reports does_not_exist, or a transient timeout with the feature, matching grpc-core's ResourceState. Delivery clears the timer. Options.resource_timer_timeout may shorten the budget.",
+  "change": "runtime.Options.resource_timer_is_transient_error implements the gRPC xDS server feature of the same name together with the initial resource-fetch timer. Controller.nextResourceTimerExpiry and pollResourceTimers arm a timer for every subscribed but undelivered LDS/RDS/CDS/EDS/SDS resource, and resourceStatus reports requested, acked, does_not_exist or timeout. The default budget is 15 s, or 30 s with the feature; an expired timer reports does_not_exist, or a transient timeout with the feature, matching grpc-core's ResourceState. Controller.expireResourceTimersWithDeadline publishes the does-not-exist effect: a timed-out EDS resource becomes an empty assignment, while the transient mode publishes nothing. Delivery clears the timer. Options.resource_timer_timeout may shorten the budget.",
   "tests": {
-    "unit": "src/grpc/xds/runtime/resource_timer_tests.zig covers the delta and SotW clients: requested to does_not_exist without the feature, requested to timeout with it, delivery clearing the listener timer while the referenced CDS stays pending, and an EDS timer expiring independently next to an acked cluster.",
+    "unit": "src/grpc/xds/runtime/resource_timer_tests.zig covers the delta and SotW clients: requested to does_not_exist without the feature, requested to timeout with it, delivery clearing the listener timer while the referenced CDS stays pending, an EDS timer expiring independently next to an acked cluster including the default empty-assignment publication and the transient mode leaving the endpoint set pending, and a real EDS delivery replacing the timed-out placeholder.",
     "focused_gate": {
-      "command": "zig build test-lib -Dtest-filter='resource timer' -Dtest-filter='xDS runtime' --summary all",
-      "passed": 198,
-      "total": 198,
+      "command": "zig build test-lib -Dtest-filter='resource timer' -Dtest-filter='xDS runtime' -Dtest-filter='timed-out placeholder' --summary all",
+      "passed": 199,
+      "total": 199,
       "failed": 0
     },
     "compile": {
@@ -20,17 +20,17 @@
       "command": "zig build test-lib",
       "status": "passed",
       "exit_code": 0,
-      "passed": 6528,
-      "total": 6528,
+      "passed": 6529,
+      "total": 6529,
       "failed": 0
     }
   },
   "source_sha256": {
-    "src/grpc/xds/runtime/controller.zig": "d2511d80aa26a4e90287bd7865aa78d1c21ce7173f071e09947661364654ad07",
+    "src/grpc/xds/runtime/controller.zig": "a1c45aa3eb3cf6a0d76d97ad91969e04c542eaa42b964793a3cea5be53228116",
     "src/grpc/xds/runtime/options.zig": "277eea3187d8eec231ed66551dd0e350ec643488e7f0aa5a63ef7b6efeb22af5",
     "src/grpc/xds/runtime.zig": "c8ea6a8260ca10ea36ad1e541782d47fb4d8584f03a96c2d80f514c81f5eb1ec",
-    "src/grpc/xds/runtime/resource_timer_tests.zig": "6fa96553cc7fde85cca452d2358d1943b6320237d93a678bd3c8961a613d7449",
-    "docs/grpc_xds_runtime.md": "abd25c206f52adeb382e8fc20dac548f410ea26eb44e59d56450b2f187d460c0"
+    "src/grpc/xds/runtime/resource_timer_tests.zig": "c1e7b5702825cc690e36fddc80dc384f579cc8084e76351dd385bf738cf4fdf0",
+    "docs/grpc_xds_runtime.md": "758faeeb73eeaea490b04d99edcbbd7e23d4c698a820ca64cb4eb597c8fd1d81"
   },
-  "notes": "The timer follows grpc-core's per-resource ResourceState: it only arms for a subscribed resource that has never been cached, and a timed-out resource stays subscribed so a later delivery still applies. netz exposes the outcome through resourceStatus; cached configuration is unchanged because the timed-out resource was never cached. Callers drive the timer with nextResourceTimerExpiry or pollResourceTimers after each discovery step so newly desired names are registered."
+  "notes": "The timer follows grpc-core's per-resource ResourceState: it only arms for a subscribed resource that has never been cached, and a timed-out resource stays subscribed so a later delivery still applies. netz exposes the outcome through resourceStatus; cached configuration is unchanged because the timed-out resource was never cached. expireResourceTimersWithDeadline publishes only the EDS empty assignment, which is the one type whose absent state was previously represented as pending. Statuses change after successful publication so a failed call can be retried. Callers drive the timer with nextResourceTimerExpiry, pollResourceTimers or expireResourceTimersWithDeadline after each discovery step so newly desired names are registered."
 }
