@@ -39,8 +39,12 @@ pub const Hcm = struct {
     filters: []const Filter,
     /// Raw `envoy.filters.http.rbac.v3.RBAC` config, when present.
     rbac_config: ?[]const u8 = null,
+    /// HCM filter instance name that owns RBAC overrides.
+    rbac_name: ?[]const u8 = null,
     /// Raw `envoy.filters.http.fault.v3.HTTPFault` config, when present.
     fault_config: ?[]const u8 = null,
+    /// HCM filter instance name that owns fault overrides.
+    fault_name: ?[]const u8 = null,
 };
 pub const Listener = struct { name: []const u8, hcm: Hcm };
 pub const Owned = struct {

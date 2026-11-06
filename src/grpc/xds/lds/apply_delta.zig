@@ -67,14 +67,16 @@ pub fn applyListener(self: *ctl.Controller, client: *delta.Client, update: delta
         defer subscription.deinit();
         const empty = try self.empty("_");
         defer empty.release();
-        const projection = try Projection.create(self.allocator, empty, null, null, null);
+        const projection = try Projection.create(self.allocator, empty, null, null, null, null, null);
         defer projection.release();
         const revision = try self.publishDelta(client, projection, destination, deadline);
         subscription.commit();
         if (self.listener) |*previous| previous.deinit();
         self.listener = null;
         self.rbac_config = null;
+        self.rbac_name = null;
         self.fault_config = null;
+        self.fault_name = null;
         if (self.routes) |previous| previous.release();
         self.routes = null;
         self.routes_accepted = false;
@@ -98,7 +100,7 @@ pub fn applyListener(self: *ctl.Controller, client: *delta.Client, update: delta
         } else try self.empty(hcm.route_source.rds);
         var source_owned = true;
         defer if (source_owned) source.release();
-        const projection = try Projection.create(self.allocator, source, hcm.max_stream_duration, hcm.rbac_config, hcm.fault_config);
+        const projection = try Projection.create(self.allocator, source, hcm.max_stream_duration, hcm.rbac_config, hcm.fault_config, hcm.rbac_name, hcm.fault_name);
         defer projection.release();
         const revision = try self.publishDelta(client, projection, destination, deadline);
         subscription.commit();
@@ -106,7 +108,9 @@ pub fn applyListener(self: *ctl.Controller, client: *delta.Client, update: delta
         self.listener = candidates.items[index];
         candidates.items[index] = null;
         self.rbac_config = hcm.rbac_config;
+        self.rbac_name = hcm.rbac_name;
         self.fault_config = hcm.fault_config;
+        self.fault_name = hcm.fault_name;
         if (self.routes) |previous| previous.release();
         self.routes = source;
         self.routes_accepted = hcm.route_source == .inline_rds or same;
@@ -200,7 +204,7 @@ pub fn applyRoutes(self: *ctl.Controller, client: *delta.Client, update: delta.U
         }
         const empty = try self.empty(name);
         defer empty.release();
-        const projection = try Projection.create(self.allocator, empty, listener.value.hcm.max_stream_duration, self.rbac_config, self.fault_config);
+        const projection = try Projection.create(self.allocator, empty, listener.value.hcm.max_stream_duration, self.rbac_config, self.fault_config, self.rbac_name, self.fault_name);
         defer projection.release();
         const revision = try self.publishDelta(client, projection, destination, deadline);
         empty.retain();
@@ -218,7 +222,7 @@ pub fn applyRoutes(self: *ctl.Controller, client: *delta.Client, update: delta.U
             if (first_error) |err| return err;
             return try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
         }
-        const projection = try Projection.create(self.allocator, snapshot, listener.value.hcm.max_stream_duration, self.rbac_config, self.fault_config);
+        const projection = try Projection.create(self.allocator, snapshot, listener.value.hcm.max_stream_duration, self.rbac_config, self.fault_config, self.rbac_name, self.fault_name);
         defer projection.release();
         const revision = try self.publishDelta(client, projection, destination, deadline);
         snapshot.retain();

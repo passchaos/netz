@@ -54,7 +54,7 @@ pub fn apply(self: *ctl.Controller, client: *ads.Client, update: ads.Update, des
         } else try self.empty(hcm.route_source.rds);
         var source_owned = true;
         defer if (source_owned) source.release();
-        const projection = try Projection.create(self.allocator, source, hcm.max_stream_duration, hcm.rbac_config, hcm.fault_config);
+        const projection = try Projection.create(self.allocator, source, hcm.max_stream_duration, hcm.rbac_config, hcm.fault_config, hcm.rbac_name, hcm.fault_name);
         defer projection.release();
         const revision = try self.publish(client, projection, destination, deadline);
         if (subscription) |*prepared| prepared.commit();
@@ -62,7 +62,9 @@ pub fn apply(self: *ctl.Controller, client: *ads.Client, update: ads.Update, des
         self.listener = candidates.items[index];
         candidates.items[index] = null;
         self.rbac_config = hcm.rbac_config;
+        self.rbac_name = hcm.rbac_name;
         self.fault_config = hcm.fault_config;
+        self.fault_name = hcm.fault_name;
         if (self.routes) |previous| previous.release();
         self.routes = source;
         source_owned = false;
@@ -81,13 +83,15 @@ pub fn apply(self: *ctl.Controller, client: *ads.Client, update: ads.Update, des
     }
     const empty = try self.empty("_");
     defer empty.release();
-    const projection = try Projection.create(self.allocator, empty, null, null, null);
+    const projection = try Projection.create(self.allocator, empty, null, null, null, null, null);
     defer projection.release();
     const revision = try self.publish(client, projection, destination, deadline);
     if (self.listener) |*previous| previous.deinit();
     self.listener = null;
     self.rbac_config = null;
+    self.rbac_name = null;
     self.fault_config = null;
+    self.fault_name = null;
     if (self.routes) |previous| previous.release();
     self.routes = null;
     // Keep the last named RDS subscription; empty names would be wildcard.

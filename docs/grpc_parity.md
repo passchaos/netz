@@ -3809,9 +3809,11 @@ rewrites remain open for the full library/control-plane objective.
 and `and`/`or`/`not` principals and permissions with ALLOW/DENY policies.
 The official-schema interop gate denies unary and duplex probes carrying
 `x-deny` without reaching either backend and re-allows the same header after a
-listener without RBAC replaces the policy. Authenticated/IP/metadata/
+listener without RBAC replaces the policy. Route and virtual-host
+`typed_per_filter_config` overrides replace or disable RBAC and fault policies
+per route, with route scope winning. Authenticated/IP/metadata/
 requested-server-name principals, destination IP/port/metadata permissions,
-CEL conditions and route/vhost overrides remain open.
+CEL conditions and other filters' route overrides remain open.
 `envoy.filters.http.fault` is decoded and enforced client-side for fixed and
 header-driven abort/delay, `FractionalPercent`, `max_active_faults` and
 `upstream_cluster` scoping. Unary attempts, retries, hedging and streaming
@@ -3820,9 +3822,11 @@ backend and delays are bounded by the attempt deadline. The official-schema
 interop gate carries a matching `upstream_cluster`, aborts on gRPC and HTTP
 status headers, verifies a zero-percent header override routes normally, and
 measures a real header delay before backend delivery. Fault header matchers
-gate injection and are shared with RBAC's HeaderMatcher decoder. Fault filters
-placed before RBAC and fault downstream-node/rate-limit fields are rejected;
-other non-router filters remain open.
+gate injection and are shared with RBAC's HeaderMatcher decoder. The same gate
+publishes a route `HTTPFault` override that replaces the listener policy and
+requires the override's status with no backend call. Fault filters placed
+before RBAC and fault downstream-node/rate-limit fields are rejected; other
+non-router filters remain open.
 
 ## SotW resource omission and initial discovery
 

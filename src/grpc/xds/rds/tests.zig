@@ -486,3 +486,67 @@ test "gRPC RDS applies URI template path rewrites" {
         try selected.path_rewrite.?.write(gpa, "/cat/dog", &rewritten),
     );
 }
+
+fn anyBytes(allocator: std.mem.Allocator, type_url: []const u8, value: []const u8) ![]u8 {
+    var any = fixture.Builder{ .allocator = allocator };
+    defer any.deinit();
+    try any.bytes(1, type_url);
+    try any.bytes(2, value);
+    return any.data.toOwnedSlice(allocator);
+}
+fn overrideEntry(allocator: std.mem.Allocator, name: []const u8, any_bytes: []const u8) ![]u8 {
+    var entry = fixture.Builder{ .allocator = allocator };
+    defer entry.deinit();
+    try entry.bytes(1, name);
+    try entry.bytes(2, any_bytes);
+    return entry.data.toOwnedSlice(allocator);
+}
+test "gRPC RDS decodes route and virtual-host per-filter overrides" {
+    const rbac_policy = "\x08\x00\x12\x0d\x0a\x01p\x12\x08\x0a\x02\x18\x01\x12\x02\x18\x01";
+    var per_route = fixture.Builder{ .allocator = gpa };
+    defer per_route.deinit();
+    try per_route.bytes(2, rbac_policy);
+    const rbac_any = try anyBytes(gpa, "type.googleapis.com/envoy.extensions.filters.http.rbac.v3.RBACPerRoute", per_route.data.items);
+    defer gpa.free(rbac_any);
+    const route_entry = try overrideEntry(gpa, "rbac", rbac_any);
+    defer gpa.free(route_entry);
+    var route_extra = fixture.Builder{ .allocator = gpa };
+    defer route_extra.deinit();
+    try route_extra.bytes(13, route_entry);
+
+    var abort = fixture.Builder{ .allocator = gpa };
+    defer abort.deinit();
+    try abort.number(5, 14);
+    var percentage = fixture.Builder{ .allocator = gpa };
+    defer percentage.deinit();
+    try percentage.number(1, 100);
+    try percentage.number(2, 0);
+    try abort.bytes(3, percentage.data.items);
+    var fault = fixture.Builder{ .allocator = gpa };
+    defer fault.deinit();
+    try fault.bytes(2, abort.data.items);
+    const fault_any = try anyBytes(gpa, "type.googleapis.com/envoy.extensions.filters.http.fault.v3.HTTPFault", fault.data.items);
+    defer gpa.free(fault_any);
+    const host_entry = try overrideEntry(gpa, "fault", fault_any);
+    defer gpa.free(host_entry);
+    var host_extra = fixture.Builder{ .allocator = gpa };
+    defer host_extra.deinit();
+    try host_extra.bytes(15, host_entry);
+
+    const bytes = try fixture.encodeWithHostExtra(gpa, "routes", &.{"backend.test"}, &.{.{
+        .exact = "/svc/Get",
+        .route_extra = route_extra.data.items,
+    }}, null, host_extra.data.items);
+    defer gpa.free(bytes);
+    var owned = try rds.decode(gpa, bytes, .{});
+    defer owned.deinit();
+    const host = owned.value.virtual_hosts[0];
+    try std.testing.expectEqual(@as(usize, 1), host.overrides.len);
+    try std.testing.expectEqual(rds.resource.OverrideKind.fault, host.overrides[0].kind.?);
+    try std.testing.expectEqualStrings("fault", host.overrides[0].name);
+    const route = host.routes[0];
+    try std.testing.expectEqual(@as(usize, 1), route.overrides.len);
+    try std.testing.expectEqual(rds.resource.OverrideKind.rbac, route.overrides[0].kind.?);
+    try std.testing.expectEqualStrings("rbac", route.overrides[0].name);
+    try std.testing.expectEqualStrings(rbac_policy, route.overrides[0].config);
+}

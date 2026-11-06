@@ -17,6 +17,8 @@ pub const Options = struct {
     trusted_xds_server: bool = false,
 };
 pub const Selection = struct {
+    virtual_host: usize,
+    route: usize,
     cluster: []const u8,
     hash: u64,
     duration: ?std.Io.Duration,
@@ -103,7 +105,7 @@ pub const Snapshot = struct {
         if (request.budget) |budget| try budget.check();
         if (request.path.len > request.max_header_bytes or request.authority.len > request.max_header_bytes) return error.RouteMetadataLimitExceeded;
         const host = self.virtual_host orelse return error.NoMatchingRoute;
-        for (self.resource.value.virtual_hosts[host].routes) |route| {
+        for (self.resource.value.virtual_hosts[host].routes, 0..) |route, route_index| {
             if (request.budget) |budget| try budget.check();
             var captures: routing.template.Captures = .{};
             const matched = switch (route.path) {
@@ -251,6 +253,8 @@ pub const Snapshot = struct {
                 if (policy.terminal and hash != null) break;
             }
             return .{
+                .virtual_host = host,
+                .route = route_index,
                 .cluster = cluster,
                 .hash = hash orelse random.int(u64),
                 .duration = forward.max_stream_duration orelse self.options.default_max_stream_duration,
@@ -291,8 +295,7 @@ pub const Snapshot = struct {
         };
         return selected;
     }
-    pub fn resolveUnary(self: *Snapshot, context: selector.Context, base: service.ResolvedUnary) selector.Error!service.ResolvedUnary {
-        const selection = try self.selectRandom(context, base.options);
+    pub fn applyUnary(context: selector.Context, base: service.ResolvedUnary, selection: Selection) selector.Error!service.ResolvedUnary {
         var resolved = base;
         resolved.options = try apply(base.options, selection);
         resolved.retry_policy = selection.retry;
@@ -302,12 +305,19 @@ pub const Snapshot = struct {
         resolved.hedging_policy = null;
         return resolved;
     }
-    pub fn resolveStreaming(self: *Snapshot, context: selector.Context, base: service.ResolvedStreaming) selector.Error!service.ResolvedStreaming {
-        const selection = try self.selectRandom(context, base.options);
+    pub fn applyStreaming(base: service.ResolvedStreaming, selection: Selection) selector.Error!service.ResolvedStreaming {
         var resolved = base;
         resolved.options = try apply(base.options, selection);
         resolved.hedging_policy = null;
         return resolved;
+    }
+    pub fn resolveUnary(self: *Snapshot, context: selector.Context, base: service.ResolvedUnary) selector.Error!service.ResolvedUnary {
+        const selection = try self.selectRandom(context, base.options);
+        return applyUnary(context, base, selection);
+    }
+    pub fn resolveStreaming(self: *Snapshot, context: selector.Context, base: service.ResolvedStreaming) selector.Error!service.ResolvedStreaming {
+        const selection = try self.selectRandom(context, base.options);
+        return applyStreaming(base, selection);
     }
     fn retainContext(context: *anyopaque) void {
         const self: *Snapshot = @ptrCast(@alignCast(context));

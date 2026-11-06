@@ -222,6 +222,12 @@ fn decodePolicy(arena: std.mem.Allocator, bytes: []const u8, limits: Limits) Err
 }
 
 /// Decode an `envoy.extensions.filters.http.rbac.v3.RBAC` filter config.
+/// Decode a bare `envoy.config.rbac.v3.RBAC` policy, as carried by an
+/// `RBACPerRoute` override.
+pub fn decodePolicyBytes(arena: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!Policy {
+    return decodePolicy(arena, bytes, limits);
+}
+
 /// The enforcing policy is the nested `rules` message (field 1).
 pub fn decode(arena: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!Policy {
     var reader = pb.Reader{ .bytes = bytes };

@@ -14,6 +14,7 @@ pub const Limits = struct {
     max_cluster_entries: usize = 16384,
     max_referenced_clusters: usize = 4096,
     max_hash_policies: usize = 64,
+    max_overrides: usize = 64,
     max_total_regex_instructions: usize = 65536,
     max_storage_bytes: usize = 64 * 1024 * 1024,
     regex: routing.regex.Limits = .{},
@@ -62,6 +63,17 @@ pub const Forward = struct {
     path_rewrite: ?PathRewrite = null,
     host_rewrite: ?HostRewrite = null,
 };
+pub const OverrideKind = enum { rbac, fault };
+/// One `typed_per_filter_config` entry. `kind` is null when a disabled
+/// `FilterConfig` omitted its inner config; the projection resolves it by
+/// matching the HCM filter name.
+pub const Override = struct {
+    name: []const u8 = "",
+    kind: ?OverrideKind = null,
+    disabled: bool = false,
+    /// `envoy.config.rbac.v3.RBAC` for RBAC or HTTPFault for fault.
+    config: []const u8 = "",
+};
 pub const Route = struct {
     path: routing.string.Match,
     headers: []const routing.header.Match,
@@ -71,8 +83,13 @@ pub const Route = struct {
     request_headers_to_remove: []const []const u8 = &.{},
     response_headers_to_add: []const @import("../../call.zig").HeaderMutation = &.{},
     response_headers_to_remove: []const []const u8 = &.{},
+    overrides: []const Override = &.{},
 };
-pub const VirtualHost = struct { domains: []const []const u8, routes: []const Route };
+pub const VirtualHost = struct {
+    domains: []const []const u8,
+    routes: []const Route,
+    overrides: []const Override = &.{},
+};
 pub const Config = struct { name: []const u8, virtual_hosts: []const VirtualHost };
 pub const Owned = struct {
     wire: []const u8 = "",

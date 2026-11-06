@@ -3,10 +3,14 @@ const std = @import("std");
 pub const Builder = @import("../cds/testing.zig").Builder;
 pub const Route = struct { prefix: []const u8 = "", exact: ?[]const u8 = null, regex: ?[]const u8 = null, cluster: []const u8 = "a", match_extra: []const u8 = "", action_extra: []const u8 = "", route_extra: []const u8 = "", retry: ?[]const u8 = null };
 pub fn encode(gpa: std.mem.Allocator, name: []const u8, domains: []const []const u8, routes: []const Route, retry: ?[]const u8) ![]u8 {
+    return encodeWithHostExtra(gpa, name, domains, routes, retry, "");
+}
+pub fn encodeWithHostExtra(gpa: std.mem.Allocator, name: []const u8, domains: []const []const u8, routes: []const Route, retry: ?[]const u8, host_extra: []const u8) ![]u8 {
     var host = Builder{ .allocator = gpa };
     defer host.deinit();
     for (domains) |domain| try host.bytes(2, domain);
     if (retry) |raw| try host.bytes(16, raw);
+    try host.data.appendSlice(gpa, host_extra);
     for (routes) |route| {
         var match = Builder{ .allocator = gpa };
         defer match.deinit();

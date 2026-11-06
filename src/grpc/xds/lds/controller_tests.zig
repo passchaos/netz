@@ -234,3 +234,118 @@ test "gRPC LDS fault injection aborts unary and streaming before any backend" {
         else => return error.UnexpectedStreamEvent,
     }
 }
+
+fn resolvePathWith(
+    channel: grpc.SharedChannel,
+    io: std.Io,
+    path: []const u8,
+    metadata: []const @import("../../../http2/mod.zig").Hpack.HeaderField,
+) !@import("../../service_config.zig").ResolvedUnary {
+    const generation = channel.state.retainConfig().?;
+    defer generation.release();
+    const selected = generation.call_selector.?;
+    return selected.unary_fn(selected.context, .{ .allocator = gpa, .io = io, .deadline = null, .channel_id = 42 }, .{ .options = .{ .path = path, .message = "request", .metadata = metadata }, .retry_policy = null, .hedging_policy = null, .wait_for_ready = false });
+}
+
+test "gRPC LDS RBAC route override replaces the listener policy" {
+    var threaded = std.Io.Threaded.init(gpa, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var channel = try grpc.SharedChannel.init(gpa, io, .{ .resolved = .{ .endpoints = &.{ .{ .cleartext_ip = .{ .address = .{ .ip4 = .loopback(1) }, .hierarchical_path = &.{"cluster:a"} } }, .{ .cleartext_ip = .{ .address = .{ .ip4 = .loopback(2) }, .hierarchical_path = &.{"cluster:b"} } } } } }, .{ .service_config_json = manager });
+    defer channel.deinit();
+    var sender = channel.sender();
+    defer sender.deinit();
+    var client = try ads.Client.init(gpa, sender, .{ .node = .{ .id = "test" } });
+    defer client.deinit();
+    var controller = try lds.Controller.init(gpa, .{ .listener_name = "frontend", .authority = "backend.test" });
+    defer controller.deinit();
+    try controller.subscribe(&client);
+
+    // Route-level ALLOW override for the exact Get path.
+    const rbac_allow = "\x08\x00\x12\x0d\x0a\x01p\x12\x08\x0a\x02\x18\x01\x12\x02\x18\x01";
+    var per_route = fixture.Builder{ .allocator = gpa };
+    defer per_route.deinit();
+    try per_route.bytes(2, rbac_allow);
+    var any = fixture.Builder{ .allocator = gpa };
+    defer any.deinit();
+    try any.bytes(1, "type.googleapis.com/envoy.extensions.filters.http.rbac.v3.RBACPerRoute");
+    try any.bytes(2, per_route.data.items);
+    var entry = fixture.Builder{ .allocator = gpa };
+    defer entry.deinit();
+    try entry.bytes(1, "rbac");
+    try entry.bytes(2, any.data.items);
+    var route_extra = fixture.Builder{ .allocator = gpa };
+    defer route_extra.deinit();
+    try route_extra.bytes(13, entry.data.items);
+
+    const routes = try route_fixture.encode(gpa, "inline", &.{"backend.test"}, &.{
+        .{ .exact = "/demo.Service/Get", .route_extra = route_extra.data.items },
+        .{ .prefix = "/" },
+    }, null);
+    defer gpa.free(routes);
+    const rbac_value = "\x0a\x1b\x08\x01\x12\x17\x0a\x01p\x12\x12\x0a\x0c\x22\x0a\x0a\x06x-deny\x38\x01\x12\x02\x18\x01";
+    const listener = try fixture.encode(gpa, .{ .inline_rds = routes, .filters = &.{
+        .{ .name = "rbac", .type_name = lds.resource.rbac_type, .value = rbac_value },
+        .{},
+    } });
+    defer gpa.free(listener);
+    try apply(&controller, &client, channel, io, lds.type_url, "l1", listener);
+
+    const denied = [_]@import("../../../http2/mod.zig").Hpack.HeaderField{.{ .name = "x-deny", .value = "1" }};
+    const overridden = try resolvePathWith(channel, io, "/demo.Service/Get", &denied);
+    try std.testing.expectEqualStrings("cluster:a", overridden.options.xds_cluster.?);
+    try std.testing.expectError(
+        error.PermissionDenied,
+        resolvePathWith(channel, io, "/demo.Service/Other", &denied),
+    );
+}
+
+test "gRPC LDS fault route override disables injection for the matched route" {
+    var threaded = std.Io.Threaded.init(gpa, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var channel = try grpc.SharedChannel.init(gpa, io, .{ .resolved = .{ .endpoints = &.{ .{ .cleartext_ip = .{ .address = .{ .ip4 = .loopback(1) }, .hierarchical_path = &.{"cluster:a"} } }, .{ .cleartext_ip = .{ .address = .{ .ip4 = .loopback(2) }, .hierarchical_path = &.{"cluster:b"} } } } } }, .{ .service_config_json = manager });
+    defer channel.deinit();
+    var sender = channel.sender();
+    defer sender.deinit();
+    var client = try ads.Client.init(gpa, sender, .{ .node = .{ .id = "test" } });
+    defer client.deinit();
+    var controller = try lds.Controller.init(gpa, .{ .listener_name = "frontend", .authority = "backend.test" });
+    defer controller.deinit();
+    try controller.subscribe(&client);
+
+    const fault_value = try fixedAbort(gpa, 14);
+    defer gpa.free(fault_value);
+    // FilterConfig { disabled: true } for the "fault" filter on Get.
+    var filter_config = fixture.Builder{ .allocator = gpa };
+    defer filter_config.deinit();
+    try filter_config.number(3, 1);
+    var any = fixture.Builder{ .allocator = gpa };
+    defer any.deinit();
+    try any.bytes(1, "type.googleapis.com/envoy.config.route.v3.FilterConfig");
+    try any.bytes(2, filter_config.data.items);
+    var entry = fixture.Builder{ .allocator = gpa };
+    defer entry.deinit();
+    try entry.bytes(1, "fault");
+    try entry.bytes(2, any.data.items);
+    var route_extra = fixture.Builder{ .allocator = gpa };
+    defer route_extra.deinit();
+    try route_extra.bytes(13, entry.data.items);
+
+    const routes = try route_fixture.encode(gpa, "inline", &.{"backend.test"}, &.{
+        .{ .exact = "/demo.Service/Get", .route_extra = route_extra.data.items },
+        .{ .prefix = "/" },
+    }, null);
+    defer gpa.free(routes);
+    const listener = try fixture.encode(gpa, .{ .inline_rds = routes, .filters = &.{
+        .{ .name = "fault", .type_name = lds.resource.fault_type, .value = fault_value },
+        .{},
+    } });
+    defer gpa.free(listener);
+    try apply(&controller, &client, channel, io, lds.type_url, "l1", listener);
+
+    const overridden = try resolvePathWith(channel, io, "/demo.Service/Get", &.{});
+    try std.testing.expect(overridden.options.fault_policy == null);
+    const inherited = try resolvePathWith(channel, io, "/demo.Service/Other", &.{});
+    try std.testing.expect(inherited.options.fault_policy != null);
+}

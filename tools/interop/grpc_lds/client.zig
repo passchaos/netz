@@ -81,6 +81,13 @@ fn faultDelay(sender: grpc.SharedChannelSender, io: std.Io, label: []const u8) !
     try std.testing.expectEqualStrings(label, response.message.?.payload);
     try std.testing.expect(started.durationTo(std.Io.Clock.awake.now(io)).nanoseconds >= 30 * std.time.ns_per_ms);
 }
+fn faultOverrideStatus(sender: grpc.SharedChannelSender) !void {
+    var response = try sender.unary(.{ .path = "/fixture.Lds/Fault", .authority = "backend.test", .message = "request", .wait_for_ready = true, .timeout = .{ .value = 3, .unit = .second }, .metadata = &.{ .{ .name = "x-fault", .value = "1" }, .{ .name = "x-envoy-fault-abort-grpc-request", .value = "14" } } });
+    defer response.deinit();
+    try std.testing.expectEqual(grpc.Status.permission_denied, response.status);
+    try std.testing.expectEqualStrings("Fault injected", response.status_message);
+    try std.testing.expect(response.message == null and response.transport == null and !response.was_dropped);
+}
 fn stream(sender: grpc.SharedChannelSender, label: []const u8) !void {
     var duplex = try sender.startDuplex(.{ .path = "/fixture.Lds/Stream", .authority = "backend.test", .wait_for_ready = true, .timeout = .{ .value = 3, .unit = .second } });
     defer duplex.deinit();
@@ -184,6 +191,7 @@ pub fn main(init: std.process.Init) !void {
         .{ .name = "x-envoy-fault-abort-request-percentage", .value = "0" },
     });
     try faultDelay(sender, io, "b");
+    try faultOverrideStatus(sender);
     const revision = destination.configurationRevision();
     try apply(&controller, &client, destination, io); // r4 ignored in inline mode
     try std.testing.expectEqual(revision, destination.configurationRevision());
@@ -198,5 +206,5 @@ pub fn main(init: std.process.Init) !void {
     var terminal = try client.nextWithDeadline(until(io));
     defer terminal.deinit();
     try std.testing.expectEqual(grpc.Status.ok, terminal.terminal.status);
-    std.debug.print("LDS_RESULT {{\"status\":\"passed\",\"inline\":true,\"dynamic\":true,\"cached_projection\":true,\"zero_override\":true,\"old_deadline_preserved\":true,\"name_change_cleared\":true,\"late_rds_ignored\":true,\"deleted\":true,\"rbac_denied\":true,\"rbac_stream_denied\":true,\"rbac_header_scope\":true,\"fault_abort\":true,\"fault_delay\":true,\"fault_percentage\":true,\"nacks\":3}}\n", .{});
+    std.debug.print("LDS_RESULT {{\"status\":\"passed\",\"inline\":true,\"dynamic\":true,\"cached_projection\":true,\"zero_override\":true,\"old_deadline_preserved\":true,\"name_change_cleared\":true,\"late_rds_ignored\":true,\"deleted\":true,\"rbac_denied\":true,\"rbac_stream_denied\":true,\"rbac_header_scope\":true,\"fault_abort\":true,\"fault_delay\":true,\"fault_percentage\":true,\"fault_route_override\":true,\"nacks\":3}}\n", .{});
 }

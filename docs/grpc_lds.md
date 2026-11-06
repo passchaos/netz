@@ -100,6 +100,18 @@ inverted, regex, and string matchers. `downstream_nodes` and
 `response_rate_limit` change which requests or bytes are affected and remain
 rejected as unsupported.
 
+Route and virtual-host `typed_per_filter_config` overrides are decoded for both
+supported filters. An entry whose key matches the HCM filter instance name
+replaces that filter for the selected route, with route scope taking precedence
+over virtual-host scope. A direct `RBACPerRoute` (or bare `RBAC`) value replaces
+the listener policy; an `RBACPerRoute` without a policy, or a `FilterConfig`
+marked `disabled`, disables RBAC for that route so the request is admitted.
+Fault overrides work the same way: a direct `HTTPFault` replaces the listener
+policy and a disabled entry removes it. Entries for other filter names are
+ignored, matching Envoy's per-filter keying. A malformed supported override
+fails listener publication instead of silently falling back to the listener
+policy.
+
 HCM selects inline route_config or RDS through ADS/SELF ConfigSource. AUTO API
 version follows the ADS session's v3 type URL; explicit V2 and unsupported
 versions fail validation. The same source decoder is used for EDS-backed CDS.
@@ -147,15 +159,17 @@ and ADS schemas plus grpc-js-xds Listener validation, with two grpc-js
 application backends. It checks inline and dynamic routing, stream dispatch,
 HCM timeout inheritance, explicit route zero override, same-name cached
 projection, new-name admission clearing, late RDS handling, invalid filter/
-inline NACKs, RBAC denial/scope, fault abort/delay/percentage scope and
-listener deletion. A held old 300 ms RPC completes after a new 20 ms HCM
-default starts rejecting slow new calls. The peer counts all 31 RPCs plus one
-allowed RBAC-scope probe and two allowed fault probes, excludes denied and
+inline NACKs, RBAC denial/scope, fault abort/delay/percentage scope, a route
+fault override that replaces the listener policy, and listener deletion. A held
+old 300 ms RPC completes after a new 20 ms HCM default starts rejecting slow new
+calls. The peer counts all 31 RPCs plus one allowed RBAC-scope probe, two allowed
+fault probes and no backend call for the overridden route, excludes denied and
 aborted probes from backend counters, and requires one HTTP/2 session per
 application backend. Native tests cover codec/resource bounds, inline
 owned-resource transfer/allocation failure, effective terminal handling,
-subscription/cache/version rollback, stale or expired decisions, and unary/
-streaming fault aborts before any connection. Evidence is in
+subscription/cache/version rollback, stale or expired decisions, per-filter
+override decoding and scope, and unary/streaming fault aborts before any
+connection. Evidence is in
 `docs/evidence/grpc_lds/2026-11-03.json`, the RBAC interop report
 `docs/evidence/grpc_lds/2026-11-06-rbac-interop.json`, and the fault interop
 report `docs/evidence/grpc_lds/2026-11-06-fault-interop.json`.

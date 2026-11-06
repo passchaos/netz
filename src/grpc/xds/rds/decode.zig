@@ -15,6 +15,72 @@ const Parser = struct {
         if (self.cluster_entries >= self.limits.max_cluster_entries) return error.RdsLimitExceeded;
         self.cluster_entries += 1;
     }
+    fn parseAny(self: *Parser, bytes: []const u8) pb.Error!struct { type_name: []const u8, value: []const u8 } {
+        var reader = pb.Reader{ .bytes = bytes };
+        var url: []const u8 = "";
+        var value: []const u8 = "";
+        while (try reader.next()) |field| {
+            if (field.number == 1 and field.wire_type == 2) url = try pb.text(&reader, self.limits.max_text_bytes) else if (field.number == 2 and field.wire_type == 2) value = try reader.bytesValue() else try reader.skip(field);
+        }
+        const offset = std.mem.lastIndexOfScalar(u8, url, '/') orelse return error.InvalidRdsResource;
+        if (offset + 1 == url.len) return error.InvalidRdsResource;
+        return .{ .type_name = url[offset + 1 ..], .value = value };
+    }
+    fn overrideKind(type_name: []const u8) ?model.OverrideKind {
+        if (std.mem.eql(u8, type_name, "envoy.extensions.filters.http.rbac.v3.RBACPerRoute")) return .rbac;
+        if (std.mem.eql(u8, type_name, "envoy.extensions.filters.http.fault.v3.HTTPFault")) return .fault;
+        return null;
+    }
+    fn rbacPerRoute(self: *Parser, bytes: []const u8) pb.Error!model.Override {
+        _ = self;
+        var reader = pb.Reader{ .bytes = bytes };
+        var policy: ?[]const u8 = null;
+        while (try reader.next()) |field| {
+            if (field.number == 2 and field.wire_type == 2) policy = try reader.bytesValue() else try reader.skip(field);
+        }
+        return if (policy) |value|
+            .{ .kind = .rbac, .config = value }
+        else
+            .{ .kind = .rbac, .disabled = true };
+    }
+    fn overrideAny(self: *Parser, bytes: []const u8) pb.Error!?model.Override {
+        const parsed = try self.parseAny(bytes);
+        if (std.mem.eql(u8, parsed.type_name, "envoy.config.route.v3.FilterConfig")) {
+            var reader = pb.Reader{ .bytes = parsed.value };
+            var inner: ?[]const u8 = null;
+            var disabled = false;
+            while (try reader.next()) |field| {
+                if (field.number == 1 and field.wire_type == 2) inner = try reader.bytesValue() else if (field.number == 3 and field.wire_type == 0) disabled = (try reader.varint()) != 0 else try reader.skip(field);
+            }
+            if (disabled) {
+                if (inner) |value| {
+                    const nested = try self.parseAny(value);
+                    return .{ .kind = overrideKind(nested.type_name), .disabled = true };
+                }
+                return .{ .disabled = true };
+            }
+            const value = inner orelse return error.InvalidRdsResource;
+            const nested = try self.parseAny(value);
+            if (overrideKind(nested.type_name) == .rbac) return try self.rbacPerRoute(nested.value);
+            if (overrideKind(nested.type_name) == .fault) return .{ .kind = .fault, .config = nested.value };
+            return null;
+        }
+        if (overrideKind(parsed.type_name) == .rbac) return try self.rbacPerRoute(parsed.value);
+        if (overrideKind(parsed.type_name) == .fault) return .{ .kind = .fault, .config = parsed.value };
+        return null;
+    }
+    fn overrideEntry(self: *Parser, bytes: []const u8) pb.Error!?model.Override {
+        var reader = pb.Reader{ .bytes = bytes };
+        var name: []const u8 = "";
+        var any: ?[]const u8 = null;
+        while (try reader.next()) |field| {
+            if (field.number == 1 and field.wire_type == 2) name = try pb.text(&reader, self.limits.max_text_bytes) else if (field.number == 2 and field.wire_type == 2) any = try reader.bytesValue() else try reader.skip(field);
+        }
+        if (name.len == 0 or any == null) return error.InvalidRdsResource;
+        var value = (try self.overrideAny(any.?)) orelse return null;
+        value.name = name;
+        return value;
+    }
     pub fn regex(self: *Parser, bytes: []const u8) pb.Error!routing.string.Match {
         var reader = pb.Reader{ .bytes = bytes };
         var pattern: []const u8 = "";
@@ -120,6 +186,8 @@ const Parser = struct {
         defer response_headers_to_add.deinit(self.allocator);
         var response_headers_to_remove: std.ArrayList([]const u8) = .empty;
         defer response_headers_to_remove.deinit(self.allocator);
+        var overrides: std.ArrayList(model.Override) = .empty;
+        defer overrides.deinit(self.allocator);
         while (try reader.next()) |field| {
             if (field.number == 1 and field.wire_type == 2) raw_match = try reader.bytesValue() else if (field.number == 2 and field.wire_type == 2) raw_action = try reader.bytesValue() else if ((field.number == 3 or field.number == 7 or field.number == 17 or field.number == 18 or field.number == 19) and field.wire_type == 2) {
                 _ = try reader.bytesValue();
@@ -152,7 +220,10 @@ const Parser = struct {
                 const name = try pb.text(&reader, self.limits.max_text_bytes);
                 if (!headerNameValid(name)) return error.InvalidRdsResource;
                 try response_headers_to_remove.append(self.allocator, name);
-            } else if (field.number == 13 and field.wire_type == 2) return error.UnsupportedRdsFeature else try reader.skip(field);
+            } else if (field.number == 13 and field.wire_type == 2) {
+                if (overrides.items.len >= self.limits.max_overrides) return error.RdsLimitExceeded;
+                if (try self.overrideEntry(try reader.bytesValue())) |entry| try overrides.append(self.allocator, entry);
+            } else try reader.skip(field);
         }
         const match = (try @import("match.zig").decode(self, raw_match orelse return error.InvalidRdsResource)) orelse return null;
         var action: @FieldType(model.Route, "action") = .inappropriate;
@@ -170,6 +241,7 @@ const Parser = struct {
             .request_headers_to_remove = try headers_to_remove.toOwnedSlice(self.allocator),
             .response_headers_to_add = try response_headers_to_add.toOwnedSlice(self.allocator),
             .response_headers_to_remove = try response_headers_to_remove.toOwnedSlice(self.allocator),
+            .overrides = try overrides.toOwnedSlice(self.allocator),
         };
     }
     fn virtualHost(self: *Parser, bytes: []const u8) pb.Error!model.VirtualHost {
@@ -179,6 +251,8 @@ const Parser = struct {
         var routes: std.ArrayList([]const u8) = .empty;
         defer routes.deinit(self.allocator);
         var retry: ?@import("../../call.zig").RetryPolicy = null;
+        var overrides: std.ArrayList(model.Override) = .empty;
+        defer overrides.deinit(self.allocator);
         while (try reader.next()) |field| {
             if (field.number == 2 and field.wire_type == 2) {
                 if (self.domains >= self.limits.max_domains) return error.RdsLimitExceeded;
@@ -189,7 +263,10 @@ const Parser = struct {
             } else if (field.number == 3 and field.wire_type == 2) {
                 if (routes.items.len >= self.limits.max_routes) return error.RdsLimitExceeded;
                 try routes.append(self.allocator, try reader.bytesValue());
-            } else if (field.number == 16 and field.wire_type == 2) retry = try @import("retry.zig").parse(self.allocator, try reader.bytesValue(), self.limits.max_text_bytes) else if (field.number == 15 and field.wire_type == 2) return error.UnsupportedRdsFeature else try reader.skip(field);
+            } else if (field.number == 16 and field.wire_type == 2) retry = try @import("retry.zig").parse(self.allocator, try reader.bytesValue(), self.limits.max_text_bytes) else if (field.number == 15 and field.wire_type == 2) {
+                if (overrides.items.len >= self.limits.max_overrides) return error.RdsLimitExceeded;
+                if (try self.overrideEntry(try reader.bytesValue())) |entry| try overrides.append(self.allocator, entry);
+            } else try reader.skip(field);
         }
         if (domains.items.len == 0) return error.InvalidRdsResource;
         var values: std.ArrayList(model.Route) = .empty;
@@ -198,7 +275,11 @@ const Parser = struct {
             if (try self.route(raw, retry)) |value| try values.append(self.allocator, value);
             if (self.arena.queryCapacity() > self.limits.max_storage_bytes) return error.RdsLimitExceeded;
         }
-        return .{ .domains = try domains.toOwnedSlice(self.allocator), .routes = try values.toOwnedSlice(self.allocator) };
+        return .{
+            .domains = try domains.toOwnedSlice(self.allocator),
+            .routes = try values.toOwnedSlice(self.allocator),
+            .overrides = try overrides.toOwnedSlice(self.allocator),
+        };
     }
 };
 pub fn decode(gpa: std.mem.Allocator, bytes: []const u8, limits: model.Limits) model.Error!model.Owned {

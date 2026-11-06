@@ -40,13 +40,26 @@ const faultHeader=()=>({
   },
 });
 const optional={name:'optional',is_optional:true,typed_config:{type_url:'type.googleapis.com/custom.Optional',value:Buffer.from('opaque')}};
-const routes=(name,cluster,zero=false)=>({name,virtual_hosts:[{name:'host',domains:['backend.test'],routes:[...(zero?[{match:{path:'/fixture.Lds/NoCap'},route:{cluster,max_stream_duration:{max_stream_duration:{}}}}]:[]),{match:{prefix:'/fixture.Lds/'},route:{cluster}}]}]});
+const routeMessageType=root.lookupType('envoy.config.route.v3.Route');
+// Direct HTTPFault route override: fixed PERMISSION_DENIED replaces the
+// listener's header-driven abort for this route.
+const faultOverride=()=>({type_url:faultUrl,value:encode(faultType,{
+  abort:{grpc_status:7,percentage:{numerator:100,denominator:0}},
+})});
+// protobufjs create() drops map fields with message values, so build the Route
+// message first and assign typed_per_filter_config directly.
+function faultOverrideRoute(cluster){
+  const route=routeMessageType.create({match:{path:'/fixture.Lds/Fault'},route:{cluster}});
+  route.typed_per_filter_config={fault:faultOverride()};
+  return route;
+}
+const routes=(name,cluster,zero=false,extra=[])=>({name,virtual_hosts:[{name:'host',domains:['backend.test'],routes:[...extra,...(zero?[{match:{path:'/fixture.Lds/NoCap'},route:{cluster,max_stream_duration:{max_stream_duration:{}}}}]:[]),{match:{prefix:'/fixture.Lds/'},route:{cluster}}]}]});
 function listener(name,maximum,inline,extra={}){
   const hcm={http_filters:[optional,router('router')],common_http_protocol_options:{max_stream_duration:{nanos:maximum*1000000}},...(inline?{route_config:inline}:{rds:{config_source:{ads:{},resource_api_version:2},route_config_name:name}}),...extra};
   const resource={type_url:ldsUrl,value:encode(listenerType,{name:'frontend',api_listener:{api_listener:{type_url:hcmUrl,value:encode(hcmType,hcm)}}})};
   return resource;
 }
-const inlineA=listener('inline-a',50,routes('inline-a','a',true),{http_filters:[optional,rbacDenyHeader(),router('router')]});const dynamic=listener('routes-a',300);const capped=listener('routes-a',20);const renamed=listener('routes-b',100);const inlineB=listener('inline-b',0,routes('inline-b','b'),{http_filters:[faultHeader(),router('router')]});
+const inlineA=listener('inline-a',50,routes('inline-a','a',true),{http_filters:[optional,rbacDenyHeader(),router('router')]});const dynamic=listener('routes-a',300);const capped=listener('routes-a',20);const renamed=listener('routes-b',100);const inlineB=listener('inline-b',0,routes('inline-b','b',false,[faultOverrideRoute('b')]),{http_filters:[faultHeader(),router('router')]});
 for(const resource of [inlineA,dynamic,capped,renamed,inlineB])assert.equal(ListenerResourceType.get().decode({server:{},bootstrap:{}},resource).error,undefined);
 const assignment=(name,cluster)=>({type_url:rdsUrl,value:encode(routeType,routes(name,cluster))});
 const servers=[],sessions=[new Set(),new Set()],counts={Fast:0,Slow:0,NoCap:0,Stream:0},labels={a:0,b:0},transcript=[];

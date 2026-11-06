@@ -43,7 +43,9 @@ pub fn decode(bytes: []const u8, limit: usize) pb.Error!model.Filter {
 }
 pub const Validated = struct {
     rbac: ?[]const u8 = null,
+    rbac_name: ?[]const u8 = null,
     fault: ?[]const u8 = null,
+    fault_name: ?[]const u8 = null,
 };
 
 /// Validate ordering and compile the supported policies into the listener
@@ -55,7 +57,9 @@ pub fn validate(
 ) (pb.Error || rbac.Error || fault.Error)!Validated {
     var routers: usize = 0;
     var rbac_config: ?[]const u8 = null;
+    var rbac_name: ?[]const u8 = null;
     var fault_config: ?[]const u8 = null;
+    var fault_name: ?[]const u8 = null;
     var rbac_index: ?usize = null;
     var fault_index: ?usize = null;
     for (values, 0..) |value, index| {
@@ -69,11 +73,13 @@ pub fn validate(
                 .max_text_bytes = limits.max_text_bytes,
             });
             rbac_config = value.config;
+            rbac_name = value.name;
             rbac_index = index;
         } else if (std.mem.eql(u8, value.type_name, model.fault_type)) {
             if (fault_config != null) return error.InvalidLdsResource;
             _ = try fault.decode(arena, value.config, .{ .max_text_bytes = limits.max_text_bytes });
             fault_config = value.config;
+            fault_name = value.name;
             fault_index = index;
         }
     }
@@ -83,5 +89,5 @@ pub fn validate(
     // fault filter placed before RBAC would observe a different order, so
     // reject it instead of silently changing the configured chain.
     if (rbac_index != null and fault_index != null and fault_index.? < rbac_index.?) return error.UnsupportedLdsFeature;
-    return .{ .rbac = rbac_config, .fault = fault_config };
+    return .{ .rbac = rbac_config, .rbac_name = rbac_name, .fault = fault_config, .fault_name = fault_name };
 }

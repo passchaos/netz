@@ -41,6 +41,8 @@ pub fn decode(gpa: std.mem.Allocator, bytes: []const u8, limits: model.Limits) p
         .max_stream_duration = maximum,
         .filters = try filters.toOwnedSlice(gpa),
         .rbac_config = validated.rbac,
+        .rbac_name = validated.rbac_name,
         .fault_config = validated.fault,
+        .fault_name = validated.fault_name,
     };
 }
