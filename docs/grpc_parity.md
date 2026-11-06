@@ -107,14 +107,17 @@ existing HTTP/2 runtime:
   HTTP/2 exchange; expiration returns `error.Timeout`, while a null timeout
   remains unbounded. After expiry, best-effort CANCEL and connection-credit
   return share a separate bounded terminal cleanup budget, described below,
-- one default transparent unary retry for REFUSED_STREAM before response
-  commitment, without charging configured retry attempts or throttle tokens.
-  The same request body and metadata are replayed, and the original absolute
-  deadline supplies the remaining timeout on the retry. The caller can disable
-  this recovery through `UnaryCallOptions.transparent_retry`. Any observed
-  response head, including informational evidence, prevents this transparent
-  replay; a second refusal remains visible unless an explicit policy permits
-  another uncommitted attempt,
+- one default transparent unary retry for REFUSED_STREAM or a
+  GOAWAY-unprocessed stream before response commitment, without charging
+  configured retry attempts or throttle tokens. A peer GOAWAY whose
+  `last_stream_id` is below the request's stream proves the request was not
+  processed, so the same replay is safe as a refused stream. The same request
+  body and metadata are replayed, and the original absolute deadline supplies
+  the remaining timeout on the retry. The caller can disable this recovery
+  through `UnaryCallOptions.transparent_retry`. Any observed response head,
+  including informational evidence, prevents this transparent replay; a second
+  refusal or GOAWAY remains visible unless an explicit policy permits another
+  uncommitted attempt,
 - explicit opt-in unary retry policies for replay-safe methods, with at most
   five configured attempts plus the independent transparent recovery,
   configured retryable status codes, exponential jittered

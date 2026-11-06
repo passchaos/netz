@@ -47,6 +47,13 @@ pub fn runWithDeadline(connection: anytype, allocator: std.mem.Allocator, option
             timeout_header,
             if (attempts == 0) null else attempts,
         ) catch |err| {
+            // A GOAWAY above this stream's ID means the peer never processed
+            // it, so one transparent replay is safe just like REFUSED_STREAM.
+            const any_err: anyerror = err;
+            if (any_err == error.ConnectionGoAway and options.transparent_retry and !transparent_used) {
+                transparent_used = true;
+                continue;
+            }
             if (err != error.Timeout or !attempt_boundary.limited) return err;
             attempts += 1;
             const configured = policy.?;
@@ -298,4 +305,24 @@ fn sleepForRetry(
     if (delay.nanoseconds > 0) {
         try std.Io.sleep(io, delay, .awake);
     }
+}
+
+test "gRPC retry transparently replays one GOAWAY-unprocessed attempt" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const Context = struct {
+        io: std.Io,
+        calls: usize,
+        fn attempt(self: *@This(), _: std.mem.Allocator, _: call.UnaryCallOptions, _: ?std.Io.Clock.Timestamp, _: ?std.Io.Clock.Timestamp, _: ?Timeout, _: ?u8) (Error || error{ConnectionGoAway})!UnaryResponse {
+            self.calls += 1;
+            if (self.calls == 1) return error.ConnectionGoAway;
+            return .{ .allocator = std.testing.allocator, .transport = null, .status = .ok, .status_message = try std.testing.allocator.dupe(u8, ""), .message = null, .was_compressed = false, .encoding = null, .owned_message = null };
+        }
+    };
+    var context = Context{ .io = io, .calls = 0 };
+    var response = try runWithDeadline(&context, std.testing.allocator, .{ .path = "/svc/Op", .message = "body" }, null, null, Context.attempt);
+    defer response.deinit();
+    try std.testing.expectEqual(@as(usize, 2), context.calls);
+    try std.testing.expectEqual(@import("../wire.zig").Status.ok, response.status);
 }
