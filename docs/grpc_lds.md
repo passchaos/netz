@@ -72,6 +72,29 @@ the channel. grpc-js-xds registers only a server-side RBAC constructor, so the
 fixture marks the filter `is_optional` to pass its client-side Listener
 validator; netz enforces supported optional filters instead of skipping them.
 
+`envoy.filters.http.fault.v3.HTTPFault` is decoded and enforced on the client
+path. The supported subset covers fixed `grpc_status` and `http_status` aborts,
+`header_abort`, fixed `fixed_delay` and `header_delay` delays,
+`FractionalPercent`, and `max_active_faults`. A percentage is required for both
+abort and delay, matching grpc-js-xds's config validation, and a numerator above
+its denominator is capped at 100%. HTTP abort statuses use the same fallback
+mapping as response trailers; HTTP 200 and gRPC OK never abort. Header-driven
+aborts read `x-envoy-fault-abort-grpc-request`,
+`x-envoy-fault-abort-request`, and
+`x-envoy-fault-abort-request-percentage`; header delays read
+`x-envoy-fault-delay-request` (milliseconds) and
+`x-envoy-fault-delay-request-percentage`. A fixed delay above the 24-hour
+decode bound is rejected, and header delays are clamped to that bound. Abort
+returns the configured status with message `Fault injected`; a delay sleeps
+only up to the attempt or open deadline and then returns `error.Timeout`
+instead of extending past it. Fault injection runs per unary attempt (including
+retries and hedging) and once before a streaming open; an aborted stream opens
+with an immediately readable terminal event and no backend connection. Listener
+RBAC is evaluated before fault injection, and a fault filter placed before RBAC
+is rejected rather than silently reordering the chain. `upstream_cluster`,
+`headers`, `downstream_nodes`, and `response_rate_limit` change which requests
+or bytes are affected and are rejected as unsupported.
+
 HCM selects inline route_config or RDS through ADS/SELF ConfigSource. AUTO API
 version follows the ADS session's v3 type URL; explicit V2 and unsupported
 versions fail validation. The same source decoder is used for EDS-backed CDS.
@@ -119,15 +142,18 @@ and ADS schemas plus grpc-js-xds Listener validation, with two grpc-js
 application backends. It checks inline and dynamic routing, stream dispatch,
 HCM timeout inheritance, explicit route zero override, same-name cached
 projection, new-name admission clearing, late RDS handling, invalid filter/
-inline NACKs, RBAC denial/scope and listener deletion. A held old 300 ms RPC
-completes after a new 20 ms HCM default starts rejecting slow new calls. The
-peer counts all 31 RPCs plus one allowed RBAC-scope probe, excludes denied
-probes from backend counters, and requires one HTTP/2 session per application
-backend. Native tests cover codec/resource bounds, inline owned-resource
-transfer/allocation failure, effective terminal handling,
-subscription/cache/version rollback and stale or expired decisions. Evidence is
-in `docs/evidence/grpc_lds/2026-11-03.json` and the RBAC interop report
-`docs/evidence/grpc_lds/2026-11-06-rbac-interop.json`.
+inline NACKs, RBAC denial/scope, fault abort/delay/percentage scope and
+listener deletion. A held old 300 ms RPC completes after a new 20 ms HCM
+default starts rejecting slow new calls. The peer counts all 31 RPCs plus one
+allowed RBAC-scope probe and two allowed fault probes, excludes denied and
+aborted probes from backend counters, and requires one HTTP/2 session per
+application backend. Native tests cover codec/resource bounds, inline
+owned-resource transfer/allocation failure, effective terminal handling,
+subscription/cache/version rollback, stale or expired decisions, and unary/
+streaming fault aborts before any connection. Evidence is in
+`docs/evidence/grpc_lds/2026-11-03.json`, the RBAC interop report
+`docs/evidence/grpc_lds/2026-11-06-rbac-interop.json`, and the fault interop
+report `docs/evidence/grpc_lds/2026-11-06-fault-interop.json`.
 
 [Automatic typed discovery](grpc_xds_runtime.md) now derives cluster/service
 subscriptions and publishes CDS/EDS children from these listener/RDS snapshots.

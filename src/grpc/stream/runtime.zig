@@ -15,6 +15,7 @@ const call = @import("../call.zig");
 const compression = @import("../compression.zig");
 const metadata = @import("../metadata.zig");
 const wire = @import("../wire.zig");
+const fault_mod = @import("../fault.zig");
 const codec = @import("codec.zig");
 const completion = @import("completion.zig");
 const web = @import("../web.zig");
@@ -55,6 +56,9 @@ pub const RequestOptions = struct {
     /// Internal xDS `auto_host_rewrite`: use the selected endpoint authority
     /// as the outbound `:authority`.
     xds_auto_host_rewrite: bool = false,
+    /// Internal xDS HCM fault-injection policy. Streaming opens evaluate it
+    /// once before any connection or request is submitted.
+    fault_policy: ?*fault_mod.Policy = null,
     metadata: []const http2.Hpack.HeaderField = &.{},
     binary_metadata: []const metadata.BinaryMetadata = &.{},
     /// Compatibility ceiling used for both directions unless a directional

@@ -10,6 +10,7 @@ const details_mod = @import("status_details.zig");
 const response_metadata = @import("response_metadata.zig");
 const retry = @import("call/retry.zig");
 const wire = @import("wire.zig");
+const fault_mod = @import("fault.zig");
 const codec = @import("stream/codec.zig");
 const outbound_ownership = @import("stream/duplex/outbound_ownership.zig");
 
@@ -363,6 +364,9 @@ pub const UnaryCallOptions = struct {
     /// Internal xDS `auto_host_rewrite`: use the selected endpoint authority
     /// as the outbound `:authority`.
     xds_auto_host_rewrite: bool = false,
+    /// Internal xDS HCM fault-injection policy. The policy remains owned by
+    /// the retained selector publication for the logical call.
+    fault_policy: ?*fault_mod.Policy = null,
     /// Retry one REFUSED_STREAM before response commitment without charging a
     /// configured retry attempt. Disable for explicit single-attempt probes.
     transparent_retry: bool = true,

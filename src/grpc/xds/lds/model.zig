@@ -5,6 +5,7 @@ pub const type_url = "type.googleapis.com/envoy.config.listener.v3.Listener";
 pub const hcm_type = "envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager";
 pub const router_type = "envoy.extensions.filters.http.router.v3.Router";
 pub const rbac_type = "envoy.extensions.filters.http.rbac.v3.RBAC";
+pub const fault_type = "envoy.extensions.filters.http.fault.v3.HTTPFault";
 pub const Error = rds.resource.Error || error{
     InvalidLdsResource,
     LdsLimitExceeded,
@@ -12,6 +13,9 @@ pub const Error = rds.resource.Error || error{
     InvalidRbacResource,
     RbacLimitExceeded,
     UnsupportedRbacFeature,
+    InvalidFaultResource,
+    FaultLimitExceeded,
+    UnsupportedFaultFeature,
 };
 pub const Limits = struct {
     max_bytes: usize = 8 * 1024 * 1024,
@@ -24,6 +28,8 @@ pub const Filter = struct {
     name: []const u8,
     type_name: []const u8,
     optional: bool,
+    /// A supported filter disabled by the control plane is ignored.
+    disabled: bool = false,
     /// Raw typed config bytes for supported non-router filters.
     config: []const u8 = "",
 };
@@ -33,6 +39,8 @@ pub const Hcm = struct {
     filters: []const Filter,
     /// Raw `envoy.filters.http.rbac.v3.RBAC` config, when present.
     rbac_config: ?[]const u8 = null,
+    /// Raw `envoy.filters.http.fault.v3.HTTPFault` config, when present.
+    fault_config: ?[]const u8 = null,
 };
 pub const Listener = struct { name: []const u8, hcm: Hcm };
 pub const Owned = struct {

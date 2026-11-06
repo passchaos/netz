@@ -104,3 +104,121 @@ test "gRPC LDS rejects an unsupported RBAC principal" {
     defer gpa.free(bytes);
     try std.testing.expectError(error.UnsupportedRbacFeature, lds.decode(gpa, bytes, .{}));
 }
+
+fn encodeFault(allocator: std.mem.Allocator, abort: ?[]const u8, delay: ?[]const u8) ![]u8 {
+    var fault = fixture.Builder{ .allocator = allocator };
+    errdefer fault.deinit();
+    if (abort) |value| try fault.bytes(2, value);
+    if (delay) |value| try fault.bytes(1, value);
+    return fault.data.toOwnedSlice(allocator);
+}
+
+fn headerAbort(allocator: std.mem.Allocator, numerator: u32) ![]u8 {
+    var abort = fixture.Builder{ .allocator = allocator };
+    defer abort.deinit();
+    var marker = fixture.Builder{ .allocator = gpa };
+    defer marker.deinit();
+    try abort.bytes(4, marker.data.items);
+    var percentage = fixture.Builder{ .allocator = gpa };
+    defer percentage.deinit();
+    try percentage.number(1, numerator);
+    try percentage.number(2, 0);
+    try abort.bytes(3, percentage.data.items);
+    return abort.data.toOwnedSlice(allocator);
+}
+
+test "gRPC LDS accepts a fault filter and orders it after RBAC" {
+    const fault_value = try headerAbort(gpa, 100);
+    defer gpa.free(fault_value);
+    const fault = try encodeFault(gpa, fault_value, null);
+    defer gpa.free(fault);
+    const bytes = try fixture.encode(gpa, .{ .filters = &.{
+        .{ .name = "fault", .type_name = lds.resource.fault_type, .value = fault },
+        .{},
+    } });
+    defer gpa.free(bytes);
+    var owned = try lds.decode(gpa, bytes, .{});
+    defer owned.deinit();
+    try std.testing.expect(owned.value.hcm.fault_config != null);
+
+    const rbac_value = "\x0a\x11\x08\x00\x12\x0d\x0a\x01p\x12\x08\x0a\x02\x18\x01\x12\x02\x18\x01";
+    const ordered = try fixture.encode(gpa, .{ .filters = &.{
+        .{ .name = "rbac", .type_name = lds.resource.rbac_type, .value = rbac_value },
+        .{ .name = "fault", .type_name = lds.resource.fault_type, .value = fault },
+        .{},
+    } });
+    defer gpa.free(ordered);
+    var owned_ordered = try lds.decode(gpa, ordered, .{});
+    defer owned_ordered.deinit();
+    try std.testing.expect(owned_ordered.value.hcm.rbac_config != null and owned_ordered.value.hcm.fault_config != null);
+
+    const disabled = try fixture.encode(gpa, .{ .filters = &.{
+        .{ .name = "fault", .type_name = lds.resource.fault_type, .value = fault, .disabled = true },
+        .{},
+    } });
+    defer gpa.free(disabled);
+    var owned_disabled = try lds.decode(gpa, disabled, .{});
+    defer owned_disabled.deinit();
+    try std.testing.expect(owned_disabled.value.hcm.fault_config == null);
+}
+
+test "gRPC LDS rejects duplicate fault filters and fault-before-RBAC ordering" {
+    const fault_value = try headerAbort(gpa, 100);
+    defer gpa.free(fault_value);
+    const fault = try encodeFault(gpa, fault_value, null);
+    defer gpa.free(fault);
+    const duplicate = try fixture.encode(gpa, .{ .filters = &.{
+        .{ .name = "fault-a", .type_name = lds.resource.fault_type, .value = fault },
+        .{ .name = "fault-b", .type_name = lds.resource.fault_type, .value = fault },
+        .{},
+    } });
+    defer gpa.free(duplicate);
+    try std.testing.expectError(error.InvalidLdsResource, lds.decode(gpa, duplicate, .{}));
+
+    const rbac_value = "\x0a\x11\x08\x00\x12\x0d\x0a\x01p\x12\x08\x0a\x02\x18\x01\x12\x02\x18\x01";
+    const reversed = try fixture.encode(gpa, .{ .filters = &.{
+        .{ .name = "fault", .type_name = lds.resource.fault_type, .value = fault },
+        .{ .name = "rbac", .type_name = lds.resource.rbac_type, .value = rbac_value },
+        .{},
+    } });
+    defer gpa.free(reversed);
+    try std.testing.expectError(error.UnsupportedLdsFeature, lds.decode(gpa, reversed, .{}));
+}
+
+test "gRPC LDS rejects malformed and unsupported fault filters" {
+    var abort = fixture.Builder{ .allocator = gpa };
+    defer abort.deinit();
+    try abort.number(5, 14);
+    const missing_percentage = try encodeFault(gpa, abort.data.items, null);
+    defer gpa.free(missing_percentage);
+    const bytes = try fixture.encode(gpa, .{ .filters = &.{
+        .{ .name = "fault", .type_name = lds.resource.fault_type, .value = missing_percentage },
+        .{},
+    } });
+    defer gpa.free(bytes);
+    try std.testing.expectError(error.InvalidFaultResource, lds.decode(gpa, bytes, .{}));
+
+    var unsupported = fixture.Builder{ .allocator = gpa };
+    defer unsupported.deinit();
+    try unsupported.bytes(3, "cluster");
+    const unsupported_bytes = try fixture.encode(gpa, .{ .filters = &.{
+        .{ .name = "fault", .type_name = lds.resource.fault_type, .value = unsupported.data.items },
+        .{},
+    } });
+    defer gpa.free(unsupported_bytes);
+    try std.testing.expectError(error.UnsupportedFaultFeature, lds.decode(gpa, unsupported_bytes, .{}));
+
+    const invalid_percentage = try headerAbort(gpa, 100);
+    defer gpa.free(invalid_percentage);
+    var no_percentage = fixture.Builder{ .allocator = gpa };
+    defer no_percentage.deinit();
+    try no_percentage.bytes(4, "");
+    const no_percentage_fault = try encodeFault(gpa, no_percentage.data.items, null);
+    defer gpa.free(no_percentage_fault);
+    const no_percentage_bytes = try fixture.encode(gpa, .{ .filters = &.{
+        .{ .name = "fault", .type_name = lds.resource.fault_type, .value = no_percentage_fault },
+        .{},
+    } });
+    defer gpa.free(no_percentage_bytes);
+    try std.testing.expectError(error.InvalidFaultResource, lds.decode(gpa, no_percentage_bytes, .{}));
+}

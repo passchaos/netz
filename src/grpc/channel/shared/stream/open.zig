@@ -27,6 +27,31 @@ pub fn openUntil(state: anytype, options: streaming.RequestOptions, entered: std
     // Resolve against one retained immutable generation so a later dynamic
     // publication cannot invalidate borrowed method-policy strings.
     const opening_deadline = @import("../../../../internal/deadline.zig").earlier(deadline, admission);
+    if (resolved.options.fault_policy) |policy| {
+        var decision = policy.evaluate(state.io, resolved.options.metadata);
+        defer decision.release(policy);
+        if (decision.delay) |delay| {
+            try @import("../../../fault.zig").sleepBounded(state.io, delay, opening_deadline);
+            if (deadline) |until| {
+                const remaining = until.durationFromNow(state.io).raw;
+                if (remaining.nanoseconds <= 0) return error.Timeout;
+                resolved.options.timeout = @import("../../../wire.zig").Timeout.fromDuration(remaining) catch return error.Timeout;
+            }
+            decision.release(policy);
+        }
+        if (decision.abort) |abort| {
+            const stream = try State.StreamCall.create(state, resolved.options, deadline);
+            stream.options.fault_policy = null;
+            stream.terminal = .{
+                .allocator = state.allocator,
+                .status = abort.status,
+                .status_message = try state.allocator.dupe(u8, abort.message),
+            };
+            stream.retireLocked(null);
+            return stream;
+        }
+        resolved.options.fault_policy = null;
+    }
     try state.lockBefore(opening_deadline);
     const closed = state.closed;
     state.unlock();

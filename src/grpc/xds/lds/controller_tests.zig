@@ -173,3 +173,64 @@ test "gRPC LDS RBAC denies a matching request and allows others" {
         resolveWith(channel, io, &.{.{ .name = "x-deny", .value = "1" }}),
     );
 }
+
+fn fixedAbort(allocator: std.mem.Allocator, status: u32) ![]u8 {
+    var abort = fixture.Builder{ .allocator = allocator };
+    defer abort.deinit();
+    try abort.number(5, status);
+    var percentage = fixture.Builder{ .allocator = gpa };
+    defer percentage.deinit();
+    try percentage.number(1, 100);
+    try percentage.number(2, 0);
+    try abort.bytes(3, percentage.data.items);
+    var fault = fixture.Builder{ .allocator = gpa };
+    errdefer fault.deinit();
+    try fault.bytes(2, abort.data.items);
+    return fault.data.toOwnedSlice(allocator);
+}
+
+test "gRPC LDS fault injection aborts unary and streaming before any backend" {
+    var threaded = std.Io.Threaded.init(gpa, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var channel = try grpc.SharedChannel.init(gpa, io, .{ .resolved = .{ .endpoints = &.{ .{ .cleartext_ip = .{ .address = .{ .ip4 = .loopback(1) }, .hierarchical_path = &.{"cluster:a"} } }, .{ .cleartext_ip = .{ .address = .{ .ip4 = .loopback(2) }, .hierarchical_path = &.{"cluster:b"} } } } } }, .{ .service_config_json = manager });
+    defer channel.deinit();
+    var sender = channel.sender();
+    defer sender.deinit();
+    var client = try ads.Client.init(gpa, sender, .{ .node = .{ .id = "test" } });
+    defer client.deinit();
+    var controller = try lds.Controller.init(gpa, .{ .listener_name = "frontend", .authority = "backend.test" });
+    defer controller.deinit();
+    try controller.subscribe(&client);
+    const routes = try route_fixture.encode(gpa, "inline", &.{"backend.test"}, &.{.{ .prefix = "/", .cluster = "a" }}, null);
+    defer gpa.free(routes);
+    const fault_value = try fixedAbort(gpa, 14);
+    defer gpa.free(fault_value);
+    const listener = try fixture.encode(gpa, .{ .inline_rds = routes, .filters = &.{
+        .{ .name = "fault", .type_name = lds.resource.fault_type, .value = fault_value },
+        .{},
+    } });
+    defer gpa.free(listener);
+    try apply(&controller, &client, channel, io, lds.type_url, "l1", listener);
+    const resolved = try resolve(channel, io);
+    try std.testing.expect(resolved.options.fault_policy != null);
+
+    var response = try sender.unary(.{ .path = "/demo.Service/Get", .authority = "backend.test", .message = "request", .timeout = .{ .value = 3, .unit = .second } });
+    defer response.deinit();
+    try std.testing.expectEqual(grpc.Status.unavailable, response.status);
+    try std.testing.expectEqualStrings("Fault injected", response.status_message);
+
+    var duplex = try sender.startDuplex(.{ .path = "/demo.Service/Stream", .authority = "backend.test", .timeout = .{ .value = 3, .unit = .second } });
+    defer duplex.deinit();
+    var reader = duplex.reader();
+    defer reader.deinit();
+    var event = try reader.nextWithTimeout(.fromSeconds(1));
+    defer event.deinit(gpa);
+    switch (event) {
+        .terminal => |terminal| {
+            try std.testing.expectEqual(grpc.Status.unavailable, terminal.status);
+            try std.testing.expectEqualStrings("Fault injected", terminal.status_message);
+        },
+        else => return error.UnexpectedStreamEvent,
+    }
+}

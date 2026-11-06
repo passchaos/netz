@@ -3808,8 +3808,16 @@ The official-schema interop gate denies unary and duplex probes carrying
 `x-deny` without reaching either backend and re-allows the same header after a
 listener without RBAC replaces the policy. Authenticated/IP/metadata/
 requested-server-name principals, destination IP/port/metadata permissions,
-CEL conditions and route/vhost overrides remain open. Other non-router filters
-remain open.
+CEL conditions and route/vhost overrides remain open.
+`envoy.filters.http.fault` is decoded and enforced client-side for fixed and
+header-driven abort/delay, `FractionalPercent` and `max_active_faults`. Unary
+attempts, retries, hedging and streaming opens observe the same policy; aborts
+return the configured status without a backend and delays are bounded by the
+attempt deadline. The official-schema interop gate aborts on gRPC and HTTP
+status headers, verifies a zero-percent header override routes normally, and
+measures a real header delay before backend delivery. Fault filters placed
+before RBAC and `upstream_cluster`/header/downstream/rate-limit fields are
+rejected; other non-router filters remain open.
 
 ## SotW resource omission and initial discovery
 

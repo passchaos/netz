@@ -2,6 +2,7 @@
 const std = @import("std");
 const call = @import("../call.zig");
 const service = @import("../service_config.zig");
+const wire = @import("../wire.zig");
 pub const Error = call.Error || service.Error || error{ NoMatchingRoute, InvalidRouteAction, RouteMetadataLimitExceeded, PermissionDenied };
 pub const Context = struct {
     allocator: std.mem.Allocator,
@@ -35,4 +36,7 @@ pub fn unavailable(gpa: std.mem.Allocator, err: Error) std.mem.Allocator.Error!c
 }
 pub fn permissionDenied(gpa: std.mem.Allocator) std.mem.Allocator.Error!call.UnaryResponse {
     return .{ .allocator = gpa, .transport = null, .status = .permission_denied, .status_message = try gpa.dupe(u8, "RBAC policy denied the request"), .message = null, .was_compressed = false, .encoding = null, .owned_message = null };
+}
+pub fn faultAborted(gpa: std.mem.Allocator, status: wire.Status, message: []const u8) std.mem.Allocator.Error!call.UnaryResponse {
+    return .{ .allocator = gpa, .transport = null, .status = status, .status_message = try gpa.dupe(u8, message), .message = null, .was_compressed = false, .encoding = null, .owned_message = null };
 }

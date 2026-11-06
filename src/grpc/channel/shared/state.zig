@@ -1102,6 +1102,22 @@ pub const State = struct {
     pub fn attempt(self: *State, _: std.mem.Allocator, options: call.UnaryCallOptions, deadline: ?std.Io.Clock.Timestamp, rpc_deadline: ?std.Io.Clock.Timestamp, timeout_header: ?@import("../../wire.zig").Timeout, previous: ?u8) Error!call.UnaryResponse {
         var attempt_options = options;
         attempt_options.timeout = timeout_header;
+        if (attempt_options.fault_policy) |policy| {
+            var decision = policy.evaluate(self.io, attempt_options.metadata);
+            defer decision.release(policy);
+            if (decision.delay) |delay| {
+                try @import("../../fault.zig").sleepBounded(self.io, delay, deadline);
+                if (deadline) |until| {
+                    const remaining = until.durationFromNow(self.io).raw;
+                    if (remaining.nanoseconds <= 0) return error.Timeout;
+                    attempt_options.timeout = @import("../../wire.zig").Timeout.fromDuration(remaining) catch return error.Timeout;
+                }
+                decision.release(policy);
+            }
+            if (decision.abort) |abort| {
+                return call_selector.faultAborted(self.allocator, abort.status, abort.message);
+            }
+        }
         const job = try Job.create(
             self,
             attempt_options,

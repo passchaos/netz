@@ -62,6 +62,25 @@ fn headerAllowed(sender: grpc.SharedChannelSender, label: []const u8) !void {
     defer response.deinit();
     try std.testing.expectEqualStrings(label, response.message.?.payload);
 }
+fn faultAbort(sender: grpc.SharedChannelSender, name: []const u8, value: []const u8) !void {
+    var response = try sender.unary(.{ .path = "/fixture.Lds/Fast", .authority = "backend.test", .message = "request", .wait_for_ready = true, .timeout = .{ .value = 3, .unit = .second }, .metadata = &.{.{ .name = name, .value = value }} });
+    defer response.deinit();
+    try std.testing.expectEqual(grpc.Status.unavailable, response.status);
+    try std.testing.expectEqualStrings("Fault injected", response.status_message);
+    try std.testing.expect(response.message == null and response.transport == null and !response.was_dropped);
+}
+fn faultAllowed(sender: grpc.SharedChannelSender, label: []const u8, metadata: []const netz.http2.Hpack.HeaderField) !void {
+    var response = try sender.unary(.{ .path = "/fixture.Lds/Fast", .authority = "backend.test", .message = "request", .wait_for_ready = true, .timeout = .{ .value = 3, .unit = .second }, .metadata = metadata });
+    defer response.deinit();
+    try std.testing.expectEqualStrings(label, response.message.?.payload);
+}
+fn faultDelay(sender: grpc.SharedChannelSender, io: std.Io, label: []const u8) !void {
+    const started = std.Io.Clock.awake.now(io);
+    var response = try sender.unary(.{ .path = "/fixture.Lds/Fast", .authority = "backend.test", .message = "request", .wait_for_ready = true, .timeout = .{ .value = 3, .unit = .second }, .metadata = &.{.{ .name = "x-envoy-fault-delay-request", .value = "40" }} });
+    defer response.deinit();
+    try std.testing.expectEqualStrings(label, response.message.?.payload);
+    try std.testing.expect(started.durationTo(std.Io.Clock.awake.now(io)).nanoseconds >= 30 * std.time.ns_per_ms);
+}
 fn stream(sender: grpc.SharedChannelSender, label: []const u8) !void {
     var duplex = try sender.startDuplex(.{ .path = "/fixture.Lds/Stream", .authority = "backend.test", .wait_for_ready = true, .timeout = .{ .value = 3, .unit = .second } });
     defer duplex.deinit();
@@ -157,6 +176,13 @@ pub fn main(init: std.process.Init) !void {
     try apply(&controller, &client, destination, io); // l5 inline
     try fast(sender, "b");
     try headerAllowed(sender, "b");
+    try faultAbort(sender, "x-envoy-fault-abort-grpc-request", "14");
+    try faultAbort(sender, "x-envoy-fault-abort-request", "503");
+    try faultAllowed(sender, "b", &.{
+        .{ .name = "x-envoy-fault-abort-grpc-request", .value = "14" },
+        .{ .name = "x-envoy-fault-abort-request-percentage", .value = "0" },
+    });
+    try faultDelay(sender, io, "b");
     const revision = destination.configurationRevision();
     try apply(&controller, &client, destination, io); // r4 ignored in inline mode
     try std.testing.expectEqual(revision, destination.configurationRevision());
@@ -171,5 +197,5 @@ pub fn main(init: std.process.Init) !void {
     var terminal = try client.nextWithDeadline(until(io));
     defer terminal.deinit();
     try std.testing.expectEqual(grpc.Status.ok, terminal.terminal.status);
-    std.debug.print("LDS_RESULT {{\"status\":\"passed\",\"inline\":true,\"dynamic\":true,\"cached_projection\":true,\"zero_override\":true,\"old_deadline_preserved\":true,\"name_change_cleared\":true,\"late_rds_ignored\":true,\"deleted\":true,\"rbac_denied\":true,\"rbac_stream_denied\":true,\"rbac_header_scope\":true,\"nacks\":3}}\n", .{});
+    std.debug.print("LDS_RESULT {{\"status\":\"passed\",\"inline\":true,\"dynamic\":true,\"cached_projection\":true,\"zero_override\":true,\"old_deadline_preserved\":true,\"name_change_cleared\":true,\"late_rds_ignored\":true,\"deleted\":true,\"rbac_denied\":true,\"rbac_stream_denied\":true,\"rbac_header_scope\":true,\"fault_abort\":true,\"fault_delay\":true,\"fault_percentage\":true,\"nacks\":3}}\n", .{});
 }
