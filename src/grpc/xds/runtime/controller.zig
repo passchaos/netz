@@ -665,6 +665,108 @@ pub const Controller = struct {
         if (self.findResourceTimer(type_url, name)) |index| return self.resource_timers.items[index].status;
         return null;
     }
+    fn resourceVersion(client: anytype, type_url: []const u8, name: []const u8) []const u8 {
+        const entry = client.subscriptions.find(type_url) orelse return "";
+        if (@TypeOf(client) == *delta.Client) {
+            for (entry.versions) |version| {
+                if (std.mem.eql(u8, version.name, name)) return version.version;
+            }
+            return "";
+        }
+        return entry.version;
+    }
+    /// Encode one `ClientStatusDiscoveryService` `ClientStatusResponse` for
+    /// this controller. Accepted LDS/RDS/CDS/EDS/SDS resources carry their raw
+    /// wire bytes and the version the client accepted. SotW reports the type's
+    /// accepted version for every resource; delta reports the per-resource
+    /// accepted version.
+    pub fn encodeClientStatus(
+        self: *Controller,
+        client: anytype,
+        allocator: std.mem.Allocator,
+        options: @import("../csds.zig").Options,
+    ) Error![]u8 {
+        const csds = @import("../csds.zig");
+        try self.refreshResourceTimers(client);
+        var resources: std.ArrayList(csds.Resource) = .empty;
+        defer resources.deinit(allocator);
+        if (self.listener) |*listener| {
+            if (listener.listener) |*owned| {
+                try resources.append(allocator, .{
+                    .type_url = lds.type_url,
+                    .name = owned.value.name,
+                    .wire = owned.wire,
+                    .version = resourceVersion(client, lds.type_url, owned.value.name),
+                    .status = self.csdsResourceStatus(lds.type_url, owned.value.name),
+                });
+            }
+            if (listener.routes_accepted) {
+                if (listener.routes) |routes| {
+                    try resources.append(allocator, .{
+                        .type_url = rds.type_url,
+                        .name = routes.resource.value.name,
+                        .wire = routes.resource.wire,
+                        .version = resourceVersion(client, rds.type_url, routes.resource.value.name),
+                        .status = self.csdsResourceStatus(rds.type_url, routes.resource.value.name),
+                    });
+                }
+            }
+        }
+        for (self.entries.items) |entry| {
+            if (entry.cds_seen) {
+                if (entry.cluster) |cluster| {
+                    try resources.append(allocator, .{
+                        .type_url = cds.type_url,
+                        .name = entry.identity.name,
+                        .wire = cluster.resource.wire,
+                        .version = resourceVersion(client, cds.type_url, entry.identity.name),
+                        .status = self.csdsResourceStatus(cds.type_url, entry.identity.name),
+                    });
+                }
+            }
+            if (entry.eds_seen) {
+                if (entry.snapshot) |snapshot| {
+                    const cluster = entry.cluster orelse continue;
+                    const name = cluster.resource.value.edsName();
+                    try resources.append(allocator, .{
+                        .type_url = eds.type_url,
+                        .name = name,
+                        .wire = snapshot.resource.wire,
+                        .version = resourceVersion(client, eds.type_url, name),
+                        .status = self.csdsResourceStatus(eds.type_url, name),
+                    });
+                }
+            }
+        }
+        var secrets = self.sds_secrets.iterator();
+        while (secrets.next()) |item| {
+            try resources.append(allocator, .{
+                .type_url = sds.type_url,
+                .name = item.key_ptr.*,
+                .wire = item.value_ptr.*.owned.wire,
+                .version = resourceVersion(client, sds.type_url, item.key_ptr.*),
+                .status = self.csdsResourceStatus(sds.type_url, item.key_ptr.*),
+            });
+        }
+        for (self.resource_timers.items) |timer| {
+            if (self.cachedResource(timer.type_url, timer.name)) continue;
+            try resources.append(allocator, .{
+                .type_url = timer.type_url,
+                .name = timer.name,
+                .status = self.csdsResourceStatus(timer.type_url, timer.name),
+            });
+        }
+        return csds.encodeResponse(allocator, resources.items, options);
+    }
+    fn csdsResourceStatus(self: *Controller, type_url: []const u8, name: []const u8) @import("../csds.zig").ClientStatus {
+        const status = self.resourceStatus(type_url, name) orelse return .acked;
+        return switch (status) {
+            .requested => .requested,
+            .does_not_exist => .does_not_exist,
+            .timeout => .requested,
+            .acked => .acked,
+        };
+    }
     /// True when an expired EDS timer still matches the empty assignment that
     /// its own does-not-exist publication installed. A different wire means a
     /// real delivery replaced the placeholder, so the timer can be dropped.

@@ -172,5 +172,28 @@ aggregate name remains a manager selection key rather than an endpoint path
 element, so leaf cluster paths match directly. A loopback regression serves the
 first leaf, retires it, and verifies the same channel falls back to the second
 leaf in order.
+## Client status discovery
+
+`grpc.xds.csds.encodeResponse` encodes one
+`envoy.service.status.v3.ClientStatusResponse` for a client-side CSDS
+`FetchClientStatus` handler. `Controller.encodeClientStatus(client, allocator,
+options)` gathers the accepted LDS/RDS/CDS/EDS/SDS resources with their type
+URL, name, raw wire bytes and ACKED status; SotW reports the type's accepted
+version and delta reports the per-resource accepted version. Subscribed but
+undelivered resources are included without wire bytes as REQUESTED or
+DOES_NOT_EXIST, so a dump taken immediately after start shows what the client is
+waiting for. Pass the encoded `ads.codec.encodeNode` bytes as `Options.node`. The application serves the admin
+service from its own gRPC server and returns these response bytes; netz does not
+own an admin listener, and the request's node matchers are ignored because the
+response describes this client.
+
+```zig
+const node = try netz.grpc.xds.ads.codec.encodeNode(allocator, configuration.adsNode());
+defer allocator.free(node);
+const response = try controller.encodeClientStatus(
+    discovery, allocator, .{ .node = node },
+);
+```
+
 Unsupported resource features continue to fail typed validation rather than
 claim deployment support.

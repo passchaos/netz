@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "date": "2026-11-06",
+  "head": "working-tree",
+  "subject": "gRPC xDS client status discovery (CSDS)",
+  "change": "grpc.xds.csds encodes envoy.service.status.v3.ClientStatusResponse without generated protobuf code, and Controller.encodeClientStatus gathers this client's accepted LDS/RDS/CDS/EDS/SDS resources with type URL, name, accepted version, raw wire bytes and status. SotW reports the type's accepted version; delta reports the per-resource accepted version. Subscribed but undelivered resources are included without wire bytes as REQUESTED or DOES_NOT_EXIST, so a dump taken right after start shows what the client is waiting for. The application serves FetchClientStatus from its own gRPC server and returns these bytes; netz does not own an admin listener.",
+  "tests": {
+    "unit": "src/grpc/xds/csds.zig covers response encoding for an accepted resource with wire bytes and a does-not-exist resource without wire. src/grpc/xds/csds_tests.zig drives a delta controller through LDS, RDS, CDS and EDS and checks all four accepted entries with their per-resource version and ACKED status, then drives a SotW controller and checks the accepted listener version plus the pending CDS subscription reported as REQUESTED without a version.",
+    "focused_gate": {
+      "command": "zig build test-lib -Dtest-filter='CSDS' --summary all",
+      "passed": 169,
+      "total": 169,
+      "failed": 0
+    },
+    "compile": {
+      "command": "zig build test-compile",
+      "status": "passed"
+    },
+    "full_library": {
+      "command": "zig build test-lib",
+      "status": "passed",
+      "exit_code": 0,
+      "passed": 6533,
+      "total": 6533,
+      "failed": 0
+    }
+  },
+  "source_sha256": {
+    "src/grpc/xds/csds.zig": "f389b7c4583a7f18da5da26e1298028b16e8b58dcf3259e2ab5115449c6b53fe",
+    "src/grpc/xds/csds_tests.zig": "d0615dba1f94d3a58b01d71e178a6bfe4f56b2f5ae5371a683d1f7593cafb094",
+    "src/grpc/xds/runtime/controller.zig": "06fb7a34e5c2135777112a6ed3598a1f5158dcb9582aae6ac73155a30643a956",
+    "src/grpc/xds/mod.zig": "aa7efa52021418c61259c78735bd70847ebc2bf21ba9d0c3b229fccd05defabc",
+    "docs/grpc_xds_runtime.md": "09b5906c7aa746cf9f13499a657326ef383bba7a1a872bfbfcef9dcb6b16f03a"
+  },
+  "notes": "The request's node matchers are ignored because the response describes the local client. Resource status maps requested to REQUESTED, does_not_exist to DOES_NOT_EXIST, a transient timeout to REQUESTED, and a delivered resource to ACKED. The encoder emits proto3 defaults by omission and encodes each accepted resource as a google.protobuf.Any with the resource type URL."
+}
