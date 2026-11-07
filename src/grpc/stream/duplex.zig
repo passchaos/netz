@@ -1459,7 +1459,7 @@ pub const ServerDuplex = struct {
 
     pub fn reset(self: *ServerDuplex, code: http2.ErrorCode) Error!void {
         try self.ensureResponseWritable();
-        self.recordTerminal(.canceled);
+        self.recordTerminal(.cancelled);
         self.discardReceiveState();
         self.receive_state = .failed;
         try self.transport.reset(code);
