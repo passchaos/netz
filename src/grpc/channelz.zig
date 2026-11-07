@@ -858,6 +858,7 @@ pub const ServerInfo = struct {
     name: []const u8 = "",
     data: ServerData = .{},
     trace: ?TraceInfo = null,
+    listen_sockets: []SocketRefInfo = &.{},
 };
 
 /// Owned page of top-level channels. `channels` borrow `arena` storage.
@@ -1251,6 +1252,7 @@ pub fn decodeSubchannelResponse(allocator: std.mem.Allocator, bytes: []const u8)
 
 fn decodeServerInfo(allocator: std.mem.Allocator, bytes: []const u8) Error!ServerInfo {
     var value = ServerInfo{};
+    var listen_sockets: std.ArrayList(SocketRefInfo) = .empty;
     var reader = pb.Reader{ .bytes = bytes };
     while (try reader.next()) |field| switch (field.number) {
         1 => {
@@ -1272,8 +1274,13 @@ fn decodeServerInfo(allocator: std.mem.Allocator, bytes: []const u8) Error!Serve
                 else => try data.skip(item),
             };
         },
+        3 => try listen_sockets.append(
+            allocator,
+            try decodeSocketRef(allocator, try reader.bytesValue()),
+        ),
         else => try reader.skip(field),
     };
+    value.listen_sockets = try listen_sockets.toOwnedSlice(allocator);
     return value;
 }
 
@@ -1651,6 +1658,13 @@ fn encodeServer(out: *std.ArrayList(u8), allocator: std.mem.Allocator, server: *
     const last = server.last_call_started_ns.load(.acquire);
     if (last != 0) try putTimestampField(&data, allocator, 5, last);
     try putBytesField(out, allocator, 2, data.items);
+    for (server.listen_sockets.items) |id| {
+        const socket = server.registry.findSocket(id) orelse continue;
+        var socket_ref: std.ArrayList(u8) = .empty;
+        defer socket_ref.deinit(allocator);
+        try encodeSocketRef(&socket_ref, allocator, socket.id, socket.name);
+        try putBytesField(out, allocator, 3, socket_ref.items);
+    }
 }
 
 fn encodeSocketRef(out: *std.ArrayList(u8), allocator: std.mem.Allocator, id: i64, name: []const u8) !void {

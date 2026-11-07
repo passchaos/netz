@@ -1,0 +1,32 @@
+{
+  "status": "passed",
+  "port": 45147,
+  "channelz_schema": "grpc/grpc-js/proto/channelz.proto",
+  "grpc_js": "1.14.7",
+  "proto_loader": "0.8.1",
+  "protobufjs": "7.6.6",
+  "source_sha256": {
+    "build.zig": "4252e97576b3b04043b9c099f40c117517fe421369a64408e6122c98f7d6f5cb",
+    "src/grpc/mod.zig": "f3d2fa74f7b68b412eb9ef81d59072407007f5085964a6150ec0da3033d27bb8",
+    "src/grpc/channelz.zig": "3dd15fb93789a6b9349fcbcef6dfa3672f3158aae377cb6451dbf6583fff4793",
+    "src/grpc/channelz_tests.zig": "072f3ec20fc4fb2de1edda13d30797e47ed5ed3d0fcedf145e2b81d6ed36020f",
+    "src/grpc/runtime.zig": "62601134b1cc21d94a8919f500396c8d871472e560971f255340bb77b5bc0783",
+    "tools/interop/grpc_channelz/server.zig": "ecb42c24d19f59a03a3207a5e4b31f8ed0fd18ef52d1c4be59285713cf561af8",
+    "tools/interop/grpc_channelz/client.js": "ca0c307ee756d5a6fdf655b3b8eb97fd31dc8cc8a7a00c773603ba3200101c6f",
+    "tools/interop/grpc_channelz/run.py": "660f4e21ec4b8830906e37832eaa91ebad037a3fc755b239a08569e7ea774e57"
+  },
+  "schema_sha256": "3724a98db4870287d1ab3fe0f320af17f196bdec363f50f17f9a2a0a772c9228",
+  "server_sha256": "be2d896e68a8162a83f787fcd6ef40f238a2676c92725f07ae946d7ab89c3f1a"
+}
+Build Summary: 8/8 steps succeeded
+interop-grpc-channelz success
++- run python3 success 298ms
+   +- compile exe netz-grpc-channelz-server Debug native cached 27ms MaxRSS:40M
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 6ms MaxRSS:38M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 5ms MaxRSS:38M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options cached
+

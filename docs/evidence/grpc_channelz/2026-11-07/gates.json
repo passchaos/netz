@@ -10,10 +10,29 @@
       "all"
     ],
     "exit_code": 0,
-    "elapsed_seconds": 0.281,
+    "elapsed_seconds": 0.282,
     "summary": "8/8 steps succeeded; 172/172 tests passed",
     "log": "docs/evidence/grpc_channelz/2026-11-07/channelz.Debug.log",
-    "source_manifest": "docs/evidence/grpc_channelz/2026-11-07/sources.7e1aab574d22.json",
-    "source_manifest_sha256": "7e1aab574d2241b4582ba832ae3a0fbb687f35376f60fdcd224f4603b821753d"
+    "source_manifest": "docs/evidence/grpc_channelz/2026-11-07/sources.1d7fdff56c89.json",
+    "source_manifest_sha256": "1d7fdff56c89a4062f31648f202fc1c859a9fa46eb2288d2af4b88236e9b7206"
+  },
+  {
+    "name": "interop.Debug",
+    "command": [
+      "zig",
+      "build",
+      "interop-grpc-channelz",
+      "--summary",
+      "all",
+      "--",
+      "--output",
+      "docs/evidence/grpc_channelz/2026-11-07/interop.Debug.json"
+    ],
+    "exit_code": 0,
+    "summary": "8/8 steps succeeded; official grpc-js 1.14.7",
+    "log": "docs/evidence/grpc_channelz/2026-11-07/interop.Debug.log",
+    "report": "docs/evidence/grpc_channelz/2026-11-07/interop.Debug.json",
+    "source_manifest": "docs/evidence/grpc_channelz/2026-11-07/sources.06386d9792c1.json",
+    "source_manifest_sha256": "06386d9792c1d803ddcaebaad62e8285f7999d1c4d5b4cc2a7271eb307140add"
   }
 ]

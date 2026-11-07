@@ -269,6 +269,12 @@ test "Channelz server pages and single lookups expose call counters" {
     const first = try registry.addServer("first");
     first.callStarted();
     first.callSucceeded();
+    const listen = try registry.addSocket(
+        "listen",
+        .{ .tcpip = .{ .ip4 = .loopback(8080) } },
+        null,
+    );
+    try first.addListenSocket(listen);
     const second = try registry.addServer("second");
     second.callStarted();
     second.callFailed();
@@ -287,6 +293,15 @@ test "Channelz server pages and single lookups expose call counters" {
     try std.testing.expectEqual(@as(i64, 2), dump.servers[1].id);
     try std.testing.expectEqual(@as(i64, 1), dump.servers[1].failed);
 
+    const first_request = try idRequest(1, 1);
+    defer gpa.free(first_request);
+    const first_bytes = (try registry.handle(gpa, channelz.get_server_path, first_request)).?;
+    defer gpa.free(first_bytes);
+    var first_server = try channelz.decodeServerResponse(gpa, first_bytes);
+    defer first_server.deinit();
+    try std.testing.expectEqual(@as(usize, 1), first_server.value.listen_sockets.len);
+    try std.testing.expectEqualStrings("listen", first_server.value.listen_sockets[0].name);
+
     const server_request = try idRequest(1, 2);
     defer gpa.free(server_request);
     const server_bytes = (try registry.handle(gpa, channelz.get_server_path, server_request)).?;
@@ -302,7 +317,8 @@ test "Channelz server pages and single lookups expose call counters" {
     defer gpa.free(sockets_bytes);
     var sockets = try channelz.decodeServerSockets(gpa, sockets_bytes);
     defer sockets.deinit();
-    try std.testing.expectEqual(@as(usize, 0), sockets.sockets.len);
+    try std.testing.expectEqual(@as(usize, 1), sockets.sockets.len);
+    try std.testing.expectEqualStrings("listen", sockets.sockets[0].name);
     try std.testing.expect(sockets.end);
 }
 

@@ -133,3 +133,16 @@ zig build test-lib -Dtest-filter=Channelz --summary all
 The tests decode the emitted wire bytes independently and cover pagination,
 single-entity lookup, counter/timestamp encoding, unknown methods, unknown ids,
 invalid page sizes and channel removal.
+
+## Official schema interop
+
+```sh
+zig build interop-grpc-channelz --summary all
+```
+
+This starts the native Channelz server and drives it with the official
+`@grpc/grpc-js` 1.14.7 client loaded from
+`@grpc/grpc-js/proto/channelz.proto`. It checks channels, subchannels, servers,
+listen-socket refs, sockets, traces, counters and `NOT_FOUND` statuses. The
+official client caught an earlier omission of `Server.listen_socket` refs,
+which is now encoded and decoded by the native implementation.

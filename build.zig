@@ -2195,6 +2195,20 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| grpc_federation.addArgs(args);
     b.step("interop-grpc-federation", "Verify managed cross-authority discovery, publication and LRS with independent peers").dependOn(&grpc_federation.step);
 
+    const grpc_channelz_server = b.addExecutable(.{
+        .name = "netz-grpc-channelz-server",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/interop/grpc_channelz/server.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const grpc_channelz = b.addSystemCommand(&.{ "python3", "tools/interop/grpc_channelz/run.py" });
+    grpc_channelz.addArtifactArg(grpc_channelz_server);
+    if (b.args) |args| grpc_channelz.addArgs(args);
+    b.step("interop-grpc-channelz", "Verify Channelz channels, subchannels, servers, sockets and traces with the official grpc-js client").dependOn(&grpc_channelz.step);
+
     const grpc_impl_client = b.addExecutable(.{
         .name = "netz-grpc-cluster-impl-client",
         .root_module = b.createModule(.{

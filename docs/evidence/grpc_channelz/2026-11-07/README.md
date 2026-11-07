@@ -8,6 +8,7 @@ serialized with registry mutation.
 | Gate | Result | Evidence |
 | --- | --- | --- |
 | Focused Channelz Debug | 172/172 tests | `channelz.Debug.log` |
+| Official grpc-js Channelz interop | all methods + NOT_FOUND | `interop.Debug.json` |
 
 The focused run covers independent wire decoding of paginated top channels and
 servers, single-entity lookup, ids/names/targets/connectivity state, call
@@ -29,8 +30,16 @@ transport subchannels automatically. Socket security details, socket options,
 flow-control windows and server connection sockets are not synthesized.
 Applications may register connection sockets explicitly when they own them.
 
+The official interop gate loads `@grpc/grpc-js/proto/channelz.proto` with
+`@grpc/grpc-js` 1.14.7 and calls every supported method against the native
+server. It verifies channel/subchannel/server/socket fields, traces, counters,
+listen-socket refs, socket addresses and `NOT_FOUND` statuses. This gate caught
+the earlier omission of `Server.listen_socket` refs; the native encoder and
+client decoder now cover them.
+
 Reproduce with:
 
 ```sh
 zig build test-lib -Dtest-filter=Channelz --summary all
+zig build interop-grpc-channelz --summary all
 ```
