@@ -132,6 +132,10 @@ const PendingMessage = struct {
 /// messages.
 const borrowed_server_message_threshold: usize = 64 * 1024;
 
+/// Large client requests use the same borrowed prefix-plus-payload burst as
+/// large server responses, so an identity message is not staged first.
+const borrowed_client_message_threshold: usize = 64 * 1024;
+
 const ReceiveState = enum {
     active,
     terminal_pending,
@@ -249,8 +253,130 @@ pub const ClientDuplex = struct {
         payload: []const u8,
         options: codec.MessageOptions,
     ) Error!WriteResult {
+        if (payload.len >= borrowed_client_message_threshold) {
+            try self.ensureWritable();
+            if (self.pending_message != null) return error.InvalidStreamState;
+            if (payload.len > self.encoder.max_message_size) {
+                return error.GrpcMessageTooLarge;
+            }
+            return self.writeBorrowedMessage(payload, options, false);
+        }
         try self.stageMessage(payload, options);
         return self.resumeMessage();
+    }
+
+    fn writeBorrowedMessage(
+        self: *ClientDuplex,
+        payload: []const u8,
+        options: codec.MessageOptions,
+        end_stream: bool,
+    ) Error!WriteResult {
+        const algorithm: compression.Algorithm =
+            if (options.disable_compression) .identity else self.encoder.algorithm;
+        var encoded = try compression.compressAlloc(
+            self.allocator,
+            algorithm,
+            payload,
+            self.encoder.compression_level,
+        );
+        defer encoded.deinit(self.allocator);
+        _ = try wire.encodedMessageLen(encoded.bytes.len);
+
+        var prefix: [5]u8 = undefined;
+        _ = try wire.writeMessageInto(&prefix, &.{}, encoded.compressed);
+        std.mem.writeInt(
+            u32,
+            prefix[1..5],
+            @intCast(encoded.bytes.len),
+            .big,
+        );
+        const total = std.math.add(
+            usize,
+            prefix.len,
+            encoded.bytes.len,
+        ) catch {
+            self.fail(.internal_error);
+            return error.MessageTooLarge;
+        };
+        const slices = [_][]const u8{ &prefix, encoded.bytes };
+        const committed_before = self.transport.requestCommittedBytes();
+        const result = if (self.deadline) |until|
+            self.transport.writeRequestSlicesWithDeadline(
+                &slices,
+                end_stream,
+                until,
+            )
+        else
+            self.transport.writeRequestSlices(&slices, end_stream);
+        const written = result catch |err| switch (err) {
+            error.ResponseAvailable => {
+                // The peer responded before the borrowed payload was fully
+                // committed. Copy only the unsent wire suffix so the caller
+                // can read the response and resume this message later.
+                const committed = self.transport.requestCommittedBytes() -
+                    committed_before;
+                if (committed == total) return .complete;
+                try self.stageUnsentSuffix(
+                    &prefix,
+                    encoded.bytes,
+                    committed,
+                    total,
+                    end_stream,
+                );
+                return .peer_event;
+            },
+            else => {
+                self.fail(if (err == error.Timeout) .cancel else .internal_error);
+                return err;
+            },
+        };
+        if (written.response_available) {
+            if (written.written == total) return .complete;
+            try self.stageUnsentSuffix(
+                &prefix,
+                encoded.bytes,
+                written.written,
+                total,
+                end_stream,
+            );
+            return .peer_event;
+        }
+        if (written.written != total) {
+            self.fail(.internal_error);
+            return error.InvalidStreamState;
+        }
+        return .complete;
+    }
+
+    fn stageUnsentSuffix(
+        self: *ClientDuplex,
+        prefix: *const [5]u8,
+        payload: []const u8,
+        committed: usize,
+        total: usize,
+        end_stream: bool,
+    ) Error!void {
+        if (committed > total) {
+            self.fail(.internal_error);
+            return error.InvalidStreamState;
+        }
+        const suffix = self.allocator.alloc(u8, total - committed) catch |err| {
+            self.fail(.internal_error);
+            return err;
+        };
+        errdefer self.allocator.free(suffix);
+        var cursor: usize = 0;
+        if (committed < prefix.len) {
+            const remaining_prefix = prefix.len - committed;
+            @memcpy(suffix[0..remaining_prefix], prefix[committed..]);
+            cursor = remaining_prefix;
+        }
+        const payload_offset = if (committed > prefix.len)
+            committed - prefix.len
+        else
+            0;
+        @memcpy(suffix[cursor..], payload[payload_offset..]);
+        self.pending_message = .{ .bytes = suffix, .end_stream = end_stream };
     }
 
     pub fn allocMessage(
@@ -298,6 +424,14 @@ pub const ClientDuplex = struct {
         payload: []const u8,
         options: codec.MessageOptions,
     ) Error!WriteResult {
+        if (payload.len >= borrowed_client_message_threshold) {
+            try self.ensureWritable();
+            if (self.pending_message != null) return error.InvalidStreamState;
+            if (payload.len > self.encoder.max_message_size) {
+                return error.GrpcMessageTooLarge;
+            }
+            return self.writeBorrowedMessage(payload, options, true);
+        }
         try self.stageFinalMessage(payload, options);
         return self.resumeMessage();
     }

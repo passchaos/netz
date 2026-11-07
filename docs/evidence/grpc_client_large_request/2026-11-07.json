@@ -1,0 +1,34 @@
+{
+  "schema": 1,
+  "date": "2026-11-07",
+  "head": "working-tree",
+  "subject": "Borrowed large client duplex requests",
+  "change": "ClientDuplex.writeMessage and writeFinalMessage now use a borrowed prefix-plus-payload DATA burst for identity messages at or above 64 KiB, mirroring the existing large server-response path. The request is written directly from the caller's payload instead of being staged into a prefix-reserved allocation. Compressed messages write the 5-byte frame prefix and the compressor output in one burst. If the peer responds before the burst completes, only the unsent wire suffix is copied into pending storage so the response can be read and the message resumed later; the common complete path performs no payload-sized allocation.",
+  "tests": {
+    "large_identity_request": "A real h2c regression writes a 163,840-byte identity final request through a tracking allocator and asserts zero allocations at or above the payload size, then verifies the server received the exact payload and the terminal status is OK.",
+    "early_response": "A second h2c regression has the server respond before reading the request; the client write returns peer_event, the unavailable terminal status is preserved, and the unsent suffix remains staged for resumption.",
+    "focused_grpc": {
+      "command": "zig build test-lib -Dtest-filter=grpc --summary all",
+      "passed": 1061,
+      "total": 1061,
+      "failed": 0
+    },
+    "compile": {
+      "command": "zig build test-compile",
+      "status": "passed"
+    },
+    "full_library": {
+      "command": "zig build test-lib -j1 --seed 0x4a337f0d --summary all",
+      "status": "passed",
+      "passed": 6764,
+      "total": 6764,
+      "failed": 0
+    }
+  },
+  "source_sha256": {
+    "src/grpc/stream/duplex.zig": "c4cba59bc92fbb7cd909e795356bfe2d213264b872933cc9cb6ffae78c4ece0b",
+    "src/grpc/stream/tests.zig": "10eb745b823694fac2f66a7da42c15b4c7efdef702bc33381b0bb4bc028019c5",
+    "docs/grpc_parity.md": "ba1f55ad4f37ad2626704840ec05faedc27bf83c3984af04776736cc9de0682a"
+  },
+  "notes": "The borrowed path is limited to the low-level ClientDuplex used by ordinary Channel streaming and direct runtime clients. SharedChannel keeps its bounded per-turn write staging so one large stream cannot monopolize an endpoint owner; its copy remains the fairness boundary. The early-response fallback copies at most the unsent window suffix, never the already-committed prefix or payload."
+}

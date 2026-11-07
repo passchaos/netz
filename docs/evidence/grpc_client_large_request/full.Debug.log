@@ -1,0 +1,25 @@
+federated native mode=sotw phase=finish-b2 step=0 authority=B url=type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment nonce=eb2
+federated native mode=delta phase=initial step=0 authority=A url=type.googleapis.com/envoy.config.listener.v3.Listener nonce=l1
+federated native mode=delta phase=initial step=1 authority=B url=type.googleapis.com/envoy.config.route.v3.RouteConfiguration nonce=r1
+federated native mode=delta phase=initial step=2 authority=B url=type.googleapis.com/envoy.config.cluster.v3.Cluster nonce=cb1
+federated native mode=delta phase=initial step=3 authority=B url=type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment nonce=eb1
+federated native mode=delta phase=initial step=4 authority=A url=type.googleapis.com/envoy.config.cluster.v3.Cluster nonce=ca1
+federated native mode=delta phase=initial step=5 authority=A url=type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment nonce=ea1
+federated native mode=delta phase=remove-a step=0 authority=A url=type.googleapis.com/envoy.config.cluster.v3.Cluster nonce=ca-empty
+federated native mode=delta phase=replacement step=0 authority=B url=type.googleapis.com/envoy.config.route.v3.RouteConfiguration nonce=r2
+federated native mode=delta phase=replacement step=1 authority=B url=type.googleapis.com/envoy.config.cluster.v3.Cluster nonce=cb2
+federated native mode=delta phase=finish-b2 step=0 authority=B url=type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment nonce=eb2
+failed command: ./.zig-cache/o/b39b43f7b49f2114eff8364ff826aa0c/test --cache-dir=./.zig-cache --seed=0x4a337f0d --listen=-
+
+Build Summary: 8/8 steps succeeded; 6764/6764 tests passed
+test-lib success
++- run test 6764 pass (6764 total) 7m MaxRSS:1G
+   +- compile test Debug native cached 31ms MaxRSS:40M
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 6ms MaxRSS:39M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 5ms MaxRSS:38M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options cached
+

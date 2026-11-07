@@ -560,6 +560,24 @@ The fixture peer drains the request through its empty FIN before closing TCP
 and asserts that only the first framed message arrived, avoiding a transport
 reset race from closing with unread upload bytes.
 
+## Large client request ownership
+
+Client duplex writes at or above 64 KiB now use the same borrowed
+prefix-plus-payload DATA burst as large server responses. An identity message
+is written directly from the caller's payload instead of being staged into a
+prefix-reserved allocation first. Compressed messages write the small frame
+prefix and the compressor output in one burst, and the compressor allocation is
+released when the synchronous write returns. If the peer responds before the
+burst completes, only the unsent wire suffix is copied into pending storage so
+the caller can read the response and resume the message; the common complete
+path performs no payload-sized allocation.
+
+A real h2c regression writes a 163,840-byte identity final request through a
+tracking allocator and asserts zero allocations at or above the payload size,
+then verifies the server payload and OK terminal status. A second regression
+responds early and checks that the write returns `peer_event`, the terminal
+status is preserved, and the staged suffix remains resumable.
+
 ## Remaining work before broad gRPC parity
 
 1. Generated pbz clients and handlers now have netz transport adapters for all
