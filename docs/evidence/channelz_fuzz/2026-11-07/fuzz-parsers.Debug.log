@@ -1,0 +1,12 @@
+Build Summary: 8/8 steps succeeded; 2/2 tests passed
+fuzz-parsers success
++- run test 2 pass (2 total) 353ms MaxRSS:13M
+   +- compile test Debug native cached 29ms MaxRSS:40M
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 7ms MaxRSS:36M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 7ms MaxRSS:36M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options cached
+

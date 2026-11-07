@@ -102,6 +102,8 @@ test "fuzz bounded cross-protocol parsers" {
         &mqtt_publish_seed,
         &mqtt_subscribe_seed,
         &mqtt_bad_length_seed,
+        &channelz_channel_seed,
+        &channelz_socket_seed,
     } });
 }
 
@@ -142,6 +144,8 @@ test "bounded deterministic parser mutation smoke" {
         mqtt_publish_seed[4..],
         mqtt_subscribe_seed[4..],
         mqtt_bad_length_seed[4..],
+        channelz_channel_seed[4..],
+        channelz_socket_seed[4..],
     };
     var buffer: [max_input_bytes]u8 = undefined;
     for (seeds) |seed| {
@@ -178,6 +182,7 @@ fn exerciseAll(bytes: []const u8) !void {
     try exerciseWebSocket(bytes);
     try exerciseWebTransport(bytes);
     try exerciseMqtt(bytes);
+    try exerciseChannelz(bytes);
 }
 
 fn exerciseHttp(bytes: []const u8) !void {
@@ -554,6 +559,15 @@ const mqtt_subscribe_seed = smithSliceSeed(
     "\x82\x09\x00\x01\x00\x00\x03a/+\x01",
 );
 const mqtt_bad_length_seed = smithSliceSeed(&.{ 0x30, 0x80, 0x00 });
+const channelz_channel_seed = smithSliceSeed(&.{
+    0x0a, 0x0c, 0x0a, 0x05, 0x08, 0x01, 0x12, 0x01, 0x63,
+    0x12, 0x04, 0x0a, 0x02, 0x08, 0x03,
+});
+const channelz_socket_seed = smithSliceSeed(&.{
+    0x0a, 0x13, 0x0a, 0x05, 0x18, 0x01, 0x22, 0x01, 0x73,
+    0x1a, 0x0a, 0x0a, 0x08, 0x0a, 0x04, 0x7f, 0x00, 0x00,
+    0x01, 0x10, 0x1f,
+});
 
 fn exerciseMqtt(bytes: []const u8) !void {
     const mqtt = netz.mqtt;
@@ -584,4 +598,33 @@ fn exerciseMqtt(bytes: []const u8) !void {
             } else |_| {}
         }
     }
+}
+
+fn exerciseChannelz(bytes: []const u8) !void {
+    const allocator = std.testing.allocator;
+    const channelz = netz.grpc.channelz;
+    if (channelz.decodeTopChannels(allocator, bytes)) |value| {
+        var dump = value;
+        dump.deinit();
+    } else |_| {}
+    if (channelz.decodeServers(allocator, bytes)) |value| {
+        var dump = value;
+        dump.deinit();
+    } else |_| {}
+    if (channelz.decodeChannelResponse(allocator, bytes)) |value| {
+        var channel = value;
+        channel.deinit();
+    } else |_| {}
+    if (channelz.decodeServerResponse(allocator, bytes)) |value| {
+        var server = value;
+        server.deinit();
+    } else |_| {}
+    if (channelz.decodeServerSockets(allocator, bytes)) |value| {
+        var sockets = value;
+        sockets.deinit();
+    } else |_| {}
+    if (channelz.decodeSocketResponse(allocator, bytes)) |value| {
+        var socket = value;
+        socket.deinit();
+    } else |_| {}
 }
