@@ -1,0 +1,19 @@
+[
+  {
+    "name": "channelz.Debug",
+    "command": [
+      "zig",
+      "build",
+      "test-lib",
+      "-Dtest-filter=Channelz",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 0.275,
+    "summary": "8/8 steps succeeded; 169/169 tests passed",
+    "log": "docs/evidence/grpc_channelz/2026-11-07/channelz.Debug.log",
+    "source_manifest": "docs/evidence/grpc_channelz/2026-11-07/sources.9e5c43bd19b4.json",
+    "source_manifest_sha256": "9e5c43bd19b459b0d9010b59b60dc5a0f619264e45866e9ae779eca2f4c76aa8"
+  }
+]

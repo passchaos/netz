@@ -976,7 +976,10 @@ Current protocol coverage includes:
   SharedChannel gate verifies background OOB admission and two independent
   report watchers without weakening the exact keepalive ACK gate. The official reflection
   and generated-pbz gates also use zio, with the pbz server scheduled through
-  `std.Io.async`.
+  `std.Io.async`. The server-side `grpc.channelz.v1` registry exposes paginated
+  top channels and servers, per-entity call counters, connectivity state, and
+  the standard unary admin methods; `channelz.serve` maps protocol errors to
+  gRPC status and leaves unrelated paths to the application dispatcher.
 - QUIC varints with encode length reuse, preallocated direct writes, long-header parsing, stream IDs, transport parameters, and core
   frame codecs (STREAM, CRYPTO, ACK, close, DATAGRAM, flow-control frames) with one-byte control-frame, direct single-/multi-varint, varint-payload, STREAM, DATAGRAM, NEW_CONNECTION_ID, and ACK_FREQUENCY write/length, fixed PATH, STREAM flag-byte, reset/stop, NEW_TOKEN, NEW_CONNECTION_ID, CRYPTO, MAX_DATA, stream flow-control, close, ACK/ACK_ECN, DATAGRAM, and ACK_FREQUENCY frame-type write fast paths, frame-payload close-error classification, shortest-form frame-type enforcement, empty non-FIN STREAM no-op rejection, stream-count bounds on MAX_STREAMS/STREAMS_BLOCKED and
   RFC 9000 packet-type legality checks for Initial/Handshake/0-RTT/1-RTT, typed

@@ -21,6 +21,7 @@ pub const web = @import("web.zig");
 pub const runtime = @import("runtime.zig");
 pub const health = @import("health.zig");
 pub const reflection = @import("reflection.zig");
+pub const channelz = @import("channelz.zig");
 pub const service_config = @import("service_config.zig");
 pub const pbz = @import("pbz.zig");
 
@@ -229,6 +230,8 @@ test {
     _ = stream;
     _ = health;
     _ = reflection;
+    _ = channelz;
+    _ = @import("channelz_tests.zig");
     _ = service_config;
     _ = pbz;
 }
