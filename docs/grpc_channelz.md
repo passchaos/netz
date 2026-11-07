@@ -49,6 +49,29 @@ if (try grpc.channelz.serve(&registry, &connection, &request)) continue;
 `serve` converts `NotFound`, `Unimplemented` and `InvalidRequest` into the
 corresponding gRPC statuses. Transport failures are returned to the caller.
 
+## Client
+
+`channelz.Client` wraps one connected `grpc.runtime.Client` and returns
+arena-owned decoded pages:
+
+```zig
+var admin = grpc.channelz.Client{
+    .allocator = allocator,
+    .connection = &client,
+};
+var channels = try admin.getTopChannels(0, 0);
+defer channels.deinit();
+for (channels.channels) |channel| {
+    // channel.id, channel.name, channel.data.calls_started, ...
+}
+```
+
+`getServers`, `getServer`, `getChannel` and `getServerSockets` follow the same
+pattern. `TopChannels`, `ServersPage`, `OwnedChannel` and `OwnedServer` own
+their arena and must be deinitialized. Client status mapping returns
+`NotFound`, `Unimplemented` or `InvalidRequest`; other non-OK statuses return
+`RpcFailed`. A successful response without a message returns `InvalidResponse`.
+
 ## Ownership and concurrency
 
 `addChannel` and `addServer` return handles that remain valid until

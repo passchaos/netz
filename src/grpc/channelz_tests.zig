@@ -334,6 +334,9 @@ test "Channelz serve dispatches real unary gRPC requests and statuses" {
     channel.setState(.ready);
     channel.callStarted();
     channel.callSucceeded();
+    const server_info = try registry.addServer("backend");
+    server_info.callStarted();
+    server_info.callSucceeded();
 
     var server = try runtime.Server.listen(
         gpa,
@@ -355,7 +358,7 @@ test "Channelz serve dispatches real unary gRPC requests and statuses" {
                 return;
             };
             defer connection.deinit();
-            for (0..2) |_| {
+            for (0..8) |_| {
                 var request = connection.readUnary() catch |err| {
                     self.err = err;
                     return;
@@ -409,6 +412,35 @@ test "Channelz serve dispatches real unary gRPC requests and statuses" {
     });
     defer missing.deinit();
     try std.testing.expectEqual(wire.Status.not_found, missing.status);
+
+    var admin = channelz.Client{ .allocator = gpa, .connection = &client };
+    var top = try admin.getTopChannels(0, 0);
+    defer top.deinit();
+    try std.testing.expectEqual(@as(usize, 1), top.channels.len);
+    try std.testing.expectEqualStrings("frontend", top.channels[0].name);
+    try std.testing.expectEqual(
+        channelz.ConnectivityState.ready,
+        top.channels[0].data.state,
+    );
+    try std.testing.expectEqual(@as(i64, 1), top.channels[0].data.calls_started);
+
+    var servers = try admin.getServers(0, 0);
+    defer servers.deinit();
+    try std.testing.expectEqual(@as(usize, 1), servers.servers.len);
+    try std.testing.expectEqualStrings("backend", servers.servers[0].name);
+    try std.testing.expectEqual(@as(i64, 1), servers.servers[0].data.calls_succeeded);
+
+    var server_value = try admin.getServer(1);
+    defer server_value.deinit();
+    try std.testing.expectEqualStrings("backend", server_value.value.name);
+
+    var channel_value = try admin.getChannel(1);
+    defer channel_value.deinit();
+    try std.testing.expectEqualStrings("frontend", channel_value.value.name);
+
+    const sockets = try admin.getServerSockets(1, 0, 0);
+    try std.testing.expect(sockets.end);
+    try std.testing.expectError(error.NotFound, admin.getChannel(999));
 
     thread.join();
     joined = true;

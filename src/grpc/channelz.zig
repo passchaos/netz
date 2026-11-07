@@ -14,6 +14,9 @@
 const std = @import("std");
 const pb = @import("protobuf.zig");
 const runtime = @import("runtime.zig");
+const call = @import("call.zig");
+const wire = @import("wire.zig");
+const http2 = @import("../http2/mod.zig");
 
 pub const service = "grpc.channelz.v1.Channelz";
 pub const get_top_channels_path = "/grpc.channelz.v1.Channelz/GetTopChannels";
@@ -386,6 +389,382 @@ pub fn serve(
     try connection.writeUnary(request.request.stream_id, .{ .message = encoded });
     return true;
 }
+
+pub const Timestamp = struct {
+    seconds: i64 = 0,
+    nanos: u32 = 0,
+};
+
+pub const ChannelData = struct {
+    state: ConnectivityState = .unknown,
+    target: []const u8 = "",
+    calls_started: i64 = 0,
+    calls_succeeded: i64 = 0,
+    calls_failed: i64 = 0,
+    last_call_started: ?Timestamp = null,
+};
+
+pub const ChannelInfo = struct {
+    id: i64 = 0,
+    name: []const u8 = "",
+    data: ChannelData = .{},
+};
+
+pub const ServerData = struct {
+    calls_started: i64 = 0,
+    calls_succeeded: i64 = 0,
+    calls_failed: i64 = 0,
+    last_call_started: ?Timestamp = null,
+};
+
+pub const ServerInfo = struct {
+    id: i64 = 0,
+    name: []const u8 = "",
+    data: ServerData = .{},
+};
+
+/// Owned page of top-level channels. `channels` borrow `arena` storage.
+pub const TopChannels = struct {
+    arena: std.heap.ArenaAllocator,
+    channels: []ChannelInfo = &.{},
+    end: bool = false,
+
+    pub fn deinit(self: *TopChannels) void {
+        self.arena.deinit();
+        self.* = undefined;
+    }
+};
+
+/// Owned page of servers. `servers` borrow `arena` storage.
+pub const ServersPage = struct {
+    arena: std.heap.ArenaAllocator,
+    servers: []ServerInfo = &.{},
+    end: bool = false,
+
+    pub fn deinit(self: *ServersPage) void {
+        self.arena.deinit();
+        self.* = undefined;
+    }
+};
+
+pub const OwnedChannel = struct {
+    arena: std.heap.ArenaAllocator,
+    value: ChannelInfo,
+
+    pub fn deinit(self: *OwnedChannel) void {
+        self.arena.deinit();
+        self.* = undefined;
+    }
+};
+
+pub const OwnedServer = struct {
+    arena: std.heap.ArenaAllocator,
+    value: ServerInfo,
+
+    pub fn deinit(self: *OwnedServer) void {
+        self.arena.deinit();
+        self.* = undefined;
+    }
+};
+
+pub const SocketPage = struct {
+    end: bool = false,
+};
+
+pub fn decodeTopChannels(allocator: std.mem.Allocator, bytes: []const u8) Error!TopChannels {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+    const owned = arena.allocator();
+    var values: std.ArrayList(ChannelInfo) = .empty;
+    var end = false;
+    var reader = pb.Reader{ .bytes = bytes };
+    while (try reader.next()) |field| switch (field.number) {
+        1 => try values.append(owned, try decodeChannelInfo(owned, try reader.bytesValue())),
+        2 => end = (try reader.varint()) != 0,
+        else => try reader.skip(field),
+    };
+    return .{
+        .arena = arena,
+        .channels = try values.toOwnedSlice(owned),
+        .end = end,
+    };
+}
+
+pub fn decodeServers(allocator: std.mem.Allocator, bytes: []const u8) Error!ServersPage {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+    const owned = arena.allocator();
+    var values: std.ArrayList(ServerInfo) = .empty;
+    var end = false;
+    var reader = pb.Reader{ .bytes = bytes };
+    while (try reader.next()) |field| switch (field.number) {
+        1 => try values.append(owned, try decodeServerInfo(owned, try reader.bytesValue())),
+        2 => end = (try reader.varint()) != 0,
+        else => try reader.skip(field),
+    };
+    return .{
+        .arena = arena,
+        .servers = try values.toOwnedSlice(owned),
+        .end = end,
+    };
+}
+
+pub fn decodeChannelResponse(allocator: std.mem.Allocator, bytes: []const u8) Error!OwnedChannel {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+    const owned = arena.allocator();
+    var value: ?ChannelInfo = null;
+    var reader = pb.Reader{ .bytes = bytes };
+    while (try reader.next()) |field| switch (field.number) {
+        1 => value = try decodeChannelInfo(owned, try reader.bytesValue()),
+        else => try reader.skip(field),
+    };
+    return .{ .arena = arena, .value = value orelse return error.InvalidRequest };
+}
+
+pub fn decodeServerResponse(allocator: std.mem.Allocator, bytes: []const u8) Error!OwnedServer {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+    const owned = arena.allocator();
+    var value: ?ServerInfo = null;
+    var reader = pb.Reader{ .bytes = bytes };
+    while (try reader.next()) |field| switch (field.number) {
+        1 => value = try decodeServerInfo(owned, try reader.bytesValue()),
+        else => try reader.skip(field),
+    };
+    return .{ .arena = arena, .value = value orelse return error.InvalidRequest };
+}
+
+pub fn decodeServerSockets(bytes: []const u8) Error!SocketPage {
+    var end = false;
+    var reader = pb.Reader{ .bytes = bytes };
+    while (try reader.next()) |field| switch (field.number) {
+        2 => end = (try reader.varint()) != 0,
+        else => try reader.skip(field),
+    };
+    return .{ .end = end };
+}
+
+fn decodeChannelInfo(allocator: std.mem.Allocator, bytes: []const u8) Error!ChannelInfo {
+    var value = ChannelInfo{};
+    var reader = pb.Reader{ .bytes = bytes };
+    while (try reader.next()) |field| switch (field.number) {
+        1 => {
+            var ref = pb.Reader{ .bytes = try reader.bytesValue() };
+            while (try ref.next()) |item| switch (item.number) {
+                1 => value.id = @bitCast(try ref.varint()),
+                2 => value.name = try allocator.dupe(u8, try ref.string()),
+                else => try ref.skip(item),
+            };
+        },
+        2 => {
+            var data = pb.Reader{ .bytes = try reader.bytesValue() };
+            while (try data.next()) |item| switch (item.number) {
+                1 => {
+                    var state = pb.Reader{ .bytes = try data.bytesValue() };
+                    while (try state.next()) |entry| switch (entry.number) {
+                        1 => {
+                            const raw = std.math.cast(
+                                u32,
+                                try state.varint(),
+                            ) orelse 0;
+                            value.data.state = std.enums.fromInt(
+                                ConnectivityState,
+                                raw,
+                            ) orelse .unknown;
+                        },
+                        else => try state.skip(entry),
+                    };
+                },
+                2 => value.data.target = try allocator.dupe(u8, try data.string()),
+                4 => value.data.calls_started = @bitCast(try data.varint()),
+                5 => value.data.calls_succeeded = @bitCast(try data.varint()),
+                6 => value.data.calls_failed = @bitCast(try data.varint()),
+                7 => value.data.last_call_started = try decodeTimestamp(try data.bytesValue()),
+                else => try data.skip(item),
+            };
+        },
+        else => try reader.skip(field),
+    };
+    return value;
+}
+
+fn decodeServerInfo(allocator: std.mem.Allocator, bytes: []const u8) Error!ServerInfo {
+    var value = ServerInfo{};
+    var reader = pb.Reader{ .bytes = bytes };
+    while (try reader.next()) |field| switch (field.number) {
+        1 => {
+            var ref = pb.Reader{ .bytes = try reader.bytesValue() };
+            while (try ref.next()) |item| switch (item.number) {
+                5 => value.id = @bitCast(try ref.varint()),
+                6 => value.name = try allocator.dupe(u8, try ref.string()),
+                else => try ref.skip(item),
+            };
+        },
+        2 => {
+            var data = pb.Reader{ .bytes = try reader.bytesValue() };
+            while (try data.next()) |item| switch (item.number) {
+                2 => value.data.calls_started = @bitCast(try data.varint()),
+                3 => value.data.calls_succeeded = @bitCast(try data.varint()),
+                4 => value.data.calls_failed = @bitCast(try data.varint()),
+                5 => value.data.last_call_started = try decodeTimestamp(try data.bytesValue()),
+                else => try data.skip(item),
+            };
+        },
+        else => try reader.skip(field),
+    };
+    return value;
+}
+
+fn decodeTimestamp(bytes: []const u8) Error!Timestamp {
+    var value = Timestamp{};
+    var reader = pb.Reader{ .bytes = bytes };
+    while (try reader.next()) |field| switch (field.number) {
+        1 => value.seconds = @bitCast(try reader.varint()),
+        2 => value.nanos = std.math.cast(u32, try reader.varint()) orelse return error.InvalidRequest,
+        else => try reader.skip(field),
+    };
+    return value;
+}
+
+pub fn encodePageRequest(
+    allocator: std.mem.Allocator,
+    start: i64,
+    max_results: i64,
+) Error![]u8 {
+    if (start < 0 or max_results < 0) return error.InvalidRequest;
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    if (start != 0) try putVarintField(&out, allocator, 1, @bitCast(start));
+    if (max_results != 0) try putVarintField(&out, allocator, 2, @bitCast(max_results));
+    return out.toOwnedSlice(allocator);
+}
+
+pub fn encodeIdRequest(allocator: std.mem.Allocator, id: i64) Error![]u8 {
+    if (id <= 0) return error.InvalidRequest;
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try putVarintField(&out, allocator, 1, @intCast(id));
+    return out.toOwnedSlice(allocator);
+}
+
+pub fn encodeServerSocketsRequest(
+    allocator: std.mem.Allocator,
+    server_id: i64,
+    start_socket_id: i64,
+    max_results: i64,
+) Error![]u8 {
+    if (server_id <= 0 or start_socket_id < 0 or max_results < 0) return error.InvalidRequest;
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try putVarintField(&out, allocator, 1, @intCast(server_id));
+    if (start_socket_id != 0) try putVarintField(&out, allocator, 2, @bitCast(start_socket_id));
+    if (max_results != 0) try putVarintField(&out, allocator, 3, @bitCast(max_results));
+    return out.toOwnedSlice(allocator);
+}
+
+pub const ClientOptions = struct {
+    authority: []const u8 = "localhost",
+    timeout: ?wire.Timeout = null,
+    metadata: []const http2.Hpack.HeaderField = &.{},
+};
+
+pub const ClientError = Error || runtime.Error || error{ RpcFailed, InvalidResponse };
+
+/// Unary Channelz client over one connected `grpc.runtime.Client`.
+pub const Client = struct {
+    allocator: std.mem.Allocator,
+    connection: *runtime.Client,
+    options: ClientOptions = .{},
+
+    pub fn getTopChannels(
+        self: *Client,
+        start: i64,
+        max_results: i64,
+    ) ClientError!TopChannels {
+        const request = try encodePageRequest(self.allocator, start, max_results);
+        defer self.allocator.free(request);
+        var response = try self.unary(get_top_channels_path, request);
+        defer response.deinit();
+        const message = response.message orelse return error.InvalidResponse;
+        return decodeTopChannels(self.allocator, message.payload);
+    }
+
+    pub fn getServers(
+        self: *Client,
+        start: i64,
+        max_results: i64,
+    ) ClientError!ServersPage {
+        const request = try encodePageRequest(self.allocator, start, max_results);
+        defer self.allocator.free(request);
+        var response = try self.unary(get_servers_path, request);
+        defer response.deinit();
+        const message = response.message orelse return error.InvalidResponse;
+        return decodeServers(self.allocator, message.payload);
+    }
+
+    pub fn getServer(self: *Client, id: i64) ClientError!OwnedServer {
+        const request = try encodeIdRequest(self.allocator, id);
+        defer self.allocator.free(request);
+        var response = try self.unary(get_server_path, request);
+        defer response.deinit();
+        const message = response.message orelse return error.InvalidResponse;
+        return decodeServerResponse(self.allocator, message.payload);
+    }
+
+    pub fn getChannel(self: *Client, id: i64) ClientError!OwnedChannel {
+        const request = try encodeIdRequest(self.allocator, id);
+        defer self.allocator.free(request);
+        var response = try self.unary(get_channel_path, request);
+        defer response.deinit();
+        const message = response.message orelse return error.InvalidResponse;
+        return decodeChannelResponse(self.allocator, message.payload);
+    }
+
+    pub fn getServerSockets(
+        self: *Client,
+        server_id: i64,
+        start_socket_id: i64,
+        max_results: i64,
+    ) ClientError!SocketPage {
+        const request = try encodeServerSocketsRequest(
+            self.allocator,
+            server_id,
+            start_socket_id,
+            max_results,
+        );
+        defer self.allocator.free(request);
+        var response = try self.unary(get_server_sockets_path, request);
+        defer response.deinit();
+        const message = response.message orelse return error.InvalidResponse;
+        return decodeServerSockets(message.payload);
+    }
+
+    fn unary(
+        self: *Client,
+        path: []const u8,
+        message: []const u8,
+    ) ClientError!call.UnaryResponse {
+        var response = try self.connection.unary(.{
+            .path = path,
+            .authority = self.options.authority,
+            .message = message,
+            .timeout = self.options.timeout,
+            .metadata = self.options.metadata,
+        });
+        if (response.status != .ok) {
+            const status = response.status;
+            response.deinit();
+            return switch (status) {
+                .not_found => error.NotFound,
+                .unimplemented => error.Unimplemented,
+                .invalid_argument => error.InvalidRequest,
+                else => error.RpcFailed,
+            };
+        }
+        return response;
+    }
+};
 
 const PageRequest = struct { start: i64, limit: usize };
 

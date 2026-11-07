@@ -15,7 +15,9 @@ started/succeeded/failed counters, last-call timestamps, default and capped page
 sizes, unknown methods, unknown ids, invalid pages and channel removal. A real
 loopback gRPC unary server/client test dispatches `GetTopChannels` through
 `channelz.serve`, decodes the response, and verifies `NOT_FOUND` status mapping
-for an unknown channel id.
+for an unknown channel id. The same fixture exercises `channelz.Client` for
+top-channel and server pages, single server/channel lookup, server sockets and
+client-side `NOT_FOUND` mapping.
 
 `GetSubchannel` and `GetSocket` return `NOT_FOUND`, and `GetServerSockets`
 returns an empty final page, because this library does not expose stable
