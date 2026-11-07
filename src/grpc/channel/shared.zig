@@ -56,7 +56,10 @@ pub const Sender = struct {
     }
     fn unaryResolved(self: Sender, options: call.UnaryCallOptions, retry_policy: ?call.RetryPolicy, hedging_policy: ?call.HedgingPolicy) Error!call.UnaryResponse {
         const entered = std.Io.Clock.awake.now(self.state.io);
-        if (options.message.len > options.requestMessageLimit()) return error.GrpcMessageTooLarge;
+        if (options.owned_message) |owned| {
+            if (options.message.len != 0) return error.InvalidMessageCount;
+            if (owned.payload().len > options.requestMessageLimit()) return error.GrpcMessageTooLarge;
+        } else if (options.message.len > options.requestMessageLimit()) return error.GrpcMessageTooLarge;
         _ = try call.parseRequestMetadata("POST", options.path, &.{ .{ .name = "content-type", .value = "application/grpc" }, .{ .name = "te", .value = "trailers" } });
         try call.validateCustomMetadata(options.metadata);
         try call.validateCustomBinaryMetadata(options.binary_metadata);

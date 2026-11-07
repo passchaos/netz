@@ -87,6 +87,45 @@ test "gRPC shared background channel multiplexes concurrent unary calls on one c
     try peer.await(io);
 }
 
+test "gRPC shared channel unary accepts prefix-reserved request storage" {
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try grpc.runtime.Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{}, 4096);
+    defer server.deinit();
+    const Peer = struct {
+        fn run(server_ptr: *grpc.runtime.Server) !void {
+            var connection = try server_ptr.acceptWithTimeout(.fromSeconds(3));
+            defer connection.deinit();
+            var request = try connection.readUnary();
+            defer request.deinit();
+            if (!std.mem.eql(u8, request.request.message.payload, "shared-owned")) {
+                return error.InvalidGrpcRequest;
+            }
+            try connection.writeUnary(request.request.stream_id, .{ .message = "ok" });
+        }
+    };
+    var peer = io.async(Peer.run, .{&server});
+    defer _ = peer.cancel(io) catch {};
+    var client = try shared.SharedChannel.init(allocator, io, .{ .cleartext_ip = .{ .address = server.address() } }, .{});
+    defer client.deinit();
+    var sender = client.sender();
+    defer sender.deinit();
+    var owned = try grpc.OwnedRequestMessage.init(allocator, "shared-owned".len);
+    defer owned.deinit();
+    @memcpy(owned.payload(), "shared-owned");
+    var response = try sender.unary(.{
+        .path = "/demo.Shared/Unary",
+        .owned_message = &owned,
+        .timeout = .{ .value = 3, .unit = .second },
+        .wait_for_ready = true,
+    });
+    defer response.deinit();
+    try std.testing.expectEqual(grpc.Status.ok, response.status);
+    try std.testing.expectEqualStrings("ok", response.message.?.payload);
+    try peer.await(io);
+}
+
 test "gRPC shared send handles and connectivity watches survive channel destruction" {
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
     defer threaded.deinit();

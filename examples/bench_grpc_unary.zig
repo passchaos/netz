@@ -11,6 +11,9 @@ const Options = struct {
     /// Server responses use the prefix-reserved owned buffer. Pass
     /// --borrowed-response for the staged borrowed path.
     owned_response: bool = true,
+    /// Client requests serialize into prefix-reserved storage. Pass
+    /// --owned-request for that path instead of the staged borrowed request.
+    owned_request: bool = false,
 };
 
 fn parse(init: std.process.Init) !Options {
@@ -30,6 +33,8 @@ fn parse(init: std.process.Init) !Options {
             options.validate = false;
         } else if (std.mem.eql(u8, arg, "--borrowed-response")) {
             options.owned_response = false;
+        } else if (std.mem.eql(u8, arg, "--owned-request")) {
+            options.owned_request = true;
         } else if (std.mem.startsWith(u8, arg, "--payload=")) {
             options.payload_bytes = try std.fmt.parseInt(
                 usize,
@@ -75,6 +80,15 @@ pub fn main(init: std.process.Init) !void {
     defer backing.free(response);
     @memset(request, 'a');
     @memset(response, 'b');
+    var request_message: ?netz.grpc.OwnedRequestMessage = null;
+    defer if (request_message) |*message| message.deinit();
+    if (options.owned_request) {
+        request_message = try netz.grpc.OwnedRequestMessage.init(
+            backing,
+            options.payload_bytes,
+        );
+        @memcpy(request_message.?.payload(), request);
+    }
     // The server reuses one prefix-reserved response buffer for every call.
     var response_message = try netz.grpc.OwnedResponseMessage.init(
         backing,
@@ -125,11 +139,23 @@ pub fn main(init: std.process.Init) !void {
         var sender = channel.sender();
         defer sender.deinit();
         for (0..options.warmup) |_| {
-            try sharedExchange(sender, request, response, options.validate);
+            try sharedExchange(
+                sender,
+                request,
+                response,
+                options.validate,
+                if (request_message) |*message| message else null,
+            );
         }
         const started = now(io);
         for (0..options.iterations) |_| {
-            try sharedExchange(sender, request, response, options.validate);
+            try sharedExchange(
+                sender,
+                request,
+                response,
+                options.validate,
+                if (request_message) |*message| message else null,
+            );
         }
         elapsed = now(io) -| started;
     } else {
@@ -141,11 +167,25 @@ pub fn main(init: std.process.Init) !void {
         );
         defer client.close();
         for (0..options.warmup) |_| {
-            try exchange(&client, backing, request, response, options.validate);
+            try exchange(
+                &client,
+                backing,
+                request,
+                response,
+                options.validate,
+                if (request_message) |*message| message else null,
+            );
         }
         const started = now(io);
         for (0..options.iterations) |_| {
-            try exchange(&client, backing, request, response, options.validate);
+            try exchange(
+                &client,
+                backing,
+                request,
+                response,
+                options.validate,
+                if (request_message) |*message| message else null,
+            );
         }
         elapsed = now(io) -| started;
     }
@@ -163,11 +203,12 @@ pub fn main(init: std.process.Init) !void {
     }
     std.debug.print(
         "record=result schema=2 implementation=netz protocol=grpc transport=h2c " ++
-            "client_api={s} allocator={s} warmup={d} iterations={d} " ++
+            "client_api={s} request_storage={s} allocator={s} warmup={d} iterations={d} " ++
             "payload_bytes={d} validation={s} elapsed_ns={d} ns_per_roundtrip={d} " ++
             "roundtrips_per_second={d} complete=true\n",
         .{
             if (options.shared) "shared-unary" else "ordinary-unary",
+            if (options.owned_request) "owned" else "staged",
             if (options.cached_allocator) "cached" else "smp",
             options.warmup,
             options.iterations,
@@ -186,11 +227,13 @@ fn exchange(
     request: []const u8,
     response: []const u8,
     validate: bool,
+    owned_request: ?*netz.grpc.OwnedRequestMessage,
 ) !void {
     var result = try netz.grpc.unaryCall(connection, allocator, .{
         .path = "/bench.Echo/Unary",
         .authority = "localhost",
-        .message = request,
+        .message = if (owned_request == null) request else "",
+        .owned_message = owned_request,
     });
     defer result.deinit();
     try validateUnary(result, response, validate);
@@ -201,11 +244,13 @@ fn sharedExchange(
     request: []const u8,
     response: []const u8,
     validate: bool,
+    owned_request: ?*netz.grpc.OwnedRequestMessage,
 ) !void {
     var result = try sender.unary(.{
         .path = "/bench.Echo/Unary",
         .authority = "localhost",
-        .message = request,
+        .message = if (owned_request == null) request else "",
+        .owned_message = owned_request,
     });
     defer result.deinit();
     try validateUnary(result, response, validate);
@@ -249,6 +294,13 @@ const Peer = struct {
                 self.response.len + 8,
             );
             defer call.deinit();
+            // Guard the request path: an empty or truncated request would make
+            // request-storage comparisons meaningless.
+            if (call.message.payload.len != self.response.len or
+                (call.message.payload.len != 0 and call.message.payload[0] != 'a'))
+            {
+                return error.InvalidGrpcRequest;
+            }
             try netz.grpc.writeUnaryResponse(
                 &connection,
                 self.allocator,

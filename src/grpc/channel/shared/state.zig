@@ -1244,7 +1244,10 @@ pub const State = struct {
         const closed = self.closed;
         self.unlock();
         if (closed) return error.SharedChannelClosed;
-        if (resolved.options.message.len > resolved.options.requestMessageLimit()) return error.GrpcMessageTooLarge;
+        if (resolved.options.owned_message) |owned| {
+            if (resolved.options.message.len != 0) return error.InvalidMessageCount;
+            if (owned.payload().len > resolved.options.requestMessageLimit()) return error.GrpcMessageTooLarge;
+        } else if (resolved.options.message.len > resolved.options.requestMessageLimit()) return error.GrpcMessageTooLarge;
         resolved.options.wait_for_ready = resolved.wait_for_ready;
         if (resolved.hedging_policy) |policy| {
             return @import("hedging.zig").run(

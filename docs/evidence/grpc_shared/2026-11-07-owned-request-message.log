@@ -1,0 +1,48 @@
+mode=ordinary pair=1 order=staged
+record=result schema=2 implementation=netz protocol=grpc transport=h2c client_api=ordinary-unary request_storage=staged allocator=smp warmup=20 iterations=200 payload_bytes=262144 validation=full-bytes elapsed_ns=81726736 ns_per_roundtrip=408633 roundtrips_per_second=2447 complete=true
+mode=ordinary pair=1 order=owned
+record=result schema=2 implementation=netz protocol=grpc transport=h2c client_api=ordinary-unary request_storage=owned allocator=smp warmup=20 iterations=200 payload_bytes=262144 validation=full-bytes elapsed_ns=68954634 ns_per_roundtrip=344773 roundtrips_per_second=2900 complete=true
+mode=ordinary pair=2 order=owned
+record=result schema=2 implementation=netz protocol=grpc transport=h2c client_api=ordinary-unary request_storage=owned allocator=smp warmup=20 iterations=200 payload_bytes=262144 validation=full-bytes elapsed_ns=68946517 ns_per_roundtrip=344732 roundtrips_per_second=2900 complete=true
+mode=ordinary pair=2 order=staged
+record=result schema=2 implementation=netz protocol=grpc transport=h2c client_api=ordinary-unary request_storage=staged allocator=smp warmup=20 iterations=200 payload_bytes=262144 validation=full-bytes elapsed_ns=82148631 ns_per_roundtrip=410743 roundtrips_per_second=2434 complete=true
+mode=ordinary pair=3 order=staged
+record=result schema=2 implementation=netz protocol=grpc transport=h2c client_api=ordinary-unary request_storage=staged allocator=smp warmup=20 iterations=200 payload_bytes=262144 validation=full-bytes elapsed_ns=81851990 ns_per_roundtrip=409259 roundtrips_per_second=2443 complete=true
+mode=ordinary pair=3 order=owned
+record=result schema=2 implementation=netz protocol=grpc transport=h2c client_api=ordinary-unary request_storage=owned allocator=smp warmup=20 iterations=200 payload_bytes=262144 validation=full-bytes elapsed_ns=68925463 ns_per_roundtrip=344627 roundtrips_per_second=2901 complete=true
+mode=ordinary pair=4 order=owned
+record=result schema=2 implementation=netz protocol=grpc transport=h2c client_api=ordinary-unary request_storage=owned allocator=smp warmup=20 iterations=200 payload_bytes=262144 validation=full-bytes elapsed_ns=68569983 ns_per_roundtrip=342849 roundtrips_per_second=2916 complete=true
+mode=ordinary pair=4 order=staged
+record=result schema=2 implementation=netz protocol=grpc transport=h2c client_api=ordinary-unary request_storage=staged allocator=smp warmup=20 iterations=200 payload_bytes=262144 validation=full-bytes elapsed_ns=81384430 ns_per_roundtrip=406922 roundtrips_per_second=2457 complete=true
+mode=ordinary pair=5 order=staged
+record=result schema=2 implementation=netz protocol=grpc transport=h2c client_api=ordinary-unary request_storage=staged allocator=smp warmup=20 iterations=200 payload_bytes=262144 validation=full-bytes elapsed_ns=80933873 ns_per_roundtrip=404669 roundtrips_per_second=2471 complete=true
+mode=ordinary pair=5 order=owned
+record=result schema=2 implementation=netz protocol=grpc transport=h2c client_api=ordinary-unary request_storage=owned allocator=smp warmup=20 iterations=200 payload_bytes=262144 validation=full-bytes elapsed_ns=68728262 ns_per_roundtrip=343641 roundtrips_per_second=2910 complete=true
+mode=ordinary pair=6 order=owned
+record=result schema=2 implementation=netz protocol=grpc transport=h2c client_api=ordinary-unary request_storage=owned allocator=smp warmup=20 iterations=200 payload_bytes=262144 validation=full-bytes elapsed_ns=68877988 ns_per_roundtrip=344389 roundtrips_per_second=2903 complete=true
+mode=ordinary pair=6 order=staged
+record=result schema=2 implementation=netz protocol=grpc transport=h2c client_api=ordinary-unary request_storage=staged allocator=smp warmup=20 iterations=200 payload_bytes=262144 validation=full-bytes elapsed_ns=80751372 ns_per_roundtrip=403756 roundtrips_per_second=2476 complete=true
+mode=shared pair=1 order=staged
+record=result schema=2 implementation=netz protocol=grpc transport=h2c client_api=shared-unary request_storage=staged allocator=smp warmup=20 iterations=200 payload_bytes=262144 validation=full-bytes elapsed_ns=112756482 ns_per_roundtrip=563782 roundtrips_per_second=1773 complete=true
+mode=shared pair=1 order=owned
+record=result schema=2 implementation=netz protocol=grpc transport=h2c client_api=shared-unary request_storage=owned allocator=smp warmup=20 iterations=200 payload_bytes=262144 validation=full-bytes elapsed_ns=111715494 ns_per_roundtrip=558577 roundtrips_per_second=1790 complete=true
+mode=shared pair=2 order=owned
+record=result schema=2 implementation=netz protocol=grpc transport=h2c client_api=shared-unary request_storage=owned allocator=smp warmup=20 iterations=200 payload_bytes=262144 validation=full-bytes elapsed_ns=111061307 ns_per_roundtrip=555306 roundtrips_per_second=1800 complete=true
+mode=shared pair=2 order=staged
+record=result schema=2 implementation=netz protocol=grpc transport=h2c client_api=shared-unary request_storage=staged allocator=smp warmup=20 iterations=200 payload_bytes=262144 validation=full-bytes elapsed_ns=111569552 ns_per_roundtrip=557847 roundtrips_per_second=1792 complete=true
+mode=shared pair=3 order=staged
+record=result schema=2 implementation=netz protocol=grpc transport=h2c client_api=shared-unary request_storage=staged allocator=smp warmup=20 iterations=200 payload_bytes=262144 validation=full-bytes elapsed_ns=112213123 ns_per_roundtrip=561065 roundtrips_per_second=1782 complete=true
+mode=shared pair=3 order=owned
+record=result schema=2 implementation=netz protocol=grpc transport=h2c client_api=shared-unary request_storage=owned allocator=smp warmup=20 iterations=200 payload_bytes=262144 validation=full-bytes elapsed_ns=111431161 ns_per_roundtrip=557155 roundtrips_per_second=1794 complete=true
+mode=shared pair=4 order=owned
+record=result schema=2 implementation=netz protocol=grpc transport=h2c client_api=shared-unary request_storage=owned allocator=smp warmup=20 iterations=200 payload_bytes=262144 validation=full-bytes elapsed_ns=111405149 ns_per_roundtrip=557025 roundtrips_per_second=1795 complete=true
+mode=shared pair=4 order=staged
+record=result schema=2 implementation=netz protocol=grpc transport=h2c client_api=shared-unary request_storage=staged allocator=smp warmup=20 iterations=200 payload_bytes=262144 validation=full-bytes elapsed_ns=112652809 ns_per_roundtrip=563264 roundtrips_per_second=1775 complete=true
+mode=shared pair=5 order=staged
+record=result schema=2 implementation=netz protocol=grpc transport=h2c client_api=shared-unary request_storage=staged allocator=smp warmup=20 iterations=200 payload_bytes=262144 validation=full-bytes elapsed_ns=111410178 ns_per_roundtrip=557050 roundtrips_per_second=1795 complete=true
+mode=shared pair=5 order=owned
+record=result schema=2 implementation=netz protocol=grpc transport=h2c client_api=shared-unary request_storage=owned allocator=smp warmup=20 iterations=200 payload_bytes=262144 validation=full-bytes elapsed_ns=111114999 ns_per_roundtrip=555574 roundtrips_per_second=1799 complete=true
+mode=shared pair=6 order=owned
+record=result schema=2 implementation=netz protocol=grpc transport=h2c client_api=shared-unary request_storage=owned allocator=smp warmup=20 iterations=200 payload_bytes=262144 validation=full-bytes elapsed_ns=111114255 ns_per_roundtrip=555571 roundtrips_per_second=1799 complete=true
+mode=shared pair=6 order=staged
+record=result schema=2 implementation=netz protocol=grpc transport=h2c client_api=shared-unary request_storage=staged allocator=smp warmup=20 iterations=200 payload_bytes=262144 validation=full-bytes elapsed_ns=111304957 ns_per_roundtrip=556524 roundtrips_per_second=1796 complete=true

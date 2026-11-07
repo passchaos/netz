@@ -337,7 +337,9 @@ pub const UnaryCallOptions = struct {
     message: []const u8 = "",
     /// Mutually exclusive with a non-empty `message`. Prefix-reserved storage
     /// borrowed for the synchronous write; identity requests reach the HTTP/2
-    /// writer without another payload copy.
+    /// writer without another payload copy. SharedChannel queues jobs, so it
+    /// copies the payload into job-owned storage and keeps this buffer
+    /// caller-owned and reusable.
     owned_message: ?*OwnedRequestMessage = null,
     /// Requested per-message encoding. Compression is skipped when it cannot
     /// make this particular message smaller.

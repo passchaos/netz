@@ -42,25 +42,32 @@ pub const Job = struct {
         deadline: ?std.Io.Clock.Timestamp,
         rpc_deadline: ?std.Io.Clock.Timestamp,
         previous: ?u8,
-    ) (std.mem.Allocator.Error || error{ MissingRequestHash, GrpcMessageTooLarge })!*Job {
+    ) (std.mem.Allocator.Error || error{ MissingRequestHash, GrpcMessageTooLarge, InvalidMessageCount })!*Job {
         const allocator = parent.allocator;
         const routing_hash: ?ring_hash.RequestHash = null;
         const job = try allocator.create(Job);
         errdefer allocator.destroy(job);
         var request = try inputs.clone(allocator, options);
         errdefer request.inputs.deinit();
-        if (options.message.len > std.math.maxInt(u32)) {
+        const payload = if (options.owned_message) |owned| blk: {
+            if (options.message.len != 0) return error.InvalidMessageCount;
+            break :blk owned.payload();
+        } else options.message;
+        if (payload.len > std.math.maxInt(u32)) {
             return error.GrpcMessageTooLarge;
         }
         const encoded_len = std.math.add(
             usize,
             5,
-            options.message.len,
+            payload.len,
         ) catch return error.GrpcMessageTooLarge;
         const message = try allocator.alloc(u8, encoded_len);
         errdefer allocator.free(message);
-        @memcpy(message[5..], options.message);
+        @memcpy(message[5..], payload);
         request.options.message = message[5..];
+        // The job owns its queued copy; the caller's prefix-reserved storage
+        // stays caller-owned and reusable.
+        request.options.owned_message = null;
         parent.retain();
         job.* = .{ .parent = parent, .options = request.options, .deadline = deadline, .rpc_deadline = rpc_deadline, .wait_for_ready = options.wait_for_ready orelse false, .previous_attempts = previous, .routing_hash = routing_hash, .owned_inputs = request.inputs, .owned_message = message };
         return job;

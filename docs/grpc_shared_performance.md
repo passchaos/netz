@@ -353,6 +353,24 @@ on 2026-11-06 measured a 404.664 us median round trip for the owned path versus
 in 8/8 pairs. Every arm validated the full 262,144-byte response and completed
 200 measured round trips after 20 warmups.
 
+Client unary requests now accept the matching prefix-reserved ownership through
+`grpc.OwnedRequestMessage` and `UnaryCallOptions.owned_message`. Ordinary unary
+calls hand the caller's identity storage to the HTTP/2 writer without the
+intermediate `framed` copy; compression falls back to a separate framed
+allocation, and the caller's buffer stays caller-owned and reusable.
+`SharedChannel` queues jobs that may outlive the caller, so it copies the owned
+payload into job-owned queued storage; owned requests therefore match the
+staged path there instead of bypassing the copy.
+
+`zig build bench-grpc-unary -Doptimize=ReleaseFast -- --payload=262144
+--iterations=200 --warmup=20 --owned-request` selects the owned request path.
+Six CPU-0 order-interleaved pairs on 2026-11-07 measured a 344.508 us median
+round trip for the owned path versus 407.778 us for the staged path, a 15.5%
+reduction with the owned arm faster in 6/6 pairs. The shared-channel arm
+measured 556.300 us versus 559.456 us (0.6%, 6/6), consistent with the queued
+copy. Both arms validated request framing on the server and full response
+bytes on the client for every measured call.
+
 [Complete timing and allocation records](evidence/grpc_shared/2026-10-28-deadline-scatter.json)
 retain 128 validated result/peer-completion pairs plus source and executable
 fingerprints. They do not replace the independent grpc-cpp comparison.

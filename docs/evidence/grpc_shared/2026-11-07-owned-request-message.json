@@ -1,0 +1,61 @@
+{
+  "schema": 1,
+  "date": "2026-11-07",
+  "head": "working-tree",
+  "subject": "gRPC owned unary request storage",
+  "change": "UnaryCallOptions gains owned_message backed by grpc.OwnedRequestMessage, prefix-reserved storage that a client serializes into directly. An identity unary request hands that exact allocation to the HTTP/2 writer, removing the framed staging copy of the whole request; compressed requests still allocate a separate framed buffer, and the borrowed message field keeps the existing staging path. The buffer is borrowed for the synchronous write and remains caller-owned, so a persistent client reuses one allocation across requests. SharedChannel queues jobs that may outlive the caller, so Job.create copies the owned payload into job-owned queued storage and leaves the caller's buffer reusable.",
+  "tests": {
+    "unit": [
+      "src/grpc/runtime_tests.zig runs a real h2c server that checks an owned 13-byte request payload and answers the call.",
+      "src/grpc/channel/shared/tests.zig runs a SharedChannel unary call whose server checks the owned request payload, covering the queued copy path."
+    ],
+    "focused_gate": {
+      "command": "zig build test-lib -Dtest-filter=grpc --summary all",
+      "passed": 1057,
+      "total": 1057,
+      "failed": 0
+    },
+    "compile": {
+      "command": "zig build test-compile",
+      "status": "passed"
+    },
+    "full_library": {
+      "command": "zig build test-lib -j1 --seed 0x4a337f0d --summary all",
+      "status": "passed",
+      "exit_code": 0,
+      "passed": 6760,
+      "total": 6760,
+      "failed": 0
+    },
+    "benchmark": {
+      "command": "taskset -c 0 netz-bench-grpc-unary --payload=262144 --iterations=200 --warmup=20 [--owned-request] [--shared]",
+      "pairs": 6,
+      "order": "alternating staged/owned and owned/staged per mode",
+      "ordinary_staged_ns_per_roundtrip": [408633, 410743, 409259, 406922, 404669, 403756],
+      "ordinary_owned_ns_per_roundtrip": [344773, 344732, 344627, 342849, 343641, 344389],
+      "ordinary_staged_median_ns": 407778,
+      "ordinary_owned_median_ns": 344508,
+      "ordinary_median_reduction_percent": 15.5,
+      "ordinary_owned_faster_pairs": "6/6",
+      "shared_staged_ns_per_roundtrip": [563782, 557847, 561065, 563264, 557050, 556524],
+      "shared_owned_ns_per_roundtrip": [558577, 555306, 557155, 557025, 555574, 555571],
+      "shared_staged_median_ns": 559456,
+      "shared_owned_median_ns": 556300,
+      "shared_median_reduction_percent": 0.6,
+      "shared_owned_faster_pairs": "6/6",
+      "workload": "256 KiB request and response, full-byte response validation, server request length and first-byte validation, 20 warmups, 200 measured calls"
+    }
+  },
+  "source_sha256": {
+    "src/grpc/call.zig": "c5b999c8c9b8c26e63a1d7550c08711c3d0f27c7e0692721cbc4c3b75da626aa",
+    "src/grpc/mod.zig": "d58b88a041e308add87d2e9ca5bd7b6becd9024ab388113cde87f8be971c8a5a",
+    "src/grpc/runtime_tests.zig": "93e84f67f74a8b7bf019fc04c12a17eb080de887157c969cbc0b29615e55b2af",
+    "src/grpc/channel/shared/job.zig": "a3cf17fc2bf44decf01cb4f42c9d38cf6be3eb2728bb9c6c11f1b9e3c67e3643",
+    "src/grpc/channel/shared.zig": "815c682a930fc90b469e0822a6d84d3141bf63dd64f638e67ff4c887d10222cc",
+    "src/grpc/channel/shared/state.zig": "82249cbacdb903443f12d687dbeb95927bdab23766dffa56f26ac11bb09be93c",
+    "src/grpc/channel/shared/tests.zig": "61ac26a1231c331a6c49860a2a8981f967fa19095422b639917b6044d3c30304",
+    "examples/bench_grpc_unary.zig": "b940d9aff23306f30990858641048cf06ec7c6d9d5c13f468ce07262cc234a25",
+    "docs/grpc_shared_performance.md": "b0092648e03ad35fded84a644d626206a45a696c7c261dfdf84db6abe41c791a"
+  },
+  "notes": "The benchmark compares request storage with the same binary and server: only the client request ownership changes. The staged path compresses/copies the payload and frames it per request; the owned path reuses one prefix-reserved buffer and performs no per-request payload copy or allocation. A request with both message and owned_message is rejected as InvalidMessageCount, and compressed requests still take the framed fallback. SharedChannel's queued-job copy is intentional because a job can outlive the caller after abandonment; the shared arm therefore measures parity rather than the ordinary zero-copy win."
+}
