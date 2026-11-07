@@ -58,6 +58,8 @@ def main() -> None:
     parser.add_argument("--warmup", type=int, default=100)
     parser.add_argument("--iterations", type=int, default=2000)
     parser.add_argument("--netz-borrowed-writes", action="store_true", help="use SharedChannel caller-owned request storage")
+    parser.add_argument("--netz-max-frame-size", type=int, help="override the native HTTP/2 max frame size")
+    parser.add_argument("--netz-cached-allocator", action="store_true", help="use the native BlockCache allocator")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     if args.samples < 3 or args.iterations <= 0 or args.warmup < 0 or args.cpu not in os.sched_getaffinity(0):
@@ -86,6 +88,8 @@ def main() -> None:
         "grpc_cpp_sha256": hashlib.sha256(cpp.read_bytes()).hexdigest(),
         "cpp_time_basis": "real_time", "netz_validation": "full-bytes",
         "netz_write_storage": "borrowed" if args.netz_borrowed_writes else "staged",
+        "netz_max_frame_size": args.netz_max_frame_size,
+        "netz_allocator": "cached" if args.netz_cached_allocator else "smp",
         "netz_protobuf_scope": "preencoded", "grpc_cpp_protobuf_scope": "serialize+parse",
     }
     (output / "context.json").write_text(json.dumps(context, indent=2) + "\n")
@@ -103,10 +107,15 @@ def main() -> None:
                     native_command = ["taskset", "-c", str(args.cpu), str(netz), f"--mode={mode}", f"--payload={payload}", f"--warmup={args.warmup}", f"--iterations={args.iterations}"]
                     if args.netz_borrowed_writes:
                         native_command.append("--borrowed-writes")
+                    if args.netz_max_frame_size is not None:
+                        native_command.append(f"--max-frame-size={args.netz_max_frame_size}")
+                    if args.netz_cached_allocator:
+                        native_command.append("--cached-allocator")
                     command(native_command, log, 60)
                     row = verify(log.read_text(encoding="utf-8"))
                     expected_storage = "borrowed" if args.netz_borrowed_writes else "staged"
-                    if row["mode"] != mode or int(row["payload_bytes"]) != payload or int(row["warmup"]) != args.warmup or int(row["iterations"]) != args.iterations or row["stats_enabled"] != "false" or row.get("write_storage", "staged") != expected_storage or row.get("stream_window", "65535") != "65535" or row.get("connection_window", "65535") != "65535" or row.get("adaptive_window", "false") != "false":
+                    expected_allocator = "cached" if args.netz_cached_allocator else "smp"
+                    if row["mode"] != mode or int(row["payload_bytes"]) != payload or int(row["warmup"]) != args.warmup or int(row["iterations"]) != args.iterations or row["stats_enabled"] != "false" or row.get("write_storage", "staged") != expected_storage or row.get("allocator", "smp") != expected_allocator or (args.netz_max_frame_size is not None and int(row.get("max_frame_size", "16384")) != args.netz_max_frame_size) or row.get("stream_window", "65535") != "65535" or row.get("connection_window", "65535") != "65535" or row.get("adaptive_window", "false") != "false":
                         raise ValueError(f"native workload mismatch: {log}")
                     native[mode, payload].append(int(row["ns_per_roundtrip"]))
             else:
