@@ -9,6 +9,7 @@ MQTT bytes and therefore remain meaningful against a different broker process.
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 import socket
 import sys
@@ -19,6 +20,7 @@ from mqtt_vectors import (
     authentication_username,
     bad_authentication_method,
     disconnect_forms,
+    equal_subscription_identifiers,
     extended_authentication,
     maximum_topic_hierarchy,
     pattern_matching,
@@ -49,6 +51,7 @@ SCENARIO_COUNT = (
     + authentication_username.SCENARIO_COUNT
     + bad_authentication_method.SCENARIO_COUNT
     + disconnect_forms.SCENARIO_COUNT
+    + equal_subscription_identifiers.SCENARIO_COUNT
     + extended_authentication.SCENARIO_COUNT
     + pattern_matching.SCENARIO_COUNT
     + persistent_incoming_qos2.SCENARIO_COUNT
@@ -74,6 +77,10 @@ SCENARIO_COUNT = (
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("broker", type=Path)
+    parser.add_argument(
+        "--only-equal-subscription-identifiers", action="store_true",
+        help="run the independent equal-ID live and journal fixture only",
+    )
     parser.add_argument(
         "--mosquitto-test-root",
         type=Path,
@@ -6264,12 +6271,17 @@ def retained_tombstone_properties(
 
 def main() -> None:
     args = parse_args()
+    if args.only_equal_subscription_identifiers:
+        print(json.dumps(equal_subscription_identifiers.run(args.broker), sort_keys=True))
+        return
     source_lock.verify_mosquitto_sources(args.mosquitto_test_root)
     sys.path.insert(0, str(args.mosquitto_test_root))
     import mqtt5_props  # type: ignore
     import mqtt5_rc  # type: ignore
     import mqtt5_opts  # type: ignore
     import mqtt_packets  # type: ignore
+
+    print(json.dumps(equal_subscription_identifiers.run(args.broker), sort_keys=True))
 
     bad_authentication_method.run(
         args.broker,

@@ -1358,8 +1358,13 @@ reporting success; append automatically takes this path before a configured
 journal-size bound would be exceeded. The initial journal creation follows the
 same file-sync, rename, and directory-sync sequence.
 
+The [delivery and disconnect rules](mqtt_delivery_and_disconnect.md) preserve
+per-filter Subscription Identifier multiplicity and place successful normal
+DISCONNECT/Will cancellation before physical shutdown. They also describe the
+explicit sync-failure result and writer-quiescence boundary.
+
 When `--commit-log=PATH` is enabled in the production example, the broker records
-protocol-visible durable boundaries before CONNACK, SUBACK, UNSUBACK,
+successful protocol-visible durable decisions before CONNACK, SUBACK, UNSUBACK,
 PUBACK/PUBREC/PUBCOMP, durable outgoing delivery, disconnect/Will scheduling,
 Will publication, and Session expiry can be observed by a peer. This first
 version intentionally journals complete state images so every private store is

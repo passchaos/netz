@@ -14,8 +14,14 @@ pub fn canReadBuffered(connection: anytype) bool {
 
 pub fn receivedDisconnect(connection: anytype) void {
     if (!connection.peer_disconnect_received.swap(true, .acq_rel)) {
-        connection.transport.interrupt() catch {};
+        if (!shutdownDeferred(connection)) connection.transport.interrupt() catch {};
     }
+}
+
+pub fn shutdownDeferred(connection: anytype) bool {
+    return connection.defer_peer_disconnect_shutdown and
+        connection.peer_disconnect_received.load(.acquire) and
+        !connection.peer_disconnect_shutdown_ready.load(.acquire);
 }
 
 pub fn sentDisconnect(connection: anytype) void {

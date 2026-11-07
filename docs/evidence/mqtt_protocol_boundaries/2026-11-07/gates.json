@@ -1,0 +1,92 @@
+[
+  {
+    "name": "identifiers-disconnect.Debug",
+    "command": [
+      "zig",
+      "build",
+      "test-lib",
+      "-Dtest-filter=Session delivery plan",
+      "-Dtest-filter=broker MQTT5 coalesced live delivery preserves equal Subscription Identifiers",
+      "-Dtest-filter=broker MQTT5 offline journal and DUP replay retain equal Subscription Identifiers",
+      "-Dtest-filter=MQTT Broker-managed DISCONNECT",
+      "-Dtest-filter=broker normal DISCONNECT",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 1.597,
+    "summary": "8/8 steps succeeded; 178/178 tests passed",
+    "log": "docs/evidence/mqtt_protocol_boundaries/2026-11-07/identifiers-disconnect.Debug.log",
+    "source_manifest": "docs/evidence/mqtt_protocol_boundaries/2026-11-07/sources.3f641b284ba6.json",
+    "source_manifest_sha256": "3f641b284ba608473218305f0009e254d8436082076af11d2295427a7b638477"
+  },
+  {
+    "name": "broker.Debug",
+    "command": [
+      "zig",
+      "build",
+      "build-mqtt-vector-broker",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 38.517,
+    "summary": "8/8 steps succeeded",
+    "log": "docs/evidence/mqtt_protocol_boundaries/2026-11-07/broker.Debug.log",
+    "source_manifest": "docs/evidence/mqtt_protocol_boundaries/2026-11-07/sources.e5f4c8afb6c1.json",
+    "source_manifest_sha256": "e5f4c8afb6c104d37ffbf402fe0e0f204cf17cb81fd17a01e30dcfdffe72d791"
+  },
+  {
+    "name": "termination-durability.ReleaseSafe",
+    "command": [
+      "zig",
+      "build",
+      "test-lib",
+      "-Doptimize=ReleaseSafe",
+      "-Dtest-filter=Session delivery plan",
+      "-Dtest-filter=Subscription Identifier",
+      "-Dtest-filter=DISCONNECT",
+      "-Dtest-filter=Will",
+      "-Dtest-filter=CONNACK",
+      "-Dtest-filter=takeover",
+      "-Dtest-filter=commit log",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 241.726,
+    "summary": "8/8 steps succeeded; 310/310 tests passed",
+    "log": "docs/evidence/mqtt_protocol_boundaries/2026-11-07/termination-durability.ReleaseSafe.log",
+    "source_manifest": "docs/evidence/mqtt_protocol_boundaries/2026-11-07/sources.e5f4c8afb6c1.json",
+    "source_manifest_sha256": "e5f4c8afb6c104d37ffbf402fe0e0f204cf17cb81fd17a01e30dcfdffe72d791"
+  },
+  {
+    "name": "wire.Debug",
+    "command": [
+      "python3",
+      "tools/interop/mqtt_mosquitto_vectors.py",
+      "zig-out/bin/netz-mqtt-vector-broker",
+      "--only-equal-subscription-identifiers"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 23.444,
+    "summary": "",
+    "log": "docs/evidence/mqtt_protocol_boundaries/2026-11-07/wire.Debug.log",
+    "source_manifest": "docs/evidence/mqtt_protocol_boundaries/2026-11-07/sources.e5f4c8afb6c1.json",
+    "source_manifest_sha256": "e5f4c8afb6c104d37ffbf402fe0e0f204cf17cb81fd17a01e30dcfdffe72d791"
+  },
+  {
+    "name": "crash-recovery.Debug",
+    "command": [
+      "python3",
+      "tools/interop/mqtt_commit_log.py",
+      "zig-out/bin/netz-mqtt-vector-broker"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 17.755,
+    "summary": "",
+    "log": "docs/evidence/mqtt_protocol_boundaries/2026-11-07/crash-recovery.Debug.log",
+    "source_manifest": "docs/evidence/mqtt_protocol_boundaries/2026-11-07/sources.e5f4c8afb6c1.json",
+    "source_manifest_sha256": "e5f4c8afb6c104d37ffbf402fe0e0f204cf17cb81fd17a01e30dcfdffe72d791"
+  }
+]

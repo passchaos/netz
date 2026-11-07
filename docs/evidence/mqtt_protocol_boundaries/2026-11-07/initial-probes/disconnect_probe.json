@@ -1,0 +1,92 @@
+{
+  "executable_sha256": "612bb86f2d567864fefe6ad9e194b19457698edc02e25f42fd8a3f640e5bc6e1",
+  "results": [
+    {
+      "publisher_before_disconnect": "absent",
+      "argv": [
+        "/home/passchaos/project-z/netz/zig-out/bin/netz-mqtt-vector-broker",
+        "--bind=127.0.0.1:46999",
+        "--connections=2",
+        "--max-queued-deliveries=1024",
+        "--max-outgoing-inflight=64",
+        "--connect-timeout-ms=5000",
+        "--commit-log=/tmp/netz-equal-id-disconnect-probe-g0lk9471/broker.log"
+      ],
+      "before_disconnect": {
+        "1727777": {
+          "wchan": "io_cqring_wait",
+          "syscall": "426 0x3 0x1 0x1 0x9 0x7ffd5ce69fa0 0x18 0x7ffd5ce69dd8 0x146c20e\n",
+          "stack": "PermissionError(13, 'Permission denied')"
+        },
+        "1727778": {
+          "wchan": "io_wq_worker",
+          "syscall": "426 0x3 0x2 0x1 0x9 0x7ffd5ce6bf00 0x18 0x0 0x0\n",
+          "stack": "PermissionError(13, 'Permission denied')"
+        }
+      },
+      "eof_elapsed_seconds": 0.008753317000810057,
+      "status": "EOF",
+      "journal_bytes": 927,
+      "broker_returncode": -15,
+      "broker_output": ""
+    },
+    {
+      "publisher_before_disconnect": "mqtt_connected",
+      "argv": [
+        "/home/passchaos/project-z/netz/zig-out/bin/netz-mqtt-vector-broker",
+        "--bind=127.0.0.1:37851",
+        "--connections=2",
+        "--max-queued-deliveries=1024",
+        "--max-outgoing-inflight=64",
+        "--connect-timeout-ms=5000",
+        "--commit-log=/tmp/netz-equal-id-disconnect-probe-06c2ap6r/broker.log"
+      ],
+      "before_disconnect": {
+        "1727788": {
+          "wchan": "io_cqring_wait",
+          "syscall": "426 0x3 0x1 0x1 0x9 0x7fffb97a5ca0 0x18 0x7fffb97a5ad8 0x146c20e\n",
+          "stack": "PermissionError(13, 'Permission denied')"
+        },
+        "1727796": {
+          "wchan": "io_wq_worker",
+          "syscall": "426 0x3 0x2 0x1 0x9 0x7fffb97a7bc0 0x18 0x0 0x0\n",
+          "stack": "PermissionError(13, 'Permission denied')"
+        }
+      },
+      "eof_elapsed_seconds": 0.005930662009632215,
+      "status": "EOF",
+      "journal_bytes": 1141,
+      "broker_returncode": -15,
+      "broker_output": ""
+    },
+    {
+      "publisher_before_disconnect": "tcp_only",
+      "argv": [
+        "/home/passchaos/project-z/netz/zig-out/bin/netz-mqtt-vector-broker",
+        "--bind=127.0.0.1:38259",
+        "--connections=2",
+        "--max-queued-deliveries=1024",
+        "--max-outgoing-inflight=64",
+        "--connect-timeout-ms=5000",
+        "--commit-log=/tmp/netz-equal-id-disconnect-probe-ljyfuclt/broker.log"
+      ],
+      "before_disconnect": {
+        "1727823": {
+          "wchan": "io_cqring_wait",
+          "syscall": "426 0x3 0x1 0x1 0x9 0x7fff36c6ed20 0x18 0x7fff36c6eb58 0x146c20e\n",
+          "stack": "PermissionError(13, 'Permission denied')"
+        },
+        "1727826": {
+          "wchan": "io_wq_worker",
+          "syscall": "426 0x3 0x2 0x1 0x9 0x7fff36c70c80 0x18 0x0 0x0\n",
+          "stack": "PermissionError(13, 'Permission denied')"
+        }
+      },
+      "eof_elapsed_seconds": 0.005555165000259876,
+      "status": "EOF",
+      "journal_bytes": 927,
+      "broker_returncode": -15,
+      "broker_output": ""
+    }
+  ]
+}

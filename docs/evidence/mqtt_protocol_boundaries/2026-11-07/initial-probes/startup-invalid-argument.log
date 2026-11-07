@@ -1,0 +1,14 @@
+Traceback (most recent call last):
+  File "/home/passchaos/project-z/netz/tools/interop/mqtt_vectors/equal_subscription_identifiers.py", line 308, in <module>
+    main()
+  File "/home/passchaos/project-z/netz/tools/interop/mqtt_vectors/equal_subscription_identifiers.py", line 304, in main
+    print(json.dumps(run(args.broker, reference=args.reference_mosquitto), sort_keys=True))
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/passchaos/project-z/netz/tools/interop/mqtt_vectors/equal_subscription_identifiers.py", line 294, in run
+    report["journal"] = journal(executable)
+                        ^^^^^^^^^^^^^^^^^^^
+  File "/home/passchaos/project-z/netz/tools/interop/mqtt_vectors/equal_subscription_identifiers.py", line 195, in journal
+    with NetzBroker(executable, connections=2, extra_args=extra) as broker:
+  File "/home/passchaos/project-z/netz/tools/interop/mqtt_vectors/broker.py", line 58, in __enter__
+    raise RuntimeError(f"netz broker failed to start: {line.strip()}")
+RuntimeError: netz broker failed to start: error: InvalidArgument

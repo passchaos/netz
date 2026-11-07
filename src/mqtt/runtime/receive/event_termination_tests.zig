@@ -119,6 +119,28 @@ test "MQTT prefixed event readers preserve pending prefix and enforce terminal I
     try std.testing.expectError(error.ConnectionClosed, pair.receiver.readBrokerEventWithKeepAliveIntoPrefixed(&storage, 32));
 }
 
+test "MQTT Broker-managed DISCONNECT is logically terminal before owner shutdown" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var pair = try Pair.init(io);
+    defer pair.deinit();
+    pair.receiver.defer_peer_disconnect_shutdown = true;
+    const deadline = pair.receiver.startManagedKeepAlive().?;
+    try pair.send();
+    try receive(&pair.receiver, .broker, &.{});
+    try std.testing.expect(!pair.receiver.isUsable());
+    try std.testing.expectError(error.ConnectionClosed, pair.receiver.readBrokerEventWithTimeout(.fromMilliseconds(10)));
+    try std.testing.expect(pair.receiver.managedKeepAliveDeadline() == null);
+    try std.testing.expect(!pair.receiver.expireManagedKeepAlive(deadline));
+    // A concurrent writer seeing logical termination cannot expose EOF before
+    // the Broker owner completes its persistence decision.
+    try pair.receiver.interrupt();
+    try std.testing.expectError(error.Timeout, pair.peer.transport.readPacketWithDeadline(std.testing.allocator, 4096, pair.peer.transport.deadlineFromNow(.fromMilliseconds(10))));
+    try pair.receiver.completePeerDisconnect();
+    try std.testing.expectError(error.ConnectionClosed, pair.peer.transport.readPacketWithDeadline(std.testing.allocator, 4096, pair.peer.transport.deadlineFromNow(.fromSeconds(1))));
+}
+
 test "MQTT prefixed event readers consume queued packets before transport read ahead" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();

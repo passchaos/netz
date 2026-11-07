@@ -2423,5 +2423,7 @@ test {
     _ = @import("broker/retained_tests.zig");
     _ = @import("broker/will_tests.zig");
     _ = @import("broker/will_snapshot_tests.zig");
+    _ = @import("broker/disconnect_completion_tests.zig");
     _ = @import("broker/session_tests.zig");
+    _ = @import("broker/subscription_identifier_tests.zig");
 }

@@ -89,3 +89,10 @@ and new CONNECT exclusion during a held fsync. Expanded broker/snapshot gates
 passed 648/648 in Debug and ReleaseSafe. The production SIGKILL recovery gate
 also passed after these changes; synchronous pending-state and completion
 boundaries remain enforced.
+
+The [delivery and disconnect regressions](mqtt_delivery_and_disconnect.md)
+add equal Subscription Identifier occurrences across coalesced live/offline
+delivery and journal/DUP recovery. Broker-managed normal DISCONNECT now holds
+physical shutdown until its persistence decision, preserving the first error
+through any coherent cancellation retry and waiting for writer quiescence
+before freeing or reusing the connection.

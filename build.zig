@@ -1384,6 +1384,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "netz", .module = netz_mod }},
         }),
     });
+    b.step("build-mqtt-vector-broker", "Build the standalone MQTT wire-vector broker").dependOn(&b.addInstallArtifact(mqtt_vectors_broker, .{}).step);
     const mqtt_vectors = b.addSystemCommand(&.{
         "python3",
         "tools/interop/mqtt_mosquitto_vectors.py",

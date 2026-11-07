@@ -1,0 +1,11 @@
+MQTT incremental commit-log SIGKILL recovery passed with reduced Message Expiry and Subscription Identifier 53
+MQTT retained-source authorization survived commit-log SIGKILL recovery
+MQTT 3.1.1/5 retained deletion survived commit-log SIGKILL recovery
+MQTT expired Session deletion survived commit-log SIGKILL recovery
+MQTT outgoing QoS 2 resumed at PUBREL and completed across commit-log SIGKILL recovery
+MQTT 3.1.1/5 incoming QoS 2 routed once across commit-log SIGKILL recovery
+MQTT 3.1.1/5 outgoing QoS 1 DUP state completed across commit-log SIGKILL recovery
+MQTT delayed retained Will survived commit-log SIGKILL recovery
+MQTT delayed Will cancellation survived commit-log SIGKILL recovery
+MQTT clean Session retained Will survived commit-log SIGKILL recovery
+MQTT clean Session normal DISCONNECT Will cancellation survived commit-log SIGKILL recovery

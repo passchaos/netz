@@ -8,6 +8,7 @@ import unittest
 import authentication_username
 import bad_authentication_method
 import disconnect_forms
+import equal_subscription_identifiers
 import extended_authentication
 import maximum_topic_hierarchy
 import pattern_matching
@@ -419,6 +420,7 @@ class SourceLockTests(unittest.TestCase):
         self.assertEqual(subscription_flip_flop.SCENARIO_COUNT, 2)
         self.assertEqual(subscription_hierarchy.SCENARIO_COUNT, 2)
         self.assertEqual(subscription_identifiers.SCENARIO_COUNT, 1)
+        self.assertEqual(equal_subscription_identifiers.SCENARIO_COUNT, 5)
         self.assertEqual(pattern_matching.SCENARIO_COUNT, 46)
         self.assertEqual(qos0_live_queue_scope.SCENARIO_COUNT, 2)
         self.assertLess(
@@ -468,6 +470,48 @@ class SourceLockTests(unittest.TestCase):
                 ("02/subpub/subid/id1", "message1", None),
             ),
         )
+
+    def test_equal_identifier_subscribe_has_explicit_normative_bytes(self) -> None:
+        self.assertEqual(
+            equal_subscription_identifiers.SUBSCRIBE.hex(),
+            "82170001020b070003612f23010003612f2b010003612f7801",
+        )
+        self.assertEqual(equal_subscription_identifiers.LIVE_CASES,
+                         ((False, 0), (False, 1), (True, 0), (True, 1)))
+
+    def test_equal_identifier_raw_decoder_preserves_all_occurrences(self) -> None:
+        delivery = equal_subscription_identifiers.decode_publish(
+            0x30, bytes.fromhex("0003612f78060b070b070b076c697665")
+        )
+        self.assertEqual(delivery.identifiers, (7, 7, 7))
+        self.assertEqual(delivery.payload, b"live")
+        equal_subscription_identifiers.validate_copies(
+            [delivery], qos=0, payload=b"live"
+        )
+
+    def test_equal_identifier_oracle_accepts_per_filter_reference_copies(self) -> None:
+        per_filter = equal_subscription_identifiers.decode_publish(
+            0x30, bytes.fromhex("0003612f78020b076c697665")
+        )
+        equal_subscription_identifiers.validate_copies(
+            [per_filter] * 3, qos=0, payload=b"live"
+        )
+        for identifiers in ((7,), (7, 7), (7, 7, 7, 7), (7, 8, 7)):
+            with self.subTest(identifiers=identifiers), self.assertRaises(AssertionError):
+                equal_subscription_identifiers.validate_copies(
+                    [equal_subscription_identifiers.Delivery(
+                        0, None, False, identifiers, b"live"
+                    )], qos=0, payload=b"live",
+                )
+
+    def test_equal_identifier_oracle_rejects_duplicate_qos1_ownership(self) -> None:
+        delivery = equal_subscription_identifiers.Delivery(
+            1, 19, False, (7,), b"live"
+        )
+        with self.assertRaisesRegex(AssertionError, "Packet Identifier"):
+            equal_subscription_identifiers.validate_copies(
+                [delivery] * 3, qos=1, payload=b"live"
+            )
 
     def test_pattern_matrix_matches_upstream_source(self) -> None:
         self.assertEqual(

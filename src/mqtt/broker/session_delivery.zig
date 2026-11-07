@@ -3,7 +3,8 @@
 //! MQTT permits one client to have multiple matching subscriptions. The
 //! resulting Application Message is queued once per Session, with the highest
 //! effective QoS, Retain As Published enabled if any match requests it, and
-//! every distinct Subscription Identifier attached to that one PUBLISH.
+//! every matching subscription's Identifier attached to that one PUBLISH.
+//! Equal Identifier values remain separate occurrences (MQTT-3.3.4-4).
 
 const std = @import("std");
 const mqtt = @import("../mod.zig");
@@ -151,8 +152,8 @@ pub const Plan = struct {
         errdefer if (!use_scratch) allocator.free(identifiers);
 
         // The first pass assigns each route enough contiguous space for all
-        // raw identifiers. The second pass preserves router match order while
-        // compacting duplicate values inside each route's reserved segment.
+        // identifiers. The second pass preserves one occurrence per matching
+        // subscription, including equal values, in router match order.
         for (matches) |match| {
             const identifier = match.subscription_identifier orelse continue;
             const route_id = session_route.sessionRouteId(
@@ -164,10 +165,6 @@ pub const Plan = struct {
                 else
                     route_index.get(route_id).?
             ];
-            const existing = identifiers[route.identifier_offset..][0..route.identifier_count];
-            if (std.mem.indexOfScalar(usize, existing, identifier) != null) {
-                continue;
-            }
             identifiers[route.identifier_offset + route.identifier_count] =
                 identifier;
             route.identifier_count += 1;
@@ -288,7 +285,7 @@ test "Session delivery plan aggregates route options and identifiers" {
     try std.testing.expect(route.retain);
     try std.testing.expectEqualSlices(
         usize,
-        &.{ 3, 9 },
+        &.{ 3, 9, 3 },
         plan.identifiersFor(route),
     );
     route.output_subscriber_id = stable;
@@ -297,6 +294,26 @@ test "Session delivery plan aggregates route options and identifiers" {
         @as(router.SubscriberId, 0),
         plan.nextOutputSubscriberId(7),
     );
+}
+
+test "Session delivery plan preserves equal identifiers per matching filter and route" {
+    const first = session_route.sessionSubscriberId(7);
+    const second = session_route.sessionSubscriberId(8);
+    const matches = [_]router.Match{
+        .{ .subscriber_id = first, .subscription = .{ .topic_filter = "#" }, .subscription_identifier = 7 },
+        .{ .subscriber_id = second, .subscription = .{ .topic_filter = "a/#" }, .subscription_identifier = 7 },
+        .{ .subscriber_id = first, .subscription = .{ .topic_filter = "+/#" }, .subscription_identifier = 7 },
+        .{ .subscriber_id = second, .subscription = .{ .topic_filter = "a/x" }, .subscription_identifier = 7 },
+        .{ .subscriber_id = first, .subscription = .{ .topic_filter = "a/+" }, .subscription_identifier = 7 },
+    };
+    for ([_]bool{ false, true }) |use_scratch| {
+        var scratch: Scratch = .{};
+        var plan = try Plan.initWithScratch(std.testing.allocator, &matches, .at_least_once, false, false, if (use_scratch) &scratch else null);
+        defer plan.deinit();
+        try std.testing.expectEqual(@as(usize, 2), plan.routes.len);
+        try std.testing.expectEqualSlices(usize, &.{ 7, 7, 7 }, plan.identifiersFor(&plan.routes[0]));
+        try std.testing.expectEqualSlices(usize, &.{ 7, 7 }, plan.identifiersFor(&plan.routes[1]));
+    }
 }
 
 test "Session delivery plan allocation failures leak nothing" {

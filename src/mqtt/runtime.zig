@@ -3153,6 +3153,11 @@ pub const Connection = struct {
     /// A valid peer DISCONNECT stops network I/O while its already-buffered
     /// wire prefix and diagnostics remain available to the receive owner.
     peer_disconnect_received: std.atomic.Value(bool) = .init(false),
+    /// Attached Broker readers finish the durable DISCONNECT decision before
+    /// allowing automatic transport interruption. Immutable after attachment;
+    /// standalone runtime connections retain immediate terminal shutdown.
+    defer_peer_disconnect_shutdown: bool = false,
+    peer_disconnect_shutdown_ready: std.atomic.Value(bool) = .init(false),
     assigned_client_id_ptr: ?[*]u8 = null,
     assigned_client_id_len: u16 = 0,
     authentication: auth_runtime.State = .{},
@@ -3392,6 +3397,16 @@ pub const Connection = struct {
     /// transport, including MQTT-over-WebSocket. Ownership remains with this
     /// connection until `close`.
     pub fn interrupt(self: *Connection) Error!void {
+        if (termination.shutdownDeferred(self)) return;
+        self.transport_unusable.store(true, .release);
+        try self.transport.interrupt();
+    }
+
+    /// The attached Broker owner has finished the peer's terminal decision,
+    /// successfully or with a reported error. Wake writers before retirement
+    /// takes their quiescence lock; this does not claim a durable success.
+    pub fn completePeerDisconnect(self: *Connection) Error!void {
+        self.peer_disconnect_shutdown_ready.store(true, .release);
         self.transport_unusable.store(true, .release);
         try self.transport.interrupt();
     }
@@ -3407,6 +3422,7 @@ pub const Connection = struct {
     pub fn managedKeepAliveDeadline(
         self: *const Connection,
     ) ?std.Io.Timestamp {
+        if (self.peer_disconnect_received.load(.acquire)) return null;
         return self.managed_keep_alive.deadline();
     }
 
@@ -3417,6 +3433,7 @@ pub const Connection = struct {
         self: *Connection,
         expected: std.Io.Timestamp,
     ) bool {
+        if (self.peer_disconnect_received.load(.acquire)) return false;
         const expected_ns = std.math.cast(
             i64,
             expected.nanoseconds,

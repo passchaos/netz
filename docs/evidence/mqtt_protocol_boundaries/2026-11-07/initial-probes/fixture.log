@@ -1,0 +1,15 @@
+Traceback (most recent call last):
+  File "/home/passchaos/project-z/netz/tools/interop/mqtt_vectors/equal_subscription_identifiers.py", line 310, in <module>
+    main()
+  File "/home/passchaos/project-z/netz/tools/interop/mqtt_vectors/equal_subscription_identifiers.py", line 306, in main
+    print(json.dumps(run(args.broker, reference=args.reference_mosquitto), sort_keys=True))
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/passchaos/project-z/netz/tools/interop/mqtt_vectors/equal_subscription_identifiers.py", line 296, in run
+    report["journal"] = journal(executable)
+                        ^^^^^^^^^^^^^^^^^^^
+  File "/home/passchaos/project-z/netz/tools/interop/mqtt_vectors/equal_subscription_identifiers.py", line 202, in journal
+    disconnect(subscriber)
+  File "/home/passchaos/project-z/netz/tools/interop/mqtt_vectors/equal_subscription_identifiers.py", line 161, in disconnect
+    if sock.recv(1) != b"":
+       ^^^^^^^^^^^^
+TimeoutError: timed out

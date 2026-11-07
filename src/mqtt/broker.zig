@@ -604,9 +604,8 @@ const Delivery = struct {
             self.subscription_identifier = value;
             return;
         }
-        for (self.additional_subscription_identifiers) |existing| {
-            if (existing == value) return;
-        }
+        // Each matching filter contributes its Identifier even when another
+        // filter uses the same value (MQTT-3.3.4-4).
         const old = self.additional_subscription_identifiers;
         const replacement = try allocator.alloc(usize, old.len + 1);
         @memcpy(replacement[0..old.len], old);
@@ -5489,6 +5488,7 @@ pub const Broker = struct {
         std.debug.assert(
             subscriberId(slot_index, slot.state.generation) == id,
         );
+        stored_connection.defer_peer_disconnect_shutdown = true;
         slot.connection = stored_connection;
         var active_connections: usize = 0;
         for (self.slots) |candidate| {
@@ -5739,6 +5739,7 @@ pub const Broker = struct {
         self.state_mutex.lockUncancelable(self.io);
         var state_locked = true;
         var persistent_changed = false;
+        var append_commit = false;
         errdefer if (state_locked) {
             self.recordPersistentChangeLocked(persistent_changed);
             self.state_mutex.unlock(self.io);
@@ -5759,6 +5760,10 @@ pub const Broker = struct {
             );
         }
         if (slot.willHandle()) |handle| {
+            // A takeover may already have canceled this Will in provisional
+            // state. Its old transport still needs a coherent journal barrier
+            // before normal closure, without inventing another mutation.
+            append_commit = true;
             const result: ?will_mod.CloseResult = self.wills.closeDisconnectWithSessionExpiry(
                 handle,
                 disconnect,
@@ -5817,7 +5822,7 @@ pub const Broker = struct {
         state_locked = false;
         self.deadline_driver.notify(self.io);
         try self.finalizePersistentChange(
-            persistent_changed,
+            append_commit or persistent_changed,
             persistent_changed,
         );
     }
@@ -9465,8 +9470,11 @@ const ClientTask = struct {
         loop_result catch |err| {
             if (!ungracefulTransportClose(err)) read_error = err;
         };
-        const writer_error = task.broker.stopDeliveryWriter(slot);
         if (read_error) |err| task.result.* = err;
+        @import("broker/disconnect_completion.zig").run(struct {
+            pub const retryCurrentCommit = Broker.appendCommitIfEnabled;
+        }, task, slot, connection);
+        const writer_error = task.broker.stopDeliveryWriter(slot);
         if (writer_error) |err| {
             if (!ungracefulTransportClose(err) and task.result.* == null) {
                 task.result.* = err;
