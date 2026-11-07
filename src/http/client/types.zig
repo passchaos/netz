@@ -48,6 +48,22 @@ pub const Socks5Proxy = struct {
     options: Socks5Options = .{},
 };
 
+/// One cleartext HTTP/1.1 forward proxy. Cleartext HTTP targets use
+/// absolute-form requests; HTTPS targets use CONNECT before origin TLS.
+pub const HttpProxyOptions = struct {
+    address_resolver: ?AddressResolver = null,
+    address_connect_policy: ?AddressConnectPolicy = null,
+    connect_timeout: ?std.Io.Duration = null,
+};
+
+pub const HttpProxy = struct {
+    /// `http://host[:port]`; query, fragment and non-root paths are rejected.
+    uri: []const u8,
+    /// Sent only to the proxy, never to the origin.
+    headers: []const Header = &.{},
+    options: HttpProxyOptions = .{},
+};
+
 pub const Header = struct {
     name: []const u8,
     value: []const u8,
@@ -88,6 +104,11 @@ pub const Options = struct {
     /// One Client or Pool has one fixed proxy route; each independent origin
     /// connection retains its own SOCKS control lifetime.
     socks5_proxy: ?Socks5Proxy = null,
+    /// Route every origin through one cleartext HTTP/1.1 proxy. Cleartext HTTP
+    /// uses absolute-form requests; HTTPS uses CONNECT and keeps origin TLS
+    /// identity/SNI. Mutually exclusive with `socks5_proxy`; an HTTP/3 pool is
+    /// rejected while this is set.
+    http_proxy: ?HttpProxy = null,
     tcp_nodelay: bool = true,
     http1_limits: http1_runtime.Limits = .{},
     http2_limits: http2_runtime.Limits = .{},

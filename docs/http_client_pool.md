@@ -14,6 +14,15 @@ ticket caches and idle-return accounting. Negotiated HTTP/1.1 returns to the
 exclusive request path. Public `acquireUri` leases remain exclusive and never
 share a frame reader with ordinary requests.
 
+## HTTP proxy routing
+
+`client.http_proxy` selects one cleartext HTTP/1.1 proxy for the pool.
+Cleartext HTTP requests use absolute-form targets; HTTPS requests use CONNECT
+before origin TLS. Proxy headers remain proxy-only, idle proxy connections are
+reused per origin, SOCKS5 and HTTP proxy routes are mutually exclusive, and an
+HTTP/3 pool is rejected while a proxy is configured. See
+[HTTP proxy routing](http_proxy.md) for target selection and limitations.
+
 Two HTTP/2 dispatch cases retain exclusive aggregation:
 
 | Request/configuration | Current owner | Preserved behavior |

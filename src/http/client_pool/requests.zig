@@ -84,33 +84,35 @@ pub fn requestUriBefore(
             .port = origin_endpoint.?.port,
         };
     }
-    if (pool.http3) |h3_state| h3_attempt: {
-        const origin = h3_origin orelse break :h3_attempt;
-        var alternative = h3_state.cache.lookup(origin) catch
-            break :h3_attempt;
-        if (alternative == null) break :h3_attempt;
-        defer alternative.?.deinit();
-        if (requestHttp3(
-            pool,
-            h3_state,
-            origin,
-            uri_text,
-            &alternative.?,
-            request,
-            deadline,
-            crossed_origin,
-            forward_client_identity,
-        )) |owned| {
-            _ = h3_state.cache.recordSuccess(origin);
-            var result = owned;
-            observeAltSvc(h3_state, origin, &result);
-            return result;
-        } else |err| {
-            if (h3FailureAffectsAlternative(err)) {
-                _ = h3_state.cache.recordFailure(origin);
-            }
-            if (!h3FallbackAllowed(h3_state, request.method, err)) {
-                return err;
+    if (pool.options.client.http_proxy == null) {
+        if (pool.http3) |h3_state| h3_attempt: {
+            const origin = h3_origin orelse break :h3_attempt;
+            var alternative = h3_state.cache.lookup(origin) catch
+                break :h3_attempt;
+            if (alternative == null) break :h3_attempt;
+            defer alternative.?.deinit();
+            if (requestHttp3(
+                pool,
+                h3_state,
+                origin,
+                uri_text,
+                &alternative.?,
+                request,
+                deadline,
+                crossed_origin,
+                forward_client_identity,
+            )) |owned| {
+                _ = h3_state.cache.recordSuccess(origin);
+                var result = owned;
+                observeAltSvc(h3_state, origin, &result);
+                return result;
+            } else |err| {
+                if (h3FailureAffectsAlternative(err)) {
+                    _ = h3_state.cache.recordFailure(origin);
+                }
+                if (!h3FallbackAllowed(h3_state, request.method, err)) {
+                    return err;
+                }
             }
         }
     }
@@ -146,10 +148,12 @@ pub fn requestUriBefore(
                 crossed_origin,
             );
         defer if (lease.active) lease.discard();
+        const connection = lease.connection();
+        const request_target = if (connection.isForwardProxy()) uri_text else target;
         const response = if (deadline) |absolute|
-            lease.connection().requestWithDeadline(target, request, absolute)
+            connection.requestWithDeadline(request_target, request, absolute)
         else
-            lease.connection().request(target, request);
+            connection.request(request_target, request);
         const owned_response = response catch |err| {
             const was_reused = lease.was_reused;
             lease.discard();

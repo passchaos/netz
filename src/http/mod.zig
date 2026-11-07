@@ -78,6 +78,8 @@ pub const RequestOptions = client.RequestOptions;
 pub const RedirectOptions = client.RedirectOptions;
 pub const Socks5Proxy = client.Socks5Proxy;
 pub const Socks5Options = client.Socks5Options;
+pub const HttpProxy = client.HttpProxy;
+pub const HttpProxyOptions = client.HttpProxyOptions;
 pub const OwnedResponse = client.OwnedResponse;
 pub const EarlyDataMetadata = client.EarlyDataMetadata;
 pub const RedirectedResponse = client.RedirectedResponse;
@@ -116,5 +118,6 @@ test {
     _ = @import("client_pool/http3_origin_tests.zig");
     _ = @import("client_pool/http3_shared_tests.zig");
     _ = @import("client_pool/http3_shared_endpoint_tests.zig");
+    _ = @import("client_proxy_tests.zig");
     _ = @import("cookie_session_tests.zig");
 }

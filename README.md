@@ -269,7 +269,11 @@ Current protocol coverage includes:
   monotonic idle retirement, and retries one stale reused connection only for
   idempotent methods. TLS 1.2/1.3 tickets are retained by exact origin and ALPN,
   and pool redirects release each completed hop before acquiring the next
-  origin. When callers explicitly configure QUIC/TLS verification, successful
+  origin. `client.http_proxy` routes cleartext HTTP through absolute-form
+  proxy requests and HTTPS through an HTTP/1.1 CONNECT before origin TLS;
+  proxy headers remain proxy-only, the pool reuses one proxy connection per
+  origin, SOCKS5 and HTTP proxy routes are mutually exclusive, and an HTTP/3
+  pool is rejected while a proxy is configured. When callers explicitly configure QUIC/TLS verification, successful
   H1/H2 responses populate the bounded Alt-Svc cache and later requests use the
   origin-preserving H3 pool. H3 responses share the same owned protocol/status/
   header/body surface. QUIC failures enter exponential backoff; only idempotent

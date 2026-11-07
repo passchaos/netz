@@ -1,0 +1,35 @@
+[
+  {
+    "name": "http-proxy.Debug",
+    "command": [
+      "zig",
+      "build",
+      "test-lib",
+      "-Dtest-filter=unified HTTP",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 7.63,
+    "summary": "8/8 steps succeeded; 216/216 tests passed",
+    "log": "docs/evidence/http_proxy/2026-11-07/http-proxy.Debug.log",
+    "source_manifest": "docs/evidence/http_proxy/2026-11-07/sources.aa5f9bea60e5.json",
+    "source_manifest_sha256": "aa5f9bea60e59bab3803ffd1aa1bbcab0642da4ecb63baececebfd080bbfb107"
+  },
+  {
+    "name": "http.Debug",
+    "command": [
+      "zig",
+      "build",
+      "test-lib",
+      "-Dtest-filter=HTTP",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 0,
+    "summary": "8/8 steps succeeded; 2558/2558 tests passed",
+    "log": "docs/evidence/http_proxy/2026-11-07/http.Debug.log",
+    "source_manifest": "docs/evidence/http_proxy/2026-11-07/sources.aa5f9bea60e5.json",
+    "source_manifest_sha256": "aa5f9bea60e59bab3803ffd1aa1bbcab0642da4ecb63baececebfd080bbfb107"
+  }
+]

@@ -36,6 +36,8 @@ pub const AddressConnectPolicy = types.AddressConnectPolicy;
 pub const HappyEyeballsOptions = types.HappyEyeballsOptions;
 pub const Socks5Options = types.Socks5Options;
 pub const Socks5Proxy = types.Socks5Proxy;
+pub const HttpProxy = types.HttpProxy;
+pub const HttpProxyOptions = types.HttpProxyOptions;
 pub const Header = types.Header;
 pub const HeaderIterator = types.HeaderIterator;
 pub const RequestOptions = types.RequestOptions;
@@ -59,6 +61,13 @@ const ConnectionValue = union(ConnectionProtocol) {
 pub const Connection = struct {
     allocator: std.mem.Allocator,
     value: ConnectionValue,
+    /// Set only for cleartext HTTP/1.1 forward-proxy connections. Requests
+    /// passed to this connection must use an absolute-form URI.
+    forward_proxy: ?HttpProxy = null,
+
+    pub fn isForwardProxy(self: *const Connection) bool {
+        return self.forward_proxy != null;
+    }
 
     pub fn close(self: *Connection) void {
         switch (self.value) {
@@ -206,6 +215,37 @@ pub const Connection = struct {
                     .body = options.body,
                     .trailers = trailers.items,
                 };
+                if (self.forward_proxy) |proxy| {
+                    var proxy_stack: [max_stack_headers]http1.Header = undefined;
+                    var proxy_headers = try header_mapping.mapHttp1(
+                        self.allocator,
+                        proxy.headers,
+                        &proxy_stack,
+                    );
+                    defer proxy_headers.deinit(self.allocator);
+                    const proxy_options: http1_runtime.ProxyOptions = .{
+                        .headers = proxy_headers.items,
+                        .address_resolver = proxy.options.address_resolver,
+                        .address_connect_policy = proxy.options.address_connect_policy,
+                    };
+                    const response = if (deadline) |absolute|
+                        try client.requestForwardProxyUriWithDeadline(
+                            target,
+                            request_options,
+                            proxy_options,
+                            absolute,
+                        )
+                    else
+                        try client.requestForwardProxyUri(
+                            target,
+                            request_options,
+                            proxy_options,
+                        );
+                    return .{
+                        .allocator = self.allocator,
+                        .value = .{ .http1 = response },
+                    };
+                }
                 const response = if (deadline) |absolute|
                     try client.requestWithDeadline(request_options, absolute)
                 else
@@ -263,6 +303,17 @@ pub const Connection = struct {
     }
 };
 
+fn connectAuthority(
+    allocator: std.mem.Allocator,
+    host: []const u8,
+    port: u16,
+) std.mem.Allocator.Error![]u8 {
+    if (std.mem.indexOfScalar(u8, host, ':') != null) {
+        return std.fmt.allocPrint(allocator, "[{s}]:{d}", .{ host, port });
+    }
+    return std.fmt.allocPrint(allocator, "{s}:{d}", .{ host, port });
+}
+
 pub const Client = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -275,6 +326,35 @@ pub const Client = struct {
     ) Error!Client {
         if (options.connect_timeout) |timeout| {
             if (timeout.nanoseconds <= 0) return error.InvalidClientOptions;
+        }
+        if (options.socks5_proxy != null and options.http_proxy != null) {
+            return error.InvalidClientOptions;
+        }
+        if (options.http_proxy != null and
+            options.cleartext_protocol == .http2_prior_knowledge)
+        {
+            return error.InvalidClientOptions;
+        }
+        if (options.http_proxy) |proxy| {
+            const uri = std.Uri.parse(proxy.uri) catch return error.InvalidClientOptions;
+            if (!std.ascii.eqlIgnoreCase(uri.scheme, "http") or
+                uri.query != null or uri.fragment != null or
+                uri.user != null or uri.password != null)
+            {
+                return error.InvalidClientOptions;
+            }
+            const path = switch (uri.path) {
+                .raw, .percent_encoded => |value| value,
+            };
+            if (path.len != 0 and !std.mem.eql(u8, path, "/")) {
+                return error.InvalidClientOptions;
+            }
+            if (proxy.options.connect_timeout) |timeout| {
+                if (timeout.nanoseconds <= 0) return error.InvalidClientOptions;
+            }
+            if (proxy.options.address_connect_policy) |policy| {
+                try tcp_connect.validateAddressConnectPolicy(policy);
+            }
         }
         try tcp_connect.validateAddressConnectPolicy(
             options.address_connect_policy,
@@ -348,6 +428,17 @@ pub const Client = struct {
                 self.io,
                 self.options.connect_timeout,
             );
+        if (self.options.http_proxy) |proxy| {
+            if (secure) {
+                return self.connectTunnelProxyBefore(
+                    endpoint,
+                    proxy,
+                    connect_deadline,
+                    deadline,
+                );
+            }
+            return self.connectForwardProxyBefore(proxy, connect_deadline);
+        }
         const stream = if (self.options.socks5_proxy) |proxy|
             try self.connectEndpointViaSocks5Before(
                 endpoint,
@@ -397,6 +488,15 @@ pub const Client = struct {
             };
         }
 
+        return self.adoptTlsStream(stream, endpoint, deadline);
+    }
+
+    fn adoptTlsStream(
+        self: *Client,
+        stream: std.Io.net.Stream,
+        endpoint: http1_runtime.UriEndpoint,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!Connection {
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(self.io);
         const tls_options = types.verifiedTlsOptions(
@@ -462,9 +562,132 @@ pub const Client = struct {
         };
     }
 
+    fn connectForwardProxyBefore(
+        self: *Client,
+        proxy: HttpProxy,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!Connection {
+        if (self.options.protocol_policy == .http2_only) return error.UnsupportedScheme;
+        const proxy_uri = std.Uri.parse(proxy.uri) catch return error.InvalidUri;
+        if (!std.ascii.eqlIgnoreCase(proxy_uri.scheme, "http")) {
+            return error.UnsupportedScheme;
+        }
+        if (proxy_uri.query != null or proxy_uri.fragment != null) return error.InvalidUri;
+        const path = switch (proxy_uri.path) {
+            .raw, .percent_encoded => |value| value,
+        };
+        if (path.len != 0 and !std.mem.eql(u8, path, "/")) return error.InvalidUri;
+        var proxy_endpoint = try http1_runtime.uriEndpoint(
+            self.allocator,
+            proxy_uri,
+            80,
+        );
+        defer proxy_endpoint.deinit();
+        const stream = try self.connectEndpointWithOptionsBefore(
+            proxy_endpoint,
+            proxy.options.address_resolver,
+            proxy.options.address_connect_policy,
+            deadline,
+        );
+        if (self.options.tcp_nodelay) {
+            socket_options.setTcpNoDelay(stream) catch {
+                stream.close(self.io);
+                return error.SocketOptionFailed;
+            };
+        }
+        return .{
+            .allocator = self.allocator,
+            .value = .{ .http1 = try http1_runtime.Client.adoptStream(
+                self.allocator,
+                self.io,
+                stream,
+                proxy_endpoint.authority,
+                self.options.http1_limits,
+            ) },
+            .forward_proxy = proxy,
+        };
+    }
+
+    fn connectTunnelProxyBefore(
+        self: *Client,
+        endpoint: http1_runtime.UriEndpoint,
+        proxy: HttpProxy,
+        connect_deadline: ?std.Io.Clock.Timestamp,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!Connection {
+        const proxy_uri = std.Uri.parse(proxy.uri) catch return error.InvalidUri;
+        if (!std.ascii.eqlIgnoreCase(proxy_uri.scheme, "http")) {
+            return error.UnsupportedScheme;
+        }
+        if (proxy_uri.query != null or proxy_uri.fragment != null) return error.InvalidUri;
+        const path = switch (proxy_uri.path) {
+            .raw, .percent_encoded => |value| value,
+        };
+        if (path.len != 0 and !std.mem.eql(u8, path, "/")) return error.InvalidUri;
+        var proxy_stack: [max_stack_headers]http1.Header = undefined;
+        var proxy_headers = try header_mapping.mapHttp1(
+            self.allocator,
+            proxy.headers,
+            &proxy_stack,
+        );
+        defer proxy_headers.deinit(self.allocator);
+        const proxy_options: http1_runtime.ProxyOptions = .{
+            .headers = proxy_headers.items,
+            .address_resolver = proxy.options.address_resolver,
+            .address_connect_policy = proxy.options.address_connect_policy,
+        };
+        const authority = try connectAuthority(
+            self.allocator,
+            endpoint.tls_host,
+            endpoint.port,
+        );
+        defer self.allocator.free(authority);
+        const stream = if (connect_deadline) |absolute|
+            try http1_runtime.Client.connectTunnelViaProxyUriWithDeadline(
+                self.allocator,
+                self.io,
+                proxy.uri,
+                authority,
+                proxy_options,
+                self.options.http1_limits,
+                absolute,
+            )
+        else
+            try http1_runtime.Client.connectTunnelViaProxyUri(
+                self.allocator,
+                self.io,
+                proxy.uri,
+                authority,
+                proxy_options,
+                self.options.http1_limits,
+            );
+        if (self.options.tcp_nodelay) {
+            socket_options.setTcpNoDelay(stream) catch {
+                stream.close(self.io);
+                return error.SocketOptionFailed;
+            };
+        }
+        return self.adoptTlsStream(stream, endpoint, deadline);
+    }
+
     fn connectEndpointBefore(
         self: *Client,
         endpoint: http1_runtime.UriEndpoint,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!std.Io.net.Stream {
+        return self.connectEndpointWithOptionsBefore(
+            endpoint,
+            null,
+            null,
+            deadline,
+        );
+    }
+
+    fn connectEndpointWithOptionsBefore(
+        self: *Client,
+        endpoint: http1_runtime.UriEndpoint,
+        resolver_option: ?AddressResolver,
+        policy_option: ?AddressConnectPolicy,
         deadline: ?std.Io.Clock.Timestamp,
     ) ResponseTimeoutError!std.Io.net.Stream {
         switch (endpoint.target) {
@@ -474,8 +697,9 @@ pub const Client = struct {
                 tcp_connect.ip(self.io, address, null),
             .host => {},
         }
-        const resolver = self.options.address_resolver;
-        if (resolver == null and self.options.address_connect_policy == .ordered) {
+        const resolver = resolver_option orelse self.options.address_resolver;
+        const policy = policy_option orelse self.options.address_connect_policy;
+        if (resolver == null and policy == .ordered) {
             return if (deadline) |absolute|
                 endpoint.connectWithDeadline(self.io, absolute)
             else
@@ -505,7 +729,7 @@ pub const Client = struct {
                 self.io,
                 addresses,
                 absolute,
-                self.options.address_connect_policy,
+                policy,
             )
         else
             tcp_connect.resolvedWithPolicy(
@@ -513,7 +737,7 @@ pub const Client = struct {
                 self.io,
                 addresses,
                 null,
-                self.options.address_connect_policy,
+                policy,
             );
     }
 
@@ -603,7 +827,8 @@ pub const Client = struct {
         defer self.allocator.free(target);
         var connection = try self.connectUriBefore(uri_text, deadline);
         defer connection.close();
-        return connection.requestBefore(target, request, deadline);
+        const request_target = if (connection.isForwardProxy()) uri_text else target;
+        return connection.requestBefore(request_target, request, deadline);
     }
 
     pub fn requestUriFollowingRedirects(

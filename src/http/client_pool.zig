@@ -119,6 +119,10 @@ pub const Pool = struct {
         if (options.max_idle_per_origin > options.max_idle_connections) {
             return error.InvalidPoolOptions;
         }
+        // An HTTP proxy route must not be bypassed by Alt-Svc HTTP/3.
+        if (options.client.http_proxy != null and options.http3 != null) {
+            return error.InvalidPoolOptions;
+        }
         const idle_timeout_ms = if (options.idle_timeout) |timeout| blk: {
             if (timeout.nanoseconds <= 0) return error.InvalidPoolOptions;
             break :blk durationMillisecondsCeil(timeout);
