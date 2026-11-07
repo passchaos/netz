@@ -18,6 +18,13 @@ channel.callSucceeded();
 const server = try registry.addServer("frontend-listener");
 server.callStarted();
 server.callFailed();
+
+const listen = try registry.addSocket(
+    "frontend-listen",
+    .{ .tcpip = listener.address() },
+    null,
+);
+try server.addListenSocket(listen);
 ```
 
 ## Methods
@@ -28,14 +35,18 @@ server.callFailed();
 | `GetServers` | Paginated servers ordered by ascending id. |
 | `GetServer` | One server, or `NOT_FOUND`. |
 | `GetChannel` | One channel, or `NOT_FOUND`. |
-| `GetServerSockets` | Empty socket page for a known server, or `NOT_FOUND`. |
+| `GetServerSockets` | Paginated listen-socket refs for a known server, or `NOT_FOUND`. |
+| `GetSocket` | One socket, or `NOT_FOUND`. |
 | `GetSubchannel` | `NOT_FOUND`; the library has no stable subchannel object model. |
-| `GetSocket` | `NOT_FOUND`; the library has no stable socket object model. |
 
 Pagination follows the standard request fields. `start_*_id` is inclusive,
 `max_results = 0` selects a default page of 100 entries, the page is capped at
 1000 entries, and `end` is true when no later entry exists. Negative ids or
 page sizes are rejected as `INVALID_ARGUMENT`.
+
+Sockets accept TCP/IP, Unix-domain and opaque `other` addresses. TCP/IP
+addresses keep their binary form. Stream and message counters are atomic, and
+`addListenSocket` keeps the server's socket ids sorted for pagination.
 
 `Registry.handle` returns the encoded response bytes or `null` for an unrelated
 path. `channelz.serve` performs the same dispatch for an already-read
@@ -66,11 +77,12 @@ for (channels.channels) |channel| {
 }
 ```
 
-`getServers`, `getServer`, `getChannel` and `getServerSockets` follow the same
-pattern. `TopChannels`, `ServersPage`, `OwnedChannel` and `OwnedServer` own
-their arena and must be deinitialized. Client status mapping returns
-`NotFound`, `Unimplemented` or `InvalidRequest`; other non-OK statuses return
-`RpcFailed`. A successful response without a message returns `InvalidResponse`.
+`getServers`, `getServer`, `getChannel`, `getServerSockets` and `getSocket`
+follow the same pattern. `TopChannels`, `ServersPage`, `OwnedChannel`,
+`OwnedServer`, `SocketPage` and `OwnedSocket` own their arena and must be
+deinitialized. Client status mapping returns `NotFound`, `Unimplemented` or
+`InvalidRequest`; other non-OK statuses return `RpcFailed`. A successful
+response without a message returns `InvalidResponse`.
 
 ## Ownership and concurrency
 
@@ -85,11 +97,12 @@ after removal or registry `deinit`.
 
 The implementation reports channel/server ids, names, targets, connectivity
 state, call started/succeeded/failed counters and the last call-start timestamp.
-Channel traces, socket counters, security details, subchannel inventories and
-server listen-socket details are not synthesized. `GetServerSockets` therefore
-returns an empty page with `end = true`; `GetSubchannel` and `GetSocket` return
-`NOT_FOUND`. This keeps the admin surface honest rather than inventing objects
-the transport does not own.
+Sockets report ids, names, TCP/IP, Unix or opaque addresses, and stream/message/
+keep-alive counters. Channel traces, socket security details, socket options,
+flow-control windows, subchannel inventories and server connection sockets are
+not synthesized. `GetSubchannel` returns `NOT_FOUND`. Server connection sockets
+can be registered explicitly when the application owns them; the listener
+socket alone is enough for the standard listen-socket page.
 
 Focused coverage is available with:
 

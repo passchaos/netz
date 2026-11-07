@@ -10,10 +10,10 @@
       "all"
     ],
     "exit_code": 0,
-    "elapsed_seconds": 0.265,
-    "summary": "8/8 steps succeeded; 169/169 tests passed",
+    "elapsed_seconds": 0.266,
+    "summary": "8/8 steps succeeded; 170/170 tests passed",
     "log": "docs/evidence/grpc_channelz/2026-11-07/channelz.Debug.log",
-    "source_manifest": "docs/evidence/grpc_channelz/2026-11-07/sources.8716f310746b.json",
-    "source_manifest_sha256": "8716f310746b6c1051288d37061cc2459de26cb034f5db6e7d16caf106232325"
+    "source_manifest": "docs/evidence/grpc_channelz/2026-11-07/sources.4e129c9a269e.json",
+    "source_manifest_sha256": "4e129c9a269e86d8ad3688ee98ca7bae52ac2c5d78b0efe4657bd162b97e3e1d"
   }
 ]

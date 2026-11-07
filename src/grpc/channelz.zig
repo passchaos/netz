@@ -90,10 +90,20 @@ pub const Server = struct {
     registry: *Registry,
     id: i64,
     name: []const u8,
+    listen_sockets: std.ArrayList(i64) = .empty,
     calls_started: std.atomic.Value(i64) = .init(0),
     calls_succeeded: std.atomic.Value(i64) = .init(0),
     calls_failed: std.atomic.Value(i64) = .init(0),
     last_call_started_ns: std.atomic.Value(i64) = .init(0),
+
+    pub fn addListenSocket(self: *Server, socket: *Socket) Error!void {
+        if (socket.registry != self.registry) return error.InvalidRequest;
+        self.registry.mutex.lockUncancelable(self.registry.io);
+        defer self.registry.mutex.unlock(self.registry.io);
+        var index = self.listen_sockets.items.len;
+        while (index != 0 and self.listen_sockets.items[index - 1] > socket.id) index -= 1;
+        try self.listen_sockets.insert(self.registry.allocator, index, socket.id);
+    }
 
     pub fn callStarted(self: *Server) void {
         _ = self.calls_started.fetchAdd(1, .monotonic);
@@ -110,7 +120,79 @@ pub const Server = struct {
     }
 
     fn destroy(self: *Server, allocator: std.mem.Allocator) void {
+        self.listen_sockets.deinit(allocator);
         allocator.free(self.name);
+        allocator.destroy(self);
+    }
+};
+
+/// A socket address reported by Channelz. TCP/IP addresses keep their binary
+/// form; Unix and opaque addresses own their strings.
+pub const Address = union(enum) {
+    tcpip: std.Io.net.IpAddress,
+    uds: []const u8,
+    other: []const u8,
+
+    fn deinit(self: Address, allocator: std.mem.Allocator) void {
+        switch (self) {
+            .tcpip => {},
+            .uds => |value| allocator.free(value),
+            .other => |value| allocator.free(value),
+        }
+    }
+
+    fn clone(self: Address, allocator: std.mem.Allocator) !Address {
+        return switch (self) {
+            .tcpip => |value| .{ .tcpip = value },
+            .uds => |value| .{ .uds = try allocator.dupe(u8, value) },
+            .other => |value| .{ .other = try allocator.dupe(u8, value) },
+        };
+    }
+};
+
+/// One socket with stream/message counters. `local` and `remote` are
+/// registry-owned addresses.
+pub const Socket = struct {
+    registry: *Registry,
+    id: i64,
+    name: []const u8,
+    local: Address,
+    remote: ?Address,
+    streams_started: std.atomic.Value(i64) = .init(0),
+    streams_succeeded: std.atomic.Value(i64) = .init(0),
+    streams_failed: std.atomic.Value(i64) = .init(0),
+    messages_sent: std.atomic.Value(i64) = .init(0),
+    messages_received: std.atomic.Value(i64) = .init(0),
+    keep_alives_sent: std.atomic.Value(i64) = .init(0),
+
+    pub fn streamStarted(self: *Socket) void {
+        _ = self.streams_started.fetchAdd(1, .monotonic);
+    }
+
+    pub fn streamSucceeded(self: *Socket) void {
+        _ = self.streams_succeeded.fetchAdd(1, .monotonic);
+    }
+
+    pub fn streamFailed(self: *Socket) void {
+        _ = self.streams_failed.fetchAdd(1, .monotonic);
+    }
+
+    pub fn messageSent(self: *Socket) void {
+        _ = self.messages_sent.fetchAdd(1, .monotonic);
+    }
+
+    pub fn messageReceived(self: *Socket) void {
+        _ = self.messages_received.fetchAdd(1, .monotonic);
+    }
+
+    pub fn keepAliveSent(self: *Socket) void {
+        _ = self.keep_alives_sent.fetchAdd(1, .monotonic);
+    }
+
+    fn destroy(self: *Socket, allocator: std.mem.Allocator) void {
+        allocator.free(self.name);
+        self.local.deinit(allocator);
+        if (self.remote) |remote| remote.deinit(allocator);
         allocator.destroy(self);
     }
 };
@@ -121,8 +203,10 @@ pub const Registry = struct {
     mutex: std.Io.Mutex = .init,
     channels: std.ArrayList(*Channel) = .empty,
     servers: std.ArrayList(*Server) = .empty,
+    sockets: std.ArrayList(*Socket) = .empty,
     next_channel_id: i64 = 1,
     next_server_id: i64 = 1,
+    next_socket_id: i64 = 1,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io) Registry {
         return .{ .allocator = allocator, .io = io };
@@ -132,8 +216,10 @@ pub const Registry = struct {
         self.mutex.lockUncancelable(self.io);
         for (self.channels.items) |channel| channel.destroy(self.allocator);
         for (self.servers.items) |server| server.destroy(self.allocator);
+        for (self.sockets.items) |socket| socket.destroy(self.allocator);
         self.channels.deinit(self.allocator);
         self.servers.deinit(self.allocator);
+        self.sockets.deinit(self.allocator);
         self.mutex.unlock(self.io);
         self.* = undefined;
     }
@@ -176,6 +262,35 @@ pub const Registry = struct {
         return server;
     }
 
+    pub fn addSocket(
+        self: *Registry,
+        name: []const u8,
+        local: Address,
+        remote: ?Address,
+    ) Error!*Socket {
+        const socket = try self.allocator.create(Socket);
+        errdefer self.allocator.destroy(socket);
+        const owned_name = try self.allocator.dupe(u8, name);
+        errdefer self.allocator.free(owned_name);
+        const owned_local = try local.clone(self.allocator);
+        errdefer owned_local.deinit(self.allocator);
+        const owned_remote = if (remote) |value| try value.clone(self.allocator) else null;
+        errdefer if (owned_remote) |value| value.deinit(self.allocator);
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        const id = self.next_socket_id;
+        self.next_socket_id = std.math.add(i64, id, 1) catch return error.InvalidRequest;
+        socket.* = .{
+            .registry = self,
+            .id = id,
+            .name = owned_name,
+            .local = owned_local,
+            .remote = owned_remote,
+        };
+        try self.sockets.append(self.allocator, socket);
+        return socket;
+    }
+
     /// Remove and destroy a channel. The caller must not use the handle after
     /// this returns.
     pub fn removeChannel(self: *Registry, channel: *Channel) bool {
@@ -200,6 +315,22 @@ pub const Registry = struct {
             _ = self.servers.orderedRemove(index);
             self.mutex.unlock(self.io);
             server.destroy(self.allocator);
+            return true;
+        }
+        self.mutex.unlock(self.io);
+        return false;
+    }
+
+    /// Remove and destroy a socket. The caller must not use the handle after
+    /// this returns. Server listen-socket references remain as stale ids until
+    /// the application removes them explicitly.
+    pub fn removeSocket(self: *Registry, socket: *Socket) bool {
+        self.mutex.lockUncancelable(self.io);
+        for (self.sockets.items, 0..) |candidate, index| {
+            if (candidate != socket) continue;
+            _ = self.sockets.orderedRemove(index);
+            self.mutex.unlock(self.io);
+            socket.destroy(self.allocator);
             return true;
         }
         self.mutex.unlock(self.io);
@@ -234,9 +365,10 @@ pub const Registry = struct {
         if (std.mem.eql(u8, path, get_server_sockets_path)) {
             return try self.serverSocketsResponse(allocator, request_bytes);
         }
-        if (std.mem.eql(u8, path, get_subchannel_path) or
-            std.mem.eql(u8, path, get_socket_path))
-        {
+        if (std.mem.eql(u8, path, get_socket_path)) {
+            return try self.socketResponse(allocator, request_bytes);
+        }
+        if (std.mem.eql(u8, path, get_subchannel_path)) {
             return error.NotFound;
         }
         return error.Unimplemented;
@@ -306,16 +438,17 @@ pub const Registry = struct {
 
     fn serverSocketsResponse(self: *Registry, allocator: std.mem.Allocator, request_bytes: []const u8) Error![]u8 {
         var reader = pb.Reader{ .bytes = request_bytes };
-        var id: i64 = 0;
+        var server_id: i64 = 0;
+        var start: i64 = 0;
         var max_results: i64 = 0;
         while (try reader.next()) |field| switch (field.number) {
             1 => {
                 if (field.wire_type != 0) return error.InvalidRequest;
-                id = @bitCast(try reader.varint());
+                server_id = @bitCast(try reader.varint());
             },
             2 => {
                 if (field.wire_type != 0) return error.InvalidRequest;
-                _ = try reader.varint();
+                start = @bitCast(try reader.varint());
             },
             3 => {
                 if (field.wire_type != 0) return error.InvalidRequest;
@@ -323,13 +456,53 @@ pub const Registry = struct {
             },
             else => try reader.skip(field),
         };
-        if (id <= 0 or max_results < 0) return error.InvalidRequest;
+        if (server_id <= 0 or start < 0 or max_results < 0) return error.InvalidRequest;
+        const limit: usize = if (max_results == 0)
+            default_page_size
+        else
+            @min(@as(usize, @intCast(max_results)), max_page_size);
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        if (self.findServer(id) == null) return error.NotFound;
+        const server = self.findServer(server_id) orelse return error.NotFound;
         var out: std.ArrayList(u8) = .empty;
         errdefer out.deinit(allocator);
-        try putBoolField(&out, allocator, 2, true);
+        var index: usize = 0;
+        var count: usize = 0;
+        while (index < server.listen_sockets.items.len) : (index += 1) {
+            const socket_id = server.listen_sockets.items[index];
+            if (socket_id < start) continue;
+            if (count == limit) break;
+            const socket = self.findSocket(socket_id) orelse continue;
+            var encoded: std.ArrayList(u8) = .empty;
+            defer encoded.deinit(allocator);
+            try encodeSocketRef(&encoded, allocator, socket.id, socket.name);
+            try putBytesField(&out, allocator, 1, encoded.items);
+            count += 1;
+        }
+        var end = true;
+        while (index < server.listen_sockets.items.len) : (index += 1) {
+            const socket_id = server.listen_sockets.items[index];
+            if (socket_id < start) continue;
+            if (self.findSocket(socket_id) != null) {
+                end = false;
+                break;
+            }
+        }
+        try putBoolField(&out, allocator, 2, end);
+        return out.toOwnedSlice(allocator);
+    }
+
+    fn socketResponse(self: *Registry, allocator: std.mem.Allocator, request_bytes: []const u8) Error![]u8 {
+        const id = try parseId(request_bytes, 1);
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(allocator);
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        const socket = self.findSocket(id) orelse return error.NotFound;
+        var encoded: std.ArrayList(u8) = .empty;
+        defer encoded.deinit(allocator);
+        try encodeSocket(&encoded, allocator, socket);
+        try putBytesField(&out, allocator, 1, encoded.items);
         return out.toOwnedSlice(allocator);
     }
 
@@ -340,6 +513,11 @@ pub const Registry = struct {
 
     fn findServer(self: *Registry, id: i64) ?*Server {
         for (self.servers.items) |server| if (server.id == id) return server;
+        return null;
+    }
+
+    fn findSocket(self: *Registry, id: i64) ?*Socket {
+        for (self.sockets.items) |socket| if (socket.id == id) return socket;
         return null;
     }
 };
@@ -467,8 +645,48 @@ pub const OwnedServer = struct {
     }
 };
 
+pub const SocketRefInfo = struct {
+    id: i64 = 0,
+    name: []const u8 = "",
+};
+
+pub const SocketData = struct {
+    streams_started: i64 = 0,
+    streams_succeeded: i64 = 0,
+    streams_failed: i64 = 0,
+    messages_sent: i64 = 0,
+    messages_received: i64 = 0,
+    keep_alives_sent: i64 = 0,
+};
+
+pub const SocketInfo = struct {
+    id: i64 = 0,
+    name: []const u8 = "",
+    data: SocketData = .{},
+    local: ?Address = null,
+    remote: ?Address = null,
+};
+
+/// Owned socket page. `sockets` borrow `arena` storage.
 pub const SocketPage = struct {
+    arena: std.heap.ArenaAllocator,
+    sockets: []SocketRefInfo = &.{},
     end: bool = false,
+
+    pub fn deinit(self: *SocketPage) void {
+        self.arena.deinit();
+        self.* = undefined;
+    }
+};
+
+pub const OwnedSocket = struct {
+    arena: std.heap.ArenaAllocator,
+    value: SocketInfo,
+
+    pub fn deinit(self: *OwnedSocket) void {
+        self.arena.deinit();
+        self.* = undefined;
+    }
 };
 
 pub fn decodeTopChannels(allocator: std.mem.Allocator, bytes: []const u8) Error!TopChannels {
@@ -535,14 +753,114 @@ pub fn decodeServerResponse(allocator: std.mem.Allocator, bytes: []const u8) Err
     return .{ .arena = arena, .value = value orelse return error.InvalidRequest };
 }
 
-pub fn decodeServerSockets(bytes: []const u8) Error!SocketPage {
+pub fn decodeServerSockets(allocator: std.mem.Allocator, bytes: []const u8) Error!SocketPage {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+    const owned = arena.allocator();
+    var values: std.ArrayList(SocketRefInfo) = .empty;
     var end = false;
     var reader = pb.Reader{ .bytes = bytes };
     while (try reader.next()) |field| switch (field.number) {
+        1 => try values.append(owned, try decodeSocketRef(owned, try reader.bytesValue())),
         2 => end = (try reader.varint()) != 0,
         else => try reader.skip(field),
     };
-    return .{ .end = end };
+    return .{
+        .arena = arena,
+        .sockets = try values.toOwnedSlice(owned),
+        .end = end,
+    };
+}
+
+pub fn decodeSocketResponse(allocator: std.mem.Allocator, bytes: []const u8) Error!OwnedSocket {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+    const owned = arena.allocator();
+    var value: ?SocketInfo = null;
+    var reader = pb.Reader{ .bytes = bytes };
+    while (try reader.next()) |field| switch (field.number) {
+        1 => value = try decodeSocketInfo(owned, try reader.bytesValue()),
+        else => try reader.skip(field),
+    };
+    return .{ .arena = arena, .value = value orelse return error.InvalidRequest };
+}
+
+fn decodeSocketRef(allocator: std.mem.Allocator, bytes: []const u8) Error!SocketRefInfo {
+    var value = SocketRefInfo{};
+    var reader = pb.Reader{ .bytes = bytes };
+    while (try reader.next()) |field| switch (field.number) {
+        3 => value.id = @bitCast(try reader.varint()),
+        4 => value.name = try allocator.dupe(u8, try reader.string()),
+        else => try reader.skip(field),
+    };
+    return value;
+}
+
+fn decodeSocketInfo(allocator: std.mem.Allocator, bytes: []const u8) Error!SocketInfo {
+    var value = SocketInfo{};
+    var reader = pb.Reader{ .bytes = bytes };
+    while (try reader.next()) |field| switch (field.number) {
+        1 => {
+            const ref = try decodeSocketRef(allocator, try reader.bytesValue());
+            value.id = ref.id;
+            value.name = ref.name;
+        },
+        2 => {
+            var data = pb.Reader{ .bytes = try reader.bytesValue() };
+            while (try data.next()) |item| switch (item.number) {
+                1 => value.data.streams_started = @bitCast(try data.varint()),
+                2 => value.data.streams_succeeded = @bitCast(try data.varint()),
+                3 => value.data.streams_failed = @bitCast(try data.varint()),
+                4 => value.data.messages_sent = @bitCast(try data.varint()),
+                5 => value.data.messages_received = @bitCast(try data.varint()),
+                6 => value.data.keep_alives_sent = @bitCast(try data.varint()),
+                else => try data.skip(item),
+            };
+        },
+        3 => value.local = try decodeAddress(allocator, try reader.bytesValue()),
+        4 => value.remote = try decodeAddress(allocator, try reader.bytesValue()),
+        else => try reader.skip(field),
+    };
+    return value;
+}
+
+fn decodeAddress(allocator: std.mem.Allocator, bytes: []const u8) Error!Address {
+    var reader = pb.Reader{ .bytes = bytes };
+    var result: ?Address = null;
+    while (try reader.next()) |field| switch (field.number) {
+        1 => {
+            var tcp = pb.Reader{ .bytes = try reader.bytesValue() };
+            var ip: ?[]const u8 = null;
+            var port: u16 = 0;
+            while (try tcp.next()) |item| switch (item.number) {
+                1 => ip = try tcp.bytesValue(),
+                2 => port = std.math.cast(u16, try tcp.varint()) orelse return error.InvalidRequest,
+                else => try tcp.skip(item),
+            };
+            const address = ip orelse return error.InvalidRequest;
+            result = switch (address.len) {
+                4 => .{ .tcpip = .{ .ip4 = .{ .bytes = address[0..4].*, .port = port } } },
+                16 => .{ .tcpip = .{ .ip6 = .{ .bytes = address[0..16].*, .port = port } } },
+                else => return error.InvalidRequest,
+            };
+        },
+        2 => {
+            var uds = pb.Reader{ .bytes = try reader.bytesValue() };
+            while (try uds.next()) |item| switch (item.number) {
+                1 => result = .{ .uds = try allocator.dupe(u8, try uds.string()) },
+                else => try uds.skip(item),
+            };
+        },
+        3 => {
+            var other = pb.Reader{ .bytes = try reader.bytesValue() };
+            while (try other.next()) |item| switch (item.number) {
+                1 => result = .{ .other = try allocator.dupe(u8, try other.string()) },
+                else => try other.skip(item),
+            };
+        },
+        else => try reader.skip(field),
+    };
+    return result orelse error.InvalidRequest;
 }
 
 fn decodeChannelInfo(allocator: std.mem.Allocator, bytes: []const u8) Error!ChannelInfo {
@@ -737,7 +1055,16 @@ pub const Client = struct {
         var response = try self.unary(get_server_sockets_path, request);
         defer response.deinit();
         const message = response.message orelse return error.InvalidResponse;
-        return decodeServerSockets(message.payload);
+        return decodeServerSockets(self.allocator, message.payload);
+    }
+
+    pub fn getSocket(self: *Client, id: i64) ClientError!OwnedSocket {
+        const request = try encodeIdRequest(self.allocator, id);
+        defer self.allocator.free(request);
+        var response = try self.unary(get_socket_path, request);
+        defer response.deinit();
+        const message = response.message orelse return error.InvalidResponse;
+        return decodeSocketResponse(self.allocator, message.payload);
     }
 
     fn unary(
@@ -853,6 +1180,73 @@ fn encodeServer(out: *std.ArrayList(u8), allocator: std.mem.Allocator, server: *
     const last = server.last_call_started_ns.load(.acquire);
     if (last != 0) try putTimestampField(&data, allocator, 5, last);
     try putBytesField(out, allocator, 2, data.items);
+}
+
+fn encodeSocketRef(out: *std.ArrayList(u8), allocator: std.mem.Allocator, id: i64, name: []const u8) !void {
+    try putVarintField(out, allocator, 3, @intCast(id));
+    if (name.len != 0) try putBytesField(out, allocator, 4, name);
+}
+
+fn encodeAddress(out: *std.ArrayList(u8), allocator: std.mem.Allocator, address: Address) !void {
+    switch (address) {
+        .tcpip => |value| {
+            const bytes, const port = switch (value) {
+                .ip4 => |ip| .{ ip.bytes[0..], ip.port },
+                .ip6 => |ip| .{ ip.bytes[0..], ip.port },
+            };
+            var tcp: std.ArrayList(u8) = .empty;
+            defer tcp.deinit(allocator);
+            try putBytesField(&tcp, allocator, 1, bytes);
+            try putVarintField(&tcp, allocator, 2, port);
+            try putBytesField(out, allocator, 1, tcp.items);
+        },
+        .uds => |value| {
+            var uds: std.ArrayList(u8) = .empty;
+            defer uds.deinit(allocator);
+            try putBytesField(&uds, allocator, 1, value);
+            try putBytesField(out, allocator, 2, uds.items);
+        },
+        .other => |value| {
+            var other: std.ArrayList(u8) = .empty;
+            defer other.deinit(allocator);
+            try putBytesField(&other, allocator, 1, value);
+            try putBytesField(out, allocator, 3, other.items);
+        },
+    }
+}
+
+fn encodeSocket(out: *std.ArrayList(u8), allocator: std.mem.Allocator, socket: *const Socket) !void {
+    var ref: std.ArrayList(u8) = .empty;
+    defer ref.deinit(allocator);
+    try encodeSocketRef(&ref, allocator, socket.id, socket.name);
+    try putBytesField(out, allocator, 1, ref.items);
+
+    var data: std.ArrayList(u8) = .empty;
+    defer data.deinit(allocator);
+    const started = socket.streams_started.load(.monotonic);
+    const succeeded = socket.streams_succeeded.load(.monotonic);
+    const failed = socket.streams_failed.load(.monotonic);
+    const sent = socket.messages_sent.load(.monotonic);
+    const received = socket.messages_received.load(.monotonic);
+    const keep_alives = socket.keep_alives_sent.load(.monotonic);
+    if (started != 0) try putVarintField(&data, allocator, 1, @bitCast(started));
+    if (succeeded != 0) try putVarintField(&data, allocator, 2, @bitCast(succeeded));
+    if (failed != 0) try putVarintField(&data, allocator, 3, @bitCast(failed));
+    if (sent != 0) try putVarintField(&data, allocator, 4, @bitCast(sent));
+    if (received != 0) try putVarintField(&data, allocator, 5, @bitCast(received));
+    if (keep_alives != 0) try putVarintField(&data, allocator, 6, @bitCast(keep_alives));
+    try putBytesField(out, allocator, 2, data.items);
+
+    var local: std.ArrayList(u8) = .empty;
+    defer local.deinit(allocator);
+    try encodeAddress(&local, allocator, socket.local);
+    try putBytesField(out, allocator, 3, local.items);
+    if (socket.remote) |remote| {
+        var remote_message: std.ArrayList(u8) = .empty;
+        defer remote_message.deinit(allocator);
+        try encodeAddress(&remote_message, allocator, remote);
+        try putBytesField(out, allocator, 4, remote_message.items);
+    }
 }
 
 fn putTimestampField(out: *std.ArrayList(u8), allocator: std.mem.Allocator, number: u32, ns: i64) !void {

@@ -16,13 +16,16 @@ sizes, unknown methods, unknown ids, invalid pages and channel removal. A real
 loopback gRPC unary server/client test dispatches `GetTopChannels` through
 `channelz.serve`, decodes the response, and verifies `NOT_FOUND` status mapping
 for an unknown channel id. The same fixture exercises `channelz.Client` for
-top-channel and server pages, single server/channel lookup, server sockets and
-client-side `NOT_FOUND` mapping.
+top-channel and server pages, single server/channel lookup, server sockets,
+socket lookup and client-side `NOT_FOUND` mapping. TCP/IP, Unix-domain and
+opaque socket addresses are encoded and decoded, with stream/message counters
+and sorted listen-socket pagination.
 
-`GetSubchannel` and `GetSocket` return `NOT_FOUND`, and `GetServerSockets`
-returns an empty final page, because this library does not expose stable
-subchannel or socket object models. Channel traces and socket security details
-are not synthesized.
+`GetSubchannel` returns `NOT_FOUND` because this library does not expose a
+stable subchannel object model. Channel traces, socket security details, socket
+options, flow-control windows and server connection sockets are not
+synthesized. Applications may register connection sockets explicitly when they
+own them.
 
 Reproduce with:
 

@@ -300,10 +300,50 @@ test "Channelz server pages and single lookups expose call counters" {
     defer gpa.free(sockets_request);
     const sockets_bytes = (try registry.handle(gpa, channelz.get_server_sockets_path, sockets_request)).?;
     defer gpa.free(sockets_bytes);
-    const sockets = try decodeServers(sockets_bytes);
+    var sockets = try channelz.decodeServerSockets(gpa, sockets_bytes);
     defer sockets.deinit();
-    try std.testing.expectEqual(@as(usize, 0), sockets.servers.len);
+    try std.testing.expectEqual(@as(usize, 0), sockets.sockets.len);
     try std.testing.expect(sockets.end);
+}
+
+test "Channelz encodes Unix and opaque socket addresses" {
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    var registry = channelz.Registry.init(gpa, threaded.io());
+    defer registry.deinit();
+    const server = try registry.addServer("uds-server");
+    const socket = try registry.addSocket(
+        "uds",
+        .{ .uds = "/tmp/channelz.sock" },
+        .{ .other = "opaque-peer" },
+    );
+    socket.streamStarted();
+    socket.streamFailed();
+    socket.messageReceived();
+    try server.addListenSocket(socket);
+
+    const page_request = try channelz.encodeServerSocketsRequest(gpa, server.id, 0, 0);
+    defer gpa.free(page_request);
+    const page_bytes = (try registry.handle(gpa, channelz.get_server_sockets_path, page_request)).?;
+    defer gpa.free(page_bytes);
+    var page = try channelz.decodeServerSockets(gpa, page_bytes);
+    defer page.deinit();
+    try std.testing.expectEqual(@as(usize, 1), page.sockets.len);
+    try std.testing.expectEqualStrings("uds", page.sockets[0].name);
+    try std.testing.expect(page.end);
+
+    const socket_request = try channelz.encodeIdRequest(gpa, socket.id);
+    defer gpa.free(socket_request);
+    const socket_bytes = (try registry.handle(gpa, channelz.get_socket_path, socket_request)).?;
+    defer gpa.free(socket_bytes);
+    var decoded = try channelz.decodeSocketResponse(gpa, socket_bytes);
+    defer decoded.deinit();
+    try std.testing.expectEqualStrings("uds", decoded.value.name);
+    try std.testing.expectEqual(@as(i64, 1), decoded.value.data.streams_started);
+    try std.testing.expectEqual(@as(i64, 1), decoded.value.data.streams_failed);
+    try std.testing.expectEqual(@as(i64, 1), decoded.value.data.messages_received);
+    try std.testing.expectEqualStrings("/tmp/channelz.sock", decoded.value.local.?.uds);
+    try std.testing.expectEqualStrings("opaque-peer", decoded.value.remote.?.other);
 }
 
 test "Channelz rejects unknown methods, unknown ids and invalid pages" {
@@ -346,6 +386,15 @@ test "Channelz serve dispatches real unary gRPC requests and statuses" {
         1024,
     );
     defer server.deinit();
+    const listen = try registry.addSocket(
+        "listen",
+        .{ .tcpip = server.address() },
+        null,
+    );
+    listen.streamStarted();
+    listen.streamSucceeded();
+    listen.messageSent();
+    try server_info.addListenSocket(listen);
 
     const Shared = struct {
         server: *runtime.Server,
@@ -358,7 +407,7 @@ test "Channelz serve dispatches real unary gRPC requests and statuses" {
                 return;
             };
             defer connection.deinit();
-            for (0..8) |_| {
+            for (0..10) |_| {
                 var request = connection.readUnary() catch |err| {
                     self.err = err;
                     return;
@@ -438,9 +487,20 @@ test "Channelz serve dispatches real unary gRPC requests and statuses" {
     defer channel_value.deinit();
     try std.testing.expectEqualStrings("frontend", channel_value.value.name);
 
-    const sockets = try admin.getServerSockets(1, 0, 0);
+    var sockets = try admin.getServerSockets(1, 0, 0);
+    defer sockets.deinit();
+    try std.testing.expectEqual(@as(usize, 1), sockets.sockets.len);
+    try std.testing.expectEqualStrings("listen", sockets.sockets[0].name);
     try std.testing.expect(sockets.end);
+
+    var socket_value = try admin.getSocket(1);
+    defer socket_value.deinit();
+    try std.testing.expectEqualStrings("listen", socket_value.value.name);
+    try std.testing.expectEqual(@as(i64, 1), socket_value.value.data.streams_started);
+    try std.testing.expect(socket_value.value.local != null);
+
     try std.testing.expectError(error.NotFound, admin.getChannel(999));
+    try std.testing.expectError(error.NotFound, admin.getSocket(999));
 
     thread.join();
     joined = true;
