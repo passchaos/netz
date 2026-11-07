@@ -2164,6 +2164,36 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| grpc_lrs_automatic.addArgs(args);
     b.step("interop-grpc-lrs-automatic", "Verify managed CDS LRS source provenance, migration and nonblocking reporting transport").dependOn(&grpc_lrs_automatic.step);
 
+    const grpc_client_target_emitter = b.addExecutable(.{
+        .name = "netz-grpc-client-target-emitter",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/interop/grpc_client_target/emit.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    b.step("build-grpc-client-target", "Build the bootstrap-derived xDS target emitter").dependOn(&b.addInstallArtifact(grpc_client_target_emitter, .{}).step);
+    const grpc_client_target = b.addSystemCommand(&.{ "python3", "tools/interop/grpc_client_target/run.py", "--native" });
+    grpc_client_target.addArtifactArg(grpc_client_target_emitter);
+    if (b.args) |args| grpc_client_target.addArgs(args);
+    b.step("interop-grpc-client-target", "Verify xDS target templates and data authority with pinned C-Core (-- --reference-python PATH)").dependOn(&grpc_client_target.step);
+
+    const grpc_federation_client = b.addExecutable(.{
+        .name = "netz-grpc-federation-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/interop/grpc_federation/client.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    b.step("build-grpc-federation", "Build the managed federated xDS client").dependOn(&b.addInstallArtifact(grpc_federation_client, .{}).step);
+    const grpc_federation = b.addSystemCommand(&.{ "python3", "tools/interop/grpc_federation/run.py", "--native" });
+    grpc_federation.addArtifactArg(grpc_federation_client);
+    if (b.args) |args| grpc_federation.addArgs(args);
+    b.step("interop-grpc-federation", "Verify managed cross-authority discovery, publication and LRS with independent peers").dependOn(&grpc_federation.step);
+
     const grpc_impl_client = b.addExecutable(.{
         .name = "netz-grpc-cluster-impl-client",
         .root_module = b.createModule(.{

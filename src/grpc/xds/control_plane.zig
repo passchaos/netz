@@ -31,8 +31,7 @@ pub const Options = struct {
 };
 
 fn usable(server: bootstrap.Server) bool {
-    return (server.target.scheme == .http and server.hasInsecureCreds()) or
-        (server.target.scheme == .https and server.hasTlsCreds());
+    return server.selectedCredential() != null;
 }
 
 fn earlier(a: std.Io.Clock.Timestamp, b: std.Io.Clock.Timestamp) std.Io.Clock.Timestamp {
@@ -127,21 +126,16 @@ const TlsMaterial = struct {
 };
 
 fn createChannel(gpa: std.mem.Allocator, io: std.Io, server: bootstrap.Server, options: shared.Options, material: *TlsMaterial) Error!shared.SharedChannel {
-    if (server.target.scheme == .http) {
-        if (!server.hasInsecureCreds()) return error.UnsupportedBootstrapCreds;
-        const channel = try shared.SharedChannel.init(gpa, io, .{ .cleartext_host = .{ .host = material.host, .port = server.target.port } }, options);
-        channel.state.target_lifetime = material.lifetime().retain();
-        for (channel.state.sources) |source| source.target_lifetime = material.lifetime().retain();
-        return channel;
-    }
-    if (server.target.scheme == .https) {
-        if (!server.hasTlsCreds()) return error.UnsupportedBootstrapCreds;
-        const channel = try shared.SharedChannel.init(gpa, io, .{ .tls_host = .{ .host = material.host, .port = server.target.port, .tls = material.options() } }, options);
-        channel.state.target_lifetime = material.lifetime().retain();
-        for (channel.state.sources) |source| source.target_lifetime = material.lifetime().retain();
-        return channel;
-    }
-    return error.UnsupportedBootstrapCreds;
+    if (server.selectedCredential() == null) return error.UnsupportedBootstrapCreds;
+    // Credential preference is fixed by bootstrap order. Connection failures
+    // retry that transport or another server without changing credentials.
+    const channel = if (server.usesTls())
+        try shared.SharedChannel.init(gpa, io, .{ .tls_host = .{ .host = material.host, .port = server.target.port, .tls = material.options() } }, options)
+    else
+        try shared.SharedChannel.init(gpa, io, .{ .cleartext_host = .{ .host = material.host, .port = server.target.port } }, options);
+    channel.state.target_lifetime = material.lifetime().retain();
+    for (channel.state.sources) |source| source.target_lifetime = material.lifetime().retain();
+    return channel;
 }
 
 pub const ControlPlane = struct {

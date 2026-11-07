@@ -1,128 +1,81 @@
-//! Delta SDS resources applied to the controller's secret cache.
+//! Delta SDS resources staged in the supplying authority's secret cache.
 const std = @import("std");
 const ctl = @import("controller.zig");
 const sds = @import("../sds.zig");
 const delta = @import("../ads/delta.zig");
 const shared = @import("../../channel/shared.zig");
 const Plan = @import("plan.zig").Plan;
+const SecretPlan = @import("apply_sds.zig").SecretPlan;
 
 pub fn apply(self: *ctl.Controller, client: *delta.Client, update: delta.Update, destination: shared.SharedChannel, deadline: std.Io.Clock.Timestamp) ctl.Error!u64 {
     if (self.latest == null) return error.XdsNotStarted;
     _ = try @import("../../../internal/deadline.zig").usableAwake(client.sender.state.io, deadline);
     const io = client.sender.state.io;
     const response = update.response.value;
-    const decoded = try self.allocator.alloc(*ctl.CachedSecret, response.resources.len);
-    defer self.allocator.free(decoded);
-    const owned = try self.allocator.alloc(bool, response.resources.len);
-    defer self.allocator.free(owned);
-    var count: usize = 0;
+    var secrets = try SecretPlan.init(self);
+    defer secrets.deinit();
     var storage: usize = 0;
     var invalid: std.ArrayList([]const u8) = .empty;
     defer invalid.deinit(self.allocator);
     var first_error: ?sds.Error = null;
-    defer for (decoded[0..count], owned[0..count]) |value, keep| {
-        if (!keep) continue;
-        value.owned.deinit();
-        self.allocator.destroy(value);
-    };
     for (response.resources) |raw| {
         const any = raw.resource orelse continue;
         var value = sds.decode(self.allocator, any.value, self.options.limits.sds) catch |err| {
             if (!self.options.fail_on_data_errors) return err;
             if (raw.name.len == 0) return err;
+            if (!self.inResponseScope(raw.name)) continue;
             try invalid.append(self.allocator, raw.name);
             if (first_error == null) first_error = err;
             continue;
+        };
+        if (!std.mem.eql(u8, value.value.name, raw.name)) {
+            value.deinit();
+            return error.InvalidDiscoveryMessage;
+        }
+        if (!self.inResponseScope(raw.name)) {
+            value.deinit();
+            continue;
+        }
+        const ttl = delta.codec.ttlDeadline(io, raw.ttl) catch |err| {
+            value.deinit();
+            return err;
         };
         const pointer = self.allocator.create(ctl.CachedSecret) catch |err| {
             value.deinit();
             return err;
         };
-        pointer.* = .{
-            .owned = value,
-            .deadline = try delta.codec.ttlDeadline(io, raw.ttl),
-        };
-        decoded[count] = pointer;
-        owned[count] = true;
-        count += 1;
+        pointer.* = .{ .owned = value, .deadline = ttl };
+        try secrets.put(pointer);
         storage = std.math.add(usize, storage, value.arena.queryCapacity()) catch return error.XdsLimitExceeded;
         if (storage > self.options.limits.max_storage_bytes) return error.XdsLimitExceeded;
     }
-    std.mem.sort(*ctl.CachedSecret, decoded[0..count], {}, struct {
+    std.mem.sort(*ctl.CachedSecret, secrets.decoded.items, {}, struct {
         fn less(_: void, a: *ctl.CachedSecret, b: *ctl.CachedSecret) bool {
             return std.mem.order(u8, a.owned.value.name, b.owned.value.name) == .lt;
         }
     }.less);
-    if (count > 1) for (decoded[1..count], 0..) |value, i| {
-        if (std.mem.eql(u8, value.owned.value.name, decoded[i].owned.value.name)) return error.DuplicateSdsResource;
+    if (secrets.decoded.items.len > 1) for (secrets.decoded.items[1..], 0..) |value, i| {
+        if (std.mem.eql(u8, value.owned.value.name, secrets.decoded.items[i].owned.value.name)) return error.DuplicateSdsResource;
     };
-    try self.sds_secrets.ensureUnusedCapacity(self.allocator, @intCast(count));
-    var changed = false;
-    for (decoded[0..count], owned[0..count]) |value, *keep| {
-        if (self.sds_secrets.get(value.owned.value.name)) |old| {
-            if (std.mem.eql(u8, old.owned.wire, value.owned.wire)) {
-                // Same payload: only the delta timer may have moved.
-                old.deadline = value.deadline;
-                keep.* = false;
-                value.owned.deinit();
-                self.allocator.destroy(value);
-                continue;
-            }
-            const removed = self.sds_secrets.fetchRemove(value.owned.value.name).?;
-            removed.value.owned.deinit();
-            self.allocator.destroy(removed.value);
-        }
-        self.sds_secrets.putAssumeCapacity(value.owned.value.name, value);
-        keep.* = false;
-        changed = true;
-    }
-    // Payload-free heartbeats refresh the timer without republishing secrets.
+    // Timer changes are staged too: a later invalid heartbeat or failed
+    // endpoint publication cannot refresh part of the accepted cache.
     for (response.resources) |raw| {
-        if (raw.resource != null) continue;
-        const cached = self.sds_secrets.get(raw.name) orelse continue;
-        cached.deadline = try delta.codec.ttlDeadline(io, raw.ttl);
+        if (raw.resource != null or !self.inResponseScope(raw.name)) continue;
+        const cached = secrets.secrets.get(raw.name) orelse continue;
+        try secrets.refresh(cached, try delta.codec.ttlDeadline(io, raw.ttl));
     }
     for (response.removed) |name| {
-        if (self.sds_secrets.fetchRemove(name)) |removed| {
-            removed.value.owned.deinit();
-            self.allocator.destroy(removed.value);
-            changed = true;
-        }
+        if (self.inResponseScope(name)) secrets.remove(name);
     }
-    // fail_on_data_errors: an invalid secret drops its cached entry while the
-    // response is still NACKed.
-    for (invalid.items) |name| {
-        if (self.sds_secrets.fetchRemove(name)) |removed| {
-            removed.value.owned.deinit();
-            self.allocator.destroy(removed.value);
-            changed = true;
-        }
-    }
-    if (!changed) {
-        // Still validate and resolve referenced clusters so a wrong-kind
-        // reference keeps failing instead of being accepted on retry.
-        for (self.entries.items) |*item| {
-            const cluster = item.cluster orelse continue;
-            if (cluster.resource.value.tls_sds == null) continue;
-            try self.resolveClusterTls(cluster);
-        }
-        if (first_error) |err| return err;
-        return try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
-    }
-    for (self.entries.items) |*item| {
-        const cluster = item.cluster orelse continue;
-        if (cluster.resource.value.tls_sds == null) continue;
-        try self.resolveClusterTls(cluster);
-    }
-
+    for (invalid.items) |name| secrets.remove(name);
     var plan = try Plan.create(self, null);
     defer plan.deinit();
-    for (plan.entries.items) |*item| {
-        const cluster = item.cluster orelse continue;
-        if (cluster.resource.value.tls_sds == null) continue;
-        try self.reproject(io, item);
-    }
-    _ = try self.publishDelta(client, &plan, self.latest.?, false, destination, deadline);
+    const changed = try secrets.stageClusters(&plan, io);
+    const revision = if (changed)
+        try self.publishDelta(client, &plan, self.latest.?, false, destination, deadline)
+    else
+        try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
+    secrets.commit();
     if (first_error) |err| return err;
-    return @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
+    return revision;
 }

@@ -33,8 +33,7 @@ pub fn Owner(comptime State: type) type {
                 worker.connection.?.limits.adaptive_window_max
             else
                 worker.connection.?.limits.initial_window_size;
-            if (maximum > state.options.max_buffered_stream_bytes) return error.InvalidSharedOptions;
-            call.bytes = try state.allocator.alloc(u8, @max(maximum, 1));
+            try call.reserveReceiveBuffer(maximum);
             call.lrs_registration = state.captureLrs(worker);
             errdefer if (call.lrs_registration) |registration| {
                 registration.release();

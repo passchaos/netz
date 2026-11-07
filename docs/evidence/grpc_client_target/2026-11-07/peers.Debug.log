@@ -1,0 +1,30 @@
+Build Summary: 13/13 steps succeeded
+build-grpc-client-target success
++- install netz-grpc-client-target-emitter success
+   +- compile exe netz-grpc-client-target-emitter Debug native success 564ms MaxRSS:388M
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 6ms MaxRSS:36M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 7ms MaxRSS:36M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options cached
+build-webtransport-protocol success
++- install netz-webtransport-protocol-server success
+|  +- compile exe netz-webtransport-protocol-server Debug native success 24s MaxRSS:1G
+|     +- WriteFile (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options (reused)
++- install netz-webtransport-protocol-client success
+   +- compile exe netz-webtransport-protocol-client Debug native success 22s MaxRSS:1G
+      +- WriteFile (reused)
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- WriteFile (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options (reused)

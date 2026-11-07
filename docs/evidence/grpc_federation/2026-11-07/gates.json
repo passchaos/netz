@@ -1,0 +1,457 @@
+[
+  {
+    "name": "native.Debug",
+    "command": [
+      "zig",
+      "build",
+      "test-lib",
+      "-Dtest-filter=federated",
+      "-Dtest-filter=authority",
+      "-Dtest-filter=bootstrap",
+      "-Dtest-filter=control plane",
+      "-Dtest-filter=discovery source",
+      "-Dtest-filter=LRS",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 1,
+    "elapsed_seconds": 38.31,
+    "summary": "5/8 steps succeeded (1 failed)",
+    "log": "docs/evidence/grpc_federation/2026-11-07/native.Debug.log",
+    "source_manifest": "docs/evidence/grpc_federation/2026-11-07/sources.9a6a82f4465f.json",
+    "source_manifest_sha256": "9a6a82f4465f105808907679c6639ef0c7a9dd2749c7284a01e81aa2affc62fe"
+  },
+  {
+    "name": "native.Debug.corrected",
+    "command": [
+      "zig",
+      "build",
+      "test-lib",
+      "-Dtest-filter=federated",
+      "-Dtest-filter=authority",
+      "-Dtest-filter=bootstrap",
+      "-Dtest-filter=control plane",
+      "-Dtest-filter=discovery source",
+      "-Dtest-filter=LRS",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 1,
+    "elapsed_seconds": 685.699,
+    "summary": "6/8 steps succeeded (1 failed); 334/342 tests passed (7 failed, 1 crashed)",
+    "log": "docs/evidence/grpc_federation/2026-11-07/native.Debug.corrected.log",
+    "source_manifest": "docs/evidence/grpc_federation/2026-11-07/sources.90b011b1ef0a.json",
+    "source_manifest_sha256": "90b011b1ef0a5ed9d7795d4f35c5ff1a55cf93df25105a2537eb6f388e7ed7fe"
+  },
+  {
+    "name": "regressions.Debug",
+    "command": [
+      "zig",
+      "build",
+      "test-lib",
+      "-Dtest-filter=requires a usable server",
+      "-Dtest-filter=HTTPS alias selects",
+      "-Dtest-filter=pending route handoff",
+      "-Dtest-filter=managed subscriptions roll back",
+      "-Dtest-filter=managed source features",
+      "-Dtest-filter=routes native authorities",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 1,
+    "elapsed_seconds": 34.627,
+    "summary": "5/8 steps succeeded (1 failed)",
+    "log": "docs/evidence/grpc_federation/2026-11-07/regressions.Debug.log",
+    "source_manifest": "docs/evidence/grpc_federation/2026-11-07/sources.2d70d256a4ac.json",
+    "source_manifest_sha256": "2d70d256a4aca2244bbbd54d4a0b690d1169af2bdb6c56a26c365b18736c6355"
+  },
+  {
+    "name": "regressions.Debug.corrected",
+    "command": [
+      "zig",
+      "build",
+      "test-lib",
+      "-Dtest-filter=requires a usable server",
+      "-Dtest-filter=HTTPS alias selects",
+      "-Dtest-filter=pending route handoff",
+      "-Dtest-filter=managed subscriptions roll back",
+      "-Dtest-filter=managed source features",
+      "-Dtest-filter=routes native authorities",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 1,
+    "elapsed_seconds": 34.559,
+    "summary": "6/8 steps succeeded (1 failed); 177/179 tests passed (2 failed)",
+    "log": "docs/evidence/grpc_federation/2026-11-07/regressions.Debug.corrected.log",
+    "source_manifest": "docs/evidence/grpc_federation/2026-11-07/sources.acec27aaae85.json",
+    "source_manifest_sha256": "acec27aaae85382f0c472b1c98d9d5d5cef17dd935a67cada34f7b14e87f005f"
+  },
+  {
+    "name": "cancellation.Debug",
+    "command": [
+      "zig",
+      "build",
+      "test-lib",
+      "-Dtest-filter=routes native authorities",
+      "-Dtest-filter=resumable read cancellation",
+      "-Dtest-filter=stream interruption returns",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 1,
+    "elapsed_seconds": 34.006,
+    "summary": "6/8 steps succeeded (1 failed); 173/174 tests passed (1 failed)",
+    "log": "docs/evidence/grpc_federation/2026-11-07/cancellation.Debug.log",
+    "source_manifest": "docs/evidence/grpc_federation/2026-11-07/sources.047092b67a26.json",
+    "source_manifest_sha256": "047092b67a2695c28294b01b3954053d1a2efbc2990c8f7e4f21ef117d4deff7"
+  },
+  {
+    "name": "wire.Debug",
+    "command": [
+      "zig",
+      "build",
+      "interop-grpc-federation",
+      "--summary",
+      "all",
+      "--",
+      "--output",
+      "docs/evidence/grpc_federation/2026-11-07/wire.Debug/report.json"
+    ],
+    "exit_code": 1,
+    "elapsed_seconds": 32.012,
+    "summary": "5/8 steps succeeded (1 failed)",
+    "log": "docs/evidence/grpc_federation/2026-11-07/wire.Debug.log",
+    "source_manifest": "docs/evidence/grpc_federation/2026-11-07/sources.047092b67a26.json",
+    "source_manifest_sha256": "047092b67a2695c28294b01b3954053d1a2efbc2990c8f7e4f21ef117d4deff7"
+  },
+  {
+    "name": "resumable-read.Debug",
+    "command": [
+      "zig",
+      "build",
+      "test-lib",
+      "-Dtest-filter=resumable read cancellation",
+      "-Dtest-filter=stream interruption returns",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 36.198,
+    "summary": "8/8 steps succeeded; 172/172 tests passed",
+    "log": "docs/evidence/grpc_federation/2026-11-07/resumable-read.Debug.log",
+    "source_manifest": "docs/evidence/grpc_federation/2026-11-07/sources.4a03c6da2fff.json",
+    "source_manifest_sha256": "4a03c6da2fffa27352245f4742f429288a565b1b4b3077d647a5e311eaae28f3"
+  },
+  {
+    "name": "wire.Debug.corrected",
+    "command": [
+      "zig",
+      "build",
+      "interop-grpc-federation",
+      "--summary",
+      "all",
+      "--",
+      "--output",
+      "docs/evidence/grpc_federation/2026-11-07/wire.Debug.corrected/report.json"
+    ],
+    "exit_code": 1,
+    "elapsed_seconds": 34.357,
+    "summary": "6/8 steps succeeded (1 failed)",
+    "log": "docs/evidence/grpc_federation/2026-11-07/wire.Debug.corrected.log",
+    "source_manifest": "docs/evidence/grpc_federation/2026-11-07/sources.4a03c6da2fff.json",
+    "source_manifest_sha256": "4a03c6da2fffa27352245f4742f429288a565b1b4b3077d647a5e311eaae28f3"
+  },
+  {
+    "name": "pending-publication.Debug",
+    "command": [
+      "zig",
+      "build",
+      "test-lib",
+      "-Dtest-filter=routes native authorities",
+      "-Dtest-filter=pending route handoff",
+      "-Dtest-filter=resumable read cancellation",
+      "-Dtest-filter=stream interruption returns",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 32.331,
+    "summary": "8/8 steps succeeded; 177/177 tests passed",
+    "log": "docs/evidence/grpc_federation/2026-11-07/pending-publication.Debug.log",
+    "source_manifest": "docs/evidence/grpc_federation/2026-11-07/sources.a7370f36126e.json",
+    "source_manifest_sha256": "a7370f36126ee4eb9452a48e6f70cd17af55e5cc64131347d055ce30819202b6"
+  },
+  {
+    "name": "wire.Debug.pending-fixed",
+    "command": [
+      "zig",
+      "build",
+      "interop-grpc-federation",
+      "--summary",
+      "all",
+      "--",
+      "--output",
+      "docs/evidence/grpc_federation/2026-11-07/wire.Debug.pending-fixed/report.json"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 33.247,
+    "summary": "8/8 steps succeeded",
+    "log": "docs/evidence/grpc_federation/2026-11-07/wire.Debug.pending-fixed.log",
+    "source_manifest": "docs/evidence/grpc_federation/2026-11-07/sources.a7370f36126e.json",
+    "source_manifest_sha256": "a7370f36126ee4eb9452a48e6f70cd17af55e5cc64131347d055ce30819202b6"
+  },
+  {
+    "name": "native.Debug.final",
+    "command": [
+      "zig",
+      "build",
+      "test-lib",
+      "-Dtest-filter=federated",
+      "-Dtest-filter=authority",
+      "-Dtest-filter=bootstrap",
+      "-Dtest-filter=control plane",
+      "-Dtest-filter=discovery source",
+      "-Dtest-filter=LRS",
+      "-Dtest-filter=stream interruption returns",
+      "-Dtest-filter=resumable read cancellation",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 45.962,
+    "summary": "8/8 steps succeeded; 345/345 tests passed",
+    "log": "docs/evidence/grpc_federation/2026-11-07/native.Debug.final.log",
+    "source_manifest": "docs/evidence/grpc_federation/2026-11-07/sources.a7370f36126e.json",
+    "source_manifest_sha256": "a7370f36126ee4eb9452a48e6f70cd17af55e5cc64131347d055ce30819202b6"
+  },
+  {
+    "name": "budget.Debug",
+    "command": [
+      "zig",
+      "build",
+      "test-lib",
+      "-Dtest-filter=serving inventory storage budget",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 1,
+    "elapsed_seconds": 33.933,
+    "summary": "6/8 steps succeeded (1 failed); 170/171 tests passed (1 failed)",
+    "log": "docs/evidence/grpc_federation/2026-11-07/budget.Debug.log",
+    "source_manifest": "docs/evidence/grpc_federation/2026-11-07/sources.8439a1b3b2c2.json",
+    "source_manifest_sha256": "8439a1b3b2c297d61a0855157c6a644ae54b8b5ca0bebb7891241ae47e3ddf50"
+  },
+  {
+    "name": "budget.Debug.corrected",
+    "command": [
+      "zig",
+      "build",
+      "test-lib",
+      "-Dtest-filter=serving inventory storage budget",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 31.573,
+    "summary": "8/8 steps succeeded; 171/171 tests passed",
+    "log": "docs/evidence/grpc_federation/2026-11-07/budget.Debug.corrected.log",
+    "source_manifest": "docs/evidence/grpc_federation/2026-11-07/sources.dcefbbbbeefe.json",
+    "source_manifest_sha256": "dcefbbbbeefe87511dac05b7ea0aff79266da3a7169eaba4a3be090deac95c9c"
+  },
+  {
+    "name": "native.ReleaseSafe.final",
+    "command": [
+      "zig",
+      "build",
+      "test-lib",
+      "-Doptimize=ReleaseSafe",
+      "-Dtest-filter=federated",
+      "-Dtest-filter=authority",
+      "-Dtest-filter=bootstrap",
+      "-Dtest-filter=control plane",
+      "-Dtest-filter=discovery source",
+      "-Dtest-filter=LRS",
+      "-Dtest-filter=stream interruption returns",
+      "-Dtest-filter=resumable read cancellation",
+      "-Dtest-filter=client target",
+      "-Dtest-filter=gRPC xDS URI",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 1,
+    "elapsed_seconds": 295.3,
+    "summary": "6/8 steps succeeded (1 failed); 348/349 tests passed (1 failed)",
+    "log": "docs/evidence/grpc_federation/2026-11-07/native.ReleaseSafe.final.log",
+    "source_manifest": "docs/evidence/grpc_federation/2026-11-07/sources.dcefbbbbeefe.json",
+    "source_manifest_sha256": "dcefbbbbeefe87511dac05b7ea0aff79266da3a7169eaba4a3be090deac95c9c"
+  },
+  {
+    "name": "lrs-provenance.ReleaseSafe",
+    "command": [
+      "zig",
+      "build",
+      "test-lib",
+      "-Doptimize=ReleaseSafe",
+      "-Dtest-filter=preserves accepted CDS provenance",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 172.863,
+    "summary": "8/8 steps succeeded; 171/171 tests passed",
+    "log": "docs/evidence/grpc_federation/2026-11-07/lrs-provenance.ReleaseSafe.log",
+    "source_manifest": "docs/evidence/grpc_federation/2026-11-07/sources.5f7b92977e18.json",
+    "source_manifest_sha256": "5f7b92977e185b7950c56391be2c349e6a589134107caefb67ace34ed764e959"
+  },
+  {
+    "name": "wire.ReleaseSafe",
+    "command": [
+      "zig",
+      "build",
+      "interop-grpc-federation",
+      "-Doptimize=ReleaseSafe",
+      "--summary",
+      "all",
+      "--",
+      "--output",
+      "docs/evidence/grpc_federation/2026-11-07/wire.ReleaseSafe/report.json"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 169.651,
+    "summary": "8/8 steps succeeded",
+    "log": "docs/evidence/grpc_federation/2026-11-07/wire.ReleaseSafe.log",
+    "source_manifest": "docs/evidence/grpc_federation/2026-11-07/sources.5f7b92977e18.json",
+    "source_manifest_sha256": "5f7b92977e185b7950c56391be2c349e6a589134107caefb67ace34ed764e959"
+  },
+  {
+    "name": "cluster-quota.Debug.before",
+    "command": [
+      "zig",
+      "build",
+      "test-lib",
+      "-Dtest-filter=federated cluster quota",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 1,
+    "elapsed_seconds": 32.044,
+    "summary": "6/8 steps succeeded (1 failed); 170/171 tests passed (1 failed)",
+    "log": "docs/evidence/grpc_federation/2026-11-07/cluster-quota.Debug.before.log",
+    "source_manifest": "docs/evidence/grpc_federation/2026-11-07/sources.0d70a9342b2c.json",
+    "source_manifest_sha256": "0d70a9342b2c32e42cde1eb70db27ff88b26b88d23051a6d903e9b047d79fb27"
+  },
+  {
+    "name": "native.Debug.complete",
+    "command": [
+      "zig",
+      "build",
+      "test-lib",
+      "-Dtest-filter=federated",
+      "-Dtest-filter=authority",
+      "-Dtest-filter=bootstrap",
+      "-Dtest-filter=control plane",
+      "-Dtest-filter=discovery source",
+      "-Dtest-filter=LRS",
+      "-Dtest-filter=stream interruption returns",
+      "-Dtest-filter=resumable read cancellation",
+      "-Dtest-filter=client target",
+      "-Dtest-filter=gRPC xDS URI",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 47.384,
+    "summary": "8/8 steps succeeded; 350/350 tests passed",
+    "log": "docs/evidence/grpc_federation/2026-11-07/native.Debug.complete.log",
+    "source_manifest": "docs/evidence/grpc_federation/2026-11-07/sources.8a5aabba3764.json",
+    "source_manifest_sha256": "8a5aabba37648b17bde9a0679ef51da1d7a34e3907cef6294660a78f65ec21f2"
+  },
+  {
+    "name": "native.ReleaseSafe.complete",
+    "command": [
+      "zig",
+      "build",
+      "test-lib",
+      "-Doptimize=ReleaseSafe",
+      "-Dtest-filter=xDS",
+      "-Dtest-filter=authority",
+      "-Dtest-filter=bootstrap",
+      "-Dtest-filter=control plane",
+      "-Dtest-filter=discovery source",
+      "-Dtest-filter=LRS",
+      "-Dtest-filter=stream interruption returns",
+      "-Dtest-filter=resumable read cancellation",
+      "-Dtest-filter=client target",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 1,
+    "elapsed_seconds": 295.967,
+    "summary": "6/8 steps succeeded (1 failed); 428/429 tests passed (1 failed)",
+    "log": "docs/evidence/grpc_federation/2026-11-07/native.ReleaseSafe.complete.log",
+    "source_manifest": "docs/evidence/grpc_federation/2026-11-07/sources.8a5aabba3764.json",
+    "source_manifest_sha256": "8a5aabba37648b17bde9a0679ef51da1d7a34e3907cef6294660a78f65ec21f2"
+  },
+  {
+    "name": "publication.Debug.complete",
+    "command": [
+      "zig",
+      "build",
+      "test-lib",
+      "-Dtest-filter=LDS routes",
+      "-Dtest-filter=CSDS",
+      "-Dtest-filter=federated managed",
+      "-Dtest-filter=federated registry",
+      "-Dtest-filter=resource timer",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 32.213,
+    "summary": "8/8 steps succeeded; 185/185 tests passed",
+    "log": "docs/evidence/grpc_federation/2026-11-07/publication.Debug.complete.log",
+    "source_manifest": "docs/evidence/grpc_federation/2026-11-07/sources.1e6cda4cb7c8.json",
+    "source_manifest_sha256": "1e6cda4cb7c8f39843455b1422d19d22b9ef72e96611595aa51d0f4b18d9e79f"
+  },
+  {
+    "name": "xds.ReleaseSafe.complete",
+    "command": [
+      "zig",
+      "build",
+      "test-lib",
+      "-Doptimize=ReleaseSafe",
+      "-Dtest-filter=grpc.xds",
+      "-Dtest-filter=stream interruption returns",
+      "-Dtest-filter=resumable read cancellation",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 256.668,
+    "summary": "8/8 steps succeeded; 461/461 tests passed",
+    "log": "docs/evidence/grpc_federation/2026-11-07/xds.ReleaseSafe.complete.log",
+    "source_manifest": "docs/evidence/grpc_federation/2026-11-07/sources.1e6cda4cb7c8.json",
+    "source_manifest_sha256": "1e6cda4cb7c8f39843455b1422d19d22b9ef72e96611595aa51d0f4b18d9e79f"
+  },
+  {
+    "name": "wire.ReleaseSafe.complete",
+    "command": [
+      "zig",
+      "build",
+      "interop-grpc-federation",
+      "-Doptimize=ReleaseSafe",
+      "--summary",
+      "all",
+      "--",
+      "--output",
+      "docs/evidence/grpc_federation/2026-11-07/wire.ReleaseSafe.complete/report.json"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 168.25,
+    "summary": "8/8 steps succeeded",
+    "log": "docs/evidence/grpc_federation/2026-11-07/wire.ReleaseSafe.complete.log",
+    "source_manifest": "docs/evidence/grpc_federation/2026-11-07/sources.1e6cda4cb7c8.json",
+    "source_manifest_sha256": "1e6cda4cb7c8f39843455b1422d19d22b9ef72e96611595aa51d0f4b18d9e79f"
+  }
+]

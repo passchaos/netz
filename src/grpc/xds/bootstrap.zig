@@ -23,7 +23,8 @@ pub const Limits = struct {
     max_metadata_entries: usize = 1024,
 };
 
-pub const Scheme = enum { http, https };
+/// Target syntax/default port only; channel credentials select transport TLS.
+pub const Scheme = enum { http, https, dns };
 pub const Target = struct { scheme: Scheme, host: []const u8, port: u16 };
 pub const TlsConfig = struct {
     ca_certificate_file: []const u8 = "",
@@ -64,9 +65,23 @@ pub const Server = struct {
         for (self.channel_creds) |creds| if (std.mem.eql(u8, creds.type, "tls")) return true;
         return false;
     }
-    pub fn tlsConfig(self: Server) ?TlsConfig {
-        for (self.channel_creds) |creds| if (creds.tls) |config| return config;
+    /// Select the first credential type this implementation can instantiate.
+    /// Unknown entries remain in the inventory; connection errors never select
+    /// a later credential or downgrade an already selected TLS transport.
+    pub fn selectedCredential(self: Server) ?*const Creds {
+        for (self.channel_creds) |*creds| {
+            if (std.mem.eql(u8, creds.type, "insecure") or std.mem.eql(u8, creds.type, "tls")) return creds;
+        }
         return null;
+    }
+    pub fn usesTls(self: Server) bool {
+        const creds = self.selectedCredential() orelse return false;
+        return std.mem.eql(u8, creds.type, "tls");
+    }
+    pub fn tlsConfig(self: Server) ?TlsConfig {
+        const creds = self.selectedCredential() orelse return null;
+        if (!std.mem.eql(u8, creds.type, "tls")) return null;
+        return creds.tls orelse TlsConfig{};
     }
 };
 
@@ -123,7 +138,8 @@ pub const Bootstrap = struct {
 
     pub fn firstInsecureServer(self: *const Bootstrap) ?*const Server {
         for (self.servers) |*server| {
-            if (server.target.scheme == .http and server.hasInsecureCreds()) return server;
+            const creds = server.selectedCredential() orelse continue;
+            if (std.mem.eql(u8, creds.type, "insecure")) return server;
         }
         return null;
     }
@@ -168,35 +184,46 @@ fn optionalBool(object: std.json.ObjectMap, key: []const u8) Error!bool {
 }
 
 fn parseTarget(uri: []const u8, limits: Limits) Error!Target {
-    var scheme: Scheme = .http;
+    var scheme: Scheme = .dns;
+    var default_port: u16 = 443;
     var rest = uri;
     if (std.mem.startsWith(u8, uri, "http://")) {
+        scheme = .http;
+        default_port = 80;
         rest = uri["http://".len..];
     } else if (std.mem.startsWith(u8, uri, "https://")) {
         scheme = .https;
         rest = uri["https://".len..];
-    } else return error.InvalidServerUri;
+    } else if (std.mem.startsWith(u8, uri, "dns:///")) {
+        rest = uri["dns:///".len..];
+    } else if (std.mem.indexOf(u8, uri, "://") != null) return error.InvalidServerUri;
     if (rest.len == 0 or rest.len > limits.max_text_bytes) return error.InvalidServerUri;
     if (std.mem.indexOfAny(u8, rest, "/?#@") != null) return error.InvalidServerUri;
     var host: []const u8 = undefined;
     var port_text: []const u8 = "";
+    var explicit_port = false;
     if (rest[0] == '[') {
         const close = std.mem.indexOfScalar(u8, rest, ']') orelse return error.InvalidServerUri;
         host = rest[1..close];
+        if (std.Io.net.Ip6Address.Unresolved.parse(host) != .success) return error.InvalidServerUri;
         if (close + 1 < rest.len) {
             if (rest[close + 1] != ':') return error.InvalidServerUri;
+            explicit_port = true;
             port_text = rest[close + 2 ..];
         }
     } else if (std.mem.lastIndexOfScalar(u8, rest, ':')) |colon| {
         if (std.mem.indexOfScalar(u8, rest[0..colon], ':') != null) return error.InvalidServerUri;
         host = rest[0..colon];
+        explicit_port = true;
         port_text = rest[colon + 1 ..];
     } else {
         host = rest;
     }
     if (host.len == 0 or host.len > limits.max_text_bytes) return error.InvalidServerUri;
-    const port: u16 = if (port_text.len == 0)
-        (if (scheme == .http) 80 else 443)
+    if (explicit_port and port_text.len == 0) return error.InvalidServerUri;
+    for (port_text) |digit| if (!std.ascii.isDigit(digit)) return error.InvalidServerUri;
+    const port: u16 = if (!explicit_port)
+        default_port
     else
         std.fmt.parseInt(u16, port_text, 10) catch return error.InvalidServerUri;
     if (port == 0) return error.InvalidServerUri;
@@ -418,6 +445,8 @@ fn parseAuthorities(arena: std.mem.Allocator, value: std.json.Value, limits: Lim
         const servers: []Server = if (body.get("xds_servers")) |raw| try parseServers(arena, raw, limits) else &.{};
         const template = try optionalText(body, "client_listener_resource_name_template", limits);
         if (template.len != 0) {
+            // Supplied templates require the literal raw authority prefix,
+            // matching grpc-core. Generated resource names encode separately.
             const prefix = try std.fmt.allocPrint(arena, "xdstp://{s}/", .{name});
             if (!std.mem.startsWith(u8, template, prefix)) return error.InvalidBootstrap;
         }

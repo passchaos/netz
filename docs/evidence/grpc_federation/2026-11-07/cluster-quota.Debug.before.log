@@ -1,0 +1,47 @@
+test-lib
++- run test 170 pass, 1 fail (171 total)
+error: 'grpc.xds.runtime.rollback_tests.test.gRPC xDS federated cluster quota counts unique dependencies across retained route projections' failed:
+       expected error.AdsNotConnected, found error.XdsLimitExceeded
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/plan.zig:63:70: 0x2e0dfeb in createWithClusters (root.zig)
+                   if (key_index >= controller.options.limits.max_clusters) return error.XdsLimitExceeded;
+                                                                            ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/plan.zig:18:9: 0x2e0b9c7 in create (root.zig)
+               return createWithClusters(controller, projection, &.{});
+               ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/controller.zig:476:20: 0x2f54703 in publishHook (root.zig)
+               var plan = try Plan.create(self, projection);
+                          ^
+       /home/passchaos/project-z/netz/src/grpc/xds/lds/controller.zig:82:49: 0x2e7d2a9 in publish (root.zig)
+               if (self.options.publisher) |publisher| return publisher.publish_fn(publisher.context, client, projection, destination, deadline);
+                                                       ^
+       /home/passchaos/project-z/netz/src/grpc/xds/lds/apply_listener.zig:63:26: 0x2f210d4 in apply (root.zig)
+               const revision = try self.publish(client, projection, destination, deadline);
+                                ^
+       /home/passchaos/project-z/netz/src/grpc/xds/lds/controller.zig:112:13: 0x2e77b6b in applyWithDeadline (root.zig)
+                   try @import("apply_listener.zig").apply(self, client, update, destination, deadline)
+                   ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/controller.zig:531:87: 0x2ad1126 in applyWithDeadline (root.zig)
+               if (std.mem.eql(u8, url, lds.type_url) or std.mem.eql(u8, url, rds.type_url)) return self.listener.?.applyWithDeadline(client, update, destination, deadline);
+                                                                                             ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/std/testing.zig:72:13: 0x138d56e in expectError__anon_46642 (std.zig)
+                   return error.TestUnexpectedError;
+                   ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/rollback_tests.zig:205:13: 0x138f514 in test.gRPC xDS federated cluster quota counts unique dependencies across retained route projections (root.zig)
+                   try std.testing.expectError(error.AdsNotConnected, controller.applyWithDeadline(&client, candidate, channel, budgetDeadline(io)));
+                   ^
+failed command: ./.zig-cache/o/3c07bba905d1371395ccee3149b11753/test --cache-dir=./.zig-cache --seed=0x7d338180 --listen=-
+
+Build Summary: 6/8 steps succeeded (1 failed); 170/171 tests passed (1 failed)
+test-lib transitive failure
++- run test 170 pass, 1 fail (171 total)
+   +- compile test Debug native success 30s MaxRSS:2G
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 6ms MaxRSS:39M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 6ms MaxRSS:39M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options cached
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/63a4f13a38ebb3037e00652cc87f88eb/build /home/passchaos/Temp/zig-x86_64-linux-0.16.0/zig /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib /home/passchaos/project-z/netz .zig-cache /home/passchaos/.cache/zig --seed 0x7d338180 -Z9ea069de8491b0a8 test-lib -Dtest-filter=federated cluster quota --summary all

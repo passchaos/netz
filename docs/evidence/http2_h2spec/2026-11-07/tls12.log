@@ -1,0 +1,26 @@
+interop-http2-h2spec
++- run tools/interop/http2_h2spec.sh
+   +- compile exe netz-h2spec-server ReleaseFast native 1 errors
+src/grpc/xds/runtime/apply_sds.zig:94:37: error: capture shadows declaration of 'refresh'
+        for (self.deadlines.items) |refresh| {
+                                    ^~~~~~~
+src/grpc/xds/runtime/apply_sds.zig:63:9: note: declared here
+    pub fn refresh(self: *SecretPlan, secret: *ctl.CachedSecret, deadline: ?std.Io.Clock.Timestamp) std.mem.Allocator.Error!void {
+    ~~~~^~
+error: 1 compilation errors
+failed command: /home/passchaos/Temp/zig-x86_64-linux-0.16.0/zig build-exe -OReleaseFast --dep netz -Mroot=/home/passchaos/project-z/netz/tools/interop/http2_h2spec_server.zig -OReleaseFast --dep vail --dep vort --dep zio -Mnetz=/home/passchaos/project-z/netz/src/root.zig -OReleaseFast --dep vort -Mvail=/home/passchaos/project-z/vail/src/root.zig .zig-cache/o/461167bf3e7774a4ac52f4f7fa32e581/vort-br-record-optimal.o .zig-cache/o/a175a69bc70452f84ab1d11b327e93a3/vort-zstd-huffman-x2.o -OReleaseFast -I .zig-cache/o/2fb5824d4233e9fe32370ab196a5b16d -I .zig-cache/o/2fb5824d4233e9fe32370ab196a5b16d --dep vail_archive_crypto -Mvort=/home/passchaos/project-z/vort/src/root.zig -OReleaseFast --dep zio_build_options -Mzio=/home/passchaos/project-z/netz/zig-pkg/zio-0.19.1-xHbVVHZNLABUkjHyJHQiljEahUaadEy3x1_4vyCvFxjw/src/zio.zig -OReleaseFast -Mvail_archive_crypto=/home/passchaos/project-z/vail/archive_crypto/src/root.zig -Mzio_build_options=.zig-cache/c/320401b06d5c6c293b0e48afbc96afbe/options.zig -lc --cache-dir .zig-cache --global-cache-dir /home/passchaos/.cache/zig --name netz-h2spec-server --zig-lib-dir /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/ --listen=-
+
+Build Summary: 5/8 steps succeeded (1 failed)
+interop-http2-h2spec transitive failure
++- run tools/interop/http2_h2spec.sh transitive failure
+   +- compile exe netz-h2spec-server ReleaseFast native 1 errors
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal ReleaseFast native cached 7ms MaxRSS:36M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 ReleaseFast native cached 7ms MaxRSS:36M
+      +- compile obj vort-br-record-optimal ReleaseFast native (reused)
+      +- compile obj vort-zstd-huffman-x2 ReleaseFast native (reused)
+      +- options cached
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/c28acc2825328182513893e29d4b908d/build /home/passchaos/Temp/zig-x86_64-linux-0.16.0/zig /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib /home/passchaos/project-z/netz .zig-cache /home/passchaos/.cache/zig --seed 0x30869fb6 -Z9698b55cb2d7f870 interop-http2-h2spec -Doptimize=ReleaseFast --summary all -- --tls12

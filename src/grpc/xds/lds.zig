@@ -7,6 +7,7 @@ pub const Options = @import("lds/controller.zig").Options;
 pub const Error = @import("lds/controller.zig").Error;
 pub const rbac = @import("lds/rbac.zig");
 test {
+    _ = @import("lds/discovery_router_tests.zig");
     _ = rbac;
     _ = @import("lds/tests.zig");
     _ = @import("lds/controller_tests.zig");

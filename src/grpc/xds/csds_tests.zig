@@ -190,6 +190,7 @@ test "gRPC SotW xDS CSDS dump reports the accepted type version" {
     // The listener is accepted; publishing its inline routes subscribed CDS
     // "a", which has not been delivered yet and therefore reports REQUESTED.
     try std.testing.expectEqual(@as(usize, 2), configs.len);
+    try std.testing.expect(find(configs, rds.type_url, "inline") == null);
     const listener_info = find(configs, lds.type_url, "frontend") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("v1", listener_info.version);
     try std.testing.expectEqual(@as(u64, 3), listener_info.status); // ACKED
@@ -207,6 +208,8 @@ test "gRPC SotW xDS CSDS dump reports the accepted type version" {
     defer gpa.free(excluded);
     const excluded_configs = try collect(gpa, excluded);
     defer gpa.free(excluded_configs);
+    try std.testing.expectEqual(@as(usize, 2), excluded_configs.len);
+    try std.testing.expect(find(excluded_configs, rds.type_url, "inline") == null);
     const excluded_listener = find(excluded_configs, lds.type_url, "frontend") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("v1", excluded_listener.version);
     try std.testing.expectEqual(@as(u64, 3), excluded_listener.status);

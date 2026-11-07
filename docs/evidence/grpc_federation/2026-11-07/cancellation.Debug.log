@@ -1,0 +1,323 @@
+test-lib
++- run test 173 pass, 1 fail (174 total); 10 leaks
+federated native mode=sotw phase=initial step=0 authority=A url=type.googleapis.com/envoy.config.listener.v3.Listener nonce=l1
+federated native mode=sotw phase=initial step=1 authority=B url=type.googleapis.com/envoy.config.route.v3.RouteConfiguration nonce=r1
+federated native mode=sotw phase=initial step=2 authority=B url=type.googleapis.com/envoy.config.cluster.v3.Cluster nonce=cb1
+federated native mode=sotw phase=initial step=3 authority=A url=type.googleapis.com/envoy.config.cluster.v3.Cluster nonce=ca1
+federated native mode=sotw phase=initial step=4 authority=A url=type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment nonce=ea1
+federated native mode=sotw phase=initial step=5 authority=B url=type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment nonce=eb1
+federated native mode=sotw phase=remove-a step=0 authority=A url=type.googleapis.com/envoy.config.cluster.v3.Cluster nonce=ca-empty
+federated native mode=sotw phase=replacement step=0 authority=B url=type.googleapis.com/envoy.config.route.v3.RouteConfiguration nonce=r2
+federated native mode=sotw phase=replacement step=1 authority=B url=type.googleapis.com/envoy.config.cluster.v3.Cluster nonce=cb2
+federated native mode=sotw phase=finish-b2 step=0 authority=B url=type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment nonce=eb2
+federated native mode=delta phase=initial step=0 authority=A url=type.googleapis.com/envoy.config.listener.v3.Listener nonce=l1
+federated native mode=delta phase=initial step=1 authority=B url=type.googleapis.com/envoy.config.route.v3.RouteConfiguration nonce=r1
+federated native mode=delta phase=initial step=2 authority=B url=type.googleapis.com/envoy.config.cluster.v3.Cluster nonce=cb1
+federated native mode=delta phase=initial step=3 authority=A url=type.googleapis.com/envoy.config.cluster.v3.Cluster nonce=ca1
+federated native mode=delta phase=initial step=4 authority=B url=type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment nonce=eb1
+federated native mode=delta phase=initial step=5 authority=A url=type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment nonce=ea1
+federated native mode=delta phase=remove-a step=0 authority=A url=type.googleapis.com/envoy.config.cluster.v3.Cluster nonce=ca-empty
+federated native mode=delta phase=replacement step=0 authority=B url=type.googleapis.com/envoy.config.route.v3.RouteConfiguration nonce=r2
+federated native mode=delta phase=replacement step=1 authority=B url=type.googleapis.com/envoy.config.cluster.v3.Cluster nonce=cb2
+federated native mode=delta phase=finish-b2 step=0 authority=B url=type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment nonce=eb2
+error: 'grpc.channel.shared.stream.tests.operation_deadlines.test.gRPC shared stream resumable read cancellation preserves buffered message delivery' failed:
+       /home/passchaos/project-z/netz/src/grpc/channel/shared/stream/call.zig:238:55: 0x2b432c8 in appendLocked (root.zig)
+                   if (data.len > self.bytes.len - self.len) return error.StreamReceiveBufferExceeded;
+                                                             ^
+       /home/passchaos/project-z/netz/src/grpc/channel/shared/stream/tests/operation_deadlines.zig:202:13: 0x13fdde2 in exerciseInterrupted (root.zig)
+                   try call.appendLocked(&wire);
+                   ^
+       /home/passchaos/project-z/netz/src/grpc/channel/shared/stream/tests/operation_deadlines.zig:228:5: 0x13ff7db in test.gRPC shared stream resumable read cancellation preserves buffered message delivery (root.zig)
+           try exerciseInterrupted(.read, true);
+           ^
+       [DebugAllocator] (err): memory address 0x74968e1e0000 leaked:
+       /home/passchaos/project-z/netz/src/grpc/channel/shared/layout.zig:23:40: 0x2a5ae3f in create (root.zig)
+           const sources = try allocator.alloc(*State.Source, count);
+                                              ^
+       /home/passchaos/project-z/netz/src/grpc/channel/shared/init.zig:171:53: 0x1405bd3 in create (root.zig)
+           const sources = try @import("layout.zig").create(allocator, io, target, options, state.policy, if (state.weighted_target) |*runtime| runtime else null, state.shuffle_addresses, true);
+                                                           ^
+       /home/passchaos/project-z/netz/src/grpc/channel/shared.zig:75:65: 0x13ff8df in init (root.zig)
+               return .{ .state = try @import("shared/init.zig").create(allocator, io, target, options) };
+                                                                       ^
+       /home/passchaos/project-z/netz/src/grpc/channel/shared/stream/tests/operation_deadlines.zig:110:48: 0x13fc535 in exerciseInterrupted (root.zig)
+           var channel = try shared.SharedChannel.init(std.testing.allocator, base, .{ .cleartext_ip = .{ .address = .{ .ip4 = .loopback(1) } } }, .{});
+                                                      ^
+       /home/passchaos/project-z/netz/src/grpc/channel/shared/stream/tests/operation_deadlines.zig:228:28: 0x13ff7a0 in test.gRPC shared stream resumable read cancellation preserves buffered message delivery (root.zig)
+           try exerciseInterrupted(.read, true);
+                                  ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/compiler/test_runner.zig:140:68: 0x13b42ac in mainServer (test_runner.zig)
+                       const status: TestResults.Status = if (test_fn.func()) |v| s: {
+                                                                          ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/compiler/test_runner.zig:71:26: 0x13b509d in main (test_runner.zig)
+               return mainServer(init) catch |err| panic("internal test runner failure: {t}", .{err});
+                                ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/std/start.zig:699:88: 0x13b1e3e in callMain (std.zig)
+           if (fn_info.params[0].type.? == std.process.Init.Minimal) return wrapMain(root.main(.{
+                                                                                              ^
+       ../sysdeps/nptl/libc_start_call_main.h:58:16: 0x74968ea2a1c9 in __libc_start_call_main (../sysdeps/x86/libc-start.c)
+       ../csu/libc-start.c:360:3: 0x74968ea2a28a in __libc_start_main_impl (../sysdeps/x86/libc-start.c)
+       (additional stack frames may have been skipped...)
+
+       [DebugAllocator] (err): memory address 0x74968e1e0008 leaked:
+       /home/passchaos/project-z/netz/src/grpc/channel/shared/init.zig:183:49: 0x14066d3 in create (root.zig)
+                   source.current = try allocator.alloc(*State.Worker, 1);
+                                                       ^
+       /home/passchaos/project-z/netz/src/grpc/channel/shared.zig:75:65: 0x13ff8df in init (root.zig)
+               return .{ .state = try @import("shared/init.zig").create(allocator, io, target, options) };
+                                                                       ^
+       /home/passchaos/project-z/netz/src/grpc/channel/shared/stream/tests/operation_deadlines.zig:110:48: 0x13fc535 in exerciseInterrupted (root.zig)
+           var channel = try shared.SharedChannel.init(std.testing.allocator, base, .{ .cleartext_ip = .{ .address = .{ .ip4 = .loopback(1) } } }, .{});
+                                                      ^
+       /home/passchaos/project-z/netz/src/grpc/channel/shared/stream/tests/operation_deadlines.zig:228:28: 0x13ff7a0 in test.gRPC shared stream resumable read cancellation preserves buffered message delivery (root.zig)
+           try exerciseInterrupted(.read, true);
+                                  ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/compiler/test_runner.zig:140:68: 0x13b42ac in mainServer (test_runner.zig)
+                       const status: TestResults.Status = if (test_fn.func()) |v| s: {
+                                                                          ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/compiler/test_runner.zig:71:26: 0x13b509d in main (test_runner.zig)
+               return mainServer(init) catch |err| panic("internal test runner failure: {t}", .{err});
+                                ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/std/start.zig:699:88: 0x13b1e3e in callMain (std.zig)
+           if (fn_info.params[0].type.? == std.process.Init.Minimal) return wrapMain(root.main(.{
+                                                                                              ^
+       ../sysdeps/nptl/libc_start_call_main.h:58:16: 0x74968ea2a1c9 in __libc_start_call_main (../sysdeps/x86/libc-start.c)
+       ../csu/libc-start.c:360:3: 0x74968ea2a28a in __libc_start_main_impl (../sysdeps/x86/libc-start.c)
+       ???:?:?: 0x3201754 in ??? (???)
+       (additional stack frames may have been skipped...)
+
+       [DebugAllocator] (err): memory address 0x74968e100000 leaked:
+       /home/passchaos/project-z/netz/src/grpc/channel/shared/request_inputs.zig:59:40: 0x2a6beb4 in clone__anon_10803764 (root.zig)
+           const storage = try allocator.alloc(u8, size);
+                                              ^
+       /home/passchaos/project-z/netz/src/grpc/channel/shared/stream/call.zig:178:43: 0x2b5d1f9 in create (root.zig)
+                   const owned = try inputs.clone(parent.allocator, options);
+                                                 ^
+       /home/passchaos/project-z/netz/src/grpc/channel/shared/stream/tests/operation_deadlines.zig:119:45: 0x13fc72c in exerciseInterrupted (root.zig)
+           const call = try State.StreamCall.create(state, .{ .path = "/svc/Bidi" }, null);
+                                                   ^
+       /home/passchaos/project-z/netz/src/grpc/channel/shared/stream/tests/operation_deadlines.zig:228:28: 0x13ff7a0 in test.gRPC shared stream resumable read cancellation preserves buffered message delivery (root.zig)
+           try exerciseInterrupted(.read, true);
+                                  ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/compiler/test_runner.zig:140:68: 0x13b42ac in mainServer (test_runner.zig)
+                       const status: TestResults.Status = if (test_fn.func()) |v| s: {
+                                                                          ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/compiler/test_runner.zig:71:26: 0x13b509d in main (test_runner.zig)
+               return mainServer(init) catch |err| panic("internal test runner failure: {t}", .{err});
+                                ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/std/start.zig:699:88: 0x13b1e3e in callMain (std.zig)
+           if (fn_info.params[0].type.? == std.process.Init.Minimal) return wrapMain(root.main(.{
+                                                                                              ^
+       ../sysdeps/nptl/libc_start_call_main.h:58:16: 0x74968ea2a1c9 in __libc_start_call_main (../sysdeps/x86/libc-start.c)
+       ../csu/libc-start.c:360:3: 0x74968ea2a28a in __libc_start_main_impl (../sysdeps/x86/libc-start.c)
+       ???:?:?: 0x3201754 in ??? (???)
+       (additional stack frames may have been skipped...)
+
+       [DebugAllocator] (err): memory address 0x74968e280000 leaked:
+       /home/passchaos/project-z/netz/src/grpc/channel/shared/wake.zig:8:42: 0x2b5cc26 in create (root.zig)
+               const wake = try allocator.create(Wake);
+                                                ^
+       /home/passchaos/project-z/netz/src/grpc/channel/shared/stream/tests/operation_deadlines.zig:121:33: 0x13fc811 in exerciseInterrupted (root.zig)
+           const wake = try Wake.create(std.testing.allocator);
+                                       ^
+       /home/passchaos/project-z/netz/src/grpc/channel/shared/stream/tests/operation_deadlines.zig:228:28: 0x13ff7a0 in test.gRPC shared stream resumable read cancellation preserves buffered message delivery (root.zig)
+           try exerciseInterrupted(.read, true);
+                                  ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/compiler/test_runner.zig:140:68: 0x13b42ac in mainServer (test_runner.zig)
+                       const status: TestResults.Status = if (test_fn.func()) |v| s: {
+                                                                          ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/compiler/test_runner.zig:71:26: 0x13b509d in main (test_runner.zig)
+               return mainServer(init) catch |err| panic("internal test runner failure: {t}", .{err});
+                                ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/std/start.zig:699:88: 0x13b1e3e in callMain (std.zig)
+           if (fn_info.params[0].type.? == std.process.Init.Minimal) return wrapMain(root.main(.{
+                                                                                              ^
+       ../sysdeps/nptl/libc_start_call_main.h:58:16: 0x74968ea2a1c9 in __libc_start_call_main (../sysdeps/x86/libc-start.c)
+       ../csu/libc-start.c:360:3: 0x74968ea2a28a in __libc_start_main_impl (../sysdeps/x86/libc-start.c)
+       ???:?:?: 0x3201754 in ??? (???)
+
+       [DebugAllocator] (err): memory address 0x74968e220000 leaked:
+       /home/passchaos/project-z/netz/src/grpc/channel/connectivity.zig:44:45: 0x2a69531 in create (root.zig)
+               const tracker = try allocator.create(Tracker);
+                                                   ^
+       /home/passchaos/project-z/netz/src/grpc/channel/shared/init.zig:91:52: 0x140303a in create (root.zig)
+           const tracker = try connectivity.Tracker.create(allocator, io);
+                                                          ^
+       /home/passchaos/project-z/netz/src/grpc/channel/shared.zig:75:65: 0x13ff8df in init (root.zig)
+               return .{ .state = try @import("shared/init.zig").create(allocator, io, target, options) };
+                                                                       ^
+       /home/passchaos/project-z/netz/src/grpc/channel/shared/stream/tests/operation_deadlines.zig:110:48: 0x13fc535 in exerciseInterrupted (root.zig)
+           var channel = try shared.SharedChannel.init(std.testing.allocator, base, .{ .cleartext_ip = .{ .address = .{ .ip4 = .loopback(1) } } }, .{});
+                                                      ^
+       /home/passchaos/project-z/netz/src/grpc/channel/shared/stream/tests/operation_deadlines.zig:228:28: 0x13ff7a0 in test.gRPC shared stream resumable read cancellation preserves buffered message delivery (root.zig)
+           try exerciseInterrupted(.read, true);
+                                  ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/compiler/test_runner.zig:140:68: 0x13b42ac in mainServer (test_runner.zig)
+                       const status: TestResults.Status = if (test_fn.func()) |v| s: {
+                                                                          ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/compiler/test_runner.zig:71:26: 0x13b509d in main (test_runner.zig)
+               return mainServer(init) catch |err| panic("internal test runner failure: {t}", .{err});
+                                ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/std/start.zig:699:88: 0x13b1e3e in callMain (std.zig)
+           if (fn_info.params[0].type.? == std.process.Init.Minimal) return wrapMain(root.main(.{
+                                                                                              ^
+       ../sysdeps/nptl/libc_start_call_main.h:58:16: 0x74968ea2a1c9 in __libc_start_call_main (../sysdeps/x86/libc-start.c)
+       ../csu/libc-start.c:360:3: 0x74968ea2a28a in __libc_start_main_impl (../sysdeps/x86/libc-start.c)
+       (additional stack frames may have been skipped...)
+
+       [DebugAllocator] (err): memory address 0x74968e1c0000 leaked:
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/std/array_list.zig:1235:56: 0x2a50d67 in ensureTotalCapacityPrecise (std.zig)
+                       const new_memory = try gpa.alignedAlloc(T, alignment, new_capacity);
+                                                              ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/std/array_list.zig:1211:51: 0x2a50a09 in ensureTotalCapacity (std.zig)
+                   return self.ensureTotalCapacityPrecise(gpa, growCapacity(new_capacity));
+                                                         ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/std/array_list.zig:1250:44: 0x2a507de in ensureUnusedCapacity (std.zig)
+                   return self.ensureTotalCapacity(gpa, try addOrOom(self.items.len, additional_count));
+                                                  ^
+       /home/passchaos/project-z/netz/src/grpc/channel/shared/membership.zig:10:51: 0x140d6b9 in createLocked (root.zig)
+                   try state.workers.ensureUnusedCapacity(state.allocator, 1);
+                                                         ^
+       /home/passchaos/project-z/netz/src/grpc/channel/shared/init.zig:185:57: 0x1406b93 in create (root.zig)
+                   const worker = State.Membership.createLocked(state, index, null) catch |err| {
+                                                               ^
+       /home/passchaos/project-z/netz/src/grpc/channel/shared.zig:75:65: 0x13ff8df in init (root.zig)
+               return .{ .state = try @import("shared/init.zig").create(allocator, io, target, options) };
+                                                                       ^
+       /home/passchaos/project-z/netz/src/grpc/channel/shared/stream/tests/operation_deadlines.zig:110:48: 0x13fc535 in exerciseInterrupted (root.zig)
+           var channel = try shared.SharedChannel.init(std.testing.allocator, base, .{ .cleartext_ip = .{ .address = .{ .ip4 = .loopback(1) } } }, .{});
+                                                      ^
+       /home/passchaos/project-z/netz/src/grpc/channel/shared/stream/tests/operation_deadlines.zig:228:28: 0x13ff7a0 in test.gRPC shared stream resumable read cancellation preserves buffered message delivery (root.zig)
+           try exerciseInterrupted(.read, true);
+                                  ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/compiler/test_runner.zig:140:68: 0x13b42ac in mainServer (test_runner.zig)
+                       const status: TestResults.Status = if (test_fn.func()) |v| s: {
+                                                                          ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/compiler/test_runner.zig:71:26: 0x13b509d in main (test_runner.zig)
+               return mainServer(init) catch |err| panic("internal test runner failure: {t}", .{err});
+                                ^
+       (additional stack frames may have been skipped...)
+
+       [DebugAllocator] (err): memory address 0x74968e120000 leaked:
+       /home/passchaos/project-z/netz/src/grpc/channel/shared/stream/call.zig:176:53: 0x2b5d0bd in create (root.zig)
+                   const call = try parent.allocator.create(Self);
+                                                           ^
+       /home/passchaos/project-z/netz/src/grpc/channel/shared/stream/tests/operation_deadlines.zig:119:45: 0x13fc72c in exerciseInterrupted (root.zig)
+           const call = try State.StreamCall.create(state, .{ .path = "/svc/Bidi" }, null);
+                                                   ^
+       /home/passchaos/project-z/netz/src/grpc/channel/shared/stream/tests/operation_deadlines.zig:228:28: 0x13ff7a0 in test.gRPC shared stream resumable read cancellation preserves buffered message delivery (root.zig)
+           try exerciseInterrupted(.read, true);
+                                  ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/compiler/test_runner.zig:140:68: 0x13b42ac in mainServer (test_runner.zig)
+                       const status: TestResults.Status = if (test_fn.func()) |v| s: {
+                                                                          ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/compiler/test_runner.zig:71:26: 0x13b509d in main (test_runner.zig)
+               return mainServer(init) catch |err| panic("internal test runner failure: {t}", .{err});
+                                ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/std/start.zig:699:88: 0x13b1e3e in callMain (std.zig)
+           if (fn_info.params[0].type.? == std.process.Init.Minimal) return wrapMain(root.main(.{
+                                                                                              ^
+       ../sysdeps/nptl/libc_start_call_main.h:58:16: 0x74968ea2a1c9 in __libc_start_call_main (../sysdeps/x86/libc-start.c)
+       ../csu/libc-start.c:360:3: 0x74968ea2a28a in __libc_start_main_impl (../sysdeps/x86/libc-start.c)
+       ???:?:?: 0x3201754 in ??? (???)
+
+       [DebugAllocator] (err): memory address 0x74968e240000 leaked:
+       /home/passchaos/project-z/netz/src/grpc/channel/shared/init.zig:40:52: 0x1400c31 in create (root.zig)
+           const canonical_endpoints = try allocator.alloc(
+                                                          ^
+       /home/passchaos/project-z/netz/src/grpc/channel/shared.zig:75:65: 0x13ff8df in init (root.zig)
+               return .{ .state = try @import("shared/init.zig").create(allocator, io, target, options) };
+                                                                       ^
+       /home/passchaos/project-z/netz/src/grpc/channel/shared/stream/tests/operation_deadlines.zig:110:48: 0x13fc535 in exerciseInterrupted (root.zig)
+           var channel = try shared.SharedChannel.init(std.testing.allocator, base, .{ .cleartext_ip = .{ .address = .{ .ip4 = .loopback(1) } } }, .{});
+                                                      ^
+       /home/passchaos/project-z/netz/src/grpc/channel/shared/stream/tests/operation_deadlines.zig:228:28: 0x13ff7a0 in test.gRPC shared stream resumable read cancellation preserves buffered message delivery (root.zig)
+           try exerciseInterrupted(.read, true);
+                                  ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/compiler/test_runner.zig:140:68: 0x13b42ac in mainServer (test_runner.zig)
+                       const status: TestResults.Status = if (test_fn.func()) |v| s: {
+                                                                          ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/compiler/test_runner.zig:71:26: 0x13b509d in main (test_runner.zig)
+               return mainServer(init) catch |err| panic("internal test runner failure: {t}", .{err});
+                                ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/std/start.zig:699:88: 0x13b1e3e in callMain (std.zig)
+           if (fn_info.params[0].type.? == std.process.Init.Minimal) return wrapMain(root.main(.{
+                                                                                              ^
+       ../sysdeps/nptl/libc_start_call_main.h:58:16: 0x74968ea2a1c9 in __libc_start_call_main (../sysdeps/x86/libc-start.c)
+       ../csu/libc-start.c:360:3: 0x74968ea2a28a in __libc_start_main_impl (../sysdeps/x86/libc-start.c)
+       ???:?:?: 0x3201754 in ??? (???)
+       (additional stack frames may have been skipped...)
+
+       [DebugAllocator] (err): memory address 0x74968e200000 leaked:
+       /home/passchaos/project-z/netz/src/grpc/channel/shared/init.zig:100:39: 0x1403c6e in create (root.zig)
+           const state = try allocator.create(State);
+                                             ^
+       /home/passchaos/project-z/netz/src/grpc/channel/shared.zig:75:65: 0x13ff8df in init (root.zig)
+               return .{ .state = try @import("shared/init.zig").create(allocator, io, target, options) };
+                                                                       ^
+       /home/passchaos/project-z/netz/src/grpc/channel/shared/stream/tests/operation_deadlines.zig:110:48: 0x13fc535 in exerciseInterrupted (root.zig)
+           var channel = try shared.SharedChannel.init(std.testing.allocator, base, .{ .cleartext_ip = .{ .address = .{ .ip4 = .loopback(1) } } }, .{});
+                                                      ^
+       /home/passchaos/project-z/netz/src/grpc/channel/shared/stream/tests/operation_deadlines.zig:228:28: 0x13ff7a0 in test.gRPC shared stream resumable read cancellation preserves buffered message delivery (root.zig)
+           try exerciseInterrupted(.read, true);
+                                  ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/compiler/test_runner.zig:140:68: 0x13b42ac in mainServer (test_runner.zig)
+                       const status: TestResults.Status = if (test_fn.func()) |v| s: {
+                                                                          ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/compiler/test_runner.zig:71:26: 0x13b509d in main (test_runner.zig)
+               return mainServer(init) catch |err| panic("internal test runner failure: {t}", .{err});
+                                ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/std/start.zig:699:88: 0x13b1e3e in callMain (std.zig)
+           if (fn_info.params[0].type.? == std.process.Init.Minimal) return wrapMain(root.main(.{
+                                                                                              ^
+       ../sysdeps/nptl/libc_start_call_main.h:58:16: 0x74968ea2a1c9 in __libc_start_call_main (../sysdeps/x86/libc-start.c)
+       ../csu/libc-start.c:360:3: 0x74968ea2a28a in __libc_start_main_impl (../sysdeps/x86/libc-start.c)
+       ???:?:?: 0x3201754 in ??? (???)
+       (additional stack frames may have been skipped...)
+
+       [DebugAllocator] (err): memory address 0x74968e201000 leaked:
+       /home/passchaos/project-z/netz/src/grpc/channel/shared/source.zig:30:48: 0x2a619ec in create (root.zig)
+                   const source = try allocator.create(Self);
+                                                      ^
+       /home/passchaos/project-z/netz/src/grpc/channel/shared/layout.zig:103:56: 0x2a5d26f in create (root.zig)
+               sources[source_index] = try State.Source.create(allocator, io, endpoint, options.channel);
+                                                              ^
+       /home/passchaos/project-z/netz/src/grpc/channel/shared/init.zig:171:53: 0x1405bd3 in create (root.zig)
+           const sources = try @import("layout.zig").create(allocator, io, target, options, state.policy, if (state.weighted_target) |*runtime| runtime else null, state.shuffle_addresses, true);
+                                                           ^
+       /home/passchaos/project-z/netz/src/grpc/channel/shared.zig:75:65: 0x13ff8df in init (root.zig)
+               return .{ .state = try @import("shared/init.zig").create(allocator, io, target, options) };
+                                                                       ^
+       /home/passchaos/project-z/netz/src/grpc/channel/shared/stream/tests/operation_deadlines.zig:110:48: 0x13fc535 in exerciseInterrupted (root.zig)
+           var channel = try shared.SharedChannel.init(std.testing.allocator, base, .{ .cleartext_ip = .{ .address = .{ .ip4 = .loopback(1) } } }, .{});
+                                                      ^
+       /home/passchaos/project-z/netz/src/grpc/channel/shared/stream/tests/operation_deadlines.zig:228:28: 0x13ff7a0 in test.gRPC shared stream resumable read cancellation preserves buffered message delivery (root.zig)
+           try exerciseInterrupted(.read, true);
+                                  ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/compiler/test_runner.zig:140:68: 0x13b42ac in mainServer (test_runner.zig)
+                       const status: TestResults.Status = if (test_fn.func()) |v| s: {
+                                                                          ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/compiler/test_runner.zig:71:26: 0x13b509d in main (test_runner.zig)
+               return mainServer(init) catch |err| panic("internal test runner failure: {t}", .{err});
+                                ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/std/start.zig:699:88: 0x13b1e3e in callMain (std.zig)
+           if (fn_info.params[0].type.? == std.process.Init.Minimal) return wrapMain(root.main(.{
+                                                                                              ^
+       ../sysdeps/nptl/libc_start_call_main.h:58:16: 0x74968ea2a1c9 in __libc_start_call_main (../sysdeps/x86/libc-start.c)
+       (additional stack frames may have been skipped...)
+failed command: ./.zig-cache/o/fdd139a499c124b9e24eb9a0a4a17f68/test --cache-dir=./.zig-cache --seed=0x7df14298 --listen=-
+
+Build Summary: 6/8 steps succeeded (1 failed); 173/174 tests passed (1 failed)
+test-lib transitive failure
++- run test 173 pass, 1 fail (174 total); 10 leaks
+   +- compile test Debug native success 32s MaxRSS:2G
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 6ms MaxRSS:39M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 7ms MaxRSS:39M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options cached
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/63a4f13a38ebb3037e00652cc87f88eb/build /home/passchaos/Temp/zig-x86_64-linux-0.16.0/zig /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib /home/passchaos/project-z/netz .zig-cache /home/passchaos/.cache/zig --seed 0x7df14298 -Z83fe36ccfd12ee68 test-lib -Dtest-filter=routes native authorities -Dtest-filter=resumable read cancellation -Dtest-filter=stream interruption returns --summary all

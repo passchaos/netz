@@ -1,8 +1,8 @@
 # xDS bootstrap and control-plane failover
 
 `grpc.xds.bootstrap` parses the gRPC xDS bootstrap JSON into bounded, owned
-configuration. `grpc.xds.control_plane.ControlPlane` turns an insecure
-`http://` or TLS `https://` bootstrap server into a SharedChannel and delta ADS
+configuration. `grpc.xds.control_plane.ControlPlane` turns a DNS/IP bootstrap
+target and its selected channel credentials into a SharedChannel and delta ADS
 client, and can move the same logical discovery session to the next server.
 
 ```zig
@@ -28,7 +28,7 @@ try plane.failoverWithDeadline(deadline);
 | Field | Behavior |
 | --- | --- |
 | `xds_servers` | Required, non-empty array of server objects |
-| `server_uri` | Required `http://` or `https://` authority; default ports 80/443; IPv6 brackets accepted |
+| `server_uri` | Required DNS/IP `host:port`, `dns:///host:port`, or HTTP/HTTPS alias; DNS defaults to port 443, HTTP/HTTPS aliases to 80/443; IPv6 brackets accepted |
 | `channel_creds` | Required array of `{type, config}`; at least one known type (`insecure`, `tls`, `google_default`, `xds`) |
 | `tls` config | `ca_certificate_file`, `certificate_file`, `private_key_file`, `refresh_interval`, `root_certificate_provider`, `identity_certificate_provider`; certificate/key must be paired; direct files and provider references are mutually exclusive |
 | `certificate_providers` | Optional map of provider name to `{plugin_name, config}`; `file_watcher` config supports `certificate_file`, `private_key_file`, `ca_certificate_file`, `refresh_interval` |
@@ -53,7 +53,11 @@ can be passed directly to `delta.Client`.
 
 ## Control plane
 
-`ControlPlane` supports `http://` and TLS `https://` servers and TLS `https://` servers.
+`ControlPlane` selects the first supported `insecure` or `tls` credential in
+the server's ordered list. The URI controls target spelling and default port;
+credentials control plaintext or TLS. A connection failure does not select a
+later credential or downgrade TLS. Only the selected credential's TLS material
+is loaded.
 TLS uses `ca_certificate_file` as the server trust bundle when present and the
 platform roots otherwise. `certificate_file` plus `private_key_file` supply an
 optional client identity for mTLS. The files are loaded once at control-plane
@@ -80,6 +84,11 @@ later publications use the new one.
 top-level list when the authority has none); an unknown authority fails with
 `InvalidControlPlaneOptions`. The bootstrap node is used unless `Options.node`
 overrides it; a missing node id fails with `InvalidBootstrapNode`.
+
+[Managed federation](grpc_federation.md) owns these authority sessions and
+routes dependency watches while retaining one Controller/data-plane publisher.
+Its target factory uses the bootstrap's listener templates and a parsed
+`xds:` URI through [client target resolution](grpc_client_target.md).
 
 `connectWithDeadline` tries the current server and then the remaining usable
 servers. Each attempt gets `Options.server_open_timeout` (default 250 ms) or
@@ -127,8 +136,8 @@ server or node-less configurations. See
 ## Remaining integration
 
 Certificate-provider plugins other than `file_watcher`, a self-driving refresh
-task, a background retry schedule and DNS/aggregate control-plane targets remain
-follow-up work; `reloadIfDue` exposes the bootstrap-derived schedule, but reload
-reconnects the delta client, so the discovery-owning task must call it. The
-parser retains authority server lists and per-server feature flags, and
-`Options.authority` already selects those servers.
+task, a background retry schedule and further gRPC resolver target families
+remain follow-up work. DNS/IP target spelling is supported. `reloadIfDue`
+exposes the bootstrap-derived schedule, while the discovery-owning task calls
+it at the reconnect boundary. Managed federation dispatches authority watches
+and applies each server's features to its own resource operations.

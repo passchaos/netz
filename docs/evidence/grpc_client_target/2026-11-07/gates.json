@@ -1,0 +1,69 @@
+[
+  {
+    "name": "peers.Debug",
+    "command": [
+      "zig",
+      "build",
+      "build-grpc-client-target",
+      "build-webtransport-protocol",
+      "-j1",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 47.926,
+    "summary": "13/13 steps succeeded",
+    "log": "docs/evidence/grpc_client_target/2026-11-07/peers.Debug.log",
+    "source_manifest": "docs/evidence/grpc_client_target/2026-11-07/sources.80284c4a28b7.json",
+    "source_manifest_sha256": "80284c4a28b7e9b55ebb2288f05cfcb3b3def7fa72fced0482b0a6eceb63ddde"
+  },
+  {
+    "name": "target-wire.Debug.final",
+    "command": [
+      "python3",
+      "tools/interop/grpc_client_target/run.py",
+      "--native",
+      "zig-out/bin/netz-grpc-client-target-emitter",
+      "--reference-python",
+      "/tmp/netz-grpc-client-target-venv/bin/python",
+      "--output",
+      "/home/passchaos/project-z/netz/docs/evidence/grpc_client_target/2026-11-07/full.Debug.final/report.json"
+    ],
+    "exit_code": 0,
+    "summary": "37/37 real-wire target vectors passed",
+    "report": "docs/evidence/grpc_client_target/2026-11-07/full.Debug.final/report.json",
+    "log": "docs/evidence/grpc_client_target/2026-11-07/full.Debug.final.log",
+    "executable_sha256": {
+      "native": "8e5d70426c74e65ba4815a5d743b9a17aed889f24b86bb2125822237b817777b",
+      "reference_python": "e50d468e8b0adfb05733f5b87b3cff34829c4a8c1aea50c865aa8bdfe4bb150f",
+      "node": "9323a20d5a7f1e4e486ec1abed1d1431e4bc61abcc10e051d587ee613fe38671"
+    },
+    "stability_input_sha256": {
+      "build.zig": "2d28ea7be6a6d3dfad8a7e71d9d29223d312909f32c50497851b7ba6c9e6618c",
+      "build.zig.zon": "e7be92a4961ae730f43e621e402855e744a18779c62b56a227e1f0ead2604fd1",
+      "src/grpc/metadata.zig": "ba74bad221644c602701da045fa5a061d8a06857ac06ce37b3f5c2d8ac545486",
+      "src/grpc/mod.zig": "76b169d8190152692b4fa0724f2cf8807d64b1de7c72d5b2c233c646973c029f",
+      "src/grpc/protobuf.zig": "7140156bfd8522253ad2b67fcfdb191f8ec0553872bfc81ef0a9ff040cf1d543",
+      "src/grpc/status_details.zig": "a85755fb712497e96b6abf963a89174930757caeeff820a7d12f5fd2ae61796f",
+      "src/grpc/wire.zig": "8854c55bac49dc536ed47e14885e9778bb41d0199a7a17fcfb1d967d375f58f7",
+      "src/grpc/xds/ads/codec.zig": "388e81d3b66d1113c99e8b50790ad01a401f041b1825e59f03b7ed66a3fd90e3",
+      "src/grpc/xds/ads.zig": "816b6a1f8fe8db089614ea8fa64a970f2cd4e0869ef647d8bba0f966bbed688e",
+      "src/grpc/xds/bootstrap.zig": "b9bbbc29022ab664f1fa5f81706f42f6db7b2bf0ce7ee404985070df7ed79cf2",
+      "src/grpc/xds/client_target.zig": "7f3d45bc0e7d34ea5a617e9411b8fccdf1c3cb46275cafbb428cb32966aa1ccc",
+      "src/grpc/xds/mod.zig": "e944cc18a6d16aadba78e3ca2237eb56f156771a9ce6f72ca0b35a42545b28cb",
+      "src/grpc/xds/resource_name.zig": "466bd8e7cefd2b207c20eddc266d670289fe06adbcdd317a15dfc11133b98b78",
+      "src/grpc/xds/uri.zig": "37804862a27050ce103fdf337f03af8ecba5ee3b9d1b4fb7545b66c76de2a2b9",
+      "src/root.zig": "00b68592a4facceeee821f83649977accaf9606e9d703eb5c0ee08b56c621390",
+      "tools/interop/grpc_client_target/README.md": "95a15ffad58571f815c061a519157c688c26a2143906f10a1ed6dd7283256d80",
+      "tools/interop/grpc_client_target/capture.py": "1d4b99c9cfe8e5cf18149c2b5abf9a0732adee033b03d97f25920368390a363f",
+      "tools/interop/grpc_client_target/emit.zig": "637ddf18eab32684c9e9cc1267e30ee85ec0a266ae985f5a2c91ebc002559b19",
+      "tools/interop/grpc_client_target/peer.js": "23321934dc17aa3a6c51212ff0d819b0a7a83021433ee3f7b34e49b4b6c6e6fe",
+      "tools/interop/grpc_client_target/reference.py": "b8f9903a10d5164d926160d8fce013f2efc61f89d967d57e2ec62dcc5c762628",
+      "tools/interop/grpc_client_target/requirements.txt": "075443bccd6f8a4aef141f403e1c90bd0688d03c9fc3e785136ecc2a157c7eb9",
+      "tools/interop/grpc_client_target/run.py": "ee1a8fd4288f88b8ed46a5acbb671830253a11bc22ed896e5f341bd4768c67a2",
+      "tools/interop/grpc_client_target/vectors.json": "132759f67e637a94c8ad408f5a42e46c23fded2ab53e750b8dc36988dd1c1a6e",
+      "tools/interop/grpc_locality/package-lock.json": "9cae21a36a38e30b732bfb139abca82bf77ea326fd9ce981f22867c7c01ccb2b",
+      "tools/interop/grpc_locality/package.json": "8db54803ab44c882d2063b5e271764ea3b4901da17c3d065d5036e6a36c7ef53"
+    }
+  }
+]

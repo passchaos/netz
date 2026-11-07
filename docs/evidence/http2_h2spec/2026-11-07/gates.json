@@ -1,0 +1,83 @@
+[
+  {
+    "transport": "h2c",
+    "command": [
+      "zig",
+      "build",
+      "interop-http2-h2spec",
+      "-Doptimize=ReleaseFast",
+      "--summary",
+      "all"
+    ],
+    "H2SPEC": "/tmp/netz-h2spec-reference-20261107/h2spec",
+    "exit_code": 0,
+    "elapsed_seconds": 153.478,
+    "log": "docs/evidence/http2_h2spec/2026-11-07/h2c.log",
+    "summaries": [
+      "147 tests, 147 passed, 0 skipped, 0 failed",
+      "h2spec strict cases passed: 147",
+      "Build Summary: 8/8 steps succeeded"
+    ]
+  },
+  {
+    "transport": "tls13",
+    "command": [
+      "zig",
+      "build",
+      "interop-http2-h2spec",
+      "-Doptimize=ReleaseFast",
+      "--summary",
+      "all",
+      "--",
+      "--tls"
+    ],
+    "H2SPEC": "/tmp/netz-h2spec-reference-20261107/h2spec",
+    "exit_code": 0,
+    "elapsed_seconds": 156.997,
+    "log": "docs/evidence/http2_h2spec/2026-11-07/tls13.log",
+    "summaries": [
+      "147 tests, 147 passed, 0 skipped, 0 failed",
+      "h2spec strict cases passed: 147",
+      "Build Summary: 8/8 steps succeeded"
+    ]
+  },
+  {
+    "transport": "tls12",
+    "command": [
+      "zig",
+      "build",
+      "interop-http2-h2spec",
+      "-Doptimize=ReleaseFast",
+      "--summary",
+      "all",
+      "--",
+      "--tls12"
+    ],
+    "H2SPEC": "/tmp/netz-h2spec-reference-20261107/h2spec",
+    "exit_code": 1,
+    "elapsed_seconds": 34.43,
+    "log": "docs/evidence/http2_h2spec/2026-11-07/tls12.log",
+    "summaries": [
+      "Build Summary: 5/8 steps succeeded (1 failed)"
+    ]
+  },
+  {
+    "transport": "tls12",
+    "command": [
+      "tools/interop/http2_h2spec.sh",
+      "/home/passchaos/project-z/netz/.zig-cache/o/c03241a856ae87bb640006dda56af949/netz-h2spec-server",
+      "--tls12"
+    ],
+    "H2SPEC": "/tmp/netz-h2spec-reference-20261107/h2spec",
+    "exit_code": 0,
+    "elapsed_seconds": 0.196,
+    "log": "docs/evidence/http2_h2spec/2026-11-07/tls12.frozen-owner.log",
+    "server_sha256": "bcd9d0720115a45d843832a34c61b3ece2ba95e9e04266bcd251062d812a6f8c",
+    "owner_sources_verified": true,
+    "summaries": [
+      "147 tests, 147 passed, 0 skipped, 0 failed",
+      "h2spec strict cases passed: 147"
+    ],
+    "note": "Reuse the successfully compiled server while unrelated gRPC source edits proceed; all recorded HTTP2 owning source hashes are unchanged."
+  }
+]

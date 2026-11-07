@@ -1,0 +1,46 @@
+test-lib
++- run test 348 pass, 1 fail (349 total)
+automatic LRS peer source-limit/sotw/source-a: expected transport close error=ConnectionClosed phase=shutdown initial=1 reports=7 events=8 last=messages closing=true counts=.{ .issued = 2, .successful = 1, .failed = 1, .dropped = 1 }
+automatic LRS peer source-limit/sotw/source-b: failed error=Canceled phase=accepting initial=0 reports=0 events=0 last=none closing=false counts=.{ .issued = 0, .successful = 0, .failed = 0, .dropped = 0 }
+automatic LRS peer source-limit/delta/source-a: expected transport close error=ConnectionClosed phase=shutdown initial=1 reports=7 events=8 last=messages closing=true counts=.{ .issued = 2, .successful = 1, .failed = 1, .dropped = 1 }
+automatic LRS peer source-limit/delta/source-b: failed error=Canceled phase=accepting initial=0 reports=0 events=0 last=none closing=false counts=.{ .issued = 0, .successful = 0, .failed = 0, .dropped = 0 }
+federated native mode=sotw phase=initial step=0 authority=A url=type.googleapis.com/envoy.config.listener.v3.Listener nonce=l1
+federated native mode=sotw phase=initial step=1 authority=B url=type.googleapis.com/envoy.config.route.v3.RouteConfiguration nonce=r1
+federated native mode=sotw phase=initial step=2 authority=B url=type.googleapis.com/envoy.config.cluster.v3.Cluster nonce=cb1
+federated native mode=sotw phase=initial step=3 authority=A url=type.googleapis.com/envoy.config.cluster.v3.Cluster nonce=ca1
+federated native mode=sotw phase=initial step=4 authority=B url=type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment nonce=eb1
+federated native mode=sotw phase=initial step=5 authority=A url=type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment nonce=ea1
+federated native mode=sotw phase=remove-a step=0 authority=A url=type.googleapis.com/envoy.config.cluster.v3.Cluster nonce=ca-empty
+federated native mode=sotw phase=replacement step=0 authority=B url=type.googleapis.com/envoy.config.route.v3.RouteConfiguration nonce=r2
+federated native mode=sotw phase=replacement step=1 authority=B url=type.googleapis.com/envoy.config.cluster.v3.Cluster nonce=cb2
+federated native mode=sotw phase=finish-b2 step=0 authority=B url=type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment nonce=eb2
+federated native mode=delta phase=initial step=0 authority=A url=type.googleapis.com/envoy.config.listener.v3.Listener nonce=l1
+federated native mode=delta phase=initial step=1 authority=B url=type.googleapis.com/envoy.config.route.v3.RouteConfiguration nonce=r1
+federated native mode=delta phase=initial step=2 authority=B url=type.googleapis.com/envoy.config.cluster.v3.Cluster nonce=cb1
+federated native mode=delta phase=initial step=3 authority=A url=type.googleapis.com/envoy.config.cluster.v3.Cluster nonce=ca1
+federated native mode=delta phase=initial step=4 authority=B url=type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment nonce=eb1
+federated native mode=delta phase=initial step=5 authority=A url=type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment nonce=ea1
+federated native mode=delta phase=remove-a step=0 authority=A url=type.googleapis.com/envoy.config.cluster.v3.Cluster nonce=ca-empty
+federated native mode=delta phase=replacement step=0 authority=B url=type.googleapis.com/envoy.config.route.v3.RouteConfiguration nonce=r2
+federated native mode=delta phase=replacement step=1 authority=B url=type.googleapis.com/envoy.config.cluster.v3.Cluster nonce=cb2
+federated native mode=delta phase=finish-b2 step=0 authority=B url=type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment nonce=eb2
+error: 'grpc.xds.runtime.lrs_automatic_tests.test.gRPC automatic LRS preserves accepted CDS provenance through rebind NACK and OOM' failed:
+       automatic LRS peer late/sotw/automatic: expected transport close error=ConnectionClosed phase=shutdown initial=1 reports=2 events=3 last=messages closing=true counts=.{ .issued = 2, .successful = 1, .failed = 1, .dropped = 1 }
+       automatic LRS peer initial/delta/automatic: expected transport close error=ConnectionClosed phase=shutdown initial=1 reports=2 events=3 last=messages closing=true counts=.{ .issued = 2, .successful = 1, .failed = 1, .dropped = 1 }
+       automatic LRS peer late/delta/automatic: expected transport close error=ConnectionClosed phase=shutdown initial=1 reports=2 events=3 last=messages closing=true counts=.{ .issued = 2, .successful = 1, .failed = 1, .dropped = 1 }
+failed command: ./.zig-cache/o/0a9175d4c2d02751ca157488840f7db2/test --cache-dir=./.zig-cache --seed=0x9eeab8fe --listen=-
+
+Build Summary: 6/8 steps succeeded (1 failed); 348/349 tests passed (1 failed)
+test-lib transitive failure
++- run test 348 pass, 1 fail (349 total)
+   +- compile test ReleaseSafe native success 4m MaxRSS:6G
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal ReleaseSafe native cached 7ms MaxRSS:37M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 ReleaseSafe native cached 7ms MaxRSS:37M
+      +- compile obj vort-br-record-optimal ReleaseSafe native (reused)
+      +- compile obj vort-zstd-huffman-x2 ReleaseSafe native (reused)
+      +- options cached
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/63a4f13a38ebb3037e00652cc87f88eb/build /home/passchaos/Temp/zig-x86_64-linux-0.16.0/zig /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib /home/passchaos/project-z/netz .zig-cache /home/passchaos/.cache/zig --seed 0x9eeab8fe -Zaeb1f229a1eed5a6 test-lib -Doptimize=ReleaseSafe -Dtest-filter=federated -Dtest-filter=authority -Dtest-filter=bootstrap -Dtest-filter=control plane -Dtest-filter=discovery source -Dtest-filter=LRS -Dtest-filter=stream interruption returns -Dtest-filter=resumable read cancellation -Dtest-filter=client target -Dtest-filter=gRPC xDS URI --summary all

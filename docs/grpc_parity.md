@@ -3478,10 +3478,12 @@ four types, refresh timers from payload-free heartbeats, publish the removal and
 forget the accepted version so a reconnect does not advertise a stale payload.
 The [bootstrap parser and control-plane helper](grpc_bootstrap.md) parse
 `xds_servers`, node metadata, authorities and server features, and fail over
-across `http://` and TLS `https://` servers while replaying `initial_resource_versions`
+across credential-backed DNS/IP targets while replaying `initial_resource_versions`
 on the same delta client. Bootstrap `refresh_interval` drives a caller-checked
-TLS reload schedule; certificate providers and
-authority-specific control planes remain open.
+TLS reload schedule with file-watcher provider support.
+[Managed federation](grpc_federation.md) owns authority sessions and routes
+dependency watches into one transactional publisher; its URI factory consumes
+the bootstrap listener templates through [client targets](grpc_client_target.md).
 
 
 ## Typed EDS to reference-owned channel targets

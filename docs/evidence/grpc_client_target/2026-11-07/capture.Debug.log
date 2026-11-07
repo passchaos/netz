@@ -1,0 +1,12 @@
+PASSED default-bare: echoed
+PASSED authority-colon-at: authority-rejected-after-lds
+PASSED explicit-default-authority: authority-rejected-after-lds
+PASSED unknown-authority: invalid-target-rejected
+PASSED invalid-query: invalid-target-rejected
+{
+  "status": "passed",
+  "passed": 5,
+  "total": 5,
+  "report": "/home/passchaos/project-z/netz/docs/evidence/grpc_client_target/2026-11-07/capture.Debug/report.json",
+  "failures": []
+}

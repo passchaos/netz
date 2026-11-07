@@ -103,7 +103,7 @@ test "gRPC shared stream operation admission obeys deadline and cancellation" {
     }
 }
 
-fn exerciseInterrupted(operation: Operation) !void {
+fn exerciseInterrupted(operation: Operation, preserve_read: bool) !void {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .unlimited });
     defer threaded.deinit();
     const base = threaded.io();
@@ -118,6 +118,8 @@ fn exerciseInterrupted(operation: Operation) !void {
     const references = state.refs.load(.acquire);
     const call = try State.StreamCall.create(state, .{ .path = "/svc/Bidi" }, null);
     call.retain();
+    var call_retired = false;
+    defer if (!call_retired) retire(state, call);
     const wake = try Wake.create(std.testing.allocator);
     call.setOwnerWake(wake);
     wake.release();
@@ -127,6 +129,7 @@ fn exerciseInterrupted(operation: Operation) !void {
         mutex: *std.Io.Mutex,
         retired: *std.Io.Event,
         entered: bool = false,
+        mutex_held: bool = false,
         unbounded_waits: usize = 0,
         var active: ?*@This() = null;
         fn wait(_: ?*anyopaque, _: *const u32, _: u32, _: std.Io.Timeout) std.Io.Cancelable!void {
@@ -134,6 +137,7 @@ fn exerciseInterrupted(operation: Operation) !void {
             if (!self.entered) {
                 self.mutex.lockUncancelable(self.base);
                 self.entered = true;
+                self.mutex_held = true;
             }
             return error.Canceled;
         }
@@ -144,6 +148,7 @@ fn exerciseInterrupted(operation: Operation) !void {
             const retired: *const u32 = @ptrCast(self.retired);
             if (pointer == mutex) {
                 self.mutex.state.store(.unlocked, .release);
+                self.mutex_held = false;
             } else if (pointer == retired) {
                 self.retired.set(self.base);
             } else self.base.vtable.futexWaitUncancelable(userdata, pointer, expected);
@@ -155,6 +160,14 @@ fn exerciseInterrupted(operation: Operation) !void {
     table.futexWaitUncancelable = Probe.waitUncancelable;
     Probe.active = &probe;
     state.io = .{ .userdata = base.userdata, .vtable = &table };
+    defer {
+        state.io = base;
+        Probe.active = null;
+        if (probe.mutex_held) {
+            state.mutex.unlock(base);
+            probe.mutex_held = false;
+        }
+    }
 
     switch (operation) {
         .write => {
@@ -170,27 +183,72 @@ fn exerciseInterrupted(operation: Operation) !void {
             );
         },
         .read => {
-            const reader = stream.Reader{ .call = call };
+            const reader = stream.Reader{ .call = call, .cancel_call_on_interrupt = !preserve_read };
             try std.testing.expectError(error.Canceled, reader.next());
             try std.testing.expect(probe.entered);
             try std.testing.expect(!call.read_busy.load(.acquire));
         },
     }
-    try std.testing.expectEqual(@as(?anyerror, error.Canceled), call.failureValue());
-    try std.testing.expect(call.cancel_requested.load(.acquire));
-    try std.testing.expect(wake.event.isSet());
+    if (operation == .read and preserve_read) {
+        try std.testing.expectEqual(@as(?anyerror, null), call.failureValue());
+        try std.testing.expect(!call.cancel_requested.load(.acquire));
+        try std.testing.expect(!wake.event.isSet());
+    } else {
+        try std.testing.expectEqual(@as(?anyerror, error.Canceled), call.failureValue());
+        try std.testing.expect(call.cancel_requested.load(.acquire));
+        try std.testing.expect(wake.event.isSet());
+    }
     try std.testing.expectEqual(@as(usize, 0), probe.unbounded_waits);
-    try std.testing.expect(!state.mutex.tryLock());
+    const unexpected_admission = state.mutex.tryLock();
+    if (unexpected_admission) {
+        state.mutex.unlock(base);
+        probe.mutex_held = false;
+    }
+    try std.testing.expect(!unexpected_admission);
+    try std.testing.expect(!call.retired and !call.retired_event.isSet());
 
     state.io = base;
     Probe.active = null;
     state.mutex.unlock(base);
+    probe.mutex_held = false;
+    if (operation == .read and preserve_read) {
+        // A later authority update must still be consumable after a losing
+        // local read is canceled, without a new RPC or decoder reset.
+        call.decoder = try @import("../../../../stream/codec.zig").Decoder.init(state.allocator, call.options.responseMessageLimit(), null, call.options.accepted_encodings);
+        const wire = [_]u8{ 0, 0, 0, 0, 4, 'k', 'e', 'p', 't' };
+        try call.reserveReceiveBuffer(wire.len);
+        {
+            state.lock();
+            defer state.unlock();
+            try call.appendLocked(&wire);
+        }
+        const reader = stream.Reader{ .call = call, .cancel_call_on_interrupt = false };
+        var message = blk: {
+            var resumed = reader.clone();
+            defer resumed.deinit();
+            try std.testing.expect(!resumed.cancel_call_on_interrupt);
+            break :blk try resumed.nextWithTimeout(.fromMilliseconds(10));
+        };
+        defer message.deinit(state.allocator);
+        try std.testing.expect(message == .message);
+        try std.testing.expectEqualStrings("kept", message.message.payload);
+        try std.testing.expectEqual(@as(usize, 0), call.len);
+        try std.testing.expect(!call.read_busy.load(.acquire));
+        try std.testing.expectEqual(@as(?anyerror, null), call.failureValue());
+        try std.testing.expect(!call.cancel_requested.load(.acquire));
+        try std.testing.expect(!call.retired and !call.retired_event.isSet());
+    }
     retire(state, call);
+    call_retired = true;
     try std.testing.expectEqual(references, state.refs.load(.acquire));
 }
 
 test "gRPC shared stream interruption returns before operation retirement" {
-    for ([_]Operation{ .read, .write }) |operation| try exerciseInterrupted(operation);
+    for ([_]Operation{ .read, .write }) |operation| try exerciseInterrupted(operation, false);
+}
+
+test "gRPC shared stream resumable read cancellation preserves buffered message delivery" {
+    try exerciseInterrupted(.read, true);
 }
 
 test "gRPC shared write command allocation failures release partial ownership" {

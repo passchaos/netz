@@ -1,0 +1,51 @@
+test-lib
++- run test
+   +- compile test Debug native 3 errors
+src/grpc/xds/runtime/federated_scope_tests.zig:363:62: error: incompatible types: '*anyopaque' and '*grpc.xds.lds.projection.Projection'
+    try std.testing.expect(published.call_selector.?.context == served);
+                           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~
+src/grpc/xds/runtime/federated_scope_tests.zig:363:53: note: type '*anyopaque' here
+    try std.testing.expect(published.call_selector.?.context == served);
+                           ~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~
+src/grpc/xds/runtime/federated_scope_tests.zig:363:65: note: type '*grpc.xds.lds.projection.Projection' here
+    try std.testing.expect(published.call_selector.?.context == served);
+                                                                ^~~~~~
+referenced by:
+    test.gRPC xDS federated pending route handoff cannot retain expired SDS certificate: src/grpc/xds/runtime/federated_scope_tests.zig:522:30
+    test_0: src/grpc/xds/runtime.zig:24:17
+    6 reference(s) hidden; use '-freference-trace=8' to see all references
+src/grpc/xds/runtime/federated_scope_tests.zig:363:62: error: incompatible types: '*anyopaque' and '*grpc.xds.lds.projection.Projection'
+    try std.testing.expect(published.call_selector.?.context == served);
+                           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~
+src/grpc/xds/runtime/federated_scope_tests.zig:363:53: note: type '*anyopaque' here
+    try std.testing.expect(published.call_selector.?.context == served);
+                           ~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~
+src/grpc/xds/runtime/federated_scope_tests.zig:363:65: note: type '*grpc.xds.lds.projection.Projection' here
+    try std.testing.expect(published.call_selector.?.context == served);
+                                                                ^~~~~~
+src/grpc/xds/runtime/federated_scope_tests.zig:363:62: error: incompatible types: '*anyopaque' and '*grpc.xds.lds.projection.Projection'
+    try std.testing.expect(published.call_selector.?.context == served);
+                           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~
+src/grpc/xds/runtime/federated_scope_tests.zig:363:53: note: type '*anyopaque' here
+    try std.testing.expect(published.call_selector.?.context == served);
+                           ~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~
+src/grpc/xds/runtime/federated_scope_tests.zig:363:65: note: type '*grpc.xds.lds.projection.Projection' here
+    try std.testing.expect(published.call_selector.?.context == served);
+                                                                ^~~~~~
+error: 3 compilation errors
+failed command: /home/passchaos/Temp/zig-x86_64-linux-0.16.0/zig test -ODebug --dep vail --dep vort --dep zio -Mroot=/home/passchaos/project-z/netz/src/root.zig -ODebug --dep vort -Mvail=/home/passchaos/project-z/vail/src/root.zig .zig-cache/o/798ab5fd0dc947cfee9492e0ae0a0919/vort-br-record-optimal.o .zig-cache/o/15472fc6b58bf5d00adbc935a8e059f8/vort-zstd-huffman-x2.o -ODebug -I .zig-cache/o/2fb5824d4233e9fe32370ab196a5b16d -I .zig-cache/o/2fb5824d4233e9fe32370ab196a5b16d --dep vail_archive_crypto -Mvort=/home/passchaos/project-z/vort/src/root.zig -ODebug --dep zio_build_options -Mzio=/home/passchaos/project-z/netz/zig-pkg/zio-0.19.1-xHbVVHZNLABUkjHyJHQiljEahUaadEy3x1_4vyCvFxjw/src/zio.zig -ODebug -Mvail_archive_crypto=/home/passchaos/project-z/vail/archive_crypto/src/root.zig -Mzio_build_options=.zig-cache/c/320401b06d5c6c293b0e48afbc96afbe/options.zig -lc --test-filter federated --test-filter authority --test-filter bootstrap --test-filter "control plane" --test-filter "discovery source" --test-filter LRS --cache-dir .zig-cache --global-cache-dir /home/passchaos/.cache/zig --name test --zig-lib-dir /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/ --listen=-
+
+Build Summary: 5/8 steps succeeded (1 failed)
+test-lib transitive failure
++- run test transitive failure
+   +- compile test Debug native 3 errors
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 6ms MaxRSS:37M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 5ms MaxRSS:37M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options cached
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/63a4f13a38ebb3037e00652cc87f88eb/build /home/passchaos/Temp/zig-x86_64-linux-0.16.0/zig /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib /home/passchaos/project-z/netz .zig-cache /home/passchaos/.cache/zig --seed 0xc169e31e -Za8d043005b82b02d test-lib -Dtest-filter=federated -Dtest-filter=authority -Dtest-filter=bootstrap -Dtest-filter=control plane -Dtest-filter=discovery source -Dtest-filter=LRS --summary all

@@ -131,9 +131,11 @@ deterministic tests.
 resource names for one or more authorities served by the controller's control
 plane. The listener, route, cluster, endpoint-assignment and secret names are
 parsed and must match one of the configured authorities and their expected
-resource type. Old-style names remain valid. Authorities routed to different
-xDS servers still need separate controllers; routing several authorities from
-one controller over distinct ADS streams remains open.
+resource type. Old-style names remain valid. The
+[managed federation facade](grpc_federation.md) additionally owns distinct
+authority sessions and routes their dependency subscriptions into one
+transactional Controller. Its URI factory derives the listener template and
+data authority from bootstrap configuration.
 
 `zig build interop-grpc-xds-runtime --summary all` starts with an empty
 application data plane and receives official LDS → RDS → CDS → EDS resources
@@ -159,13 +161,13 @@ publication. `nextDeltaExpiry` and `expireDeltaWithDeadline` enforce
 and forget expired accepted versions. Delta SDS resources use the same TTL
 driver, including payload-free heartbeat refreshes. The
 [bootstrap parser and control-plane failover](grpc_bootstrap.md)
-select `http://` servers, retry refused servers and rebind the same delta client
+select credential-backed DNS/IP servers, retry refused servers and rebind the same delta client
 with `initial_resource_versions` replay. Bootstrap `refresh_interval` exposes a
-TLS reload schedule checked by `reloadIfDue`; certificate providers and
-authority-specific control planes, other custom CDS extensions (STATIC, DNS and
-`envoy.clusters.aggregate` clusters are supported), full security (inline
-upstream TLS and SDS-provided certificate/validation material are supported),
-non-router filters and capture/rewriting remain open.
+TLS reload schedule checked by `reloadIfDue`. File-watcher certificate providers,
+authority sessions and source-pinned LRS are integrated. Supported CDS forms
+include EDS, STATIC, DNS and `envoy.clusters.aggregate`; inline upstream TLS
+and SDS material feed the data plane. Fault/RBAC filters and route rewriting
+are described in their dedicated client LDS/RDS modules.
 Aggregate clusters subscribe to their ordered leaf clusters and publish an
 ordered `priority_experimental` child policy over the live leaf policies. The
 aggregate name remains a manager selection key rather than an endpoint path

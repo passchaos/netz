@@ -1,0 +1,25 @@
+AssertionError [ERR_ASSERTION]: FEDERATION_EVENT {"authority":"A","type_url":"type.googleapis.com/envoy.config.listener.v3.Listener","nonce":"l-a1","rejected":false,"revision":3}
+FEDERATION_EVENT {"authority":"B","type_url":"type.googleapis.com/envoy.config.route.v3.RouteConfiguration","nonce":"r-b1","rejected":false,"revision":4}
+FEDERATION_EVENT {"authority":"B","type_url":"type.googleapis.com/envoy.config.cluster.v3.Cluster","nonce":"c-b1","rejected":false,"revision":5}
+FEDERATION_EVENT {"authority":"A","type_url":"type.googleapis.com/envoy.config.cluster.v3.Cluster","nonce":"c-a1","rejected":false,"revision":6}
+FEDERATION_EVENT {"authority":"B","type_url":"type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment","nonce":"e-b1","rejected":false,"revision":7}
+FEDERATION_EVENT {"authority":"A","type_url":"type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment","nonce":"e-a1","rejected":false,"revision":8}
+FEDERATION_EVENT {"authority":"B","type_url":"type.googleapis.com/envoy.config.cluster.v3.Cluster","nonce":"c-b-omit","rejected":false,"revision":8}
+FEDERATION_EVENT {"authority":"A","type_url":"type.googleapis.com/envoy.config.cluster.v3.Cluster","nonce":"c-a-omit","rejected":false,"revision":9}
+FEDERATION_EVENT {"authority":"A","type_url":"type.googleapis.com/envoy.config.cluster.v3.Cluster","nonce":"c-a2","rejected":false,"revision":10}
+FEDERATION_EVENT {"authority":"A","type_url":"type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment","nonce":"e-a2","rejected":false,"revision":11}
+FEDERATION_EVENT {"authority":"A","type_url":"type.googleapis.com/envoy.config.cluster.v3.Cluster","nonce":"c-a-bad","rejected":true,"revision":11}
+FEDERATION_EVENT {"authority":"B","type_url":"type.googleapis.com/envoy.config.route.v3.RouteConfiguration","nonce":"r-b2","rejected":false,"revision":12}
+expected 11, found 12
+error: TestExpectedEqual
+/home/passchaos/project-z/netz/tools/interop/grpc_federation/client.zig:127:5: 0x139099c in run__anon_38755 (client.zig)
+    try std.testing.expectEqual(retained_revision, data.configurationRevision());
+    ^
+/home/passchaos/project-z/netz/tools/interop/grpc_federation/client.zig:165:127: 0x1396123 in main (client.zig)
+    if (std.mem.eql(u8, args[4], "sotw")) try run(.sotw, io, configuration, a, b) else if (std.mem.eql(u8, args[4], "delta")) try run(.delta, io, configuration, a, b) else return error.InvalidArguments;
+                                                                                                                              ^
+
+
+1 !== 0
+
+    at main (/home/passchaos/project-z/netz/tools/interop/grpc_federation/peer.js:278:12)

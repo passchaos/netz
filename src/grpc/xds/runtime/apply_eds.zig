@@ -20,10 +20,15 @@ pub fn apply(self: *ctl.Controller, client: *ads.Client, update: ads.Update, des
         var resource = eds.decode(self.allocator, raw.value, self.options.limits.eds) catch |err| {
             if (!self.options.fail_on_data_errors) return err;
             const name = raw_name.first(raw.value, 1) orelse return err;
+            if (!self.inResponseScope(name)) continue;
             try invalid.append(self.allocator, name);
             if (first_error == null) first_error = err;
             continue;
         };
+        if (!self.inResponseScope(resource.value.cluster_name)) {
+            resource.deinit();
+            continue;
+        }
         errdefer resource.deinit();
         storage = std.math.add(usize, storage, resource.arena.queryCapacity()) catch return error.XdsLimitExceeded;
         if (storage > self.options.limits.max_storage_bytes) return error.XdsLimitExceeded;
@@ -44,6 +49,7 @@ pub fn apply(self: *ctl.Controller, client: *ads.Client, update: ads.Update, des
     for (plan.entries.items) |*item| {
         const cluster = item.cluster orelse continue;
         const cluster_name = cluster.resource.value.edsName();
+        if (!self.inResponseScope(cluster_name)) continue;
         var dropped = false;
         for (invalid.items) |name| {
             if (std.mem.eql(u8, name, cluster_name)) {
@@ -69,7 +75,12 @@ pub fn apply(self: *ctl.Controller, client: *ads.Client, update: ads.Update, des
         // Endpoints cannot be published before the cluster's SDS material is
         // resolved. Retain the payload so it can be projected on resolution.
         if (cluster.sdsPending()) {
-            try cluster.setPendingEds(selected);
+            const staged = try @import("apply_sds.zig").cloneCluster(self, cluster);
+            errdefer staged.release();
+            try self.resolveClusterTls(staged);
+            try staged.setPendingEds(selected);
+            cluster.release();
+            item.cluster = staged;
             item.eds_seen = false;
             continue;
         }
@@ -88,7 +99,11 @@ pub fn apply(self: *ctl.Controller, client: *ads.Client, update: ads.Update, des
     }
     if (!changed) {
         if (first_error) |err| return err;
-        return try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
+        const revision = try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
+        const old = self.entries;
+        self.entries = plan.entries;
+        plan.entries = old;
+        return revision;
     }
     _ = try self.publish(client, &plan, self.latest.?, false, destination, deadline);
     if (first_error) |err| return err;

@@ -14,6 +14,7 @@ const sds = @import("../sds.zig");
 const entries = @import("entry.zig");
 const Plan = @import("plan.zig").Plan;
 const Target = @import("target.zig").Target;
+const discovery = @import("discovery.zig");
 pub const Options = @import("options.zig").Options;
 pub const Error = @import("errors.zig").PublishError || lds.Error || cds.Error || eds.Error || tls_material.Error || lrs.RunnerError || sds.Error || @import("../csds.zig").Error || error{ InvalidXdsOptions, XdsNotStarted, DuplicateSdsResource, InvalidXdsResourceName };
 pub const CachedSecret = struct {
@@ -53,6 +54,14 @@ pub const Controller = struct {
     local_captured: bool = false,
     lrs_runner: ?*lrs.Runner = null,
     lrs_bindings: @import("lrs_bindings.zig").Bindings = .{},
+    discovery_router: ?discovery.Router = null,
+    /// Null retains raw-client global semantics; empty scopes old-style names.
+    response_authority: ?[]const u8 = null,
+    retain_valid_routes: bool = false,
+    served_projection: ?*@import("../lds/projection.zig").Projection = null,
+    served_entries: std.ArrayList(entries.Entry) = .empty,
+    published_entries: std.ArrayList(@import("serving.zig").PublishedEntry) = .empty,
+    upstream_router: ?discovery.Router = null,
     /// Accepted xdstp authorities; empty accepts only old-style names.
     authorities: []const []const u8 = &.{},
     /// SotW/delta SDS cache keyed by secret name. Secrets are copied into each
@@ -100,8 +109,26 @@ pub const Controller = struct {
             self.local_captured = true;
         }
         self.listener = try lds.Controller.init(gpa, .{ .listener_name = options.listener_name, .authority = self.options.target.authority, .max_header_bytes = options.max_header_bytes, .limits = options.limits.lds, .ignore_resource_deletion = options.ignore_resource_deletion, .fail_on_data_errors = options.fail_on_data_errors, .trusted_xds_server = options.trusted_xds_server, .publisher = .{ .context = self, .publish_fn = publishHook }, .delta_publisher = .{ .context = self, .publish_fn = publishDeltaHook } });
+        self.options.listener_name = self.listener.?.options.listener_name;
+        const offset: usize = if (options.authority != null) 1 else 0;
+        self.options.authority = if (offset != 0) self.authorities[0] else null;
+        self.options.additional_authorities = self.authorities[offset..];
+        self.options.local_service_config_json = if (options.local_service_config_json != null) self.local_json else null;
         return self;
     }
+
+    pub fn inResponseScope(self: *const Controller, name: []const u8) bool {
+        const authority = self.response_authority orelse return true;
+        const parsed = @import("../resource_name.zig").parse(name) catch return false;
+        return if (parsed.authority) |encoded| @import("../resource_name.zig").authorityMatches(encoded, authority) else authority.len == 0;
+    }
+
+    pub fn setDiscoveryRouter(self: *Controller, router: discovery.Router) void {
+        self.upstream_router = router;
+        self.discovery_router = .{ .context = self, .prepare_fn = @import("serving.zig").subscriptions };
+        self.listener.?.options.discovery_router = self.discovery_router;
+    }
+
     /// Apply the current bootstrap server's feature set to this live
     /// controller. Call it after creation and after a failover that selects a
     /// server with different `server_features`; the listener policy is updated
@@ -117,6 +144,11 @@ pub const Controller = struct {
     pub fn deinit(self: *Controller) void {
         if (self.lrs_runner) |runner| runner.deinit();
         self.lrs_bindings.deinit(self.allocator);
+        if (self.served_projection) |projection| projection.release();
+        for (self.served_entries.items) |*item| item.deinit();
+        self.served_entries.deinit(self.allocator);
+        for (self.published_entries.items) |*item| item.deinit();
+        self.published_entries.deinit(self.allocator);
         var secrets = self.sds_secrets.iterator();
         while (secrets.next()) |item| {
             item.value_ptr.*.owned.deinit();
@@ -288,7 +320,9 @@ pub const Controller = struct {
             if (self.projections.items.len >= self.options.limits.max_projections) return error.XdsLimitExceeded;
             try self.projections.ensureUnusedCapacity(self.allocator, 1);
         }
-        const target = try Target.createWithReporting(self.allocator, destination.state.io, plan.entries.items, self.local_json, self.options.lrs == null);
+        var view = try @import("serving.zig").View.prepare(self, plan, projection);
+        defer view.deinit();
+        const target = try Target.createWithReporting(self.allocator, destination.state.io, view.targetEntries(plan), self.local_json, self.options.lrs == null);
         defer target.release();
         const automatic = self.options.lrs == null and !self.options.disable_automatic_lrs;
         var bindings = if (automatic)
@@ -298,13 +332,17 @@ pub const Controller = struct {
         defer bindings.deinit();
         var storage = std.math.add(usize, plan.route_storage, target.arena.queryCapacity()) catch return error.XdsLimitExceeded;
         storage = std.math.add(usize, storage, bindings.storageBytes()) catch return error.XdsLimitExceeded;
+        storage = std.math.add(usize, storage, try view.storageBytes(self)) catch return error.XdsLimitExceeded;
         if (target.lrs_selection) |selection| storage = std.math.add(usize, storage, selection.arena.queryCapacity()) catch return error.XdsLimitExceeded;
         for (plan.entries.items) |entry| {
             if (entry.cluster) |cluster| storage = std.math.add(usize, storage, cluster.resource.arena.queryCapacity()) catch return error.XdsLimitExceeded;
             if (entry.snapshot) |snapshot| storage = std.math.add(usize, storage, snapshot.resource.arena.queryCapacity()) catch return error.XdsLimitExceeded;
         }
         if (storage > self.options.limits.max_storage_bytes) return error.XdsLimitExceeded;
-        const revision = try target.publish(destination, projection.descriptor(), deadline, automatic and bindings.has_sources);
+        const revision = if (view.unchanged(self))
+            try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline)
+        else
+            try target.publish(destination, view.projection.descriptor(), deadline, automatic and bindings.has_sources);
         bindings.commit();
         // Clusters that leave the inventory must not keep a stale ORCA
         // propagation selection; new/kept selections were applied above.
@@ -321,6 +359,7 @@ pub const Controller = struct {
         const old = self.entries;
         self.entries = plan.entries;
         plan.entries = old;
+        view.commit(self, projection);
         if (new_projection) {
             projection.retain();
             self.projections.appendAssumeCapacity(projection);
@@ -348,6 +387,17 @@ pub const Controller = struct {
             if (names[0]) |value| self.allocator.free(value);
             if (names[1]) |value| self.allocator.free(value);
             if (names[2]) |value| self.allocator.free(value);
+        }
+        if (self.discovery_router) |router| {
+            var subscriptions = try router.prepare(&.{
+                .{ .type_url = cds.type_url, .names = names[0] orelse &.{} },
+                .{ .type_url = eds.type_url, .names = names[1] orelse &.{} },
+                .{ .type_url = sds.type_url, .names = names[2] orelse &.{} },
+            }, deadline);
+            defer subscriptions.deinit();
+            const revision = try self.publishPlan(plan, projection, new_projection, destination, deadline);
+            subscriptions.commit();
+            return revision;
         }
         var requested: [3]ads.subscriptions.Subscription = undefined;
         var count: usize = 0;
@@ -381,6 +431,17 @@ pub const Controller = struct {
             if (names[0]) |value| self.allocator.free(value);
             if (names[1]) |value| self.allocator.free(value);
             if (names[2]) |value| self.allocator.free(value);
+        }
+        if (self.discovery_router) |router| {
+            var subscriptions = try router.prepare(&.{
+                .{ .type_url = cds.type_url, .names = names[0] orelse &.{} },
+                .{ .type_url = eds.type_url, .names = names[1] orelse &.{} },
+                .{ .type_url = sds.type_url, .names = names[2] orelse &.{} },
+            }, deadline);
+            defer subscriptions.deinit();
+            const revision = try self.publishPlan(plan, projection, new_projection, destination, deadline);
+            subscriptions.commit();
+            return revision;
         }
         var requested: [3]delta.subscriptions.Subscription = undefined;
         var count: usize = 0;
@@ -434,7 +495,7 @@ pub const Controller = struct {
             };
             self.local_captured = true;
         }
-        var subscription = try client.subscriptions.prepare(lds.type_url, &.{self.listener.?.options.listener_name});
+        var subscription = try discovery.prepare(client, self.discovery_router, lds.type_url, &.{self.listener.?.options.listener_name}, deadline);
         defer subscription.deinit();
         const empty = try self.listener.?.empty("_");
         defer empty.release();
@@ -492,7 +553,7 @@ pub const Controller = struct {
             };
             self.local_captured = true;
         }
-        var subscription = try client.subscriptions.prepare(lds.type_url, &.{self.listener.?.options.listener_name});
+        var subscription = try discovery.prepare(client, self.discovery_router, lds.type_url, &.{self.listener.?.options.listener_name}, deadline);
         defer subscription.deinit();
         const empty = try self.listener.?.empty("_");
         defer empty.release();
@@ -571,6 +632,8 @@ pub const Controller = struct {
         if (std.mem.eql(u8, type_url, rds.type_url)) {
             const listener = self.listener orelse return false;
             if (!listener.routes_accepted) return false;
+            const owned = listener.listener orelse return false;
+            if (owned.value.hcm.route_source != .rds) return false;
             const routes = listener.routes orelse return false;
             return std.mem.eql(u8, routes.resource.value.name, name);
         }
@@ -758,7 +821,9 @@ pub const Controller = struct {
                     .status = self.csdsResourceStatus(lds.type_url, owned.value.name),
                 });
             }
-            if (listener.routes_accepted) {
+            // Inline routes belong to the accepted LDS payload, without an
+            // independent RDS watch, version or acceptance timestamp.
+            if (listener.routes_accepted and listener.listener != null and listener.listener.?.value.hcm.route_source == .rds) {
                 if (listener.routes) |routes| {
                     try self.appendResource(allocator, &resources, client, .{
                         .type_url = rds.type_url,
@@ -890,100 +955,9 @@ pub const Controller = struct {
         _ = try client.flushWithDeadline(deadline);
         return revision;
     }
-    /// Remove cached secrets whose delta TTL has expired and forget their
-    /// accepted versions. Returns true when at least one secret expired.
-    fn expireSecrets(
-        self: *Controller,
-        now: std.Io.Clock.Timestamp,
-        client: *delta.Client,
-    ) Error!bool {
-        var names: std.ArrayList([]const u8) = .empty;
-        defer names.deinit(self.allocator);
-        var iterator = self.sds_secrets.iterator();
-        while (iterator.next()) |item| {
-            if (item.value_ptr.*.deadline) |value| {
-                if (value.raw.nanoseconds <= now.raw.nanoseconds) {
-                    try names.append(self.allocator, item.key_ptr.*);
-                }
-            }
-        }
-        if (names.items.len == 0) return false;
-        for (names.items) |name| {
-            if (client.subscriptions.find(sds.type_url) != null) {
-                try client.subscriptions.forget(sds.type_url, name);
-            }
-            const removed = self.sds_secrets.fetchRemove(name).?;
-            removed.value.owned.deinit();
-            self.allocator.destroy(removed.value);
-        }
-        return true;
-    }
-    /// Expire due TTL resources, republish their removal, and forget their
-    /// accepted versions. The caller drives this between delta updates.
+    /// Withdraw only this supplying authority's due resources after staging.
     pub fn expireDeltaWithDeadline(self: *Controller, client: *delta.Client, destination: shared.SharedChannel, deadline: std.Io.Clock.Timestamp) Error!u64 {
-        if (self.latest == null) return error.XdsNotStarted;
-        _ = try @import("../../../internal/deadline.zig").usableAwake(client.sender.state.io, deadline);
-        const now = std.Io.Clock.Timestamp.now(client.sender.state.io, .awake);
-        var revision = try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
-        if (self.listener) |*listener| {
-            const listener_expired = if (listener.listener_deadline) |value| value.raw.nanoseconds <= now.raw.nanoseconds else false;
-            if (listener_expired) {
-                revision = try listener.expireListenerWithDeadline(client, destination, deadline);
-            } else if (listener.routes_deadline) |value| {
-                if (value.raw.nanoseconds <= now.raw.nanoseconds) {
-                    revision = try listener.expireRoutesWithDeadline(client, destination, deadline);
-                }
-            }
-        }
-        var plan = try Plan.create(self, null);
-        defer plan.deinit();
-        var changed = false;
-        for (plan.entries.items) |*item| {
-            if (item.cds_deadline) |value| {
-                if (value.raw.nanoseconds <= now.raw.nanoseconds) {
-                    if (item.cluster == null) {
-                        item.cds_deadline = null;
-                    } else {
-                        if (client.subscriptions.find(cds.type_url) != null) try client.subscriptions.forget(cds.type_url, item.identity.name);
-                        if (item.cluster) |old| old.release();
-                        if (item.snapshot) |old| old.release();
-                        item.cluster = null;
-                        item.snapshot = null;
-                        item.cds_seen = true;
-                        item.eds_seen = false;
-                        item.cds_deadline = null;
-                        changed = true;
-                    }
-                }
-            }
-            if (item.eds_deadline) |value| {
-                if (value.raw.nanoseconds <= now.raw.nanoseconds) {
-                    const cluster = item.cluster orelse {
-                        item.eds_deadline = null;
-                        continue;
-                    };
-                    if (client.subscriptions.find(eds.type_url) != null) try client.subscriptions.forget(eds.type_url, cluster.resource.value.edsName());
-                    const empty = try self.emptyEds(client.sender.state.io, cluster);
-                    if (item.snapshot) |old| old.release();
-                    item.snapshot = empty;
-                    item.eds_seen = true;
-                    item.eds_deadline = null;
-                    changed = true;
-                }
-            }
-        }
-        if (try self.expireSecrets(now, client)) {
-            for (plan.entries.items) |*item| {
-                const cluster = item.cluster orelse continue;
-                if (cluster.resource.value.tls_sds == null) continue;
-                try self.resolveClusterTls(cluster);
-                try self.reproject(client.sender.state.io, item);
-            }
-            changed = true;
-        }
-        if (changed) revision = try self.publishDelta(client, &plan, self.latest.?, false, destination, deadline);
-        _ = try client.flushWithDeadline(deadline);
-        return revision;
+        return @import("expiry.zig").expireDelta(self, client, destination, deadline);
     }
     pub fn project(self: *Controller, io: std.Io, cluster: *entries.Cluster, bytes: []const u8) Error!*eds.Snapshot {
         const config = cluster.resource.value;

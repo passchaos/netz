@@ -4,7 +4,8 @@ const std = @import("std");
 pub const Error = error{InvalidXdsResourceName};
 
 pub const Parsed = struct {
-    /// Null for old-style names without an authority.
+    /// Borrowed URI-encoded bytes; null for old-style names. Percent escapes
+    /// and the decoded UTF-8 are validated. Bootstrap names use decoded bytes.
     authority: ?[]const u8,
     /// Short resource type (`envoy.config...`) for xdstp names.
     type_url: ?[]const u8,
@@ -34,8 +35,8 @@ pub fn parse(name: []const u8) Error!Parsed {
     const type_url = path[0..type_end];
     const id = path[type_end + 1 ..];
     if (type_url.len == 0 or id.len == 0) return error.InvalidXdsResourceName;
-    if (!std.unicode.utf8ValidateSlice(authority) or
-        !std.unicode.utf8ValidateSlice(type_url) or
+    _ = try authorityLength(authority);
+    if (!std.unicode.utf8ValidateSlice(type_url) or
         !std.unicode.utf8ValidateSlice(id))
     {
         return error.InvalidXdsResourceName;
@@ -43,8 +44,58 @@ pub fn parse(name: []const u8) Error!Parsed {
     return .{ .authority = authority, .type_url = type_url, .id = id };
 }
 
-/// True when `name` is either an old-style name or an xdstp name whose
-/// authority is in `authorities` and whose short type matches.
+fn authorityByte(encoded: []const u8, offset: *usize) Error!?u8 {
+    if (offset.* == encoded.len) return null;
+    const byte = encoded[offset.*];
+    if (byte != '%') {
+        offset.* += 1;
+        return byte;
+    }
+    if (encoded.len - offset.* < 3) return error.InvalidXdsResourceName;
+    const high = std.fmt.charToDigit(encoded[offset.* + 1], 16) catch return error.InvalidXdsResourceName;
+    const low = std.fmt.charToDigit(encoded[offset.* + 2], 16) catch return error.InvalidXdsResourceName;
+    offset.* += 3;
+    return high * 16 + low;
+}
+
+/// Validate decoded UTF-8 one code point at a time without allocating.
+fn authorityLength(encoded: []const u8) Error!usize {
+    if (encoded.len == 0) return error.InvalidXdsResourceName;
+    var offset: usize = 0;
+    var length: usize = 0;
+    while (try authorityByte(encoded, &offset)) |first| {
+        const count = std.unicode.utf8ByteSequenceLength(first) catch return error.InvalidXdsResourceName;
+        var bytes: [4]u8 = undefined;
+        bytes[0] = first;
+        for (1..count) |index| bytes[index] = (try authorityByte(encoded, &offset)) orelse return error.InvalidXdsResourceName;
+        _ = std.unicode.utf8Decode(bytes[0..count]) catch return error.InvalidXdsResourceName;
+        length += count;
+    }
+    return length;
+}
+
+/// Decode an authority for case-sensitive Bootstrap lookup. The caller owns
+/// the result. Decoding happens once: `%252F` becomes `%2F`, not `/`.
+pub fn decodeAuthority(gpa: std.mem.Allocator, encoded: []const u8) (std.mem.Allocator.Error || Error)![]u8 {
+    const result = try gpa.alloc(u8, try authorityLength(encoded));
+    var offset: usize = 0;
+    for (result) |*byte| byte.* = (authorityByte(encoded, &offset) catch unreachable).?;
+    return result;
+}
+
+/// Compare a URI-encoded authority with a raw Bootstrap name, preserving case.
+/// Invalid escapes or decoded UTF-8 never match. This does not allocate.
+pub fn authorityMatches(encoded: []const u8, raw: []const u8) bool {
+    if (!std.unicode.utf8ValidateSlice(raw)) return false;
+    const length = authorityLength(encoded) catch return false;
+    if (length != raw.len) return false;
+    var offset: usize = 0;
+    for (raw) |byte| if ((authorityByte(encoded, &offset) catch unreachable).? != byte) return false;
+    return true;
+}
+
+/// True for an old-style name or an xdstp name whose decoded authority is in
+/// the raw Bootstrap `authorities` and whose short type matches.
 pub fn matchesAuthorities(
     name: []const u8,
     authorities: []const []const u8,
@@ -54,7 +105,7 @@ pub fn matchesAuthorities(
     const parsed_authority = parsed.authority orelse return true;
     if (!std.mem.eql(u8, parsed.type_url.?, shortType(type_url))) return false;
     for (authorities) |authority| {
-        if (std.mem.eql(u8, parsed_authority, authority)) return true;
+        if (authorityMatches(parsed_authority, authority)) return true;
     }
     return false;
 }
@@ -121,4 +172,32 @@ test "xDS resource name matching accepts several authorities" {
         &.{},
         "type.googleapis.com/envoy.config.cluster.v3.Cluster",
     ));
+}
+
+test "xDS authorities decode escapes once and retain case-sensitive lookup" {
+    const gpa = std.testing.allocator;
+    for ([_]struct { encoded: []const u8, raw: []const u8 }{
+        .{ .encoded = "a%2Fb", .raw = "a/b" },
+        .{ .encoded = "a%2fb", .raw = "a/b" },
+        .{ .encoded = "%25%E5%90%8D", .raw = "%名" },
+        .{ .encoded = "名", .raw = "名" },
+        .{ .encoded = "%252F", .raw = "%2F" },
+        .{ .encoded = "%41uth", .raw = "Auth" },
+    }) |case| {
+        const decoded = try decodeAuthority(gpa, case.encoded);
+        defer gpa.free(decoded);
+        try std.testing.expectEqualStrings(case.raw, decoded);
+        try std.testing.expect(authorityMatches(case.encoded, case.raw));
+    }
+    const parsed = try parse("xdstp://a%2Fb/type/id");
+    try std.testing.expectEqualStrings("a%2Fb", parsed.authority.?);
+    try std.testing.expect(matches("xdstp://a%2Fb/type/id", "a/b", "type"));
+    try std.testing.expect(!authorityMatches("%41uth", "auth"));
+    for ([_][]const u8{ "%", "%2", "%GG", "%FF", "%C0%AF", "%E5%90", "%ED%A0%80", "\xff" }) |invalid| {
+        try std.testing.expectError(error.InvalidXdsResourceName, decodeAuthority(gpa, invalid));
+        try std.testing.expect(!authorityMatches(invalid, invalid));
+        const name = try std.fmt.allocPrint(gpa, "xdstp://{s}/type/id", .{invalid});
+        defer gpa.free(name);
+        try std.testing.expectError(error.InvalidXdsResourceName, parse(name));
+    }
 }

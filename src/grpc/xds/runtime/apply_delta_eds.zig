@@ -30,32 +30,39 @@ pub fn apply(self: *ctl.Controller, client: *delta.Client, update: delta.Update,
         var resource = eds.decode(self.allocator, any.value, self.options.limits.eds) catch |err| {
             if (!self.options.fail_on_data_errors) return err;
             if (raw.name.len == 0) return err;
+            if (!self.inResponseScope(raw.name)) continue;
             try invalid.append(self.allocator, raw.name);
             if (first_error == null) first_error = err;
             continue;
         };
         errdefer resource.deinit();
         if (!std.mem.eql(u8, resource.value.cluster_name, raw.name)) return error.InvalidDiscoveryMessage;
+        if (!self.inResponseScope(raw.name)) {
+            resource.deinit();
+            continue;
+        }
         storage = std.math.add(usize, storage, resource.arena.queryCapacity()) catch return error.XdsLimitExceeded;
         if (storage > self.options.limits.max_storage_bytes) return error.XdsLimitExceeded;
         try resources.append(self.allocator, .{ .resource = resource, .ttl = raw.ttl });
     }
+    var plan = try Plan.create(self, null);
+    defer plan.deinit();
     // Payload-free heartbeats refresh the timer without republishing endpoints.
     for (response.resources) |raw| {
         if (raw.resource != null) continue;
-        for (self.entries.items) |*item| {
+        if (!self.inResponseScope(raw.name)) continue;
+        for (plan.entries.items) |*item| {
             const cluster = item.cluster orelse continue;
             if (!std.mem.eql(u8, cluster.resource.value.edsName(), raw.name)) continue;
             if (item.snapshot == null or !item.eds_seen) return error.InvalidDiscoveryMessage;
             item.eds_deadline = try delta.codec.ttlDeadline(client.sender.state.io, raw.ttl);
         }
     }
-    var plan = try Plan.create(self, null);
-    defer plan.deinit();
     var changed = false;
     for (plan.entries.items) |*item| {
         const cluster = item.cluster orelse continue;
         const name = cluster.resource.value.edsName();
+        if (!self.inResponseScope(name)) continue;
         if (removedName(invalid.items, name)) {
             // fail_on_data_errors: drop the cached assignment while the response
             // is still NACKed.
@@ -77,7 +84,12 @@ pub fn apply(self: *ctl.Controller, client: *delta.Client, update: delta.Update,
         if (selected) |candidate| {
             const wire = candidate.resource.wire;
             if (cluster.sdsPending()) {
-                try cluster.setPendingEds(wire);
+                const staged = try @import("apply_sds.zig").cloneCluster(self, cluster);
+                errdefer staged.release();
+                try self.resolveClusterTls(staged);
+                try staged.setPendingEds(wire);
+                cluster.release();
+                item.cluster = staged;
                 item.eds_seen = false;
                 continue;
             }
@@ -99,7 +111,12 @@ pub fn apply(self: *ctl.Controller, client: *delta.Client, update: delta.Update,
         } else if (removedName(response.removed, name)) {
             if (self.options.ignore_resource_deletion) continue;
             if (cluster.sdsPending()) {
-                cluster.clearPendingEds();
+                const staged = try @import("apply_sds.zig").cloneCluster(self, cluster);
+                errdefer staged.release();
+                try self.resolveClusterTls(staged);
+                staged.clearPendingEds();
+                cluster.release();
+                item.cluster = staged;
                 item.eds_seen = false;
                 continue;
             }
@@ -119,7 +136,11 @@ pub fn apply(self: *ctl.Controller, client: *delta.Client, update: delta.Update,
     }
     if (!changed) {
         if (first_error) |err| return err;
-        return try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
+        const revision = try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
+        const old = self.entries;
+        self.entries = plan.entries;
+        plan.entries = old;
+        return revision;
     }
     _ = try self.publishDelta(client, &plan, self.latest.?, false, destination, deadline);
     if (first_error) |err| return err;

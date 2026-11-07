@@ -37,36 +37,49 @@ pub fn apply(self: *ctl.Controller, client: *delta.Client, update: delta.Update,
         var owned = cds.decode(self.allocator, any.value, limits) catch |err| {
             if (!self.options.fail_on_data_errors) return err;
             if (raw.name.len == 0) return err;
+            if (!self.inResponseScope(raw.name)) continue;
             try invalid.append(self.allocator, raw.name);
             if (first_error == null) first_error = err;
             continue;
         };
+        if (!std.mem.eql(u8, owned.value.name, raw.name)) {
+            owned.deinit();
+            return error.InvalidDiscoveryMessage;
+        }
+        if (!self.inResponseScope(raw.name)) {
+            owned.deinit();
+            continue;
+        }
         const resource = entry.Cluster.create(self.allocator, owned) catch |err| {
             owned.deinit();
             return err;
         };
         errdefer resource.release();
         resource.discovery_source = if (update.source) |source| source.retain() else null;
-        if (!std.mem.eql(u8, resource.resource.value.name, raw.name)) return error.InvalidDiscoveryMessage;
         try self.resolveClusterTls(resource);
         storage = std.math.add(usize, storage, owned.arena.queryCapacity()) catch return error.XdsLimitExceeded;
         if (storage > self.options.limits.max_storage_bytes) return error.XdsLimitExceeded;
         try candidates.append(self.allocator, .{ .name = raw.name, .resource = resource, .ttl = raw.ttl });
     }
+    const clusters = try self.allocator.alloc(*entry.Cluster, candidates.items.len);
+    defer self.allocator.free(clusters);
+    for (candidates.items, clusters) |candidate, *cluster| cluster.* = candidate.resource;
+    var plan = try Plan.createWithClusters(self, null, clusters);
+    defer plan.deinit();
     // A payload-free heartbeat only refreshes the timer. It does not require a
     // target publication and must not invent a new payload.
     for (response.resources) |raw| {
         if (raw.resource != null) continue;
-        for (self.entries.items) |*item| {
+        if (!self.inResponseScope(raw.name)) continue;
+        for (plan.entries.items) |*item| {
             if (!std.mem.eql(u8, item.identity.name, raw.name)) continue;
             if (item.cluster == null) return error.InvalidDiscoveryMessage;
             item.cds_deadline = try delta.codec.ttlDeadline(client.sender.state.io, raw.ttl);
         }
     }
-    var plan = try Plan.create(self, null);
-    defer plan.deinit();
     var changed = false;
     for (plan.entries.items) |*item| {
+        if (!self.inResponseScope(item.identity.name)) continue;
         const selected = for (candidates.items) |candidate| {
             if (std.mem.eql(u8, candidate.name, item.identity.name)) break candidate;
         } else null;
@@ -89,14 +102,14 @@ pub fn apply(self: *ctl.Controller, client: *delta.Client, update: delta.Update,
                 continue;
             }
             changed = true;
-            const snapshot: ?*@import("../eds.zig").Snapshot = if (same_config) blk: {
+            const snapshot: ?*@import("../eds.zig").Snapshot = if (same_config and item.snapshot != null) blk: {
                 item.snapshot.?.retain();
                 break :blk item.snapshot.?;
             } else if (same_identity and item.snapshot != null)
                 try self.project(client.sender.state.io, resource, if (after.isEds()) item.snapshot.?.resource.wire else after.inline_assignment)
             else if (after.isEds())
                 try self.emptyEds(client.sender.state.io, resource)
-            else if (after.isDns())
+            else if (after.isDns() or after.isAggregate())
                 null
             else if (resource.sdsPending())
                 null
@@ -142,7 +155,11 @@ pub fn apply(self: *ctl.Controller, client: *delta.Client, update: delta.Update,
     }
     if (!changed) {
         if (first_error) |err| return err;
-        return try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
+        const revision = try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
+        const old = self.entries;
+        self.entries = plan.entries;
+        plan.entries = old;
+        return revision;
     }
     _ = try self.publishDelta(client, &plan, self.latest.?, false, destination, deadline);
     if (first_error) |err| return err;

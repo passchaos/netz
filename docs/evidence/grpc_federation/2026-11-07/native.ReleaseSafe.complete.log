@@ -1,0 +1,30 @@
+test-lib
++- run test 428 pass, 1 fail (429 total)
+automatic LRS peer initial/sotw/automatic: expected transport close error=ConnectionClosed phase=shutdown initial=1 reports=2 events=3 last=messages closing=true counts=.{ .issued = 2, .successful = 1, .failed = 1, .dropped = 1 }
+automatic LRS peer late/sotw/automatic: expected transport close error=ConnectionClosed phase=shutdown initial=1 reports=2 events=3 last=messages closing=true counts=.{ .issued = 2, .successful = 1, .failed = 1, .dropped = 1 }
+automatic LRS peer initial/delta/automatic: expected transport close error=ConnectionClosed phase=shutdown initial=1 reports=2 events=3 last=messages closing=true counts=.{ .issued = 2, .successful = 1, .failed = 1, .dropped = 1 }
+automatic LRS peer provenance/sotw/source-a: expected transport close error=ConnectionClosed phase=shutdown initial=1 reports=14 events=15 last=messages closing=true counts=.{ .issued = 4, .successful = 4, .failed = 0, .dropped = 3 }
+automatic LRS peer provenance/sotw/source-b: expected transport close error=ConnectionClosed phase=shutdown initial=1 reports=1 events=2 last=messages closing=true counts=.{ .issued = 1, .successful = 0, .failed = 1, .dropped = 1 }
+automatic LRS peer provenance/delta/source-a: expected transport close error=ConnectionClosed phase=shutdown initial=1 reports=14 events=15 last=messages closing=true counts=.{ .issued = 4, .successful = 4, .failed = 0, .dropped = 3 }
+automatic LRS peer source-limit/sotw/source-b: failed error=Canceled phase=accepting initial=0 reports=0 events=0 last=none closing=false counts=.{ .issued = 0, .successful = 0, .failed = 0, .dropped = 0 }
+automatic LRS peer source-limit/delta/source-a: expected transport close error=ConnectionClosed phase=shutdown initial=1 reports=7 events=8 last=messages closing=true counts=.{ .issued = 2, .successful = 1, .failed = 1, .dropped = 1 }
+automatic LRS peer source-limit/delta/source-b: failed error=Canceled phase=accepting initial=0 reports=0 events=0 last=none closing=false counts=.{ .issued = 0, .successful = 0, .failed = 0, .dropped = 0 }
+automatic LRS peer generated-route/delta/routing: expected transport close error=ConnectionClosed phase=shutdown initial=1 reports=2 events=3 last=messages closing=true counts=.{ .issued = 4, .successful = 4, .failed = 0, .dropped = 0 }
+error: 'grpc.xds.csds_tests.test.gRPC SotW xDS CSDS dump reports the accepted type version' failed:
+       expected 2, found 3
+failed command: ./.zig-cache/o/94724940b833d1173070a3f390dabd13/test --cache-dir=./.zig-cache --seed=0x763e080e --listen=-
+
+Build Summary: 6/8 steps succeeded (1 failed); 428/429 tests passed (1 failed)
+test-lib transitive failure
++- run test 428 pass, 1 fail (429 total)
+   +- compile test ReleaseSafe native success 4m MaxRSS:6G
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal ReleaseSafe native cached 6ms MaxRSS:40M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 ReleaseSafe native cached 6ms MaxRSS:39M
+      +- compile obj vort-br-record-optimal ReleaseSafe native (reused)
+      +- compile obj vort-zstd-huffman-x2 ReleaseSafe native (reused)
+      +- options cached
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/63a4f13a38ebb3037e00652cc87f88eb/build /home/passchaos/Temp/zig-x86_64-linux-0.16.0/zig /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib /home/passchaos/project-z/netz .zig-cache /home/passchaos/.cache/zig --seed 0x763e080e -Zd016069f6b90c8ad test-lib -Doptimize=ReleaseSafe -Dtest-filter=xDS -Dtest-filter=authority -Dtest-filter=bootstrap -Dtest-filter=control plane -Dtest-filter=discovery source -Dtest-filter=LRS -Dtest-filter=stream interruption returns -Dtest-filter=resumable read cancellation -Dtest-filter=client target --summary all

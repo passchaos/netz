@@ -201,6 +201,9 @@ pub const Client = struct {
         const stream = self.stream orelse return error.AdsNotConnected;
         var reader = stream.reader();
         defer reader.deinit();
+        // A managed authority race cancels the losing read operation without
+        // withdrawing its ADS stream or discarding buffered responses.
+        reader.cancel_call_on_interrupt = false;
         while (true) {
             var event = reader.nextWithDeadline(deadline) catch |err| {
                 const rpc_expired = if (stream.call.deadline) |until| until.durationFromNow(self.sender.state.io).raw.nanoseconds <= 0 else false;

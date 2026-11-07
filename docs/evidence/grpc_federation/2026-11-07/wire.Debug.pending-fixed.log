@@ -1,0 +1,22 @@
+PASS sotw: production subscriptions, scoped caches, pending handoff, held completion, LRS
+PASS delta: production subscriptions, scoped caches, pending handoff, held completion, LRS
+{
+  "status": "passed",
+  "passed_modes": [
+    "sotw",
+    "delta"
+  ],
+  "report": "/home/passchaos/project-z/netz/docs/evidence/grpc_federation/2026-11-07/wire.Debug.pending-fixed/report.json",
+  "failures": []
+}
+Build Summary: 8/8 steps succeeded
+interop-grpc-federation success
++- run python3 success 2s
+   +- compile exe netz-grpc-federation-client Debug native success 31s MaxRSS:2G
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 7ms MaxRSS:39M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 5ms MaxRSS:39M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options cached

@@ -9,6 +9,7 @@ const delta = @import("../ads/delta.zig");
 const shared = @import("../../channel/shared.zig");
 const raw_name = @import("../raw_name.zig");
 const Projection = @import("projection.zig").Projection;
+const discovery = @import("../runtime/discovery.zig");
 
 fn hasName(names: []const []const u8, name: []const u8) bool {
     for (names) |value| if (std.mem.eql(u8, value, name)) return true;
@@ -63,7 +64,7 @@ pub fn applyListener(self: *ctl.Controller, client: *delta.Client, update: delta
             if (first_error) |err| return err;
             return try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
         }
-        var subscription = try client.subscriptions.prepare(rds.type_url, &.{});
+        var subscription = try discovery.prepare(client, self.options.discovery_router, rds.type_url, &.{}, deadline);
         defer subscription.deinit();
         const empty = try self.empty("_");
         defer empty.release();
@@ -89,9 +90,10 @@ pub fn applyListener(self: *ctl.Controller, client: *delta.Client, update: delta
         const candidate = &candidates.items[index].?;
         const hcm = candidate.value.hcm;
         const listener_deadline = try delta.codec.ttlDeadline(client.sender.state.io, selected_ttl);
-        var subscription = try client.subscriptions.prepare(rds.type_url, if (hcm.route_source == .rds) &.{hcm.route_source.rds} else &.{});
+        var subscription = try discovery.prepare(client, self.options.discovery_router, rds.type_url, if (hcm.route_source == .rds) &.{hcm.route_source.rds} else &.{}, deadline);
         defer subscription.deinit();
         const same = if (self.listener) |previous| self.routes_accepted and previous.value.hcm.route_source == .rds and hcm.route_source == .rds and std.mem.eql(u8, previous.value.hcm.route_source.rds, hcm.route_source.rds) else false;
+        const cached_accepted = same and self.routes != null;
         const source = if (hcm.route_source == .inline_rds)
             try self.takeInline(candidate)
         else if (same and self.routes != null) blk: {
@@ -101,6 +103,8 @@ pub fn applyListener(self: *ctl.Controller, client: *delta.Client, update: delta
         var source_owned = true;
         defer if (source_owned) source.release();
         const projection = try Projection.create(self.allocator, source, hcm.max_stream_duration, hcm.rbac_config, hcm.fault_config, hcm.rbac_name, hcm.fault_name);
+        projection.pending = hcm.route_source == .rds and !cached_accepted;
+        projection.remote_rds = if (hcm.route_source == .rds) source.resource.value.name else null;
         defer projection.release();
         const revision = try self.publishDelta(client, projection, destination, deadline);
         subscription.commit();
@@ -113,7 +117,7 @@ pub fn applyListener(self: *ctl.Controller, client: *delta.Client, update: delta
         self.fault_name = hcm.fault_name;
         if (self.routes) |previous| previous.release();
         self.routes = source;
-        self.routes_accepted = hcm.route_source == .inline_rds or same;
+        self.routes_accepted = hcm.route_source == .inline_rds or cached_accepted;
         self.listener_deadline = listener_deadline;
         if (hcm.route_source == .inline_rds or !same) self.routes_deadline = null;
         source_owned = false;
@@ -223,6 +227,7 @@ pub fn applyRoutes(self: *ctl.Controller, client: *delta.Client, update: delta.U
             return try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
         }
         const projection = try Projection.create(self.allocator, snapshot, listener.value.hcm.max_stream_duration, self.rbac_config, self.fault_config, self.rbac_name, self.fault_name);
+        projection.remote_rds = snapshot.resource.value.name;
         defer projection.release();
         const revision = try self.publishDelta(client, projection, destination, deadline);
         snapshot.retain();

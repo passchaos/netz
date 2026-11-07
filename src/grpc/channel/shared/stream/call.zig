@@ -206,6 +206,12 @@ pub fn Call(comptime State: type) type {
             wake.retain();
             std.debug.assert(self.owner_wake.swap(wake, .release) == null);
         }
+        /// Reserve the bounded receive ring before endpoint admission.
+        pub fn reserveReceiveBuffer(self: *Self, maximum: usize) State.Failure!void {
+            std.debug.assert(self.bytes.len == 0);
+            if (maximum > self.parent.options.max_buffered_stream_bytes) return error.InvalidSharedOptions;
+            self.bytes = try self.parent.allocator.alloc(u8, @max(maximum, 1));
+        }
         pub fn requestCancel(self: *Self) void {
             self.cancel_requested.store(true, .release);
             if (self.owner_wake.load(.acquire)) |wake| wake.set(self.parent.io);

@@ -66,6 +66,12 @@ pub const Observed = struct {
     fn traceLocked(self: *@This(), action: []const u8, err: anyerror) void {
         std.debug.print("automatic LRS peer {s}/{s}/{s}: {s} error={s} phase={s} initial={d} reports={d} events={d} last={s} closing={} counts={any}\n", .{ self.scenario, self.mode, self.category, action, @errorName(err), @tagName(self.phase), self.initial_requests, self.report_requests, self.events, self.last_event, self.expected_close != null, self.counts });
     }
+    pub fn diagnose(self: *@This(), action: []const u8, err: anyerror) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        self.traceLocked(action, err);
+        std.debug.print("  observed failure={s} metrics={any}\n", .{ if (self.failure) |failure| @errorName(failure) else "none", self.metrics });
+    }
     fn enter(self: *@This(), phase: Phase) void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);

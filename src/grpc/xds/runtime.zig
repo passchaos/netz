@@ -4,6 +4,7 @@ pub const Options = @import("runtime/options.zig").Options;
 pub const Limits = @import("runtime/options.zig").Limits;
 pub const Error = @import("runtime/controller.zig").Error;
 pub const ResourceStatus = @import("runtime/controller.zig").ResourceStatus;
+pub const managed = @import("runtime/managed.zig");
 test {
     _ = @import("runtime/tests.zig");
     _ = @import("runtime/target_tests.zig");
@@ -20,5 +21,8 @@ test {
     _ = @import("runtime/ignore_deletion_tests.zig");
     _ = @import("runtime/authority_tests.zig");
     _ = @import("runtime/fail_on_data_errors_tests.zig");
+    _ = @import("runtime/federated_scope_tests.zig");
+    _ = @import("runtime/managed/tests.zig");
+    _ = @import("runtime/managed/registry_tests.zig");
     _ = @import("runtime/resource_timer_tests.zig");
 }

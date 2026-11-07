@@ -1,0 +1,2142 @@
+{
+  "status": "passed",
+  "mode": "delta",
+  "failure": null,
+  "pending_barriers": [],
+  "phase": "held-released",
+  "sources": {
+    "A": {
+      "requests": [
+        {
+          "source": "A",
+          "kind": "lds",
+          "names": [
+            "xdstp://A/envoy.config.listener.v3.Listener/service"
+          ],
+          "subscribe": [
+            "xdstp://A/envoy.config.listener.v3.Listener/service"
+          ],
+          "unsubscribe": [],
+          "version": null,
+          "nonce": "",
+          "error": null,
+          "node": "netz-federation"
+        },
+        {
+          "source": "A",
+          "kind": "lds",
+          "names": [
+            "xdstp://A/envoy.config.listener.v3.Listener/service"
+          ],
+          "subscribe": [],
+          "unsubscribe": [],
+          "version": null,
+          "nonce": "l-a1",
+          "error": null,
+          "node": null
+        },
+        {
+          "source": "A",
+          "kind": "cds",
+          "names": [
+            "xdstp://A/envoy.config.cluster.v3.Cluster/canary"
+          ],
+          "subscribe": [
+            "xdstp://A/envoy.config.cluster.v3.Cluster/canary"
+          ],
+          "unsubscribe": [],
+          "version": null,
+          "nonce": "",
+          "error": null,
+          "node": null
+        },
+        {
+          "source": "A",
+          "kind": "cds",
+          "names": [
+            "xdstp://A/envoy.config.cluster.v3.Cluster/canary"
+          ],
+          "subscribe": [],
+          "unsubscribe": [],
+          "version": null,
+          "nonce": "c-a1",
+          "error": null,
+          "node": null
+        },
+        {
+          "source": "A",
+          "kind": "eds",
+          "names": [
+            "xdstp://A/envoy.config.endpoint.v3.ClusterLoadAssignment/canary"
+          ],
+          "subscribe": [
+            "xdstp://A/envoy.config.endpoint.v3.ClusterLoadAssignment/canary"
+          ],
+          "unsubscribe": [],
+          "version": null,
+          "nonce": "",
+          "error": null,
+          "node": null
+        },
+        {
+          "source": "A",
+          "kind": "eds",
+          "names": [
+            "xdstp://A/envoy.config.endpoint.v3.ClusterLoadAssignment/canary"
+          ],
+          "subscribe": [],
+          "unsubscribe": [],
+          "version": null,
+          "nonce": "e-a1",
+          "error": null,
+          "node": null
+        },
+        {
+          "source": "A",
+          "kind": "cds",
+          "names": [
+            "xdstp://A/envoy.config.cluster.v3.Cluster/canary"
+          ],
+          "subscribe": [],
+          "unsubscribe": [],
+          "version": null,
+          "nonce": "c-a-omit",
+          "error": null,
+          "node": null
+        },
+        {
+          "source": "A",
+          "kind": "cds",
+          "names": [
+            "xdstp://A/envoy.config.cluster.v3.Cluster/canary"
+          ],
+          "subscribe": [],
+          "unsubscribe": [],
+          "version": null,
+          "nonce": "c-a2",
+          "error": null,
+          "node": null
+        },
+        {
+          "source": "A",
+          "kind": "eds",
+          "names": [
+            "xdstp://A/envoy.config.endpoint.v3.ClusterLoadAssignment/canary"
+          ],
+          "subscribe": [],
+          "unsubscribe": [],
+          "version": null,
+          "nonce": "e-a2",
+          "error": null,
+          "node": null
+        },
+        {
+          "source": "A",
+          "kind": "cds",
+          "names": [
+            "xdstp://A/envoy.config.cluster.v3.Cluster/canary"
+          ],
+          "subscribe": [],
+          "unsubscribe": [],
+          "version": null,
+          "nonce": "c-a-bad",
+          "error": {
+            "details": [],
+            "code": 3,
+            "message": "UnsupportedCdsFeature"
+          },
+          "node": null
+        },
+        {
+          "source": "A",
+          "kind": "cds",
+          "names": [
+            "xdstp://A/envoy.config.cluster.v3.Cluster/canary",
+            "xdstp://A/envoy.config.cluster.v3.Cluster/main"
+          ],
+          "subscribe": [
+            "xdstp://A/envoy.config.cluster.v3.Cluster/main"
+          ],
+          "unsubscribe": [],
+          "version": null,
+          "nonce": "",
+          "error": null,
+          "node": null
+        },
+        {
+          "source": "A",
+          "kind": "cds",
+          "names": [
+            "xdstp://A/envoy.config.cluster.v3.Cluster/canary",
+            "xdstp://A/envoy.config.cluster.v3.Cluster/main"
+          ],
+          "subscribe": [],
+          "unsubscribe": [],
+          "version": null,
+          "nonce": "c-a3",
+          "error": null,
+          "node": null
+        },
+        {
+          "source": "A",
+          "kind": "eds",
+          "names": [
+            "xdstp://A/envoy.config.endpoint.v3.ClusterLoadAssignment/canary",
+            "xdstp://A/envoy.config.endpoint.v3.ClusterLoadAssignment/main"
+          ],
+          "subscribe": [
+            "xdstp://A/envoy.config.endpoint.v3.ClusterLoadAssignment/main"
+          ],
+          "unsubscribe": [],
+          "version": null,
+          "nonce": "",
+          "error": null,
+          "node": null
+        },
+        {
+          "source": "A",
+          "kind": "eds",
+          "names": [
+            "xdstp://A/envoy.config.endpoint.v3.ClusterLoadAssignment/canary",
+            "xdstp://A/envoy.config.endpoint.v3.ClusterLoadAssignment/main"
+          ],
+          "subscribe": [],
+          "unsubscribe": [],
+          "version": null,
+          "nonce": "e-a3",
+          "error": null,
+          "node": null
+        }
+      ],
+      "responses": [
+        {
+          "source": "A",
+          "kind": "lds",
+          "version": "l-a1",
+          "names": [
+            "xdstp://A/envoy.config.listener.v3.Listener/service"
+          ],
+          "removed": [],
+          "sha256": [
+            "e91a7fbd6e75bd1b960d6e3d51029bd9da380044063bbc13e4c7d949a75230b9"
+          ]
+        },
+        {
+          "source": "A",
+          "kind": "cds",
+          "version": "c-a1",
+          "names": [
+            "xdstp://A/envoy.config.cluster.v3.Cluster/canary"
+          ],
+          "removed": [],
+          "sha256": [
+            "5e8d5368dd0ab19ebf4b092cde9486ce84c7bfbb041c28d7831aae5fb966dd5e"
+          ]
+        },
+        {
+          "source": "A",
+          "kind": "eds",
+          "version": "e-a1",
+          "names": [
+            "xdstp://A/envoy.config.endpoint.v3.ClusterLoadAssignment/canary"
+          ],
+          "removed": [],
+          "sha256": [
+            "9fce16c379d89ac7c7f7b740b4df79672e3f0a62beea20c7419f221fcabce594"
+          ]
+        },
+        {
+          "source": "A",
+          "kind": "cds",
+          "version": "c-a-omit",
+          "names": [],
+          "removed": [
+            "xdstp://A/envoy.config.cluster.v3.Cluster/canary"
+          ],
+          "sha256": []
+        },
+        {
+          "source": "A",
+          "kind": "cds",
+          "version": "c-a2",
+          "names": [
+            "xdstp://A/envoy.config.cluster.v3.Cluster/canary"
+          ],
+          "removed": [],
+          "sha256": [
+            "5e8d5368dd0ab19ebf4b092cde9486ce84c7bfbb041c28d7831aae5fb966dd5e"
+          ]
+        },
+        {
+          "source": "A",
+          "kind": "eds",
+          "version": "e-a2",
+          "names": [
+            "xdstp://A/envoy.config.endpoint.v3.ClusterLoadAssignment/canary"
+          ],
+          "removed": [],
+          "sha256": [
+            "9fce16c379d89ac7c7f7b740b4df79672e3f0a62beea20c7419f221fcabce594"
+          ]
+        },
+        {
+          "source": "A",
+          "kind": "cds",
+          "version": "c-a-bad",
+          "names": [
+            "xdstp://A/envoy.config.cluster.v3.Cluster/canary"
+          ],
+          "removed": [],
+          "sha256": [
+            "e7bd7435e45698868818937580fd4477e585dfa74ecdbdab5eb9e0fbace2fa07"
+          ]
+        },
+        {
+          "source": "A",
+          "kind": "cds",
+          "version": "c-a3",
+          "names": [
+            "xdstp://A/envoy.config.cluster.v3.Cluster/canary",
+            "xdstp://A/envoy.config.cluster.v3.Cluster/main"
+          ],
+          "removed": [],
+          "sha256": [
+            "5e8d5368dd0ab19ebf4b092cde9486ce84c7bfbb041c28d7831aae5fb966dd5e",
+            "3d94470aa1b9d7dc57eafa215e7b78c076088b20f3359dc00884aedcd77d677f"
+          ]
+        },
+        {
+          "source": "A",
+          "kind": "eds",
+          "version": "e-a3",
+          "names": [
+            "xdstp://A/envoy.config.endpoint.v3.ClusterLoadAssignment/canary",
+            "xdstp://A/envoy.config.endpoint.v3.ClusterLoadAssignment/main"
+          ],
+          "removed": [],
+          "sha256": [
+            "9fce16c379d89ac7c7f7b740b4df79672e3f0a62beea20c7419f221fcabce594",
+            "1e1cf0652de562333bb26e39dc95758f5cbb545bf0b9e158331497de08521ab6"
+          ]
+        }
+      ],
+      "watches": {
+        "lds": [
+          "xdstp://A/envoy.config.listener.v3.Listener/service"
+        ],
+        "rds": [],
+        "cds": [
+          "xdstp://A/envoy.config.cluster.v3.Cluster/canary",
+          "xdstp://A/envoy.config.cluster.v3.Cluster/main"
+        ],
+        "eds": [
+          "xdstp://A/envoy.config.endpoint.v3.ClusterLoadAssignment/canary",
+          "xdstp://A/envoy.config.endpoint.v3.ClusterLoadAssignment/main"
+        ]
+      },
+      "accepted": {
+        "lds": "l-a1",
+        "cds": "c-a3",
+        "eds": "e-a3"
+      },
+      "lrs": [
+        {
+          "cluster_stats": [
+            {
+              "upstream_locality_stats": [
+                {
+                  "load_metric_stats": [],
+                  "upstream_endpoint_stats": [],
+                  "locality": {
+                    "region": "r",
+                    "zone": "z",
+                    "sub_zone": ""
+                  },
+                  "total_successful_requests": "1",
+                  "total_requests_in_progress": "0",
+                  "total_error_requests": "0",
+                  "priority": 0,
+                  "total_issued_requests": "1",
+                  "total_active_connections": "0",
+                  "total_new_connections": "0",
+                  "total_fail_connections": "0",
+                  "cpu_utilization": null,
+                  "mem_utilization": null,
+                  "application_utilization": null
+                }
+              ],
+              "dropped_requests": [],
+              "cluster_name": "xdstp://A/envoy.config.cluster.v3.Cluster/canary",
+              "total_dropped_requests": "0",
+              "load_report_interval": {
+                "seconds": "0",
+                "nanos": 100007232
+              },
+              "cluster_service_name": "xdstp://A/envoy.config.endpoint.v3.ClusterLoadAssignment/canary"
+            }
+          ],
+          "node": null
+        },
+        {
+          "cluster_stats": [
+            {
+              "upstream_locality_stats": [
+                {
+                  "load_metric_stats": [],
+                  "upstream_endpoint_stats": [],
+                  "locality": {
+                    "region": "r",
+                    "zone": "z",
+                    "sub_zone": ""
+                  },
+                  "total_successful_requests": "1",
+                  "total_requests_in_progress": "0",
+                  "total_error_requests": "0",
+                  "priority": 0,
+                  "total_issued_requests": "1",
+                  "total_active_connections": "0",
+                  "total_new_connections": "0",
+                  "total_fail_connections": "0",
+                  "cpu_utilization": null,
+                  "mem_utilization": null,
+                  "application_utilization": null
+                }
+              ],
+              "dropped_requests": [],
+              "cluster_name": "xdstp://A/envoy.config.cluster.v3.Cluster/canary",
+              "total_dropped_requests": "0",
+              "load_report_interval": {
+                "seconds": "0",
+                "nanos": 100106425
+              },
+              "cluster_service_name": "xdstp://A/envoy.config.endpoint.v3.ClusterLoadAssignment/canary"
+            },
+            {
+              "upstream_locality_stats": [
+                {
+                  "load_metric_stats": [],
+                  "upstream_endpoint_stats": [],
+                  "locality": {
+                    "region": "r",
+                    "zone": "z",
+                    "sub_zone": ""
+                  },
+                  "total_successful_requests": "1",
+                  "total_requests_in_progress": "0",
+                  "total_error_requests": "0",
+                  "priority": 0,
+                  "total_issued_requests": "1",
+                  "total_active_connections": "0",
+                  "total_new_connections": "0",
+                  "total_fail_connections": "0",
+                  "cpu_utilization": null,
+                  "mem_utilization": null,
+                  "application_utilization": null
+                }
+              ],
+              "dropped_requests": [],
+              "cluster_name": "xdstp://A/envoy.config.cluster.v3.Cluster/main",
+              "total_dropped_requests": "0",
+              "load_report_interval": {
+                "seconds": "0",
+                "nanos": 100106425
+              },
+              "cluster_service_name": "xdstp://A/envoy.config.endpoint.v3.ClusterLoadAssignment/main"
+            }
+          ],
+          "node": null
+        },
+        {
+          "cluster_stats": [
+            {
+              "upstream_locality_stats": [
+                {
+                  "load_metric_stats": [],
+                  "upstream_endpoint_stats": [],
+                  "locality": {
+                    "region": "r",
+                    "zone": "z",
+                    "sub_zone": ""
+                  },
+                  "total_successful_requests": "0",
+                  "total_requests_in_progress": "0",
+                  "total_error_requests": "0",
+                  "priority": 0,
+                  "total_issued_requests": "0",
+                  "total_active_connections": "0",
+                  "total_new_connections": "0",
+                  "total_fail_connections": "0",
+                  "cpu_utilization": null,
+                  "mem_utilization": null,
+                  "application_utilization": null
+                }
+              ],
+              "dropped_requests": [],
+              "cluster_name": "xdstp://A/envoy.config.cluster.v3.Cluster/canary",
+              "total_dropped_requests": "0",
+              "load_report_interval": {
+                "seconds": "0",
+                "nanos": 100109350
+              },
+              "cluster_service_name": "xdstp://A/envoy.config.endpoint.v3.ClusterLoadAssignment/canary"
+            },
+            {
+              "upstream_locality_stats": [
+                {
+                  "load_metric_stats": [],
+                  "upstream_endpoint_stats": [],
+                  "locality": {
+                    "region": "r",
+                    "zone": "z",
+                    "sub_zone": ""
+                  },
+                  "total_successful_requests": "0",
+                  "total_requests_in_progress": "0",
+                  "total_error_requests": "0",
+                  "priority": 0,
+                  "total_issued_requests": "0",
+                  "total_active_connections": "0",
+                  "total_new_connections": "0",
+                  "total_fail_connections": "0",
+                  "cpu_utilization": null,
+                  "mem_utilization": null,
+                  "application_utilization": null
+                }
+              ],
+              "dropped_requests": [],
+              "cluster_name": "xdstp://A/envoy.config.cluster.v3.Cluster/main",
+              "total_dropped_requests": "0",
+              "load_report_interval": {
+                "seconds": "0",
+                "nanos": 100109350
+              },
+              "cluster_service_name": "xdstp://A/envoy.config.endpoint.v3.ClusterLoadAssignment/main"
+            }
+          ],
+          "node": null
+        }
+      ],
+      "lrs_initials": [
+        {
+          "cluster_stats": [],
+          "node": {
+            "extensions": [],
+            "client_features": [
+              "envoy.lrs.supports_send_all_clusters"
+            ],
+            "listening_addresses": [],
+            "dynamic_parameters": {},
+            "id": "netz-federation",
+            "cluster": "",
+            "metadata": null,
+            "locality": null,
+            "user_agent_name": "netz",
+            "user_agent_version": "0.1.0"
+          }
+        }
+      ],
+      "totals": {
+        "xdstp://A/envoy.config.cluster.v3.Cluster/canary": {
+          "issued": 2,
+          "successful": 2,
+          "failed": 0,
+          "in_progress": 0
+        },
+        "xdstp://A/envoy.config.cluster.v3.Cluster/main": {
+          "issued": 1,
+          "successful": 1,
+          "failed": 0,
+          "in_progress": 0
+        }
+      }
+    },
+    "B": {
+      "requests": [
+        {
+          "source": "B",
+          "kind": "rds",
+          "names": [
+            "xdstp://B/envoy.config.route.v3.RouteConfiguration/routes"
+          ],
+          "subscribe": [
+            "xdstp://B/envoy.config.route.v3.RouteConfiguration/routes"
+          ],
+          "unsubscribe": [],
+          "version": null,
+          "nonce": "",
+          "error": null,
+          "node": "netz-federation"
+        },
+        {
+          "source": "B",
+          "kind": "rds",
+          "names": [
+            "xdstp://B/envoy.config.route.v3.RouteConfiguration/routes"
+          ],
+          "subscribe": [],
+          "unsubscribe": [],
+          "version": null,
+          "nonce": "r-b1",
+          "error": null,
+          "node": null
+        },
+        {
+          "source": "B",
+          "kind": "cds",
+          "names": [
+            "xdstp://B/envoy.config.cluster.v3.Cluster/main"
+          ],
+          "subscribe": [
+            "xdstp://B/envoy.config.cluster.v3.Cluster/main"
+          ],
+          "unsubscribe": [],
+          "version": null,
+          "nonce": "",
+          "error": null,
+          "node": null
+        },
+        {
+          "source": "B",
+          "kind": "cds",
+          "names": [
+            "xdstp://B/envoy.config.cluster.v3.Cluster/main"
+          ],
+          "subscribe": [],
+          "unsubscribe": [],
+          "version": null,
+          "nonce": "c-b1",
+          "error": null,
+          "node": null
+        },
+        {
+          "source": "B",
+          "kind": "eds",
+          "names": [
+            "xdstp://B/envoy.config.endpoint.v3.ClusterLoadAssignment/main"
+          ],
+          "subscribe": [
+            "xdstp://B/envoy.config.endpoint.v3.ClusterLoadAssignment/main"
+          ],
+          "unsubscribe": [],
+          "version": null,
+          "nonce": "",
+          "error": null,
+          "node": null
+        },
+        {
+          "source": "B",
+          "kind": "eds",
+          "names": [
+            "xdstp://B/envoy.config.endpoint.v3.ClusterLoadAssignment/main"
+          ],
+          "subscribe": [],
+          "unsubscribe": [],
+          "version": null,
+          "nonce": "e-b1",
+          "error": null,
+          "node": null
+        },
+        {
+          "source": "B",
+          "kind": "cds",
+          "names": [
+            "xdstp://B/envoy.config.cluster.v3.Cluster/main"
+          ],
+          "subscribe": [],
+          "unsubscribe": [],
+          "version": null,
+          "nonce": "c-b-omit",
+          "error": null,
+          "node": null
+        },
+        {
+          "source": "B",
+          "kind": "rds",
+          "names": [
+            "xdstp://B/envoy.config.route.v3.RouteConfiguration/routes"
+          ],
+          "subscribe": [],
+          "unsubscribe": [],
+          "version": null,
+          "nonce": "r-b2",
+          "error": null,
+          "node": null
+        },
+        {
+          "source": "B",
+          "kind": "cds",
+          "names": [],
+          "subscribe": [],
+          "unsubscribe": [
+            "xdstp://B/envoy.config.cluster.v3.Cluster/main"
+          ],
+          "version": null,
+          "nonce": "",
+          "error": null,
+          "node": null
+        },
+        {
+          "source": "B",
+          "kind": "eds",
+          "names": [],
+          "subscribe": [],
+          "unsubscribe": [
+            "xdstp://B/envoy.config.endpoint.v3.ClusterLoadAssignment/main"
+          ],
+          "version": null,
+          "nonce": "",
+          "error": null,
+          "node": null
+        }
+      ],
+      "responses": [
+        {
+          "source": "B",
+          "kind": "rds",
+          "version": "r-b1",
+          "names": [
+            "xdstp://B/envoy.config.route.v3.RouteConfiguration/routes"
+          ],
+          "removed": [],
+          "sha256": [
+            "1ba25c76da73ee3d72aaeea447d9fa4fab274e346179da4816ddaee3e3792317"
+          ]
+        },
+        {
+          "source": "B",
+          "kind": "cds",
+          "version": "c-b1",
+          "names": [
+            "xdstp://B/envoy.config.cluster.v3.Cluster/main"
+          ],
+          "removed": [],
+          "sha256": [
+            "53462e00ae58d2ad76a60fa1a012180346302146612a32b6b3c47475934b61db"
+          ]
+        },
+        {
+          "source": "B",
+          "kind": "eds",
+          "version": "e-b1",
+          "names": [
+            "xdstp://B/envoy.config.endpoint.v3.ClusterLoadAssignment/main"
+          ],
+          "removed": [],
+          "sha256": [
+            "fc06249fab1e873206aa6c2706d0fa886010c5a843a03d2c710c1f4fae7d91f4"
+          ]
+        },
+        {
+          "source": "B",
+          "kind": "cds",
+          "version": "c-b-omit",
+          "names": [],
+          "removed": [
+            "xdstp://B/envoy.config.cluster.v3.Cluster/main"
+          ],
+          "sha256": []
+        },
+        {
+          "source": "B",
+          "kind": "rds",
+          "version": "r-b2",
+          "names": [
+            "xdstp://B/envoy.config.route.v3.RouteConfiguration/routes"
+          ],
+          "removed": [],
+          "sha256": [
+            "4d3ca062c6526e5bc1e3404baa62221856bd9d90e18592216ae5e9267fe2b5de"
+          ]
+        }
+      ],
+      "watches": {
+        "lds": [],
+        "rds": [
+          "xdstp://B/envoy.config.route.v3.RouteConfiguration/routes"
+        ],
+        "cds": [],
+        "eds": []
+      },
+      "accepted": {
+        "rds": "r-b2",
+        "cds": "c-b-omit",
+        "eds": "e-b1"
+      },
+      "lrs": [
+        {
+          "cluster_stats": [
+            {
+              "upstream_locality_stats": [
+                {
+                  "load_metric_stats": [],
+                  "upstream_endpoint_stats": [],
+                  "locality": {
+                    "region": "r",
+                    "zone": "z",
+                    "sub_zone": ""
+                  },
+                  "total_successful_requests": "1",
+                  "total_requests_in_progress": "1",
+                  "total_error_requests": "0",
+                  "priority": 0,
+                  "total_issued_requests": "2",
+                  "total_active_connections": "0",
+                  "total_new_connections": "0",
+                  "total_fail_connections": "0",
+                  "cpu_utilization": null,
+                  "mem_utilization": null,
+                  "application_utilization": null
+                }
+              ],
+              "dropped_requests": [],
+              "cluster_name": "xdstp://B/envoy.config.cluster.v3.Cluster/main",
+              "total_dropped_requests": "0",
+              "load_report_interval": {
+                "seconds": "0",
+                "nanos": 100034337
+              },
+              "cluster_service_name": "xdstp://B/envoy.config.endpoint.v3.ClusterLoadAssignment/main"
+            }
+          ],
+          "node": null
+        },
+        {
+          "cluster_stats": [
+            {
+              "upstream_locality_stats": [
+                {
+                  "load_metric_stats": [],
+                  "upstream_endpoint_stats": [],
+                  "locality": {
+                    "region": "r",
+                    "zone": "z",
+                    "sub_zone": ""
+                  },
+                  "total_successful_requests": "5",
+                  "total_requests_in_progress": "1",
+                  "total_error_requests": "0",
+                  "priority": 0,
+                  "total_issued_requests": "5",
+                  "total_active_connections": "0",
+                  "total_new_connections": "0",
+                  "total_fail_connections": "0",
+                  "cpu_utilization": null,
+                  "mem_utilization": null,
+                  "application_utilization": null
+                }
+              ],
+              "dropped_requests": [],
+              "cluster_name": "xdstp://B/envoy.config.cluster.v3.Cluster/main",
+              "total_dropped_requests": "0",
+              "load_report_interval": {
+                "seconds": "0",
+                "nanos": 100061815
+              },
+              "cluster_service_name": "xdstp://B/envoy.config.endpoint.v3.ClusterLoadAssignment/main"
+            }
+          ],
+          "node": null
+        },
+        {
+          "cluster_stats": [
+            {
+              "upstream_locality_stats": [
+                {
+                  "load_metric_stats": [],
+                  "upstream_endpoint_stats": [],
+                  "locality": {
+                    "region": "r",
+                    "zone": "z",
+                    "sub_zone": ""
+                  },
+                  "total_successful_requests": "1",
+                  "total_requests_in_progress": "0",
+                  "total_error_requests": "0",
+                  "priority": 0,
+                  "total_issued_requests": "0",
+                  "total_active_connections": "0",
+                  "total_new_connections": "0",
+                  "total_fail_connections": "0",
+                  "cpu_utilization": null,
+                  "mem_utilization": null,
+                  "application_utilization": null
+                }
+              ],
+              "dropped_requests": [],
+              "cluster_name": "xdstp://B/envoy.config.cluster.v3.Cluster/main",
+              "total_dropped_requests": "0",
+              "load_report_interval": {
+                "seconds": "0",
+                "nanos": 100108722
+              },
+              "cluster_service_name": "xdstp://B/envoy.config.endpoint.v3.ClusterLoadAssignment/main"
+            }
+          ],
+          "node": null
+        }
+      ],
+      "lrs_initials": [
+        {
+          "cluster_stats": [],
+          "node": {
+            "extensions": [],
+            "client_features": [
+              "envoy.lrs.supports_send_all_clusters"
+            ],
+            "listening_addresses": [],
+            "dynamic_parameters": {},
+            "id": "netz-federation",
+            "cluster": "",
+            "metadata": null,
+            "locality": null,
+            "user_agent_name": "netz",
+            "user_agent_version": "0.1.0"
+          }
+        }
+      ],
+      "totals": {
+        "xdstp://B/envoy.config.cluster.v3.Cluster/main": {
+          "issued": 7,
+          "successful": 7,
+          "failed": 0,
+          "in_progress": 0
+        }
+      }
+    }
+  },
+  "applications": [
+    {
+      "source": "B",
+      "label": "initial-b",
+      "authority": "service",
+      "path": "/fixture.Federation/Main",
+      "request_sha256": "27dee205bee9d727028ec3e1819461d84c7d5c511aa00a5a372908d871a9136c"
+    },
+    {
+      "source": "A",
+      "label": "initial-canary-a",
+      "authority": "service",
+      "path": "/fixture.Federation/Canary",
+      "request_sha256": "7a5b60a6b60b716479849d0a6f539e786d4c8506031ca594d06302146f588a1f"
+    },
+    {
+      "source": "B",
+      "label": "held-b",
+      "authority": "service",
+      "path": "/fixture.Federation/Main",
+      "request_sha256": "00456e3ed7114f432997e709bc353f9fec17bea7fb64ac0bf4aa88926bdf2972"
+    },
+    {
+      "source": "B",
+      "label": "b-omission",
+      "authority": "service",
+      "path": "/fixture.Federation/Main",
+      "request_sha256": "95a73db2b03d2c0d1236075801e6827756b2637e4ac8a27efb94857884530ac9"
+    },
+    {
+      "source": "B",
+      "label": "a-omission-b",
+      "authority": "service",
+      "path": "/fixture.Federation/Main",
+      "request_sha256": "5af32235485e7f87f80fbb5e1b0232b668ff8e3d9f89976560dc77691d2caa90"
+    },
+    {
+      "source": "A",
+      "label": "restored-canary-a",
+      "authority": "service",
+      "path": "/fixture.Federation/Canary",
+      "request_sha256": "6a566afdb78e2a42df8e8fd99e4d1b11d3d1178f60c2845a7f32491cc17145f8"
+    },
+    {
+      "source": "B",
+      "label": "nack-b",
+      "authority": "service",
+      "path": "/fixture.Federation/Main",
+      "request_sha256": "50c710539698d3089669c7eff85f134b89203cb4b151c3f5ba6c969dcd8e1436"
+    },
+    {
+      "source": "B",
+      "label": "pending-rds-b",
+      "authority": "service",
+      "path": "/fixture.Federation/Main",
+      "request_sha256": "fbd3ca99fe906227640cb38accb06a2c5f4b402126d036a55268341cd6d5bb7d"
+    },
+    {
+      "source": "B",
+      "label": "pending-cds-b",
+      "authority": "service",
+      "path": "/fixture.Federation/Main",
+      "request_sha256": "77e243cdc85aa91cde563920e306a87e73200aa93211695abb1542fb0134c8e3"
+    },
+    {
+      "source": "A",
+      "label": "replacement-a",
+      "authority": "service",
+      "path": "/fixture.Federation/Main",
+      "request_sha256": "23af9b149945abf84d777a949d59d8328520e454aa13cac7ce598e6a191780f1"
+    }
+  ],
+  "events": [
+    {
+      "order": 0,
+      "event": "discovery_request",
+      "source": "A",
+      "kind": "lds",
+      "names": [
+        "xdstp://A/envoy.config.listener.v3.Listener/service"
+      ],
+      "subscribe": [
+        "xdstp://A/envoy.config.listener.v3.Listener/service"
+      ],
+      "unsubscribe": [],
+      "version": null,
+      "nonce": "",
+      "error": null,
+      "node": "netz-federation"
+    },
+    {
+      "order": 1,
+      "event": "discovery_response",
+      "source": "A",
+      "kind": "lds",
+      "version": "l-a1",
+      "names": [
+        "xdstp://A/envoy.config.listener.v3.Listener/service"
+      ],
+      "removed": [],
+      "sha256": [
+        "e91a7fbd6e75bd1b960d6e3d51029bd9da380044063bbc13e4c7d949a75230b9"
+      ]
+    },
+    {
+      "order": 2,
+      "event": "discovery_request",
+      "source": "A",
+      "kind": "lds",
+      "names": [
+        "xdstp://A/envoy.config.listener.v3.Listener/service"
+      ],
+      "subscribe": [],
+      "unsubscribe": [],
+      "version": null,
+      "nonce": "l-a1",
+      "error": null,
+      "node": null
+    },
+    {
+      "order": 3,
+      "event": "discovery_request",
+      "source": "B",
+      "kind": "rds",
+      "names": [
+        "xdstp://B/envoy.config.route.v3.RouteConfiguration/routes"
+      ],
+      "subscribe": [
+        "xdstp://B/envoy.config.route.v3.RouteConfiguration/routes"
+      ],
+      "unsubscribe": [],
+      "version": null,
+      "nonce": "",
+      "error": null,
+      "node": "netz-federation"
+    },
+    {
+      "order": 4,
+      "event": "discovery_response",
+      "source": "B",
+      "kind": "rds",
+      "version": "r-b1",
+      "names": [
+        "xdstp://B/envoy.config.route.v3.RouteConfiguration/routes"
+      ],
+      "removed": [],
+      "sha256": [
+        "1ba25c76da73ee3d72aaeea447d9fa4fab274e346179da4816ddaee3e3792317"
+      ]
+    },
+    {
+      "order": 5,
+      "event": "discovery_request",
+      "source": "B",
+      "kind": "rds",
+      "names": [
+        "xdstp://B/envoy.config.route.v3.RouteConfiguration/routes"
+      ],
+      "subscribe": [],
+      "unsubscribe": [],
+      "version": null,
+      "nonce": "r-b1",
+      "error": null,
+      "node": null
+    },
+    {
+      "order": 6,
+      "event": "discovery_request",
+      "source": "B",
+      "kind": "cds",
+      "names": [
+        "xdstp://B/envoy.config.cluster.v3.Cluster/main"
+      ],
+      "subscribe": [
+        "xdstp://B/envoy.config.cluster.v3.Cluster/main"
+      ],
+      "unsubscribe": [],
+      "version": null,
+      "nonce": "",
+      "error": null,
+      "node": null
+    },
+    {
+      "order": 7,
+      "event": "discovery_response",
+      "source": "B",
+      "kind": "cds",
+      "version": "c-b1",
+      "names": [
+        "xdstp://B/envoy.config.cluster.v3.Cluster/main"
+      ],
+      "removed": [],
+      "sha256": [
+        "53462e00ae58d2ad76a60fa1a012180346302146612a32b6b3c47475934b61db"
+      ]
+    },
+    {
+      "order": 8,
+      "event": "discovery_request",
+      "source": "A",
+      "kind": "cds",
+      "names": [
+        "xdstp://A/envoy.config.cluster.v3.Cluster/canary"
+      ],
+      "subscribe": [
+        "xdstp://A/envoy.config.cluster.v3.Cluster/canary"
+      ],
+      "unsubscribe": [],
+      "version": null,
+      "nonce": "",
+      "error": null,
+      "node": null
+    },
+    {
+      "order": 9,
+      "event": "discovery_response",
+      "source": "A",
+      "kind": "cds",
+      "version": "c-a1",
+      "names": [
+        "xdstp://A/envoy.config.cluster.v3.Cluster/canary"
+      ],
+      "removed": [],
+      "sha256": [
+        "5e8d5368dd0ab19ebf4b092cde9486ce84c7bfbb041c28d7831aae5fb966dd5e"
+      ]
+    },
+    {
+      "order": 10,
+      "event": "discovery_request",
+      "source": "B",
+      "kind": "cds",
+      "names": [
+        "xdstp://B/envoy.config.cluster.v3.Cluster/main"
+      ],
+      "subscribe": [],
+      "unsubscribe": [],
+      "version": null,
+      "nonce": "c-b1",
+      "error": null,
+      "node": null
+    },
+    {
+      "order": 11,
+      "event": "discovery_request",
+      "source": "B",
+      "kind": "eds",
+      "names": [
+        "xdstp://B/envoy.config.endpoint.v3.ClusterLoadAssignment/main"
+      ],
+      "subscribe": [
+        "xdstp://B/envoy.config.endpoint.v3.ClusterLoadAssignment/main"
+      ],
+      "unsubscribe": [],
+      "version": null,
+      "nonce": "",
+      "error": null,
+      "node": null
+    },
+    {
+      "order": 12,
+      "event": "discovery_response",
+      "source": "B",
+      "kind": "eds",
+      "version": "e-b1",
+      "names": [
+        "xdstp://B/envoy.config.endpoint.v3.ClusterLoadAssignment/main"
+      ],
+      "removed": [],
+      "sha256": [
+        "fc06249fab1e873206aa6c2706d0fa886010c5a843a03d2c710c1f4fae7d91f4"
+      ]
+    },
+    {
+      "order": 13,
+      "event": "discovery_request",
+      "source": "A",
+      "kind": "cds",
+      "names": [
+        "xdstp://A/envoy.config.cluster.v3.Cluster/canary"
+      ],
+      "subscribe": [],
+      "unsubscribe": [],
+      "version": null,
+      "nonce": "c-a1",
+      "error": null,
+      "node": null
+    },
+    {
+      "order": 14,
+      "event": "discovery_request",
+      "source": "A",
+      "kind": "eds",
+      "names": [
+        "xdstp://A/envoy.config.endpoint.v3.ClusterLoadAssignment/canary"
+      ],
+      "subscribe": [
+        "xdstp://A/envoy.config.endpoint.v3.ClusterLoadAssignment/canary"
+      ],
+      "unsubscribe": [],
+      "version": null,
+      "nonce": "",
+      "error": null,
+      "node": null
+    },
+    {
+      "order": 15,
+      "event": "discovery_response",
+      "source": "A",
+      "kind": "eds",
+      "version": "e-a1",
+      "names": [
+        "xdstp://A/envoy.config.endpoint.v3.ClusterLoadAssignment/canary"
+      ],
+      "removed": [],
+      "sha256": [
+        "9fce16c379d89ac7c7f7b740b4df79672e3f0a62beea20c7419f221fcabce594"
+      ]
+    },
+    {
+      "order": 16,
+      "event": "discovery_request",
+      "source": "B",
+      "kind": "eds",
+      "names": [
+        "xdstp://B/envoy.config.endpoint.v3.ClusterLoadAssignment/main"
+      ],
+      "subscribe": [],
+      "unsubscribe": [],
+      "version": null,
+      "nonce": "e-b1",
+      "error": null,
+      "node": null
+    },
+    {
+      "order": 17,
+      "event": "discovery_request",
+      "source": "A",
+      "kind": "eds",
+      "names": [
+        "xdstp://A/envoy.config.endpoint.v3.ClusterLoadAssignment/canary"
+      ],
+      "subscribe": [],
+      "unsubscribe": [],
+      "version": null,
+      "nonce": "e-a1",
+      "error": null,
+      "node": null
+    },
+    {
+      "order": 18,
+      "event": "lrs_request",
+      "source": "A",
+      "initial": true,
+      "totals": {}
+    },
+    {
+      "order": 19,
+      "event": "lrs_request",
+      "source": "B",
+      "initial": true,
+      "totals": {}
+    },
+    {
+      "order": 20,
+      "event": "application_started",
+      "source": "B",
+      "label": "initial-b"
+    },
+    {
+      "order": 21,
+      "event": "application_completed",
+      "source": "B",
+      "label": "initial-b"
+    },
+    {
+      "order": 22,
+      "event": "application_started",
+      "source": "A",
+      "label": "initial-canary-a"
+    },
+    {
+      "order": 23,
+      "event": "application_completed",
+      "source": "A",
+      "label": "initial-canary-a"
+    },
+    {
+      "order": 24,
+      "event": "application_started",
+      "source": "B",
+      "label": "held-b"
+    },
+    {
+      "order": 25,
+      "event": "lrs_request",
+      "source": "A",
+      "initial": false,
+      "totals": {
+        "xdstp://A/envoy.config.cluster.v3.Cluster/canary": {
+          "issued": 1,
+          "successful": 1,
+          "failed": 0,
+          "in_progress": 0
+        }
+      }
+    },
+    {
+      "order": 26,
+      "event": "lrs_request",
+      "source": "B",
+      "initial": false,
+      "totals": {
+        "xdstp://B/envoy.config.cluster.v3.Cluster/main": {
+          "issued": 2,
+          "successful": 1,
+          "failed": 0,
+          "in_progress": 1
+        }
+      }
+    },
+    {
+      "order": 27,
+      "event": "barrier_completed",
+      "source": "B",
+      "label": "held-entered"
+    },
+    {
+      "order": 28,
+      "event": "discovery_response",
+      "source": "B",
+      "kind": "cds",
+      "version": "c-b-omit",
+      "names": [],
+      "removed": [
+        "xdstp://B/envoy.config.cluster.v3.Cluster/main"
+      ],
+      "sha256": []
+    },
+    {
+      "order": 29,
+      "event": "barrier_completed",
+      "source": "B",
+      "label": "omit-b"
+    },
+    {
+      "order": 30,
+      "event": "discovery_request",
+      "source": "B",
+      "kind": "cds",
+      "names": [
+        "xdstp://B/envoy.config.cluster.v3.Cluster/main"
+      ],
+      "subscribe": [],
+      "unsubscribe": [],
+      "version": null,
+      "nonce": "c-b-omit",
+      "error": null,
+      "node": null
+    },
+    {
+      "order": 31,
+      "event": "application_started",
+      "source": "B",
+      "label": "b-omission"
+    },
+    {
+      "order": 32,
+      "event": "application_completed",
+      "source": "B",
+      "label": "b-omission"
+    },
+    {
+      "order": 33,
+      "event": "discovery_response",
+      "source": "A",
+      "kind": "cds",
+      "version": "c-a-omit",
+      "names": [],
+      "removed": [
+        "xdstp://A/envoy.config.cluster.v3.Cluster/canary"
+      ],
+      "sha256": []
+    },
+    {
+      "order": 34,
+      "event": "barrier_completed",
+      "source": "A",
+      "label": "omit-a"
+    },
+    {
+      "order": 35,
+      "event": "discovery_request",
+      "source": "A",
+      "kind": "cds",
+      "names": [
+        "xdstp://A/envoy.config.cluster.v3.Cluster/canary"
+      ],
+      "subscribe": [],
+      "unsubscribe": [],
+      "version": null,
+      "nonce": "c-a-omit",
+      "error": null,
+      "node": null
+    },
+    {
+      "order": 36,
+      "event": "application_started",
+      "source": "B",
+      "label": "a-omission-b"
+    },
+    {
+      "order": 37,
+      "event": "application_completed",
+      "source": "B",
+      "label": "a-omission-b"
+    },
+    {
+      "order": 38,
+      "event": "discovery_response",
+      "source": "A",
+      "kind": "cds",
+      "version": "c-a2",
+      "names": [
+        "xdstp://A/envoy.config.cluster.v3.Cluster/canary"
+      ],
+      "removed": [],
+      "sha256": [
+        "5e8d5368dd0ab19ebf4b092cde9486ce84c7bfbb041c28d7831aae5fb966dd5e"
+      ]
+    },
+    {
+      "order": 39,
+      "event": "discovery_response",
+      "source": "A",
+      "kind": "eds",
+      "version": "e-a2",
+      "names": [
+        "xdstp://A/envoy.config.endpoint.v3.ClusterLoadAssignment/canary"
+      ],
+      "removed": [],
+      "sha256": [
+        "9fce16c379d89ac7c7f7b740b4df79672e3f0a62beea20c7419f221fcabce594"
+      ]
+    },
+    {
+      "order": 40,
+      "event": "barrier_completed",
+      "source": "A",
+      "label": "restore-a"
+    },
+    {
+      "order": 41,
+      "event": "discovery_request",
+      "source": "A",
+      "kind": "cds",
+      "names": [
+        "xdstp://A/envoy.config.cluster.v3.Cluster/canary"
+      ],
+      "subscribe": [],
+      "unsubscribe": [],
+      "version": null,
+      "nonce": "c-a2",
+      "error": null,
+      "node": null
+    },
+    {
+      "order": 42,
+      "event": "discovery_request",
+      "source": "A",
+      "kind": "eds",
+      "names": [
+        "xdstp://A/envoy.config.endpoint.v3.ClusterLoadAssignment/canary"
+      ],
+      "subscribe": [],
+      "unsubscribe": [],
+      "version": null,
+      "nonce": "e-a2",
+      "error": null,
+      "node": null
+    },
+    {
+      "order": 43,
+      "event": "application_started",
+      "source": "A",
+      "label": "restored-canary-a"
+    },
+    {
+      "order": 44,
+      "event": "application_completed",
+      "source": "A",
+      "label": "restored-canary-a"
+    },
+    {
+      "order": 45,
+      "event": "discovery_response",
+      "source": "A",
+      "kind": "cds",
+      "version": "c-a-bad",
+      "names": [
+        "xdstp://A/envoy.config.cluster.v3.Cluster/canary"
+      ],
+      "removed": [],
+      "sha256": [
+        "e7bd7435e45698868818937580fd4477e585dfa74ecdbdab5eb9e0fbace2fa07"
+      ]
+    },
+    {
+      "order": 46,
+      "event": "barrier_completed",
+      "source": "A",
+      "label": "malformed-a"
+    },
+    {
+      "order": 47,
+      "event": "discovery_request",
+      "source": "A",
+      "kind": "cds",
+      "names": [
+        "xdstp://A/envoy.config.cluster.v3.Cluster/canary"
+      ],
+      "subscribe": [],
+      "unsubscribe": [],
+      "version": null,
+      "nonce": "c-a-bad",
+      "error": {
+        "details": [],
+        "code": 3,
+        "message": "UnsupportedCdsFeature"
+      },
+      "node": null
+    },
+    {
+      "order": 48,
+      "event": "application_started",
+      "source": "B",
+      "label": "nack-b"
+    },
+    {
+      "order": 49,
+      "event": "application_completed",
+      "source": "B",
+      "label": "nack-b"
+    },
+    {
+      "order": 50,
+      "event": "discovery_response",
+      "source": "B",
+      "kind": "rds",
+      "version": "r-b2",
+      "names": [
+        "xdstp://B/envoy.config.route.v3.RouteConfiguration/routes"
+      ],
+      "removed": [],
+      "sha256": [
+        "4d3ca062c6526e5bc1e3404baa62221856bd9d90e18592216ae5e9267fe2b5de"
+      ]
+    },
+    {
+      "order": 51,
+      "event": "barrier_completed",
+      "source": "B",
+      "label": "switch-route"
+    },
+    {
+      "order": 52,
+      "event": "discovery_request",
+      "source": "B",
+      "kind": "rds",
+      "names": [
+        "xdstp://B/envoy.config.route.v3.RouteConfiguration/routes"
+      ],
+      "subscribe": [],
+      "unsubscribe": [],
+      "version": null,
+      "nonce": "r-b2",
+      "error": null,
+      "node": null
+    },
+    {
+      "order": 53,
+      "event": "discovery_request",
+      "source": "A",
+      "kind": "cds",
+      "names": [
+        "xdstp://A/envoy.config.cluster.v3.Cluster/canary",
+        "xdstp://A/envoy.config.cluster.v3.Cluster/main"
+      ],
+      "subscribe": [
+        "xdstp://A/envoy.config.cluster.v3.Cluster/main"
+      ],
+      "unsubscribe": [],
+      "version": null,
+      "nonce": "",
+      "error": null,
+      "node": null
+    },
+    {
+      "order": 54,
+      "event": "application_started",
+      "source": "B",
+      "label": "pending-rds-b"
+    },
+    {
+      "order": 55,
+      "event": "application_completed",
+      "source": "B",
+      "label": "pending-rds-b"
+    },
+    {
+      "order": 56,
+      "event": "discovery_response",
+      "source": "A",
+      "kind": "cds",
+      "version": "c-a3",
+      "names": [
+        "xdstp://A/envoy.config.cluster.v3.Cluster/canary",
+        "xdstp://A/envoy.config.cluster.v3.Cluster/main"
+      ],
+      "removed": [],
+      "sha256": [
+        "5e8d5368dd0ab19ebf4b092cde9486ce84c7bfbb041c28d7831aae5fb966dd5e",
+        "3d94470aa1b9d7dc57eafa215e7b78c076088b20f3359dc00884aedcd77d677f"
+      ]
+    },
+    {
+      "order": 57,
+      "event": "barrier_completed",
+      "source": "A",
+      "label": "complete-a-cds"
+    },
+    {
+      "order": 58,
+      "event": "discovery_request",
+      "source": "A",
+      "kind": "cds",
+      "names": [
+        "xdstp://A/envoy.config.cluster.v3.Cluster/canary",
+        "xdstp://A/envoy.config.cluster.v3.Cluster/main"
+      ],
+      "subscribe": [],
+      "unsubscribe": [],
+      "version": null,
+      "nonce": "c-a3",
+      "error": null,
+      "node": null
+    },
+    {
+      "order": 59,
+      "event": "discovery_request",
+      "source": "A",
+      "kind": "eds",
+      "names": [
+        "xdstp://A/envoy.config.endpoint.v3.ClusterLoadAssignment/canary",
+        "xdstp://A/envoy.config.endpoint.v3.ClusterLoadAssignment/main"
+      ],
+      "subscribe": [
+        "xdstp://A/envoy.config.endpoint.v3.ClusterLoadAssignment/main"
+      ],
+      "unsubscribe": [],
+      "version": null,
+      "nonce": "",
+      "error": null,
+      "node": null
+    },
+    {
+      "order": 60,
+      "event": "application_started",
+      "source": "B",
+      "label": "pending-cds-b"
+    },
+    {
+      "order": 61,
+      "event": "application_completed",
+      "source": "B",
+      "label": "pending-cds-b"
+    },
+    {
+      "order": 62,
+      "event": "discovery_response",
+      "source": "A",
+      "kind": "eds",
+      "version": "e-a3",
+      "names": [
+        "xdstp://A/envoy.config.endpoint.v3.ClusterLoadAssignment/canary",
+        "xdstp://A/envoy.config.endpoint.v3.ClusterLoadAssignment/main"
+      ],
+      "removed": [],
+      "sha256": [
+        "9fce16c379d89ac7c7f7b740b4df79672e3f0a62beea20c7419f221fcabce594",
+        "1e1cf0652de562333bb26e39dc95758f5cbb545bf0b9e158331497de08521ab6"
+      ]
+    },
+    {
+      "order": 63,
+      "event": "barrier_completed",
+      "source": "A",
+      "label": "complete-a-eds"
+    },
+    {
+      "order": 64,
+      "event": "discovery_request",
+      "source": "A",
+      "kind": "eds",
+      "names": [
+        "xdstp://A/envoy.config.endpoint.v3.ClusterLoadAssignment/canary",
+        "xdstp://A/envoy.config.endpoint.v3.ClusterLoadAssignment/main"
+      ],
+      "subscribe": [],
+      "unsubscribe": [],
+      "version": null,
+      "nonce": "e-a3",
+      "error": null,
+      "node": null
+    },
+    {
+      "order": 65,
+      "event": "application_started",
+      "source": "A",
+      "label": "replacement-a"
+    },
+    {
+      "order": 66,
+      "event": "application_completed",
+      "source": "A",
+      "label": "replacement-a"
+    },
+    {
+      "order": 67,
+      "event": "lrs_request",
+      "source": "A",
+      "initial": false,
+      "totals": {
+        "xdstp://A/envoy.config.cluster.v3.Cluster/canary": {
+          "issued": 2,
+          "successful": 2,
+          "failed": 0,
+          "in_progress": 0
+        },
+        "xdstp://A/envoy.config.cluster.v3.Cluster/main": {
+          "issued": 1,
+          "successful": 1,
+          "failed": 0,
+          "in_progress": 0
+        }
+      }
+    },
+    {
+      "order": 68,
+      "event": "lrs_request",
+      "source": "B",
+      "initial": false,
+      "totals": {
+        "xdstp://B/envoy.config.cluster.v3.Cluster/main": {
+          "issued": 7,
+          "successful": 6,
+          "failed": 0,
+          "in_progress": 1
+        }
+      }
+    },
+    {
+      "order": 69,
+      "event": "held_released_after_a_replacement"
+    },
+    {
+      "order": 70,
+      "event": "application_completed",
+      "source": "B",
+      "label": "held-b"
+    },
+    {
+      "order": 71,
+      "event": "barrier_completed",
+      "source": "B",
+      "label": "release-held"
+    },
+    {
+      "order": 72,
+      "event": "discovery_request",
+      "source": "B",
+      "kind": "cds",
+      "names": [],
+      "subscribe": [],
+      "unsubscribe": [
+        "xdstp://B/envoy.config.cluster.v3.Cluster/main"
+      ],
+      "version": null,
+      "nonce": "",
+      "error": null,
+      "node": null
+    },
+    {
+      "order": 73,
+      "event": "discovery_request",
+      "source": "B",
+      "kind": "eds",
+      "names": [],
+      "subscribe": [],
+      "unsubscribe": [
+        "xdstp://B/envoy.config.endpoint.v3.ClusterLoadAssignment/main"
+      ],
+      "version": null,
+      "nonce": "",
+      "error": null,
+      "node": null
+    },
+    {
+      "order": 74,
+      "event": "lrs_request",
+      "source": "A",
+      "initial": false,
+      "totals": {
+        "xdstp://A/envoy.config.cluster.v3.Cluster/canary": {
+          "issued": 2,
+          "successful": 2,
+          "failed": 0,
+          "in_progress": 0
+        },
+        "xdstp://A/envoy.config.cluster.v3.Cluster/main": {
+          "issued": 1,
+          "successful": 1,
+          "failed": 0,
+          "in_progress": 0
+        }
+      }
+    },
+    {
+      "order": 75,
+      "event": "lrs_request",
+      "source": "B",
+      "initial": false,
+      "totals": {
+        "xdstp://B/envoy.config.cluster.v3.Cluster/main": {
+          "issued": 7,
+          "successful": 7,
+          "failed": 0,
+          "in_progress": 0
+        }
+      }
+    },
+    {
+      "order": 76,
+      "event": "barrier_completed",
+      "source": "B",
+      "label": "final-reports"
+    }
+  ],
+  "native_output": "FEDERATION_EVENT {\"authority\":\"A\",\"type_url\":\"type.googleapis.com/envoy.config.listener.v3.Listener\",\"nonce\":\"l-a1\",\"rejected\":false,\"revision\":2}\nFEDERATION_EVENT {\"authority\":\"B\",\"type_url\":\"type.googleapis.com/envoy.config.route.v3.RouteConfiguration\",\"nonce\":\"r-b1\",\"rejected\":false,\"revision\":2}\nFEDERATION_EVENT {\"authority\":\"B\",\"type_url\":\"type.googleapis.com/envoy.config.cluster.v3.Cluster\",\"nonce\":\"c-b1\",\"rejected\":false,\"revision\":2}\nFEDERATION_EVENT {\"authority\":\"A\",\"type_url\":\"type.googleapis.com/envoy.config.cluster.v3.Cluster\",\"nonce\":\"c-a1\",\"rejected\":false,\"revision\":2}\nFEDERATION_EVENT {\"authority\":\"B\",\"type_url\":\"type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment\",\"nonce\":\"e-b1\",\"rejected\":false,\"revision\":2}\nFEDERATION_EVENT {\"authority\":\"A\",\"type_url\":\"type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment\",\"nonce\":\"e-a1\",\"rejected\":false,\"revision\":3}\nFEDERATION_EVENT {\"authority\":\"B\",\"type_url\":\"type.googleapis.com/envoy.config.cluster.v3.Cluster\",\"nonce\":\"c-b-omit\",\"rejected\":false,\"revision\":3}\nFEDERATION_EVENT {\"authority\":\"A\",\"type_url\":\"type.googleapis.com/envoy.config.cluster.v3.Cluster\",\"nonce\":\"c-a-omit\",\"rejected\":false,\"revision\":4}\nFEDERATION_EVENT {\"authority\":\"A\",\"type_url\":\"type.googleapis.com/envoy.config.cluster.v3.Cluster\",\"nonce\":\"c-a2\",\"rejected\":false,\"revision\":5}\nFEDERATION_EVENT {\"authority\":\"A\",\"type_url\":\"type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment\",\"nonce\":\"e-a2\",\"rejected\":false,\"revision\":6}\nFEDERATION_EVENT {\"authority\":\"A\",\"type_url\":\"type.googleapis.com/envoy.config.cluster.v3.Cluster\",\"nonce\":\"c-a-bad\",\"rejected\":true,\"revision\":6}\nFEDERATION_EVENT {\"authority\":\"B\",\"type_url\":\"type.googleapis.com/envoy.config.route.v3.RouteConfiguration\",\"nonce\":\"r-b2\",\"rejected\":false,\"revision\":6}\nFEDERATION_EVENT {\"authority\":\"A\",\"type_url\":\"type.googleapis.com/envoy.config.cluster.v3.Cluster\",\"nonce\":\"c-a3\",\"rejected\":false,\"revision\":6}\nFEDERATION_EVENT {\"authority\":\"A\",\"type_url\":\"type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment\",\"nonce\":\"e-a3\",\"rejected\":false,\"revision\":7}\nFEDERATION_RESULT {\"status\":\"passed\",\"mode\":\"delta\",\"source_a\":\"64be914cdd17882c4b51a61cd0a483719432f3a1b414dace86795edda26f248c\",\"source_b\":\"f15e0a132b98b4a5000cfdc898d16fa74b467d1dc7942b44d8c92b115876a991\",\"managed_resource_routing\":true,\"source_features_isolated\":true,\"foreign_cache_preserved\":true,\"pending_route_retained\":true,\"held_completion_retained_b\":true,\"automatic_lrs\":true,\"manual_subscription_routing\":false}\n",
+  "proto_sha256": {
+    "@grpc/grpc-js-xds/deps/envoy-api/envoy/annotations/deprecation.proto": "64af0d3b34f517899a05f530d4d5597d3495d72daf3e61e5da5f9b8bf0291b9a",
+    "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/accesslog/v3/accesslog.proto": "dd198a860fa62250b0e7726cebfd7568448a18d6f6d7ba8b08338b57d00d6a25",
+    "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/cluster/v3/circuit_breaker.proto": "317e9d4d23d03ea211d45056d7154d623e791cb0135d594f66dbe6363bd1ad93",
+    "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/cluster/v3/cluster.proto": "a163a314125ed9f1a6d966426c5cf42ae8be726c826ddd05df3dc69f4ab09942",
+    "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/cluster/v3/filter.proto": "cf02871b7f1ca8dc26c3f1bc48eb8a3faee0b880e748094b1897b77ab269028c",
+    "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/cluster/v3/outlier_detection.proto": "fa6d069143de56ced0b342aec48a45c4c5bdfa7f3ae900e627e7c284f422534d",
+    "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/core/v3/address.proto": "b65ff45ac25830d4ffff7fe370f152a92cd6cc880d859109d591fc6ab114bd12",
+    "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/core/v3/backoff.proto": "6357b234c4fe90084f330de9e2b53c0be9a5b40b82bfbe4d3339bf21ddb4d857",
+    "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/core/v3/base.proto": "7100d55f77dc8ae318ab9ebed11fbcd90afa44dd6c14511e3ee2312397edc9fe",
+    "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/core/v3/config_source.proto": "221023ecf8ce8c89a992afd3aa5507165a3f3fe6956127d35421c6bfc72eb35a",
+    "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/core/v3/event_service_config.proto": "0bbf60d26c0c9cec1880b032e9a4653725e938cb64d110d8b3e32ca4ec523abd",
+    "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/core/v3/extension.proto": "9ed81e39f1c1c1e121336d04f87e711e597f62e0df79e790fb31c8efc70c1ece",
+    "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/core/v3/grpc_service.proto": "7cef169c20c7137947fbfb2b6b68e0378feaad5f94dc366bff7bbdf61ced6ef9",
+    "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/core/v3/health_check.proto": "8c1c55284573c00b8fee1cbe7d10a5eed27c54ddd7312c642395069f23e5ac3a",
+    "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/core/v3/http_uri.proto": "9b5ee5cdd55149ea94859bf83f8aee180b602400b9ba976405a2265f0fcf054c",
+    "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/core/v3/protocol.proto": "a4439536916827fa91c91ab37f90fd931cc772abd4be0171df047adeb896d228",
+    "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/core/v3/proxy_protocol.proto": "0351d3cee07dfc0d78ee2a2906158fd159cd21db4cba7857824c2091a77bf933",
+    "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/core/v3/resolver.proto": "7f5293785e59e2e7fd825ebea4473fad067e6e912dfc7b05a1221bd7ba0ad61e",
+    "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/core/v3/socket_option.proto": "51af907f01fa5105c0c371b9645ea42ac82d3f38f930b5185c064a573f06b6eb",
+    "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/core/v3/substitution_format_string.proto": "67d1363a88f028d047b0de5abe0e1d07eee19e9e45610c044d3374ca1de674d0",
+    "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/core/v3/udp_socket_config.proto": "4f9a035b938049c326b63d28868afcda6e35615538bcee591b2670a53d9c8014",
+    "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/endpoint/v3/endpoint.proto": "2110b9d177d0e986174bde50647b6694b3f665168c82f35db9bb2444b32c835d",
+    "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/endpoint/v3/endpoint_components.proto": "8991de6d667f09ae701bf493b3ec3949a7fcb30ef6351cf6c3ca5b4abb0b6b9e",
+    "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/endpoint/v3/load_report.proto": "f0981c753710fe83f845c09d0e06d217c713c5799508c9c17766fa7bbc3482b0",
+    "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/listener/v3/api_listener.proto": "180adcdce55dfcc5d89382ea53cd8a44035ee9676caffb22d5374476c9836991",
+    "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/listener/v3/listener.proto": "8f1fc0f065aefb9ee95345f08cf3fdd9124bb12478621d5e31827ac465b4d241",
+    "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/listener/v3/listener_components.proto": "142b8be6becddb50c0b356ddb6cb9541f8df45c5f8560ce1243f9241a6ba4d8a",
+    "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/listener/v3/quic_config.proto": "efe3bbf01c7034f31e110c499d200ad41735d9b796708320dbf9fe3c427cffcd",
+    "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/listener/v3/udp_listener_config.proto": "a9a723696bb3701775a9eeff4aa8f2db2b2484a48a4ab4e25da930aa6051ad32",
+    "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/route/v3/route.proto": "872fbd2d981201efd64c461d674fb61ee893fa4a04f203384bf95c808fece12e",
+    "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/route/v3/route_components.proto": "a931ba426abf2def45188f95ac82bb6feb44148661e0435957c7eb8b5573be15",
+    "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/route/v3/scoped_route.proto": "8abb9db2601c0bdc1f89493781a4125331643d0be14e4330915e4b5b87d592e3",
+    "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/trace/v3/http_tracer.proto": "c62a26c1feaa4b5693b785782c8affaa477b0affbbcf198f47258434d294bde6",
+    "@grpc/grpc-js-xds/deps/envoy-api/envoy/data/accesslog/v3/accesslog.proto": "416c603c6e053e46e028f90039b69229646e437238749c7e7a73cc722b136a22",
+    "@grpc/grpc-js-xds/deps/envoy-api/envoy/extensions/filters/network/http_connection_manager/v3/http_connection_manager.proto": "992a37c41bf728d2cbd80834373b59d8b969f0f84b577ae5c053960343a68e9f",
+    "@grpc/grpc-js-xds/deps/envoy-api/envoy/service/discovery/v3/ads.proto": "b4455efa45f868f04ce11d415d9a712104edbe6ec476ce7df6da57d3997fe0af",
+    "@grpc/grpc-js-xds/deps/envoy-api/envoy/service/discovery/v3/discovery.proto": "18ade78685cbec0cdf5bdf0304a359124bd0524e598ebd41ffaf87d22cfbfa6b",
+    "@grpc/grpc-js-xds/deps/envoy-api/envoy/service/load_stats/v3/lrs.proto": "f3ec006ea4b739ccbc9976c5f092952d8b8b2d1cfe8684c09512eb0515c10611",
+    "@grpc/grpc-js-xds/deps/envoy-api/envoy/type/http/v3/path_transformation.proto": "2700e6fb7362cf5bf960949641ed9a2a031199ca440cedb9e16ce71fe050c13a",
+    "@grpc/grpc-js-xds/deps/envoy-api/envoy/type/matcher/v3/metadata.proto": "e60f6fe2118dbbe884a54412a312981ac05bb748737e9ab30942fe5f65a0627c",
+    "@grpc/grpc-js-xds/deps/envoy-api/envoy/type/matcher/v3/number.proto": "c4a40eb8eb457958d11bfdac3b7609e567d8b4e7389fd2559a1e82721b468fe5",
+    "@grpc/grpc-js-xds/deps/envoy-api/envoy/type/matcher/v3/regex.proto": "d1e3056ab7480fca958f5b384ab3df4548c21fd8851745669f03f435a8549551",
+    "@grpc/grpc-js-xds/deps/envoy-api/envoy/type/matcher/v3/string.proto": "9a26b73d5474c58e1fab5bb4b62f1386e99cfe0036835e610ef6498daca822c0",
+    "@grpc/grpc-js-xds/deps/envoy-api/envoy/type/matcher/v3/value.proto": "d68d9852966a8ac26f51bb8a84346e340fc0280c2ad07f85b0d1ac0a4aeb6a68",
+    "@grpc/grpc-js-xds/deps/envoy-api/envoy/type/metadata/v3/metadata.proto": "8b1b0b33da7026e8d41c25b6aa1aceddfbe90ed9038c1202a6918dcbf9363280",
+    "@grpc/grpc-js-xds/deps/envoy-api/envoy/type/tracing/v3/custom_tag.proto": "bb54ca01e224033c68cff12a78b11d4a6131406150109b3a3e1c151808a976a2",
+    "@grpc/grpc-js-xds/deps/envoy-api/envoy/type/v3/http.proto": "c7cbf21ccf9c18064250fecb816bcbe3700b4886a9447a91bdb4246d37aeda68",
+    "@grpc/grpc-js-xds/deps/envoy-api/envoy/type/v3/percent.proto": "8fd615d0d0676bcbaf9dcda971066a8e2108b51c14e36ccf1be7b639e958b24b",
+    "@grpc/grpc-js-xds/deps/envoy-api/envoy/type/v3/range.proto": "a27f4e6a9eb2fa9d2ca090b5b060794f946e89e8bfc4c8cf90aad54f13fc3918",
+    "@grpc/grpc-js-xds/deps/envoy-api/envoy/type/v3/semantic_version.proto": "ee3d8ec40fa9024dccee9411e4e9b536f1fd788ce88102fac31efbd706116fc3",
+    "@grpc/grpc-js-xds/deps/googleapis/google/rpc/status.proto": "03b716b8828a03c382c71c0eb4316f0e7d816a25a5845db0ee4ddacc9fd5c3af",
+    "@grpc/grpc-js-xds/deps/protoc-gen-validate/validate/validate.proto": "e56269caa0b6e3531055275cfef9539af46606e8ed26bfc8f615cf9f75b41d71",
+    "@grpc/grpc-js-xds/deps/xds/udpa/annotations/migrate.proto": "90d855b75b1174b96e65915d93402756716036f30797d5de0faca2297ae2d528",
+    "@grpc/grpc-js-xds/deps/xds/udpa/annotations/security.proto": "c8a05d6e7e16133e39bb7fb9866f6cdeaa60c32bc8785e90a7c4289c239d31f9",
+    "@grpc/grpc-js-xds/deps/xds/udpa/annotations/sensitive.proto": "72d642326a0b149967dca865d1775211d033bf388ea554cc834ef2c9ddb3b70e",
+    "@grpc/grpc-js-xds/deps/xds/udpa/annotations/status.proto": "7a24aa255f54940986bf775c2c2affb3c57136173a1461f4167a046dec885246",
+    "@grpc/grpc-js-xds/deps/xds/udpa/annotations/versioning.proto": "acd27bfb3f023f47a50521bfc89c84dc247b03fd87a9f7eea22b9735ae6c730b",
+    "@grpc/grpc-js-xds/deps/xds/xds/annotations/v3/status.proto": "64863c619e76931aba5fc1bb5c31eb04867f1a33ee6bc07f3a6969625800b374",
+    "@grpc/grpc-js-xds/deps/xds/xds/core/v3/authority.proto": "0cd94911e6084a7e304d28d3dcd8113c3d0236d1c6cefad9c60573dc1ecbd685",
+    "@grpc/grpc-js-xds/deps/xds/xds/core/v3/collection_entry.proto": "76c8aefae64a5318e9807cdadc3c6100b24f7fd63804f9cf4089e6ecf0e04970",
+    "@grpc/grpc-js-xds/deps/xds/xds/core/v3/context_params.proto": "44a53be3f020fb091ae4a175abc933fac52b7508ea6b422ca816eb2547568e2b",
+    "@grpc/grpc-js-xds/deps/xds/xds/core/v3/extension.proto": "ce29123796beee74510a3057e3988b97b09b1e3d1a719a3d86a89fc992d01017",
+    "@grpc/grpc-js-xds/deps/xds/xds/core/v3/resource_locator.proto": "5604fce2ba3481321cb5b318c840a6f797f4b89bacc365b1cef80da60c4ee587",
+    "@grpc/grpc-js-xds/deps/xds/xds/type/matcher/v3/matcher.proto": "b6e9e468e1ad18231b08f0c43a5a5642a9a94e8bdcf585a68e12aba8216ca035",
+    "@grpc/grpc-js-xds/deps/xds/xds/type/matcher/v3/regex.proto": "8a78a2c9d2f819511fdd99fc3390a37a0c01d9ee0ad10d7216eefb7c10e35924",
+    "@grpc/grpc-js-xds/deps/xds/xds/type/matcher/v3/string.proto": "6b1b167f845db1f41ca3df072e40696a9eeeb14173f363da4a76e84f27f17a16",
+    "protobufjs-builtin:google/protobuf/any.proto": "2a9a97f09767300438fe6812e5335f9c74c530779bd9e3d23221ea0436160a57",
+    "protobufjs-builtin:google/protobuf/descriptor.proto": "44d4f764e8f7788855e51a832c02563b68276bdb4bbd5cf26c4a78bbb38167ba",
+    "protobufjs-builtin:google/protobuf/duration.proto": "5d8c287bf36774df2808943eca819293d7bf9e18d55fb33ade00e2c086c530b2",
+    "protobufjs-builtin:google/protobuf/empty.proto": "2b6513c368ca73a95a3101ea86c8d5183b984b7c886e8b361cb054cfe32b5423",
+    "protobufjs-builtin:google/protobuf/struct.proto": "12f00866b06a3a21998dfc90571c308400df9a3eeb495a64506551199b81a1fb",
+    "protobufjs-builtin:google/protobuf/timestamp.proto": "bf8b0e0645f9b601d389bde707735de7ddca52544ef95a776642b03e4647e2f7",
+    "protobufjs-builtin:google/protobuf/wrappers.proto": "64ec6254e6dd499dfff40200badfeff5cf90233ba860315cac99fefe7cae7665"
+  },
+  "builtin_proto_provenance": {
+    "protobufjs-builtin:google/protobuf/any.proto": {
+      "kind": "protobufjs-builtin",
+      "logical_name": "google/protobuf/any.proto",
+      "descriptor_encoding": "canonical-json",
+      "descriptor_sha256": "2a9a97f09767300438fe6812e5335f9c74c530779bd9e3d23221ea0436160a57",
+      "package_source_sha256": {
+        "protobufjs/src/common.js": "577786d95c5cb3e11eb475342735c7cf8c71ecb4456d9f07258d60af8a1bfe9a",
+        "protobufjs/src/root.js": "1f610f79137dff45ce2ec4e0f742ae43f26b296f2518f4ba41e0a497af5ad624",
+        "protobufjs/package.json": "0e56b70de03bffc143e74311b42ae22b557370a4a1f4b5066568fbc77857639a"
+      }
+    },
+    "protobufjs-builtin:google/protobuf/descriptor.proto": {
+      "kind": "protobufjs-builtin",
+      "logical_name": "google/protobuf/descriptor.proto",
+      "descriptor_encoding": "canonical-json",
+      "descriptor_sha256": "44d4f764e8f7788855e51a832c02563b68276bdb4bbd5cf26c4a78bbb38167ba",
+      "package_source_sha256": {
+        "protobufjs/src/common.js": "577786d95c5cb3e11eb475342735c7cf8c71ecb4456d9f07258d60af8a1bfe9a",
+        "protobufjs/src/root.js": "1f610f79137dff45ce2ec4e0f742ae43f26b296f2518f4ba41e0a497af5ad624",
+        "protobufjs/package.json": "0e56b70de03bffc143e74311b42ae22b557370a4a1f4b5066568fbc77857639a"
+      }
+    },
+    "protobufjs-builtin:google/protobuf/duration.proto": {
+      "kind": "protobufjs-builtin",
+      "logical_name": "google/protobuf/duration.proto",
+      "descriptor_encoding": "canonical-json",
+      "descriptor_sha256": "5d8c287bf36774df2808943eca819293d7bf9e18d55fb33ade00e2c086c530b2",
+      "package_source_sha256": {
+        "protobufjs/src/common.js": "577786d95c5cb3e11eb475342735c7cf8c71ecb4456d9f07258d60af8a1bfe9a",
+        "protobufjs/src/root.js": "1f610f79137dff45ce2ec4e0f742ae43f26b296f2518f4ba41e0a497af5ad624",
+        "protobufjs/package.json": "0e56b70de03bffc143e74311b42ae22b557370a4a1f4b5066568fbc77857639a"
+      }
+    },
+    "protobufjs-builtin:google/protobuf/empty.proto": {
+      "kind": "protobufjs-builtin",
+      "logical_name": "google/protobuf/empty.proto",
+      "descriptor_encoding": "canonical-json",
+      "descriptor_sha256": "2b6513c368ca73a95a3101ea86c8d5183b984b7c886e8b361cb054cfe32b5423",
+      "package_source_sha256": {
+        "protobufjs/src/common.js": "577786d95c5cb3e11eb475342735c7cf8c71ecb4456d9f07258d60af8a1bfe9a",
+        "protobufjs/src/root.js": "1f610f79137dff45ce2ec4e0f742ae43f26b296f2518f4ba41e0a497af5ad624",
+        "protobufjs/package.json": "0e56b70de03bffc143e74311b42ae22b557370a4a1f4b5066568fbc77857639a"
+      }
+    },
+    "protobufjs-builtin:google/protobuf/struct.proto": {
+      "kind": "protobufjs-builtin",
+      "logical_name": "google/protobuf/struct.proto",
+      "descriptor_encoding": "canonical-json",
+      "descriptor_sha256": "12f00866b06a3a21998dfc90571c308400df9a3eeb495a64506551199b81a1fb",
+      "package_source_sha256": {
+        "protobufjs/src/common.js": "577786d95c5cb3e11eb475342735c7cf8c71ecb4456d9f07258d60af8a1bfe9a",
+        "protobufjs/src/root.js": "1f610f79137dff45ce2ec4e0f742ae43f26b296f2518f4ba41e0a497af5ad624",
+        "protobufjs/package.json": "0e56b70de03bffc143e74311b42ae22b557370a4a1f4b5066568fbc77857639a"
+      }
+    },
+    "protobufjs-builtin:google/protobuf/timestamp.proto": {
+      "kind": "protobufjs-builtin",
+      "logical_name": "google/protobuf/timestamp.proto",
+      "descriptor_encoding": "canonical-json",
+      "descriptor_sha256": "bf8b0e0645f9b601d389bde707735de7ddca52544ef95a776642b03e4647e2f7",
+      "package_source_sha256": {
+        "protobufjs/src/common.js": "577786d95c5cb3e11eb475342735c7cf8c71ecb4456d9f07258d60af8a1bfe9a",
+        "protobufjs/src/root.js": "1f610f79137dff45ce2ec4e0f742ae43f26b296f2518f4ba41e0a497af5ad624",
+        "protobufjs/package.json": "0e56b70de03bffc143e74311b42ae22b557370a4a1f4b5066568fbc77857639a"
+      }
+    },
+    "protobufjs-builtin:google/protobuf/wrappers.proto": {
+      "kind": "protobufjs-builtin",
+      "logical_name": "google/protobuf/wrappers.proto",
+      "descriptor_encoding": "canonical-json",
+      "descriptor_sha256": "64ec6254e6dd499dfff40200badfeff5cf90233ba860315cac99fefe7cae7665",
+      "package_source_sha256": {
+        "protobufjs/src/common.js": "577786d95c5cb3e11eb475342735c7cf8c71ecb4456d9f07258d60af8a1bfe9a",
+        "protobufjs/src/root.js": "1f610f79137dff45ce2ec4e0f742ae43f26b296f2518f4ba41e0a497af5ad624",
+        "protobufjs/package.json": "0e56b70de03bffc143e74311b42ae22b557370a4a1f4b5066568fbc77857639a"
+      }
+    }
+  },
+  "dependencies": {
+    "@grpc/grpc-js": {
+      "version": "1.14.7",
+      "package_sha256": "425331076f9212318ca9582c75cd45c6c1efbe3baa66b97691e3cecb80f59afa"
+    },
+    "@grpc/grpc-js-xds": {
+      "version": "1.14.2",
+      "package_sha256": "4ae73673878b4506cb0e3f16b3cfc7de00f9945d935804fddefc536b4fe19922"
+    },
+    "@grpc/proto-loader": {
+      "version": "0.8.1",
+      "package_sha256": "04fc16d6ba1496e29f0919c9c9438e19156153988b4a4776c9139365bd6650a9"
+    },
+    "protobufjs": {
+      "version": "7.6.6",
+      "package_sha256": "0e56b70de03bffc143e74311b42ae22b557370a4a1f4b5066568fbc77857639a"
+    }
+  },
+  "node": "v26.4.0",
+  "native": {
+    "status": "passed",
+    "mode": "delta",
+    "source_a": "64be914cdd17882c4b51a61cd0a483719432f3a1b414dace86795edda26f248c",
+    "source_b": "f15e0a132b98b4a5000cfdc898d16fa74b467d1dc7942b44d8c92b115876a991",
+    "managed_resource_routing": true,
+    "source_features_isolated": true,
+    "foreign_cache_preserved": true,
+    "pending_route_retained": true,
+    "held_completion_retained_b": true,
+    "automatic_lrs": true,
+    "manual_subscription_routing": false
+  },
+  "native_events": [
+    {
+      "authority": "A",
+      "type_url": "type.googleapis.com/envoy.config.listener.v3.Listener",
+      "nonce": "l-a1",
+      "rejected": false,
+      "revision": 2
+    },
+    {
+      "authority": "B",
+      "type_url": "type.googleapis.com/envoy.config.route.v3.RouteConfiguration",
+      "nonce": "r-b1",
+      "rejected": false,
+      "revision": 2
+    },
+    {
+      "authority": "B",
+      "type_url": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+      "nonce": "c-b1",
+      "rejected": false,
+      "revision": 2
+    },
+    {
+      "authority": "A",
+      "type_url": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+      "nonce": "c-a1",
+      "rejected": false,
+      "revision": 2
+    },
+    {
+      "authority": "B",
+      "type_url": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+      "nonce": "e-b1",
+      "rejected": false,
+      "revision": 2
+    },
+    {
+      "authority": "A",
+      "type_url": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+      "nonce": "e-a1",
+      "rejected": false,
+      "revision": 3
+    },
+    {
+      "authority": "B",
+      "type_url": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+      "nonce": "c-b-omit",
+      "rejected": false,
+      "revision": 3
+    },
+    {
+      "authority": "A",
+      "type_url": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+      "nonce": "c-a-omit",
+      "rejected": false,
+      "revision": 4
+    },
+    {
+      "authority": "A",
+      "type_url": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+      "nonce": "c-a2",
+      "rejected": false,
+      "revision": 5
+    },
+    {
+      "authority": "A",
+      "type_url": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+      "nonce": "e-a2",
+      "rejected": false,
+      "revision": 6
+    },
+    {
+      "authority": "A",
+      "type_url": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+      "nonce": "c-a-bad",
+      "rejected": true,
+      "revision": 6
+    },
+    {
+      "authority": "B",
+      "type_url": "type.googleapis.com/envoy.config.route.v3.RouteConfiguration",
+      "nonce": "r-b2",
+      "rejected": false,
+      "revision": 6
+    },
+    {
+      "authority": "A",
+      "type_url": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+      "nonce": "c-a3",
+      "rejected": false,
+      "revision": 6
+    },
+    {
+      "authority": "A",
+      "type_url": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+      "nonce": "e-a3",
+      "rejected": false,
+      "revision": 7
+    }
+  ]
+}

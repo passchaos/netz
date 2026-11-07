@@ -6,6 +6,7 @@ const delta = @import("../ads/delta.zig");
 const rds = @import("../rds.zig");
 const shared = @import("../../channel/shared.zig");
 const Projection = @import("projection.zig").Projection;
+const discovery = @import("../runtime/discovery.zig");
 pub const Error = model.Error || ads.Error || delta.Error || rds.Error || shared.Error || @import("../runtime/errors.zig").PublishError || error{ InvalidLdsOptions, WrongLdsResource, DuplicateLdsResource };
 pub const Publisher = struct {
     context: *anyopaque,
@@ -22,6 +23,8 @@ pub const Options = struct {
     limits: model.Limits = .{},
     publisher: ?Publisher = null,
     delta_publisher: ?DeltaPublisher = null,
+    /// Route dynamic RDS watches to their resource-name authority.
+    discovery_router: ?discovery.Router = null,
     /// gRPC `ignore_resource_deletion`: retain resources omitted or removed.
     ignore_resource_deletion: bool = false,
     /// gRPC `fail_on_data_errors`: drop the cached listener/routes when the
@@ -142,13 +145,13 @@ pub const Controller = struct {
     pub fn expireListenerWithDeadline(self: *Controller, client: *delta.Client, destination: shared.SharedChannel, deadline: std.Io.Clock.Timestamp) Error!u64 {
         if (self.listener == null) return @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
         if (client.subscriptions.find(model.type_url) != null) try client.subscriptions.forget(model.type_url, self.options.listener_name);
-        var subscription: ?delta.subscriptions.Prepared = null;
+        var subscription: ?discovery.Prepared = null;
         defer if (subscription) |*prepared| prepared.deinit();
         if (self.listener.?.value.hcm.route_source == .rds) {
             const name = self.listener.?.value.hcm.route_source.rds;
             if (client.subscriptions.find(rds.type_url) != null) try client.subscriptions.forget(rds.type_url, name);
-            if (client.subscriptions.find(rds.type_url) != null) {
-                subscription = try client.subscriptions.prepare(rds.type_url, &.{});
+            if (self.options.discovery_router != null or client.subscriptions.find(rds.type_url) != null) {
+                subscription = try discovery.prepare(client, self.options.discovery_router, rds.type_url, &.{}, deadline);
             }
         }
         const rejecting = try self.empty("_");

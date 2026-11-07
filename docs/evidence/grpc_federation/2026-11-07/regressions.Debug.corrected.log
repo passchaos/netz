@@ -1,0 +1,32 @@
+test-lib
++- run test 177 pass, 2 fail (179 total)
+error: 'grpc.xds.runtime.managed.tests.test.gRPC federated managed SotW routes native authorities and retains valid targets' failed:
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/managed/tests.zig:132:20: 0x34fb1db in native__anon_10917874 (root.zig)
+           for (0..6) |_| try applyNext(facade);
+                          ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/managed/tests.zig:305:5: 0x350abe7 in test.gRPC federated managed SotW routes native authorities and retains valid targets (root.zig)
+           try native(.sotw);
+           ^
+error: 'grpc.xds.runtime.managed.tests.test.gRPC federated managed delta routes native authorities and retains valid targets' failed:
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/managed/tests.zig:132:20: 0x344b5eb in native__anon_10914064 (root.zig)
+           for (0..6) |_| try applyNext(facade);
+                          ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/managed/tests.zig:308:5: 0x345bbf7 in test.gRPC federated managed delta routes native authorities and retains valid targets (root.zig)
+           try native(.delta);
+           ^
+failed command: ./.zig-cache/o/5c36645fcafe2a6c6825b7bd27f4cdbb/test --cache-dir=./.zig-cache --seed=0xd8de90d6 --listen=-
+
+Build Summary: 6/8 steps succeeded (1 failed); 177/179 tests passed (2 failed)
+test-lib transitive failure
++- run test 177 pass, 2 fail (179 total)
+   +- compile test Debug native success 33s MaxRSS:2G
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 6ms MaxRSS:36M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 7ms MaxRSS:36M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options cached
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/63a4f13a38ebb3037e00652cc87f88eb/build /home/passchaos/Temp/zig-x86_64-linux-0.16.0/zig /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib /home/passchaos/project-z/netz .zig-cache /home/passchaos/.cache/zig --seed 0xd8de90d6 -Z189bb56355c88524 test-lib -Dtest-filter=requires a usable server -Dtest-filter=HTTPS alias selects -Dtest-filter=pending route handoff -Dtest-filter=managed subscriptions roll back -Dtest-filter=managed source features -Dtest-filter=routes native authorities --summary all

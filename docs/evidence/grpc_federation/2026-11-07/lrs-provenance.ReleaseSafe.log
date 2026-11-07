@@ -1,0 +1,18 @@
+test-lib
++- run test w
+automatic LRS peer provenance/sotw/source-a: expected transport close error=ConnectionClosed phase=shutdown initial=1 reports=14 events=15 last=messages closing=true counts=.{ .issued = 4, .successful = 4, .failed = 0, .dropped = 3 }
+automatic LRS peer provenance/sotw/source-b: expected transport close error=ConnectionClosed phase=shutdown initial=1 reports=1 events=2 last=messages closing=true counts=.{ .issued = 1, .successful = 0, .failed = 1, .dropped = 1 }
+automatic LRS peer provenance/delta/source-b: expected transport close error=ConnectionClosed phase=shutdown initial=1 reports=1 events=2 last=messages closing=true counts=.{ .issued = 1, .successful = 0, .failed = 1, .dropped = 1 }
+failed command: ./.zig-cache/o/6ce326ec60a476500b164ab71e0d06a5/test --cache-dir=./.zig-cache --seed=0x415d15e6 --listen=-
+
+Build Summary: 8/8 steps succeeded; 171/171 tests passed
+test-lib success
++- run test 171 pass (171 total) 858ms MaxRSS:14M
+   +- compile test ReleaseSafe native success 2m MaxRSS:4G
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal ReleaseSafe native cached 7ms MaxRSS:36M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 ReleaseSafe native cached 7ms MaxRSS:36M
+      +- compile obj vort-br-record-optimal ReleaseSafe native (reused)
+      +- compile obj vort-zstd-huffman-x2 ReleaseSafe native (reused)
+      +- options cached

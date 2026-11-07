@@ -1,0 +1,10 @@
+PASSED default-bare: LDS and :authority agree
+PASSED authority-default: LDS and :authority agree
+PASSED top-xdstp-route: LDS and :authority agree
+{
+  "status": "passed",
+  "passed": 3,
+  "total": 3,
+  "report": "/home/passchaos/project-z/netz/docs/evidence/grpc_client_target/2026-11-07/smoke.Debug.corrected/report.json",
+  "failures": []
+}

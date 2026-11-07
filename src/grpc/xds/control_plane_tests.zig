@@ -283,7 +283,7 @@ test "gRPC xDS control plane schedules TLS material refresh" {
 
 test "gRPC xDS control plane requires a usable server and node" {
     const unusable =
-        \\{"xds_servers":[{"server_uri":"https://host","channel_creds":[{"type":"insecure"}]}],"node":{"id":"node"}}
+        \\{"xds_servers":[{"server_uri":"https://host","channel_creds":[{"type":"google_default"}]}],"node":{"id":"node"}}
     ;
     const configuration = try bootstrap.parse(gpa, unusable, .{});
     defer configuration.deinit();
@@ -295,4 +295,18 @@ test "gRPC xDS control plane requires a usable server and node" {
     const no_node_config = try bootstrap.parse(gpa, no_node, .{});
     defer no_node_config.deinit();
     try std.testing.expectError(error.InvalidBootstrapNode, control.ControlPlane.init(gpa, std.testing.io, no_node_config, .{}));
+}
+
+test "gRPC xDS control plane HTTPS alias selects supported insecure credentials" {
+    const json =
+        \\{"xds_servers":[{"server_uri":"https://127.0.0.1:1","channel_creds":[{"type":"google_default"},{"type":"insecure"}]}],"node":{"id":"node"}}
+    ;
+    const configuration = try bootstrap.parse(gpa, json, .{});
+    defer configuration.deinit();
+    const plane = try control.ControlPlane.init(gpa, std.testing.io, configuration, .{});
+    defer plane.deinit();
+    try std.testing.expectEqualStrings("insecure", plane.server().selectedCredential().?.type);
+    try std.testing.expect(!plane.server().usesTls());
+    try std.testing.expect(plane.channel.state.canonical_endpoints[0] == .cleartext_host);
+    try std.testing.expectEqualStrings("https://127.0.0.1:1", plane.serverUri());
 }

@@ -7,6 +7,7 @@ pub const lds = @import("lds.zig");
 pub const config_source = @import("config_source.zig");
 pub const resource_name = @import("resource_name.zig");
 pub const bootstrap = @import("bootstrap.zig");
+pub const client_target = @import("client_target.zig");
 pub const control_plane = @import("control_plane.zig");
 pub const lrs = @import("lrs.zig");
 pub const sds = @import("sds.zig");
@@ -25,6 +26,7 @@ test {
     _ = config_source;
     _ = resource_name;
     _ = bootstrap;
+    _ = client_target;
     _ = control_plane;
     _ = lrs;
     _ = sds;
@@ -34,6 +36,7 @@ test {
     _ = @import("control_plane_tests.zig");
     _ = @import("control_plane_provenance_tests.zig");
     _ = @import("control_plane_inventory_tests.zig");
+    _ = @import("control_plane_transport_tests.zig");
     _ = @import("csds_tests.zig");
     _ = @import("csds_service_tests.zig");
 }

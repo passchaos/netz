@@ -20,10 +20,15 @@ pub fn apply(self: *ctl.Controller, client: *ads.Client, update: ads.Update, des
     for (update.response.value.resources) |raw| {
         var owned = cds.decode(self.allocator, raw.value, limits) catch |err| {
             if (!self.options.fail_on_data_errors) return err;
-            if (raw_name.first(raw.value, 1) == null) return err;
+            const name = raw_name.first(raw.value, 1) orelse return err;
+            if (!self.inResponseScope(name)) continue;
             if (first_error == null) first_error = err;
             continue;
         };
+        if (!self.inResponseScope(owned.value.name)) {
+            owned.deinit();
+            continue;
+        }
         const resource = entry.Cluster.create(self.allocator, owned) catch |err| {
             owned.deinit();
             return err;
@@ -45,6 +50,7 @@ pub fn apply(self: *ctl.Controller, client: *ads.Client, update: ads.Update, des
     defer plan.deinit();
     var changed = false;
     for (plan.entries.items) |*item| {
+        if (!self.inResponseScope(item.identity.name)) continue;
         const selected = for (resources.items) |resource| {
             if (std.mem.eql(u8, resource.resource.value.name, item.identity.name)) break resource;
         } else null;

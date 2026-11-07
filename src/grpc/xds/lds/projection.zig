@@ -26,6 +26,10 @@ pub const Projection = struct {
     allocator: std.mem.Allocator,
     refs: std.atomic.Value(usize) = .init(1),
     source: *rds.Snapshot,
+    /// A dynamic listener still awaits an accepted RDS image.
+    pending: bool = false,
+    /// Borrowed from the retained source snapshot for managed watch retention.
+    remote_rds: ?[]const u8 = null,
     maximum: ?std.Io.Duration,
     arena: std.heap.ArenaAllocator,
     rbac: ?*rbac.Policy = null,

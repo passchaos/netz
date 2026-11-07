@@ -1,0 +1,51 @@
+{
+  "node": {
+    "id": "netz-federation"
+  },
+  "xds_servers": [
+    {
+      "server_uri": "127.0.0.1:45097",
+      "channel_creds": [
+        {
+          "type": "insecure"
+        }
+      ],
+      "server_features": [
+        "xds_v3"
+      ]
+    }
+  ],
+  "authorities": {
+    "A": {
+      "xds_servers": [
+        {
+          "server_uri": "127.0.0.1:45097",
+          "channel_creds": [
+            {
+              "type": "insecure"
+            }
+          ],
+          "server_features": [
+            "xds_v3"
+          ]
+        }
+      ]
+    },
+    "B": {
+      "xds_servers": [
+        {
+          "server_uri": "127.0.0.1:38867",
+          "channel_creds": [
+            {
+              "type": "insecure"
+            }
+          ],
+          "server_features": [
+            "xds_v3",
+            "ignore_resource_deletion"
+          ]
+        }
+      ]
+    }
+  }
+}

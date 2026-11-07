@@ -37,7 +37,11 @@ pub const Plan = struct {
         var sources: std.ArrayList(*@import("../rds.zig").Snapshot) = .empty;
         defer sources.deinit(controller.allocator);
         for (controller.projections.items) |view| {
-            if (view.refs.load(.acquire) == 1) continue;
+            // Managed handoff keeps the previous selector published while the
+            // latest route waits for CDS/EDS. The latest projection may have
+            // only this controller's reference, but its dependencies must
+            // remain requested so the handoff can become ready.
+            if (view != controller.latest and view.refs.load(.acquire) == 1) continue;
             try keys.appendSlice(controller.allocator, view.source.required_clusters);
             try sources.append(controller.allocator, view.source);
         }
@@ -50,8 +54,15 @@ pub const Plan = struct {
         // are about to be applied so the first aggregate response subscribes to
         // its leaves without waiting for another control-plane round trip.
         var key_index: usize = 0;
+        var expanded_count: usize = 0;
         while (key_index < keys.items.len) : (key_index += 1) {
             const key = keys.items[key_index];
+            const repeated = for (keys.items[0..key_index]) |previous| {
+                if (std.mem.eql(u8, previous, key)) break true;
+            } else false;
+            if (repeated) continue;
+            if (expanded_count >= controller.options.limits.max_clusters) return error.XdsLimitExceeded;
+            expanded_count += 1;
             if (!std.mem.startsWith(u8, key, "cluster:") or key.len == 8) continue;
             const name = key[8..];
             var leaves: ?[]const []const u8 = null;
@@ -133,6 +144,40 @@ pub const Plan = struct {
         for (self.entries.items, names) |item, *name| name.* = item.identity.name;
         return names;
     }
+    pub fn ready(self: *const Plan, projection: *const Projection) bool {
+        if (projection.pending) return false;
+        for (projection.source.required_clusters) |key| {
+            if (!std.mem.startsWith(u8, key, "cluster:") or !self.readyName(key[8..], 0)) return false;
+        }
+        return true;
+    }
+    fn readyName(self: *const Plan, name: []const u8, depth: usize) bool {
+        if (depth > self.entries.items.len) return false;
+        const item = for (self.entries.items) |value| {
+            if (std.mem.eql(u8, value.identity.name, name)) break value;
+        } else return false;
+        if (item.pending()) return false;
+        if (item.cluster) |cluster| if (cluster.resource.value.isAggregate()) {
+            for (cluster.resource.value.aggregate_clusters) |leaf| if (!self.readyName(leaf, depth + 1)) return false;
+        };
+        return true;
+    }
+    pub fn required(self: *const Plan, projection: *const Projection, name: []const u8) bool {
+        for (projection.source.required_clusters) |key| if (self.requiredFrom(key[8..], name, 0)) return true;
+        return false;
+    }
+    fn requiredFrom(self: *const Plan, root: []const u8, name: []const u8, depth: usize) bool {
+        if (std.mem.eql(u8, root, name)) return true;
+        if (depth > self.entries.items.len) return false;
+        for (self.entries.items) |item| {
+            if (!std.mem.eql(u8, item.identity.name, root)) continue;
+            const cluster = item.cluster orelse return false;
+            if (cluster.resource.value.isAggregate()) for (cluster.resource.value.aggregate_clusters) |leaf| {
+                if (self.requiredFrom(leaf, name, depth + 1)) return true;
+            };
+        }
+        return false;
+    }
     pub fn edsNames(self: *Plan) @import("errors.zig").PublishError![]const []const u8 {
         var names: std.ArrayList([]const u8) = .empty;
         for (self.entries.items) |item| if (item.cluster) |cluster| {
@@ -140,6 +185,9 @@ pub const Plan = struct {
             const name = cluster.resource.value.edsName();
             try self.controller.validateResourceName(name, @import("../eds.zig").type_url);
             try names.append(self.allocator, name);
+        };
+        for (self.controller.served_entries.items) |item| if (item.cluster) |cluster| {
+            if (cluster.resource.value.isEds()) try names.append(self.allocator, cluster.resource.value.edsName());
         };
         std.mem.sort([]const u8, names.items, {}, struct {
             fn less(_: void, a: []const u8, b: []const u8) bool {
@@ -168,6 +216,11 @@ pub const Plan = struct {
                 try self.controller.validateResourceName(name, @import("../sds.zig").type_url);
                 try names.append(self.allocator, name);
             }
+        };
+        for (self.controller.served_entries.items) |item| if (item.cluster) |cluster| {
+            const refs = cluster.resource.value.tls_sds orelse continue;
+            if (refs.certificate) |name| try names.append(self.allocator, name);
+            if (refs.validation) |name| try names.append(self.allocator, name);
         };
         std.mem.sort([]const u8, names.items, {}, struct {
             fn less(_: void, a: []const u8, b: []const u8) bool {

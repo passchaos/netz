@@ -10,11 +10,11 @@ fn fail(call: anytype, err: anyerror) void {
     call.requestCancel();
 }
 
-fn interrupted(call: anytype, err: anyerror, rpc_expired: bool) void {
-    if (err == error.Canceled or rpc_expired) fail(call, err);
+fn interrupted(call: anytype, err: anyerror, rpc_expired: bool, cancel_call_on_interrupt: bool) void {
+    if ((err == error.Canceled and cancel_call_on_interrupt) or rpc_expired) fail(call, err);
 }
 
-pub fn next(call: anytype, requested: ?std.Io.Clock.Timestamp) @TypeOf(call.parent.*).Failure!call_module.Event {
+pub fn next(call: anytype, requested: ?std.Io.Clock.Timestamp, cancel_call_on_interrupt: bool) @TypeOf(call.parent.*).Failure!call_module.Event {
     if (requested) |until| if (until.clock != .awake) return error.Timeout;
     const state = call.parent;
     call.retain();
@@ -162,7 +162,10 @@ pub fn next(call: anytype, requested: ?std.Io.Clock.Timestamp) @TypeOf(call.pare
             waited catch |err| {
                 if (err == error.Timeout and deadline.?.durationFromNow(state.io).raw.nanoseconds > 0) continue;
                 const rpc_expired = call.deadline != null and call.deadline.?.durationFromNow(state.io).raw.nanoseconds <= 0;
-                interrupted(call, err, rpc_expired);
+                // No message or cursor ownership moved while this wait was
+                // pending. ADS can cancel a losing local read and resume the
+                // same receive queue; an expired RPC still cancels the call.
+                interrupted(call, err, rpc_expired, cancel_call_on_interrupt);
                 return err;
             };
             break;

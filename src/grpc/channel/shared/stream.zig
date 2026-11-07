@@ -95,6 +95,9 @@ pub const Writer = struct {
 
 pub const Reader = struct {
     call: *State.StreamCall,
+    /// Whether canceling this read operation also cancels the RPC. ADS reads
+    /// disable this; explicit Duplex cancellation and RPC expiry still apply.
+    cancel_call_on_interrupt: bool = true,
     pub fn clone(self: Reader) Reader {
         self.call.retain();
         return self;
@@ -104,10 +107,10 @@ pub const Reader = struct {
         self.* = undefined;
     }
     pub fn next(self: Reader) Error!Event {
-        return reading.next(self.call, null);
+        return reading.next(self.call, null, self.cancel_call_on_interrupt);
     }
     pub fn nextWithDeadline(self: Reader, deadline: std.Io.Clock.Timestamp) Error!Event {
-        return reading.next(self.call, deadline);
+        return reading.next(self.call, deadline, self.cancel_call_on_interrupt);
     }
     pub fn nextWithTimeout(self: Reader, timeout: std.Io.Duration) Error!Event {
         if (timeout.nanoseconds <= 0) return error.Timeout;

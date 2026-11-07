@@ -1,0 +1,31 @@
+interop-grpc-federation
++- run python3
+   +- compile exe netz-grpc-federation-client Debug native 1 errors
+tools/interop/grpc_federation/client.zig:95:20: error: value of type '*grpc.xds.discovery_source.Source' ignored
+    source_b.retain();
+    ~~~~~~~~~~~~~~~^~
+tools/interop/grpc_federation/client.zig:95:20: note: all non-void values must be used
+tools/interop/grpc_federation/client.zig:95:20: note: to discard the value, assign it to '_'
+referenced by:
+    main: tools/interop/grpc_federation/client.zig:171:50
+    callMain [inlined]: /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/std/start.zig:737:30
+    callMainWithArgs [inlined]: /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/std/start.zig:638:20
+    main: /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/std/start.zig:663:28
+    1 reference(s) hidden; use '-freference-trace=5' to see all references
+error: 1 compilation errors
+failed command: /home/passchaos/Temp/zig-x86_64-linux-0.16.0/zig build-exe -ODebug --dep netz -Mroot=/home/passchaos/project-z/netz/tools/interop/grpc_federation/client.zig -ODebug --dep vail --dep vort --dep zio -Mnetz=/home/passchaos/project-z/netz/src/root.zig -ODebug --dep vort -Mvail=/home/passchaos/project-z/vail/src/root.zig .zig-cache/o/798ab5fd0dc947cfee9492e0ae0a0919/vort-br-record-optimal.o .zig-cache/o/15472fc6b58bf5d00adbc935a8e059f8/vort-zstd-huffman-x2.o -ODebug -I .zig-cache/o/2fb5824d4233e9fe32370ab196a5b16d -I .zig-cache/o/2fb5824d4233e9fe32370ab196a5b16d --dep vail_archive_crypto -Mvort=/home/passchaos/project-z/vort/src/root.zig -ODebug --dep zio_build_options -Mzio=/home/passchaos/project-z/netz/zig-pkg/zio-0.19.1-xHbVVHZNLABUkjHyJHQiljEahUaadEy3x1_4vyCvFxjw/src/zio.zig -ODebug -Mvail_archive_crypto=/home/passchaos/project-z/vail/archive_crypto/src/root.zig -Mzio_build_options=.zig-cache/c/320401b06d5c6c293b0e48afbc96afbe/options.zig -lc --cache-dir .zig-cache --global-cache-dir /home/passchaos/.cache/zig --name netz-grpc-federation-client --zig-lib-dir /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/ --listen=-
+
+Build Summary: 5/8 steps succeeded (1 failed)
+interop-grpc-federation transitive failure
++- run python3 transitive failure
+   +- compile exe netz-grpc-federation-client Debug native 1 errors
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 7ms MaxRSS:35M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 7ms MaxRSS:35M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options cached
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/63a4f13a38ebb3037e00652cc87f88eb/build /home/passchaos/Temp/zig-x86_64-linux-0.16.0/zig /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib /home/passchaos/project-z/netz .zig-cache /home/passchaos/.cache/zig --seed 0xe5a304be -Z5b4cd96bba933040 interop-grpc-federation --summary all -- --output docs/evidence/grpc_federation/2026-11-07/wire.Debug/report.json

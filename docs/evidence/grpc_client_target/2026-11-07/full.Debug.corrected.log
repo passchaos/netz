@@ -1,0 +1,49 @@
+PASSED default-bare: echoed
+PASSED default-dns: echoed
+PASSED single-slash: echoed
+PASSED relative-path: echoed
+PASSED nested-path: echoed
+PASSED encoded-nested-path: echoed
+PASSED double-leading-slash: echoed
+PASSED query-fragment: echoed
+PASSED empty-fragment: echoed
+PASSED legacy-percent-decoding: authority-rejected-after-lds
+PASSED encoded-query-fragment: echoed
+PASSED invalid-percent-triplet: echoed
+PASSED one-decode-only: echoed
+PASSED top-custom: echoed
+PASSED top-repeated: echoed
+PASSED top-constant: echoed
+PASSED top-empty: echoed
+PASSED authority-default: echoed
+PASSED authority-inherited-server: echoed
+PASSED authority-custom: echoed
+PASSED authority-repeated: echoed
+PASSED authority-constant: echoed
+PASSED authority-empty: echoed
+PASSED authority-colon-at: authority-rejected-after-lds
+PASSED authority-path-query: echoed
+PASSED authority-escaped-key: echoed
+PASSED top-xdstp-route: echoed
+FAILED explicit-default-authority: raw HTTP/2 capture errors: [{'connection': 2, 'error': 'captured client did not send the HTTP/2 preface'}]
+PASSED unknown-authority: invalid-target-rejected
+PASSED empty-path: invalid-target-rejected
+PASSED root-path: invalid-target-rejected
+PASSED trailing-slash: invalid-target-rejected
+PASSED encoded-trailing-slash: invalid-target-rejected
+PASSED empty-query: invalid-target-rejected
+PASSED empty-query-fragment: invalid-target-rejected
+PASSED invalid-query: invalid-target-rejected
+PASSED invalid-fragment: invalid-target-rejected
+{
+  "status": "failed",
+  "passed": 36,
+  "total": 37,
+  "report": "/home/passchaos/project-z/netz/docs/evidence/grpc_client_target/2026-11-07/full.Debug.corrected/report.json",
+  "failures": [
+    {
+      "id": "explicit-default-authority",
+      "failure": "raw HTTP/2 capture errors: [{'connection': 2, 'error': 'captured client did not send the HTTP/2 preface'}]"
+    }
+  ]
+}

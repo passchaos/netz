@@ -1,0 +1,1525 @@
+{
+  "status": "passed",
+  "oracle": "grpcio-1.76.0-c-core-real-wire",
+  "results": [
+    {
+      "id": "default-bare",
+      "target": "xds:///svc",
+      "status": "passed",
+      "artifact_directory": "/home/passchaos/project-z/netz/docs/evidence/grpc_client_target/2026-11-07/capture.Debug/report-cases/default-bare",
+      "bootstrap_sha256": "df3b7e5d4358f922b63fe4a0157195e946ef474614e31af611cdfd0d28cab9a8",
+      "native": {
+        "status": "ok",
+        "err": null,
+        "listener_name": "svc",
+        "discovery_authority": null,
+        "listener_resource_authority": null,
+        "data_authority": "svc"
+      },
+      "reference": {
+        "grpcio": "1.76.0",
+        "typing_extensions": "4.15.0",
+        "python": "3.12.3",
+        "core_extension": "/tmp/netz-grpc-client-target-venv/lib/python3.12/site-packages/grpc/_cython/cygrpc.cpython-312-x86_64-linux-gnu.so",
+        "core_sha256": "df68c8100961eb29df4651d7fdcbe12e85f12ff7d4adcbbdff4cc9d4285ee7d6",
+        "dependency_sha256": {
+          "grpc/__init__.py": "da04867956f5cf2f388f51365c92d7f42d90205744364f3e0dc4fbf39ab332e5",
+          "grpc/_auth.py": "f2f7ad895cb980b0ad87bec8b1119d84e80716b0b5ad619eff7ea5a4c1bc3723",
+          "grpc/_channel.py": "4a6b751ac44fe3db8f925198b130d1b362607d2e6c3e3faec59abd29bf27926c",
+          "grpc/_common.py": "5bc309cfe0268eb9cbb6c9d945c38b8a83beef32d69c31e7c78cc3955dde41d6",
+          "grpc/_compression.py": "d0ff727cd227df706671098e7673144e881b2c83d1d1e4ff2e69a79b79657058",
+          "grpc/_cython/__init__.py": "c3792a480c9a6603fe5b4f3dd314782f859e04f1abb6c4024097b4154151d0ad",
+          "grpc/_cython/_cygrpc/__init__.py": "c3792a480c9a6603fe5b4f3dd314782f859e04f1abb6c4024097b4154151d0ad",
+          "grpc/_cython/cygrpc.cpython-312-x86_64-linux-gnu.so": "df68c8100961eb29df4651d7fdcbe12e85f12ff7d4adcbbdff4cc9d4285ee7d6",
+          "grpc/_grpcio_metadata.py": "f20649933f7aaf6a13775355bff7020ef4778abbebcfd7cf93b1343280756204",
+          "grpc/_interceptor.py": "b1b55f049e49ca78e4c64de6f79ad0c9101c1fa3664a4f19dc969ee1b0ca6a3c",
+          "grpc/_observability.py": "09e2257d6e6a06fe72925785ab44e115b638e40ec2159db2c70ad40b5b615fa0",
+          "grpc/_plugin_wrapping.py": "6faafa45d8dd0eb9e1732bc6777c3bc8b4c74f3cbea8d6b41fb57c4a34bc63c1",
+          "grpc/_runtime_protos.py": "704ef5b60b347595e069337c6b593b4e8637c75a083030e9e5b4b37311cba921",
+          "grpc/_server.py": "cf5bcf329b3ba9f0488e21246c4472c3247708471628166c84141848a06f179a",
+          "grpc/_simple_stubs.py": "90143ca0a1b4a04fdfd74990c9360e2e986f7f5fb6bd9bb69002bc97dc98e888",
+          "grpc/_typing.py": "c980d3dcf6961bc4586c7cd3ff2f4e6a598c3a5744ea9046a1b12842606d6e3e",
+          "grpc/_utilities.py": "261e02e450e74f99c0bf367774f74b78f02aed03c017fa3047584f3deb558b96",
+          "grpc/aio/__init__.py": "f341e8d45a25a6e785a8822fca5edde5bf45260bf0e62959807717c4dd4d994b",
+          "grpc/aio/_base_call.py": "4c71571b4a342129f8d09af0d2c365705cdfa1b0fc52b8e08dd74c5ad83c6490",
+          "grpc/aio/_base_channel.py": "c15c04949ef76df4d39180bd27a3598c2abeab6304bd338b49b3ac78d3f3afc9",
+          "grpc/aio/_base_server.py": "787abd103527d5433a33e7bec126b1dd9320ac518ef030ca913b98c286c94d84",
+          "grpc/aio/_call.py": "2fe0763fc9af8a95202fc25bb13e7a5166b5dea4e85daaa28290a6b40f82dfa9",
+          "grpc/aio/_channel.py": "b5e3d58dd27918e69b439c33fe86920b91452cd94a3dd5a919eb4c131b229970",
+          "grpc/aio/_interceptor.py": "545e73d800ef35e330774c64062d2215f776e1ef849fb6733b5f4ea1fd1b2dd1",
+          "grpc/aio/_metadata.py": "e300bc4edb600ab14917cfd0c76cae09706998a9d3a494360d7579d1fcde8376",
+          "grpc/aio/_server.py": "e0b6e61e730c2d567375dc77139f010b8a6bad2944cfb3c0146a31ee961b6c9b",
+          "grpc/aio/_typing.py": "c4c946df7be7fd491d911bf7f54771e36d4159582de511c2bbc8095c0435f1da",
+          "grpc/aio/_utils.py": "061e7e9503b6c6ccdd65e4c501615f16185a2b2db4965e24b9c0fa7ff6194e58",
+          "grpc/beta/__init__.py": "c3792a480c9a6603fe5b4f3dd314782f859e04f1abb6c4024097b4154151d0ad",
+          "grpc/beta/_client_adaptations.py": "f0fdf0b52b513b019b94596104b2e7c71388d863db3208ad1b9822d2de66267d",
+          "grpc/beta/_metadata.py": "56cb7fcfec1c64083f3b44a972f20058d4da5f1376a095b971b48759dc939eb4",
+          "grpc/beta/_server_adaptations.py": "6dc0048b2aba7aa0ac0767b12615bcdd2c3741a132fb74546de563d33cacfa06",
+          "grpc/beta/implementations.py": "d32213820cea28aa3c2dbf19c0fc76cc8bb8d789884317da9f78e67a77212079",
+          "grpc/beta/interfaces.py": "9ad427be6ec1836bb931065fdbf9e6c54c4a14200d0f0ed550e1c7bc4edc0613",
+          "grpc/beta/utilities.py": "9474b11690f960337b3c90ee415828aa60c71d0997625d53f5e0ae694c6ef5e0",
+          "grpc/experimental/__init__.py": "53add28affdadacb49a2eb15ce01d235fa1c7334a68bb2d4f87b651566e0313e",
+          "grpc/experimental/aio/__init__.py": "6c8c8374605b3478b917f907bf007238d8dce0cffbe2d872e77626043af564fa",
+          "grpc/experimental/gevent.py": "fd8024f5a1f63c2642a5a0a75bdb8663bed6db5df8d9d1169bcc0e540a53c7cf",
+          "grpc/experimental/session_cache.py": "c006aebc3cf1bd30bafa9de331b3e74dcef2ef89e10ca4918dbd24b5f30f0a6f",
+          "grpc/framework/__init__.py": "c3792a480c9a6603fe5b4f3dd314782f859e04f1abb6c4024097b4154151d0ad",
+          "grpc/framework/common/__init__.py": "c3792a480c9a6603fe5b4f3dd314782f859e04f1abb6c4024097b4154151d0ad",
+          "grpc/framework/common/cardinality.py": "ca05adae38ec93e48e3cb1da7b2ebeede903db7421bb7938414366608d527155",
+          "grpc/framework/common/style.py": "5fdc0df9a7fc4fb5968457ddb6616476a3cde4f6e923c149b0a19d98f8af6805",
+          "grpc/framework/foundation/__init__.py": "c3792a480c9a6603fe5b4f3dd314782f859e04f1abb6c4024097b4154151d0ad",
+          "grpc/framework/foundation/abandonment.py": "005e18ef7e1b18855a5f408bf16f5769a3d8b8f51a72072204467d59be1fa460",
+          "grpc/framework/foundation/callable_util.py": "71fc1c724cca7bd9a98efcfae24d54c71cf9b8ed553cfd91b061d43b10624ac0",
+          "grpc/framework/foundation/future.py": "763a1e36af96779fed93343017f65e2f59d8016289e6bc337a51a84cf751d4c1",
+          "grpc/framework/foundation/logging_pool.py": "8fc3c56966ab42b9c379bb03c667093337c5b091fcc46636038cfa3e5a3f43d7",
+          "grpc/framework/foundation/stream.py": "17a5d05090bcad3f9c8b26cfb473fb3d3325317368557cb39a747060aa2cd0cb",
+          "grpc/framework/foundation/stream_util.py": "8b9b0a292a915772ecb12e84c3ede854501ee881df897ce0cc280a6a5b3693f7",
+          "grpc/framework/interfaces/__init__.py": "c3792a480c9a6603fe5b4f3dd314782f859e04f1abb6c4024097b4154151d0ad",
+          "grpc/framework/interfaces/base/__init__.py": "c3792a480c9a6603fe5b4f3dd314782f859e04f1abb6c4024097b4154151d0ad",
+          "grpc/framework/interfaces/base/base.py": "6835be9c2540e1bac37376517ff6f5f8c399e09bfbb2cfc5e15ea321e26e8137",
+          "grpc/framework/interfaces/base/utilities.py": "6eebe50efdee94782c1787a3e83cd079ca0f197c1f315d9ec99ef494f3097cd0",
+          "grpc/framework/interfaces/face/__init__.py": "c3792a480c9a6603fe5b4f3dd314782f859e04f1abb6c4024097b4154151d0ad",
+          "grpc/framework/interfaces/face/face.py": "386c80a5d8ec67c045f6736afb6b1de965ddf5b3e96ef8f88ef5eb19d26efa76",
+          "grpc/framework/interfaces/face/utilities.py": "8d1980995d215cf5dc3796ba560ece9416dc96d181e81d746d47e8aaa1c99947",
+          "grpcio-1.76.0.dist-info/METADATA": "fbffe82677cada416245852e3edfb28efdd84869e088d31407b244376fc3452f",
+          "grpcio-1.76.0.dist-info/RECORD": "3775057beee7f6c0a2ecfb0a93ae1e6bd8be2abe6940052984f7bf9185e4a1ea",
+          "grpcio-1.76.0.dist-info/WHEEL": "3afb6f9dba5c6b11dae5381781f0b8f04e8903bccbafbb2f32ca4f3fb564e68f",
+          "typing_extensions-4.15.0.dist-info/METADATA": "c138378fe8f18934ac99de060535c53ec6c13aeed65e94c32641da7ee3192a72",
+          "typing_extensions-4.15.0.dist-info/RECORD": "c42db5851c3a20efb41dbe1a0d03c18db577a5449c7e685f6b139df34b98e62f",
+          "typing_extensions-4.15.0.dist-info/WHEEL": "1b68144734c4b66791f27add5d425f3620775585718a03d0f9b110ba3a4d88db",
+          "typing_extensions.py": "433d11d170d3a24d2eb065ebc1bfe848cea7e3d7ce68567ab52bea2d4c2f7ed8"
+        },
+        "status": "ok",
+        "response_base64": "dGFyZ2V0LXByb2Jl"
+      },
+      "wire": {
+        "requests": [
+          {
+            "scope": "root",
+            "stream": 1,
+            "type_url": "type.googleapis.com/envoy.config.listener.v3.Listener",
+            "names": [
+              "svc"
+            ],
+            "version": "",
+            "nonce": "",
+            "node_id": "target-default-bare",
+            "error": null
+          },
+          {
+            "scope": "root",
+            "stream": 1,
+            "type_url": "type.googleapis.com/envoy.config.listener.v3.Listener",
+            "names": [
+              "svc"
+            ],
+            "version": "v1-lds",
+            "nonce": "v1-lds",
+            "node_id": null,
+            "error": null
+          },
+          {
+            "scope": "root",
+            "stream": 1,
+            "type_url": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+            "names": [
+              "backend"
+            ],
+            "version": "",
+            "nonce": "",
+            "node_id": null,
+            "error": null
+          },
+          {
+            "scope": "root",
+            "stream": 1,
+            "type_url": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+            "names": [
+              "backend"
+            ],
+            "version": "v1-cds",
+            "nonce": "v1-cds",
+            "node_id": null,
+            "error": null
+          },
+          {
+            "scope": "root",
+            "stream": 1,
+            "type_url": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+            "names": [
+              "backend-eds"
+            ],
+            "version": "",
+            "nonce": "",
+            "node_id": null,
+            "error": null
+          },
+          {
+            "scope": "root",
+            "stream": 1,
+            "type_url": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+            "names": [
+              "backend-eds"
+            ],
+            "version": "v1-eds",
+            "nonce": "v1-eds",
+            "node_id": null,
+            "error": null
+          }
+        ],
+        "backend_calls": [
+          {
+            "authority": "svc",
+            "path": "/fixture.Target/Unary",
+            "method": "POST",
+            "content_type": "application/grpc",
+            "request_base64": "AAAAAAx0YXJnZXQtcHJvYmU="
+          }
+        ],
+        "errors": [],
+        "session_errors": []
+      },
+      "capture": {
+        "status": "ok",
+        "hpack": "4.1.0",
+        "dependency_sha256": {
+          "hpack-4.1.0.dist-info/METADATA": "4358172828085470690d07c5efeb9e54331dd55baa4c715a28fb4e2e4826e2e6",
+          "hpack-4.1.0.dist-info/RECORD": "fa23808b49ea0eb64cb982539a74f00bbf04dc770b4841525bd730bf30053c49",
+          "hpack-4.1.0.dist-info/WHEEL": "227f454cdc5e3fad0a9d3906c3bc24ea624f61dfdd4128c46665dd05d30223ef",
+          "hpack/__init__.py": "5589bcbe1b3b87642b58c497e9efa4103b73258cc0de316076dfd54303f66208",
+          "hpack/exceptions.py": "5eacbcbe2aaf28a1c1c90ec8a3c169f873e50cfdd3ed133d6a994f4b176bf632",
+          "hpack/hpack.py": "06abd248e677400807e63e59457e4ca77712c71e6a7bfa3883f78ee311cc03c2",
+          "hpack/huffman.py": "c6e199140a8b727c6b484b9c8ea3503a1257c5d189e4f1b58438089868bfa8e3",
+          "hpack/huffman_constants.py": "e0f84e31e97998dd1ab24151ae7e2756927f09339484ed6a6c544eeaefc87f63",
+          "hpack/huffman_table.py": "ddd26e52678fe84a1c7c70be50b873926053a179f594fd871ba8303ff78199b6",
+          "hpack/struct.py": "3574b63bce2edb31dda248eeb5ffbd21267b875ab264b4cf13e4caa5c5a5d53e",
+          "hpack/table.py": "500937f5f52433fafc76704a3832ffa86afdff044e9ca4150761033f60032642"
+        },
+        "connections": [
+          {
+            "id": 1,
+            "client_sha256": "63528362e820671197e6de85fc511e5436383a72f695ac7148fb3b41310af03d",
+            "server_sha256": "14af01b34de8ae8d677344578ed5746c880f00f956be95c04c674e351940aa13",
+            "client_bytes": 413,
+            "server_bytes": 129,
+            "requests": [
+              {
+                "connection": 1,
+                "stream": 1,
+                "headers": [
+                  [
+                    ":path",
+                    "/fixture.Target/Unary"
+                  ],
+                  [
+                    ":authority",
+                    "svc"
+                  ],
+                  [
+                    ":method",
+                    "POST"
+                  ],
+                  [
+                    ":scheme",
+                    "http"
+                  ],
+                  [
+                    "content-type",
+                    "application/grpc"
+                  ],
+                  [
+                    "te",
+                    "trailers"
+                  ],
+                  [
+                    "grpc-accept-encoding",
+                    "identity, deflate, gzip"
+                  ],
+                  [
+                    "grpc-timeout",
+                    "4970m"
+                  ],
+                  [
+                    "user-agent",
+                    "grpc-python/1.76.0 grpc-c/51.0.0 (linux; chttp2)"
+                  ]
+                ],
+                "hpack_sha256": "0a26c14d60e241b42820155e08e23c7b6728760decc0ec060dee24099e6bb42d"
+              }
+            ],
+            "rejections": []
+          }
+        ],
+        "errors": []
+      },
+      "outcome": "echoed",
+      "elapsed_seconds": 0.574
+    },
+    {
+      "id": "authority-colon-at",
+      "target": "xds://tenant/svc:443@edge",
+      "status": "passed",
+      "artifact_directory": "/home/passchaos/project-z/netz/docs/evidence/grpc_client_target/2026-11-07/capture.Debug/report-cases/authority-colon-at",
+      "bootstrap_sha256": "7114429c919610f119fdbd70c058a34a0f2a1747e674fe59ebfc3f29fdbb4cda",
+      "native": {
+        "status": "ok",
+        "err": null,
+        "listener_name": "xdstp://tenant/envoy.config.listener.v3.Listener/svc:443@edge",
+        "discovery_authority": "tenant",
+        "listener_resource_authority": "tenant",
+        "data_authority": "svc:443@edge"
+      },
+      "reference": {
+        "grpcio": "1.76.0",
+        "typing_extensions": "4.15.0",
+        "python": "3.12.3",
+        "core_extension": "/tmp/netz-grpc-client-target-venv/lib/python3.12/site-packages/grpc/_cython/cygrpc.cpython-312-x86_64-linux-gnu.so",
+        "core_sha256": "df68c8100961eb29df4651d7fdcbe12e85f12ff7d4adcbbdff4cc9d4285ee7d6",
+        "dependency_sha256": {
+          "grpc/__init__.py": "da04867956f5cf2f388f51365c92d7f42d90205744364f3e0dc4fbf39ab332e5",
+          "grpc/_auth.py": "f2f7ad895cb980b0ad87bec8b1119d84e80716b0b5ad619eff7ea5a4c1bc3723",
+          "grpc/_channel.py": "4a6b751ac44fe3db8f925198b130d1b362607d2e6c3e3faec59abd29bf27926c",
+          "grpc/_common.py": "5bc309cfe0268eb9cbb6c9d945c38b8a83beef32d69c31e7c78cc3955dde41d6",
+          "grpc/_compression.py": "d0ff727cd227df706671098e7673144e881b2c83d1d1e4ff2e69a79b79657058",
+          "grpc/_cython/__init__.py": "c3792a480c9a6603fe5b4f3dd314782f859e04f1abb6c4024097b4154151d0ad",
+          "grpc/_cython/_cygrpc/__init__.py": "c3792a480c9a6603fe5b4f3dd314782f859e04f1abb6c4024097b4154151d0ad",
+          "grpc/_cython/cygrpc.cpython-312-x86_64-linux-gnu.so": "df68c8100961eb29df4651d7fdcbe12e85f12ff7d4adcbbdff4cc9d4285ee7d6",
+          "grpc/_grpcio_metadata.py": "f20649933f7aaf6a13775355bff7020ef4778abbebcfd7cf93b1343280756204",
+          "grpc/_interceptor.py": "b1b55f049e49ca78e4c64de6f79ad0c9101c1fa3664a4f19dc969ee1b0ca6a3c",
+          "grpc/_observability.py": "09e2257d6e6a06fe72925785ab44e115b638e40ec2159db2c70ad40b5b615fa0",
+          "grpc/_plugin_wrapping.py": "6faafa45d8dd0eb9e1732bc6777c3bc8b4c74f3cbea8d6b41fb57c4a34bc63c1",
+          "grpc/_runtime_protos.py": "704ef5b60b347595e069337c6b593b4e8637c75a083030e9e5b4b37311cba921",
+          "grpc/_server.py": "cf5bcf329b3ba9f0488e21246c4472c3247708471628166c84141848a06f179a",
+          "grpc/_simple_stubs.py": "90143ca0a1b4a04fdfd74990c9360e2e986f7f5fb6bd9bb69002bc97dc98e888",
+          "grpc/_typing.py": "c980d3dcf6961bc4586c7cd3ff2f4e6a598c3a5744ea9046a1b12842606d6e3e",
+          "grpc/_utilities.py": "261e02e450e74f99c0bf367774f74b78f02aed03c017fa3047584f3deb558b96",
+          "grpc/aio/__init__.py": "f341e8d45a25a6e785a8822fca5edde5bf45260bf0e62959807717c4dd4d994b",
+          "grpc/aio/_base_call.py": "4c71571b4a342129f8d09af0d2c365705cdfa1b0fc52b8e08dd74c5ad83c6490",
+          "grpc/aio/_base_channel.py": "c15c04949ef76df4d39180bd27a3598c2abeab6304bd338b49b3ac78d3f3afc9",
+          "grpc/aio/_base_server.py": "787abd103527d5433a33e7bec126b1dd9320ac518ef030ca913b98c286c94d84",
+          "grpc/aio/_call.py": "2fe0763fc9af8a95202fc25bb13e7a5166b5dea4e85daaa28290a6b40f82dfa9",
+          "grpc/aio/_channel.py": "b5e3d58dd27918e69b439c33fe86920b91452cd94a3dd5a919eb4c131b229970",
+          "grpc/aio/_interceptor.py": "545e73d800ef35e330774c64062d2215f776e1ef849fb6733b5f4ea1fd1b2dd1",
+          "grpc/aio/_metadata.py": "e300bc4edb600ab14917cfd0c76cae09706998a9d3a494360d7579d1fcde8376",
+          "grpc/aio/_server.py": "e0b6e61e730c2d567375dc77139f010b8a6bad2944cfb3c0146a31ee961b6c9b",
+          "grpc/aio/_typing.py": "c4c946df7be7fd491d911bf7f54771e36d4159582de511c2bbc8095c0435f1da",
+          "grpc/aio/_utils.py": "061e7e9503b6c6ccdd65e4c501615f16185a2b2db4965e24b9c0fa7ff6194e58",
+          "grpc/beta/__init__.py": "c3792a480c9a6603fe5b4f3dd314782f859e04f1abb6c4024097b4154151d0ad",
+          "grpc/beta/_client_adaptations.py": "f0fdf0b52b513b019b94596104b2e7c71388d863db3208ad1b9822d2de66267d",
+          "grpc/beta/_metadata.py": "56cb7fcfec1c64083f3b44a972f20058d4da5f1376a095b971b48759dc939eb4",
+          "grpc/beta/_server_adaptations.py": "6dc0048b2aba7aa0ac0767b12615bcdd2c3741a132fb74546de563d33cacfa06",
+          "grpc/beta/implementations.py": "d32213820cea28aa3c2dbf19c0fc76cc8bb8d789884317da9f78e67a77212079",
+          "grpc/beta/interfaces.py": "9ad427be6ec1836bb931065fdbf9e6c54c4a14200d0f0ed550e1c7bc4edc0613",
+          "grpc/beta/utilities.py": "9474b11690f960337b3c90ee415828aa60c71d0997625d53f5e0ae694c6ef5e0",
+          "grpc/experimental/__init__.py": "53add28affdadacb49a2eb15ce01d235fa1c7334a68bb2d4f87b651566e0313e",
+          "grpc/experimental/aio/__init__.py": "6c8c8374605b3478b917f907bf007238d8dce0cffbe2d872e77626043af564fa",
+          "grpc/experimental/gevent.py": "fd8024f5a1f63c2642a5a0a75bdb8663bed6db5df8d9d1169bcc0e540a53c7cf",
+          "grpc/experimental/session_cache.py": "c006aebc3cf1bd30bafa9de331b3e74dcef2ef89e10ca4918dbd24b5f30f0a6f",
+          "grpc/framework/__init__.py": "c3792a480c9a6603fe5b4f3dd314782f859e04f1abb6c4024097b4154151d0ad",
+          "grpc/framework/common/__init__.py": "c3792a480c9a6603fe5b4f3dd314782f859e04f1abb6c4024097b4154151d0ad",
+          "grpc/framework/common/cardinality.py": "ca05adae38ec93e48e3cb1da7b2ebeede903db7421bb7938414366608d527155",
+          "grpc/framework/common/style.py": "5fdc0df9a7fc4fb5968457ddb6616476a3cde4f6e923c149b0a19d98f8af6805",
+          "grpc/framework/foundation/__init__.py": "c3792a480c9a6603fe5b4f3dd314782f859e04f1abb6c4024097b4154151d0ad",
+          "grpc/framework/foundation/abandonment.py": "005e18ef7e1b18855a5f408bf16f5769a3d8b8f51a72072204467d59be1fa460",
+          "grpc/framework/foundation/callable_util.py": "71fc1c724cca7bd9a98efcfae24d54c71cf9b8ed553cfd91b061d43b10624ac0",
+          "grpc/framework/foundation/future.py": "763a1e36af96779fed93343017f65e2f59d8016289e6bc337a51a84cf751d4c1",
+          "grpc/framework/foundation/logging_pool.py": "8fc3c56966ab42b9c379bb03c667093337c5b091fcc46636038cfa3e5a3f43d7",
+          "grpc/framework/foundation/stream.py": "17a5d05090bcad3f9c8b26cfb473fb3d3325317368557cb39a747060aa2cd0cb",
+          "grpc/framework/foundation/stream_util.py": "8b9b0a292a915772ecb12e84c3ede854501ee881df897ce0cc280a6a5b3693f7",
+          "grpc/framework/interfaces/__init__.py": "c3792a480c9a6603fe5b4f3dd314782f859e04f1abb6c4024097b4154151d0ad",
+          "grpc/framework/interfaces/base/__init__.py": "c3792a480c9a6603fe5b4f3dd314782f859e04f1abb6c4024097b4154151d0ad",
+          "grpc/framework/interfaces/base/base.py": "6835be9c2540e1bac37376517ff6f5f8c399e09bfbb2cfc5e15ea321e26e8137",
+          "grpc/framework/interfaces/base/utilities.py": "6eebe50efdee94782c1787a3e83cd079ca0f197c1f315d9ec99ef494f3097cd0",
+          "grpc/framework/interfaces/face/__init__.py": "c3792a480c9a6603fe5b4f3dd314782f859e04f1abb6c4024097b4154151d0ad",
+          "grpc/framework/interfaces/face/face.py": "386c80a5d8ec67c045f6736afb6b1de965ddf5b3e96ef8f88ef5eb19d26efa76",
+          "grpc/framework/interfaces/face/utilities.py": "8d1980995d215cf5dc3796ba560ece9416dc96d181e81d746d47e8aaa1c99947",
+          "grpcio-1.76.0.dist-info/METADATA": "fbffe82677cada416245852e3edfb28efdd84869e088d31407b244376fc3452f",
+          "grpcio-1.76.0.dist-info/RECORD": "3775057beee7f6c0a2ecfb0a93ae1e6bd8be2abe6940052984f7bf9185e4a1ea",
+          "grpcio-1.76.0.dist-info/WHEEL": "3afb6f9dba5c6b11dae5381781f0b8f04e8903bccbafbb2f32ca4f3fb564e68f",
+          "typing_extensions-4.15.0.dist-info/METADATA": "c138378fe8f18934ac99de060535c53ec6c13aeed65e94c32641da7ee3192a72",
+          "typing_extensions-4.15.0.dist-info/RECORD": "c42db5851c3a20efb41dbe1a0d03c18db577a5449c7e685f6b139df34b98e62f",
+          "typing_extensions-4.15.0.dist-info/WHEEL": "1b68144734c4b66791f27add5d425f3620775585718a03d0f9b110ba3a4d88db",
+          "typing_extensions.py": "433d11d170d3a24d2eb065ebc1bfe848cea7e3d7ce68567ab52bea2d4c2f7ed8"
+        },
+        "status": "error",
+        "code": "UNAVAILABLE",
+        "details": "Socket closed"
+      },
+      "wire": {
+        "requests": [
+          {
+            "scope": "tenant",
+            "stream": 1,
+            "type_url": "type.googleapis.com/envoy.config.listener.v3.Listener",
+            "names": [
+              "xdstp://tenant/envoy.config.listener.v3.Listener/svc:443@edge"
+            ],
+            "version": "",
+            "nonce": "",
+            "node_id": "target-authority-colon-at",
+            "error": null
+          },
+          {
+            "scope": "tenant",
+            "stream": 1,
+            "type_url": "type.googleapis.com/envoy.config.listener.v3.Listener",
+            "names": [
+              "xdstp://tenant/envoy.config.listener.v3.Listener/svc:443@edge"
+            ],
+            "version": "v1-lds",
+            "nonce": "v1-lds",
+            "node_id": null,
+            "error": null
+          },
+          {
+            "scope": "root",
+            "stream": 1,
+            "type_url": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+            "names": [
+              "backend"
+            ],
+            "version": "",
+            "nonce": "",
+            "node_id": "target-authority-colon-at",
+            "error": null
+          },
+          {
+            "scope": "root",
+            "stream": 1,
+            "type_url": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+            "names": [
+              "backend"
+            ],
+            "version": "v1-cds",
+            "nonce": "v1-cds",
+            "node_id": null,
+            "error": null
+          },
+          {
+            "scope": "root",
+            "stream": 1,
+            "type_url": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+            "names": [
+              "backend-eds"
+            ],
+            "version": "",
+            "nonce": "",
+            "node_id": null,
+            "error": null
+          },
+          {
+            "scope": "root",
+            "stream": 1,
+            "type_url": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+            "names": [
+              "backend-eds"
+            ],
+            "version": "v1-eds",
+            "nonce": "v1-eds",
+            "node_id": null,
+            "error": null
+          }
+        ],
+        "backend_calls": [],
+        "errors": [
+          "HTTP/2 session: Protocol error"
+        ],
+        "session_errors": [
+          {
+            "code": "ERR_HTTP2_ERROR",
+            "errno": -505,
+            "message": "Protocol error"
+          }
+        ]
+      },
+      "capture": {
+        "status": "ok",
+        "hpack": "4.1.0",
+        "dependency_sha256": {
+          "hpack-4.1.0.dist-info/METADATA": "4358172828085470690d07c5efeb9e54331dd55baa4c715a28fb4e2e4826e2e6",
+          "hpack-4.1.0.dist-info/RECORD": "fa23808b49ea0eb64cb982539a74f00bbf04dc770b4841525bd730bf30053c49",
+          "hpack-4.1.0.dist-info/WHEEL": "227f454cdc5e3fad0a9d3906c3bc24ea624f61dfdd4128c46665dd05d30223ef",
+          "hpack/__init__.py": "5589bcbe1b3b87642b58c497e9efa4103b73258cc0de316076dfd54303f66208",
+          "hpack/exceptions.py": "5eacbcbe2aaf28a1c1c90ec8a3c169f873e50cfdd3ed133d6a994f4b176bf632",
+          "hpack/hpack.py": "06abd248e677400807e63e59457e4ca77712c71e6a7bfa3883f78ee311cc03c2",
+          "hpack/huffman.py": "c6e199140a8b727c6b484b9c8ea3503a1257c5d189e4f1b58438089868bfa8e3",
+          "hpack/huffman_constants.py": "e0f84e31e97998dd1ab24151ae7e2756927f09339484ed6a6c544eeaefc87f63",
+          "hpack/huffman_table.py": "ddd26e52678fe84a1c7c70be50b873926053a179f594fd871ba8303ff78199b6",
+          "hpack/struct.py": "3574b63bce2edb31dda248eeb5ffbd21267b875ab264b4cf13e4caa5c5a5d53e",
+          "hpack/table.py": "500937f5f52433fafc76704a3832ffa86afdff044e9ca4150761033f60032642"
+        },
+        "connections": [
+          {
+            "id": 1,
+            "client_sha256": "052bb94c2dd8dfdeb870eb5e962e9719e7580c92521d5d1ad7b435fd3cc0578e",
+            "server_sha256": "59f700195ef2481eaa52e664ddaf070363c493d9ff63e8e6525a29add99da339",
+            "client_bytes": 379,
+            "server_bytes": 35,
+            "requests": [
+              {
+                "connection": 1,
+                "stream": 1,
+                "headers": [
+                  [
+                    ":path",
+                    "/fixture.Target/Unary"
+                  ],
+                  [
+                    ":authority",
+                    "svc:443@edge"
+                  ],
+                  [
+                    ":method",
+                    "POST"
+                  ],
+                  [
+                    ":scheme",
+                    "http"
+                  ],
+                  [
+                    "content-type",
+                    "application/grpc"
+                  ],
+                  [
+                    "te",
+                    "trailers"
+                  ],
+                  [
+                    "grpc-accept-encoding",
+                    "identity, deflate, gzip"
+                  ],
+                  [
+                    "grpc-timeout",
+                    "4970m"
+                  ],
+                  [
+                    "user-agent",
+                    "grpc-python/1.76.0 grpc-c/51.0.0 (linux; chttp2)"
+                  ]
+                ],
+                "hpack_sha256": "7b4da8f1ba3021feefa05d7a9d6c15443475bc8906421b290ed2c6416268b1da"
+              }
+            ],
+            "rejections": [
+              {
+                "connection": 1,
+                "kind": "GOAWAY",
+                "last_stream": 1,
+                "code": 1,
+                "debug_base64": ""
+              }
+            ]
+          },
+          {
+            "id": 2,
+            "client_sha256": "4903661f144cf40d2388048fe0041fb70b691e5e296e730bcc98d9178c5d8897",
+            "server_sha256": "d2a2e7c9bc950d98dec161255aa08b90d160846c82043ebbeab4e1b3e85a1a8a",
+            "client_bytes": 82,
+            "server_bytes": 18,
+            "requests": [],
+            "rejections": []
+          }
+        ],
+        "errors": []
+      },
+      "outcome": "authority-rejected-after-lds",
+      "elapsed_seconds": 0.507
+    },
+    {
+      "id": "explicit-default-authority",
+      "target": "xds://tenant/svc",
+      "status": "passed",
+      "artifact_directory": "/home/passchaos/project-z/netz/docs/evidence/grpc_client_target/2026-11-07/capture.Debug/report-cases/explicit-default-authority",
+      "bootstrap_sha256": "0acd4b7abe63d8eeb6839f9da34d2cfdad2684c8dac2dac35fdbaa8f89fb9fe2",
+      "native": {
+        "status": "ok",
+        "err": null,
+        "listener_name": "xdstp://tenant/envoy.config.listener.v3.Listener/svc",
+        "discovery_authority": "tenant",
+        "listener_resource_authority": "tenant",
+        "data_authority": "user@override.test:7443"
+      },
+      "reference": {
+        "grpcio": "1.76.0",
+        "typing_extensions": "4.15.0",
+        "python": "3.12.3",
+        "core_extension": "/tmp/netz-grpc-client-target-venv/lib/python3.12/site-packages/grpc/_cython/cygrpc.cpython-312-x86_64-linux-gnu.so",
+        "core_sha256": "df68c8100961eb29df4651d7fdcbe12e85f12ff7d4adcbbdff4cc9d4285ee7d6",
+        "dependency_sha256": {
+          "grpc/__init__.py": "da04867956f5cf2f388f51365c92d7f42d90205744364f3e0dc4fbf39ab332e5",
+          "grpc/_auth.py": "f2f7ad895cb980b0ad87bec8b1119d84e80716b0b5ad619eff7ea5a4c1bc3723",
+          "grpc/_channel.py": "4a6b751ac44fe3db8f925198b130d1b362607d2e6c3e3faec59abd29bf27926c",
+          "grpc/_common.py": "5bc309cfe0268eb9cbb6c9d945c38b8a83beef32d69c31e7c78cc3955dde41d6",
+          "grpc/_compression.py": "d0ff727cd227df706671098e7673144e881b2c83d1d1e4ff2e69a79b79657058",
+          "grpc/_cython/__init__.py": "c3792a480c9a6603fe5b4f3dd314782f859e04f1abb6c4024097b4154151d0ad",
+          "grpc/_cython/_cygrpc/__init__.py": "c3792a480c9a6603fe5b4f3dd314782f859e04f1abb6c4024097b4154151d0ad",
+          "grpc/_cython/cygrpc.cpython-312-x86_64-linux-gnu.so": "df68c8100961eb29df4651d7fdcbe12e85f12ff7d4adcbbdff4cc9d4285ee7d6",
+          "grpc/_grpcio_metadata.py": "f20649933f7aaf6a13775355bff7020ef4778abbebcfd7cf93b1343280756204",
+          "grpc/_interceptor.py": "b1b55f049e49ca78e4c64de6f79ad0c9101c1fa3664a4f19dc969ee1b0ca6a3c",
+          "grpc/_observability.py": "09e2257d6e6a06fe72925785ab44e115b638e40ec2159db2c70ad40b5b615fa0",
+          "grpc/_plugin_wrapping.py": "6faafa45d8dd0eb9e1732bc6777c3bc8b4c74f3cbea8d6b41fb57c4a34bc63c1",
+          "grpc/_runtime_protos.py": "704ef5b60b347595e069337c6b593b4e8637c75a083030e9e5b4b37311cba921",
+          "grpc/_server.py": "cf5bcf329b3ba9f0488e21246c4472c3247708471628166c84141848a06f179a",
+          "grpc/_simple_stubs.py": "90143ca0a1b4a04fdfd74990c9360e2e986f7f5fb6bd9bb69002bc97dc98e888",
+          "grpc/_typing.py": "c980d3dcf6961bc4586c7cd3ff2f4e6a598c3a5744ea9046a1b12842606d6e3e",
+          "grpc/_utilities.py": "261e02e450e74f99c0bf367774f74b78f02aed03c017fa3047584f3deb558b96",
+          "grpc/aio/__init__.py": "f341e8d45a25a6e785a8822fca5edde5bf45260bf0e62959807717c4dd4d994b",
+          "grpc/aio/_base_call.py": "4c71571b4a342129f8d09af0d2c365705cdfa1b0fc52b8e08dd74c5ad83c6490",
+          "grpc/aio/_base_channel.py": "c15c04949ef76df4d39180bd27a3598c2abeab6304bd338b49b3ac78d3f3afc9",
+          "grpc/aio/_base_server.py": "787abd103527d5433a33e7bec126b1dd9320ac518ef030ca913b98c286c94d84",
+          "grpc/aio/_call.py": "2fe0763fc9af8a95202fc25bb13e7a5166b5dea4e85daaa28290a6b40f82dfa9",
+          "grpc/aio/_channel.py": "b5e3d58dd27918e69b439c33fe86920b91452cd94a3dd5a919eb4c131b229970",
+          "grpc/aio/_interceptor.py": "545e73d800ef35e330774c64062d2215f776e1ef849fb6733b5f4ea1fd1b2dd1",
+          "grpc/aio/_metadata.py": "e300bc4edb600ab14917cfd0c76cae09706998a9d3a494360d7579d1fcde8376",
+          "grpc/aio/_server.py": "e0b6e61e730c2d567375dc77139f010b8a6bad2944cfb3c0146a31ee961b6c9b",
+          "grpc/aio/_typing.py": "c4c946df7be7fd491d911bf7f54771e36d4159582de511c2bbc8095c0435f1da",
+          "grpc/aio/_utils.py": "061e7e9503b6c6ccdd65e4c501615f16185a2b2db4965e24b9c0fa7ff6194e58",
+          "grpc/beta/__init__.py": "c3792a480c9a6603fe5b4f3dd314782f859e04f1abb6c4024097b4154151d0ad",
+          "grpc/beta/_client_adaptations.py": "f0fdf0b52b513b019b94596104b2e7c71388d863db3208ad1b9822d2de66267d",
+          "grpc/beta/_metadata.py": "56cb7fcfec1c64083f3b44a972f20058d4da5f1376a095b971b48759dc939eb4",
+          "grpc/beta/_server_adaptations.py": "6dc0048b2aba7aa0ac0767b12615bcdd2c3741a132fb74546de563d33cacfa06",
+          "grpc/beta/implementations.py": "d32213820cea28aa3c2dbf19c0fc76cc8bb8d789884317da9f78e67a77212079",
+          "grpc/beta/interfaces.py": "9ad427be6ec1836bb931065fdbf9e6c54c4a14200d0f0ed550e1c7bc4edc0613",
+          "grpc/beta/utilities.py": "9474b11690f960337b3c90ee415828aa60c71d0997625d53f5e0ae694c6ef5e0",
+          "grpc/experimental/__init__.py": "53add28affdadacb49a2eb15ce01d235fa1c7334a68bb2d4f87b651566e0313e",
+          "grpc/experimental/aio/__init__.py": "6c8c8374605b3478b917f907bf007238d8dce0cffbe2d872e77626043af564fa",
+          "grpc/experimental/gevent.py": "fd8024f5a1f63c2642a5a0a75bdb8663bed6db5df8d9d1169bcc0e540a53c7cf",
+          "grpc/experimental/session_cache.py": "c006aebc3cf1bd30bafa9de331b3e74dcef2ef89e10ca4918dbd24b5f30f0a6f",
+          "grpc/framework/__init__.py": "c3792a480c9a6603fe5b4f3dd314782f859e04f1abb6c4024097b4154151d0ad",
+          "grpc/framework/common/__init__.py": "c3792a480c9a6603fe5b4f3dd314782f859e04f1abb6c4024097b4154151d0ad",
+          "grpc/framework/common/cardinality.py": "ca05adae38ec93e48e3cb1da7b2ebeede903db7421bb7938414366608d527155",
+          "grpc/framework/common/style.py": "5fdc0df9a7fc4fb5968457ddb6616476a3cde4f6e923c149b0a19d98f8af6805",
+          "grpc/framework/foundation/__init__.py": "c3792a480c9a6603fe5b4f3dd314782f859e04f1abb6c4024097b4154151d0ad",
+          "grpc/framework/foundation/abandonment.py": "005e18ef7e1b18855a5f408bf16f5769a3d8b8f51a72072204467d59be1fa460",
+          "grpc/framework/foundation/callable_util.py": "71fc1c724cca7bd9a98efcfae24d54c71cf9b8ed553cfd91b061d43b10624ac0",
+          "grpc/framework/foundation/future.py": "763a1e36af96779fed93343017f65e2f59d8016289e6bc337a51a84cf751d4c1",
+          "grpc/framework/foundation/logging_pool.py": "8fc3c56966ab42b9c379bb03c667093337c5b091fcc46636038cfa3e5a3f43d7",
+          "grpc/framework/foundation/stream.py": "17a5d05090bcad3f9c8b26cfb473fb3d3325317368557cb39a747060aa2cd0cb",
+          "grpc/framework/foundation/stream_util.py": "8b9b0a292a915772ecb12e84c3ede854501ee881df897ce0cc280a6a5b3693f7",
+          "grpc/framework/interfaces/__init__.py": "c3792a480c9a6603fe5b4f3dd314782f859e04f1abb6c4024097b4154151d0ad",
+          "grpc/framework/interfaces/base/__init__.py": "c3792a480c9a6603fe5b4f3dd314782f859e04f1abb6c4024097b4154151d0ad",
+          "grpc/framework/interfaces/base/base.py": "6835be9c2540e1bac37376517ff6f5f8c399e09bfbb2cfc5e15ea321e26e8137",
+          "grpc/framework/interfaces/base/utilities.py": "6eebe50efdee94782c1787a3e83cd079ca0f197c1f315d9ec99ef494f3097cd0",
+          "grpc/framework/interfaces/face/__init__.py": "c3792a480c9a6603fe5b4f3dd314782f859e04f1abb6c4024097b4154151d0ad",
+          "grpc/framework/interfaces/face/face.py": "386c80a5d8ec67c045f6736afb6b1de965ddf5b3e96ef8f88ef5eb19d26efa76",
+          "grpc/framework/interfaces/face/utilities.py": "8d1980995d215cf5dc3796ba560ece9416dc96d181e81d746d47e8aaa1c99947",
+          "grpcio-1.76.0.dist-info/METADATA": "fbffe82677cada416245852e3edfb28efdd84869e088d31407b244376fc3452f",
+          "grpcio-1.76.0.dist-info/RECORD": "3775057beee7f6c0a2ecfb0a93ae1e6bd8be2abe6940052984f7bf9185e4a1ea",
+          "grpcio-1.76.0.dist-info/WHEEL": "3afb6f9dba5c6b11dae5381781f0b8f04e8903bccbafbb2f32ca4f3fb564e68f",
+          "typing_extensions-4.15.0.dist-info/METADATA": "c138378fe8f18934ac99de060535c53ec6c13aeed65e94c32641da7ee3192a72",
+          "typing_extensions-4.15.0.dist-info/RECORD": "c42db5851c3a20efb41dbe1a0d03c18db577a5449c7e685f6b139df34b98e62f",
+          "typing_extensions-4.15.0.dist-info/WHEEL": "1b68144734c4b66791f27add5d425f3620775585718a03d0f9b110ba3a4d88db",
+          "typing_extensions.py": "433d11d170d3a24d2eb065ebc1bfe848cea7e3d7ce68567ab52bea2d4c2f7ed8"
+        },
+        "status": "error",
+        "code": "UNAVAILABLE",
+        "details": "Socket closed"
+      },
+      "wire": {
+        "requests": [
+          {
+            "scope": "tenant",
+            "stream": 1,
+            "type_url": "type.googleapis.com/envoy.config.listener.v3.Listener",
+            "names": [
+              "xdstp://tenant/envoy.config.listener.v3.Listener/svc"
+            ],
+            "version": "",
+            "nonce": "",
+            "node_id": "target-explicit-default-authority",
+            "error": null
+          },
+          {
+            "scope": "tenant",
+            "stream": 1,
+            "type_url": "type.googleapis.com/envoy.config.listener.v3.Listener",
+            "names": [
+              "xdstp://tenant/envoy.config.listener.v3.Listener/svc"
+            ],
+            "version": "v1-lds",
+            "nonce": "v1-lds",
+            "node_id": null,
+            "error": null
+          },
+          {
+            "scope": "root",
+            "stream": 1,
+            "type_url": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+            "names": [
+              "backend"
+            ],
+            "version": "",
+            "nonce": "",
+            "node_id": "target-explicit-default-authority",
+            "error": null
+          },
+          {
+            "scope": "root",
+            "stream": 1,
+            "type_url": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+            "names": [
+              "backend"
+            ],
+            "version": "v1-cds",
+            "nonce": "v1-cds",
+            "node_id": null,
+            "error": null
+          },
+          {
+            "scope": "root",
+            "stream": 1,
+            "type_url": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+            "names": [
+              "backend-eds"
+            ],
+            "version": "",
+            "nonce": "",
+            "node_id": null,
+            "error": null
+          },
+          {
+            "scope": "root",
+            "stream": 1,
+            "type_url": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+            "names": [
+              "backend-eds"
+            ],
+            "version": "v1-eds",
+            "nonce": "v1-eds",
+            "node_id": null,
+            "error": null
+          }
+        ],
+        "backend_calls": [],
+        "errors": [
+          "HTTP/2 session: Protocol error"
+        ],
+        "session_errors": [
+          {
+            "code": "ERR_HTTP2_ERROR",
+            "errno": -505,
+            "message": "Protocol error"
+          }
+        ]
+      },
+      "capture": {
+        "status": "ok",
+        "hpack": "4.1.0",
+        "dependency_sha256": {
+          "hpack-4.1.0.dist-info/METADATA": "4358172828085470690d07c5efeb9e54331dd55baa4c715a28fb4e2e4826e2e6",
+          "hpack-4.1.0.dist-info/RECORD": "fa23808b49ea0eb64cb982539a74f00bbf04dc770b4841525bd730bf30053c49",
+          "hpack-4.1.0.dist-info/WHEEL": "227f454cdc5e3fad0a9d3906c3bc24ea624f61dfdd4128c46665dd05d30223ef",
+          "hpack/__init__.py": "5589bcbe1b3b87642b58c497e9efa4103b73258cc0de316076dfd54303f66208",
+          "hpack/exceptions.py": "5eacbcbe2aaf28a1c1c90ec8a3c169f873e50cfdd3ed133d6a994f4b176bf632",
+          "hpack/hpack.py": "06abd248e677400807e63e59457e4ca77712c71e6a7bfa3883f78ee311cc03c2",
+          "hpack/huffman.py": "c6e199140a8b727c6b484b9c8ea3503a1257c5d189e4f1b58438089868bfa8e3",
+          "hpack/huffman_constants.py": "e0f84e31e97998dd1ab24151ae7e2756927f09339484ed6a6c544eeaefc87f63",
+          "hpack/huffman_table.py": "ddd26e52678fe84a1c7c70be50b873926053a179f594fd871ba8303ff78199b6",
+          "hpack/struct.py": "3574b63bce2edb31dda248eeb5ffbd21267b875ab264b4cf13e4caa5c5a5d53e",
+          "hpack/table.py": "500937f5f52433fafc76704a3832ffa86afdff044e9ca4150761033f60032642"
+        },
+        "connections": [
+          {
+            "id": 1,
+            "client_sha256": "a10ed84121d65cfb304d0763265e7bde2489978916b6d450c5ebf9ab67bed31d",
+            "server_sha256": "59f700195ef2481eaa52e664ddaf070363c493d9ff63e8e6525a29add99da339",
+            "client_bytes": 390,
+            "server_bytes": 35,
+            "requests": [
+              {
+                "connection": 1,
+                "stream": 1,
+                "headers": [
+                  [
+                    ":path",
+                    "/fixture.Target/Unary"
+                  ],
+                  [
+                    ":authority",
+                    "user@override.test:7443"
+                  ],
+                  [
+                    ":method",
+                    "POST"
+                  ],
+                  [
+                    ":scheme",
+                    "http"
+                  ],
+                  [
+                    "content-type",
+                    "application/grpc"
+                  ],
+                  [
+                    "te",
+                    "trailers"
+                  ],
+                  [
+                    "grpc-accept-encoding",
+                    "identity, deflate, gzip"
+                  ],
+                  [
+                    "grpc-timeout",
+                    "4970m"
+                  ],
+                  [
+                    "user-agent",
+                    "grpc-python/1.76.0 grpc-c/51.0.0 (linux; chttp2)"
+                  ]
+                ],
+                "hpack_sha256": "33142e5f133da876fb60bb922d0d19e9f06345f7096d92ddace4c5be9577fc0f"
+              }
+            ],
+            "rejections": [
+              {
+                "connection": 1,
+                "kind": "GOAWAY",
+                "last_stream": 1,
+                "code": 1,
+                "debug_base64": ""
+              }
+            ]
+          },
+          {
+            "id": 2,
+            "client_sha256": "4903661f144cf40d2388048fe0041fb70b691e5e296e730bcc98d9178c5d8897",
+            "server_sha256": "d2a2e7c9bc950d98dec161255aa08b90d160846c82043ebbeab4e1b3e85a1a8a",
+            "client_bytes": 82,
+            "server_bytes": 18,
+            "requests": [],
+            "rejections": []
+          }
+        ],
+        "errors": []
+      },
+      "outcome": "authority-rejected-after-lds",
+      "elapsed_seconds": 0.517
+    },
+    {
+      "id": "unknown-authority",
+      "target": "xds://missing/svc",
+      "status": "passed",
+      "artifact_directory": "/home/passchaos/project-z/netz/docs/evidence/grpc_client_target/2026-11-07/capture.Debug/report-cases/unknown-authority",
+      "bootstrap_sha256": "2010df8c7f82a42515b50a9d34351e66e21b2644f25d51cc3d0e82fdd8fefb8b",
+      "native": {
+        "status": "error",
+        "err": "UnknownXdsAuthority",
+        "listener_name": null,
+        "discovery_authority": null,
+        "listener_resource_authority": null,
+        "data_authority": null
+      },
+      "reference": {
+        "grpcio": "1.76.0",
+        "typing_extensions": "4.15.0",
+        "python": "3.12.3",
+        "core_extension": "/tmp/netz-grpc-client-target-venv/lib/python3.12/site-packages/grpc/_cython/cygrpc.cpython-312-x86_64-linux-gnu.so",
+        "core_sha256": "df68c8100961eb29df4651d7fdcbe12e85f12ff7d4adcbbdff4cc9d4285ee7d6",
+        "dependency_sha256": {
+          "grpc/__init__.py": "da04867956f5cf2f388f51365c92d7f42d90205744364f3e0dc4fbf39ab332e5",
+          "grpc/_auth.py": "f2f7ad895cb980b0ad87bec8b1119d84e80716b0b5ad619eff7ea5a4c1bc3723",
+          "grpc/_channel.py": "4a6b751ac44fe3db8f925198b130d1b362607d2e6c3e3faec59abd29bf27926c",
+          "grpc/_common.py": "5bc309cfe0268eb9cbb6c9d945c38b8a83beef32d69c31e7c78cc3955dde41d6",
+          "grpc/_compression.py": "d0ff727cd227df706671098e7673144e881b2c83d1d1e4ff2e69a79b79657058",
+          "grpc/_cython/__init__.py": "c3792a480c9a6603fe5b4f3dd314782f859e04f1abb6c4024097b4154151d0ad",
+          "grpc/_cython/_cygrpc/__init__.py": "c3792a480c9a6603fe5b4f3dd314782f859e04f1abb6c4024097b4154151d0ad",
+          "grpc/_cython/cygrpc.cpython-312-x86_64-linux-gnu.so": "df68c8100961eb29df4651d7fdcbe12e85f12ff7d4adcbbdff4cc9d4285ee7d6",
+          "grpc/_grpcio_metadata.py": "f20649933f7aaf6a13775355bff7020ef4778abbebcfd7cf93b1343280756204",
+          "grpc/_interceptor.py": "b1b55f049e49ca78e4c64de6f79ad0c9101c1fa3664a4f19dc969ee1b0ca6a3c",
+          "grpc/_observability.py": "09e2257d6e6a06fe72925785ab44e115b638e40ec2159db2c70ad40b5b615fa0",
+          "grpc/_plugin_wrapping.py": "6faafa45d8dd0eb9e1732bc6777c3bc8b4c74f3cbea8d6b41fb57c4a34bc63c1",
+          "grpc/_runtime_protos.py": "704ef5b60b347595e069337c6b593b4e8637c75a083030e9e5b4b37311cba921",
+          "grpc/_server.py": "cf5bcf329b3ba9f0488e21246c4472c3247708471628166c84141848a06f179a",
+          "grpc/_simple_stubs.py": "90143ca0a1b4a04fdfd74990c9360e2e986f7f5fb6bd9bb69002bc97dc98e888",
+          "grpc/_typing.py": "c980d3dcf6961bc4586c7cd3ff2f4e6a598c3a5744ea9046a1b12842606d6e3e",
+          "grpc/_utilities.py": "261e02e450e74f99c0bf367774f74b78f02aed03c017fa3047584f3deb558b96",
+          "grpc/aio/__init__.py": "f341e8d45a25a6e785a8822fca5edde5bf45260bf0e62959807717c4dd4d994b",
+          "grpc/aio/_base_call.py": "4c71571b4a342129f8d09af0d2c365705cdfa1b0fc52b8e08dd74c5ad83c6490",
+          "grpc/aio/_base_channel.py": "c15c04949ef76df4d39180bd27a3598c2abeab6304bd338b49b3ac78d3f3afc9",
+          "grpc/aio/_base_server.py": "787abd103527d5433a33e7bec126b1dd9320ac518ef030ca913b98c286c94d84",
+          "grpc/aio/_call.py": "2fe0763fc9af8a95202fc25bb13e7a5166b5dea4e85daaa28290a6b40f82dfa9",
+          "grpc/aio/_channel.py": "b5e3d58dd27918e69b439c33fe86920b91452cd94a3dd5a919eb4c131b229970",
+          "grpc/aio/_interceptor.py": "545e73d800ef35e330774c64062d2215f776e1ef849fb6733b5f4ea1fd1b2dd1",
+          "grpc/aio/_metadata.py": "e300bc4edb600ab14917cfd0c76cae09706998a9d3a494360d7579d1fcde8376",
+          "grpc/aio/_server.py": "e0b6e61e730c2d567375dc77139f010b8a6bad2944cfb3c0146a31ee961b6c9b",
+          "grpc/aio/_typing.py": "c4c946df7be7fd491d911bf7f54771e36d4159582de511c2bbc8095c0435f1da",
+          "grpc/aio/_utils.py": "061e7e9503b6c6ccdd65e4c501615f16185a2b2db4965e24b9c0fa7ff6194e58",
+          "grpc/beta/__init__.py": "c3792a480c9a6603fe5b4f3dd314782f859e04f1abb6c4024097b4154151d0ad",
+          "grpc/beta/_client_adaptations.py": "f0fdf0b52b513b019b94596104b2e7c71388d863db3208ad1b9822d2de66267d",
+          "grpc/beta/_metadata.py": "56cb7fcfec1c64083f3b44a972f20058d4da5f1376a095b971b48759dc939eb4",
+          "grpc/beta/_server_adaptations.py": "6dc0048b2aba7aa0ac0767b12615bcdd2c3741a132fb74546de563d33cacfa06",
+          "grpc/beta/implementations.py": "d32213820cea28aa3c2dbf19c0fc76cc8bb8d789884317da9f78e67a77212079",
+          "grpc/beta/interfaces.py": "9ad427be6ec1836bb931065fdbf9e6c54c4a14200d0f0ed550e1c7bc4edc0613",
+          "grpc/beta/utilities.py": "9474b11690f960337b3c90ee415828aa60c71d0997625d53f5e0ae694c6ef5e0",
+          "grpc/experimental/__init__.py": "53add28affdadacb49a2eb15ce01d235fa1c7334a68bb2d4f87b651566e0313e",
+          "grpc/experimental/aio/__init__.py": "6c8c8374605b3478b917f907bf007238d8dce0cffbe2d872e77626043af564fa",
+          "grpc/experimental/gevent.py": "fd8024f5a1f63c2642a5a0a75bdb8663bed6db5df8d9d1169bcc0e540a53c7cf",
+          "grpc/experimental/session_cache.py": "c006aebc3cf1bd30bafa9de331b3e74dcef2ef89e10ca4918dbd24b5f30f0a6f",
+          "grpc/framework/__init__.py": "c3792a480c9a6603fe5b4f3dd314782f859e04f1abb6c4024097b4154151d0ad",
+          "grpc/framework/common/__init__.py": "c3792a480c9a6603fe5b4f3dd314782f859e04f1abb6c4024097b4154151d0ad",
+          "grpc/framework/common/cardinality.py": "ca05adae38ec93e48e3cb1da7b2ebeede903db7421bb7938414366608d527155",
+          "grpc/framework/common/style.py": "5fdc0df9a7fc4fb5968457ddb6616476a3cde4f6e923c149b0a19d98f8af6805",
+          "grpc/framework/foundation/__init__.py": "c3792a480c9a6603fe5b4f3dd314782f859e04f1abb6c4024097b4154151d0ad",
+          "grpc/framework/foundation/abandonment.py": "005e18ef7e1b18855a5f408bf16f5769a3d8b8f51a72072204467d59be1fa460",
+          "grpc/framework/foundation/callable_util.py": "71fc1c724cca7bd9a98efcfae24d54c71cf9b8ed553cfd91b061d43b10624ac0",
+          "grpc/framework/foundation/future.py": "763a1e36af96779fed93343017f65e2f59d8016289e6bc337a51a84cf751d4c1",
+          "grpc/framework/foundation/logging_pool.py": "8fc3c56966ab42b9c379bb03c667093337c5b091fcc46636038cfa3e5a3f43d7",
+          "grpc/framework/foundation/stream.py": "17a5d05090bcad3f9c8b26cfb473fb3d3325317368557cb39a747060aa2cd0cb",
+          "grpc/framework/foundation/stream_util.py": "8b9b0a292a915772ecb12e84c3ede854501ee881df897ce0cc280a6a5b3693f7",
+          "grpc/framework/interfaces/__init__.py": "c3792a480c9a6603fe5b4f3dd314782f859e04f1abb6c4024097b4154151d0ad",
+          "grpc/framework/interfaces/base/__init__.py": "c3792a480c9a6603fe5b4f3dd314782f859e04f1abb6c4024097b4154151d0ad",
+          "grpc/framework/interfaces/base/base.py": "6835be9c2540e1bac37376517ff6f5f8c399e09bfbb2cfc5e15ea321e26e8137",
+          "grpc/framework/interfaces/base/utilities.py": "6eebe50efdee94782c1787a3e83cd079ca0f197c1f315d9ec99ef494f3097cd0",
+          "grpc/framework/interfaces/face/__init__.py": "c3792a480c9a6603fe5b4f3dd314782f859e04f1abb6c4024097b4154151d0ad",
+          "grpc/framework/interfaces/face/face.py": "386c80a5d8ec67c045f6736afb6b1de965ddf5b3e96ef8f88ef5eb19d26efa76",
+          "grpc/framework/interfaces/face/utilities.py": "8d1980995d215cf5dc3796ba560ece9416dc96d181e81d746d47e8aaa1c99947",
+          "grpcio-1.76.0.dist-info/METADATA": "fbffe82677cada416245852e3edfb28efdd84869e088d31407b244376fc3452f",
+          "grpcio-1.76.0.dist-info/RECORD": "3775057beee7f6c0a2ecfb0a93ae1e6bd8be2abe6940052984f7bf9185e4a1ea",
+          "grpcio-1.76.0.dist-info/WHEEL": "3afb6f9dba5c6b11dae5381781f0b8f04e8903bccbafbb2f32ca4f3fb564e68f",
+          "typing_extensions-4.15.0.dist-info/METADATA": "c138378fe8f18934ac99de060535c53ec6c13aeed65e94c32641da7ee3192a72",
+          "typing_extensions-4.15.0.dist-info/RECORD": "c42db5851c3a20efb41dbe1a0d03c18db577a5449c7e685f6b139df34b98e62f",
+          "typing_extensions-4.15.0.dist-info/WHEEL": "1b68144734c4b66791f27add5d425f3620775585718a03d0f9b110ba3a4d88db",
+          "typing_extensions.py": "433d11d170d3a24d2eb065ebc1bfe848cea7e3d7ce68567ab52bea2d4c2f7ed8"
+        },
+        "status": "error",
+        "code": "UNAVAILABLE",
+        "details": "Invalid target URI -- authority not found for missing"
+      },
+      "wire": {
+        "requests": [],
+        "backend_calls": [],
+        "errors": [],
+        "session_errors": []
+      },
+      "capture": {
+        "status": "ok",
+        "hpack": "4.1.0",
+        "dependency_sha256": {
+          "hpack-4.1.0.dist-info/METADATA": "4358172828085470690d07c5efeb9e54331dd55baa4c715a28fb4e2e4826e2e6",
+          "hpack-4.1.0.dist-info/RECORD": "fa23808b49ea0eb64cb982539a74f00bbf04dc770b4841525bd730bf30053c49",
+          "hpack-4.1.0.dist-info/WHEEL": "227f454cdc5e3fad0a9d3906c3bc24ea624f61dfdd4128c46665dd05d30223ef",
+          "hpack/__init__.py": "5589bcbe1b3b87642b58c497e9efa4103b73258cc0de316076dfd54303f66208",
+          "hpack/exceptions.py": "5eacbcbe2aaf28a1c1c90ec8a3c169f873e50cfdd3ed133d6a994f4b176bf632",
+          "hpack/hpack.py": "06abd248e677400807e63e59457e4ca77712c71e6a7bfa3883f78ee311cc03c2",
+          "hpack/huffman.py": "c6e199140a8b727c6b484b9c8ea3503a1257c5d189e4f1b58438089868bfa8e3",
+          "hpack/huffman_constants.py": "e0f84e31e97998dd1ab24151ae7e2756927f09339484ed6a6c544eeaefc87f63",
+          "hpack/huffman_table.py": "ddd26e52678fe84a1c7c70be50b873926053a179f594fd871ba8303ff78199b6",
+          "hpack/struct.py": "3574b63bce2edb31dda248eeb5ffbd21267b875ab264b4cf13e4caa5c5a5d53e",
+          "hpack/table.py": "500937f5f52433fafc76704a3832ffa86afdff044e9ca4150761033f60032642"
+        },
+        "connections": [],
+        "errors": []
+      },
+      "outcome": "invalid-target-rejected",
+      "elapsed_seconds": 0.479
+    },
+    {
+      "id": "invalid-query",
+      "target": "xds:///svc?bad space",
+      "status": "passed",
+      "artifact_directory": "/home/passchaos/project-z/netz/docs/evidence/grpc_client_target/2026-11-07/capture.Debug/report-cases/invalid-query",
+      "bootstrap_sha256": "a157753d7547a2458337c17c52b96a241dc71c38b37b843b14169e0b9284e32d",
+      "native": {
+        "status": "error",
+        "err": "InvalidXdsTarget",
+        "listener_name": null,
+        "discovery_authority": null,
+        "listener_resource_authority": null,
+        "data_authority": null
+      },
+      "reference": {
+        "grpcio": "1.76.0",
+        "typing_extensions": "4.15.0",
+        "python": "3.12.3",
+        "core_extension": "/tmp/netz-grpc-client-target-venv/lib/python3.12/site-packages/grpc/_cython/cygrpc.cpython-312-x86_64-linux-gnu.so",
+        "core_sha256": "df68c8100961eb29df4651d7fdcbe12e85f12ff7d4adcbbdff4cc9d4285ee7d6",
+        "dependency_sha256": {
+          "grpc/__init__.py": "da04867956f5cf2f388f51365c92d7f42d90205744364f3e0dc4fbf39ab332e5",
+          "grpc/_auth.py": "f2f7ad895cb980b0ad87bec8b1119d84e80716b0b5ad619eff7ea5a4c1bc3723",
+          "grpc/_channel.py": "4a6b751ac44fe3db8f925198b130d1b362607d2e6c3e3faec59abd29bf27926c",
+          "grpc/_common.py": "5bc309cfe0268eb9cbb6c9d945c38b8a83beef32d69c31e7c78cc3955dde41d6",
+          "grpc/_compression.py": "d0ff727cd227df706671098e7673144e881b2c83d1d1e4ff2e69a79b79657058",
+          "grpc/_cython/__init__.py": "c3792a480c9a6603fe5b4f3dd314782f859e04f1abb6c4024097b4154151d0ad",
+          "grpc/_cython/_cygrpc/__init__.py": "c3792a480c9a6603fe5b4f3dd314782f859e04f1abb6c4024097b4154151d0ad",
+          "grpc/_cython/cygrpc.cpython-312-x86_64-linux-gnu.so": "df68c8100961eb29df4651d7fdcbe12e85f12ff7d4adcbbdff4cc9d4285ee7d6",
+          "grpc/_grpcio_metadata.py": "f20649933f7aaf6a13775355bff7020ef4778abbebcfd7cf93b1343280756204",
+          "grpc/_interceptor.py": "b1b55f049e49ca78e4c64de6f79ad0c9101c1fa3664a4f19dc969ee1b0ca6a3c",
+          "grpc/_observability.py": "09e2257d6e6a06fe72925785ab44e115b638e40ec2159db2c70ad40b5b615fa0",
+          "grpc/_plugin_wrapping.py": "6faafa45d8dd0eb9e1732bc6777c3bc8b4c74f3cbea8d6b41fb57c4a34bc63c1",
+          "grpc/_runtime_protos.py": "704ef5b60b347595e069337c6b593b4e8637c75a083030e9e5b4b37311cba921",
+          "grpc/_server.py": "cf5bcf329b3ba9f0488e21246c4472c3247708471628166c84141848a06f179a",
+          "grpc/_simple_stubs.py": "90143ca0a1b4a04fdfd74990c9360e2e986f7f5fb6bd9bb69002bc97dc98e888",
+          "grpc/_typing.py": "c980d3dcf6961bc4586c7cd3ff2f4e6a598c3a5744ea9046a1b12842606d6e3e",
+          "grpc/_utilities.py": "261e02e450e74f99c0bf367774f74b78f02aed03c017fa3047584f3deb558b96",
+          "grpc/aio/__init__.py": "f341e8d45a25a6e785a8822fca5edde5bf45260bf0e62959807717c4dd4d994b",
+          "grpc/aio/_base_call.py": "4c71571b4a342129f8d09af0d2c365705cdfa1b0fc52b8e08dd74c5ad83c6490",
+          "grpc/aio/_base_channel.py": "c15c04949ef76df4d39180bd27a3598c2abeab6304bd338b49b3ac78d3f3afc9",
+          "grpc/aio/_base_server.py": "787abd103527d5433a33e7bec126b1dd9320ac518ef030ca913b98c286c94d84",
+          "grpc/aio/_call.py": "2fe0763fc9af8a95202fc25bb13e7a5166b5dea4e85daaa28290a6b40f82dfa9",
+          "grpc/aio/_channel.py": "b5e3d58dd27918e69b439c33fe86920b91452cd94a3dd5a919eb4c131b229970",
+          "grpc/aio/_interceptor.py": "545e73d800ef35e330774c64062d2215f776e1ef849fb6733b5f4ea1fd1b2dd1",
+          "grpc/aio/_metadata.py": "e300bc4edb600ab14917cfd0c76cae09706998a9d3a494360d7579d1fcde8376",
+          "grpc/aio/_server.py": "e0b6e61e730c2d567375dc77139f010b8a6bad2944cfb3c0146a31ee961b6c9b",
+          "grpc/aio/_typing.py": "c4c946df7be7fd491d911bf7f54771e36d4159582de511c2bbc8095c0435f1da",
+          "grpc/aio/_utils.py": "061e7e9503b6c6ccdd65e4c501615f16185a2b2db4965e24b9c0fa7ff6194e58",
+          "grpc/beta/__init__.py": "c3792a480c9a6603fe5b4f3dd314782f859e04f1abb6c4024097b4154151d0ad",
+          "grpc/beta/_client_adaptations.py": "f0fdf0b52b513b019b94596104b2e7c71388d863db3208ad1b9822d2de66267d",
+          "grpc/beta/_metadata.py": "56cb7fcfec1c64083f3b44a972f20058d4da5f1376a095b971b48759dc939eb4",
+          "grpc/beta/_server_adaptations.py": "6dc0048b2aba7aa0ac0767b12615bcdd2c3741a132fb74546de563d33cacfa06",
+          "grpc/beta/implementations.py": "d32213820cea28aa3c2dbf19c0fc76cc8bb8d789884317da9f78e67a77212079",
+          "grpc/beta/interfaces.py": "9ad427be6ec1836bb931065fdbf9e6c54c4a14200d0f0ed550e1c7bc4edc0613",
+          "grpc/beta/utilities.py": "9474b11690f960337b3c90ee415828aa60c71d0997625d53f5e0ae694c6ef5e0",
+          "grpc/experimental/__init__.py": "53add28affdadacb49a2eb15ce01d235fa1c7334a68bb2d4f87b651566e0313e",
+          "grpc/experimental/aio/__init__.py": "6c8c8374605b3478b917f907bf007238d8dce0cffbe2d872e77626043af564fa",
+          "grpc/experimental/gevent.py": "fd8024f5a1f63c2642a5a0a75bdb8663bed6db5df8d9d1169bcc0e540a53c7cf",
+          "grpc/experimental/session_cache.py": "c006aebc3cf1bd30bafa9de331b3e74dcef2ef89e10ca4918dbd24b5f30f0a6f",
+          "grpc/framework/__init__.py": "c3792a480c9a6603fe5b4f3dd314782f859e04f1abb6c4024097b4154151d0ad",
+          "grpc/framework/common/__init__.py": "c3792a480c9a6603fe5b4f3dd314782f859e04f1abb6c4024097b4154151d0ad",
+          "grpc/framework/common/cardinality.py": "ca05adae38ec93e48e3cb1da7b2ebeede903db7421bb7938414366608d527155",
+          "grpc/framework/common/style.py": "5fdc0df9a7fc4fb5968457ddb6616476a3cde4f6e923c149b0a19d98f8af6805",
+          "grpc/framework/foundation/__init__.py": "c3792a480c9a6603fe5b4f3dd314782f859e04f1abb6c4024097b4154151d0ad",
+          "grpc/framework/foundation/abandonment.py": "005e18ef7e1b18855a5f408bf16f5769a3d8b8f51a72072204467d59be1fa460",
+          "grpc/framework/foundation/callable_util.py": "71fc1c724cca7bd9a98efcfae24d54c71cf9b8ed553cfd91b061d43b10624ac0",
+          "grpc/framework/foundation/future.py": "763a1e36af96779fed93343017f65e2f59d8016289e6bc337a51a84cf751d4c1",
+          "grpc/framework/foundation/logging_pool.py": "8fc3c56966ab42b9c379bb03c667093337c5b091fcc46636038cfa3e5a3f43d7",
+          "grpc/framework/foundation/stream.py": "17a5d05090bcad3f9c8b26cfb473fb3d3325317368557cb39a747060aa2cd0cb",
+          "grpc/framework/foundation/stream_util.py": "8b9b0a292a915772ecb12e84c3ede854501ee881df897ce0cc280a6a5b3693f7",
+          "grpc/framework/interfaces/__init__.py": "c3792a480c9a6603fe5b4f3dd314782f859e04f1abb6c4024097b4154151d0ad",
+          "grpc/framework/interfaces/base/__init__.py": "c3792a480c9a6603fe5b4f3dd314782f859e04f1abb6c4024097b4154151d0ad",
+          "grpc/framework/interfaces/base/base.py": "6835be9c2540e1bac37376517ff6f5f8c399e09bfbb2cfc5e15ea321e26e8137",
+          "grpc/framework/interfaces/base/utilities.py": "6eebe50efdee94782c1787a3e83cd079ca0f197c1f315d9ec99ef494f3097cd0",
+          "grpc/framework/interfaces/face/__init__.py": "c3792a480c9a6603fe5b4f3dd314782f859e04f1abb6c4024097b4154151d0ad",
+          "grpc/framework/interfaces/face/face.py": "386c80a5d8ec67c045f6736afb6b1de965ddf5b3e96ef8f88ef5eb19d26efa76",
+          "grpc/framework/interfaces/face/utilities.py": "8d1980995d215cf5dc3796ba560ece9416dc96d181e81d746d47e8aaa1c99947",
+          "grpcio-1.76.0.dist-info/METADATA": "fbffe82677cada416245852e3edfb28efdd84869e088d31407b244376fc3452f",
+          "grpcio-1.76.0.dist-info/RECORD": "3775057beee7f6c0a2ecfb0a93ae1e6bd8be2abe6940052984f7bf9185e4a1ea",
+          "grpcio-1.76.0.dist-info/WHEEL": "3afb6f9dba5c6b11dae5381781f0b8f04e8903bccbafbb2f32ca4f3fb564e68f",
+          "typing_extensions-4.15.0.dist-info/METADATA": "c138378fe8f18934ac99de060535c53ec6c13aeed65e94c32641da7ee3192a72",
+          "typing_extensions-4.15.0.dist-info/RECORD": "c42db5851c3a20efb41dbe1a0d03c18db577a5449c7e685f6b139df34b98e62f",
+          "typing_extensions-4.15.0.dist-info/WHEEL": "1b68144734c4b66791f27add5d425f3620775585718a03d0f9b110ba3a4d88db",
+          "typing_extensions.py": "433d11d170d3a24d2eb065ebc1bfe848cea7e3d7ce68567ab52bea2d4c2f7ed8"
+        },
+        "status": "error",
+        "code": "UNKNOWN",
+        "details": "Failed to create channel to 'xds:///svc?bad space':the target uri is not valid: dns:///xds:///svc?bad space"
+      },
+      "wire": {
+        "requests": [],
+        "backend_calls": [],
+        "errors": [],
+        "session_errors": []
+      },
+      "capture": {
+        "status": "ok",
+        "hpack": "4.1.0",
+        "dependency_sha256": {
+          "hpack-4.1.0.dist-info/METADATA": "4358172828085470690d07c5efeb9e54331dd55baa4c715a28fb4e2e4826e2e6",
+          "hpack-4.1.0.dist-info/RECORD": "fa23808b49ea0eb64cb982539a74f00bbf04dc770b4841525bd730bf30053c49",
+          "hpack-4.1.0.dist-info/WHEEL": "227f454cdc5e3fad0a9d3906c3bc24ea624f61dfdd4128c46665dd05d30223ef",
+          "hpack/__init__.py": "5589bcbe1b3b87642b58c497e9efa4103b73258cc0de316076dfd54303f66208",
+          "hpack/exceptions.py": "5eacbcbe2aaf28a1c1c90ec8a3c169f873e50cfdd3ed133d6a994f4b176bf632",
+          "hpack/hpack.py": "06abd248e677400807e63e59457e4ca77712c71e6a7bfa3883f78ee311cc03c2",
+          "hpack/huffman.py": "c6e199140a8b727c6b484b9c8ea3503a1257c5d189e4f1b58438089868bfa8e3",
+          "hpack/huffman_constants.py": "e0f84e31e97998dd1ab24151ae7e2756927f09339484ed6a6c544eeaefc87f63",
+          "hpack/huffman_table.py": "ddd26e52678fe84a1c7c70be50b873926053a179f594fd871ba8303ff78199b6",
+          "hpack/struct.py": "3574b63bce2edb31dda248eeb5ffbd21267b875ab264b4cf13e4caa5c5a5d53e",
+          "hpack/table.py": "500937f5f52433fafc76704a3832ffa86afdff044e9ca4150761033f60032642"
+        },
+        "connections": [],
+        "errors": []
+      },
+      "outcome": "invalid-target-rejected",
+      "elapsed_seconds": 0.549
+    }
+  ],
+  "failures": [],
+  "source_sha256": {
+    "build.zig": "2d28ea7be6a6d3dfad8a7e71d9d29223d312909f32c50497851b7ba6c9e6618c",
+    "build.zig.zon": "e7be92a4961ae730f43e621e402855e744a18779c62b56a227e1f0ead2604fd1",
+    "src/grpc/metadata.zig": "ba74bad221644c602701da045fa5a061d8a06857ac06ce37b3f5c2d8ac545486",
+    "src/grpc/mod.zig": "76b169d8190152692b4fa0724f2cf8807d64b1de7c72d5b2c233c646973c029f",
+    "src/grpc/protobuf.zig": "7140156bfd8522253ad2b67fcfdb191f8ec0553872bfc81ef0a9ff040cf1d543",
+    "src/grpc/status_details.zig": "a85755fb712497e96b6abf963a89174930757caeeff820a7d12f5fd2ae61796f",
+    "src/grpc/wire.zig": "8854c55bac49dc536ed47e14885e9778bb41d0199a7a17fcfb1d967d375f58f7",
+    "src/grpc/xds/ads/batch_tests.zig": "be92dcdc03c6b7a10e8d9b8d286986a004e49db5192ae0a36d36c9867b35e7e1",
+    "src/grpc/xds/ads/client.zig": "4a576a2a0e80fce26826f5b6694c467b1353a4217ef324bb98320c08a31b11f4",
+    "src/grpc/xds/ads/codec.zig": "388e81d3b66d1113c99e8b50790ad01a401f041b1825e59f03b7ed66a3fd90e3",
+    "src/grpc/xds/ads/delta.zig": "77a0f0c73fc22b5f8adabe664c1463fa574e5e8349dcafd6b4d7f7205a6fc6d9",
+    "src/grpc/xds/ads/delta_client.zig": "8a34c810e25b5d2c703f509b9cf6ac3fadf8e4b11ebbb062dfb08ffacd0616c5",
+    "src/grpc/xds/ads/delta_codec.zig": "74b9d77c6f4ff42aa7a9ee8d0d429be8e8a4f553482c0b14d9f89a3deec2116a",
+    "src/grpc/xds/ads/delta_subscriptions.zig": "0351b020c2a46fc71c4ee856fc8176d281c00945ae70018f7b58c3cd7ea5009d",
+    "src/grpc/xds/ads/delta_tests.zig": "d6a875f29168bd5429bc0404f93d734bc7bc658a5013a4f6d889bcd9dcb0dea4",
+    "src/grpc/xds/ads/delta_transport_tests.zig": "65f95011c3369f88bbbfb33e72f9466d273671283b54dc1c34320e076b73c7b8",
+    "src/grpc/xds/ads/prepared_batch.zig": "61a6cd4ae3f626b2110bd709b749b4d92aefe5172c2ff04e761c9961c703f2a3",
+    "src/grpc/xds/ads/subscriptions.zig": "58a934accd1352ca5caad4a5677224da0875049bb7bd4462da47cf18885de2e7",
+    "src/grpc/xds/ads/tests.zig": "d0a6cf330668e3ff9b586f2ad3399939cbc072c1cd140c7719cc74a39c104f7b",
+    "src/grpc/xds/ads/transport_tests.zig": "f99c3ea76c3684fdfea11407c2bc0c94c697f6ab950a3f764bbc608e55289f2a",
+    "src/grpc/xds/ads.zig": "816b6a1f8fe8db089614ea8fa64a970f2cd4e0869ef647d8bba0f966bbed688e",
+    "src/grpc/xds/bootstrap.zig": "b9bbbc29022ab664f1fa5f81706f42f6db7b2bf0ce7ee404985070df7ed79cf2",
+    "src/grpc/xds/bootstrap_tests.zig": "2bcdfce883cab969ab1b4a96ce7e6f80b265fa3e0f7152f6197697f3532e79a8",
+    "src/grpc/xds/cds/controller.zig": "dd0eb46710e5b0f2cc3d58320308e694d46e9e458603be0fad7d73488b543fc4",
+    "src/grpc/xds/cds/controller_tests.zig": "c0244b1caab6844e244afb565932650f83b62b3587f5b11d38f6de7d9b40449a",
+    "src/grpc/xds/cds/decode.zig": "f9ad360dcb6446cd03c9573445c6c3eeb3c23255eb915adeb5ac3f3e9a77d538",
+    "src/grpc/xds/cds/policy.zig": "758f05c3bf2694dd00e3c61cc8b94ed5c5bcaeec577f939b9b73b8bb7b8c4079",
+    "src/grpc/xds/cds/protobuf.zig": "087dd1d033bdf8878de5267b8a8159fee82894e673c3aaba6111c660ee3f3ff5",
+    "src/grpc/xds/cds/testing.zig": "cea2c2ffc5d9b5c9fa1d07beb44cc48b0c76e1ad0ac90ca3d5243cc9a1ba3f14",
+    "src/grpc/xds/cds/tests.zig": "13483c5e55caffd7fae50e283b8130c8afcc319d8f73ae4cea2f19070b86e2ee",
+    "src/grpc/xds/cds.zig": "905e33352315090c5fca795109cc3b897947ee506d2369664b5da7e3d8e4dd0f",
+    "src/grpc/xds/client_target/tests.zig": "906675a5f577fd5de95942efd1a72d1b8b5fa02c3a423748adbfd42af92cc705",
+    "src/grpc/xds/client_target.zig": "7f3d45bc0e7d34ea5a617e9411b8fccdf1c3cb46275cafbb428cb32966aa1ccc",
+    "src/grpc/xds/config_source.zig": "aa64598661abfdafd79cbdb6abb0b4a8194d1cf50541f9bc8278c796c18aea59",
+    "src/grpc/xds/control_plane.zig": "f989fe3db6dcd8d9de237efcc8f80344a725ceee418123886b507a1d46def641",
+    "src/grpc/xds/control_plane_inventory_tests.zig": "a24cdf46d939368a82b47ef1e79b74782bb0d0c141fe8a44d19fa5c677d83689",
+    "src/grpc/xds/control_plane_provenance_tests.zig": "7b10d04618e587948dbb24689907e749f5023098dd2a197b1b1ab6e495628cee",
+    "src/grpc/xds/control_plane_tests.zig": "610ef899976d061fedff57dd875a5188db88bc79c8c11837889966937efa2342",
+    "src/grpc/xds/control_plane_transport_tests.zig": "f5dd24b87ddf05646594ae77e9819de7241ca977406c3d87fc6e938095c0aa80",
+    "src/grpc/xds/csds.zig": "091ca123c24c60e06fd455f7cb3287c4c16610308f35596c9d1ceaa66fce814c",
+    "src/grpc/xds/csds_service.zig": "3bbccfedebad66e300b80a1c94a276c67ceb5b7ade9110afd2651a219cba7688",
+    "src/grpc/xds/csds_service_tests.zig": "312ed5d9fa36ee4b5bb8456a09ff8f0166e05a8aec2fe3d4491dbef5c7249cfe",
+    "src/grpc/xds/csds_tests.zig": "c9fd22c63ca92274be13cdb633614a3135d66a5ede9a9d70a2599386ec38d7ef",
+    "src/grpc/xds/discovery_source.zig": "7f29d2ec9f7c299aa93f5180ed8fef611937a17b4535648601b2507bc80c2558",
+    "src/grpc/xds/eds/apply.zig": "eeaf92518eedac5429bd1529f46d8f7ebeba73aa0012c18ef333ba9941b11ca0",
+    "src/grpc/xds/eds/decode.zig": "ca05dc0d76a0edab53c6eb732e67db42e7ad1335bd1c1b529d2e80f6231b60e4",
+    "src/grpc/xds/eds/target.zig": "0c11f6e3faec6c6375281dc2a4cf4aebd4cbfcd24ba508b560fa96417f27eb54",
+    "src/grpc/xds/eds/testing.zig": "d2428b5cfd07052e2c46ed53ddcc32fda4ed8105856e1608c659d32d63e5a254",
+    "src/grpc/xds/eds/tests.zig": "4a1fbeb0c2bf113511c27c600ddec521b06409673d7b87a57918b56f660824cc",
+    "src/grpc/xds/eds/transport_tests.zig": "84a190f6109e3077361304ab336cb54444240847d81038337adc06eac59a467f",
+    "src/grpc/xds/eds.zig": "fd3de33a5e2a66c6755e23e3fe8c154e275db09d9e6373252e5758d90df8da9d",
+    "src/grpc/xds/lds/apply_delta.zig": "eba32511431eaa74045dd97a4e46471d0f9868ac3500468f85b05d94679992ee",
+    "src/grpc/xds/lds/apply_listener.zig": "e667d06b9dfbf57089001c1906dcd0312088e836af6dc05422c94bc3ff1b13d3",
+    "src/grpc/xds/lds/apply_routes.zig": "c71dad402ab75c8598849006b862a45bebd3793062601d79807bfc4cf48088bc",
+    "src/grpc/xds/lds/controller.zig": "dcf1cbc7ca8778ea1f56c2da8b2cb4b84cfc01f37be98a18420a18593e4fbf73",
+    "src/grpc/xds/lds/controller_tests.zig": "06545dced580ab73ddf3dc23ad89b295e0e91cb537a1aec9bb93332303555d84",
+    "src/grpc/xds/lds/decode.zig": "3ab761ed59835577f8be2b3889e0542e69e3b6e9fe3dd612441a2d7c08a38140",
+    "src/grpc/xds/lds/discovery_router_tests.zig": "2a302e0d7f5c479cf1ac8077357ef0056b7604454abcc63b0476abfdad000a11",
+    "src/grpc/xds/lds/filter.zig": "74fceedea03657c674e2d48f5aaed5d1dc711e7fd5fc0967b728a61aedf8d620",
+    "src/grpc/xds/lds/hcm.zig": "0243037d1313c044347728dd2d3110440f8ef1348e990652271d9011f4bd996e",
+    "src/grpc/xds/lds/model.zig": "e8a4afb6d7bc24ac665e6446db78254161fb3a3ba0f051ab844df05b43c8db45",
+    "src/grpc/xds/lds/projection.zig": "77dc095b7b7872598b62cedb7900b014716a669ee9bafa0f28bc1132f57067bd",
+    "src/grpc/xds/lds/protobuf.zig": "5ea141bdb003ce36d42fa2223783622685a560495647ebce759ec31802ba5839",
+    "src/grpc/xds/lds/rbac.zig": "781d9baef310175c216f78796735d6bbf049c0093b77aafc6154870a18889ad2",
+    "src/grpc/xds/lds/rollback_tests.zig": "f4996052df49ebf143ff2e1f33868a0c0696cfe710dc4cc0dedb90ae380251d8",
+    "src/grpc/xds/lds/testing.zig": "84d064433d7ffe6c1ebf5bb7b568cc097f0702e0aaf84585cab02b4528ff56fa",
+    "src/grpc/xds/lds/tests.zig": "1e155251d5aa2f70f12f5d240a051f8e023e85406d4dfa6d7023dbe0aa2fedbe",
+    "src/grpc/xds/lds.zig": "70962161db0ff2a48c4f740511444d75eb64137a0806aba94b2721caf69af0c3",
+    "src/grpc/xds/lrs/client.zig": "feea9671ede9ffe120b9f3ce781b937b04f20ca7fe7cdd8bbf07b32d7a2797b4",
+    "src/grpc/xds/lrs/codec.zig": "ffb35262db13c94bd78e681169d00798e2b2adf426df7c6990e3c1f390d784c7",
+    "src/grpc/xds/lrs/control_plane_tests.zig": "46b2d685422cca5fc649fc6b8961007eda93911a402477204cd6d61dd59c857c",
+    "src/grpc/xds/lrs/integration.zig": "ecd363a352864c77067b9da52d6eb66e2587d21fa828310784cfc8d9b5884757",
+    "src/grpc/xds/lrs/reporter.zig": "43a4fd1fc0a95b7635f4f001851e8e220d7aef3753baec4f905f42aaf5cc85bc",
+    "src/grpc/xds/lrs/runner.zig": "32dab2272f882a5485adc24a753cb1175a2d2f1dca0bc6b43d255b25fdc68b0b",
+    "src/grpc/xds/lrs/runner_tests.zig": "ba3a9b901df08c267fc2246d95f4b7e22cb046dc84a20776cecd1c2c3d64b6ce",
+    "src/grpc/xds/lrs/scheduler.zig": "0f591ea82e93514d23b16c051c852e9052f5dde4bdfda209c0255249436106c1",
+    "src/grpc/xds/lrs/scheduler_tests.zig": "313202257995e6cacb7e1b378b40c4fca106eabd2961ab7067f59888e7b862ad",
+    "src/grpc/xds/lrs/tests.zig": "e873bb7d4addd85047770bc7242055140a34cca152044aca595957b7a9689530",
+    "src/grpc/xds/lrs/transport_tests.zig": "af4f6ee7e4f1f61cf224d171763f9118a645dbfad9c7fb04d5d6af9f0faf9aae",
+    "src/grpc/xds/lrs.zig": "6d8d59172278cd9e2f99d807301805e3fffa2b32a3275a1d06c1474b7face89c",
+    "src/grpc/xds/mod.zig": "e944cc18a6d16aadba78e3ca2237eb56f156771a9ce6f72ca0b35a42545b28cb",
+    "src/grpc/xds/publication.zig": "218402c62522c923422dddbe4524a826a164c1ccc12d63f893276427bf3ccb41",
+    "src/grpc/xds/raw_name.zig": "b4ea587ffa089efbf058302ee9187cd506289a0156a383b9f769bb027c6d2b39",
+    "src/grpc/xds/rds/action.zig": "e4ebb2644fb69ef424fd357970e1be9b33f48f6fe1ae11b3e32a5a576fe6e999",
+    "src/grpc/xds/rds/apply.zig": "5fa5e77b90647adac226bedd46e01f6487db35406cb8010d91527534fbfffd4c",
+    "src/grpc/xds/rds/decode.zig": "c883ecdb7a5c0fd9423bf52ecc040e47bb6db5a5b611ad93478e5d9064eca513",
+    "src/grpc/xds/rds/lifecycle_tests.zig": "11d2fb60d7014de5530b05ec391f0dc38159fee37071330c5331877fb0aeedc2",
+    "src/grpc/xds/rds/match.zig": "5793927e40b30ac297edce7ca5cc679a776975d0b83890b82b8d2c755bffdf81",
+    "src/grpc/xds/rds/model.zig": "b7a48e5a6f74ef5e389fc5bd4526559c0e654a10ed9bd30be115034b67b0a4d8",
+    "src/grpc/xds/rds/protobuf.zig": "6b98d9fe99f144c8fabd5c6fbb9713af76c8652d77bc32e9c0579ad80595823b",
+    "src/grpc/xds/rds/retry.zig": "0d9cb1229b3b74f8d345384870af689d0e77e01e619b496a9e463b5dcf5d2050",
+    "src/grpc/xds/rds/snapshot.zig": "65f8f5b53b5f87c2d8618149fa822d57e7af76a6dae7e6881116b97b56b9463a",
+    "src/grpc/xds/rds/testing.zig": "9e5bf3b1363b04961aa6d8c74505fdb3a706cdd0b39ce4c0b4c587a3ebf330ce",
+    "src/grpc/xds/rds/tests.zig": "19df02b1ef6f0a3547448dc5c5e6c401b3f8cf74c6133e011fd9f2862f962e60",
+    "src/grpc/xds/rds/transport_tests.zig": "fdfd1443577e290e67d456280b1ad401cce76a88e2ee506010cd1ace477202a9",
+    "src/grpc/xds/rds.zig": "8fea5e4f2db53c1e86c29488cf90c36335a70ffb24286b8888269cdae09a7017",
+    "src/grpc/xds/resource_name.zig": "466bd8e7cefd2b207c20eddc266d670289fe06adbcdd317a15dfc11133b98b78",
+    "src/grpc/xds/routing/domain.zig": "456603136723630e6ccde68d2b3ed1651813670cf75bd87946cbde3ba0faf215",
+    "src/grpc/xds/routing/header.zig": "f0b9fa646dd5cbc0cffa6be39a4eb86bf36242b9c06cdcf68c5516f27ee0e2fe",
+    "src/grpc/xds/routing/mod.zig": "7ea6a2269fa426a876e91a8525221cfe8c6c3ec69f4317b5ecaaa5d6b13364ca",
+    "src/grpc/xds/routing/regex/budget.zig": "69dcffa2490dbcf9de098713e6d24ed2d965db9cfce3388fa7fcad6c287fed0c",
+    "src/grpc/xds/routing/regex/budget_tests.zig": "e9a73e9ecf29751e5db7a024f5c69ecace24a7a24dbcd9cc415ee34a902f2fe1",
+    "src/grpc/xds/routing/regex/classes.zig": "37fc8c80ff0c6a6b0f5ace2bf455901d29aa9e4e30159fc9466076d6d660e63c",
+    "src/grpc/xds/routing/regex/compile.zig": "5d77fd643a75b9c91d832fba7b31789b236df4650b01bf244277029ac1f9b1bb",
+    "src/grpc/xds/routing/regex/escape.zig": "6a3d3a063069a5db34621b9be9cd52554db15512196f577f3122882e636326cf",
+    "src/grpc/xds/routing/regex/execute.zig": "170cd4a0ea974b260d51e9ca1be0929852e7c82dda1dc86eb67e9f6861f6c10c",
+    "src/grpc/xds/routing/regex/model.zig": "de9997c7c2e9fe293fa1e5229e7dccaf41b1a5974c82c1c70084d59b90e0fcd6",
+    "src/grpc/xds/routing/regex/parse.zig": "7395136c35f75a26155679adb16e05041d285121c3ee9e2ff5a9f68c58c561c2",
+    "src/grpc/xds/routing/regex/replace.zig": "62c25016a93993218acb0789edacd6db4211745effbfec8ee87d0c22acb876b7",
+    "src/grpc/xds/routing/regex/replace_tests.zig": "bd46676f0d88c685502064e0178c0d785d06a707a07c99e952b2edbe2c3ef408",
+    "src/grpc/xds/routing/regex/tests.zig": "cd3a312308b3dcc5f1e5fa442930e119c676a137f3b8a2e3e2ccf189538238de",
+    "src/grpc/xds/routing/regex/unicode/groups.zig": "f65ff584956d795d5ed6039c24d1ece22287b6e381790ac6388c0b66aea41413",
+    "src/grpc/xds/routing/regex/unicode.zig": "fc0cc1a9e8c6965db4de0c7383a647760aa17174ac4131c53fa7ef539cf685f4",
+    "src/grpc/xds/routing/regex.zig": "7afd9a93b6d46cdeaa203811f805a333b10c9e48be883b4e6fdc14a948ca6e2a",
+    "src/grpc/xds/routing/string.zig": "8d8e3b6dba94f543e55e5cc74c2a757de758cf31cb9dbf5c71c297eee29104e3",
+    "src/grpc/xds/routing/template.zig": "7417b5f512f6bc1d05b840b7d4626a26f22c29f8f98691a3e3f2f7a649ee72d6",
+    "src/grpc/xds/routing/template_tests.zig": "47edab8b5bd99f5293127466fa794c8a671fbb65cee0b5db4b8c2957672dd79f",
+    "src/grpc/xds/routing/tests.zig": "6045dae47fcf59cd2edbda1b63aa43e9c31e2eaad833f01b7f6e8e1341e98751",
+    "src/grpc/xds/runtime/apply_cds.zig": "cdd36947f7f0fdd21903e91bf6660dbc549afd3fd03516c5c0c2e864c0c1be53",
+    "src/grpc/xds/runtime/apply_delta_cds.zig": "8ab42e447860e8a928a90077f3bfed6eb9518276bb46ed5754bef1baa0484e81",
+    "src/grpc/xds/runtime/apply_delta_eds.zig": "8f9bcadf853af3972026f5b6fcf5b47574c0860990a52b7e0c51c4013c43fbe8",
+    "src/grpc/xds/runtime/apply_delta_sds.zig": "6afa9cb5637d3953b0c2e861adc66a0ebe44e5b199066a8f7efd347af48850ba",
+    "src/grpc/xds/runtime/apply_eds.zig": "04e81b1f7f5f66c198ef58074fdb755a41e47f13d36950ecc3c20482585a3d30",
+    "src/grpc/xds/runtime/apply_sds.zig": "6b22082fe252fd24eed6d0f0941af6bee36604f0214d635d33b0f8728b9d162b",
+    "src/grpc/xds/runtime/authority_tests.zig": "a6a84aa56864b39524c48c4275671c969cc412e6721bb36d5b61f299c0312217",
+    "src/grpc/xds/runtime/constructor_tests.zig": "c33c1965451729f2a5c6552779559efcd185e1014f5cfcf996bbe88511f2845a",
+    "src/grpc/xds/runtime/controller.zig": "84b7da6a7ff56408aabdc48848be94252e431916ad5d55e1e018e520a6691290",
+    "src/grpc/xds/runtime/delta_tests.zig": "4b13cbddeb7a96239ebf98247fa24fbcf06cf4c5e6a6084057e903680b6471bb",
+    "src/grpc/xds/runtime/delta_ttl_tests.zig": "76c1c2103bffa0fcd33915a52afde6464cae59f175adf788f625bd4999061096",
+    "src/grpc/xds/runtime/discovery.zig": "6bb3bcf78100b433890562a2865f7038207c0f209e09a99c7bacf7c0cb37046a",
+    "src/grpc/xds/runtime/entry.zig": "27c7124ebd68ef24be63a00332966842d91f6b6d8c1104b00fc96e37d2ec44c0",
+    "src/grpc/xds/runtime/errors.zig": "c4fa4ff763a24dadb09b15c179776f94df8af3a9653f5dd907926949b8b248eb",
+    "src/grpc/xds/runtime/expiry.zig": "b291f9368c0811dc77f583e237b91a0935c7125a85b335c4fff590354a8acfd2",
+    "src/grpc/xds/runtime/fail_on_data_errors_tests.zig": "104174c525e616bfde7836c1ab3de47fef0176a1a462a1adc6c7b560c22119c8",
+    "src/grpc/xds/runtime/federated_scope_tests.zig": "99dc53cb6cefabb4218a1a9ec90276fc4b4172ce7642704ebb232bdc03036b1c",
+    "src/grpc/xds/runtime/ignore_deletion_tests.zig": "8f0b564068a4b8fd1d411416fe83818e2c6a9907165e0b70ab5e2f82f4cbb0cb",
+    "src/grpc/xds/runtime/lrs_automatic/routing_tests.zig": "7b886a89bfc7b19f9e34a08aa3be3e8ea9ac87385fa4825bcd38d60b63a05fbe",
+    "src/grpc/xds/runtime/lrs_automatic/testing.zig": "37e38cfd24d9f2ea8c44ae602e1086bfb58da882abd76695fff59b45e91e259b",
+    "src/grpc/xds/runtime/lrs_automatic_tests.zig": "2364b35649b64d630632df82f5dcd2135120ec562a916cfa1245f64d637f8d2a",
+    "src/grpc/xds/runtime/lrs_bindings.zig": "d6196127343f11d01c6c327d62d572c12fc9d05b256696ee58f49587dcee4215",
+    "src/grpc/xds/runtime/lrs_named_metric_tests.zig": "1db734be536106250df4219acc0c334543202a0fcb4396cd596cf206a64e34e7",
+    "src/grpc/xds/runtime/lrs_selection_tests.zig": "9718c08a11978a69f519a4dc33ebf9f54dc9fabfd66d65b84c24cfde9da488ef",
+    "src/grpc/xds/runtime/lrs_tests.zig": "5a1b947833fc06621098e3f972e01f089bf881aba7e0d5c45469c67688060749",
+    "src/grpc/xds/runtime/managed/features.zig": "c1c9a47fbe7aa66e55e4f288d2ed23302e70c844af4c51451caca42dc5f2f58e",
+    "src/grpc/xds/runtime/managed/names.zig": "2ea3a7d306f06332789dcf3e12755256196353afb82c80dfdae77bbc960b82ce",
+    "src/grpc/xds/runtime/managed/registry.zig": "4f7d8bb0bbdf902bf10a9fee75bda43cfe3af12e10c8fadc185f7da4c1fd4a32",
+    "src/grpc/xds/runtime/managed/registry_tests.zig": "37ef010ba459842e77a6af4d773ca3d84bc5ac67a6598cc8687a07f3b147e393",
+    "src/grpc/xds/runtime/managed/session.zig": "9d945936d6f2c813bd002eca9759ea4f6c5dfa4d2748f91b989aa58973982272",
+    "src/grpc/xds/runtime/managed/testing.zig": "b548eca224782233fb613998c24946b6e2a22a73d0b9d45ae1455950e92a1544",
+    "src/grpc/xds/runtime/managed/tests.zig": "574dfef35ad91afa09dd3c9dabdcdd9597f2ff8404e1b6ac517d1df42947820c",
+    "src/grpc/xds/runtime/managed.zig": "6b81d5afa3312ddf26899d5a5ecf864021666f61ce978b96501d2c6970f4751c",
+    "src/grpc/xds/runtime/options.zig": "1be533c71207026c404e45b0a07051bf0d787fff3ed387e65fc5c0d027f33094",
+    "src/grpc/xds/runtime/plan.zig": "6b2eea8edba11d5fa627bb0760e0db9276a4e993695f4f84a8ea069a4bac3d03",
+    "src/grpc/xds/runtime/resource_timer_tests.zig": "c1e7b5702825cc690e36fddc80dc384f579cc8084e76351dd385bf738cf4fdf0",
+    "src/grpc/xds/runtime/rollback_tests.zig": "a716de6fc76b7a7832b2f9b92879e2bad2bc45162e408f21859be711a0fbdd5a",
+    "src/grpc/xds/runtime/sds_tests.zig": "df1c8e212b15f96a971fa2683696b2d29be9e066d234258ef4c47985dc571689",
+    "src/grpc/xds/runtime/serving.zig": "b5575dc567372f875b498f6dca8e2abd73795189e523e1e3ab24bda773c909f3",
+    "src/grpc/xds/runtime/target.zig": "4b0440b0ab5b1f665e41269008f86e6b4ce70816c5f1d43c2721c31a2a1b4dac",
+    "src/grpc/xds/runtime/target_tests.zig": "af68a5d123e5ffa6938d1055049137393f23e911772d25290c936107e1e9717d",
+    "src/grpc/xds/runtime/tests.zig": "da70a5ebbe33ff6103f735e8dbba576860c28ef384dab4d17ac6f3a19d783e01",
+    "src/grpc/xds/runtime.zig": "18a08c83e8c378230734d5c11421eef8096d1d555023bcb36b7b8956dd3988d3",
+    "src/grpc/xds/sds/secret.zig": "064479db880848204dd9cf2fccf0e43e2fef603e4ac806fb2d3caa738636da1c",
+    "src/grpc/xds/sds/secret_tests.zig": "5220701e0803c7a63d72eaf8238d95cc6129eba8a71d553e594b5283f5040e9e",
+    "src/grpc/xds/sds/testing.zig": "1f01f4b90dc45db1a20fb2e96e08291a208115af029ef9967e001b56dd61bda5",
+    "src/grpc/xds/sds.zig": "ab53a1d0a6d5d5f3a9943f573fa29731d8c278a5ba984a3352d0bcb1d3ab35d1",
+    "src/grpc/xds/sotw_tests.zig": "c80becb1e7608b8624fe494ee546e6f89af15a30331cebe8a5d144624d904987",
+    "src/grpc/xds/tls_material.zig": "a0ff8b4dbce76f83d1beb0c9ac063d3076a8f2dae1545bfad24142ae7e5448ef",
+    "src/grpc/xds/uri.zig": "37804862a27050ce103fdf337f03af8ecba5ee3b9d1b4fb7545b66c76de2a2b9",
+    "src/root.zig": "00b68592a4facceeee821f83649977accaf9606e9d703eb5c0ee08b56c621390",
+    "tools/interop/grpc_client_target/README.md": "95a15ffad58571f815c061a519157c688c26a2143906f10a1ed6dd7283256d80",
+    "tools/interop/grpc_client_target/capture.py": "4afc3be38941acea6b38223f390c61fbc7611fe3d72850207e0e2f7df5230e5f",
+    "tools/interop/grpc_client_target/emit.zig": "637ddf18eab32684c9e9cc1267e30ee85ec0a266ae985f5a2c91ebc002559b19",
+    "tools/interop/grpc_client_target/peer.js": "23321934dc17aa3a6c51212ff0d819b0a7a83021433ee3f7b34e49b4b6c6e6fe",
+    "tools/interop/grpc_client_target/reference.py": "b8f9903a10d5164d926160d8fce013f2efc61f89d967d57e2ec62dcc5c762628",
+    "tools/interop/grpc_client_target/requirements.txt": "075443bccd6f8a4aef141f403e1c90bd0688d03c9fc3e785136ecc2a157c7eb9",
+    "tools/interop/grpc_client_target/run.py": "ee1a8fd4288f88b8ed46a5acbb671830253a11bc22ed896e5f341bd4768c67a2",
+    "tools/interop/grpc_client_target/vectors.json": "132759f67e637a94c8ad408f5a42e46c23fded2ab53e750b8dc36988dd1c1a6e",
+    "tools/interop/grpc_locality/package-lock.json": "9cae21a36a38e30b732bfb139abca82bf77ea326fd9ce981f22867c7c01ccb2b",
+    "tools/interop/grpc_locality/package.json": "8db54803ab44c882d2063b5e271764ea3b4901da17c3d065d5036e6a36c7ef53"
+  },
+  "stability_input_sha256": {
+    "build.zig": "2d28ea7be6a6d3dfad8a7e71d9d29223d312909f32c50497851b7ba6c9e6618c",
+    "build.zig.zon": "e7be92a4961ae730f43e621e402855e744a18779c62b56a227e1f0ead2604fd1",
+    "src/grpc/metadata.zig": "ba74bad221644c602701da045fa5a061d8a06857ac06ce37b3f5c2d8ac545486",
+    "src/grpc/mod.zig": "76b169d8190152692b4fa0724f2cf8807d64b1de7c72d5b2c233c646973c029f",
+    "src/grpc/protobuf.zig": "7140156bfd8522253ad2b67fcfdb191f8ec0553872bfc81ef0a9ff040cf1d543",
+    "src/grpc/status_details.zig": "a85755fb712497e96b6abf963a89174930757caeeff820a7d12f5fd2ae61796f",
+    "src/grpc/wire.zig": "8854c55bac49dc536ed47e14885e9778bb41d0199a7a17fcfb1d967d375f58f7",
+    "src/grpc/xds/ads/codec.zig": "388e81d3b66d1113c99e8b50790ad01a401f041b1825e59f03b7ed66a3fd90e3",
+    "src/grpc/xds/ads.zig": "816b6a1f8fe8db089614ea8fa64a970f2cd4e0869ef647d8bba0f966bbed688e",
+    "src/grpc/xds/bootstrap.zig": "b9bbbc29022ab664f1fa5f81706f42f6db7b2bf0ce7ee404985070df7ed79cf2",
+    "src/grpc/xds/client_target.zig": "7f3d45bc0e7d34ea5a617e9411b8fccdf1c3cb46275cafbb428cb32966aa1ccc",
+    "src/grpc/xds/mod.zig": "e944cc18a6d16aadba78e3ca2237eb56f156771a9ce6f72ca0b35a42545b28cb",
+    "src/grpc/xds/resource_name.zig": "466bd8e7cefd2b207c20eddc266d670289fe06adbcdd317a15dfc11133b98b78",
+    "src/grpc/xds/uri.zig": "37804862a27050ce103fdf337f03af8ecba5ee3b9d1b4fb7545b66c76de2a2b9",
+    "src/root.zig": "00b68592a4facceeee821f83649977accaf9606e9d703eb5c0ee08b56c621390",
+    "tools/interop/grpc_client_target/README.md": "95a15ffad58571f815c061a519157c688c26a2143906f10a1ed6dd7283256d80",
+    "tools/interop/grpc_client_target/capture.py": "4afc3be38941acea6b38223f390c61fbc7611fe3d72850207e0e2f7df5230e5f",
+    "tools/interop/grpc_client_target/emit.zig": "637ddf18eab32684c9e9cc1267e30ee85ec0a266ae985f5a2c91ebc002559b19",
+    "tools/interop/grpc_client_target/peer.js": "23321934dc17aa3a6c51212ff0d819b0a7a83021433ee3f7b34e49b4b6c6e6fe",
+    "tools/interop/grpc_client_target/reference.py": "b8f9903a10d5164d926160d8fce013f2efc61f89d967d57e2ec62dcc5c762628",
+    "tools/interop/grpc_client_target/requirements.txt": "075443bccd6f8a4aef141f403e1c90bd0688d03c9fc3e785136ecc2a157c7eb9",
+    "tools/interop/grpc_client_target/run.py": "ee1a8fd4288f88b8ed46a5acbb671830253a11bc22ed896e5f341bd4768c67a2",
+    "tools/interop/grpc_client_target/vectors.json": "132759f67e637a94c8ad408f5a42e46c23fded2ab53e750b8dc36988dd1c1a6e",
+    "tools/interop/grpc_locality/package-lock.json": "9cae21a36a38e30b732bfb139abca82bf77ea326fd9ce981f22867c7c01ccb2b",
+    "tools/interop/grpc_locality/package.json": "8db54803ab44c882d2063b5e271764ea3b4901da17c3d065d5036e6a36c7ef53"
+  },
+  "executable_sha256": {
+    "native": "8e5d70426c74e65ba4815a5d743b9a17aed889f24b86bb2125822237b817777b",
+    "reference_python": "e50d468e8b0adfb05733f5b87b3cff34829c4a8c1aea50c865aa8bdfe4bb150f",
+    "node": "9323a20d5a7f1e4e486ec1abed1d1431e4bc61abcc10e051d587ee613fe38671"
+  },
+  "executables": {
+    "native": "/home/passchaos/project-z/netz/zig-out/bin/netz-grpc-client-target-emitter",
+    "reference_python": "/tmp/netz-grpc-client-target-venv/bin/python",
+    "node": "/home/passchaos/.pixi/bin/node"
+  },
+  "vectors_sha256": "132759f67e637a94c8ad408f5a42e46c23fded2ab53e750b8dc36988dd1c1a6e",
+  "reference": {
+    "grpcio": "1.76.0",
+    "typing_extensions": "4.15.0",
+    "python": "3.12.3",
+    "core_extension": "/tmp/netz-grpc-client-target-venv/lib/python3.12/site-packages/grpc/_cython/cygrpc.cpython-312-x86_64-linux-gnu.so",
+    "core_sha256": "df68c8100961eb29df4651d7fdcbe12e85f12ff7d4adcbbdff4cc9d4285ee7d6",
+    "dependency_sha256": {
+      "grpc/__init__.py": "da04867956f5cf2f388f51365c92d7f42d90205744364f3e0dc4fbf39ab332e5",
+      "grpc/_auth.py": "f2f7ad895cb980b0ad87bec8b1119d84e80716b0b5ad619eff7ea5a4c1bc3723",
+      "grpc/_channel.py": "4a6b751ac44fe3db8f925198b130d1b362607d2e6c3e3faec59abd29bf27926c",
+      "grpc/_common.py": "5bc309cfe0268eb9cbb6c9d945c38b8a83beef32d69c31e7c78cc3955dde41d6",
+      "grpc/_compression.py": "d0ff727cd227df706671098e7673144e881b2c83d1d1e4ff2e69a79b79657058",
+      "grpc/_cython/__init__.py": "c3792a480c9a6603fe5b4f3dd314782f859e04f1abb6c4024097b4154151d0ad",
+      "grpc/_cython/_cygrpc/__init__.py": "c3792a480c9a6603fe5b4f3dd314782f859e04f1abb6c4024097b4154151d0ad",
+      "grpc/_cython/cygrpc.cpython-312-x86_64-linux-gnu.so": "df68c8100961eb29df4651d7fdcbe12e85f12ff7d4adcbbdff4cc9d4285ee7d6",
+      "grpc/_grpcio_metadata.py": "f20649933f7aaf6a13775355bff7020ef4778abbebcfd7cf93b1343280756204",
+      "grpc/_interceptor.py": "b1b55f049e49ca78e4c64de6f79ad0c9101c1fa3664a4f19dc969ee1b0ca6a3c",
+      "grpc/_observability.py": "09e2257d6e6a06fe72925785ab44e115b638e40ec2159db2c70ad40b5b615fa0",
+      "grpc/_plugin_wrapping.py": "6faafa45d8dd0eb9e1732bc6777c3bc8b4c74f3cbea8d6b41fb57c4a34bc63c1",
+      "grpc/_runtime_protos.py": "704ef5b60b347595e069337c6b593b4e8637c75a083030e9e5b4b37311cba921",
+      "grpc/_server.py": "cf5bcf329b3ba9f0488e21246c4472c3247708471628166c84141848a06f179a",
+      "grpc/_simple_stubs.py": "90143ca0a1b4a04fdfd74990c9360e2e986f7f5fb6bd9bb69002bc97dc98e888",
+      "grpc/_typing.py": "c980d3dcf6961bc4586c7cd3ff2f4e6a598c3a5744ea9046a1b12842606d6e3e",
+      "grpc/_utilities.py": "261e02e450e74f99c0bf367774f74b78f02aed03c017fa3047584f3deb558b96",
+      "grpc/aio/__init__.py": "f341e8d45a25a6e785a8822fca5edde5bf45260bf0e62959807717c4dd4d994b",
+      "grpc/aio/_base_call.py": "4c71571b4a342129f8d09af0d2c365705cdfa1b0fc52b8e08dd74c5ad83c6490",
+      "grpc/aio/_base_channel.py": "c15c04949ef76df4d39180bd27a3598c2abeab6304bd338b49b3ac78d3f3afc9",
+      "grpc/aio/_base_server.py": "787abd103527d5433a33e7bec126b1dd9320ac518ef030ca913b98c286c94d84",
+      "grpc/aio/_call.py": "2fe0763fc9af8a95202fc25bb13e7a5166b5dea4e85daaa28290a6b40f82dfa9",
+      "grpc/aio/_channel.py": "b5e3d58dd27918e69b439c33fe86920b91452cd94a3dd5a919eb4c131b229970",
+      "grpc/aio/_interceptor.py": "545e73d800ef35e330774c64062d2215f776e1ef849fb6733b5f4ea1fd1b2dd1",
+      "grpc/aio/_metadata.py": "e300bc4edb600ab14917cfd0c76cae09706998a9d3a494360d7579d1fcde8376",
+      "grpc/aio/_server.py": "e0b6e61e730c2d567375dc77139f010b8a6bad2944cfb3c0146a31ee961b6c9b",
+      "grpc/aio/_typing.py": "c4c946df7be7fd491d911bf7f54771e36d4159582de511c2bbc8095c0435f1da",
+      "grpc/aio/_utils.py": "061e7e9503b6c6ccdd65e4c501615f16185a2b2db4965e24b9c0fa7ff6194e58",
+      "grpc/beta/__init__.py": "c3792a480c9a6603fe5b4f3dd314782f859e04f1abb6c4024097b4154151d0ad",
+      "grpc/beta/_client_adaptations.py": "f0fdf0b52b513b019b94596104b2e7c71388d863db3208ad1b9822d2de66267d",
+      "grpc/beta/_metadata.py": "56cb7fcfec1c64083f3b44a972f20058d4da5f1376a095b971b48759dc939eb4",
+      "grpc/beta/_server_adaptations.py": "6dc0048b2aba7aa0ac0767b12615bcdd2c3741a132fb74546de563d33cacfa06",
+      "grpc/beta/implementations.py": "d32213820cea28aa3c2dbf19c0fc76cc8bb8d789884317da9f78e67a77212079",
+      "grpc/beta/interfaces.py": "9ad427be6ec1836bb931065fdbf9e6c54c4a14200d0f0ed550e1c7bc4edc0613",
+      "grpc/beta/utilities.py": "9474b11690f960337b3c90ee415828aa60c71d0997625d53f5e0ae694c6ef5e0",
+      "grpc/experimental/__init__.py": "53add28affdadacb49a2eb15ce01d235fa1c7334a68bb2d4f87b651566e0313e",
+      "grpc/experimental/aio/__init__.py": "6c8c8374605b3478b917f907bf007238d8dce0cffbe2d872e77626043af564fa",
+      "grpc/experimental/gevent.py": "fd8024f5a1f63c2642a5a0a75bdb8663bed6db5df8d9d1169bcc0e540a53c7cf",
+      "grpc/experimental/session_cache.py": "c006aebc3cf1bd30bafa9de331b3e74dcef2ef89e10ca4918dbd24b5f30f0a6f",
+      "grpc/framework/__init__.py": "c3792a480c9a6603fe5b4f3dd314782f859e04f1abb6c4024097b4154151d0ad",
+      "grpc/framework/common/__init__.py": "c3792a480c9a6603fe5b4f3dd314782f859e04f1abb6c4024097b4154151d0ad",
+      "grpc/framework/common/cardinality.py": "ca05adae38ec93e48e3cb1da7b2ebeede903db7421bb7938414366608d527155",
+      "grpc/framework/common/style.py": "5fdc0df9a7fc4fb5968457ddb6616476a3cde4f6e923c149b0a19d98f8af6805",
+      "grpc/framework/foundation/__init__.py": "c3792a480c9a6603fe5b4f3dd314782f859e04f1abb6c4024097b4154151d0ad",
+      "grpc/framework/foundation/abandonment.py": "005e18ef7e1b18855a5f408bf16f5769a3d8b8f51a72072204467d59be1fa460",
+      "grpc/framework/foundation/callable_util.py": "71fc1c724cca7bd9a98efcfae24d54c71cf9b8ed553cfd91b061d43b10624ac0",
+      "grpc/framework/foundation/future.py": "763a1e36af96779fed93343017f65e2f59d8016289e6bc337a51a84cf751d4c1",
+      "grpc/framework/foundation/logging_pool.py": "8fc3c56966ab42b9c379bb03c667093337c5b091fcc46636038cfa3e5a3f43d7",
+      "grpc/framework/foundation/stream.py": "17a5d05090bcad3f9c8b26cfb473fb3d3325317368557cb39a747060aa2cd0cb",
+      "grpc/framework/foundation/stream_util.py": "8b9b0a292a915772ecb12e84c3ede854501ee881df897ce0cc280a6a5b3693f7",
+      "grpc/framework/interfaces/__init__.py": "c3792a480c9a6603fe5b4f3dd314782f859e04f1abb6c4024097b4154151d0ad",
+      "grpc/framework/interfaces/base/__init__.py": "c3792a480c9a6603fe5b4f3dd314782f859e04f1abb6c4024097b4154151d0ad",
+      "grpc/framework/interfaces/base/base.py": "6835be9c2540e1bac37376517ff6f5f8c399e09bfbb2cfc5e15ea321e26e8137",
+      "grpc/framework/interfaces/base/utilities.py": "6eebe50efdee94782c1787a3e83cd079ca0f197c1f315d9ec99ef494f3097cd0",
+      "grpc/framework/interfaces/face/__init__.py": "c3792a480c9a6603fe5b4f3dd314782f859e04f1abb6c4024097b4154151d0ad",
+      "grpc/framework/interfaces/face/face.py": "386c80a5d8ec67c045f6736afb6b1de965ddf5b3e96ef8f88ef5eb19d26efa76",
+      "grpc/framework/interfaces/face/utilities.py": "8d1980995d215cf5dc3796ba560ece9416dc96d181e81d746d47e8aaa1c99947",
+      "grpcio-1.76.0.dist-info/METADATA": "fbffe82677cada416245852e3edfb28efdd84869e088d31407b244376fc3452f",
+      "grpcio-1.76.0.dist-info/RECORD": "3775057beee7f6c0a2ecfb0a93ae1e6bd8be2abe6940052984f7bf9185e4a1ea",
+      "grpcio-1.76.0.dist-info/WHEEL": "3afb6f9dba5c6b11dae5381781f0b8f04e8903bccbafbb2f32ca4f3fb564e68f",
+      "typing_extensions-4.15.0.dist-info/METADATA": "c138378fe8f18934ac99de060535c53ec6c13aeed65e94c32641da7ee3192a72",
+      "typing_extensions-4.15.0.dist-info/RECORD": "c42db5851c3a20efb41dbe1a0d03c18db577a5449c7e685f6b139df34b98e62f",
+      "typing_extensions-4.15.0.dist-info/WHEEL": "1b68144734c4b66791f27add5d425f3620775585718a03d0f9b110ba3a4d88db",
+      "typing_extensions.py": "433d11d170d3a24d2eb065ebc1bfe848cea7e3d7ce68567ab52bea2d4c2f7ed8"
+    }
+  },
+  "capture_reference": {
+    "status": "ok",
+    "hpack": "4.1.0",
+    "dependency_sha256": {
+      "hpack-4.1.0.dist-info/METADATA": "4358172828085470690d07c5efeb9e54331dd55baa4c715a28fb4e2e4826e2e6",
+      "hpack-4.1.0.dist-info/RECORD": "fa23808b49ea0eb64cb982539a74f00bbf04dc770b4841525bd730bf30053c49",
+      "hpack-4.1.0.dist-info/WHEEL": "227f454cdc5e3fad0a9d3906c3bc24ea624f61dfdd4128c46665dd05d30223ef",
+      "hpack/__init__.py": "5589bcbe1b3b87642b58c497e9efa4103b73258cc0de316076dfd54303f66208",
+      "hpack/exceptions.py": "5eacbcbe2aaf28a1c1c90ec8a3c169f873e50cfdd3ed133d6a994f4b176bf632",
+      "hpack/hpack.py": "06abd248e677400807e63e59457e4ca77712c71e6a7bfa3883f78ee311cc03c2",
+      "hpack/huffman.py": "c6e199140a8b727c6b484b9c8ea3503a1257c5d189e4f1b58438089868bfa8e3",
+      "hpack/huffman_constants.py": "e0f84e31e97998dd1ab24151ae7e2756927f09339484ed6a6c544eeaefc87f63",
+      "hpack/huffman_table.py": "ddd26e52678fe84a1c7c70be50b873926053a179f594fd871ba8303ff78199b6",
+      "hpack/struct.py": "3574b63bce2edb31dda248eeb5ffbd21267b875ab264b4cf13e4caa5c5a5d53e",
+      "hpack/table.py": "500937f5f52433fafc76704a3832ffa86afdff044e9ca4150761033f60032642"
+    },
+    "connections": [],
+    "errors": []
+  },
+  "peer_provenance": {
+    "proto_sha256": {
+      "@grpc/grpc-js-xds/deps/envoy-api/envoy/annotations/deprecation.proto": "64af0d3b34f517899a05f530d4d5597d3495d72daf3e61e5da5f9b8bf0291b9a",
+      "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/accesslog/v3/accesslog.proto": "dd198a860fa62250b0e7726cebfd7568448a18d6f6d7ba8b08338b57d00d6a25",
+      "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/cluster/v3/circuit_breaker.proto": "317e9d4d23d03ea211d45056d7154d623e791cb0135d594f66dbe6363bd1ad93",
+      "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/cluster/v3/cluster.proto": "a163a314125ed9f1a6d966426c5cf42ae8be726c826ddd05df3dc69f4ab09942",
+      "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/cluster/v3/filter.proto": "cf02871b7f1ca8dc26c3f1bc48eb8a3faee0b880e748094b1897b77ab269028c",
+      "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/cluster/v3/outlier_detection.proto": "fa6d069143de56ced0b342aec48a45c4c5bdfa7f3ae900e627e7c284f422534d",
+      "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/core/v3/address.proto": "b65ff45ac25830d4ffff7fe370f152a92cd6cc880d859109d591fc6ab114bd12",
+      "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/core/v3/backoff.proto": "6357b234c4fe90084f330de9e2b53c0be9a5b40b82bfbe4d3339bf21ddb4d857",
+      "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/core/v3/base.proto": "7100d55f77dc8ae318ab9ebed11fbcd90afa44dd6c14511e3ee2312397edc9fe",
+      "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/core/v3/config_source.proto": "221023ecf8ce8c89a992afd3aa5507165a3f3fe6956127d35421c6bfc72eb35a",
+      "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/core/v3/event_service_config.proto": "0bbf60d26c0c9cec1880b032e9a4653725e938cb64d110d8b3e32ca4ec523abd",
+      "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/core/v3/extension.proto": "9ed81e39f1c1c1e121336d04f87e711e597f62e0df79e790fb31c8efc70c1ece",
+      "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/core/v3/grpc_service.proto": "7cef169c20c7137947fbfb2b6b68e0378feaad5f94dc366bff7bbdf61ced6ef9",
+      "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/core/v3/health_check.proto": "8c1c55284573c00b8fee1cbe7d10a5eed27c54ddd7312c642395069f23e5ac3a",
+      "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/core/v3/http_uri.proto": "9b5ee5cdd55149ea94859bf83f8aee180b602400b9ba976405a2265f0fcf054c",
+      "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/core/v3/protocol.proto": "a4439536916827fa91c91ab37f90fd931cc772abd4be0171df047adeb896d228",
+      "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/core/v3/proxy_protocol.proto": "0351d3cee07dfc0d78ee2a2906158fd159cd21db4cba7857824c2091a77bf933",
+      "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/core/v3/resolver.proto": "7f5293785e59e2e7fd825ebea4473fad067e6e912dfc7b05a1221bd7ba0ad61e",
+      "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/core/v3/socket_option.proto": "51af907f01fa5105c0c371b9645ea42ac82d3f38f930b5185c064a573f06b6eb",
+      "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/core/v3/substitution_format_string.proto": "67d1363a88f028d047b0de5abe0e1d07eee19e9e45610c044d3374ca1de674d0",
+      "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/core/v3/udp_socket_config.proto": "4f9a035b938049c326b63d28868afcda6e35615538bcee591b2670a53d9c8014",
+      "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/endpoint/v3/endpoint.proto": "2110b9d177d0e986174bde50647b6694b3f665168c82f35db9bb2444b32c835d",
+      "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/endpoint/v3/endpoint_components.proto": "8991de6d667f09ae701bf493b3ec3949a7fcb30ef6351cf6c3ca5b4abb0b6b9e",
+      "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/listener/v3/api_listener.proto": "180adcdce55dfcc5d89382ea53cd8a44035ee9676caffb22d5374476c9836991",
+      "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/listener/v3/listener.proto": "8f1fc0f065aefb9ee95345f08cf3fdd9124bb12478621d5e31827ac465b4d241",
+      "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/listener/v3/listener_components.proto": "142b8be6becddb50c0b356ddb6cb9541f8df45c5f8560ce1243f9241a6ba4d8a",
+      "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/listener/v3/quic_config.proto": "efe3bbf01c7034f31e110c499d200ad41735d9b796708320dbf9fe3c427cffcd",
+      "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/listener/v3/udp_listener_config.proto": "a9a723696bb3701775a9eeff4aa8f2db2b2484a48a4ab4e25da930aa6051ad32",
+      "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/route/v3/route.proto": "872fbd2d981201efd64c461d674fb61ee893fa4a04f203384bf95c808fece12e",
+      "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/route/v3/route_components.proto": "a931ba426abf2def45188f95ac82bb6feb44148661e0435957c7eb8b5573be15",
+      "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/route/v3/scoped_route.proto": "8abb9db2601c0bdc1f89493781a4125331643d0be14e4330915e4b5b87d592e3",
+      "@grpc/grpc-js-xds/deps/envoy-api/envoy/config/trace/v3/http_tracer.proto": "c62a26c1feaa4b5693b785782c8affaa477b0affbbcf198f47258434d294bde6",
+      "@grpc/grpc-js-xds/deps/envoy-api/envoy/data/accesslog/v3/accesslog.proto": "416c603c6e053e46e028f90039b69229646e437238749c7e7a73cc722b136a22",
+      "@grpc/grpc-js-xds/deps/envoy-api/envoy/extensions/filters/http/router/v3/router.proto": "79f72df52d5d9a785334fab58be2d66bffdb38db7043c09f39623329a7d2cf07",
+      "@grpc/grpc-js-xds/deps/envoy-api/envoy/extensions/filters/network/http_connection_manager/v3/http_connection_manager.proto": "992a37c41bf728d2cbd80834373b59d8b969f0f84b577ae5c053960343a68e9f",
+      "@grpc/grpc-js-xds/deps/envoy-api/envoy/service/discovery/v3/ads.proto": "b4455efa45f868f04ce11d415d9a712104edbe6ec476ce7df6da57d3997fe0af",
+      "@grpc/grpc-js-xds/deps/envoy-api/envoy/service/discovery/v3/discovery.proto": "18ade78685cbec0cdf5bdf0304a359124bd0524e598ebd41ffaf87d22cfbfa6b",
+      "@grpc/grpc-js-xds/deps/envoy-api/envoy/type/http/v3/path_transformation.proto": "2700e6fb7362cf5bf960949641ed9a2a031199ca440cedb9e16ce71fe050c13a",
+      "@grpc/grpc-js-xds/deps/envoy-api/envoy/type/matcher/v3/metadata.proto": "e60f6fe2118dbbe884a54412a312981ac05bb748737e9ab30942fe5f65a0627c",
+      "@grpc/grpc-js-xds/deps/envoy-api/envoy/type/matcher/v3/number.proto": "c4a40eb8eb457958d11bfdac3b7609e567d8b4e7389fd2559a1e82721b468fe5",
+      "@grpc/grpc-js-xds/deps/envoy-api/envoy/type/matcher/v3/regex.proto": "d1e3056ab7480fca958f5b384ab3df4548c21fd8851745669f03f435a8549551",
+      "@grpc/grpc-js-xds/deps/envoy-api/envoy/type/matcher/v3/string.proto": "9a26b73d5474c58e1fab5bb4b62f1386e99cfe0036835e610ef6498daca822c0",
+      "@grpc/grpc-js-xds/deps/envoy-api/envoy/type/matcher/v3/value.proto": "d68d9852966a8ac26f51bb8a84346e340fc0280c2ad07f85b0d1ac0a4aeb6a68",
+      "@grpc/grpc-js-xds/deps/envoy-api/envoy/type/metadata/v3/metadata.proto": "8b1b0b33da7026e8d41c25b6aa1aceddfbe90ed9038c1202a6918dcbf9363280",
+      "@grpc/grpc-js-xds/deps/envoy-api/envoy/type/tracing/v3/custom_tag.proto": "bb54ca01e224033c68cff12a78b11d4a6131406150109b3a3e1c151808a976a2",
+      "@grpc/grpc-js-xds/deps/envoy-api/envoy/type/v3/http.proto": "c7cbf21ccf9c18064250fecb816bcbe3700b4886a9447a91bdb4246d37aeda68",
+      "@grpc/grpc-js-xds/deps/envoy-api/envoy/type/v3/percent.proto": "8fd615d0d0676bcbaf9dcda971066a8e2108b51c14e36ccf1be7b639e958b24b",
+      "@grpc/grpc-js-xds/deps/envoy-api/envoy/type/v3/range.proto": "a27f4e6a9eb2fa9d2ca090b5b060794f946e89e8bfc4c8cf90aad54f13fc3918",
+      "@grpc/grpc-js-xds/deps/envoy-api/envoy/type/v3/semantic_version.proto": "ee3d8ec40fa9024dccee9411e4e9b536f1fd788ce88102fac31efbd706116fc3",
+      "@grpc/grpc-js-xds/deps/googleapis/google/rpc/status.proto": "03b716b8828a03c382c71c0eb4316f0e7d816a25a5845db0ee4ddacc9fd5c3af",
+      "@grpc/grpc-js-xds/deps/protoc-gen-validate/validate/validate.proto": "e56269caa0b6e3531055275cfef9539af46606e8ed26bfc8f615cf9f75b41d71",
+      "@grpc/grpc-js-xds/deps/xds/udpa/annotations/migrate.proto": "90d855b75b1174b96e65915d93402756716036f30797d5de0faca2297ae2d528",
+      "@grpc/grpc-js-xds/deps/xds/udpa/annotations/security.proto": "c8a05d6e7e16133e39bb7fb9866f6cdeaa60c32bc8785e90a7c4289c239d31f9",
+      "@grpc/grpc-js-xds/deps/xds/udpa/annotations/sensitive.proto": "72d642326a0b149967dca865d1775211d033bf388ea554cc834ef2c9ddb3b70e",
+      "@grpc/grpc-js-xds/deps/xds/udpa/annotations/status.proto": "7a24aa255f54940986bf775c2c2affb3c57136173a1461f4167a046dec885246",
+      "@grpc/grpc-js-xds/deps/xds/udpa/annotations/versioning.proto": "acd27bfb3f023f47a50521bfc89c84dc247b03fd87a9f7eea22b9735ae6c730b",
+      "@grpc/grpc-js-xds/deps/xds/xds/annotations/v3/status.proto": "64863c619e76931aba5fc1bb5c31eb04867f1a33ee6bc07f3a6969625800b374",
+      "@grpc/grpc-js-xds/deps/xds/xds/core/v3/authority.proto": "0cd94911e6084a7e304d28d3dcd8113c3d0236d1c6cefad9c60573dc1ecbd685",
+      "@grpc/grpc-js-xds/deps/xds/xds/core/v3/collection_entry.proto": "76c8aefae64a5318e9807cdadc3c6100b24f7fd63804f9cf4089e6ecf0e04970",
+      "@grpc/grpc-js-xds/deps/xds/xds/core/v3/context_params.proto": "44a53be3f020fb091ae4a175abc933fac52b7508ea6b422ca816eb2547568e2b",
+      "@grpc/grpc-js-xds/deps/xds/xds/core/v3/extension.proto": "ce29123796beee74510a3057e3988b97b09b1e3d1a719a3d86a89fc992d01017",
+      "@grpc/grpc-js-xds/deps/xds/xds/core/v3/resource_locator.proto": "5604fce2ba3481321cb5b318c840a6f797f4b89bacc365b1cef80da60c4ee587",
+      "@grpc/grpc-js-xds/deps/xds/xds/type/matcher/v3/matcher.proto": "b6e9e468e1ad18231b08f0c43a5a5642a9a94e8bdcf585a68e12aba8216ca035",
+      "@grpc/grpc-js-xds/deps/xds/xds/type/matcher/v3/regex.proto": "8a78a2c9d2f819511fdd99fc3390a37a0c01d9ee0ad10d7216eefb7c10e35924",
+      "@grpc/grpc-js-xds/deps/xds/xds/type/matcher/v3/string.proto": "6b1b167f845db1f41ca3df072e40696a9eeeb14173f363da4a76e84f27f17a16",
+      "protobufjs-builtin:google/protobuf/any.proto": "2a9a97f09767300438fe6812e5335f9c74c530779bd9e3d23221ea0436160a57",
+      "protobufjs-builtin:google/protobuf/descriptor.proto": "44d4f764e8f7788855e51a832c02563b68276bdb4bbd5cf26c4a78bbb38167ba",
+      "protobufjs-builtin:google/protobuf/duration.proto": "5d8c287bf36774df2808943eca819293d7bf9e18d55fb33ade00e2c086c530b2",
+      "protobufjs-builtin:google/protobuf/empty.proto": "2b6513c368ca73a95a3101ea86c8d5183b984b7c886e8b361cb054cfe32b5423",
+      "protobufjs-builtin:google/protobuf/struct.proto": "12f00866b06a3a21998dfc90571c308400df9a3eeb495a64506551199b81a1fb",
+      "protobufjs-builtin:google/protobuf/timestamp.proto": "bf8b0e0645f9b601d389bde707735de7ddca52544ef95a776642b03e4647e2f7",
+      "protobufjs-builtin:google/protobuf/wrappers.proto": "64ec6254e6dd499dfff40200badfeff5cf90233ba860315cac99fefe7cae7665"
+    },
+    "builtin_proto_provenance": {
+      "protobufjs-builtin:google/protobuf/any.proto": {
+        "kind": "protobufjs-builtin",
+        "logical_name": "google/protobuf/any.proto",
+        "descriptor_encoding": "canonical-json",
+        "descriptor_sha256": "2a9a97f09767300438fe6812e5335f9c74c530779bd9e3d23221ea0436160a57",
+        "package_source_sha256": {
+          "protobufjs/src/common.js": "577786d95c5cb3e11eb475342735c7cf8c71ecb4456d9f07258d60af8a1bfe9a",
+          "protobufjs/src/root.js": "1f610f79137dff45ce2ec4e0f742ae43f26b296f2518f4ba41e0a497af5ad624",
+          "protobufjs/package.json": "0e56b70de03bffc143e74311b42ae22b557370a4a1f4b5066568fbc77857639a"
+        }
+      },
+      "protobufjs-builtin:google/protobuf/descriptor.proto": {
+        "kind": "protobufjs-builtin",
+        "logical_name": "google/protobuf/descriptor.proto",
+        "descriptor_encoding": "canonical-json",
+        "descriptor_sha256": "44d4f764e8f7788855e51a832c02563b68276bdb4bbd5cf26c4a78bbb38167ba",
+        "package_source_sha256": {
+          "protobufjs/src/common.js": "577786d95c5cb3e11eb475342735c7cf8c71ecb4456d9f07258d60af8a1bfe9a",
+          "protobufjs/src/root.js": "1f610f79137dff45ce2ec4e0f742ae43f26b296f2518f4ba41e0a497af5ad624",
+          "protobufjs/package.json": "0e56b70de03bffc143e74311b42ae22b557370a4a1f4b5066568fbc77857639a"
+        }
+      },
+      "protobufjs-builtin:google/protobuf/duration.proto": {
+        "kind": "protobufjs-builtin",
+        "logical_name": "google/protobuf/duration.proto",
+        "descriptor_encoding": "canonical-json",
+        "descriptor_sha256": "5d8c287bf36774df2808943eca819293d7bf9e18d55fb33ade00e2c086c530b2",
+        "package_source_sha256": {
+          "protobufjs/src/common.js": "577786d95c5cb3e11eb475342735c7cf8c71ecb4456d9f07258d60af8a1bfe9a",
+          "protobufjs/src/root.js": "1f610f79137dff45ce2ec4e0f742ae43f26b296f2518f4ba41e0a497af5ad624",
+          "protobufjs/package.json": "0e56b70de03bffc143e74311b42ae22b557370a4a1f4b5066568fbc77857639a"
+        }
+      },
+      "protobufjs-builtin:google/protobuf/empty.proto": {
+        "kind": "protobufjs-builtin",
+        "logical_name": "google/protobuf/empty.proto",
+        "descriptor_encoding": "canonical-json",
+        "descriptor_sha256": "2b6513c368ca73a95a3101ea86c8d5183b984b7c886e8b361cb054cfe32b5423",
+        "package_source_sha256": {
+          "protobufjs/src/common.js": "577786d95c5cb3e11eb475342735c7cf8c71ecb4456d9f07258d60af8a1bfe9a",
+          "protobufjs/src/root.js": "1f610f79137dff45ce2ec4e0f742ae43f26b296f2518f4ba41e0a497af5ad624",
+          "protobufjs/package.json": "0e56b70de03bffc143e74311b42ae22b557370a4a1f4b5066568fbc77857639a"
+        }
+      },
+      "protobufjs-builtin:google/protobuf/struct.proto": {
+        "kind": "protobufjs-builtin",
+        "logical_name": "google/protobuf/struct.proto",
+        "descriptor_encoding": "canonical-json",
+        "descriptor_sha256": "12f00866b06a3a21998dfc90571c308400df9a3eeb495a64506551199b81a1fb",
+        "package_source_sha256": {
+          "protobufjs/src/common.js": "577786d95c5cb3e11eb475342735c7cf8c71ecb4456d9f07258d60af8a1bfe9a",
+          "protobufjs/src/root.js": "1f610f79137dff45ce2ec4e0f742ae43f26b296f2518f4ba41e0a497af5ad624",
+          "protobufjs/package.json": "0e56b70de03bffc143e74311b42ae22b557370a4a1f4b5066568fbc77857639a"
+        }
+      },
+      "protobufjs-builtin:google/protobuf/timestamp.proto": {
+        "kind": "protobufjs-builtin",
+        "logical_name": "google/protobuf/timestamp.proto",
+        "descriptor_encoding": "canonical-json",
+        "descriptor_sha256": "bf8b0e0645f9b601d389bde707735de7ddca52544ef95a776642b03e4647e2f7",
+        "package_source_sha256": {
+          "protobufjs/src/common.js": "577786d95c5cb3e11eb475342735c7cf8c71ecb4456d9f07258d60af8a1bfe9a",
+          "protobufjs/src/root.js": "1f610f79137dff45ce2ec4e0f742ae43f26b296f2518f4ba41e0a497af5ad624",
+          "protobufjs/package.json": "0e56b70de03bffc143e74311b42ae22b557370a4a1f4b5066568fbc77857639a"
+        }
+      },
+      "protobufjs-builtin:google/protobuf/wrappers.proto": {
+        "kind": "protobufjs-builtin",
+        "logical_name": "google/protobuf/wrappers.proto",
+        "descriptor_encoding": "canonical-json",
+        "descriptor_sha256": "64ec6254e6dd499dfff40200badfeff5cf90233ba860315cac99fefe7cae7665",
+        "package_source_sha256": {
+          "protobufjs/src/common.js": "577786d95c5cb3e11eb475342735c7cf8c71ecb4456d9f07258d60af8a1bfe9a",
+          "protobufjs/src/root.js": "1f610f79137dff45ce2ec4e0f742ae43f26b296f2518f4ba41e0a497af5ad624",
+          "protobufjs/package.json": "0e56b70de03bffc143e74311b42ae22b557370a4a1f4b5066568fbc77857639a"
+        }
+      }
+    },
+    "dependencies": {
+      "@grpc/grpc-js": {
+        "version": "1.14.7",
+        "package_sha256": "425331076f9212318ca9582c75cd45c6c1efbe3baa66b97691e3cecb80f59afa",
+        "module_code_sha256": "cc9fd9b2db0f82cf1cb31f1143910aaa8d2eda68b97ddc374d84aa58751537d4"
+      },
+      "@grpc/grpc-js-xds": {
+        "version": "1.14.2",
+        "package_sha256": "4ae73673878b4506cb0e3f16b3cfc7de00f9945d935804fddefc536b4fe19922",
+        "module_code_sha256": "25861a88359d1570f694288f1ecf01b031ce5b330f62948d98164b2b8aa121d9"
+      },
+      "@grpc/proto-loader": {
+        "version": "0.8.1",
+        "package_sha256": "04fc16d6ba1496e29f0919c9c9438e19156153988b4a4776c9139365bd6650a9",
+        "module_code_sha256": "f469db5f30616345964e95f3117ae8d9f317d66e4f6d626652d266a20a85453a"
+      },
+      "protobufjs": {
+        "version": "7.6.6",
+        "package_sha256": "0e56b70de03bffc143e74311b42ae22b557370a4a1f4b5066568fbc77857639a",
+        "module_code_sha256": "2c7c445d436c243cc4723921d6d5f7e1f7f1f6ace12de5e60b536a6e91d43b76"
+      }
+    }
+  },
+  "passed": 5,
+  "total": 5
+}

@@ -1,0 +1,39 @@
+test-lib
++- run test 170 pass, 1 fail (171 total)
+error: 'grpc.xds.runtime.rollback_tests.test.gRPC xDS federated serving inventory storage budget rejects before cache and revision commit' failed:
+       ====== expected this output: =========
+       service-b␃
+
+       ======== instead found this: =========
+       service-a␃
+
+       ======================================
+       First difference occurs on line 1:
+       expected:
+       service-b
+               ^ ('\x62')
+       found:
+       service-a
+               ^ ('\x61')
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/std/testing.zig:682:9: 0x13fe4d5 in expectEqualStrings (std.zig)
+               return error.TestExpectedEqual;
+               ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/rollback_tests.zig:151:5: 0x1403d9d in test.gRPC xDS federated serving inventory storage budget rejects before cache and revision commit (root.zig)
+           try std.testing.expectEqualStrings("service-b", client.subscriptions.find(eds.type_url).?.names[0]);
+           ^
+failed command: ./.zig-cache/o/626aa502e809f200eefbc7efc564869b/test --cache-dir=./.zig-cache --seed=0x1e96b0dc --listen=-
+
+Build Summary: 6/8 steps succeeded (1 failed); 170/171 tests passed (1 failed)
+test-lib transitive failure
++- run test 170 pass, 1 fail (171 total)
+   +- compile test Debug native success 32s MaxRSS:2G
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 5ms MaxRSS:39M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 6ms MaxRSS:39M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options cached
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/63a4f13a38ebb3037e00652cc87f88eb/build /home/passchaos/Temp/zig-x86_64-linux-0.16.0/zig /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib /home/passchaos/project-z/netz .zig-cache /home/passchaos/.cache/zig --seed 0x1e96b0dc -Ze4528f478b77951b test-lib -Dtest-filter=serving inventory storage budget --summary all

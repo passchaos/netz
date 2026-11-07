@@ -70,6 +70,7 @@ pub fn apply(self: *ctl.Controller, client: *ads.Client, update: ads.Update, des
         return try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
     };
     const projection = try Projection.create(self.allocator, snapshot, listener.value.hcm.max_stream_duration, self.rbac_config, self.fault_config, self.rbac_name, self.fault_name);
+    projection.remote_rds = snapshot.resource.value.name;
     defer projection.release();
     const revision = try self.publish(client, projection, destination, deadline);
     snapshot.retain();

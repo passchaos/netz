@@ -1,0 +1,5 @@
+# C-Core is the resolver oracle. The runner never installs dependencies.
+grpcio==1.76.0
+typing_extensions==4.15.0
+# Independently decode captured HPACK before Node's HTTP/2 validation.
+hpack==4.1.0

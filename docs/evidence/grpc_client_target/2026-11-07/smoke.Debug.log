@@ -1,0 +1,23 @@
+FAILED default-bare: peer exited before readiness (exit=1); peer exited 1; reference C-Core extension hash mismatch; reference dependency source hashes mismatch
+FAILED authority-default: peer exited before readiness (exit=1); peer exited 1; reference C-Core extension hash mismatch; reference dependency source hashes mismatch
+FAILED top-xdstp-route: peer exited before readiness (exit=1); peer exited 1; reference C-Core extension hash mismatch; reference dependency source hashes mismatch
+{
+  "status": "failed",
+  "passed": 0,
+  "total": 3,
+  "report": "/home/passchaos/project-z/netz/docs/evidence/grpc_client_target/2026-11-07/smoke.Debug/report.json",
+  "failures": [
+    {
+      "id": "default-bare",
+      "failure": "peer exited before readiness (exit=1); peer exited 1; reference C-Core extension hash mismatch; reference dependency source hashes mismatch"
+    },
+    {
+      "id": "authority-default",
+      "failure": "peer exited before readiness (exit=1); peer exited 1; reference C-Core extension hash mismatch; reference dependency source hashes mismatch"
+    },
+    {
+      "id": "top-xdstp-route",
+      "failure": "peer exited before readiness (exit=1); peer exited 1; reference C-Core extension hash mismatch; reference dependency source hashes mismatch"
+    }
+  ]
+}
