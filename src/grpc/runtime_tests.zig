@@ -2887,6 +2887,74 @@ test "gRPC owned unary response reuses prefix-reserved storage" {
     if (shared.err) |err| return err;
 }
 
+test "gRPC unary owned request storage reaches the writer" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try grpc.runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+        1024,
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *grpc.runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var connection = self.server.accept() catch |err| {
+                self.err = err;
+                return;
+            };
+            defer connection.deinit();
+            var request = connection.readUnary() catch |err| {
+                self.err = err;
+                return;
+            };
+            defer request.deinit();
+            if (!std.mem.eql(u8, request.request.message.payload, "owned-request")) {
+                self.err = error.InvalidGrpcRequest;
+                return;
+            }
+            connection.writeUnary(request.request.stream_id, .{ .message = "ok" }) catch |err| {
+                self.err = err;
+                return;
+            };
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try grpc.runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer client.deinit();
+    var owned = try grpc.OwnedRequestMessage.init(allocator, "owned-request".len);
+    defer owned.deinit();
+    @memcpy(owned.payload(), "owned-request");
+    var response = try client.unary(.{
+        .path = "/owned/Call",
+        .authority = "localhost",
+        .owned_message = &owned,
+    });
+    defer response.deinit();
+    try std.testing.expectEqual(grpc.Status.ok, response.status);
+    try std.testing.expectEqualStrings("ok", response.message.?.payload);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test {
     _ = @import("web/runtime_tests.zig");
 }

@@ -14,6 +14,10 @@ const fault_mod = @import("fault.zig");
 const codec = @import("stream/codec.zig");
 const outbound_ownership = @import("stream/duplex/outbound_ownership.zig");
 
+/// Prefix-reserved client request storage. Serialize into `payload()` and
+/// submit it through `UnaryCallOptions.owned_message`.
+pub const OwnedRequestMessage = outbound_ownership.OwnedMessage;
+
 pub const Error = wire.Error || metadata_mod.Error ||
     compression_mod.Error || details_mod.Error ||
     http2.runtime.ResponseTimeoutError || error{
@@ -330,7 +334,11 @@ pub const UnaryCallOptions = struct {
     path: []const u8,
     authority: ?[]const u8 = null,
     scheme: ?[]const u8 = null,
-    message: []const u8,
+    message: []const u8 = "",
+    /// Mutually exclusive with a non-empty `message`. Prefix-reserved storage
+    /// borrowed for the synchronous write; identity requests reach the HTTP/2
+    /// writer without another payload copy.
+    owned_message: ?*OwnedRequestMessage = null,
     /// Requested per-message encoding. Compression is skipped when it cannot
     /// make this particular message smaller.
     compression: Algorithm = .identity,
@@ -688,16 +696,52 @@ pub fn unaryCallAttempt(
     if ((deadline == null) != (timeout_header == null)) {
         return error.InvalidTimeout;
     }
-    if (options.message.len > options.requestMessageLimit()) {
+    if (options.owned_message != null and options.message.len != 0) {
+        return error.InvalidMessageCount;
+    }
+    if (options.owned_message == null and
+        options.message.len > options.requestMessageLimit())
+    {
         return error.GrpcMessageTooLarge;
     }
-    var encoded = try compression_mod.compressAlloc(
-        allocator,
-        options.compression,
-        options.message,
-        options.compression_level,
-    );
-    defer encoded.deinit(allocator);
+    var encoded_message: ?compression_mod.EncodedPayload = null;
+    defer if (encoded_message) |*encoded| encoded.deinit(allocator);
+    var framed: std.ArrayList(u8) = .empty;
+    defer framed.deinit(allocator);
+    var compressed_frame: ?[]u8 = null;
+    defer if (compressed_frame) |bytes| allocator.free(bytes);
+    var framed_bytes: []const u8 = &.{};
+    if (options.owned_message) |owned| {
+        const storage = try owned.storageFor(allocator);
+        const encoder = codec.Encoder{
+            .allocator = allocator,
+            .algorithm = options.compression,
+            .compression_level = options.compression_level,
+            .max_message_size = options.requestMessageLimit(),
+        };
+        const result = try outbound_ownership.encode(
+            allocator,
+            encoder,
+            storage,
+            .{},
+        );
+        framed_bytes = result.bytes;
+        if (!result.input_transferred) compressed_frame = result.bytes;
+    } else {
+        encoded_message = try compression_mod.compressAlloc(
+            allocator,
+            options.compression,
+            options.message,
+            options.compression_level,
+        );
+        try writeMessage(
+            &framed,
+            allocator,
+            encoded_message.?.bytes,
+            encoded_message.?.compressed,
+        );
+        framed_bytes = framed.items;
+    }
     _ = try splitMethodPath(options.path);
     try validateCustomMetadata(options.metadata);
     try validateCustomBinaryMetadata(options.binary_metadata);
@@ -706,15 +750,6 @@ pub fn unaryCallAttempt(
         options.binary_metadata,
     );
     defer binary_metadata.deinit();
-
-    var framed: std.ArrayList(u8) = .empty;
-    defer framed.deinit(allocator);
-    try writeMessage(
-        &framed,
-        allocator,
-        encoded.bytes,
-        encoded.compressed,
-    );
 
     var header_storage: [16]http2.Hpack.HeaderField = undefined;
     const header_count = std.math.add(
@@ -785,7 +820,7 @@ pub fn unaryCallAttempt(
         .scheme = options.scheme,
         .authority = options.authority,
         .headers = headers.items,
-        .body = framed.items,
+        .body = framed_bytes,
     };
     const response = (if (deadline) |absolute|
         connection.requestWithDeadline(request_options, absolute)

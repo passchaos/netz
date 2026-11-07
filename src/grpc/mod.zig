@@ -156,6 +156,7 @@ pub const ServerKeepAliveEnforcementPolicy =
     runtime.ServerKeepAliveEnforcementPolicy;
 pub const UnaryResponse = call.UnaryResponse;
 pub const UnaryResponseOptions = call.UnaryResponseOptions;
+pub const OwnedRequestMessage = call.OwnedRequestMessage;
 pub const OwnedResponseMessage = call.OwnedResponseMessage;
 pub const parseUnaryRequest = call.parseUnaryRequest;
 pub const unaryCall = call.unaryCall;
