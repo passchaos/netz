@@ -25,7 +25,19 @@ const listen = try registry.addSocket(
     null,
 );
 try server.addListenSocket(listen);
+
+try channel.addTrace("created", .info);
+try channel.addTrace("became ready", .info);
+try server.addTrace("listening", .warning);
 ```
+
+## Traces
+
+Channels and servers retain a bounded ring of the most recent 16 trace events.
+Each event owns its description and records a severity (`info`, `warning`,
+`@"error"`) and wall-clock timestamp. `num_events_logged` counts every event
+ever added, including events already evicted from the ring; the creation
+timestamp is always reported. `addTrace` is serialized with registry mutation.
 
 ## Methods
 
@@ -96,13 +108,14 @@ after removal or registry `deinit`.
 ## Limits
 
 The implementation reports channel/server ids, names, targets, connectivity
-state, call started/succeeded/failed counters and the last call-start timestamp.
-Sockets report ids, names, TCP/IP, Unix or opaque addresses, and stream/message/
-keep-alive counters. Channel traces, socket security details, socket options,
-flow-control windows, subchannel inventories and server connection sockets are
-not synthesized. `GetSubchannel` returns `NOT_FOUND`. Server connection sockets
-can be registered explicitly when the application owns them; the listener
-socket alone is enough for the standard listen-socket page.
+state, call started/succeeded/failed counters, the last call-start timestamp
+and a bounded trace ring with a creation timestamp. Sockets report ids, names,
+TCP/IP, Unix or opaque addresses, and stream/message/keep-alive counters. Socket
+security details, socket options, flow-control windows, subchannel inventories
+and server connection sockets are not synthesized. `GetSubchannel` returns
+`NOT_FOUND`. Server connection sockets can be registered explicitly when the
+application owns them; the listener socket alone is enough for the standard
+listen-socket page.
 
 Focused coverage is available with:
 

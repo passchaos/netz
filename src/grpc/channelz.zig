@@ -45,6 +45,70 @@ pub const ConnectivityState = enum(u32) {
 
 pub const default_page_size: usize = 100;
 pub const max_page_size: usize = 1000;
+pub const max_trace_events: usize = 16;
+
+pub const TraceSeverity = enum(u32) {
+    unknown = 0,
+    info = 1,
+    warning = 2,
+    @"error" = 3,
+};
+
+const TraceEvent = struct {
+    description: []const u8,
+    severity: TraceSeverity,
+    timestamp_ns: i64,
+};
+
+const TraceRing = struct {
+    events: [max_trace_events]TraceEvent = undefined,
+    start: usize = 0,
+    count: usize = 0,
+    total: u64 = 0,
+    creation_ns: i64,
+
+    fn init(io: std.Io) TraceRing {
+        const now = std.Io.Timestamp.now(io, .real).toNanoseconds();
+        return .{ .creation_ns = @intCast(now) };
+    }
+
+    fn deinit(self: *TraceRing, allocator: std.mem.Allocator) void {
+        var index: usize = 0;
+        while (index < self.count) : (index += 1) {
+            allocator.free(self.events[(self.start + index) % max_trace_events].description);
+        }
+        self.* = undefined;
+    }
+
+    fn add(
+        self: *TraceRing,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        description: []const u8,
+        severity: TraceSeverity,
+    ) !void {
+        const owned = try allocator.dupe(u8, description);
+        errdefer allocator.free(owned);
+        const now: i64 = @intCast(std.Io.Timestamp.now(io, .real).toNanoseconds());
+        if (self.count == max_trace_events) {
+            allocator.free(self.events[self.start].description);
+            self.events[self.start] = .{
+                .description = owned,
+                .severity = severity,
+                .timestamp_ns = now,
+            };
+            self.start = (self.start + 1) % max_trace_events;
+        } else {
+            self.events[(self.start + self.count) % max_trace_events] = .{
+                .description = owned,
+                .severity = severity,
+                .timestamp_ns = now,
+            };
+            self.count += 1;
+        }
+        self.total +%= 1;
+    }
+};
 
 /// One top-level channel. Counters are updated lock-free; `name` and `target`
 /// are immutable after registration.
@@ -58,9 +122,25 @@ pub const Channel = struct {
     calls_succeeded: std.atomic.Value(i64) = .init(0),
     calls_failed: std.atomic.Value(i64) = .init(0),
     last_call_started_ns: std.atomic.Value(i64) = .init(0),
+    trace: TraceRing,
 
     pub fn setState(self: *Channel, state: ConnectivityState) void {
         self.state.store(@intFromEnum(state), .release);
+    }
+
+    pub fn addTrace(
+        self: *Channel,
+        description: []const u8,
+        severity: TraceSeverity,
+    ) Error!void {
+        self.registry.mutex.lockUncancelable(self.registry.io);
+        defer self.registry.mutex.unlock(self.registry.io);
+        try self.trace.add(
+            self.registry.allocator,
+            self.registry.io,
+            description,
+            severity,
+        );
     }
 
     pub fn callStarted(self: *Channel) void {
@@ -78,6 +158,7 @@ pub const Channel = struct {
     }
 
     fn destroy(self: *Channel, allocator: std.mem.Allocator) void {
+        self.trace.deinit(allocator);
         allocator.free(self.name);
         allocator.free(self.target);
         allocator.destroy(self);
@@ -95,6 +176,7 @@ pub const Server = struct {
     calls_succeeded: std.atomic.Value(i64) = .init(0),
     calls_failed: std.atomic.Value(i64) = .init(0),
     last_call_started_ns: std.atomic.Value(i64) = .init(0),
+    trace: TraceRing,
 
     pub fn addListenSocket(self: *Server, socket: *Socket) Error!void {
         if (socket.registry != self.registry) return error.InvalidRequest;
@@ -103,6 +185,21 @@ pub const Server = struct {
         var index = self.listen_sockets.items.len;
         while (index != 0 and self.listen_sockets.items[index - 1] > socket.id) index -= 1;
         try self.listen_sockets.insert(self.registry.allocator, index, socket.id);
+    }
+
+    pub fn addTrace(
+        self: *Server,
+        description: []const u8,
+        severity: TraceSeverity,
+    ) Error!void {
+        self.registry.mutex.lockUncancelable(self.registry.io);
+        defer self.registry.mutex.unlock(self.registry.io);
+        try self.trace.add(
+            self.registry.allocator,
+            self.registry.io,
+            description,
+            severity,
+        );
     }
 
     pub fn callStarted(self: *Server) void {
@@ -120,6 +217,7 @@ pub const Server = struct {
     }
 
     fn destroy(self: *Server, allocator: std.mem.Allocator) void {
+        self.trace.deinit(allocator);
         self.listen_sockets.deinit(allocator);
         allocator.free(self.name);
         allocator.destroy(self);
@@ -243,6 +341,7 @@ pub const Registry = struct {
             .name = owned_name,
             .target = owned_target,
             .state = .init(@intFromEnum(ConnectivityState.idle)),
+            .trace = TraceRing.init(self.io),
         };
         try self.channels.append(self.allocator, channel);
         return channel;
@@ -257,7 +356,12 @@ pub const Registry = struct {
         defer self.mutex.unlock(self.io);
         const id = self.next_server_id;
         self.next_server_id = std.math.add(i64, id, 1) catch return error.InvalidRequest;
-        server.* = .{ .registry = self, .id = id, .name = owned_name };
+        server.* = .{
+            .registry = self,
+            .id = id,
+            .name = owned_name,
+            .trace = TraceRing.init(self.io),
+        };
         try self.servers.append(self.allocator, server);
         return server;
     }
@@ -582,10 +686,23 @@ pub const ChannelData = struct {
     last_call_started: ?Timestamp = null,
 };
 
+pub const TraceEventInfo = struct {
+    description: []const u8 = "",
+    severity: TraceSeverity = .unknown,
+    timestamp: ?Timestamp = null,
+};
+
+pub const TraceInfo = struct {
+    num_events_logged: i64 = 0,
+    creation_timestamp: ?Timestamp = null,
+    events: []TraceEventInfo = &.{},
+};
+
 pub const ChannelInfo = struct {
     id: i64 = 0,
     name: []const u8 = "",
     data: ChannelData = .{},
+    trace: ?TraceInfo = null,
 };
 
 pub const ServerData = struct {
@@ -599,6 +716,7 @@ pub const ServerInfo = struct {
     id: i64 = 0,
     name: []const u8 = "",
     data: ServerData = .{},
+    trace: ?TraceInfo = null,
 };
 
 /// Owned page of top-level channels. `channels` borrow `arena` storage.
@@ -895,6 +1013,7 @@ fn decodeChannelInfo(allocator: std.mem.Allocator, bytes: []const u8) Error!Chan
                     };
                 },
                 2 => value.data.target = try allocator.dupe(u8, try data.string()),
+                3 => value.trace = try decodeTrace(allocator, try data.bytesValue()),
                 4 => value.data.calls_started = @bitCast(try data.varint()),
                 5 => value.data.calls_succeeded = @bitCast(try data.varint()),
                 6 => value.data.calls_failed = @bitCast(try data.varint()),
@@ -922,6 +1041,7 @@ fn decodeServerInfo(allocator: std.mem.Allocator, bytes: []const u8) Error!Serve
         2 => {
             var data = pb.Reader{ .bytes = try reader.bytesValue() };
             while (try data.next()) |item| switch (item.number) {
+                1 => value.trace = try decodeTrace(allocator, try data.bytesValue()),
                 2 => value.data.calls_started = @bitCast(try data.varint()),
                 3 => value.data.calls_succeeded = @bitCast(try data.varint()),
                 4 => value.data.calls_failed = @bitCast(try data.varint()),
@@ -929,6 +1049,35 @@ fn decodeServerInfo(allocator: std.mem.Allocator, bytes: []const u8) Error!Serve
                 else => try data.skip(item),
             };
         },
+        else => try reader.skip(field),
+    };
+    return value;
+}
+
+fn decodeTrace(allocator: std.mem.Allocator, bytes: []const u8) Error!TraceInfo {
+    var value = TraceInfo{};
+    var events: std.ArrayList(TraceEventInfo) = .empty;
+    var reader = pb.Reader{ .bytes = bytes };
+    while (try reader.next()) |field| switch (field.number) {
+        1 => value.num_events_logged = @bitCast(try reader.varint()),
+        2 => value.creation_timestamp = try decodeTimestamp(try reader.bytesValue()),
+        3 => try events.append(allocator, try decodeTraceEvent(allocator, try reader.bytesValue())),
+        else => try reader.skip(field),
+    };
+    value.events = try events.toOwnedSlice(allocator);
+    return value;
+}
+
+fn decodeTraceEvent(allocator: std.mem.Allocator, bytes: []const u8) Error!TraceEventInfo {
+    var value = TraceEventInfo{};
+    var reader = pb.Reader{ .bytes = bytes };
+    while (try reader.next()) |field| switch (field.number) {
+        1 => value.description = try allocator.dupe(u8, try reader.string()),
+        2 => {
+            const raw = std.math.cast(u32, try reader.varint()) orelse 0;
+            value.severity = std.enums.fromInt(TraceSeverity, raw) orelse .unknown;
+        },
+        3 => value.timestamp = try decodeTimestamp(try reader.bytesValue()),
         else => try reader.skip(field),
     };
     return value;
@@ -1137,6 +1286,23 @@ fn pageBounds(comptime T: type, items: []const *T, request: PageRequest) struct 
     return .{ .start = start, .end = @min(items.len, start + request.limit) };
 }
 
+fn encodeTraceMessage(out: *std.ArrayList(u8), allocator: std.mem.Allocator, trace: *const TraceRing) !void {
+    if (trace.total != 0) try putVarintField(out, allocator, 1, trace.total);
+    try putTimestampField(out, allocator, 2, trace.creation_ns);
+    var index: usize = 0;
+    while (index < trace.count) : (index += 1) {
+        const event = trace.events[(trace.start + index) % max_trace_events];
+        var encoded: std.ArrayList(u8) = .empty;
+        defer encoded.deinit(allocator);
+        if (event.description.len != 0) try putBytesField(&encoded, allocator, 1, event.description);
+        if (event.severity != .unknown) {
+            try putVarintField(&encoded, allocator, 2, @intCast(@intFromEnum(event.severity)));
+        }
+        try putTimestampField(&encoded, allocator, 3, event.timestamp_ns);
+        try putBytesField(out, allocator, 3, encoded.items);
+    }
+}
+
 fn encodeChannel(out: *std.ArrayList(u8), allocator: std.mem.Allocator, channel: *const Channel) !void {
     var ref: std.ArrayList(u8) = .empty;
     defer ref.deinit(allocator);
@@ -1151,6 +1317,10 @@ fn encodeChannel(out: *std.ArrayList(u8), allocator: std.mem.Allocator, channel:
     try putVarintField(&state, allocator, 1, channel.state.load(.acquire));
     try putBytesField(&data, allocator, 1, state.items);
     if (channel.target.len != 0) try putBytesField(&data, allocator, 2, channel.target);
+    var trace: std.ArrayList(u8) = .empty;
+    defer trace.deinit(allocator);
+    try encodeTraceMessage(&trace, allocator, &channel.trace);
+    try putBytesField(&data, allocator, 3, trace.items);
     const started = channel.calls_started.load(.monotonic);
     const succeeded = channel.calls_succeeded.load(.monotonic);
     const failed = channel.calls_failed.load(.monotonic);
@@ -1171,6 +1341,10 @@ fn encodeServer(out: *std.ArrayList(u8), allocator: std.mem.Allocator, server: *
 
     var data: std.ArrayList(u8) = .empty;
     defer data.deinit(allocator);
+    var trace: std.ArrayList(u8) = .empty;
+    defer trace.deinit(allocator);
+    try encodeTraceMessage(&trace, allocator, &server.trace);
+    try putBytesField(&data, allocator, 1, trace.items);
     const started = server.calls_started.load(.monotonic);
     const succeeded = server.calls_succeeded.load(.monotonic);
     const failed = server.calls_failed.load(.monotonic);

@@ -346,6 +346,37 @@ test "Channelz encodes Unix and opaque socket addresses" {
     try std.testing.expectEqualStrings("opaque-peer", decoded.value.remote.?.other);
 }
 
+test "Channelz trace ring bounds retained events and counts total" {
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    var registry = channelz.Registry.init(gpa, threaded.io());
+    defer registry.deinit();
+    const channel = try registry.addChannel("traced", "dns:///traced.example");
+    var buffer: [32]u8 = undefined;
+    for (0..channelz.max_trace_events + 4) |index| {
+        const description = try std.fmt.bufPrint(&buffer, "event-{d}", .{index});
+        try channel.addTrace(description, if (index % 2 == 0) .info else .warning);
+    }
+    const request = try channelz.encodeIdRequest(gpa, channel.id);
+    defer gpa.free(request);
+    const bytes = (try registry.handle(gpa, channelz.get_channel_path, request)).?;
+    defer gpa.free(bytes);
+    var decoded = try channelz.decodeChannelResponse(gpa, bytes);
+    defer decoded.deinit();
+    const trace = decoded.value.trace.?;
+    try std.testing.expectEqual(
+        @as(i64, channelz.max_trace_events + 4),
+        trace.num_events_logged,
+    );
+    try std.testing.expectEqual(@as(usize, channelz.max_trace_events), trace.events.len);
+    try std.testing.expectEqualStrings("event-4", trace.events[0].description);
+    try std.testing.expectEqual(
+        @as(usize, channelz.max_trace_events + 3),
+        std.fmt.parseInt(usize, trace.events[trace.events.len - 1].description["event-".len..], 10) catch unreachable,
+    );
+    try std.testing.expect(trace.creation_timestamp != null);
+}
+
 test "Channelz rejects unknown methods, unknown ids and invalid pages" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
@@ -377,6 +408,9 @@ test "Channelz serve dispatches real unary gRPC requests and statuses" {
     const server_info = try registry.addServer("backend");
     server_info.callStarted();
     server_info.callSucceeded();
+    try channel.addTrace("created", .info);
+    try channel.addTrace("ready", .info);
+    try server_info.addTrace("listening", .warning);
 
     var server = try runtime.Server.listen(
         gpa,
@@ -472,12 +506,22 @@ test "Channelz serve dispatches real unary gRPC requests and statuses" {
         top.channels[0].data.state,
     );
     try std.testing.expectEqual(@as(i64, 1), top.channels[0].data.calls_started);
+    try std.testing.expect(top.channels[0].trace != null);
+    try std.testing.expectEqual(@as(i64, 2), top.channels[0].trace.?.num_events_logged);
+    try std.testing.expectEqual(@as(usize, 2), top.channels[0].trace.?.events.len);
+    try std.testing.expectEqualStrings("created", top.channels[0].trace.?.events[0].description);
+    try std.testing.expectEqual(channelz.TraceSeverity.info, top.channels[0].trace.?.events[0].severity);
+    try std.testing.expect(top.channels[0].trace.?.creation_timestamp != null);
 
     var servers = try admin.getServers(0, 0);
     defer servers.deinit();
     try std.testing.expectEqual(@as(usize, 1), servers.servers.len);
     try std.testing.expectEqualStrings("backend", servers.servers[0].name);
     try std.testing.expectEqual(@as(i64, 1), servers.servers[0].data.calls_succeeded);
+    try std.testing.expect(servers.servers[0].trace != null);
+    try std.testing.expectEqual(@as(usize, 1), servers.servers[0].trace.?.events.len);
+    try std.testing.expectEqualStrings("listening", servers.servers[0].trace.?.events[0].description);
+    try std.testing.expectEqual(channelz.TraceSeverity.warning, servers.servers[0].trace.?.events[0].severity);
 
     var server_value = try admin.getServer(1);
     defer server_value.deinit();
