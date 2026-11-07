@@ -621,6 +621,119 @@ test "Channelz server observer counts duplex calls automatically" {
     try std.testing.expectEqual(@as(i64, 0), server_info.calls_failed.load(.monotonic));
 }
 
+test "Channelz client observer counts unary and duplex calls automatically" {
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var registry = channelz.Registry.init(gpa, io);
+    defer registry.deinit();
+    const channel_info = try registry.addChannel("auto-client", "dns:///auto.example");
+
+    var server = try runtime.Server.listen(
+        gpa,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+        1024,
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var connection = self.server.accept() catch |err| {
+                self.err = err;
+                return;
+            };
+            defer connection.deinit();
+            for (0..2) |index| {
+                var request = connection.readUnary() catch |err| {
+                    self.err = err;
+                    return;
+                };
+                defer request.deinit();
+                connection.writeUnary(request.request.stream_id, if (index == 0)
+                    .{ .message = "ok" }
+                else
+                    .{ .status = .not_found }) catch |err| {
+                    self.err = err;
+                    return;
+                };
+            }
+            var stream = connection.acceptDuplex() catch |err| {
+                self.err = err;
+                return;
+            };
+            defer stream.deinit();
+            stream.startResponse(.{}) catch |err| {
+                self.err = err;
+                return;
+            };
+            stream.finish(.ok, null, &.{}, &.{}) catch |err| {
+                self.err = err;
+                return;
+            };
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try runtime.Client.connect(
+        gpa,
+        io,
+        server.address(),
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer client.deinit();
+    client.setObserver(channel_info.observer());
+    var first = try client.unary(.{
+        .path = "/auto/Unary",
+        .authority = "localhost",
+        .message = "one",
+    });
+    defer first.deinit();
+    try std.testing.expectEqual(wire.Status.ok, first.status);
+    var second = try client.unary(.{
+        .path = "/auto/Unary",
+        .authority = "localhost",
+        .message = "two",
+    });
+    defer second.deinit();
+    try std.testing.expectEqual(wire.Status.not_found, second.status);
+
+    var stream = try client.startDuplex(.{
+        .path = "/auto/Duplex",
+        .authority = "localhost",
+    });
+    defer stream.deinit();
+    _ = try stream.finishRequest();
+    var terminal = false;
+    while (!terminal) {
+        var event = try stream.readResponseEvent({}, struct {
+            fn consume(_: void, _: @import("stream/codec.zig").DecodedMessage) !void {}
+        }.consume);
+        defer event.deinit(gpa);
+        switch (event) {
+            .terminal => |value| {
+                try std.testing.expectEqual(wire.Status.ok, value.status);
+                terminal = true;
+            },
+            else => {},
+        }
+    }
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(i64, 3), channel_info.calls_started.load(.monotonic));
+    try std.testing.expectEqual(@as(i64, 2), channel_info.calls_succeeded.load(.monotonic));
+    try std.testing.expectEqual(@as(i64, 1), channel_info.calls_failed.load(.monotonic));
+}
+
 test "Channelz serve dispatches real unary gRPC requests and statuses" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();

@@ -205,8 +205,18 @@ pub const ClientDuplex = struct {
     completion_observer: ?*completion.Observer = null,
     response_header_mutations: []const call.HeaderMutation = &.{},
     response_header_removals: []const []const u8 = &.{},
+    observer: ?observability.ServerObserver = null,
+    terminal_recorded: bool = false,
+
+    fn recordTerminal(self: *ClientDuplex, status: wire.Status) void {
+        if (self.terminal_recorded) return;
+        self.terminal_recorded = true;
+        const observer = self.observer orelse return;
+        if (status == .ok) observer.callSucceeded() else observer.callFailed();
+    }
 
     pub fn deinit(self: *ClientDuplex) void {
+        self.recordTerminal(.internal);
         self.finishCompletion(false);
         if (self.decoder) |*decoder| decoder.deinit();
         if (self.response_head) |*head| head.deinit(self.allocator);
@@ -490,6 +500,7 @@ pub const ClientDuplex = struct {
         {
             return error.ConnectionClosed;
         }
+        self.recordTerminal(.cancelled);
         self.discardReceiveState();
         self.receive_state = .failed;
         self.finishCompletion(false);
@@ -764,6 +775,7 @@ pub const ClientDuplex = struct {
         );
         self.response_head = null;
         self.finishCompletion(parsed.status == .ok);
+        self.recordTerminal(parsed.status);
         return .{
             .allocator = self.allocator,
             .head = head,
@@ -811,6 +823,7 @@ pub const ClientDuplex = struct {
     /// local state is discarded even when the transport is already unusable.
     fn fail(self: *ClientDuplex, code: http2.ErrorCode) void {
         if (self.receive_state == .failed) return;
+        self.recordTerminal(.internal);
         self.discardReceiveState();
         self.receive_state = .failed;
         self.finishCompletion(false);

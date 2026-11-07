@@ -168,6 +168,31 @@ pub const Channel = struct {
         _ = self.calls_failed.fetchAdd(1, .monotonic);
     }
 
+    /// Allocation-free observer for `grpc.runtime.Client.setObserver`.
+    pub fn observer(self: *Channel) observability.ServerObserver {
+        return .{
+            .context = self,
+            .call_started_fn = observerStarted,
+            .call_succeeded_fn = observerSucceeded,
+            .call_failed_fn = observerFailed,
+        };
+    }
+
+    fn observerStarted(context: *anyopaque) void {
+        const self: *Channel = @ptrCast(@alignCast(context));
+        self.callStarted();
+    }
+
+    fn observerSucceeded(context: *anyopaque) void {
+        const self: *Channel = @ptrCast(@alignCast(context));
+        self.callSucceeded();
+    }
+
+    fn observerFailed(context: *anyopaque) void {
+        const self: *Channel = @ptrCast(@alignCast(context));
+        self.callFailed();
+    }
+
     fn destroy(self: *Channel, allocator: std.mem.Allocator) void {
         self.subchannels.deinit(allocator);
         self.trace.deinit(allocator);

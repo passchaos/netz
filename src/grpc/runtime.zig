@@ -70,6 +70,11 @@ pub const ClientOptions = struct {
 /// A single channel must not have concurrent frame readers.
 pub const Client = struct {
     connection: http2.runtime.Connection,
+    observer: ?observability.ServerObserver = null,
+
+    pub fn setObserver(self: *Client, observer: ?observability.ServerObserver) void {
+        self.observer = observer;
+    }
 
     pub fn connect(
         allocator: std.mem.Allocator,
@@ -133,11 +138,19 @@ pub const Client = struct {
         self: *Client,
         options: call.UnaryCallOptions,
     ) Error!call.UnaryResponse {
-        return call.unaryCall(
+        if (self.observer) |observer| observer.callStarted();
+        const result = call.unaryCall(
             &self.connection,
             self.connection.allocator,
             options,
         );
+        if (result) |response| {
+            recordServerStatus(self.observer, response.status);
+            return response;
+        } else |err| {
+            if (self.observer) |observer| observer.callFailed();
+            return err;
+        }
     }
 
     /// Retry one explicitly replay-safe unary RPC on this persistent channel.
@@ -148,12 +161,20 @@ pub const Client = struct {
         options: call.UnaryCallOptions,
         policy: call.RetryPolicy,
     ) Error!call.UnaryResponse {
-        return call.unaryCallWithRetry(
+        if (self.observer) |observer| observer.callStarted();
+        const result = call.unaryCallWithRetry(
             &self.connection,
             self.connection.allocator,
             options,
             policy,
         );
+        if (result) |response| {
+            recordServerStatus(self.observer, response.status);
+            return response;
+        } else |err| {
+            if (self.observer) |observer| observer.callFailed();
+            return err;
+        }
     }
 
     /// Apply the standard service-config selector for this method. A matching
@@ -302,11 +323,16 @@ pub const Client = struct {
         self: *Client,
         options: streaming.RequestOptions,
     ) duplex.Error!duplex.ClientDuplex {
-        return duplex.startDuplex(
+        var result = try duplex.startDuplex(
             &self.connection,
             self.connection.allocator,
             options,
         );
+        if (self.observer) |observer| {
+            observer.callStarted();
+            result.observer = observer;
+        }
+        return result;
     }
 
     /// Apply method timeout and directional message-size policy to a duplex

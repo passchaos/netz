@@ -55,6 +55,17 @@ response increments `calls_succeeded`, and a non-OK terminal response, reset or
 abrupt stream teardown increments `calls_failed`. Applications may still call
 the counter methods directly when they own the dispatch path.
 
+The low-level connected client accepts the same observer:
+
+```zig
+var client = try grpc.runtime.Client.connect(allocator, io, address, limits);
+client.setObserver(channel_info.observer());
+```
+
+`unary` and `unaryWithRetry` count one logical call each; duplex streams count
+their terminal response, reset or abrupt teardown. The high-level `Channel` and
+`SharedChannel` APIs currently keep application-managed counters.
+
 ## Traces
 
 Channels, subchannels and servers retain a bounded ring of the most recent 16

@@ -10,11 +10,11 @@
       "all"
     ],
     "exit_code": 0,
-    "elapsed_seconds": 1.28,
-    "summary": "8/8 steps succeeded; 174/174 tests passed",
+    "elapsed_seconds": 0.72,
+    "summary": "8/8 steps succeeded; 175/175 tests passed",
     "log": "docs/evidence/grpc_channelz/2026-11-07/channelz.Debug.log",
-    "source_manifest": "docs/evidence/grpc_channelz/2026-11-07/sources.1f228e1ad130.json",
-    "source_manifest_sha256": "1f228e1ad13087e60f97890909b09a5ca7cbc9ca6926d5d5f729237c952679c8"
+    "source_manifest": "docs/evidence/grpc_channelz/2026-11-07/sources.18dc2c9f4831.json",
+    "source_manifest_sha256": "18dc2c9f4831ac3cca66425d89750a2104507481a4c11784b9ad7fe27a808ce3"
   },
   {
     "name": "interop.Debug",
@@ -32,7 +32,7 @@
     "summary": "8/8 steps succeeded; official grpc-js 1.14.7",
     "log": "docs/evidence/grpc_channelz/2026-11-07/interop.Debug.log",
     "report": "docs/evidence/grpc_channelz/2026-11-07/interop.Debug.json",
-    "source_manifest": "docs/evidence/grpc_channelz/2026-11-07/sources.65e01d4d4efd.json",
-    "source_manifest_sha256": "65e01d4d4efda3daa64e86977330b9cc04b7fba685641edaae9fd4f2852ae413"
+    "source_manifest": "docs/evidence/grpc_channelz/2026-11-07/sources.b4de4a817f25.json",
+    "source_manifest_sha256": "b4de4a817f25e8faa0d82f0fec9ac03e948c4f7954e999c8a9e0a825e14418e6"
   }
 ]
