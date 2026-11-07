@@ -1,0 +1,118 @@
+[
+  {
+    "name": "rust.release",
+    "command": [
+      "cargo",
+      "build",
+      "--release",
+      "--locked",
+      "--jobs",
+      "2",
+      "--manifest-path",
+      "tools/interop/webtransport_protocol/Cargo.toml",
+      "--target-dir",
+      "tools/interop/webtransport_protocol/target"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 54.206,
+    "summary": "",
+    "log": "docs/evidence/webtransport_protocol/2026-11-07/rust.release.log",
+    "source_manifest": "docs/evidence/webtransport_protocol/2026-11-07/sources.3e7157003c6d.json",
+    "source_manifest_sha256": "3e7157003c6d4d7b0ce8c2b76109acca16a732897390ddee18d09550ba3ae967"
+  },
+  {
+    "name": "interop.Debug",
+    "command": [
+      "uv",
+      "run",
+      "--script",
+      "tools/interop/webtransport_protocol/run.py",
+      "zig-out/bin/netz-webtransport-protocol-server",
+      "zig-out/bin/netz-webtransport-protocol-client",
+      "tools/interop/webtransport_protocol/target/release/netz-webtransport-protocol-peer",
+      "--output",
+      "docs/evidence/webtransport_protocol/2026-11-07/interop.Debug.json"
+    ],
+    "exit_code": 1,
+    "elapsed_seconds": 1.076,
+    "summary": "",
+    "log": "docs/evidence/webtransport_protocol/2026-11-07/interop.Debug.log",
+    "source_manifest": "docs/evidence/webtransport_protocol/2026-11-07/sources.2dd26e3ae960.json",
+    "source_manifest_sha256": "2dd26e3ae96049354977792d566c94e93e8c4236740153e362dd6af01a0dc90e"
+  },
+  {
+    "name": "peers.Debug.corrected",
+    "command": [
+      "zig",
+      "build",
+      "build-webtransport-protocol",
+      "-j1",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 61.532,
+    "summary": "10/10 steps succeeded",
+    "log": "docs/evidence/webtransport_protocol/2026-11-07/peers.Debug.corrected.log",
+    "source_manifest": "docs/evidence/webtransport_protocol/2026-11-07/sources.82581d445f37.json",
+    "source_manifest_sha256": "82581d445f377ce9261af3160b7d509b479ec7847d67d0ba8d0ce5e573056618"
+  },
+  {
+    "name": "interop.Debug.corrected",
+    "command": [
+      "uv",
+      "run",
+      "--script",
+      "tools/interop/webtransport_protocol/run.py",
+      "zig-out/bin/netz-webtransport-protocol-server",
+      "zig-out/bin/netz-webtransport-protocol-client",
+      "tools/interop/webtransport_protocol/target/release/netz-webtransport-protocol-peer",
+      "--output",
+      "docs/evidence/webtransport_protocol/2026-11-07/interop.Debug.corrected.json"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 1.281,
+    "summary": "",
+    "log": "docs/evidence/webtransport_protocol/2026-11-07/interop.Debug.corrected.log",
+    "source_manifest": "docs/evidence/webtransport_protocol/2026-11-07/sources.ed3dbec1ec9e.json",
+    "source_manifest_sha256": "ed3dbec1ec9e7a649406e87c5f7b1f64a2c61f00c822c2962def1d2d703122cb"
+  },
+  {
+    "name": "peers.ReleaseSafe",
+    "command": [
+      "zig",
+      "build",
+      "build-webtransport-protocol",
+      "-Doptimize=ReleaseSafe",
+      "-j1",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 270.54,
+    "summary": "10/10 steps succeeded",
+    "log": "docs/evidence/webtransport_protocol/2026-11-07/peers.ReleaseSafe.log",
+    "source_manifest": "docs/evidence/webtransport_protocol/2026-11-07/sources.fbfe8d728832.json",
+    "source_manifest_sha256": "fbfe8d7288320a8ab3f8e38e253c9aa427e73e8a41d72dce8c146c2c2a6c8127"
+  },
+  {
+    "name": "interop.ReleaseSafe",
+    "command": [
+      "uv",
+      "run",
+      "--script",
+      "tools/interop/webtransport_protocol/run.py",
+      "zig-out/bin/netz-webtransport-protocol-server",
+      "zig-out/bin/netz-webtransport-protocol-client",
+      "tools/interop/webtransport_protocol/target/release/netz-webtransport-protocol-peer",
+      "--output",
+      "docs/evidence/webtransport_protocol/2026-11-07/interop.ReleaseSafe.json"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 1.033,
+    "summary": "",
+    "log": "docs/evidence/webtransport_protocol/2026-11-07/interop.ReleaseSafe.log",
+    "source_manifest": "docs/evidence/webtransport_protocol/2026-11-07/sources.9a6a82f4465f.json",
+    "source_manifest_sha256": "9a6a82f4465f105808907679c6639ef0c7a9dd2749c7284a01e81aa2affc62fe"
+  }
+]

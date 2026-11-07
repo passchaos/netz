@@ -3556,6 +3556,36 @@ pub fn build(b: *std.Build) void {
         "Exercise WebTransport Origin, datagrams, streams, cancellation, reuse, and close with Firefox",
     );
     webtransport_firefox_step.dependOn(&webtransport_firefox.step);
+
+    const webtransport_protocol_server = b.addExecutable(.{
+        .name = "netz-webtransport-protocol-server",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/interop/webtransport_protocol/netz_server.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const webtransport_protocol_client = b.addExecutable(.{
+        .name = "netz-webtransport-protocol-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/interop/webtransport_protocol/netz_client.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const webtransport_protocol_build = b.step("build-webtransport-protocol", "Build native application-protocol negotiation peers");
+    webtransport_protocol_build.dependOn(&b.addInstallArtifact(webtransport_protocol_server, .{}).step);
+    webtransport_protocol_build.dependOn(&b.addInstallArtifact(webtransport_protocol_client, .{}).step);
+    const webtransport_protocol_rust = b.addSystemCommand(&.{ "cargo", "build", "--release", "--locked", "--jobs", "2", "--manifest-path", "tools/interop/webtransport_protocol/Cargo.toml", "--target-dir", "tools/interop/webtransport_protocol/target" });
+    const webtransport_protocol = b.addSystemCommand(&.{ "uv", "run", "--script", "tools/interop/webtransport_protocol/run.py" });
+    webtransport_protocol.addArtifactArg(webtransport_protocol_server);
+    webtransport_protocol.addArtifactArg(webtransport_protocol_client);
+    webtransport_protocol.addArg("tools/interop/webtransport_protocol/target/release/netz-webtransport-protocol-peer");
+    webtransport_protocol.step.dependOn(&webtransport_protocol_rust.step);
+    if (b.args) |args| webtransport_protocol.addArgs(args);
+    b.step("interop-webtransport-protocol", "Verify WebTransport application-protocol negotiation and scoped rejection with independent peers").dependOn(&webtransport_protocol.step);
     const example_specs = [_]struct {
         exe_name: []const u8,
         path: []const u8,

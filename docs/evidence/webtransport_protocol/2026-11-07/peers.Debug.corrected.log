@@ -1,0 +1,20 @@
+Build Summary: 10/10 steps succeeded
+build-webtransport-protocol success
++- install netz-webtransport-protocol-server success
+|  +- compile exe netz-webtransport-protocol-server Debug native success 26s MaxRSS:1G
+|     +- WriteFile cached
+|     +- compile obj vort-br-record-optimal Debug native cached 4ms MaxRSS:39M
+|     +- WriteFile cached
+|     +- compile obj vort-zstd-huffman-x2 Debug native cached 6ms MaxRSS:39M
+|     +- compile obj vort-br-record-optimal Debug native (reused)
+|     +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+|     +- options cached
++- install netz-webtransport-protocol-client success
+   +- compile exe netz-webtransport-protocol-client Debug native success 22s MaxRSS:1G
+      +- WriteFile (reused)
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- WriteFile (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options (reused)
