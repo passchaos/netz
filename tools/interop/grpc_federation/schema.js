@@ -16,10 +16,15 @@ const official = grpc.loadPackageDefinition(definition).envoy.service;
 const root = new protobuf.Root();
 root.resolvePath = (_origin, target) => includes.map(dir => path.join(dir, target)).find(file => fs.existsSync(file)) ?? target;
 root.loadSync(['envoy/service/discovery/v3/ads.proto', 'envoy/service/load_stats/v3/lrs.proto',
+  'envoy/service/status/v3/csds.proto',
   'envoy/config/listener/v3/listener.proto', 'envoy/config/route/v3/route.proto',
   'envoy/config/cluster/v3/cluster.proto', 'envoy/config/endpoint/v3/endpoint.proto',
   'envoy/extensions/filters/network/http_connection_manager/v3/http_connection_manager.proto'], {keepCase: true});
 root.resolveAll();
+const csdsType = root.lookupType('envoy.service.status.v3.ClientStatusResponse');
+function decodeCsds(bytes) {
+  return csdsType.toObject(csdsType.decode(bytes), {defaults: true, longs: String, enums: String, bytes: Buffer});
+}
 const typeNames = {lds: 'envoy.config.listener.v3.Listener', rds: 'envoy.config.route.v3.RouteConfiguration',
   cds: 'envoy.config.cluster.v3.Cluster', eds: 'envoy.config.endpoint.v3.ClusterLoadAssignment'};
 const urls = Object.fromEntries(Object.entries(typeNames).map(([key, name]) => [key, 'type.googleapis.com/' + name]));
@@ -101,6 +106,6 @@ function provenance() {
   }
   return {proto_sha256, builtin_proto_provenance, dependencies, node: process.version};
 }
-module.exports = {grpc, urls, names, listener, route, cluster, assignment, provenance,
+module.exports = {grpc, urls, names, listener, route, cluster, assignment, provenance, decodeCsds,
   adsService: official.discovery.v3.AggregatedDiscoveryService.service,
   lrsService: official.load_stats.v3.LoadReportingService.service};

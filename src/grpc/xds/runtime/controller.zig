@@ -69,6 +69,8 @@ pub const Controller = struct {
     sds_secrets: std.StringHashMapUnmanaged(*CachedSecret) = .empty,
     /// Owned initial-fetch timers, refreshed from the client's desired names.
     resource_timers: std.ArrayList(ResourceTimer) = .empty,
+    /// Accepted cache transactions, including a deferred target publication.
+    resource_commit_generation: u64 = 0,
     pub fn create(gpa: std.mem.Allocator, options: Options) Error!*Controller {
         if (options.limits.max_clusters == 0 or options.limits.max_projections == 0 or options.limits.max_storage_bytes == 0 or options.limits.max_lrs_sources == 0 or options.target.authority.len == 0 or options.target.attempt_delay.nanoseconds <= 0) return error.InvalidXdsOptions;
         if (options.automatic_lrs.poll_interval.nanoseconds <= 0 or options.automatic_lrs.connect_timeout.nanoseconds <= 0) return error.InvalidXdsOptions;
@@ -366,6 +368,7 @@ pub const Controller = struct {
             self.latest = projection;
         }
         self.cleanProjections();
+        self.resource_commit_generation +%= 1;
         return revision;
     }
     fn planNames(plan: *Plan) @import("errors.zig").PublishError![3]?[]const []const u8 {
@@ -671,6 +674,10 @@ pub const Controller = struct {
         var index: usize = 0;
         while (index < self.resource_timers.items.len) {
             const timer = self.resource_timers.items[index];
+            if (!self.inResponseScope(timer.name)) {
+                index += 1;
+                continue;
+            }
             const cached = self.cachedResource(timer.type_url, timer.name);
             if (!resourceTimerDesired(client, timer.type_url, timer.name) or
                 (cached and !self.edsTimeoutPlaceholder(timer)))
@@ -688,6 +695,7 @@ pub const Controller = struct {
         for (types) |type_url| {
             const entry = client.subscriptions.find(type_url) orelse continue;
             for (entry.names) |name| {
+                if (!self.inResponseScope(name)) continue;
                 if (self.cachedResource(type_url, name)) continue;
                 if (self.findResourceTimer(type_url, name) != null) continue;
                 const owned_type = try self.allocator.dupe(u8, type_url);
@@ -713,6 +721,7 @@ pub const Controller = struct {
         const now = std.Io.Clock.Timestamp.now(client.sender.state.io, .awake);
         const expired: ResourceStatus = if (self.options.resource_timer_is_transient_error) .timeout else .does_not_exist;
         for (self.resource_timers.items) |*timer| {
+            if (!self.inResponseScope(timer.name)) continue;
             if (timer.status != .requested) continue;
             if (timer.deadline.raw.nanoseconds > now.raw.nanoseconds) continue;
             timer.status = expired;
@@ -723,6 +732,7 @@ pub const Controller = struct {
         try self.refreshResourceTimers(client);
         var earliest: ?std.Io.Clock.Timestamp = null;
         for (self.resource_timers.items) |timer| {
+            if (!self.inResponseScope(timer.name)) continue;
             if (timer.status != .requested) continue;
             if (earliest == null or timer.deadline.raw.nanoseconds < earliest.?.raw.nanoseconds) earliest = timer.deadline;
         }
@@ -774,6 +784,9 @@ pub const Controller = struct {
     ) Error!void {
         _ = self;
         var resource = base;
+        if (resource.status == .timeout and resource.error_state == null) {
+            resource.error_state = .{ .details = "initial resource fetch timed out" };
+        }
         if (resourceLastUpdated(client, base.type_url, base.name)) |value| {
             resource.last_updated_seconds = value.seconds;
             resource.last_updated_nanos = value.nanos;
@@ -886,7 +899,7 @@ pub const Controller = struct {
         return switch (status) {
             .requested => .requested,
             .does_not_exist => .does_not_exist,
-            .timeout => .requested,
+            .timeout => .timeout,
             .acked => .acked,
         };
     }
@@ -926,6 +939,7 @@ pub const Controller = struct {
         defer plan.deinit();
         var changed = false;
         if (expired == .does_not_exist) for (self.resource_timers.items) |*timer| {
+            if (!self.inResponseScope(timer.name)) continue;
             if (!resourceTimerDue(timer.*, now)) continue;
             if (!std.mem.eql(u8, timer.type_url, eds.type_url)) continue;
             for (plan.entries.items) |*item| {
@@ -949,6 +963,7 @@ pub const Controller = struct {
         else
             try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
         for (self.resource_timers.items) |*timer| {
+            if (!self.inResponseScope(timer.name)) continue;
             if (!resourceTimerDue(timer.*, now)) continue;
             timer.status = expired;
         }

@@ -17,11 +17,15 @@ pub fn apply(self: *ctl.Controller, client: *ads.Client, update: ads.Update, des
     var limits = self.options.limits.cds;
     limits.allow_sds = true;
     var first_error: ?cds.resource.Error = null;
+    var invalid: std.ArrayList([]const u8) = .empty;
+    defer invalid.deinit(self.allocator);
     for (update.response.value.resources) |raw| {
         var owned = cds.decode(self.allocator, raw.value, limits) catch |err| {
+            if (err == error.OutOfMemory) return err;
             if (!self.options.fail_on_data_errors) return err;
             const name = raw_name.first(raw.value, 1) orelse return err;
             if (!self.inResponseScope(name)) continue;
+            try invalid.append(self.allocator, name);
             if (first_error == null) first_error = err;
             continue;
         };
@@ -46,6 +50,10 @@ pub fn apply(self: *ctl.Controller, client: *ads.Client, update: ads.Update, des
         }
     }.less);
     if (resources.items.len > 1) for (resources.items[1..], 0..) |resource, i| if (std.mem.eql(u8, resource.resource.value.name, resources.items[i].resource.value.name)) return error.DuplicateCdsResource;
+    for (invalid.items, 0..) |name, index| {
+        for (invalid.items[0..index]) |previous| if (std.mem.eql(u8, previous, name)) return error.DuplicateCdsResource;
+        for (resources.items) |resource| if (std.mem.eql(u8, resource.resource.value.name, name)) return error.DuplicateCdsResource;
+    }
     var plan = try Plan.createWithClusters(self, null, resources.items);
     defer plan.deinit();
     var changed = false;
@@ -93,7 +101,10 @@ pub fn apply(self: *ctl.Controller, client: *ads.Client, update: ads.Update, des
             // Delete only a previously received cluster, preserving pending
             // siblings when a full-type response predates their subscription.
             if (item.cluster == null) continue;
-            if (self.options.ignore_resource_deletion) {
+            const failed = for (invalid.items) |name| {
+                if (std.mem.eql(u8, item.identity.name, name)) break true;
+            } else false;
+            if (self.options.ignore_resource_deletion and !failed) {
                 item.cds_seen = true;
                 continue;
             }

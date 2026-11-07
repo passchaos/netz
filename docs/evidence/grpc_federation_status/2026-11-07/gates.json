@@ -1,0 +1,160 @@
+[
+  {
+    "name": "csds.Debug.initial",
+    "command": [
+      "zig",
+      "build",
+      "test-lib",
+      "-Dtest-filter=CSDS",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 1,
+    "elapsed_seconds": 31.633,
+    "summary": "5/8 steps succeeded (1 failed)",
+    "log": "docs/evidence/grpc_federation_status/2026-11-07/csds.Debug.initial.log",
+    "source_manifest": "docs/evidence/grpc_federation_status/2026-11-07/sources.b7ebdd186eb2.json",
+    "source_manifest_sha256": "b7ebdd186eb2f979cc615badf64dfd8fcb67f611d8502bc1aa9b553111cab66f"
+  },
+  {
+    "name": "csds.Debug.corrected",
+    "command": [
+      "zig",
+      "build",
+      "test-lib",
+      "-Dtest-filter=CSDS",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 32.776,
+    "summary": "8/8 steps succeeded; 192/192 tests passed",
+    "log": "docs/evidence/grpc_federation_status/2026-11-07/csds.Debug.corrected.log",
+    "source_manifest": "docs/evidence/grpc_federation_status/2026-11-07/sources.936c53899fef.json",
+    "source_manifest_sha256": "936c53899fef5e20b645de83999d3cab421dc8198be1a67347bf93a37a3891fc"
+  },
+  {
+    "name": "csds.Debug.final",
+    "command": [
+      "zig",
+      "build",
+      "test-lib",
+      "-Dtest-filter=CSDS",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 1,
+    "elapsed_seconds": 35.032,
+    "summary": "6/8 steps succeeded (1 failed); 193/194 tests passed (1 failed)",
+    "log": "docs/evidence/grpc_federation_status/2026-11-07/csds.Debug.final.log",
+    "source_manifest": "docs/evidence/grpc_federation_status/2026-11-07/sources.a3b934e9d22f.json",
+    "source_manifest_sha256": "a3b934e9d22fa26a3df7d58d6025bb004f1b2835ede9ea4932212da1b267f954"
+  },
+  {
+    "name": "transactions.Debug",
+    "command": [
+      "zig",
+      "build",
+      "test-lib",
+      "-Dtest-filter=CSDS",
+      "-Dtest-filter=gRPC delta partial",
+      "-Dtest-filter=delta prepared accepted",
+      "-Dtest-filter=prepared heartbeat preserves",
+      "-Dtest-filter=gRPC SotW fail_on_data_errors overrides ignore deletion",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 1,
+    "elapsed_seconds": 34.79,
+    "summary": "6/8 steps succeeded (1 failed); 201/209 tests passed (7 failed, 1 crashed)",
+    "log": "docs/evidence/grpc_federation_status/2026-11-07/transactions.Debug.log",
+    "source_manifest": "docs/evidence/grpc_federation_status/2026-11-07/sources.1ff6065866b0.json",
+    "source_manifest_sha256": "1ff6065866b050b1e6ed4efcebeeccf6298486d2ecf9f5c7e27390bce22e9349"
+  },
+  {
+    "name": "transactions.Debug.corrected",
+    "command": [
+      "zig",
+      "build",
+      "test-lib",
+      "-Dtest-filter=CSDS",
+      "-Dtest-filter=gRPC delta partial",
+      "-Dtest-filter=delta prepared accepted",
+      "-Dtest-filter=prepared heartbeat preserves",
+      "-Dtest-filter=gRPC SotW fail_on_data_errors overrides ignore deletion",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 1,
+    "elapsed_seconds": 32.748,
+    "summary": "6/8 steps succeeded (1 failed); 205/209 tests passed (4 failed)",
+    "log": "docs/evidence/grpc_federation_status/2026-11-07/transactions.Debug.corrected.log",
+    "source_manifest": "docs/evidence/grpc_federation_status/2026-11-07/sources.77410db1d27d.json",
+    "source_manifest_sha256": "77410db1d27da145376138df01fa01ace129cac8e07a2eef439e97a160aceff8"
+  },
+  {
+    "name": "transactions.Debug.final",
+    "command": [
+      "zig",
+      "build",
+      "test-lib",
+      "-Dtest-filter=CSDS",
+      "-Dtest-filter=gRPC delta partial",
+      "-Dtest-filter=delta prepared accepted",
+      "-Dtest-filter=prepared heartbeat preserves",
+      "-Dtest-filter=gRPC SotW fail_on_data_errors overrides ignore deletion",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 35.015,
+    "summary": "8/8 steps succeeded; 209/209 tests passed",
+    "log": "docs/evidence/grpc_federation_status/2026-11-07/transactions.Debug.final.log",
+    "source_manifest": "docs/evidence/grpc_federation_status/2026-11-07/sources.4ee813744702.json",
+    "source_manifest_sha256": "4ee81374470293f7ee040bb535c198d6abd62d79df9f09aca9c959e6e88232d1"
+  },
+  {
+    "name": "xds-http.ReleaseSafe",
+    "command": [
+      "zig",
+      "build",
+      "test-lib",
+      "-Doptimize=ReleaseSafe",
+      "-Dtest-filter=grpc.xds",
+      "-Dtest-filter=unified HTTP ordinary H2",
+      "-Dtest-filter=unified HTTP exclusive",
+      "-Dtest-filter=unified HTTP pool",
+      "-Dtest-filter=HTTP pool close",
+      "-Dtest-filter=HTTP pool deadline close",
+      "-Dtest-filter=HTTP closed pool",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 329.843,
+    "summary": "8/8 steps succeeded; 537/537 tests passed",
+    "log": "docs/evidence/grpc_federation_status/2026-11-07/xds-http.ReleaseSafe.log",
+    "source_manifest": "docs/evidence/grpc_federation_status/2026-11-07/sources.a9a1a8072804.json",
+    "source_manifest_sha256": "a9a1a807280416d30d64c85df8a54e17d8450f5d30af16d12c74366aecb735e5"
+  },
+  {
+    "name": "federation.ReleaseSafe",
+    "command": [
+      "zig",
+      "build",
+      "interop-grpc-federation",
+      "-Doptimize=ReleaseSafe",
+      "--summary",
+      "all",
+      "--",
+      "--output",
+      "docs/evidence/grpc_federation_status/2026-11-07/federation.ReleaseSafe/report.json"
+    ],
+    "exit_code": 1,
+    "elapsed_seconds": 179.203,
+    "summary": "6/8 steps succeeded (1 failed)",
+    "log": "docs/evidence/grpc_federation_status/2026-11-07/federation.ReleaseSafe.log",
+    "source_manifest": "docs/evidence/grpc_federation_status/2026-11-07/sources.73bf1359c84a.json",
+    "source_manifest_sha256": "73bf1359c84ad112cfe59e10745ddaf3c5a9d7a83c82d9043337f52d5a676a27"
+  }
+]

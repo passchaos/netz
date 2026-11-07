@@ -1,0 +1,32 @@
+test-lib
++- run test 193 pass, 1 fail (194 total)
+error: 'grpc.xds.runtime.managed.status.partial_tests.test.gRPC federated CSDS SotW partial publication preserves valid sibling acceptance' failed:
+       expected .nacked, found .acked
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/std/testing.zig:118:17: 0x3136204 in expectEqualInner__anon_10887029 (std.zig)
+                       return error.TestExpectedEqual;
+                       ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/std/testing.zig:83:5: 0x3189b00 in expectEqual (root.zig)
+           return expectEqualInner(T, expected, actual);
+           ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/managed/status/partial_tests.zig:58:5: 0x3189d6d in partial__anon_10889593 (root.zig)
+           try std.testing.expectEqual(@import("../../../csds.zig").ClientStatus.nacked, failed.status);
+           ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/managed/status/partial_tests.zig:91:5: 0x31910a7 in test.gRPC federated CSDS SotW partial publication preserves valid sibling acceptance (root.zig)
+           try partial(.sotw);
+           ^
+failed command: ./.zig-cache/o/a26cb9a83a404ae8fb62d7f2362eef28/test --cache-dir=./.zig-cache --seed=0x81f7de7f --listen=-
+
+Build Summary: 6/8 steps succeeded (1 failed); 193/194 tests passed (1 failed)
+test-lib transitive failure
++- run test 193 pass, 1 fail (194 total)
+   +- compile test Debug native success 33s MaxRSS:2G
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 8ms MaxRSS:36M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 8ms MaxRSS:36M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options cached
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/63a4f13a38ebb3037e00652cc87f88eb/build /home/passchaos/Temp/zig-x86_64-linux-0.16.0/zig /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib /home/passchaos/project-z/netz .zig-cache /home/passchaos/.cache/zig --seed 0x81f7de7f -Zf48e738eaa38f988 test-lib -Dtest-filter=CSDS --summary all

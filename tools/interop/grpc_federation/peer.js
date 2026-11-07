@@ -309,12 +309,63 @@ async function main(native, mode, directory) {
       const response = sources[record.authority].responses.find(value => value.version === record.nonce);
       assert(response); assert.equal(urls[response.kind], record.type_url);
     }
+    const statusLines = nativeOutput.split('\n').filter(value => value.startsWith('FEDERATION_CSDS '))
+      .map(value => JSON.parse(value.slice('FEDERATION_CSDS '.length)));
+    assert.deepEqual(statusLines.map(value => value.phase), ['nacked', 'excluded', 'final']);
+    const statusSnapshots = Object.fromEntries(statusLines.map(value => [value.phase, schema.decodeCsds(Buffer.from(value.bytes, 'base64'))]));
+    const resourceKey = value => value.type_url + '\0' + value.name;
+    function resourceMap(snapshot) {
+      assert.equal(snapshot.config.length, 1);
+      assert.equal(snapshot.config[0].node.id, 'netz-federation');
+      assert.equal(snapshot.config[0].client_scope, 'grpc');
+      const values = snapshot.config[0].generic_xds_configs;
+      const result = new Map(values.map(value => [resourceKey(value), value]));
+      assert.equal(result.size, values.length, 'duplicate CSDS resource');
+      return result;
+    }
+    const nacked = resourceMap(statusSnapshots.nacked), excluded = resourceMap(statusSnapshots.excluded), final = resourceMap(statusSnapshots.final);
+    assert.equal(nacked.size, 6); assert.equal(excluded.size, 6); assert.equal(final.size, 6);
+    function checkResource(map, kind, name, version, status, source, sentVersion) {
+      const value = map.get(urls[kind] + '\0' + name);
+      assert(value, 'missing CSDS resource: ' + name);
+      assert.equal(value.version_info, version); assert.equal(value.client_status, status);
+      assert(value.xds_config && value.last_updated);
+      assert.equal(value.xds_config.type_url, urls[kind]);
+      const sent = sources[source].responses.find(item => item.kind === kind && item.version === sentVersion);
+      assert(sent);
+      const index = sent.names.indexOf(name); assert(index >= 0);
+      assert.equal(hash(value.xds_config.value), sent.sha256[index], 'CSDS accepted wire/source mismatch');
+      assert(Number(value.last_updated.seconds) > 0);
+      assert(Number(value.last_updated.nanos) >= 0 && Number(value.last_updated.nanos) < 1000000000);
+      return value;
+    }
+    const rejectedA = checkResource(nacked, 'cds', names.canary, 'c-a2', 'NACKED', 'A', 'c-a2');
+    assert.equal(rejectedA.error_state.details, 'UnsupportedCdsFeature');
+    assert.equal(rejectedA.error_state.version_info, 'c-a-bad'); assert(rejectedA.error_state.last_update_attempt);
+    const retainedB = checkResource(nacked, 'cds', names.mainB, 'c-b1', 'DOES_NOT_EXIST', 'B', 'c-b1');
+    assert.equal(retainedB.error_state.version_info, 'c-b-omit');
+    for (const [key, value] of nacked) {
+      const withoutContents = excluded.get(key); assert(withoutContents);
+      assert.equal(withoutContents.xds_config, null);
+      const metadata = {...value}; delete metadata.xds_config;
+      const excludedMetadata = {...withoutContents}; delete excludedMetadata.xds_config;
+      assert.deepEqual(excludedMetadata, metadata, 'content exclusion changed CSDS state');
+    }
+    assert(!final.has(urls.cds + '\0' + names.mainB)); assert(!final.has(urls.eds + '\0' + names.mainBEds));
+    for (const [kind, name, version, source] of [
+      ['lds', names.listener, 'l-a1', 'A'], ['rds', names.route, 'r-b2', 'B'],
+      ['cds', names.canary, 'c-a3', 'A'], ['cds', names.mainA, 'c-a3', 'A'],
+      ['eds', names.canaryEds, 'e-a3', 'A'], ['eds', names.mainAEds, 'e-a3', 'A'],
+    ]) {
+      const value = checkResource(final, kind, name, version, 'ACKED', source, version);
+      assert.equal(value.error_state, null, 'successful update retained prior failure');
+    }
     const order = predicate => {const value = events.find(predicate); assert(value); return value.order;};
     assert(order(value => value.event === 'application_started' && value.label === 'replacement-a') <
       order(value => value.event === 'held_released_after_a_replacement'));
     assert(order(value => value.event === 'held_released_after_a_replacement') <
       order(value => value.event === 'application_completed' && value.label === 'held-b'));
-    const result = {...report(), native: nativeResult, native_events: records};
+    const result = {...report(), native: nativeResult, native_events: records, csds: statusSnapshots};
     fs.writeFileSync(path.join(directory, 'wire.json'), JSON.stringify(result, null, 2) + '\n');
     console.log(JSON.stringify(result));
   } catch (error) {

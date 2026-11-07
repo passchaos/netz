@@ -183,7 +183,7 @@ options)` gathers the accepted LDS/RDS/CDS/EDS/SDS resources with their type
 URL, name, raw wire bytes and ACKED status; SotW reports the type's accepted
 version and delta reports the per-resource accepted version. Subscribed but
 undelivered resources are included without wire bytes as REQUESTED or
-DOES_NOT_EXIST, so a dump taken immediately after start shows what the client is
+DOES_NOT_EXIST, or TIMEOUT with transient-error handling, so a dump taken immediately after start shows what the client is
 waiting for. `last_updated` carries the wall-clock time the client accepted the
 version: SotW shares the type's acceptance time across its resources, while
 delta records each resource's own acceptance time. Pass the encoded
@@ -210,6 +210,14 @@ allocator, node)` answers an already-read unary request whose path is
 `/envoy.service.status.v3.ClientStatusDiscoveryService/FetchClientStatus`. It
 returns false for other paths without writing, so the application's dispatcher
 can route the same request normally.
+
+The [managed federation facade](grpc_federation.md) exposes corresponding
+`encodeClientStatus`/`fetchClientStatus` entry points without a single-client
+argument. They use per-resource history across supplying authorities and include
+typed rejected-update `error_state`. `csds_service.respondManagedFetch` adapts
+that complete inventory to the same admin method. Current schema provenance,
+including `RECEIVED_ERROR = 5` and `TIMEOUT = 6`, is retained under
+`src/grpc/xds/csds_schema/`.
 
 `zig build interop-grpc-csds` emits one response and decodes it with the
 official Envoy `csds.proto` schema shipped by the pinned grpc-js-xds

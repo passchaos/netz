@@ -11,11 +11,15 @@ const controller_mod = @import("controller.zig");
 const registry_mod = @import("managed/registry.zig");
 const names = @import("managed/names.zig");
 const features = @import("managed/features.zig");
+const status = @import("managed/status.zig");
+const csds = @import("../csds.zig");
 pub const Mode = registry_mod.Mode;
+pub const ResourceStatus = controller_mod.ResourceStatus;
 pub const Error = controller_mod.Error || target.Error || std.Io.ConcurrentError || error{ WrongDiscoverySession, MissingDiscoverySource };
-pub const Options = struct { controller: controller_mod.Options, discovery: registry_mod.Options = .{} };
+pub const Options = struct { controller: controller_mod.Options, discovery: registry_mod.Options = .{}, diagnostics: status.Options = .{} };
 pub const TargetOptions = struct {
     discovery: registry_mod.Options = .{},
+    diagnostics: status.Options = .{},
     resolver: target.Options = .{},
     configure: ?*const fn (*controller_mod.Options) void = null,
 };
@@ -51,10 +55,12 @@ pub fn Managed(comptime mode: Mode) type {
         data: shared.SharedChannel,
         controller: *controller_mod.Controller,
         registry: Registry,
+        status_history: status.Ledger,
         started: bool = false,
 
         pub fn create(gpa: std.mem.Allocator, io: std.Io, configuration: *bootstrap.Bootstrap, data: shared.SharedChannel, options: Options) Error!*Self {
             if (options.discovery.max_sessions == 0) return error.InvalidXdsOptions;
+            if (options.diagnostics.max_resources == 0 or options.diagnostics.max_storage_bytes == 0) return error.InvalidXdsOptions;
             if (options.discovery.control_plane.pinned_server != null) return error.InvalidControlPlaneOptions;
             const self = try gpa.create(Self);
             errdefer gpa.destroy(self);
@@ -67,7 +73,7 @@ pub fn Managed(comptime mode: Mode) type {
             const controller = try controller_mod.Controller.create(gpa, selected);
             errdefer controller.deinit();
             data.state.retain();
-            self.* = .{ .allocator = gpa, .io = io, .data = data, .controller = controller, .registry = .init(gpa, io, configuration, options.discovery) };
+            self.* = .{ .allocator = gpa, .io = io, .data = data, .controller = controller, .registry = .init(gpa, io, configuration, options.discovery), .status_history = .init(gpa, options.diagnostics) };
             controller.setDiscoveryRouter(self.registry.router());
             controller.retain_valid_routes = true;
             return self;
@@ -78,10 +84,11 @@ pub fn Managed(comptime mode: Mode) type {
             defer resolved.deinit();
             var configured = controllerOptions(resolved);
             if (options.configure) |configure| configure(&configured);
-            return create(gpa, io, configuration, data, .{ .controller = configured, .discovery = options.discovery });
+            return create(gpa, io, configuration, data, .{ .controller = configured, .discovery = options.discovery, .diagnostics = options.diagnostics });
         }
 
         pub fn deinit(self: *Self) void {
+            self.status_history.deinit();
             self.controller.deinit();
             self.registry.deinit();
             self.data.state.release();
@@ -175,6 +182,27 @@ pub fn Managed(comptime mode: Mode) type {
             if (!self.owns(event.session)) return error.WrongDiscoverySession;
             const received = try event.result;
             if (received != .update) return error.InvalidDiscoveryMessage;
+            if (received.update.source == null) return error.MissingDiscoverySource;
+            _ = try @import("../../../internal/deadline.zig").usableAwake(self.io, deadline);
+            try event.session.client.validateUpdate(received.update);
+            var prepared = try status.prepareUpdate(mode, self, event);
+            defer prepared.deinit();
+            const previous_commit = self.controller.resource_commit_generation;
+            const result = self.applyResourceWithDeadline(event, deadline);
+            // Publication and accepted versions are authoritative even when a
+            // later ACK/flush fails. Committing diagnostics cannot allocate.
+            if (status.accepted(mode, event)) {
+                status.commitUpdate(mode, self, &prepared, event);
+            } else if (result) |_| {} else |err| {
+                if (self.controller.resource_commit_generation != previous_commit) status.commitPartial(mode, self, &prepared, event, err);
+            }
+            return result;
+        }
+
+        fn applyResourceWithDeadline(self: *Self, event: *const Event, deadline: std.Io.Clock.Timestamp) Error!u64 {
+            if (!self.owns(event.session)) return error.WrongDiscoverySession;
+            const received = try event.result;
+            if (received != .update) return error.InvalidDiscoveryMessage;
             const update = received.update;
             const source = update.source orelse return error.MissingDiscoverySource;
             const saved = features.Saved.capture(self.controller);
@@ -202,7 +230,65 @@ pub fn Managed(comptime mode: Mode) type {
             if (!self.owns(event.session)) return error.WrongDiscoverySession;
             const value = try event.result;
             if (value != .update) return error.InvalidDiscoveryMessage;
-            try event.session.client.rejectWithDeadline(value.update, .{ .code = .invalid_argument, .message = message }, deadline);
+            if (value.update.source == null) return error.MissingDiscoverySource;
+            _ = try @import("../../../internal/deadline.zig").usableAwake(self.io, deadline);
+            try event.session.client.subscriptions.validateToken(value.update.response.value.type_url, value.update.token);
+            var prepared = try status.prepareReject(mode, self, event, message);
+            defer prepared.deinit();
+            const result = event.session.client.rejectWithDeadline(value.update, .{ .code = .invalid_argument, .message = message }, deadline);
+            // Delta drops its transient wire error after a successful send.
+            // Success proves this decision; a failed send still exposes the
+            // committed NACK while its detail remains queued for retry.
+            const decided = if (result) |_| true else |_| status.rejected(mode, event);
+            if (decided) {
+                prepared.prune(&self.registry);
+                prepared.commit();
+            }
+            return result;
+        }
+
+        pub fn encodeClientStatus(self: *Self, gpa: std.mem.Allocator, options: csds.Options) Error![]u8 {
+            return status.encode(self, gpa, options);
+        }
+        pub fn fetchClientStatus(self: *Self, gpa: std.mem.Allocator, request_bytes: []const u8, options: csds.Options) Error![]u8 {
+            return status.fetch(self, gpa, request_bytes, options);
+        }
+        pub fn pollResourceTimers(self: *Self) Error!void {
+            for (self.registry.sessions.items) |session| {
+                const saved = features.Saved.capture(self.controller);
+                const old_scope = self.controller.response_authority;
+                self.controller.response_authority = session.authority;
+                if (session.client.source) |source| self.controller.applyServerFeatures(source.server);
+                defer {
+                    saved.restore(self.controller);
+                    self.controller.response_authority = old_scope;
+                }
+                var client = status.timerClient(&self.registry, session);
+                try self.controller.pollResourceTimers(&client);
+            }
+        }
+        pub fn nextResourceTimerExpiry(self: *Self) Error!?std.Io.Clock.Timestamp {
+            var next: ?std.Io.Clock.Timestamp = null;
+            for (self.registry.sessions.items) |session| {
+                const saved = features.Saved.capture(self.controller);
+                const old_scope = self.controller.response_authority;
+                self.controller.response_authority = session.authority;
+                if (session.client.source) |source| self.controller.applyServerFeatures(source.server);
+                defer {
+                    saved.restore(self.controller);
+                    self.controller.response_authority = old_scope;
+                }
+                var client = status.timerClient(&self.registry, session);
+                if (try self.controller.nextResourceTimerExpiry(&client)) |expiry| {
+                    if (next == null or expiry.raw.nanoseconds < next.?.raw.nanoseconds) next = expiry;
+                }
+            }
+            return next;
+        }
+        pub fn resourceStatus(self: *Self, url: []const u8, name: []const u8) Error!?controller_mod.ResourceStatus {
+            if (!@import("managed/status/ledger.zig").desired(&self.registry, url, name)) return null;
+            try self.pollResourceTimers();
+            return self.controller.resourceStatus(url, name);
         }
 
         pub fn synchronizeWithDeadline(self: *Self, deadline: std.Io.Clock.Timestamp) Error!u64 {
@@ -218,6 +304,7 @@ pub fn Managed(comptime mode: Mode) type {
             else
                 try self.controller.synchronizeDeltaWithDeadline(&session.client, self.data, deadline);
             routes.commit();
+            self.status_history.prune(&self.registry);
             try self.registry.flush(deadline);
             return revision;
         }
@@ -233,6 +320,9 @@ pub fn Managed(comptime mode: Mode) type {
 
         pub fn expireDeltaWithDeadline(self: *Self, deadline: std.Io.Clock.Timestamp) Error!u64 {
             if (mode == .delta) {
+                var prepared = try status.prepareExpiry(self);
+                defer prepared.deinit();
+                defer status.commitExpiry(self, &prepared);
                 var revision = try @import("../publication.zig").unchangedRevisionWithDeadline(self.data, deadline);
                 for (self.registry.sessions.items) |session| {
                     const saved = features.Saved.capture(self.controller);

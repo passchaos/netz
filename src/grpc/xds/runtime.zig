@@ -24,5 +24,12 @@ test {
     _ = @import("runtime/federated_scope_tests.zig");
     _ = @import("runtime/managed/tests.zig");
     _ = @import("runtime/managed/registry_tests.zig");
+    _ = @import("runtime/managed/status/tests.zig");
+    _ = @import("runtime/managed/status/transport_tests.zig");
+    _ = @import("runtime/managed/status/partial_tests.zig");
+    _ = @import("runtime/managed/status/publication_tests.zig");
+    _ = @import("ads/delta_versions_tests.zig");
+    _ = @import("runtime/partial_versions_tests.zig");
+    _ = @import("runtime/partial_versions_wire_tests.zig");
     _ = @import("runtime/resource_timer_tests.zig");
 }

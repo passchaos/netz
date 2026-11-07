@@ -54,6 +54,8 @@ pub const Event = union(enum) {
     }
 };
 pub const Client = struct {
+    /// Last application NACK decision survives sent-detail cleanup and reset.
+    last_rejected_token: ?subscriptions.Token = null,
     allocator: std.mem.Allocator,
     sender: shared.Sender,
     inputs: @import("../../channel/shared/request_inputs.zig").Inputs,
@@ -217,15 +219,22 @@ pub const Client = struct {
     }
     pub fn acceptAppliedUpdate(self: *Client, update: Update) Error!void {
         try self.validateUpdate(update);
+        const prepared = self.subscriptions.versionsApplied(update.response.value.type_url, update.token);
         const entry = try self.subscriptions.decide(update.response.value.type_url, update.token, null, update.response.value);
-        subscriptions.State.markAccepted(entry, update.response.value, acceptedNow(self.sender.state.io));
+        if (!prepared) subscriptions.State.markAccepted(entry, update.response.value, acceptedNow(self.sender.state.io));
+    }
+    pub fn prepareAppliedVersions(self: *Client, update: Update, accepted: []const []const u8, withdrawn: []const []const u8, desired: []const []const u8) Error!subscriptions.PreparedVersions {
+        try self.validateUpdate(update);
+        // Runtime acceptance time is captured after publication by commitAt.
+        return self.subscriptions.prepareAppliedVersions(update.response.value.type_url, update.token, update.response.value, accepted, withdrawn, desired, 0);
     }
     pub fn acknowledgeWithDeadline(self: *Client, update: Update, deadline: std.Io.Clock.Timestamp) Error!void {
         _ = try deadline_policy.usableAwake(self.sender.state.io, deadline);
         try self.sender.state.io.checkCancel();
         try self.validateUpdate(update);
+        const prepared = self.subscriptions.versionsApplied(update.response.value.type_url, update.token);
         const entry = try self.subscriptions.decide(update.response.value.type_url, update.token, null, update.response.value);
-        subscriptions.State.markAccepted(entry, update.response.value, acceptedNow(self.sender.state.io));
+        if (!prepared) subscriptions.State.markAccepted(entry, update.response.value, acceptedNow(self.sender.state.io));
         try self.send(entry, deadline);
     }
     pub fn rejectWithDeadline(self: *Client, update: Update, nack: codec.Nack, deadline: std.Io.Clock.Timestamp) Error!void {
@@ -236,6 +245,7 @@ pub const Client = struct {
         try self.subscriptions.validateToken(update.response.value.type_url, update.token);
         if (nack.message.len > self.limits.max_message_bytes) return error.DiscoveryLimitExceeded;
         const entry = try self.subscriptions.decide(update.response.value.type_url, update.token, nack, update.response.value);
+        self.last_rejected_token = update.token;
         try self.send(entry, deadline);
     }
     pub fn nextWithDeadline(self: *Client, deadline: std.Io.Clock.Timestamp) Error!Event {

@@ -1,0 +1,34 @@
+PASS sotw: production subscriptions, scoped caches, pending handoff, held completion, LRS
+{
+  "status": "failed",
+  "passed_modes": [
+    "sotw"
+  ],
+  "report": "/home/passchaos/project-z/netz/docs/evidence/grpc_federation_status/2026-11-07/federation.ReleaseSafe/report.json",
+  "failures": [
+    {
+      "mode": "delta",
+      "failure": "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n\n'ACKED' !== 'NACKED'\n",
+      "directory": "/home/passchaos/project-z/netz/docs/evidence/grpc_federation_status/2026-11-07/federation.ReleaseSafe/report-cases/delta"
+    }
+  ]
+}
+interop-grpc-federation
++- run python3 failure
+error: process exited with error code 1
+failed command: python3 tools/interop/grpc_federation/run.py --native ./.zig-cache/o/00dee62c5ed9d64d4b09d84579c85f09/netz-grpc-federation-client --output docs/evidence/grpc_federation_status/2026-11-07/federation.ReleaseSafe/report.json
+
+Build Summary: 6/8 steps succeeded (1 failed)
+interop-grpc-federation transitive failure
++- run python3 failure
+   +- compile exe netz-grpc-federation-client ReleaseSafe native success 2m MaxRSS:4G
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal ReleaseSafe native cached 7ms MaxRSS:38M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 ReleaseSafe native cached 7ms MaxRSS:38M
+      +- compile obj vort-br-record-optimal ReleaseSafe native (reused)
+      +- compile obj vort-zstd-huffman-x2 ReleaseSafe native (reused)
+      +- options cached
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/65217f301ebe7d981036cdc93a2778b5/build /home/passchaos/Temp/zig-x86_64-linux-0.16.0/zig /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib /home/passchaos/project-z/netz .zig-cache /home/passchaos/.cache/zig --seed 0x1e934bcd -Z38cfc0a750b3b6bc interop-grpc-federation -Doptimize=ReleaseSafe --summary all -- --output docs/evidence/grpc_federation_status/2026-11-07/federation.ReleaseSafe/report.json

@@ -46,6 +46,13 @@ and automatic LRS identities/counts. Native assertions additionally inspect
 cache identity and source features. Dedicated barrier RPCs only coordinate
 server response timing; they do not control discovery subscriptions.
 
+The native facade also captures full and content-excluded CSDS snapshots after
+A's NACK, then a final snapshot after replacement and pruning. The independent
+official-schema decoder checks both authorities' accepted versions and wire
+hashes, A's rejected version/details, B's cached deletion state, preserved
+acceptance timestamps, and removal of old B resources. These snapshots use
+production discovery events and the public facade query APIs.
+
 Native execution has a 45-second watchdog, each barrier has a 4.5-second peer
 deadline and a 5-second native deadline, and the outer peer deadline is 55
 seconds. Reports retain bootstrap JSON, full ADS/LRS/application transcripts,

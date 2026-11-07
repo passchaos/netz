@@ -6,6 +6,7 @@ const cds = @import("../cds.zig");
 const delta = @import("../ads/delta.zig");
 const shared = @import("../../channel/shared.zig");
 const Plan = @import("plan.zig").Plan;
+const version_patch = @import("delta_versions.zig");
 
 const Candidate = struct { name: []const u8, resource: *entry.Cluster, ttl: ?delta.codec.Duration };
 
@@ -32,13 +33,17 @@ pub fn apply(self: *ctl.Controller, client: *delta.Client, update: delta.Update,
     var invalid: std.ArrayList([]const u8) = .empty;
     defer invalid.deinit(self.allocator);
     var first_error: ?cds.resource.Error = null;
+    var versions_changed = version_patch.Changes{ .allocator = self.allocator };
+    defer versions_changed.deinit();
     for (response.resources) |raw| {
         const any = raw.resource orelse continue;
         var owned = cds.decode(self.allocator, any.value, limits) catch |err| {
+            if (err == error.OutOfMemory) return err;
             if (!self.options.fail_on_data_errors) return err;
             if (raw.name.len == 0) return err;
             if (!self.inResponseScope(raw.name)) continue;
             try invalid.append(self.allocator, raw.name);
+            try versions_changed.withdraw(raw.name);
             if (first_error == null) first_error = err;
             continue;
         };
@@ -75,6 +80,7 @@ pub fn apply(self: *ctl.Controller, client: *delta.Client, update: delta.Update,
             if (!std.mem.eql(u8, item.identity.name, raw.name)) continue;
             if (item.cluster == null) return error.InvalidDiscoveryMessage;
             item.cds_deadline = try delta.codec.ttlDeadline(client.sender.state.io, raw.ttl);
+            try versions_changed.accept(raw.name);
         }
     }
     var changed = false;
@@ -84,6 +90,7 @@ pub fn apply(self: *ctl.Controller, client: *delta.Client, update: delta.Update,
             if (std.mem.eql(u8, candidate.name, item.identity.name)) break candidate;
         } else null;
         if (selected) |candidate| {
+            try versions_changed.accept(candidate.name);
             const resource = candidate.resource;
             const cds_deadline = try delta.codec.ttlDeadline(client.sender.state.io, candidate.ttl);
             const after = resource.resource.value;
@@ -143,6 +150,7 @@ pub fn apply(self: *ctl.Controller, client: *delta.Client, update: delta.Update,
                 item.cds_seen = true;
                 continue;
             }
+            try versions_changed.withdraw(item.identity.name);
             changed = true;
             if (item.cluster) |old| old.release();
             if (item.snapshot) |old| old.release();
@@ -153,15 +161,21 @@ pub fn apply(self: *ctl.Controller, client: *delta.Client, update: delta.Update,
             item.cds_deadline = null;
         }
     }
+    var versions = try versions_changed.prepare(client, update, &plan);
+    defer versions.deinit();
+    const budget = try version_patch.Budget.reserve(self, &versions, &versions_changed);
+    defer budget.deinit();
+    const revision = if (changed)
+        try self.publishDelta(client, &plan, self.latest.?, false, destination, deadline)
+    else
+        try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
     if (!changed) {
-        if (first_error) |err| return err;
-        const revision = try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
         const old = self.entries;
         self.entries = plan.entries;
         plan.entries = old;
-        return revision;
+        if (versions_changed.accepted.items.len != 0 or versions_changed.withdrawn.items.len != 0) self.resource_commit_generation +%= 1;
     }
-    _ = try self.publishDelta(client, &plan, self.latest.?, false, destination, deadline);
+    versions_changed.commit(client, update, &versions);
     if (first_error) |err| return err;
-    return @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
+    return revision;
 }

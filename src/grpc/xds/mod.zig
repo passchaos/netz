@@ -38,5 +38,6 @@ test {
     _ = @import("control_plane_inventory_tests.zig");
     _ = @import("control_plane_transport_tests.zig");
     _ = @import("csds_tests.zig");
+    _ = @import("csds_timer_tests.zig");
     _ = @import("csds_service_tests.zig");
 }

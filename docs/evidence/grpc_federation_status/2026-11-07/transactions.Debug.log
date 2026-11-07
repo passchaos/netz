@@ -1,0 +1,124 @@
+test-lib
++- run test 201 pass, 7 fail, 1 crash (209 total)
+error: 'grpc.xds.runtime.partial_versions_tests.test.gRPC delta partial CDS acceptance preserves scoped versions through NACK and version OOM' failed:
+       expected 3, found 1
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/std/testing.zig:118:17: 0x301acf9 in expectEqualInner__anon_10839244 (std.zig)
+                       return error.TestExpectedEqual;
+                       ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/std/testing.zig:83:5: 0x31c2366 in expectEqual (root.zig)
+           return expectEqualInner(T, expected, actual);
+           ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/partial_versions_testing.zig:159:9: 0x31c259c in seed (root.zig)
+               try std.testing.expectEqual(@as(usize, 3), self.channel.configuredEndpointCount());
+               ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/partial_versions_tests.zig:12:5: 0x31db697 in run__anon_10888592 (root.zig)
+           try h.seed(kind);
+           ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/partial_versions_tests.zig:85:5: 0x31e4c57 in test.gRPC delta partial CDS acceptance preserves scoped versions through NACK and version OOM (root.zig)
+           try run(.cds);
+           ^
+error: 'grpc.xds.runtime.partial_versions_tests.test.gRPC delta partial EDS acceptance preserves scoped versions through NACK and version OOM' failed:
+       expected 3, found 1
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/std/testing.zig:118:17: 0x301acf9 in expectEqualInner__anon_10839244 (std.zig)
+                       return error.TestExpectedEqual;
+                       ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/std/testing.zig:83:5: 0x31c2366 in expectEqual (root.zig)
+           return expectEqualInner(T, expected, actual);
+           ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/partial_versions_testing.zig:159:9: 0x31c259c in seed (root.zig)
+               try std.testing.expectEqual(@as(usize, 3), self.channel.configuredEndpointCount());
+               ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/partial_versions_tests.zig:12:5: 0x31d1e77 in run__anon_10888586 (root.zig)
+           try h.seed(kind);
+           ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/partial_versions_tests.zig:88:5: 0x31db417 in test.gRPC delta partial EDS acceptance preserves scoped versions through NACK and version OOM (root.zig)
+           try run(.eds);
+           ^
+error: 'grpc.xds.runtime.partial_versions_tests.test.gRPC delta partial SDS acceptance preserves scoped versions through NACK and version OOM' failed:
+       expected 3, found 1
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/std/testing.zig:118:17: 0x301acf9 in expectEqualInner__anon_10839244 (std.zig)
+                       return error.TestExpectedEqual;
+                       ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/std/testing.zig:83:5: 0x31c2366 in expectEqual (root.zig)
+           return expectEqualInner(T, expected, actual);
+           ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/partial_versions_testing.zig:159:9: 0x31c259c in seed (root.zig)
+               try std.testing.expectEqual(@as(usize, 3), self.channel.configuredEndpointCount());
+               ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/partial_versions_tests.zig:12:5: 0x31c8277 in run__anon_10888573 (root.zig)
+           try h.seed(kind);
+           ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/partial_versions_tests.zig:91:5: 0x31d1bf7 in test.gRPC delta partial SDS acceptance preserves scoped versions through NACK and version OOM (root.zig)
+           try run(.sds);
+           ^
+error: 'grpc.xds.runtime.partial_versions_tests.test.gRPC delta partial payload acceptance time follows publication and heartbeat preserves it' failed:
+       expected 3, found 1
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/std/testing.zig:118:17: 0x301acf9 in expectEqualInner__anon_10839244 (std.zig)
+                       return error.TestExpectedEqual;
+                       ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/std/testing.zig:83:5: 0x31c2366 in expectEqual (root.zig)
+           return expectEqualInner(T, expected, actual);
+           ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/partial_versions_testing.zig:159:9: 0x31c259c in seed (root.zig)
+               try std.testing.expectEqual(@as(usize, 3), self.channel.configuredEndpointCount());
+               ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/partial_versions_tests.zig:100:5: 0x31c31fc in test.gRPC delta partial payload acceptance time follows publication and heartbeat preserves it (root.zig)
+           try h.seed(.cds);
+           ^
+error: 'grpc.xds.runtime.partial_versions_tests.test.gRPC SotW fail_on_data_errors overrides ignore deletion only for failed CDS names' terminated with signal ABRT with stderr:
+       thread 1726330 panic: index out of bounds: index 1, len 1
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/partial_versions_tests.zig:181:43: 0x31bba3c in test.gRPC SotW fail_on_data_errors overrides ignore deletion only for failed CDS names (root.zig)
+           const old_b = controller.entries.items[1].cluster;
+                                                 ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/compiler/test_runner.zig:140:68: 0x13812ac in mainServer (test_runner.zig)
+                       const status: TestResults.Status = if (test_fn.func()) |v| s: {
+                                                                          ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/compiler/test_runner.zig:71:26: 0x138209d in main (test_runner.zig)
+               return mainServer(init) catch |err| panic("internal test runner failure: {t}", .{err});
+                                ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/std/start.zig:699:88: 0x137ee3e in callMain (std.zig)
+           if (fn_info.params[0].type.? == std.process.Init.Minimal) return wrapMain(root.main(.{
+                                                                                              ^
+       ../sysdeps/nptl/libc_start_call_main.h:58:16: 0x753601a2a1c9 in __libc_start_call_main (../sysdeps/x86/libc-start.c)
+       ../csu/libc-start.c:360:3: 0x753601a2a28a in __libc_start_main_impl (../sysdeps/x86/libc-start.c)
+       ???:?:?: 0x32b2804 in ??? (???)
+error: 'grpc.xds.runtime.partial_versions_wire_tests.test.gRPC delta partial CDS NACK reconnect advertises actual accepted versions' failed:
+       expected 3, found 1
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/partial_versions_wire_tests.zig:120:5: 0x31b6b84 in run__anon_10888373 (root.zig)
+           try applyNext(&h);
+           ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/partial_versions_wire_tests.zig:146:5: 0x31b98e7 in test.gRPC delta partial CDS NACK reconnect advertises actual accepted versions (root.zig)
+           try run(.cds);
+           ^
+error: 'grpc.xds.runtime.partial_versions_wire_tests.test.gRPC delta partial EDS NACK reconnect advertises actual accepted versions' failed:
+       expected 3, found 1
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/partial_versions_wire_tests.zig:120:5: 0x31aa5f4 in run__anon_10888328 (root.zig)
+           try applyNext(&h);
+           ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/partial_versions_wire_tests.zig:149:5: 0x31ad4b7 in test.gRPC delta partial EDS NACK reconnect advertises actual accepted versions (root.zig)
+           try run(.eds);
+           ^
+error: 'grpc.xds.runtime.partial_versions_wire_tests.test.gRPC delta partial SDS NACK reconnect advertises actual accepted versions' failed:
+       expected 3, found 1
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/partial_versions_wire_tests.zig:120:5: 0x3172af4 in run__anon_10886892 (root.zig)
+           try applyNext(&h);
+           ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/partial_versions_wire_tests.zig:152:5: 0x31759b7 in test.gRPC delta partial SDS NACK reconnect advertises actual accepted versions (root.zig)
+           try run(.sds);
+           ^
+failed command: ./.zig-cache/o/f01a346d01ffd2bcfd19198d1abf8baa/test --cache-dir=./.zig-cache --seed=0x8ee8e3d8 --listen=-
+
+Build Summary: 6/8 steps succeeded (1 failed); 201/209 tests passed (7 failed, 1 crashed)
+test-lib transitive failure
++- run test 201 pass, 7 fail, 1 crash (209 total)
+   +- compile test Debug native success 32s MaxRSS:2G
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 7ms MaxRSS:39M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 7ms MaxRSS:39M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options cached
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/65217f301ebe7d981036cdc93a2778b5/build /home/passchaos/Temp/zig-x86_64-linux-0.16.0/zig /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib /home/passchaos/project-z/netz .zig-cache /home/passchaos/.cache/zig --seed 0x8ee8e3d8 -Zf2a008d08e941e5a test-lib -Dtest-filter=CSDS -Dtest-filter=gRPC delta partial -Dtest-filter=delta prepared accepted -Dtest-filter=prepared heartbeat preserves -Dtest-filter=gRPC SotW fail_on_data_errors overrides ignore deletion --summary all

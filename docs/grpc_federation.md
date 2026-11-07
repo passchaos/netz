@@ -71,3 +71,34 @@ Storage limits include candidate and retained serving-inventory backing
 allocations before publication, with cache/version/revision rollback on rejection.
 CSDS reports inline route contents as part of LDS; they do not acquire an
 independent RDS version or acceptance status.
+
+`Managed.encodeClientStatus(allocator, options)` and
+`fetchClientStatus(allocator, request_bytes, options)` expose one CSDS client
+configuration for the complete desired authority graph. Each accepted resource
+owns its wire bytes, version and acceptance time independently of a SotW
+response's type version. Retained old RDS watches therefore keep their own
+version while a replacement route waits for dependencies. Retired watches leave
+the dump after synchronization. The bootstrap node is included by default;
+`Options.node` can supply a different encoded node.
+
+NACK entries preserve the previously accepted image unless data-error policy
+withdraws it. `error_state` records the rejected version, details and attempt
+time separately. Content exclusion keeps all of that metadata. A partial
+data-error publication records valid siblings when their cache transaction
+commits; sending the NACK does not change their acceptance time. A later
+rejection of identical wire/version is still a distinct failed attempt.
+
+`diagnostics.max_resources` defaults to 65,536 and
+`diagnostics.max_storage_bytes` to 64 MiB. The storage budget counts candidate
+and retained history together, including owned resource buffers and inventory
+capacity. Preparation failure preserves cache publication and diagnostic
+history. Already returned response bytes own their snapshot independently of
+later discovery changes or facade teardown.
+
+`nextResourceTimerExpiry`, `pollResourceTimers` and `resourceStatus` use each
+supplying session's server features. Refreshing one authority preserves other
+authorities' timers. CSDS reports current Envoy `TIMEOUT` for transient initial
+fetch failures and `DOES_NOT_EXIST` for the ordinary expiry policy.
+`grpc.xds.csds_service.respondManagedFetch` serves these queries through an
+application-owned gRPC admin connection. Serialize queries with discovery
+operations, as with the other facade APIs.

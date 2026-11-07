@@ -6,6 +6,7 @@ const delta = @import("../ads/delta.zig");
 const shared = @import("../../channel/shared.zig");
 const Plan = @import("plan.zig").Plan;
 const SecretPlan = @import("apply_sds.zig").SecretPlan;
+const version_patch = @import("delta_versions.zig");
 
 pub fn apply(self: *ctl.Controller, client: *delta.Client, update: delta.Update, destination: shared.SharedChannel, deadline: std.Io.Clock.Timestamp) ctl.Error!u64 {
     if (self.latest == null) return error.XdsNotStarted;
@@ -18,13 +19,17 @@ pub fn apply(self: *ctl.Controller, client: *delta.Client, update: delta.Update,
     var invalid: std.ArrayList([]const u8) = .empty;
     defer invalid.deinit(self.allocator);
     var first_error: ?sds.Error = null;
+    var versions_changed = version_patch.Changes{ .allocator = self.allocator };
+    defer versions_changed.deinit();
     for (response.resources) |raw| {
         const any = raw.resource orelse continue;
         var value = sds.decode(self.allocator, any.value, self.options.limits.sds) catch |err| {
+            if (err == error.OutOfMemory) return err;
             if (!self.options.fail_on_data_errors) return err;
             if (raw.name.len == 0) return err;
             if (!self.inResponseScope(raw.name)) continue;
             try invalid.append(self.allocator, raw.name);
+            try versions_changed.withdraw(raw.name);
             if (first_error == null) first_error = err;
             continue;
         };
@@ -46,6 +51,7 @@ pub fn apply(self: *ctl.Controller, client: *delta.Client, update: delta.Update,
         };
         pointer.* = .{ .owned = value, .deadline = ttl };
         try secrets.put(pointer);
+        try versions_changed.accept(raw.name);
         storage = std.math.add(usize, storage, value.arena.queryCapacity()) catch return error.XdsLimitExceeded;
         if (storage > self.options.limits.max_storage_bytes) return error.XdsLimitExceeded;
     }
@@ -63,19 +69,28 @@ pub fn apply(self: *ctl.Controller, client: *delta.Client, update: delta.Update,
         if (raw.resource != null or !self.inResponseScope(raw.name)) continue;
         const cached = secrets.secrets.get(raw.name) orelse continue;
         try secrets.refresh(cached, try delta.codec.ttlDeadline(io, raw.ttl));
+        try versions_changed.accept(raw.name);
     }
     for (response.removed) |name| {
-        if (self.inResponseScope(name)) secrets.remove(name);
+        if (self.inResponseScope(name)) {
+            secrets.remove(name);
+            try versions_changed.withdraw(name);
+        }
     }
     for (invalid.items) |name| secrets.remove(name);
     var plan = try Plan.create(self, null);
     defer plan.deinit();
     const changed = try secrets.stageClusters(&plan, io);
+    var versions = try versions_changed.prepare(client, update, &plan);
+    defer versions.deinit();
+    const budget = try version_patch.Budget.reserve(self, &versions, &versions_changed);
+    defer budget.deinit();
     const revision = if (changed)
         try self.publishDelta(client, &plan, self.latest.?, false, destination, deadline)
     else
         try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
     secrets.commit();
+    versions_changed.commit(client, update, &versions);
     if (first_error) |err| return err;
     return revision;
 }

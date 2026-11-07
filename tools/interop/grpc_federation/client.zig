@@ -57,6 +57,16 @@ fn apply(managed: anytype, data: grpc.SharedChannel, io: std.Io, reject: bool) !
     defer gpa.free(record);
     std.debug.print("FEDERATION_EVENT {s}\n", .{record});
 }
+fn status(managed: anytype, phase: []const u8, excluded: bool) !void {
+    const snapshot = try managed.fetchClientStatus(gpa, if (excluded) "\x18\x01" else "", .{});
+    defer gpa.free(snapshot);
+    const encoded = try gpa.alloc(u8, std.base64.standard.Encoder.calcSize(snapshot.len));
+    defer gpa.free(encoded);
+    _ = std.base64.standard.Encoder.encode(encoded, snapshot);
+    const record = try std.json.Stringify.valueAlloc(gpa, .{ .phase = phase, .bytes = encoded }, .{});
+    defer gpa.free(record);
+    std.debug.print("FEDERATION_CSDS {s}\n", .{record});
+}
 fn run(comptime mode: xds.runtime.managed.Mode, io: std.Io, configuration: *xds.bootstrap.Bootstrap, port_a: u16, port_b: u16) !void {
     var data = try grpc.SharedChannel.init(gpa, io, .{ .cleartext_ip = .{ .address = .{ .ip4 = .loopback(1) } } }, .{});
     defer data.deinit();
@@ -117,6 +127,8 @@ fn run(comptime mode: xds.runtime.managed.Mode, io: std.Io, configuration: *xds.
     try app(sender, "restored-canary-a", "A", true);
     try barrier(gate_a, "malformed-a");
     try apply(managed, data, io, true);
+    try status(managed, "nacked", false);
+    try status(managed, "excluded", true);
     try std.testing.expect(managed.controller.entries.items[try index(managed, main_b)].cluster.? == b_cluster);
     try std.testing.expect(managed.controller.entries.items[try index(managed, main_b)].snapshot.? == b_snapshot);
     try app(sender, "nack-b", "B", false);
@@ -142,6 +154,7 @@ fn run(comptime mode: xds.runtime.managed.Mode, io: std.Io, configuration: *xds.
     try std.testing.expect(!desiredContains(managed, main_b));
     try std.testing.expect(!desiredContains(managed, main_b_eds));
     try barrier(gate_b, "final-reports");
+    try status(managed, "final", false);
     var bytes_a: [32]u8 = undefined;
     var bytes_b: [32]u8 = undefined;
     @memcpy(&bytes_a, source_a.key);

@@ -8,6 +8,7 @@ pub const Error = codec.Error || error{ DiscoveryTypeLimit, UnknownDiscoveryType
 pub const Options = struct { max_types: usize = 16, max_names_per_type: usize = 4096, max_name_bytes: usize = 4096 };
 pub const Token = struct { owner_id: u64, epoch: u64, sequence: u64 };
 pub const Subscription = struct { type_url: []const u8, names: []const []const u8 };
+pub const PreparedVersions = @import("delta_versions.zig").Prepared;
 var next_owner_id: std.atomic.Value(u64) = .init(1);
 
 pub const Version = struct {
@@ -35,6 +36,9 @@ pub const Entry = struct {
     dirty: bool = true,
     stream_started: bool = false,
     pending_sequence: ?u64 = null,
+    /// A runtime cache transaction committed this response's accepted subset.
+    /// Its original token remains pending until the response is ACKed/NACKed.
+    applied_sequence: ?u64 = null,
 
     fn deinit(self: *Entry, gpa: std.mem.Allocator) void {
         gpa.free(self.type_url);
@@ -209,6 +213,7 @@ pub const State = struct {
             staged.dirty = old.dirty or staged.subscribe.items.len != 0 or staged.unsubscribe.items.len != 0;
             staged.stream_started = old.stream_started;
             staged.pending_sequence = old.pending_sequence;
+            staged.applied_sequence = old.applied_sequence;
         } else {
             for (owned_names) |name| try appendPending(&staged.subscribe, self.allocator, name);
         }
@@ -257,6 +262,7 @@ pub const State = struct {
             self.allocator.free(entry.nonce);
             entry.nonce = &.{};
             entry.pending_sequence = null;
+            entry.applied_sequence = null;
             if (entry.error_detail) |value| self.allocator.free(value.message);
             entry.error_detail = null;
             clearPending(&entry.subscribe, self.allocator);
@@ -274,6 +280,7 @@ pub const State = struct {
         if (entry.error_detail) |value| self.allocator.free(value.message);
         entry.nonce = nonce;
         entry.error_detail = null;
+        entry.applied_sequence = null;
         if (self.owner_id == 0) self.owner_id = next_owner_id.fetchAdd(1, .monotonic);
         self.sequence +%= 1;
         entry.pending_sequence = self.sequence;
@@ -283,6 +290,15 @@ pub const State = struct {
     pub fn validateToken(self: *State, type_url: []const u8, token: Token) Error!void {
         const entry = self.find(type_url) orelse return error.UnknownDiscoveryType;
         if (token.owner_id != self.owner_id or token.epoch != self.epoch or entry.pending_sequence != token.sequence) return error.StaleDiscoveryResponse;
+    }
+
+    pub fn prepareAppliedVersions(self: *State, type_url: []const u8, token: Token, response: codec.Response, accepted: []const []const u8, withdrawn: []const []const u8, desired: []const []const u8, now_ns: i128) Error!PreparedVersions {
+        return @import("delta_versions.zig").prepare(self, type_url, token, response, accepted, withdrawn, desired, now_ns);
+    }
+
+    pub fn versionsApplied(self: *State, type_url: []const u8, token: Token) bool {
+        const entry = self.find(type_url) orelse return false;
+        return entry.applied_sequence == token.sequence and entry.pending_sequence == token.sequence;
     }
 
     /// Acceptance applies the response's per-resource versions atomically. A
@@ -299,11 +315,20 @@ pub const State = struct {
             if (entry.error_detail) |previous| self.allocator.free(previous.message);
             entry.error_detail = .{ .code = value.code, .message = message };
             entry.pending_sequence = null;
+            entry.applied_sequence = null;
             entry.dirty = true;
             return entry;
         }
         if (!std.mem.eql(u8, response.type_url, type_url)) return error.InvalidDiscoveryMessage;
         for (response.resources) |resource| if (resource.resource) |any| if (!std.mem.eql(u8, any.type_url, type_url)) return error.InvalidDiscoveryMessage;
+        if (entry.applied_sequence == token.sequence) {
+            if (entry.error_detail) |value| self.allocator.free(value.message);
+            entry.error_detail = null;
+            entry.pending_sequence = null;
+            entry.applied_sequence = null;
+            entry.dirty = true;
+            return entry;
+        }
         // Upserts and removals are computed against the current accepted map.
         // Only names still desired are retained; an unsolicited update is
         // applied by the caller but does not become reconnect state.

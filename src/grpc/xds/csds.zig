@@ -7,16 +7,37 @@
 //! resources gathered from a runtime controller.
 
 const std = @import("std");
+const protobuf = @import("../protobuf.zig");
 
 pub const Error = std.mem.Allocator.Error || error{InvalidRequest};
 
-/// `envoy.admin.v3.ClientResourceStatus`.
+/// `envoy.admin.v3.ClientResourceStatus`, including current Envoy's server-error
+/// and resource-timeout values. The pinned schema is in csds_schema/.
 pub const ClientStatus = enum(u32) {
     unknown = 0,
     requested = 1,
     does_not_exist = 2,
     acked = 3,
     nacked = 4,
+    /// Control-plane error; accepted resource contents remain available.
+    received_error = 5,
+    /// Timed out waiting for a resource from the control plane.
+    timeout = 6,
+};
+
+/// `google.protobuf.Timestamp`; nanos is the nonnegative fractional second.
+pub const Timestamp = struct {
+    seconds: i64 = 0,
+    nanos: u32 = 0,
+};
+
+/// `envoy.admin.v3.UpdateFailureState`. The optional failed_configuration
+/// image is omitted; clients may avoid retaining rejected resource contents.
+pub const UpdateFailureState = struct {
+    details: []const u8 = "",
+    /// Rejected resource version, separate from Resource.version's accepted one.
+    version_info: []const u8 = "",
+    last_update_attempt: ?Timestamp = null,
 };
 
 pub const Resource = struct {
@@ -28,6 +49,8 @@ pub const Resource = struct {
     status: ClientStatus = .acked,
     last_updated_seconds: ?i64 = null,
     last_updated_nanos: ?u32 = null,
+    /// Latest rejected update; absent after a successful update.
+    error_state: ?UpdateFailureState = null,
 };
 
 pub const Options = struct {
@@ -44,68 +67,24 @@ pub const Request = struct {
     exclude_resource_contents: bool = false,
 };
 
-const Field = struct { number: u32, wire_type: u3 };
-
-const Reader = struct {
-    bytes: []const u8,
-    offset: usize = 0,
-
-    fn varint(self: *Reader) Error!u64 {
-        var shift: u6 = 0;
-        var value: u64 = 0;
-        while (true) {
-            if (self.offset == self.bytes.len) return error.InvalidRequest;
-            const byte = self.bytes[self.offset];
-            self.offset += 1;
-            value |= @as(u64, byte & 0x7f) << shift;
-            if (byte & 0x80 == 0) return value;
-            if (shift >= 63) return error.InvalidRequest;
-            shift += 7;
-        }
-    }
-
-    fn next(self: *Reader) Error!?Field {
-        if (self.offset == self.bytes.len) return null;
-        const value = try self.varint();
-        const number: u32 = @intCast(value >> 3);
-        const wire_type: u3 = @intCast(value & 7);
-        if (number == 0) return error.InvalidRequest;
-        return .{ .number = number, .wire_type = wire_type };
-    }
-
-    fn skip(self: *Reader, field: Field) Error!void {
-        switch (field.wire_type) {
-            0 => _ = try self.varint(),
-            1 => {
-                if (self.bytes.len - self.offset < 8) return error.InvalidRequest;
-                self.offset += 8;
-            },
-            2 => {
-                const length = try self.varint();
-                if (length > self.bytes.len - self.offset) return error.InvalidRequest;
-                self.offset += @intCast(length);
-            },
-            5 => {
-                if (self.bytes.len - self.offset < 4) return error.InvalidRequest;
-                self.offset += 4;
-            },
-            else => return error.InvalidRequest,
-        }
-    }
-};
-
 /// Decode the fields of a `ClientStatusRequest` that affect this client-side
 /// response. Node matchers and the request node are ignored because the
 /// response describes the local client.
 pub fn decodeRequest(bytes: []const u8) Error!Request {
     if (bytes.len > 1024 * 1024) return error.InvalidRequest;
-    var reader = Reader{ .bytes = bytes };
+    var reader = protobuf.Reader{ .bytes = bytes };
     var request: Request = .{};
-    while (try reader.next()) |field| {
+    while (reader.next() catch return error.InvalidRequest) |field| {
         switch (field.number) {
-            1, 2 => try reader.skip(field),
-            3 => request.exclude_resource_contents = (try reader.varint()) != 0,
-            else => try reader.skip(field),
+            1, 2 => {
+                if (field.wire_type != 2) return error.InvalidRequest;
+                _ = reader.bytesValue() catch return error.InvalidRequest;
+            },
+            3 => {
+                if (field.wire_type != 0) return error.InvalidRequest;
+                request.exclude_resource_contents = (reader.varint() catch return error.InvalidRequest) != 0;
+            },
+            else => reader.skip(field) catch return error.InvalidRequest,
         }
     }
     return request;
@@ -135,6 +114,24 @@ fn varintField(out: *std.ArrayList(u8), allocator: std.mem.Allocator, field: u32
     try varint(out, allocator, value);
 }
 
+fn timestampField(out: *std.ArrayList(u8), allocator: std.mem.Allocator, field: u32, value: Timestamp) !void {
+    var timestamp: std.ArrayList(u8) = .empty;
+    defer timestamp.deinit(allocator);
+    if (value.seconds != 0) try varintField(&timestamp, allocator, 1, @bitCast(value.seconds));
+    if (value.nanos != 0) try varintField(&timestamp, allocator, 2, value.nanos);
+    try bytesField(out, allocator, field, timestamp.items);
+}
+
+fn failureField(out: *std.ArrayList(u8), allocator: std.mem.Allocator, value: UpdateFailureState) !void {
+    var failure: std.ArrayList(u8) = .empty;
+    defer failure.deinit(allocator);
+    if (value.last_update_attempt) |attempt| try timestampField(&failure, allocator, 2, attempt);
+    if (value.details.len != 0) try bytesField(&failure, allocator, 3, value.details);
+    if (value.version_info.len != 0) try bytesField(&failure, allocator, 4, value.version_info);
+    // GenericXdsConfig.error_state is field 8, including an empty present state.
+    try bytesField(out, allocator, 8, failure.items);
+}
+
 fn encodeGeneric(
     allocator: std.mem.Allocator,
     resource: Resource,
@@ -153,19 +150,12 @@ fn encodeGeneric(
         try bytesField(&out, allocator, 4, any.items);
     }
     if (resource.last_updated_seconds != null or resource.last_updated_nanos != null) {
-        var timestamp: std.ArrayList(u8) = .empty;
-        defer timestamp.deinit(allocator);
-        if (resource.last_updated_seconds) |seconds| if (seconds != 0) {
-            try varintField(&timestamp, allocator, 1, @bitCast(seconds));
-        };
-        if (resource.last_updated_nanos) |nanos| if (nanos != 0) {
-            try varintField(&timestamp, allocator, 2, nanos);
-        };
-        try bytesField(&out, allocator, 5, timestamp.items);
+        try timestampField(&out, allocator, 5, .{ .seconds = resource.last_updated_seconds orelse 0, .nanos = resource.last_updated_nanos orelse 0 });
     }
     if (resource.status != .unknown) {
         try varintField(&out, allocator, 7, @intFromEnum(resource.status));
     }
+    if (resource.error_state) |failure| try failureField(&out, allocator, failure);
     return out.toOwnedSlice(allocator);
 }
 
@@ -201,4 +191,8 @@ test "CSDS encodes accepted resources with type, name, version and status" {
     // The response is one ClientConfig containing two GenericXdsConfig entries.
     try std.testing.expectEqual(@as(usize, 0x0a), encoded[0]);
     try std.testing.expect(encoded.len > 0);
+}
+
+test {
+    _ = @import("csds_codec_tests.zig");
 }

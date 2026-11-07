@@ -1,0 +1,116 @@
+test-lib
++- run test 205 pass, 4 fail (209 total)
+error: 'grpc.xds.runtime.partial_versions_tests.test.gRPC delta partial CDS acceptance preserves scoped versions through NACK and version OOM' failed:
+       expected error.UnsupportedCdsPolicy, found error.InvalidCdsResource
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/std/mem/Allocator.zig:300:82: 0x11fc923 in allocBytesWithAlignment__anon_8642 (std.zig)
+           const byte_ptr = self.rawAlloc(byte_count, alignment, return_address) orelse return error.OutOfMemory;
+                                                                                        ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/std/mem/Allocator.zig:286:5: 0x11fc78e in allocWithSizeAndAlignment__anon_8541 (std.zig)
+           return self.allocBytesWithAlignment(alignment, byte_count, return_address);
+           ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/std/mem/Allocator.zig:274:55: 0x11fc443 in allocAdvancedWithRetAddr (std.zig)
+           const ptr: [*]align(a.toByteUnits()) T = @ptrCast(try self.allocWithSizeAndAlignment(@sizeOf(T), a, n, return_address));
+                                                             ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/std/mem/Allocator.zig:198:5: 0x11fc51e in alloc__anon_8507 (std.zig)
+           return self.allocAdvancedWithRetAddr(T, null, n, @returnAddress());
+           ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/std/mem/Allocator.zig:454:21: 0x11fcb26 in dupe__anon_8500 (std.zig)
+           const new_buf = try allocator.alloc(T, m.len);
+                           ^
+       /home/passchaos/project-z/netz/src/grpc/xds/ads/delta_versions.zig:77:17: 0x2ec603c in prepare (root.zig)
+           const key = try allocator.dupe(u8, type_url);
+                       ^
+       /home/passchaos/project-z/netz/src/grpc/xds/ads/delta_subscriptions.zig:296:9: 0x2ec5392 in prepareAppliedVersions (root.zig)
+               return @import("delta_versions.zig").prepare(self, type_url, token, response, accepted, withdrawn, desired, now_ns);
+               ^
+       /home/passchaos/project-z/netz/src/grpc/xds/ads/delta_client.zig:227:9: 0x2ec4a96 in prepareAppliedVersions (root.zig)
+               return self.subscriptions.prepareAppliedVersions(update.response.value.type_url, update.token, update.response.value, accepted, withdrawn, desired, 0);
+               ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/delta_versions.zig:36:9: 0x2eb6bf1 in prepare (root.zig)
+               return client.prepareAppliedVersions(update, self.accepted.items, self.withdrawn.items, names);
+               ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/apply_delta_cds.zig:164:20: 0x2f3a9d1 in apply (root.zig)
+           var versions = try versions_changed.prepare(client, update, &plan);
+                          ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/controller.zig:594:13: 0x2b84b18 in applyDeltaWithDeadline (root.zig)
+                   try @import("apply_delta_cds.zig").apply(self, client, update, destination, deadline)
+                   ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/partial_versions_testing.zig:140:9: 0x3171468 in apply (root.zig)
+               return self.controller.applyDeltaWithDeadline(&self.client, value, self.channel, deadline(self.io));
+               ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/apply_delta_cds.zig:179:28: 0x2f3b696 in apply (root.zig)
+           if (first_error) |err| return err;
+                                  ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/controller.zig:594:13: 0x2b84b18 in applyDeltaWithDeadline (root.zig)
+                   try @import("apply_delta_cds.zig").apply(self, client, update, destination, deadline)
+                   ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/partial_versions_testing.zig:140:9: 0x3171468 in apply (root.zig)
+               return self.controller.applyDeltaWithDeadline(&self.client, value, self.channel, deadline(self.io));
+               ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/std/testing.zig:72:13: 0x3171c0e in expectError__anon_10887651 (std.zig)
+                   return error.TestUnexpectedError;
+                   ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/partial_versions_tests.zig:43:5: 0x31de0f0 in run__anon_10888595 (root.zig)
+           try std.testing.expectError(expected, h.apply(mixed));
+           ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/partial_versions_tests.zig:85:5: 0x31e51d7 in test.gRPC delta partial CDS acceptance preserves scoped versions through NACK and version OOM (root.zig)
+           try run(.cds);
+           ^
+error: 'grpc.xds.runtime.partial_versions_tests.test.gRPC delta partial payload acceptance time follows publication and heartbeat preserves it' failed:
+       expected error.UnsupportedCdsPolicy, found error.InvalidCdsResource
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/apply_delta_cds.zig:179:28: 0x2f3b696 in apply (root.zig)
+           if (first_error) |err| return err;
+                                  ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/controller.zig:594:13: 0x2b84b18 in applyDeltaWithDeadline (root.zig)
+                   try @import("apply_delta_cds.zig").apply(self, client, update, destination, deadline)
+                   ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/partial_versions_testing.zig:140:9: 0x3171468 in apply (root.zig)
+               return self.controller.applyDeltaWithDeadline(&self.client, value, self.channel, deadline(self.io));
+               ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/std/testing.zig:72:13: 0x3171c0e in expectError__anon_10887651 (std.zig)
+                   return error.TestUnexpectedError;
+                   ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/partial_versions_tests.zig:141:5: 0x31c420e in test.gRPC delta partial payload acceptance time follows publication and heartbeat preserves it (root.zig)
+           try std.testing.expectError(error.UnsupportedCdsPolicy, h.apply(mixed));
+           ^
+error: 'grpc.xds.runtime.partial_versions_tests.test.gRPC SotW fail_on_data_errors overrides ignore deletion only for failed CDS names' failed:
+       expected error.UnsupportedCdsPolicy, found error.InvalidCdsResource
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/apply_cds.zig:125:28: 0x310298f in apply (root.zig)
+           if (first_error) |err| return err;
+                                  ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/controller.zig:536:13: 0x30cdfde in applyWithDeadline (root.zig)
+                   try @import("apply_cds.zig").apply(self, client, update, destination, deadline)
+                   ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/partial_versions_tests.zig:207:5: 0x31ba447 in sotw (root.zig)
+           return controller.applyWithDeadline(client, .{ .response = response, .token = try client.subscriptions.received(response.value) }, data, support.deadline(io));
+           ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/std/testing.zig:72:13: 0x31ba74e in expectError__anon_10888437 (std.zig)
+                   return error.TestUnexpectedError;
+                   ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/partial_versions_tests.zig:195:5: 0x31bde6c in test.gRPC SotW fail_on_data_errors overrides ignore deletion only for failed CDS names (root.zig)
+           try std.testing.expectError(error.UnsupportedCdsPolicy, sotw(controller, &client, data, support.cds.type_url, "mixed", &mixed_any, io));
+           ^
+error: 'grpc.xds.runtime.partial_versions_wire_tests.test.gRPC delta partial CDS NACK reconnect advertises actual accepted versions' failed:
+       expected error.UnsupportedCdsPolicy, found error.InvalidCdsResource
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/partial_versions_wire_tests.zig:127:5: 0x31b71f0 in run__anon_10888376 (root.zig)
+           try std.testing.expectError(if (kind == .cds) error.UnsupportedCdsPolicy else error.TruncatedMessage, h.apply(mixed.update));
+           ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/partial_versions_wire_tests.zig:146:5: 0x31b98e7 in test.gRPC delta partial CDS NACK reconnect advertises actual accepted versions (root.zig)
+           try run(.cds);
+           ^
+failed command: ./.zig-cache/o/6b8db12eda0b41e9e73c6387e36dc55f/test --cache-dir=./.zig-cache --seed=0xdc5c19ca --listen=-
+
+Build Summary: 6/8 steps succeeded (1 failed); 205/209 tests passed (4 failed)
+test-lib transitive failure
++- run test 205 pass, 4 fail (209 total)
+   +- compile test Debug native success 31s MaxRSS:2G
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 6ms MaxRSS:39M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 5ms MaxRSS:39M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options cached
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/65217f301ebe7d981036cdc93a2778b5/build /home/passchaos/Temp/zig-x86_64-linux-0.16.0/zig /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib /home/passchaos/project-z/netz .zig-cache /home/passchaos/.cache/zig --seed 0xdc5c19ca -Z9dc66135c37d169d test-lib -Dtest-filter=CSDS -Dtest-filter=gRPC delta partial -Dtest-filter=delta prepared accepted -Dtest-filter=prepared heartbeat preserves -Dtest-filter=gRPC SotW fail_on_data_errors overrides ignore deletion --summary all

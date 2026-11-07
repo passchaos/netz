@@ -6,6 +6,7 @@ const eds = @import("../eds.zig");
 const delta = @import("../ads/delta.zig");
 const shared = @import("../../channel/shared.zig");
 const Plan = @import("plan.zig").Plan;
+const version_patch = @import("delta_versions.zig");
 
 const Candidate = struct { resource: eds.resource.Owned, ttl: ?delta.codec.Duration };
 
@@ -25,13 +26,17 @@ pub fn apply(self: *ctl.Controller, client: *delta.Client, update: delta.Update,
     var invalid: std.ArrayList([]const u8) = .empty;
     defer invalid.deinit(self.allocator);
     var first_error: ?eds.resource.Error = null;
+    var versions_changed = version_patch.Changes{ .allocator = self.allocator };
+    defer versions_changed.deinit();
     for (response.resources) |raw| {
         const any = raw.resource orelse continue;
         var resource = eds.decode(self.allocator, any.value, self.options.limits.eds) catch |err| {
+            if (err == error.OutOfMemory) return err;
             if (!self.options.fail_on_data_errors) return err;
             if (raw.name.len == 0) return err;
             if (!self.inResponseScope(raw.name)) continue;
             try invalid.append(self.allocator, raw.name);
+            try versions_changed.withdraw(raw.name);
             if (first_error == null) first_error = err;
             continue;
         };
@@ -56,6 +61,7 @@ pub fn apply(self: *ctl.Controller, client: *delta.Client, update: delta.Update,
             if (!std.mem.eql(u8, cluster.resource.value.edsName(), raw.name)) continue;
             if (item.snapshot == null or !item.eds_seen) return error.InvalidDiscoveryMessage;
             item.eds_deadline = try delta.codec.ttlDeadline(client.sender.state.io, raw.ttl);
+            try versions_changed.accept(raw.name);
         }
     }
     var changed = false;
@@ -82,6 +88,7 @@ pub fn apply(self: *ctl.Controller, client: *delta.Client, update: delta.Update,
             if (std.mem.eql(u8, candidate.resource.value.cluster_name, name)) break candidate;
         } else null;
         if (selected) |candidate| {
+            try versions_changed.accept(name);
             const wire = candidate.resource.wire;
             if (cluster.sdsPending()) {
                 const staged = try @import("apply_sds.zig").cloneCluster(self, cluster);
@@ -110,6 +117,7 @@ pub fn apply(self: *ctl.Controller, client: *delta.Client, update: delta.Update,
             item.eds_deadline = eds_deadline;
         } else if (removedName(response.removed, name)) {
             if (self.options.ignore_resource_deletion) continue;
+            try versions_changed.withdraw(name);
             if (cluster.sdsPending()) {
                 const staged = try @import("apply_sds.zig").cloneCluster(self, cluster);
                 errdefer staged.release();
@@ -134,15 +142,21 @@ pub fn apply(self: *ctl.Controller, client: *delta.Client, update: delta.Update,
             item.eds_seen = true;
         }
     }
+    var versions = try versions_changed.prepare(client, update, &plan);
+    defer versions.deinit();
+    const budget = try version_patch.Budget.reserve(self, &versions, &versions_changed);
+    defer budget.deinit();
+    const revision = if (changed)
+        try self.publishDelta(client, &plan, self.latest.?, false, destination, deadline)
+    else
+        try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
     if (!changed) {
-        if (first_error) |err| return err;
-        const revision = try @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
         const old = self.entries;
         self.entries = plan.entries;
         plan.entries = old;
-        return revision;
+        if (versions_changed.accepted.items.len != 0 or versions_changed.withdrawn.items.len != 0) self.resource_commit_generation +%= 1;
     }
-    _ = try self.publishDelta(client, &plan, self.latest.?, false, destination, deadline);
+    versions_changed.commit(client, update, &versions);
     if (first_error) |err| return err;
-    return @import("../publication.zig").unchangedRevisionWithDeadline(destination, deadline);
+    return revision;
 }

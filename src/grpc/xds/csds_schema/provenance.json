@@ -1,0 +1,60 @@
+{
+  "envoy_api": {
+    "repository": "https://github.com/envoyproxy/data-plane-api",
+    "commit": "6ef568cf4a67362849911d1d2a546fd9f35db2ff",
+    "bazel_module_version": "0.0.0-20251216-6ef568c",
+    "archive_url": "https://storage.googleapis.com/grpc-bazel-mirror/github.com/envoyproxy/data-plane-api/archive/6ef568cf4a67362849911d1d2a546fd9f35db2ff.tar.gz",
+    "archive_sha256": "ed5e6c319f8ebcdf24a9491f866a599bb9a3c193b859a94ad13bd31f85b46855",
+    "archive_verified": true,
+    "files": {
+      "envoy/admin/v3/config_dump_shared.proto": {
+        "url": "https://raw.githubusercontent.com/envoyproxy/data-plane-api/6ef568cf4a67362849911d1d2a546fd9f35db2ff/envoy/admin/v3/config_dump_shared.proto",
+        "sha256": "fa9d0961da69d8deabc791ab24a5db201c68a6cc03b9fb119ae9197210175c72"
+      },
+      "envoy/service/status/v3/csds.proto": {
+        "url": "https://raw.githubusercontent.com/envoyproxy/data-plane-api/6ef568cf4a67362849911d1d2a546fd9f35db2ff/envoy/service/status/v3/csds.proto",
+        "sha256": "fe21af4662d851fd15c59ce545e44c696312cfc78376751d0023200f70d8b032"
+      }
+    }
+  },
+  "grpc_reference": {
+    "commit": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
+    "files": {
+      "MODULE.bazel": "2e17fb920434ab086019454214c7273c9e3ec62bc455455ac53c6052817dd211",
+      "MODULE.bazel.lock": "5ae4b60da9ef7e1f0e266f49706e659f8133cfb4533878c87e67980496702d93",
+      "bazel/grpc_deps.bzl": "82fecd29e71fd0668b04ed9fa42fdbbd884fbbd6704948f5fd73c8f95ea84aa3",
+      "src/core/xds/xds_client/xds_client.h": "55e155a8558b2a9d149c63c0c21f1ede73f651e812b1a12f0d9531b6e2191ef8"
+    }
+  },
+  "bazel_registry_source": {
+    "url": "https://bcr.bazel.build/modules/envoy_api/0.0.0-20251216-6ef568c/source.json",
+    "sha256": "202d7883af5608074ed1bf8a8a82f1c869ffc3408adefc765ebc05b602edcc72",
+    "matched_grpc_module_lock": true
+  },
+  "enum_excerpt": {
+    "file": "client_resource_status.proto",
+    "sha256": "7fe85d51c8ae25169f08e9caa420a90cb15490f8127336f07db4834561584720",
+    "source_lines": [
+      21,
+      50
+    ]
+  },
+  "enum_values": {
+    "UNKNOWN": 0,
+    "REQUESTED": 1,
+    "DOES_NOT_EXIST": 2,
+    "ACKED": 3,
+    "NACKED": 4,
+    "RECEIVED_ERROR": 5,
+    "TIMEOUT": 6
+  },
+  "official_wire_vectors": {
+    "UNKNOWN": "0a081a060a017412016e",
+    "REQUESTED": "0a0a1a080a017412016e3801",
+    "DOES_NOT_EXIST": "0a0a1a080a017412016e3802",
+    "ACKED": "0a0a1a080a017412016e3803",
+    "NACKED": "0a0a1a080a017412016e3804",
+    "RECEIVED_ERROR": "0a0a1a080a017412016e3805",
+    "TIMEOUT": "0a0a1a080a017412016e3806"
+  }
+}

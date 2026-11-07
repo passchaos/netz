@@ -36,3 +36,19 @@ pub fn respondFetch(
     try connection.writeUnary(request.request.stream_id, .{ .message = encoded });
     return true;
 }
+
+/// Answer FetchClientStatus using the managed facade's complete authority
+/// inventory. The caller serializes this query with discovery operations.
+pub fn respondManagedFetch(
+    connection: *runtime.ServerConnection,
+    request: *const runtime.OwnedUnaryRequest,
+    discovery: anytype,
+    allocator: std.mem.Allocator,
+    node: []const u8,
+) !bool {
+    if (!isFetch(request.request.path)) return false;
+    const encoded = try discovery.fetchClientStatus(allocator, request.request.message.payload, .{ .node = node });
+    defer allocator.free(encoded);
+    try connection.writeUnary(request.request.stream_id, .{ .message = encoded });
+    return true;
+}

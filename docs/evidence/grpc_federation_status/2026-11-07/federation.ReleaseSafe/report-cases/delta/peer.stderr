@@ -1,0 +1,6 @@
+AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+
+'ACKED' !== 'NACKED'
+
+    at checkResource (/home/passchaos/project-z/netz/tools/interop/grpc_federation/peer.js:331:57)
+    at main (/home/passchaos/project-z/netz/tools/interop/grpc_federation/peer.js:342:23)

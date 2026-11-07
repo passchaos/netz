@@ -49,6 +49,9 @@ pub const Event = union(enum) {
     }
 };
 pub const Client = struct {
+    /// Last application NACK decision, independent of its transport outcome.
+    /// Disconnect clears wire state but must not erase decision provenance.
+    last_rejected_token: ?subscriptions.Token = null,
     allocator: std.mem.Allocator,
     sender: shared.Sender,
     inputs: @import("../../channel/shared/request_inputs.zig").Inputs,
@@ -194,6 +197,7 @@ pub const Client = struct {
         try self.sender.state.io.checkCancel();
         if (nack.message.len > self.limits.max_message_bytes) return error.DiscoveryLimitExceeded;
         const entry = try self.subscriptions.decide(update.response.value.type_url, update.token, nack);
+        self.last_rejected_token = update.token;
         try self.send(entry, deadline);
     }
     pub fn nextWithDeadline(self: *Client, deadline: std.Io.Clock.Timestamp) Error!Event {

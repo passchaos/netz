@@ -101,6 +101,7 @@ pub const SecretPlan = struct {
             }
         }
         self.committed = true;
+        self.controller.resource_commit_generation +%= 1;
     }
 
     pub fn stageClusters(self: *SecretPlan, plan: *Plan, io: std.Io) ctl.Error!bool {
