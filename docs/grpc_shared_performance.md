@@ -964,4 +964,15 @@ same-application-shape comparison: grpc-cpp includes protobuf serialization and
 parsing while netz uses pre-encoded messages, so it is not an equal-wire or
 equal-API claim. Full rows and identities are in
 `docs/evidence/grpc_cpp_official_borrowed/2026-11-07/`.
+
+### Large-frame and cached-allocator configuration
+
+The same runner at `43139e7a` with `--netz-max-frame-size=262144
+--netz-cached-allocator --netz-borrowed-writes` measured 249.500 us versus
+236.982 us for 256-KiB persistent ping-pong (1.053x) and 276.230 us versus
+298.508 us for per-call RPCs (0.925x). Small messages remained 1.9-2.4x faster.
+A CPU-0 run of the same configuration measured 1.048x and 0.916x, so the result
+is stable across CPUs. The per-call large-message mode is now faster than
+grpc-cpp in this configuration; persistent ping-pong remains about 5% slower.
+Rows are in `docs/evidence/grpc_cpp_official_borrowed/2026-11-07/largeframe/`.
 `max_frame_payload`, from advertising a frame it cannot receive.

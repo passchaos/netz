@@ -1,0 +1,191 @@
+{
+  "context": {
+    "cpu": 12,
+    "samples": 5,
+    "schedule": "alternating",
+    "netz_build_mode": "ReleaseFast",
+    "netz_revision": "43139e7a970c2d79d58e0d9686e035ceff583761",
+    "netz_dirty": false,
+    "grpc_revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
+    "arch": "x86_64",
+    "netz_sha256": "b05c712a0fe54236ddc0046a901e1c2afccb2932ecee27b1b52624432aace027",
+    "grpc_cpp_sha256": "4680ec271fa937f491bb8f1817727d6a3e0fa2d1d8bafe1bc49d836693603a3e",
+    "cpp_time_basis": "real_time",
+    "netz_validation": "full-bytes",
+    "netz_write_storage": "borrowed",
+    "netz_max_frame_size": 262144,
+    "netz_allocator": "cached",
+    "netz_protobuf_scope": "preencoded",
+    "grpc_cpp_protobuf_scope": "serialize+parse"
+  },
+  "results": [
+    {
+      "mode": "persistent",
+      "payload_bytes": 0,
+      "netz_median_ns": 13423,
+      "grpc_cpp_median_ns": 31896.836777743305,
+      "netz_over_grpc_cpp": 0.42082542834987896,
+      "netz_samples_ns": [
+        13439,
+        13423,
+        13240,
+        14001,
+        13328
+      ],
+      "grpc_cpp_samples_ns": [
+        31896.836777743305,
+        31954.502629145984,
+        31765.019016869202,
+        31867.378820944865,
+        32034.222646769213
+      ]
+    },
+    {
+      "mode": "persistent",
+      "payload_bytes": 512,
+      "netz_median_ns": 13706,
+      "grpc_cpp_median_ns": 32507.66394923907,
+      "netz_over_grpc_cpp": 0.42162365223788484,
+      "netz_samples_ns": [
+        13558,
+        13771,
+        13702,
+        14504,
+        13706
+      ],
+      "grpc_cpp_samples_ns": [
+        32544.508779768945,
+        32589.52716173253,
+        32434.387049319655,
+        32507.66394923907,
+        32480.573387301793
+      ]
+    },
+    {
+      "mode": "persistent",
+      "payload_bytes": 4096,
+      "netz_median_ns": 16935,
+      "grpc_cpp_median_ns": 34790.70643102365,
+      "netz_over_grpc_cpp": 0.4867679256118433,
+      "netz_samples_ns": [
+        16857,
+        16770,
+        16936,
+        18073,
+        16935
+      ],
+      "grpc_cpp_samples_ns": [
+        34638.61381039812,
+        34931.72856537446,
+        34735.09498536196,
+        34813.035793542185,
+        34790.70643102365
+      ]
+    },
+    {
+      "mode": "persistent",
+      "payload_bytes": 262144,
+      "netz_median_ns": 249500,
+      "grpc_cpp_median_ns": 236982.0914356564,
+      "netz_over_grpc_cpp": 1.0528221710278154,
+      "netz_samples_ns": [
+        248032,
+        247929,
+        249500,
+        249791,
+        250485
+      ],
+      "grpc_cpp_samples_ns": [
+        239640.5135847049,
+        236982.0914356564,
+        233329.9109810277,
+        258056.65892489968,
+        234229.14934346633
+      ]
+    },
+    {
+      "mode": "calls",
+      "payload_bytes": 0,
+      "netz_median_ns": 42782,
+      "grpc_cpp_median_ns": 85184.75214234566,
+      "netz_over_grpc_cpp": 0.5022260313501916,
+      "netz_samples_ns": [
+        42535,
+        42721,
+        42782,
+        43887,
+        45346
+      ],
+      "grpc_cpp_samples_ns": [
+        84654.01148563786,
+        85893.0308168865,
+        85930.44097017245,
+        85184.75214234566,
+        84811.92488948136
+      ]
+    },
+    {
+      "mode": "calls",
+      "payload_bytes": 512,
+      "netz_median_ns": 43141,
+      "grpc_cpp_median_ns": 86178.507589266,
+      "netz_over_grpc_cpp": 0.500600453718851,
+      "netz_samples_ns": [
+        42787,
+        43141,
+        43150,
+        43261,
+        43062
+      ],
+      "grpc_cpp_samples_ns": [
+        86219.03685925835,
+        86685.29998465857,
+        86132.9933046839,
+        86159.40376191032,
+        86178.507589266
+      ]
+    },
+    {
+      "mode": "calls",
+      "payload_bytes": 4096,
+      "netz_median_ns": 45815,
+      "grpc_cpp_median_ns": 88712.99122230065,
+      "netz_over_grpc_cpp": 0.5164407080491165,
+      "netz_samples_ns": [
+        45612,
+        45705,
+        45815,
+        47285,
+        45885
+      ],
+      "grpc_cpp_samples_ns": [
+        88524.31941985046,
+        88964.6985750746,
+        88051.1795204608,
+        88712.99122230065,
+        89012.43143001723
+      ]
+    },
+    {
+      "mode": "calls",
+      "payload_bytes": 262144,
+      "netz_median_ns": 276230,
+      "grpc_cpp_median_ns": 298508.83798284846,
+      "netz_over_grpc_cpp": 0.9253662366133074,
+      "netz_samples_ns": [
+        274053,
+        276230,
+        276295,
+        286096,
+        275966
+      ],
+      "grpc_cpp_samples_ns": [
+        295138.04570476955,
+        299411.33248370263,
+        298082.1119631574,
+        298508.83798284846,
+        298568.6848038121
+      ]
+    }
+  ]
+}

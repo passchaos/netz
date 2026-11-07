@@ -1,0 +1,19 @@
+{
+  "cpu": 12,
+  "samples": 5,
+  "schedule": "alternating",
+  "netz_build_mode": "ReleaseFast",
+  "netz_revision": "43139e7a970c2d79d58e0d9686e035ceff583761",
+  "netz_dirty": false,
+  "grpc_revision": "03d65cc67c450ccbb58a8a45627c4da83a886ccd",
+  "arch": "x86_64",
+  "netz_sha256": "b05c712a0fe54236ddc0046a901e1c2afccb2932ecee27b1b52624432aace027",
+  "grpc_cpp_sha256": "4680ec271fa937f491bb8f1817727d6a3e0fa2d1d8bafe1bc49d836693603a3e",
+  "cpp_time_basis": "real_time",
+  "netz_validation": "full-bytes",
+  "netz_write_storage": "borrowed",
+  "netz_max_frame_size": 262144,
+  "netz_allocator": "cached",
+  "netz_protobuf_scope": "preencoded",
+  "grpc_cpp_protobuf_scope": "serialize+parse"
+}

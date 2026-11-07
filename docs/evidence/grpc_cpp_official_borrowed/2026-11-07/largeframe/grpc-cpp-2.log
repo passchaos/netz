@@ -1,0 +1,90 @@
+-------------------------------------------------------------------------------------------------------------------------
+Benchmark                                                               Time             CPU   Iterations UserCounters...
+-------------------------------------------------------------------------------------------------------------------------
+BM_StreamingPingPong<TCP, NoOpMutator, NoOpMutator>/0/1             85893 ns        36199 ns         7729 bytes_per_second=0/s
+BM_StreamingPingPong<TCP, NoOpMutator, NoOpMutator>/512/1           86685 ns        37392 ns         7497 bytes_per_second=26.1166Mi/s
+BM_StreamingPingPong<TCP, NoOpMutator, NoOpMutator>/4096/1          88965 ns        38678 ns         7297 bytes_per_second=201.988Mi/s
+BM_StreamingPingPong<TCP, NoOpMutator, NoOpMutator>/262144/1       299411 ns       155577 ns         1833 bytes_per_second=3.13852Gi/s
+BM_StreamingPingPongMsgs<TCP, NoOpMutator, NoOpMutator>/0           31955 ns        13677 ns        20559 bytes_per_second=0/s
+BM_StreamingPingPongMsgs<TCP, NoOpMutator, NoOpMutator>/512         32590 ns        14084 ns        19915 bytes_per_second=69.3381Mi/s
+BM_StreamingPingPongMsgs<TCP, NoOpMutator, NoOpMutator>/4096        34932 ns        15383 ns        18231 bytes_per_second=507.878Mi/s
+BM_StreamingPingPongMsgs<TCP, NoOpMutator, NoOpMutator>/262144     236982 ns       123572 ns         2274 bytes_per_second=3.95138Gi/s
+I1107 22:35:02.463042 3313892 test_config.cc:156] test slowdown factor: sanitizer=1, fixture=1, poller=1, total=1
+I1107 22:35:02.463072 3313892 config.cc:256] gRPC experiments enabled: call_tracer_in_transport, call_tracer_send_initial_metadata_is_an_annotation, callv3_batch_validation, chaotic_good_framing_layer, chaotic_good_send_supported_features, custom_frame_check, event_engine_callback_cq, event_engine_client, event_engine_dns, event_engine_dns_non_client_channel, event_engine_for_all_other_endpoints, event_engine_fork, event_engine_listener, header_data_frame, inproc_cancel_stream, monitoring_experiment, optimization_01, optimization_02, optimization_03, optimization_04, promise_batch_cleanup_on_cancel, promise_filter_send_cancel_metadata, return_preexisting_errors
+2026-11-07T22:35:02+08:00
+Running /home/passchaos/Work/grpc/bazel-bin/test/cpp/microbenchmarks/bm_fullstack_streaming_ping_pong
+Run on (32 X 5500 MHz CPU s)
+CPU Caches:
+  L1 Data 48 KiB (x16)
+  L1 Instruction 32 KiB (x16)
+  L2 Unified 2048 KiB (x16)
+  L3 Unified 36864 KiB (x1)
+Load Average: 2.49, 4.49, 6.01
+***WARNING*** CPU scaling is enabled, the benchmark real time measurements may be noisy and will incur extra overhead.
+***WARNING*** ASLR is enabled, the results may have unreproducible noise in them.
+I1107 22:35:02.467434 3313892 lb_policy_registry.cc:45] registering LB policy factory for "priority_experimental"
+I1107 22:35:02.467440 3313892 lb_policy_registry.cc:45] registering LB policy factory for "outlier_detection_experimental"
+I1107 22:35:02.467442 3313892 lb_policy_registry.cc:45] registering LB policy factory for "weighted_target_experimental"
+I1107 22:35:02.467443 3313892 lb_policy_registry.cc:45] registering LB policy factory for "pick_first"
+I1107 22:35:02.467445 3313892 lb_policy_registry.cc:45] registering LB policy factory for "round_robin"
+I1107 22:35:02.467446 3313892 lb_policy_registry.cc:45] registering LB policy factory for "ring_hash_experimental"
+I1107 22:35:02.467448 3313892 lb_policy_registry.cc:45] registering LB policy factory for "weighted_round_robin"
+I1107 22:35:02.467457 3313892 lb_policy_registry.cc:45] registering LB policy factory for "grpclb"
+I1107 22:35:02.467462 3313892 dns_resolver_plugin.cc:40] Using EventEngine dns resolver
+I1107 22:35:02.467467 3313892 lb_policy_registry.cc:45] registering LB policy factory for "rls_experimental"
+I1107 22:35:02.467475 3313892 lb_policy_registry.cc:45] registering LB policy factory for "xds_cluster_manager_experimental"
+I1107 22:35:02.467477 3313892 lb_policy_registry.cc:45] registering LB policy factory for "xds_cluster_impl_experimental"
+I1107 22:35:02.467478 3313892 lb_policy_registry.cc:45] registering LB policy factory for "cds_experimental"
+I1107 22:35:02.467480 3313892 lb_policy_registry.cc:45] registering LB policy factory for "xds_override_host_experimental"
+I1107 22:35:02.467481 3313892 lb_policy_registry.cc:45] registering LB policy factory for "xds_wrr_locality_experimental"
+I1107 22:35:02.467483 3313892 certificate_provider_registry.cc:34] registering certificate provider factory for "file_watcher"
+I1107 22:35:02.470494 3313935 chttp2_transport.cc:2207] ipv6:%5B::1%5D:42364 SERVER: Sending goaway last_new_stream_id=1 err=UNKNOWN:Channel Destroyed
+I1107 22:35:02.473668 3313952 chttp2_transport.cc:2207] ipv6:%5B::1%5D:41348 SERVER: Sending goaway last_new_stream_id=19 err=UNKNOWN:Channel Destroyed
+I1107 22:35:02.484692 3313975 chttp2_transport.cc:2207] ipv6:%5B::1%5D:42040 SERVER: Sending goaway last_new_stream_id=199 err=UNKNOWN:Channel Destroyed
+I1107 22:35:02.571888 3313979 chttp2_transport.cc:2207] ipv6:%5B::1%5D:58192 SERVER: Sending goaway last_new_stream_id=1999 err=UNKNOWN:Cancelling all calls
+I1107 22:35:03.238155 3314005 chttp2_transport.cc:2207] ipv6:%5B::1%5D:59430 SERVER: Sending goaway last_new_stream_id=15457 err=UNKNOWN:Channel Destroyed
+I1107 22:35:03.241006 3314026 chttp2_transport.cc:2207] ipv6:%5B::1%5D:37608 SERVER: Sending goaway last_new_stream_id=1 err=UNKNOWN:Channel Destroyed
+I1107 22:35:03.244164 3314057 chttp2_transport.cc:2207] ipv6:%5B::1%5D:36620 SERVER: Sending goaway last_new_stream_id=19 err=UNKNOWN:Channel Destroyed
+I1107 22:35:03.254983 3314070 chttp2_transport.cc:2207] ipv6:%5B::1%5D:41386 SERVER: Sending goaway last_new_stream_id=199 err=UNKNOWN:Channel Destroyed
+I1107 22:35:03.343578 3314087 chttp2_transport.cc:2207] ipv6:%5B::1%5D:59128 SERVER: Sending goaway last_new_stream_id=1999 err=UNKNOWN:Channel Destroyed
+I1107 22:35:03.995844 3314111 chttp2_transport.cc:2207] ipv6:%5B::1%5D:34856 SERVER: Sending goaway last_new_stream_id=14993 err=UNKNOWN:Channel Destroyed
+I1107 22:35:03.998624 3314137 chttp2_transport.cc:2207] ipv6:%5B::1%5D:49500 SERVER: Sending goaway last_new_stream_id=1 err=UNKNOWN:Channel Destroyed
+I1107 22:35:04.001642 3314148 chttp2_transport.cc:2207] ipv6:%5B::1%5D:58296 SERVER: Sending goaway last_new_stream_id=19 err=UNKNOWN:Channel Destroyed
+I1107 22:35:04.012667 3314170 chttp2_transport.cc:2207] ipv6:%5B::1%5D:51202 SERVER: Sending goaway last_new_stream_id=199 err=UNKNOWN:Channel Destroyed
+I1107 22:35:04.102905 3314195 chttp2_transport.cc:2207] ipv6:%5B::1%5D:38414 SERVER: Sending goaway last_new_stream_id=1999 err=UNKNOWN:Channel Destroyed
+I1107 22:35:04.754616 3314228 chttp2_transport.cc:2207] ipv6:%5B::1%5D:54362 SERVER: Sending goaway last_new_stream_id=14593 err=UNKNOWN:Channel Destroyed
+I1107 22:35:04.757901 3314334 chttp2_transport.cc:2207] ipv6:%5B::1%5D:52056 SERVER: Sending goaway last_new_stream_id=1 err=UNKNOWN:Channel Destroyed
+I1107 22:35:04.764493 3314344 chttp2_transport.cc:2207] ipv6:%5B::1%5D:53586 SERVER: Sending goaway last_new_stream_id=19 err=UNKNOWN:Channel Destroyed
+I1107 22:35:04.799066 3314367 chttp2_transport.cc:2207] ipv6:%5B::1%5D:33834 SERVER: Sending goaway last_new_stream_id=199 err=UNKNOWN:Channel Destroyed
+I1107 22:35:05.122547 3314387 chttp2_transport.cc:2207] ipv6:%5B::1%5D:49304 SERVER: Sending goaway last_new_stream_id=1999 err=UNKNOWN:Channel Destroyed
+I1107 22:35:05.673555 3314451 chttp2_transport.cc:2207] ipv6:%5B::1%5D:32960 SERVER: Sending goaway last_new_stream_id=3665 err=UNKNOWN:Channel Destroyed
+I1107 22:35:05.673887 3313892 work_stealing_thread_pool.cc:420] Waiting for lifeguard thread to shut down
+I1107 22:35:05.676097 3314505 chttp2_transport.cc:2207] ipv6:%5B::1%5D:57568 SERVER: Sending goaway last_new_stream_id=1 err=UNKNOWN:Channel Destroyed
+I1107 22:35:05.679089 3314554 chttp2_transport.cc:2207] ipv6:%5B::1%5D:38614 SERVER: Sending goaway last_new_stream_id=1 err=UNKNOWN:Channel Destroyed
+I1107 22:35:05.684470 3314572 chttp2_transport.cc:2207] ipv6:%5B::1%5D:54580 SERVER: Sending goaway last_new_stream_id=1 err=UNKNOWN:Channel Destroyed
+I1107 22:35:05.718778 3314587 chttp2_transport.cc:2207] ipv6:%5B::1%5D:57050 SERVER: Sending goaway last_new_stream_id=1 err=UNKNOWN:Channel Destroyed
+I1107 22:35:06.038661 3314607 chttp2_transport.cc:2207] ipv6:%5B::1%5D:36366 SERVER: Sending goaway last_new_stream_id=1 err=UNKNOWN:Channel Destroyed
+I1107 22:35:06.698232 3314646 chttp2_transport.cc:2207] ipv6:%5B::1%5D:51896 SERVER: Sending goaway last_new_stream_id=1 err=UNKNOWN:Channel Destroyed
+I1107 22:35:06.700986 3314753 chttp2_transport.cc:2207] ipv6:%5B::1%5D:35160 SERVER: Sending goaway last_new_stream_id=1 err=UNKNOWN:Channel Destroyed
+I1107 22:35:06.703538 3314768 chttp2_transport.cc:2207] ipv6:%5B::1%5D:49534 SERVER: Sending goaway last_new_stream_id=1 err=UNKNOWN:Channel Destroyed
+I1107 22:35:06.708971 3314781 chttp2_transport.cc:2207] ipv6:%5B::1%5D:37132 SERVER: Sending goaway last_new_stream_id=1 err=UNKNOWN:Channel Destroyed
+I1107 22:35:06.743552 3314810 chttp2_transport.cc:2207] ipv6:%5B::1%5D:52260 SERVER: Sending goaway last_new_stream_id=1 err=UNKNOWN:Channel Destroyed
+I1107 22:35:07.094653 3314825 chttp2_transport.cc:2207] ipv6:%5B::1%5D:35868 SERVER: Sending goaway last_new_stream_id=1 err=UNKNOWN:Channel Destroyed
+I1107 22:35:07.746372 3314893 chttp2_transport.cc:2207] ipv6:%5B::1%5D:53684 SERVER: Sending goaway last_new_stream_id=1 err=UNKNOWN:Channel Destroyed
+I1107 22:35:08.545814 3315030 chttp2_transport.cc:2207] ipv6:%5B::1%5D:39398 SERVER: Sending goaway last_new_stream_id=1 err=UNKNOWN:Channel Destroyed
+I1107 22:35:08.548620 3315051 chttp2_transport.cc:2207] ipv6:%5B::1%5D:38430 SERVER: Sending goaway last_new_stream_id=1 err=UNKNOWN:Channel Destroyed
+I1107 22:35:08.554499 3315064 chttp2_transport.cc:2207] ipv6:%5B::1%5D:49976 SERVER: Sending goaway last_new_stream_id=1 err=UNKNOWN:Channel Destroyed
+I1107 22:35:08.596186 3315070 chttp2_transport.cc:2207] ipv6:%5B::1%5D:60110 SERVER: Sending goaway last_new_stream_id=1 err=UNKNOWN:Channel Destroyed
+I1107 22:35:08.946522 3315094 chttp2_transport.cc:2207] ipv6:%5B::1%5D:50322 SERVER: Sending goaway last_new_stream_id=1 err=UNKNOWN:Channel Destroyed
+I1107 22:35:08.946828 3313892 work_stealing_thread_pool.cc:420] Waiting for lifeguard thread to shut down
+I1107 22:35:09.585965 3315193 chttp2_transport.cc:2207] ipv6:%5B::1%5D:58910 SERVER: Sending goaway last_new_stream_id=1 err=UNKNOWN:Channel Destroyed
+I1107 22:35:09.589246 3315300 chttp2_transport.cc:2207] ipv6:%5B::1%5D:33852 SERVER: Sending goaway last_new_stream_id=1 err=UNKNOWN:Channel Destroyed
+I1107 22:35:09.594614 3315323 chttp2_transport.cc:2207] ipv6:%5B::1%5D:50746 SERVER: Sending goaway last_new_stream_id=1 err=UNKNOWN:Channel Destroyed
+I1107 22:35:09.622073 3315336 chttp2_transport.cc:2207] ipv6:%5B::1%5D:57948 SERVER: Sending goaway last_new_stream_id=1 err=UNKNOWN:Channel Destroyed
+I1107 22:35:09.864959 3315357 chttp2_transport.cc:2207] ipv6:%5B::1%5D:38540 SERVER: Sending goaway last_new_stream_id=1 err=UNKNOWN:Channel Destroyed
+I1107 22:35:10.406717 3315447 chttp2_transport.cc:2207] ipv6:%5B::1%5D:32888 SERVER: Sending goaway last_new_stream_id=1 err=UNKNOWN:Channel Destroyed
+I1107 22:35:10.407105 3313892 init.cc:177] grpc_shutdown starts clean-up now
+I1107 22:35:10.407157 3313892 init.cc:180] grpc_shutdown done
+I1107 22:35:10.407160 3313892 test_config.cc:232] TestEnvironment ends
+I1107 22:35:10.407191 3313892 init.cc:177] grpc_shutdown starts clean-up now
+I1107 22:35:10.407214 3313892 init.cc:180] grpc_shutdown done

@@ -8815,7 +8815,9 @@ comparison to 2.079x and 1.846x for those large-message modes. SharedChannel
 borrowed request storage then removed the remaining queued 256-KiB client copy:
 five clean CPU-0 official samples at `8b83e575` measured 1.670x and 1.530x for
 the same persistent and per-call modes, while small messages remained 1.8-2.4x
-faster than grpc-cpp. Small-message
+faster than grpc-cpp. With the library's 256-KiB frame default and the opt-in
+cached allocator, the current configuration measures 1.053x persistent and
+0.925x per-call, making the large per-call mode faster than grpc-cpp. Small-message
 native times remain lower in this fixture, but broad gRPC performance
 completion is still open: the default borrowed Writer still clones its caller
 payload, while generic ClientDuplex, ServerDuplex and SharedChannel owned-write
