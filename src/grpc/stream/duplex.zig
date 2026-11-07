@@ -120,9 +120,11 @@ const PendingMessage = struct {
     bytes: []u8,
     offset: usize = 0,
     end_stream: bool = false,
+    /// False for identity storage borrowed from the caller.
+    owned: bool = true,
 
     fn deinit(self: *PendingMessage, allocator: std.mem.Allocator) void {
-        allocator.free(self.bytes);
+        if (self.owned) allocator.free(self.bytes);
         self.* = undefined;
     }
 };
@@ -486,6 +488,33 @@ pub const ClientDuplex = struct {
             .end_stream = end_stream,
         };
         return encoded.input_transferred;
+    }
+
+    /// Retain a caller-owned prefix-reserved message for a background owner.
+    /// Identity encoding keeps `storage` borrowed; compression may allocate a
+    /// separate frame owned by this stream. The caller must keep `storage`
+    /// valid until the write completes or the stream is retired.
+    pub fn stageBorrowedMessageStorage(
+        self: *ClientDuplex,
+        storage: []u8,
+        options: codec.MessageOptions,
+        end_stream: bool,
+    ) Error!void {
+        try self.ensureWritable();
+        if (self.pending_message != null) return error.InvalidStreamState;
+        var borrowed_options = options;
+        borrowed_options.borrow_input = true;
+        const encoded = try outbound_ownership.encode(
+            self.allocator,
+            self.encoder,
+            storage,
+            borrowed_options,
+        );
+        self.pending_message = .{
+            .bytes = encoded.bytes,
+            .end_stream = end_stream,
+            .owned = !encoded.input_borrowed,
+        };
     }
 
     fn stageOwnedMessageWithEndStream(

@@ -47,6 +47,8 @@ pub const Write = struct {
     completion: std.atomic.Value(Completion) = .init(.waiting),
     storage: []u8,
     payload_released: bool = false,
+    /// Caller-owned prefix-reserved storage; never freed by this command.
+    borrowed: bool = false,
     options: codec.MessageOptions,
     final: bool,
     finish_only: bool,
@@ -96,12 +98,32 @@ pub const Write = struct {
         };
         return command;
     }
+    pub fn createBorrowed(
+        allocator: std.mem.Allocator,
+        storage: []u8,
+        input: WriteInput,
+    ) (std.mem.Allocator.Error || error{InvalidStreamState})!*Write {
+        std.debug.assert(!input.finish_only and input.payload.len == 0);
+        if (storage.len < 5) return error.InvalidStreamState;
+        const command = try allocator.create(Write);
+        errdefer allocator.destroy(command);
+        command.* = .{
+            .allocator = allocator,
+            .storage = storage,
+            .borrowed = true,
+            .options = input.options,
+            .final = input.final,
+            .finish_only = false,
+            .deadline = input.deadline,
+        };
+        return command;
+    }
     pub fn retain(self: *Write) void {
         _ = self.refs.fetchAdd(1, .monotonic);
     }
     pub fn release(self: *Write) void {
         if (self.refs.fetchSub(1, .acq_rel) != 1) return;
-        if (!self.payload_released) self.allocator.free(self.storage);
+        if (!self.payload_released and !self.borrowed) self.allocator.free(self.storage);
         self.allocator.destroy(self);
     }
     pub fn payload(self: *const Write) []const u8 {
@@ -115,14 +137,14 @@ pub const Write = struct {
     /// The transport staging buffer owns the encoded message after this point.
     pub fn releasePayload(self: *Write) void {
         std.debug.assert(!self.payload_released);
-        self.allocator.free(self.storage);
+        if (!self.borrowed) self.allocator.free(self.storage);
         self.storage = &.{};
         self.payload_released = true;
     }
     /// Transfer the prefix-reserved allocation to the transport staging
     /// buffer after it has accepted ownership.
     pub fn transferPayload(self: *Write) []u8 {
-        std.debug.assert(!self.payload_released);
+        std.debug.assert(!self.payload_released and !self.borrowed);
         const storage = self.storage;
         self.storage = &.{};
         self.payload_released = true;

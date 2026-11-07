@@ -8,14 +8,22 @@ pub const Session = struct {
     allocator: std.mem.Allocator,
     expected: []const u8,
     validate: bool,
+    /// Caller-owned prefix-reserved request storage; the session never frees it.
+    borrowed: ?[]u8,
 
-    pub fn open(sender: grpc.SharedChannelSender, allocator: std.mem.Allocator, expected: []const u8, validate: bool) !Session {
+    pub fn open(
+        sender: grpc.SharedChannelSender,
+        allocator: std.mem.Allocator,
+        expected: []const u8,
+        validate: bool,
+        borrowed: ?[]u8,
+    ) !Session {
         const rpc = try sender.startDuplex(.{
             .path = "/grpc.testing.EchoTestService/BidiStream",
             .wait_for_ready = true,
             .timeout = .{ .value = 300, .unit = .second },
         });
-        return .{ .rpc = rpc, .writer = rpc.writer(), .reader = rpc.reader(), .allocator = allocator, .expected = expected, .validate = validate };
+        return .{ .rpc = rpc, .writer = rpc.writer(), .reader = rpc.reader(), .allocator = allocator, .expected = expected, .validate = validate, .borrowed = borrowed };
     }
     pub fn deinit(self: *Session) void {
         self.reader.deinit();
@@ -24,7 +32,11 @@ pub const Session = struct {
         self.* = undefined;
     }
     pub fn exchange(self: *Session, request: []const u8) !void {
-        try self.writer.writeMessage(request);
+        if (self.borrowed) |storage| {
+            try self.writer.writeBorrowedMessage(storage);
+        } else {
+            try self.writer.writeMessage(request);
+        }
         while (true) {
             var event = try self.reader.nextWithTimeout(.fromSeconds(10));
             defer event.deinit(self.allocator);

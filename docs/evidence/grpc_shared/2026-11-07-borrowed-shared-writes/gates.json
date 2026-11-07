@@ -1,0 +1,97 @@
+{
+  "schema": 1,
+  "date": "2026-11-07",
+  "head": "working-tree",
+  "subject": "Borrowed SharedChannel duplex writes",
+  "change": "SharedChannel writers gain writeBorrowedMessage and writeFinalBorrowedMessage. The endpoint owner stages caller-owned prefix-reserved identity storage without copying and still writes it in bounded max_write_bytes_per_turn turns, preserving per-endpoint fairness. Borrowed writes wait for owner completion instead of abandoning the buffer; owner-side deadline or stream failure completes the command before the caller returns. Compression still allocates a separate framed buffer owned by the stream, and pending-message ownership now records whether the transport may free the bytes.",
+  "tests": {
+    "unit": "src/grpc/channel/shared/tests.zig writes a 180,224-byte final borrowed request through a SharedChannel with a tracking allocator and asserts zero allocations at or above the payload size; the server verifies the exact payload and returns OK.",
+    "benchmark": {
+      "command": "taskset -c 0 netz-bench-grpc-shared --mode=persistent|calls --payload=262144 --iterations=200 --warmup=20 [--borrowed-writes]",
+      "pairs": 6,
+      "order": "alternating staged/borrowed and borrowed/staged per mode",
+      "persistent_staged_ns_per_roundtrip": [
+        474010,
+        471806,
+        475672,
+        471802,
+        471768,
+        475966
+      ],
+      "persistent_borrowed_ns_per_roundtrip": [
+        408932,
+        408007,
+        411158,
+        408439,
+        409216,
+        406938
+      ],
+      "persistent_staged_median_ns": 472908,
+      "persistent_borrowed_median_ns": 408686,
+      "persistent_median_reduction_percent": 13.58,
+      "persistent_borrowed_faster_pairs": "6/6",
+      "calls_staged_ns_per_roundtrip": [
+        546663,
+        545343,
+        550731,
+        546551,
+        549817,
+        547449
+      ],
+      "calls_borrowed_ns_per_roundtrip": [
+        482226,
+        482179,
+        490410,
+        485114,
+        489820,
+        491163
+      ],
+      "calls_staged_median_ns": 547056,
+      "calls_borrowed_median_ns": 487467,
+      "calls_median_reduction_percent": 10.89,
+      "calls_borrowed_faster_pairs": "6/6",
+      "workload": "256 KiB full-byte-validated duplex ping-pong, 20 warmups, 200 measured round trips",
+      "allocation_probe": {
+        "command": "taskset -c 0 netz-bench-grpc-shared --mode=persistent --payload=262144 --iterations=20 --warmup=5 --stats [--borrowed-writes]",
+        "staged_alloc_count": 80,
+        "staged_allocated_bytes": 15731220,
+        "borrowed_alloc_count": 60,
+        "borrowed_allocated_bytes": 10488160,
+        "removed_allocations_per_call": 1,
+        "removed_bytes_per_call": 262153
+      }
+    },
+    "focused_grpc": {
+      "command": "zig build test-lib -Dtest-filter=grpc --summary all",
+      "passed": 1062,
+      "total": 1062,
+      "failed": 0
+    },
+    "compile": {
+      "command": "zig build test-compile",
+      "status": "passed"
+    },
+    "full_library": {
+      "command": "zig build test-lib -j1 --seed 0x4a337f0d --summary all",
+      "status": "passed",
+      "passed": 6765,
+      "total": 6765,
+      "failed": 0
+    }
+  },
+  "source_sha256": {
+    "src/grpc/stream/codec.zig": "fc1ae199e6ebabd52e3bd0427867c9097c23b0372df11d98208f1b7eccc8bce5",
+    "src/grpc/stream/duplex.zig": "f6d99acbc66b495999d9a00b05daf1118756f479982d2abd28e9be9fa30861a9",
+    "src/grpc/stream/duplex/outbound_ownership.zig": "96d5e1baea482eb51ca04b2c7a3ddfc414cccf453d035dc306375a48db5ba500",
+    "src/grpc/channel/shared/stream/call.zig": "2fe09e770f9b5b16aebf4c0d0ccfba06ebb09d0f1c12cc30640e1bedf75c37b3",
+    "src/grpc/channel/shared/stream/write.zig": "0bb0f9d569058f01f397c2bcf192f9cf2c9934f59e52b18299aded4a7dcdea52",
+    "src/grpc/channel/shared/stream/owner.zig": "f38646c2c5d9c7c918bd051deea0f0401df74cd9b7671fb82392c0ec43ccf8d2",
+    "src/grpc/channel/shared/stream.zig": "c8fe982382d1ddc446c12bfe1fcb6a351545729ef209146b78d395eef54a99e9",
+    "src/grpc/channel/shared/tests.zig": "b17af748207439dde0bcae497687cc5e91563018c71f26e51de0b6e97d6c6ea7",
+    "examples/grpc_shared_bench/options.zig": "4a21f15b50cde914c7069e927d6db11247e909f4ec38661259d47f1ad8117f5c",
+    "examples/grpc_shared_bench/session.zig": "732b2b55a67b7e9c822d78e3ca024bc9d193cdf366f9ab260e1c2745170c1420",
+    "examples/bench_grpc_shared.zig": "96c068f6242efd716ec53643d7194198c46d8f97e6065bf21f88dbe0d83b69dd",
+    "docs/grpc_shared_performance.md": "0b7b862291040a7cdb570e5a2773b8f07f9d9dce8933db24c8cbb56931c697c0"
+  },
+  "notes": "The full suite passed 6765/6765 after the new shared borrowed-write regression. Two host-load LRS flakes during focused runs passed in isolation and as the complete LRS group before the clean 1062/1062 focused gate. The borrowed path preserves SharedChannel's bounded per-turn write scheduling; only the payload copy is removed."
+}

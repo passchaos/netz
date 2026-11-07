@@ -46,6 +46,36 @@ pub fn submitOwned(
     return submitCommand(call, command);
 }
 
+/// Submit a caller-owned prefix-reserved message. The caller must keep
+/// `storage` valid and unmodified until this call returns; the endpoint owner
+/// writes it in bounded turns without taking ownership.
+pub fn submitBorrowed(
+    call: anytype,
+    storage: []u8,
+    input: call_module.WriteInput,
+) @TypeOf(call.parent.*).Failure!void {
+    const state = call.parent;
+    if (storage.len < 5) return error.InvalidStreamState;
+    const payload_len = storage.len - 5;
+    if (payload_len > call.options.requestMessageLimit()) {
+        return error.GrpcMessageTooLarge;
+    }
+    if (input.deadline) |until| {
+        _ = try deadline_policy.usableAwake(state.io, until);
+    }
+    var owned = input;
+    owned.deadline = deadline_policy.earlier(call.deadline, input.deadline);
+    if (owned.deadline) |until| {
+        _ = try deadline_policy.usableAwake(state.io, until);
+    }
+    const command = try call_module.Write.createBorrowed(
+        state.allocator,
+        storage,
+        owned,
+    );
+    return submitCommand(call, command);
+}
+
 fn submitCommand(
     call: anytype,
     command: *call_module.Write,
@@ -71,6 +101,14 @@ fn submitCommand(
     call.write = command;
     state.wakeAllLocked();
     state.unlock();
+    if (command.borrowed) {
+        // The caller's payload must stay valid until the owner is done. The
+        // owner applies `command.deadline` to its bounded write turns, so this
+        // wait is bounded even though the submitter cannot abandon the buffer.
+        command.done.waitUncancelable(state.io);
+        if (command.err) |failure| return @errorCast(failure);
+        return;
+    }
     while (true) {
         const waited = if (command.deadline) |until|
             command.done.waitTimeout(state.io, .{ .deadline = until })

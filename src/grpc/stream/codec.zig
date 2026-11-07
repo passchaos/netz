@@ -44,6 +44,10 @@ pub const FeedProgress = struct {
 /// clear compressed flag; later messages continue using the stream default.
 pub const MessageOptions = struct {
     disable_compression: bool = false,
+    /// Identity encoding keeps the input storage caller-owned instead of
+    /// transferring it to the transport. Compression still allocates a
+    /// separate framed buffer when it reduces the message.
+    borrow_input: bool = false,
 };
 
 pub const Decoder = struct {

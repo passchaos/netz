@@ -61,6 +61,8 @@ pub const OwnedMessage = struct {
 pub const Encoding = struct {
     bytes: []u8,
     input_transferred: bool,
+    /// Identity output still borrows the caller's storage.
+    input_borrowed: bool = false,
 };
 
 /// `storage` reserves the first five bytes for the gRPC message prefix and
@@ -92,7 +94,11 @@ pub fn encode(
     if (!encoded.compressed) {
         storage[0] = 0;
         std.mem.writeInt(u32, storage[1..5], @intCast(payload.len), .big);
-        return .{ .bytes = storage, .input_transferred = true };
+        return .{
+            .bytes = storage,
+            .input_transferred = !options.borrow_input,
+            .input_borrowed = options.borrow_input,
+        };
     }
     const framed = try allocator.alloc(
         u8,
@@ -113,6 +119,9 @@ pub fn encodeMessage(
     message: *OwnedMessage,
     options: codec.MessageOptions,
 ) (compression.Error || wire.Error || error{InvalidStreamState})![]u8 {
+    // This path consumes `message`; a borrowed-input request would leave the
+    // caller's storage owned by the stream and double-free it.
+    if (options.borrow_input) return error.InvalidStreamState;
     const storage = try message.storageFor(allocator);
     const encoded = try encode(allocator, encoder, storage, options);
     if (encoded.input_transferred) {

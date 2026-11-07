@@ -126,6 +126,141 @@ test "gRPC shared channel unary accepts prefix-reserved request storage" {
     try peer.await(io);
 }
 
+test "gRPC shared channel writes a large borrowed request without staging" {
+    const large_request = "shared-borrowed-large-" ** 8192;
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try grpc.runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 16 * 1024, .max_body_bytes = large_request.len + 16 },
+        large_request.len + 16,
+    );
+    defer server.deinit();
+    const Peer = struct {
+        server: *grpc.runtime.Server,
+        expected: []const u8,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn consume(self: *@This(), message: grpc.StreamingMessage) !void {
+            try std.testing.expectEqualStrings(self.expected, message.payload);
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.acceptWithTimeout(.fromSeconds(5));
+            defer connection.deinit();
+            var stream = try connection.acceptDuplexWithTimeout(.fromSeconds(5));
+            defer stream.deinit();
+            var finished = false;
+            while (!finished) {
+                var event = try stream.readRequestEventWithTimeout(.fromSeconds(5), self, consume);
+                defer event.deinit();
+                switch (event) {
+                    .messages => {},
+                    .finished => finished = true,
+                    .reset => return error.UnexpectedReset,
+                }
+            }
+            try stream.startResponse(.{});
+            _ = try stream.writeMessage("ok");
+            try stream.finishOk();
+        }
+    };
+    var peer = Peer{ .server = &server, .expected = large_request };
+    const thread = try std.Thread.spawn(.{}, Peer.run, .{&peer});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const Tracker = struct {
+        child: std.mem.Allocator,
+        threshold: usize,
+        large_allocations: usize = 0,
+
+        fn asAllocator(self: *@This()) std.mem.Allocator {
+            return .{ .ptr = self, .vtable = &vtable };
+        }
+
+        fn alloc(pointer: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
+            const self: *@This() = @ptrCast(@alignCast(pointer));
+            if (len >= self.threshold) self.large_allocations += 1;
+            return self.child.rawAlloc(len, alignment, ret);
+        }
+
+        fn resize(pointer: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, len: usize, ret: usize) bool {
+            const self: *@This() = @ptrCast(@alignCast(pointer));
+            return self.child.rawResize(bytes, alignment, len, ret);
+        }
+
+        fn remap(pointer: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, len: usize, ret: usize) ?[*]u8 {
+            const self: *@This() = @ptrCast(@alignCast(pointer));
+            return self.child.rawRemap(bytes, alignment, len, ret);
+        }
+
+        fn free(pointer: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, ret: usize) void {
+            const self: *@This() = @ptrCast(@alignCast(pointer));
+            self.child.rawFree(bytes, alignment, ret);
+        }
+
+        const vtable: std.mem.Allocator.VTable = .{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        };
+    };
+    var tracker = Tracker{ .child = allocator, .threshold = large_request.len };
+    var client = try shared.SharedChannel.init(
+        tracker.asAllocator(),
+        io,
+        .{ .cleartext_ip = .{ .address = server.address() } },
+        .{},
+    );
+    defer client.deinit();
+    var sender = client.sender();
+    defer sender.deinit();
+    var duplex = try sender.startDuplex(.{
+        .path = "/demo.Shared/Borrowed",
+        .timeout = .{ .value = 5, .unit = .second },
+        .wait_for_ready = true,
+    });
+    defer duplex.deinit();
+    var writer = duplex.writer();
+    defer writer.deinit();
+    var reader = duplex.reader();
+    defer reader.deinit();
+    const storage = try allocator.alloc(u8, 5 + large_request.len);
+    defer allocator.free(storage);
+    @memcpy(storage[5..], large_request);
+    tracker.large_allocations = 0;
+    try writer.writeFinalBorrowedMessage(storage);
+    try std.testing.expectEqual(@as(usize, 0), tracker.large_allocations);
+
+    var terminal = false;
+    while (!terminal) {
+        var event = try reader.nextWithTimeout(.fromSeconds(5));
+        defer event.deinit(allocator);
+        switch (event) {
+            .terminal => |value| {
+                try std.testing.expectEqual(grpc.Status.ok, value.status);
+                terminal = true;
+            },
+            else => {},
+        }
+    }
+
+    thread.join();
+    joined = true;
+    if (peer.err) |err| return err;
+}
+
 test "gRPC shared send handles and connectivity watches survive channel destruction" {
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
     defer threaded.deinit();

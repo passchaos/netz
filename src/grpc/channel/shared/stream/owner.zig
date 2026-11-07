@@ -242,21 +242,37 @@ pub fn Owner(comptime State: type) type {
                     } else {
                         if (!command.staged) {
                             const storage = command.messageStorage();
-                            const transferred = active.stream.stageOwnedMessageStorage(
-                                storage,
-                                command.options,
-                                command.final,
-                            ) catch |err| {
-                                fail(worker, index, err);
-                                progress = true;
-                                continue;
-                            };
-                            command.staged = true;
-                            if (transferred) {
-                                const owned = command.transferPayload();
-                                std.debug.assert(owned.ptr == storage.ptr and
-                                    owned.len == storage.len);
-                            } else command.releasePayload();
+                            if (command.borrowed) {
+                                active.stream.stageBorrowedMessageStorage(
+                                    storage,
+                                    command.options,
+                                    command.final,
+                                ) catch |err| {
+                                    fail(worker, index, err);
+                                    progress = true;
+                                    continue;
+                                };
+                                command.staged = true;
+                                // The caller keeps ownership; only drop the
+                                // command's reference to the storage.
+                                command.releasePayload();
+                            } else {
+                                const transferred = active.stream.stageOwnedMessageStorage(
+                                    storage,
+                                    command.options,
+                                    command.final,
+                                ) catch |err| {
+                                    fail(worker, index, err);
+                                    progress = true;
+                                    continue;
+                                };
+                                command.staged = true;
+                                if (transferred) {
+                                    const owned = command.transferPayload();
+                                    std.debug.assert(owned.ptr == storage.ptr and
+                                        owned.len == storage.len);
+                                } else command.releasePayload();
+                            }
                             progress = true;
                         }
                         const before = active.stream.transport.requestCommittedBytes();

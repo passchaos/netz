@@ -24,6 +24,12 @@ pub fn main(init: std.process.Init) !void {
     defer backing.free(request);
     const response = try config.message(backing, options.payload_bytes, 'b');
     defer backing.free(response);
+    const borrowed_storage: ?[]u8 = if (options.borrowed_writes) blk: {
+        const storage = try backing.alloc(u8, 5 + request.len);
+        @memcpy(storage[5..], request);
+        break :blk storage;
+    } else null;
+    defer if (borrowed_storage) |storage| backing.free(storage);
     const latencies = try backing.alloc(u64, options.iterations);
     defer backing.free(latencies);
     var backend = try netz.runtime.Backend.init(backing);
@@ -49,14 +55,14 @@ pub fn main(init: std.process.Init) !void {
     defer if (live) client.deinit();
     var sender = client.sender();
     defer sender.deinit();
-    var persistent: ?Session = if (options.mode == .persistent) try Session.open(sender, allocator, response, options.validate) else null;
+    var persistent: ?Session = if (options.mode == .persistent) try Session.open(sender, allocator, response, options.validate, borrowed_storage) else null;
     defer if (persistent) |*session| session.deinit();
-    for (0..options.warmup) |_| try exchange(sender, allocator, request, response, &persistent);
+    for (0..options.warmup) |_| try exchange(sender, allocator, request, response, &persistent, borrowed_storage);
     const before = counting.snapshot();
     const started = now(io);
     for (latencies) |*latency| {
         const begin = now(io);
-        try exchange(sender, allocator, request, response, &persistent);
+        try exchange(sender, allocator, request, response, &persistent, borrowed_storage);
         latency.* = now(io) -| begin;
     }
     const elapsed = now(io) -| started;
@@ -77,7 +83,7 @@ pub fn main(init: std.process.Init) !void {
     }
     std.debug.print(
         "record=result schema=2 implementation=netz protocol=grpc transport=h2c " ++
-            "mode={s} client_api=shared allocator={s} client_io=zio-std-io server_io=zio-std-io " ++
+            "mode={s} client_api=shared write_storage={s} allocator={s} client_io=zio-std-io server_io=zio-std-io " ++
             "connection_scope=persistent connections=1 validation={s} " ++
             "protobuf_scope=preencoded allocation_scope=client+server+protocol stats_enabled={} warmup={d} iterations={d} " ++
             "payload_bytes={d} protobuf_bytes={d} logical_bytes={d} elapsed_ns={d} " ++
@@ -85,14 +91,14 @@ pub fn main(init: std.process.Init) !void {
             "final_client_stream_window={d} final_server_stream_window={d} " ++
             "ns_per_roundtrip={d} roundtrips_per_second={d} p50_ns={d} p95_ns={d} p99_ns={d} " ++
             "alloc_count={d} allocated_bytes={d} freed_bytes={d} live_bytes={d}\n",
-        .{ @tagName(options.mode), if (options.cached_allocator) "cached" else if (options.c_allocator) "c" else "smp", if (options.validate) "full-bytes" else "length-only", options.stats, options.warmup, options.iterations, options.payload_bytes, request.len, logical_bytes, elapsed, options.stream_window, options.connection_window, options.adaptive_window, options.adaptive_window_max, options.max_frame_size, peer.final_client_stream_window, peer.final_server_stream_window, elapsed / options.iterations, roundtrips, percentile(latencies, 50), percentile(latencies, 95), percentile(latencies, 99), after.alloc_count - before.alloc_count, after.total_allocated - before.total_allocated, after.total_freed - before.total_freed, after.current_bytes },
+        .{ @tagName(options.mode), if (options.borrowed_writes) "borrowed" else "staged", if (options.cached_allocator) "cached" else if (options.c_allocator) "c" else "smp", if (options.validate) "full-bytes" else "length-only", options.stats, options.warmup, options.iterations, options.payload_bytes, request.len, logical_bytes, elapsed, options.stream_window, options.connection_window, options.adaptive_window, options.adaptive_window_max, options.max_frame_size, peer.final_client_stream_window, peer.final_server_stream_window, elapsed / options.iterations, roundtrips, percentile(latencies, 50), percentile(latencies, 95), percentile(latencies, 99), after.alloc_count - before.alloc_count, after.total_allocated - before.total_allocated, after.total_freed - before.total_freed, after.current_bytes },
     );
     std.debug.print("record=peer-completion schema=2 implementation=netz protocol=grpc mode={s} request_messages={d} response_messages={d} terminal_calls={d} protobuf_bytes={d} stream_window={d} connection_window={d} adaptive_window={} adaptive_window_max={d} max_frame_size={d} final_client_stream_window={d} final_server_stream_window={d}\n", .{ @tagName(options.mode), peer.messages, peer.messages, peer.finished_calls, request.len, options.stream_window, options.connection_window, options.adaptive_window, options.adaptive_window_max, options.max_frame_size, peer.final_client_stream_window, peer.final_server_stream_window });
 }
 
-fn exchange(sender: netz.grpc.SharedChannelSender, allocator: std.mem.Allocator, request: []const u8, response: []const u8, persistent: *?Session) !void {
+fn exchange(sender: netz.grpc.SharedChannelSender, allocator: std.mem.Allocator, request: []const u8, response: []const u8, persistent: *?Session, borrowed: ?[]u8) !void {
     if (persistent.*) |*session| return session.exchange(request);
-    var session = try Session.open(sender, allocator, response, true);
+    var session = try Session.open(sender, allocator, response, true, borrowed);
     defer session.deinit();
     try session.exchange(request);
     try session.finish();

@@ -42,6 +42,21 @@ pub const Writer = struct {
         if (timeout.nanoseconds <= 0) return error.Timeout;
         return self.writeMessageWithDeadline(payload, .fromNow(self.call.parent.io, .{ .clock = .awake, .raw = timeout }));
     }
+    /// Write a prefix-reserved message without copying its payload. The caller
+    /// must keep `storage` valid and unmodified until this call returns. The
+    /// payload starts at byte 5; bytes 0..5 are scratch for the frame prefix.
+    pub fn writeBorrowedMessage(self: Writer, storage: []u8) Error!void {
+        return writing.submitBorrowed(self.call, storage, .{});
+    }
+    pub fn writeBorrowedMessageWithOptions(self: Writer, storage: []u8, options: codec.MessageOptions) Error!void {
+        return writing.submitBorrowed(self.call, storage, .{ .options = options });
+    }
+    pub fn writeFinalBorrowedMessage(self: Writer, storage: []u8) Error!void {
+        return writing.submitBorrowed(self.call, storage, .{ .final = true });
+    }
+    pub fn writeFinalBorrowedMessageWithOptions(self: Writer, storage: []u8, options: codec.MessageOptions) Error!void {
+        return writing.submitBorrowed(self.call, storage, .{ .options = options, .final = true });
+    }
     /// Consume `message` on success or error. It is safe to keep a deferred
     /// `message.deinit()`; consumed storage is represented by a null value.
     pub fn writeOwnedMessage(self: Writer, message: *OwnedWriteMessage) Error!void {

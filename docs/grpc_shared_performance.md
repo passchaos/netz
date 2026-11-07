@@ -371,6 +371,25 @@ measured 556.300 us versus 559.456 us (0.6%, 6/6), consistent with the queued
 copy. Both arms validated request framing on the server and full response
 bytes on the client for every measured call.
 
+SharedChannel duplex writes now also accept caller-owned prefix-reserved
+storage through `SharedStreamWriter.writeBorrowedMessage` and
+`writeFinalBorrowedMessage`. The endpoint owner stages the caller's identity
+payload without copying and still writes it in bounded
+`max_write_bytes_per_turn` turns, so one large stream cannot monopolize an
+owner. The caller's buffer must stay valid until the synchronous call returns;
+the owner never frees borrowed storage. Compression still allocates a separate
+framed buffer owned by the stream. An early peer response or owner-side
+deadline failure completes the write command before returning, so the caller
+can safely reuse the buffer.
+
+`bench-grpc-shared` accepts `--borrowed-writes`. Six CPU-0 order-interleaved
+pairs at 256 KiB measured persistent ping-pong at 408.686 us versus 472.908 us
+(13.58% lower, 6/6) and RPC-per-roundtrip at 487.467 us versus 547.056 us
+(10.89% lower, 6/6). Every arm validated the full response and completed the
+expected message and terminal-call counts. A `--stats` probe over 20 measured
+calls reduced allocation calls from 80 to 60 and allocated bytes from
+15,731,220 to 10,488,160, removing one 262,148-byte request copy per call.
+
 [Complete timing and allocation records](evidence/grpc_shared/2026-10-28-deadline-scatter.json)
 retain 128 validated result/peer-completion pairs plus source and executable
 fingerprints. They do not replace the independent grpc-cpp comparison.

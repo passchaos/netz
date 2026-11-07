@@ -16,6 +16,9 @@ pub const Options = struct {
     adaptive_window_max: u32 = 16 * 1024 * 1024,
     max_frame_size: u32 = 16 * 1024,
     write_turn_bytes: usize = 64 * 1024,
+    /// Client request messages borrow one prefix-reserved buffer instead of
+    /// staging a copy in each queued write.
+    borrowed_writes: bool = false,
 
     pub fn total(self: Options) usize {
         return self.warmup + self.iterations;
@@ -39,6 +42,8 @@ pub fn parse(init: std.process.Init) !Options {
             options.c_allocator = true;
         } else if (std.mem.eql(u8, arg, "--cached-allocator")) {
             options.cached_allocator = true;
+        } else if (std.mem.eql(u8, arg, "--borrowed-writes")) {
+            options.borrowed_writes = true;
         } else if (std.mem.eql(u8, arg, "--adaptive-window")) {
             options.adaptive_window = true;
         } else if (std.mem.startsWith(u8, arg, "--stream-window=")) {
