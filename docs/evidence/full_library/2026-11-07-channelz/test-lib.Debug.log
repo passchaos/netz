@@ -1,0 +1,40 @@
+test-lib
++- run test w
+automatic LRS peer source-limit/sotw/source-b: failed error=Canceled phase=accepting initial=0 reports=0 events=0 last=none closing=false counts=.{ .issued = 0, .successful = 0, .failed = 0, .dropped = 0 }
+automatic LRS peer source-limit/delta/source-a: expected transport close error=ConnectionClosed phase=shutdown initial=1 reports=7 events=8 last=messages closing=true counts=.{ .issued = 2, .successful = 1, .failed = 1, .dropped = 1 }
+automatic LRS peer source-limit/delta/source-b: failed error=Canceled phase=accepting initial=0 reports=0 events=0 last=none closing=false counts=.{ .issued = 0, .successful = 0, .failed = 0, .dropped = 0 }
+federated native mode=sotw phase=initial step=0 authority=A url=type.googleapis.com/envoy.config.listener.v3.Listener nonce=l1
+federated native mode=sotw phase=initial step=1 authority=B url=type.googleapis.com/envoy.config.route.v3.RouteConfiguration nonce=r1
+federated native mode=sotw phase=initial step=2 authority=B url=type.googleapis.com/envoy.config.cluster.v3.Cluster nonce=cb1
+federated native mode=sotw phase=initial step=3 authority=A url=type.googleapis.com/envoy.config.cluster.v3.Cluster nonce=ca1
+federated native mode=sotw phase=initial step=4 authority=A url=type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment nonce=ea1
+federated native mode=sotw phase=initial step=5 authority=B url=type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment nonce=eb1
+federated native mode=sotw phase=remove-a step=0 authority=A url=type.googleapis.com/envoy.config.cluster.v3.Cluster nonce=ca-empty
+federated native mode=sotw phase=replacement step=0 authority=B url=type.googleapis.com/envoy.config.route.v3.RouteConfiguration nonce=r2
+federated native mode=sotw phase=replacement step=1 authority=B url=type.googleapis.com/envoy.config.cluster.v3.Cluster nonce=cb2
+federated native mode=sotw phase=finish-b2 step=0 authority=B url=type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment nonce=eb2
+federated native mode=delta phase=initial step=0 authority=A url=type.googleapis.com/envoy.config.listener.v3.Listener nonce=l1
+federated native mode=delta phase=initial step=1 authority=B url=type.googleapis.com/envoy.config.route.v3.RouteConfiguration nonce=r1
+federated native mode=delta phase=initial step=2 authority=A url=type.googleapis.com/envoy.config.cluster.v3.Cluster nonce=ca1
+federated native mode=delta phase=initial step=3 authority=B url=type.googleapis.com/envoy.config.cluster.v3.Cluster nonce=cb1
+federated native mode=delta phase=initial step=4 authority=A url=type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment nonce=ea1
+federated native mode=delta phase=initial step=5 authority=B url=type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment nonce=eb1
+federated native mode=delta phase=remove-a step=0 authority=A url=type.googleapis.com/envoy.config.cluster.v3.Cluster nonce=ca-empty
+federated native mode=delta phase=replacement step=0 authority=B url=type.googleapis.com/envoy.config.route.v3.RouteConfiguration nonce=r2
+federated native mode=delta phase=replacement step=1 authority=B url=type.googleapis.com/envoy.config.cluster.v3.Cluster nonce=cb2
+federated native mode=delta phase=finish-b2 step=0 authority=B url=type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment nonce=eb2
+failed command: ./.zig-cache/o/9bbbeb7b6f239a0e2a31eb9fe7286eb5/test --cache-dir=./.zig-cache --seed=0x4a337f0d --listen=-
+
+Build Summary: 8/8 steps succeeded; 6757/6757 tests passed
+test-lib success
++- run test 6757 pass (6757 total) 7m MaxRSS:1G
+   +- compile test Debug native success 43s MaxRSS:2G
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 7ms MaxRSS:36M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 7ms MaxRSS:35M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options cached
+
+EXIT:0

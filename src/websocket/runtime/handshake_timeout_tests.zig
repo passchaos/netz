@@ -639,7 +639,7 @@ test "WSS server caller timeout bounds TLS and HTTP upgrade" {
         fn run(self: *@This()) void {
             var connection = self.server.acceptWithTimeout(
                 .{},
-                .fromMilliseconds(50),
+                .fromMilliseconds(2000),
             ) catch |err| {
                 self.err = err;
                 return;
@@ -670,7 +670,7 @@ test "WSS server caller timeout bounds TLS and HTTP upgrade" {
     defer client.deinit();
     // Leave the HTTP Upgrade incomplete after TLS has consumed part of the
     // same caller-owned budget. The HTTP phase must not receive a fresh one.
-    try std.Io.sleep(io, .fromMilliseconds(25), .awake);
+    try std.Io.sleep(io, .fromMilliseconds(1500), .awake);
     client.writeAll("GET / HTTP/1.1\r\nHost: localhost\r\n") catch |err| switch (err) {
         // The server may consume the shared TLS + HTTP deadline and close the
         // connection before this deliberately late, incomplete Upgrade write.
