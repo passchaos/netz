@@ -8,6 +8,7 @@ const std = @import("std");
 const http2 = @import("../http2/mod.zig");
 const auth = @import("auth.zig");
 const call = @import("call.zig");
+const wire = @import("wire.zig");
 const web = @import("web.zig");
 const health = @import("health.zig");
 const reflection = @import("reflection.zig");
@@ -16,10 +17,12 @@ const service_config = @import("service_config.zig");
 const channel = @import("channel.zig");
 const streaming = @import("stream/runtime.zig");
 const duplex = @import("stream/duplex.zig");
+const observability = @import("observability.zig");
 
 const net = std.Io.net;
 
 pub const Error = web.Error;
+pub const ServerObserver = observability.ServerObserver;
 pub const Channel = channel.Channel;
 pub const SharedChannel = @import("channel/shared.zig").SharedChannel;
 pub const SharedChannelSender = @import("channel/shared.zig").Sender;
@@ -331,12 +334,14 @@ pub const ServerOptions = struct {
     transport: http2.runtime.TlsListenOptions,
     max_message_size: usize = 16 * 1024 * 1024,
     keepalive_enforcement: ?http2.runtime.PingEnforcementPolicy = .{},
+    observer: ?observability.ServerObserver = null,
 };
 
 pub const CleartextServerOptions = struct {
     limits: http2.runtime.Limits = .{},
     max_message_size: usize = 16 * 1024 * 1024,
     keepalive_enforcement: ?http2.runtime.PingEnforcementPolicy = .{},
+    observer: ?observability.ServerObserver = null,
 };
 
 pub const ServerKeepAliveEnforcementPolicy =
@@ -351,12 +356,21 @@ fn applyServerPingEnforcement(
     return configured;
 }
 
+fn recordServerStatus(
+    observer: ?observability.ServerObserver,
+    status: wire.Status,
+) void {
+    const value = observer orelse return;
+    if (status == .ok) value.callSucceeded() else value.callFailed();
+}
+
 /// Cleartext prior-knowledge gRPC listener. The accepted connection has the
 /// same unary and streaming surface as `TlsServer`; only transport setup
 /// differs.
 pub const Server = struct {
     transport: http2.runtime.Server,
     max_message_size: usize,
+    observer: ?observability.ServerObserver = null,
 
     pub fn listen(
         allocator: std.mem.Allocator,
@@ -388,6 +402,7 @@ pub const Server = struct {
                 ),
             ),
             .max_message_size = options.max_message_size,
+            .observer = options.observer,
         };
     }
 
@@ -404,6 +419,7 @@ pub const Server = struct {
         return .{
             .connection = try self.transport.accept(),
             .max_message_size = self.max_message_size,
+            .observer = self.observer,
         };
     }
 
@@ -414,6 +430,7 @@ pub const Server = struct {
         return .{
             .connection = try self.transport.acceptWithTimeout(timeout),
             .max_message_size = self.max_message_size,
+            .observer = self.observer,
         };
     }
 
@@ -424,6 +441,7 @@ pub const Server = struct {
         return .{
             .connection = try self.transport.acceptWithDeadline(deadline),
             .max_message_size = self.max_message_size,
+            .observer = self.observer,
         };
     }
 };
@@ -435,6 +453,7 @@ pub const Server = struct {
 pub const TlsServer = struct {
     transport: http2.runtime.TlsServer,
     max_message_size: usize,
+    observer: ?observability.ServerObserver = null,
 
     pub fn listen(
         allocator: std.mem.Allocator,
@@ -455,6 +474,7 @@ pub const TlsServer = struct {
                 transport,
             ),
             .max_message_size = options.max_message_size,
+            .observer = options.observer,
         };
     }
 
@@ -471,6 +491,7 @@ pub const TlsServer = struct {
         return .{
             .connection = try self.transport.accept(),
             .max_message_size = self.max_message_size,
+            .observer = self.observer,
         };
     }
 
@@ -481,6 +502,7 @@ pub const TlsServer = struct {
         return .{
             .connection = try self.transport.acceptWithTimeout(timeout),
             .max_message_size = self.max_message_size,
+            .observer = self.observer,
         };
     }
 
@@ -491,6 +513,7 @@ pub const TlsServer = struct {
         return .{
             .connection = try self.transport.acceptWithDeadline(deadline),
             .max_message_size = self.max_message_size,
+            .observer = self.observer,
         };
     }
 };
@@ -498,6 +521,7 @@ pub const TlsServer = struct {
 pub const ServerConnection = struct {
     connection: http2.runtime.Connection,
     max_message_size: usize,
+    observer: ?observability.ServerObserver = null,
 
     pub fn deinit(self: *ServerConnection) void {
         self.connection.close();
@@ -546,6 +570,7 @@ pub const ServerConnection = struct {
             );
             return err;
         };
+        if (self.observer) |observer| observer.callStarted();
         return .{ .transport = transport, .request = request };
     }
 
@@ -554,12 +579,13 @@ pub const ServerConnection = struct {
         stream_id: u31,
         options: call.UnaryResponseOptions,
     ) Error!void {
-        return call.writeUnaryResponse(
+        try call.writeUnaryResponse(
             &self.connection,
             self.connection.allocator,
             stream_id,
             options,
         );
+        recordServerStatus(self.observer, options.status);
     }
 
     /// Read the next request when the caller has already classified it as
@@ -674,6 +700,7 @@ pub const ServerConnection = struct {
             return err;
         };
         request.stream_id = transport.stream_id;
+        if (self.observer) |observer| observer.callStarted();
         return .{
             .transport = transport,
             .request = request,
@@ -690,13 +717,14 @@ pub const ServerConnection = struct {
         options: call.UnaryResponseOptions,
         content_type: web.ContentType,
     ) Error!void {
-        return web.writeUnaryResponse(
+        try web.writeUnaryResponse(
             &self.connection,
             self.connection.allocator,
             stream_id,
             options,
             content_type,
         );
+        recordServerStatus(self.observer, options.status);
     }
 
     /// Require one RFC 6750 Bearer credential before application dispatch.
@@ -807,35 +835,50 @@ pub const ServerConnection = struct {
     pub fn acceptDuplex(
         self: *ServerConnection,
     ) duplex.Error!duplex.ServerDuplex {
-        return duplex.acceptDuplex(
+        var result = try duplex.acceptDuplex(
             &self.connection,
             self.connection.allocator,
             self.max_message_size,
         );
+        if (self.observer) |observer| {
+            observer.callStarted();
+            result.observer = observer;
+        }
+        return result;
     }
 
     pub fn acceptDuplexWithTimeout(
         self: *ServerConnection,
         timeout: std.Io.Duration,
     ) !duplex.ServerDuplex {
-        return duplex.acceptDuplexWithTimeout(
+        var result = try duplex.acceptDuplexWithTimeout(
             &self.connection,
             self.connection.allocator,
             self.max_message_size,
             timeout,
         );
+        if (self.observer) |observer| {
+            observer.callStarted();
+            result.observer = observer;
+        }
+        return result;
     }
 
     pub fn acceptDuplexWithDeadline(
         self: *ServerConnection,
         deadline: std.Io.Clock.Timestamp,
     ) !duplex.ServerDuplex {
-        return duplex.acceptDuplexWithDeadline(
+        var result = try duplex.acceptDuplexWithDeadline(
             &self.connection,
             self.connection.allocator,
             self.max_message_size,
             deadline,
         );
+        if (self.observer) |observer| {
+            observer.callStarted();
+            result.observer = observer;
+        }
+        return result;
     }
 
     /// Read one gRPC-Web server-streaming request. Exactly one framed

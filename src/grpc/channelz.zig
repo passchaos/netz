@@ -17,6 +17,7 @@ const runtime = @import("runtime.zig");
 const call = @import("call.zig");
 const wire = @import("wire.zig");
 const http2 = @import("../http2/mod.zig");
+const observability = @import("observability.zig");
 
 pub const service = "grpc.channelz.v1.Channelz";
 pub const get_top_channels_path = "/grpc.channelz.v1.Channelz/GetTopChannels";
@@ -266,6 +267,31 @@ pub const Server = struct {
             description,
             severity,
         );
+    }
+
+    /// Allocation-free observer for `grpc.runtime.ServerOptions`.
+    pub fn observer(self: *Server) observability.ServerObserver {
+        return .{
+            .context = self,
+            .call_started_fn = observerStarted,
+            .call_succeeded_fn = observerSucceeded,
+            .call_failed_fn = observerFailed,
+        };
+    }
+
+    fn observerStarted(context: *anyopaque) void {
+        const self: *Server = @ptrCast(@alignCast(context));
+        self.callStarted();
+    }
+
+    fn observerSucceeded(context: *anyopaque) void {
+        const self: *Server = @ptrCast(@alignCast(context));
+        self.callSucceeded();
+    }
+
+    fn observerFailed(context: *anyopaque) void {
+        const self: *Server = @ptrCast(@alignCast(context));
+        self.callFailed();
     }
 
     pub fn callStarted(self: *Server) void {

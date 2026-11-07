@@ -14,6 +14,7 @@ const call = @import("../call.zig");
 const compression = @import("../compression.zig");
 const metadata = @import("../metadata.zig");
 const wire = @import("../wire.zig");
+const observability = @import("../observability.zig");
 const codec = @import("codec.zig");
 const completion = @import("completion.zig");
 const client_receive = @import("duplex/client_receive.zig");
@@ -978,8 +979,18 @@ pub const ServerDuplex = struct {
     encoding: ?[]const u8,
     accepted_encodings: compression.AlgorithmSet,
     message_count: usize = 0,
+    observer: ?observability.ServerObserver = null,
+    terminal_recorded: bool = false,
+
+    fn recordTerminal(self: *ServerDuplex, status: wire.Status) void {
+        if (self.terminal_recorded) return;
+        self.terminal_recorded = true;
+        const observer = self.observer orelse return;
+        if (status == .ok) observer.callSucceeded() else observer.callFailed();
+    }
 
     pub fn deinit(self: *ServerDuplex) void {
+        self.recordTerminal(.internal);
         self.decoder.deinit();
         if (self.pending_message) |*pending| pending.deinit(self.allocator);
         if (self.pending_terminal) |*terminal| terminal.deinit();
@@ -1439,6 +1450,7 @@ pub const ServerDuplex = struct {
                 return err;
             };
         }
+        self.recordTerminal(options.status);
     }
 
     pub fn finishOk(self: *ServerDuplex) Error!void {
@@ -1447,6 +1459,7 @@ pub const ServerDuplex = struct {
 
     pub fn reset(self: *ServerDuplex, code: http2.ErrorCode) Error!void {
         try self.ensureResponseWritable();
+        self.recordTerminal(.canceled);
         self.discardReceiveState();
         self.receive_state = .failed;
         try self.transport.reset(code);
@@ -1551,6 +1564,7 @@ pub const ServerDuplex = struct {
 
     fn fail(self: *ServerDuplex, code: http2.ErrorCode) void {
         if (self.receive_state == .failed) return;
+        self.recordTerminal(.internal);
         self.discardReceiveState();
         self.receive_state = .failed;
         self.transport.reset(code) catch {};

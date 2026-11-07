@@ -7,7 +7,7 @@ serialized with registry mutation.
 
 | Gate | Result | Evidence |
 | --- | --- | --- |
-| Focused Channelz Debug | 172/172 tests | `channelz.Debug.log` |
+| Focused Channelz Debug | 174/174 tests | `channelz.Debug.log` |
 | Official grpc-js Channelz interop | all methods + NOT_FOUND | `interop.Debug.json` |
 
 The focused run covers independent wire decoding of paginated top channels and
@@ -23,7 +23,9 @@ opaque socket addresses are encoded and decoded, with stream/message counters
 and sorted listen-socket pagination. Bounded channel/subchannel/server traces
 cover severity, timestamps, creation time, total-event counting and oldest-event
 eviction after the 16-entry ring fills. Subchannel lookup covers independent
-ids/names/targets/state/counters/traces and channel-side subchannel refs.
+ids/names/targets/state/counters/traces and channel-side subchannel refs. The
+server observer regression verifies automatic started/succeeded/failed counters
+for unary calls and a duplex terminal response.
 
 Subchannels are application-registered; the library does not discover internal
 transport subchannels automatically. Socket security details, socket options,

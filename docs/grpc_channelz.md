@@ -36,6 +36,25 @@ try subchannel.addTrace("created", .info);
 try channel.addSubchannel(subchannel);
 ```
 
+## Automatic server counters
+
+`channelz.Server.observer()` returns an allocation-free observer that can be
+installed on a gRPC listener:
+
+```zig
+const server_info = try registry.addServer("frontend-listener");
+var server = try grpc.runtime.Server.listenWithOptions(allocator, io, address, .{
+    .limits = limits,
+    .observer = server_info.observer(),
+});
+```
+
+Unary, gRPC-Web unary and duplex calls then update the server entry
+automatically: a started call increments `calls_started`, an OK terminal
+response increments `calls_succeeded`, and a non-OK terminal response, reset or
+abrupt stream teardown increments `calls_failed`. Applications may still call
+the counter methods directly when they own the dispatch path.
+
 ## Traces
 
 Channels, subchannels and servers retain a bounded ring of the most recent 16
