@@ -55,6 +55,18 @@ pub const Sender = struct {
         return self.startDuplexWithDeadline(options, .fromNow(self.state.io, .{ .clock = .awake, .raw = timeout }));
     }
     fn unaryResolved(self: Sender, options: call.UnaryCallOptions, retry_policy: ?call.RetryPolicy, hedging_policy: ?call.HedgingPolicy) Error!call.UnaryResponse {
+        const observer = self.state.observer;
+        if (observer) |value| value.callStarted();
+        const result = self.unaryAttempt(options, retry_policy, hedging_policy) catch |err| {
+            if (observer) |value| value.callFailed();
+            return err;
+        };
+        if (observer) |value| {
+            if (result.status == .ok) value.callSucceeded() else value.callFailed();
+        }
+        return result;
+    }
+    fn unaryAttempt(self: Sender, options: call.UnaryCallOptions, retry_policy: ?call.RetryPolicy, hedging_policy: ?call.HedgingPolicy) Error!call.UnaryResponse {
         const entered = std.Io.Clock.awake.now(self.state.io);
         if (options.owned_message) |owned| {
             if (options.message.len != 0) return error.InvalidMessageCount;

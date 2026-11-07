@@ -52,6 +52,7 @@ pub fn openUntil(state: anytype, options: streaming.RequestOptions, entered: std
                 .status = abort.status,
                 .status_message = try state.allocator.dupe(u8, abort.message),
             };
+            stream.terminal_ok = abort.status == .ok;
             stream.retireLocked(null);
             return stream;
         }

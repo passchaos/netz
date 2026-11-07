@@ -87,6 +87,7 @@ pub fn Owner(comptime State: type) type {
                     }
                 } else |_| {}
             }
+            call.terminal_ok = response.status == .ok;
             call.terminal = response;
             call.retireLocked(null);
             state.unlock();

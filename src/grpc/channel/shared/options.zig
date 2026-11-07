@@ -3,9 +3,15 @@ const channel = @import("../../channel.zig");
 const health = @import("../../health.zig");
 const keepalive = @import("keepalive.zig");
 const orca_config = @import("orca/config.zig");
+const observability = @import("../../observability.zig");
 
 pub const Options = struct {
     channel: channel.Options = .{},
+    /// Optional allocation-free call observer for the shared channel itself.
+    /// One logical unary call and one duplex stream each report exactly one
+    /// started and one terminal event. Child transport channels never inherit
+    /// this observer, so calls are not counted twice.
+    observer: ?observability.ServerObserver = null,
     max_queued_calls: usize = 256,
     max_active_calls_per_endpoint: usize = 32,
     /// Opt-in per-cluster unary counters for xDS LRS reporting.

@@ -18,6 +18,7 @@ const orca_oob = @import("../../orca/oob.zig");
 const orca_config = @import("orca/config.zig");
 pub const orca_tracker = @import("orca/tracker.zig");
 const lrs_stats = @import("lrs_stats.zig");
+const observability = @import("../../observability.zig");
 const Job = @import("job.zig").Job;
 const HedgeControl = @import("hedging/control.zig").Control;
 const call_selector = @import("../call_selector.zig");
@@ -29,6 +30,7 @@ pub const State = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     options: Options,
+    observer: ?observability.ServerObserver = null,
     refs: std.atomic.Value(usize) = .init(1),
     mutex: std.Io.Mutex = .init,
     lrs_stats: lrs_stats.Stats = .{},

@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "date": "2026-11-07",
+  "head": "working-tree",
+  "subject": "Automatic Channelz counters for high-level gRPC channels",
+  "change": "grpc.Channel.Options and grpc.SharedChannelOptions gain an allocation-free observer. Channel counts one logical unary call across retries and one terminal event per streaming/duplex stream; SharedChannel counts each sender unary call and each duplex stream. SharedChannel child transport channels explicitly drop the observer so a call is never counted twice. The internal Health Watch transport also drops the observer. Streaming completion reuses stream/completion.Observer, which now carries an optional call observer alongside the existing policy hook.",
+  "tests": {
+    "focused_channelz": {
+      "command": "zig build test-lib -Dtest-filter=Channelz --summary all",
+      "passed": 183,
+      "total": 183,
+      "failed": 0
+    },
+    "focused_grpc": {
+      "command": "zig build test-lib -Dtest-filter=grpc --summary all",
+      "passed": 1059,
+      "total": 1059,
+      "failed": 0
+    },
+    "compile": {
+      "command": "zig build test-compile",
+      "status": "passed"
+    },
+    "full_library": {
+      "command": "zig build test-lib -j1 --seed 0x4a337f0d --summary all",
+      "status": "passed",
+      "passed": 6762,
+      "total": 6762,
+      "failed": 0
+    }
+  },
+  "source_sha256": {
+    "src/grpc/channel.zig": "477623de629c32cd6e6c74def7b18a31b377aeb1bf87852e190c50471f796f35",
+    "src/grpc/channel/shared.zig": "ece165aed4529a053955e52378efe0a2cf7087095ca606d6249e96300435b2ad",
+    "src/grpc/channel/shared/init.zig": "2bccbc2b9ed0d3d456bacb8c109addadac0d08de6311a86b9efea5dc44810a97",
+    "src/grpc/channel/shared/options.zig": "1f0693d35abf17e0c66bf1825f2dcc963c934f30ebce2a3b66f057dd2bddfed4",
+    "src/grpc/channel/shared/state.zig": "700d063d3ec0134b08edb1af8d9c4272e9ca74f4187f1a09c9e7c5610d88875d",
+    "src/grpc/channel/shared/stream/call.zig": "42bcd5784a509e289095a20841b721634027bef342dc099a817c9d719d8646d3",
+    "src/grpc/channel/shared/stream/open.zig": "318f26358cca4966f14df45d870c8606b2d59256d510e49776e065f55b99acbb",
+    "src/grpc/channel/shared/stream/owner.zig": "889d4eadbce3440967f5d6c506964ee05010c32aae5f2d8fd7feb77071428fe0",
+    "src/grpc/stream/completion.zig": "d41b26e82bb7d0038e3a4701da065f82e25592a91b7e64155ec5bef42cba78ea",
+    "src/grpc/channelz_tests.zig": "0ec7ce44e06ca02677e1f58a8f1ad24c359d88085548d4fb5122d3f749b35163",
+    "docs/grpc_channelz.md": "bb10ada9666e7979c842dc8e4d99ae76c3243350b0b927587ad513f0974b5880"
+  },
+  "notes": "The new regressions drive two unary calls (OK then NOT_FOUND) and one OK duplex stream through both a high-level Channel and a SharedChannel, then assert started=3, succeeded=2, failed=1 from a registry-backed Channelz channel. Streaming terminal classification treats an OK terminal status as success; resets, cancellation, non-OK terminals and transport failures increment calls_failed. The observer remains opt-in, so channels without one allocate no completion observer beyond the existing policy requirement."
+}

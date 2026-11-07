@@ -22,6 +22,7 @@ const least_request = @import("channel/least_request.zig");
 const ring_hash = @import("channel/ring_hash.zig");
 const outlier_detection = @import("channel/outlier_detection.zig");
 const proxy_policy = @import("channel/proxy_policy.zig");
+const observability = @import("observability.zig");
 pub const circuit_breaker = @import("channel/circuit_breaker.zig");
 pub const drop_policy = @import("channel/drop_policy.zig");
 const ConnectAllocator = @import("channel/connect_race/allocator.zig").Guard;
@@ -450,6 +451,10 @@ pub const Options = struct {
     /// `health_check_service` still wins; used by the Health Watch's own
     /// transport Channel to avoid recursive checking.
     disable_health_check: bool = false,
+    /// Optional allocation-free call observer. One logical unary call and one
+    /// streaming/duplex stream each report exactly one started and one terminal
+    /// event; retries remain inside that single call.
+    observer: ?observability.ServerObserver = null,
 
     pub fn validate(self: Options) error{InvalidChannelOptions}!void {
         try self.backoff.validate();
@@ -658,6 +663,7 @@ const HostResolution = struct {
 pub const Channel = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
+    observer: ?observability.ServerObserver = null,
     target: Target,
     slots: []Slot,
     selection_policy: SelectionPolicy,
@@ -794,6 +800,8 @@ pub const Channel = struct {
         var health_options = options;
         health_options.health_check_service = null;
         health_options.disable_health_check = true;
+        // The Health Watch's private transport is not an application call.
+        health_options.observer = null;
         var drop = try drop_policy.Policy.init(allocator, options.drop_categories);
         errdefer drop.deinit();
         health_options.drop_categories = &.{};
@@ -803,6 +811,7 @@ pub const Channel = struct {
         var result = Channel{
             .allocator = allocator,
             .io = io,
+            .observer = options.observer,
             .drop = drop,
             .circuit = circuit,
             .target = target,
@@ -1419,17 +1428,25 @@ pub const Channel = struct {
         resolved: service_config.ResolvedUnary,
     ) Error!call.UnaryResponse {
         if (resolved.hedging_policy != null) return error.InvalidChannelOptions;
+        if (self.observer) |observer| observer.callStarted();
         const deadline = callDeadline(self.io, resolved.options.timeout);
         var options = resolved.options;
         options.wait_for_ready = resolved.wait_for_ready;
-        return retry.runWithDeadline(
+        const result = retry.runWithDeadline(
             self,
             self.allocator,
             options,
             resolved.retry_policy,
             deadline,
             unaryAttempt,
-        );
+        ) catch |err| {
+            if (self.observer) |observer| observer.callFailed();
+            return err;
+        };
+        if (self.observer) |observer| {
+            if (result.status == .ok) observer.callSucceeded() else observer.callFailed();
+        }
+        return result;
     }
 
     fn unaryAttempt(
@@ -1505,6 +1522,9 @@ pub const Channel = struct {
         resolved: service_config.ResolvedStreaming,
     ) Error!streaming.ClientWriter {
         if (resolved.hedging_policy != null) return error.InvalidChannelOptions;
+        if (self.observer) |observer| observer.callStarted();
+        var handed_off = false;
+        errdefer if (!handed_off) if (self.observer) |observer| observer.callFailed();
         const deadline = callDeadline(self.io, resolved.options.timeout);
         try self.validateDropRequest(resolved.options);
         if (try self.dropCategory(deadline, resolved.options.xds_cluster)) |_| return error.CallDropped;
@@ -1538,6 +1558,7 @@ pub const Channel = struct {
             writer.setCompletionObserver(observer);
             owns_request = false;
         }
+        handed_off = true;
         return writer;
     }
 
@@ -1565,6 +1586,9 @@ pub const Channel = struct {
         resolved: service_config.ResolvedStreaming,
     ) Error!duplex.ClientDuplex {
         if (resolved.hedging_policy != null) return error.InvalidChannelOptions;
+        if (self.observer) |observer| observer.callStarted();
+        var handed_off = false;
+        errdefer if (!handed_off) if (self.observer) |observer| observer.callFailed();
         const deadline = callDeadline(self.io, resolved.options.timeout);
         try self.validateDropRequest(resolved.options);
         if (try self.dropCategory(deadline, resolved.options.xds_cluster)) |_| return error.CallDropped;
@@ -1598,6 +1622,7 @@ pub const Channel = struct {
             stream.setCompletionObserver(observer);
             owns_request = false;
         }
+        handed_off = true;
         return stream;
     }
 
@@ -2681,12 +2706,15 @@ pub const Channel = struct {
         index: usize,
     ) std.mem.Allocator.Error!?*completion.Observer {
         const slot = &self.slots[index];
-        if (!slot.least_request_enabled and !slot.outlier_enabled and slot.circuit_permit == null and
-            !hasWeightedOutlier(slot)) return null;
+        const policy_owned = slot.least_request_enabled or slot.outlier_enabled or slot.circuit_permit != null or
+            hasWeightedOutlier(slot);
+        if (!policy_owned and self.observer == null) return null;
+        const finish_fn: ?*const fn (context: *anyopaque, success: bool) void = if (policy_owned) finishRequestCompletion else null;
         return try completion.Observer.create(
             self.allocator,
-            slot,
-            finishRequestCompletion,
+            if (policy_owned) slot else null,
+            finish_fn,
+            self.observer,
         );
     }
 

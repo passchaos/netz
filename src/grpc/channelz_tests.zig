@@ -3,6 +3,8 @@ const std = @import("std");
 const channelz = @import("channelz.zig");
 const pb = @import("protobuf.zig");
 const runtime = @import("runtime.zig");
+const channel_mod = @import("channel.zig");
+const shared_mod = @import("channel/shared.zig");
 const wire = @import("wire.zig");
 const gpa = std.testing.allocator;
 
@@ -729,6 +731,248 @@ test "Channelz client observer counts unary and duplex calls automatically" {
     thread.join();
     joined = true;
     if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(i64, 3), channel_info.calls_started.load(.monotonic));
+    try std.testing.expectEqual(@as(i64, 2), channel_info.calls_succeeded.load(.monotonic));
+    try std.testing.expectEqual(@as(i64, 1), channel_info.calls_failed.load(.monotonic));
+}
+
+test "Channelz high-level Channel observer counts unary and duplex calls automatically" {
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var registry = channelz.Registry.init(gpa, io);
+    defer registry.deinit();
+    const channel_info = try registry.addChannel("high-level", "dns:///high.example");
+
+    var server = try runtime.Server.listen(
+        gpa,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+        1024,
+    );
+    defer server.deinit();
+
+    const Peer = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var connection = self.server.accept() catch |err| {
+                self.err = err;
+                return;
+            };
+            defer connection.deinit();
+            for (0..2) |index| {
+                var request = connection.readUnary() catch |err| {
+                    self.err = err;
+                    return;
+                };
+                defer request.deinit();
+                connection.writeUnary(request.request.stream_id, if (index == 0)
+                    .{ .message = "ok" }
+                else
+                    .{ .status = .not_found }) catch |err| {
+                    self.err = err;
+                    return;
+                };
+            }
+            var stream = connection.acceptDuplex() catch |err| {
+                self.err = err;
+                return;
+            };
+            defer stream.deinit();
+            stream.startResponse(.{}) catch |err| {
+                self.err = err;
+                return;
+            };
+            stream.finish(.ok, null, &.{}, &.{}) catch |err| {
+                self.err = err;
+                return;
+            };
+        }
+    };
+    var peer = Peer{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Peer.run, .{&peer});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try channel_mod.Channel.init(
+        gpa,
+        io,
+        .{ .cleartext_ip = .{ .address = server.address() } },
+        .{ .observer = channel_info.observer() },
+    );
+    defer client.deinit();
+    const timeout: wire.Timeout = .{ .value = 3, .unit = .second };
+    var first = try client.unary(.{
+        .path = "/auto/Unary",
+        .authority = "localhost",
+        .message = "one",
+        .timeout = timeout,
+        .wait_for_ready = true,
+    });
+    defer first.deinit();
+    try std.testing.expectEqual(wire.Status.ok, first.status);
+    var second = try client.unary(.{
+        .path = "/auto/Unary",
+        .authority = "localhost",
+        .message = "two",
+        .timeout = timeout,
+        .wait_for_ready = true,
+    });
+    defer second.deinit();
+    try std.testing.expectEqual(wire.Status.not_found, second.status);
+
+    var stream = try client.startDuplex(.{
+        .path = "/auto/Duplex",
+        .authority = "localhost",
+        .timeout = timeout,
+        .wait_for_ready = true,
+    });
+    defer stream.deinit();
+    _ = try stream.finishRequest();
+    var terminal = false;
+    while (!terminal) {
+        var event = try stream.readResponseEvent({}, struct {
+            fn consume(_: void, _: @import("stream/codec.zig").DecodedMessage) !void {}
+        }.consume);
+        defer event.deinit(gpa);
+        switch (event) {
+            .terminal => |value| {
+                try std.testing.expectEqual(wire.Status.ok, value.status);
+                terminal = true;
+            },
+            else => {},
+        }
+    }
+
+    thread.join();
+    joined = true;
+    if (peer.err) |err| return err;
+    try std.testing.expectEqual(@as(i64, 3), channel_info.calls_started.load(.monotonic));
+    try std.testing.expectEqual(@as(i64, 2), channel_info.calls_succeeded.load(.monotonic));
+    try std.testing.expectEqual(@as(i64, 1), channel_info.calls_failed.load(.monotonic));
+}
+
+test "Channelz SharedChannel observer counts unary and duplex calls automatically" {
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var registry = channelz.Registry.init(gpa, io);
+    defer registry.deinit();
+    const channel_info = try registry.addChannel("shared-high-level", "dns:///shared.example");
+
+    var server = try runtime.Server.listen(
+        gpa,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+        1024,
+    );
+    defer server.deinit();
+
+    const Peer = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var connection = self.server.accept() catch |err| {
+                self.err = err;
+                return;
+            };
+            defer connection.deinit();
+            for (0..2) |index| {
+                var request = connection.readUnary() catch |err| {
+                    self.err = err;
+                    return;
+                };
+                defer request.deinit();
+                connection.writeUnary(request.request.stream_id, if (index == 0)
+                    .{ .message = "ok" }
+                else
+                    .{ .status = .not_found }) catch |err| {
+                    self.err = err;
+                    return;
+                };
+            }
+            var stream = connection.acceptDuplex() catch |err| {
+                self.err = err;
+                return;
+            };
+            defer stream.deinit();
+            stream.startResponse(.{}) catch |err| {
+                self.err = err;
+                return;
+            };
+            stream.finish(.ok, null, &.{}, &.{}) catch |err| {
+                self.err = err;
+                return;
+            };
+        }
+    };
+    var peer = Peer{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Peer.run, .{&peer});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try shared_mod.SharedChannel.init(
+        gpa,
+        io,
+        .{ .cleartext_ip = .{ .address = server.address() } },
+        .{ .observer = channel_info.observer() },
+    );
+    defer client.deinit();
+    var sender = client.sender();
+    defer sender.deinit();
+    const timeout: wire.Timeout = .{ .value = 3, .unit = .second };
+    var first = try sender.unary(.{
+        .path = "/auto/Unary",
+        .authority = "localhost",
+        .message = "one",
+        .timeout = timeout,
+        .wait_for_ready = true,
+    });
+    defer first.deinit();
+    try std.testing.expectEqual(wire.Status.ok, first.status);
+    var second = try sender.unary(.{
+        .path = "/auto/Unary",
+        .authority = "localhost",
+        .message = "two",
+        .timeout = timeout,
+        .wait_for_ready = true,
+    });
+    defer second.deinit();
+    try std.testing.expectEqual(wire.Status.not_found, second.status);
+
+    var duplex = try sender.startDuplex(.{
+        .path = "/auto/Duplex",
+        .authority = "localhost",
+        .timeout = timeout,
+        .wait_for_ready = true,
+    });
+    defer duplex.deinit();
+    var writer = duplex.writer();
+    defer writer.deinit();
+    try writer.finishRequest();
+    var reader = duplex.reader();
+    defer reader.deinit();
+    var terminal = false;
+    while (!terminal) {
+        var event = try reader.next();
+        defer event.deinit(gpa);
+        switch (event) {
+            .terminal => |value| {
+                try std.testing.expectEqual(wire.Status.ok, value.status);
+                terminal = true;
+            },
+            else => {},
+        }
+    }
+
+    thread.join();
+    joined = true;
+    if (peer.err) |err| return err;
     try std.testing.expectEqual(@as(i64, 3), channel_info.calls_started.load(.monotonic));
     try std.testing.expectEqual(@as(i64, 2), channel_info.calls_succeeded.load(.monotonic));
     try std.testing.expectEqual(@as(i64, 1), channel_info.calls_failed.load(.monotonic));

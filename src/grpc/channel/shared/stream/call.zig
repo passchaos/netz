@@ -8,6 +8,7 @@ const wire = @import("../../../wire.zig");
 const http2 = @import("../../../../http2/mod.zig");
 const inputs = @import("../request_inputs.zig");
 const Wake = @import("../wake.zig").Wake;
+const observability = @import("../../../observability.zig");
 
 pub const Message = codec.OwnedDecodedMessage;
 
@@ -163,6 +164,8 @@ pub fn Call(comptime State: type) type {
         information: std.ArrayList(http2.runtime.DuplexResponseHead) = .empty,
         terminal: ?duplex.Response = null,
         terminal_taken: bool = false,
+        terminal_ok: bool = false,
+        observer: ?observability.ServerObserver = null,
         bytes: []u8 = &.{},
         head: usize = 0,
         len: usize = 0,
@@ -177,7 +180,8 @@ pub fn Call(comptime State: type) type {
             errdefer parent.allocator.destroy(call);
             const owned = try inputs.clone(parent.allocator, options);
             parent.retain();
-            call.* = .{ .parent = parent, .options = owned.options, .owned_inputs = owned.inputs, .deadline = deadline };
+            call.* = .{ .parent = parent, .options = owned.options, .owned_inputs = owned.inputs, .deadline = deadline, .observer = parent.observer };
+            if (call.observer) |observer| observer.callStarted();
             return call;
         }
         pub fn retain(self: *Self) void {
@@ -267,6 +271,13 @@ pub fn Call(comptime State: type) type {
             if (err) |value| self.fail(value);
             self.finishWriteLocked(self.failureValue() orelse error.ConnectionClosed);
             self.retired = true;
+            if (self.observer) |observer| {
+                const success = err == null and
+                    self.failureValue() == null and
+                    !self.cancel_requested.load(.acquire) and
+                    self.terminal_ok;
+                if (success) observer.callSucceeded() else observer.callFailed();
+            }
             self.changed.set(self.parent.io);
             self.retired_event.set(self.parent.io);
         }

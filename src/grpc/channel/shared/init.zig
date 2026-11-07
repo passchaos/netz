@@ -109,12 +109,15 @@ pub fn create(allocator: std.mem.Allocator, io: std.Io, target: channel.Target, 
     retained.call_selector = null;
     retained.channel.drop_categories = &.{};
     retained.channel.circuit_breaker = null;
+    // Child transport Channels must not report the shared call a second time.
+    retained.channel.observer = null;
     retained.health_service = owned_name;
     retained.health_metadata.service = owned_name orelse "";
     retained.orca_oob = null;
     state.* = .{
         .allocator = allocator,
         .io = io,
+        .observer = options.observer orelse options.channel.observer,
         .lrs_stats = .{ .allocator = if (options.enable_lrs_stats) allocator else null },
         .drop = drop,
         .circuit = circuit,

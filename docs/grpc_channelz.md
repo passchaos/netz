@@ -63,8 +63,27 @@ client.setObserver(channel_info.observer());
 ```
 
 `unary` and `unaryWithRetry` count one logical call each; duplex streams count
-their terminal response, reset or abrupt teardown. The high-level `Channel` and
-`SharedChannel` APIs currently keep application-managed counters.
+their terminal response, reset or abrupt teardown.
+
+High-level channels accept the same observer through their options:
+
+```zig
+var channel = try grpc.Channel.init(allocator, io, target, .{
+    .observer = channel_info.observer(),
+});
+var shared = try grpc.SharedChannel.init(allocator, io, target, .{
+    .observer = channel_info.observer(),
+});
+```
+
+`Channel` counts one logical call across retries for unary calls and one
+terminal event per streaming or duplex stream. `SharedChannel` counts each
+sender unary call and each duplex stream; its child transport channels never
+inherit the observer, so a call is never counted twice. An OK terminal response
+increments `calls_succeeded`; non-OK statuses, resets, cancellation and
+transport failures increment `calls_failed`. Applications may still update
+counters manually when they own a dispatch path that does not pass through
+these APIs.
 
 ## Traces
 
