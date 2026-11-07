@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "date": "2026-11-07",
+  "head": "working-tree",
+  "subject": "gRPC listener and connection graceful shutdown",
+  "change": "http2.runtime.Server and TlsServer gain an idempotent shutdown() that closes the listening socket, leaves accepted connections independent, rejects later accepts with ConnectionClosed, and keeps deinit safe. grpc.runtime.Server and TlsServer forward shutdown(), and ServerConnection forwards the underlying two-phase gracefulShutdown, timeout/deadline forms and gracefulShutdownComplete.",
+  "tests": {
+    "listener": "src/grpc/runtime_tests.zig shuts a live listener down twice and asserts the next accept returns ConnectionClosed; deinit still runs.",
+    "connection": "A real h2c server reads an in-flight unary request, performs the two-phase graceful shutdown, then writes the response. The client receives the OK response and a later unary is rejected with ConnectionGoAway.",
+    "focused_grpc": {
+      "command": "zig build test-lib -Dtest-filter=grpc --summary all",
+      "passed": 1064,
+      "total": 1064,
+      "failed": 0
+    },
+    "compile": {
+      "command": "zig build test-compile",
+      "status": "passed"
+    },
+    "full_library": {
+      "command": "zig build test-lib -j1 --seed 0x4a337f0d --summary all",
+      "status": "passed",
+      "passed": 6767,
+      "total": 6767,
+      "failed": 0
+    }
+  },
+  "source_sha256": {
+    "src/http2/runtime.zig": "dadefca55c2ec6db6a25e7d09d749ca8efcfe72d70dc006a03275086421c55a7",
+    "src/grpc/runtime.zig": "c90af56553c96bd963996a56ae7f2fe9f4fdf85036b8cbf2d7f8ad620349197d",
+    "src/grpc/runtime_tests.zig": "719f0703062ab5e08892bf80757d35ee05b6f3cadca25d2d6735c3ca72b64aaa",
+    "docs/grpc_parity.md": "209a18ccbeb54f0fa37621f939018f60c99c813a9e1c1f50a666da1b93400fb6"
+  },
+  "notes": "Connection shutdown must be the sole frame reader for its duration; the application stops its read loop before calling it. The listener shutdown does not track or close accepted connections, so each connection owner remains responsible for its own GOAWAY/drain and deinit. One earlier full-suite run lost a single host-load-sensitive test; the clean rerun passed 6767/6767."
+}

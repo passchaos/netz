@@ -578,6 +578,20 @@ then verifies the server payload and OK terminal status. A second regression
 responds early and checks that the write returns `peer_event`, the terminal
 status is preserved, and the staged suffix remains resumable.
 
+## Listener and connection shutdown
+
+`grpc.runtime.Server` and `TlsServer` expose `shutdown()`: it closes the
+listening socket, leaves accepted connections independent, makes later accepts
+return `ConnectionClosed`, and remains safe before `deinit()`. Accepted
+`ServerConnection` values expose the underlying two-phase `gracefulShutdown`,
+`gracefulShutdownWithTimeout`, `gracefulShutdownWithDeadline` and
+`gracefulShutdownComplete`. The shutdown call must be the connection's sole
+frame reader; applications should stop their read loop, run the GOAWAY/PING
+synchronization, finish accepted streams, and then deinitialize. A real h2c
+regression reads an in-flight unary request, performs the graceful shutdown,
+writes the response, and verifies the client receives it while a later stream
+is rejected with `ConnectionGoAway`.
+
 ## Remaining work before broad gRPC parity
 
 1. Generated pbz clients and handlers now have netz transport adapters for all

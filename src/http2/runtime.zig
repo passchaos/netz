@@ -780,6 +780,7 @@ pub const Server = struct {
     listener: net.Server,
     allocator: std.mem.Allocator,
     limits: Limits = .{},
+    open: bool = true,
 
     pub fn listen(allocator: std.mem.Allocator, io: std.Io, bind_address: net.IpAddress, limits: Limits) Error!Server {
         try validateLocalLimits(limits);
@@ -791,8 +792,17 @@ pub const Server = struct {
         };
     }
 
-    pub fn deinit(self: *Server) void {
+    /// Close the listening socket without invalidating the value. Existing
+    /// accepted connections remain independent; later accepts fail with
+    /// `ConnectionClosed`. `deinit` remains safe after this call.
+    pub fn shutdown(self: *Server) void {
+        if (!self.open) return;
         self.listener.deinit(self.io);
+        self.open = false;
+    }
+
+    pub fn deinit(self: *Server) void {
+        if (self.open) self.listener.deinit(self.io);
         self.* = undefined;
     }
 
@@ -801,6 +811,7 @@ pub const Server = struct {
     }
 
     pub fn accept(self: *Server) Error!Connection {
+        if (!self.open) return error.ConnectionClosed;
         const stream = try self.listener.accept(self.io);
         return self.acceptStream(stream);
     }
@@ -810,6 +821,7 @@ pub const Server = struct {
         self: *Server,
         deadline: std.Io.Clock.Timestamp,
     ) Error!Connection {
+        if (!self.open) return error.ConnectionClosed;
         _ = try deadline_policy.usableAwake(self.io, deadline);
         const stream = try accept_deadline.withDeadline(
             &self.listener,
@@ -823,6 +835,7 @@ pub const Server = struct {
         self: *Server,
         timeout: std.Io.Duration,
     ) Error!Connection {
+        if (!self.open) return error.ConnectionClosed;
         if (timeout.nanoseconds <= 0) return error.Timeout;
         const deadline = std.Io.Clock.Timestamp.fromNow(
             self.io,
@@ -1459,6 +1472,7 @@ pub const TlsServer = struct {
     limits: Limits,
     tls: tls_stream.ServerOptions,
     tcp_nodelay: bool,
+    open: bool = true,
 
     pub fn listen(
         allocator: std.mem.Allocator,
@@ -1526,6 +1540,7 @@ pub const TlsServer = struct {
         self: *TlsServer,
         timeout: std.Io.Duration,
     ) Error!Connection {
+        if (!self.open) return error.ConnectionClosed;
         if (timeout.nanoseconds <= 0) return error.Timeout;
         const deadline = std.Io.Clock.Timestamp.fromNow(
             self.io,

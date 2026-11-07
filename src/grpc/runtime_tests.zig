@@ -2955,6 +2955,93 @@ test "gRPC unary owned request storage reaches the writer" {
     if (shared.err) |err| return err;
 }
 
+test "gRPC listener shutdown stops new accepts" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try grpc.runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+        1024,
+    );
+    defer server.deinit();
+    server.shutdown();
+    server.shutdown();
+    try std.testing.expectError(
+        error.ConnectionClosed,
+        server.acceptWithTimeout(.fromMilliseconds(100)),
+    );
+}
+
+test "gRPC server connection graceful shutdown drains an in-flight unary call" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try grpc.runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+        1024,
+    );
+    defer server.deinit();
+    const Shared = struct {
+        server: *grpc.runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.deinit();
+            var request = try connection.readUnary();
+            defer request.deinit();
+            try connection.gracefulShutdownWithTimeout(.fromSeconds(3));
+            try connection.writeUnary(request.request.stream_id, .{ .message = "ok" });
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try grpc.runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer client.deinit();
+    var response = try client.unary(.{
+        .path = "/shutdown/Call",
+        .authority = "localhost",
+        .message = "one",
+    });
+    defer response.deinit();
+    try std.testing.expectEqual(grpc.Status.ok, response.status);
+    try std.testing.expectEqualStrings("ok", response.message.?.payload);
+    try std.testing.expectError(
+        error.ConnectionGoAway,
+        client.unary(.{
+            .path = "/shutdown/Next",
+            .authority = "localhost",
+            .message = "two",
+        }),
+    );
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test {
     _ = @import("web/runtime_tests.zig");
 }

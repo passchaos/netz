@@ -432,6 +432,12 @@ pub const Server = struct {
         };
     }
 
+    /// Close the listener while leaving already accepted connections alive.
+    /// Later accepts fail with `ConnectionClosed`; `deinit` remains safe.
+    pub fn shutdown(self: *Server) void {
+        self.transport.shutdown();
+    }
+
     pub fn deinit(self: *Server) void {
         self.transport.deinit();
         self.* = undefined;
@@ -504,6 +510,12 @@ pub const TlsServer = struct {
         };
     }
 
+    /// Close the listener while leaving already accepted connections alive.
+    /// Later accepts fail with `ConnectionClosed`; `deinit` remains safe.
+    pub fn shutdown(self: *TlsServer) void {
+        self.transport.shutdown();
+    }
+
     pub fn deinit(self: *TlsServer) void {
         self.transport.deinit();
         self.* = undefined;
@@ -552,6 +564,32 @@ pub const ServerConnection = struct {
     pub fn deinit(self: *ServerConnection) void {
         self.connection.close();
         self.* = undefined;
+    }
+
+    /// Send the two-phase HTTP/2 GOAWAY handshake so already accepted streams
+    /// can finish while later stream IDs are rejected. This must be the
+    /// connection's sole frame reader for its duration; stop the application
+    /// read loop before calling it.
+    pub fn gracefulShutdown(self: *ServerConnection) Error!void {
+        return self.connection.gracefulShutdown();
+    }
+
+    pub fn gracefulShutdownWithTimeout(
+        self: *ServerConnection,
+        timeout: std.Io.Duration,
+    ) Error!void {
+        return self.connection.gracefulShutdownWithTimeout(timeout);
+    }
+
+    pub fn gracefulShutdownWithDeadline(
+        self: *ServerConnection,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!void {
+        return self.connection.gracefulShutdownWithDeadline(deadline);
+    }
+
+    pub fn gracefulShutdownComplete(self: ServerConnection) bool {
+        return self.connection.gracefulShutdownComplete();
     }
 
     pub fn readUnary(self: *ServerConnection) Error!OwnedUnaryRequest {
