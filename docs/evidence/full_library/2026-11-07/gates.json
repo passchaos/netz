@@ -1,0 +1,20 @@
+[
+  {
+    "name": "test-lib.Debug",
+    "command": [
+      "zig",
+      "build",
+      "test-lib",
+      "-j1",
+      "--seed",
+      "0x4a337f0d",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 0,
+    "summary": "8/8 steps succeeded; 6752/6752 tests passed",
+    "log": "docs/evidence/full_library/2026-11-07/test-lib.Debug.log",
+    "source_manifest": "docs/evidence/full_library/2026-11-07/sources.36e2656092be.json",
+    "source_manifest_sha256": "36e2656092be5763535700ff77abbe9ae4ab708764ac7d24184c9b95d9cac354"
+  }
+]

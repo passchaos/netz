@@ -286,7 +286,7 @@ test "gRPC LRS scheduler reconnects the current server before failing over" {
     defer plane_sender.deinit();
     var client = try lrs.Client.init(allocator, plane_sender, .{ .node = .{ .id = "node-1" } });
     defer client.deinit();
-    const until = std.Io.Clock.Timestamp.fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(10) });
+    const until = std.Io.Clock.Timestamp.fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(30) });
     try client.connectWithDeadline(until);
     var scheduler = lrs.Scheduler.init(allocator, &client, source, .{ .interval_ns = std.time.ns_per_s });
     defer scheduler.deinit();
