@@ -7,7 +7,7 @@ serialized with registry mutation.
 
 | Gate | Result | Evidence |
 | --- | --- | --- |
-| Focused Channelz Debug | 171/171 tests | `channelz.Debug.log` |
+| Focused Channelz Debug | 172/172 tests | `channelz.Debug.log` |
 
 The focused run covers independent wire decoding of paginated top channels and
 servers, single-entity lookup, ids/names/targets/connectivity state, call
@@ -19,12 +19,13 @@ for an unknown channel id. The same fixture exercises `channelz.Client` for
 top-channel and server pages, single server/channel lookup, server sockets,
 socket lookup and client-side `NOT_FOUND` mapping. TCP/IP, Unix-domain and
 opaque socket addresses are encoded and decoded, with stream/message counters
-and sorted listen-socket pagination. Bounded channel/server traces cover
-severity, timestamps, creation time, total-event counting and oldest-event
-eviction after the 16-entry ring fills.
+and sorted listen-socket pagination. Bounded channel/subchannel/server traces
+cover severity, timestamps, creation time, total-event counting and oldest-event
+eviction after the 16-entry ring fills. Subchannel lookup covers independent
+ids/names/targets/state/counters/traces and channel-side subchannel refs.
 
-`GetSubchannel` returns `NOT_FOUND` because this library does not expose a
-stable subchannel object model. Socket security details, socket options,
+Subchannels are application-registered; the library does not discover internal
+transport subchannels automatically. Socket security details, socket options,
 flow-control windows and server connection sockets are not synthesized.
 Applications may register connection sockets explicitly when they own them.
 

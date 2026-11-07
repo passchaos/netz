@@ -123,6 +123,7 @@ pub const Channel = struct {
     calls_failed: std.atomic.Value(i64) = .init(0),
     last_call_started_ns: std.atomic.Value(i64) = .init(0),
     trace: TraceRing,
+    subchannels: std.ArrayList(i64) = .empty,
 
     pub fn setState(self: *Channel, state: ConnectivityState) void {
         self.state.store(@intFromEnum(state), .release);
@@ -143,6 +144,15 @@ pub const Channel = struct {
         );
     }
 
+    pub fn addSubchannel(self: *Channel, subchannel: *Subchannel) Error!void {
+        if (subchannel.registry != self.registry) return error.InvalidRequest;
+        self.registry.mutex.lockUncancelable(self.registry.io);
+        defer self.registry.mutex.unlock(self.registry.io);
+        var index = self.subchannels.items.len;
+        while (index != 0 and self.subchannels.items[index - 1] > subchannel.id) index -= 1;
+        try self.subchannels.insert(self.registry.allocator, index, subchannel.id);
+    }
+
     pub fn callStarted(self: *Channel) void {
         _ = self.calls_started.fetchAdd(1, .monotonic);
         const now = std.Io.Timestamp.now(self.registry.io, .real).toNanoseconds();
@@ -158,6 +168,62 @@ pub const Channel = struct {
     }
 
     fn destroy(self: *Channel, allocator: std.mem.Allocator) void {
+        self.subchannels.deinit(allocator);
+        self.trace.deinit(allocator);
+        allocator.free(self.name);
+        allocator.free(self.target);
+        allocator.destroy(self);
+    }
+};
+
+/// One subchannel. Subchannel refs use the distinct field numbers required by
+/// the Channelz schema; data and trace semantics match channels.
+pub const Subchannel = struct {
+    registry: *Registry,
+    id: i64,
+    name: []const u8,
+    target: []const u8,
+    state: std.atomic.Value(u32),
+    calls_started: std.atomic.Value(i64) = .init(0),
+    calls_succeeded: std.atomic.Value(i64) = .init(0),
+    calls_failed: std.atomic.Value(i64) = .init(0),
+    last_call_started_ns: std.atomic.Value(i64) = .init(0),
+    trace: TraceRing,
+
+    pub fn setState(self: *Subchannel, state: ConnectivityState) void {
+        self.state.store(@intFromEnum(state), .release);
+    }
+
+    pub fn addTrace(
+        self: *Subchannel,
+        description: []const u8,
+        severity: TraceSeverity,
+    ) Error!void {
+        self.registry.mutex.lockUncancelable(self.registry.io);
+        defer self.registry.mutex.unlock(self.registry.io);
+        try self.trace.add(
+            self.registry.allocator,
+            self.registry.io,
+            description,
+            severity,
+        );
+    }
+
+    pub fn callStarted(self: *Subchannel) void {
+        _ = self.calls_started.fetchAdd(1, .monotonic);
+        const now = std.Io.Timestamp.now(self.registry.io, .real).toNanoseconds();
+        self.last_call_started_ns.store(@intCast(now), .release);
+    }
+
+    pub fn callSucceeded(self: *Subchannel) void {
+        _ = self.calls_succeeded.fetchAdd(1, .monotonic);
+    }
+
+    pub fn callFailed(self: *Subchannel) void {
+        _ = self.calls_failed.fetchAdd(1, .monotonic);
+    }
+
+    fn destroy(self: *Subchannel, allocator: std.mem.Allocator) void {
         self.trace.deinit(allocator);
         allocator.free(self.name);
         allocator.free(self.target);
@@ -300,9 +366,11 @@ pub const Registry = struct {
     io: std.Io,
     mutex: std.Io.Mutex = .init,
     channels: std.ArrayList(*Channel) = .empty,
+    subchannels: std.ArrayList(*Subchannel) = .empty,
     servers: std.ArrayList(*Server) = .empty,
     sockets: std.ArrayList(*Socket) = .empty,
     next_channel_id: i64 = 1,
+    next_subchannel_id: i64 = 1,
     next_server_id: i64 = 1,
     next_socket_id: i64 = 1,
 
@@ -313,9 +381,11 @@ pub const Registry = struct {
     pub fn deinit(self: *Registry) void {
         self.mutex.lockUncancelable(self.io);
         for (self.channels.items) |channel| channel.destroy(self.allocator);
+        for (self.subchannels.items) |subchannel| subchannel.destroy(self.allocator);
         for (self.servers.items) |server| server.destroy(self.allocator);
         for (self.sockets.items) |socket| socket.destroy(self.allocator);
         self.channels.deinit(self.allocator);
+        self.subchannels.deinit(self.allocator);
         self.servers.deinit(self.allocator);
         self.sockets.deinit(self.allocator);
         self.mutex.unlock(self.io);
@@ -345,6 +415,29 @@ pub const Registry = struct {
         };
         try self.channels.append(self.allocator, channel);
         return channel;
+    }
+
+    pub fn addSubchannel(self: *Registry, name: []const u8, target: []const u8) Error!*Subchannel {
+        const subchannel = try self.allocator.create(Subchannel);
+        errdefer self.allocator.destroy(subchannel);
+        const owned_name = try self.allocator.dupe(u8, name);
+        errdefer self.allocator.free(owned_name);
+        const owned_target = try self.allocator.dupe(u8, target);
+        errdefer self.allocator.free(owned_target);
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        const id = self.next_subchannel_id;
+        self.next_subchannel_id = std.math.add(i64, id, 1) catch return error.InvalidRequest;
+        subchannel.* = .{
+            .registry = self,
+            .id = id,
+            .name = owned_name,
+            .target = owned_target,
+            .state = .init(@intFromEnum(ConnectivityState.idle)),
+            .trace = TraceRing.init(self.io),
+        };
+        try self.subchannels.append(self.allocator, subchannel);
+        return subchannel;
     }
 
     pub fn addServer(self: *Registry, name: []const u8) Error!*Server {
@@ -404,6 +497,22 @@ pub const Registry = struct {
             _ = self.channels.orderedRemove(index);
             self.mutex.unlock(self.io);
             channel.destroy(self.allocator);
+            return true;
+        }
+        self.mutex.unlock(self.io);
+        return false;
+    }
+
+    /// Remove and destroy a subchannel. The caller must not use the handle
+    /// after this returns. Channel references remain as stale ids until the
+    /// application removes them explicitly.
+    pub fn removeSubchannel(self: *Registry, subchannel: *Subchannel) bool {
+        self.mutex.lockUncancelable(self.io);
+        for (self.subchannels.items, 0..) |candidate, index| {
+            if (candidate != subchannel) continue;
+            _ = self.subchannels.orderedRemove(index);
+            self.mutex.unlock(self.io);
+            subchannel.destroy(self.allocator);
             return true;
         }
         self.mutex.unlock(self.io);
@@ -473,7 +582,7 @@ pub const Registry = struct {
             return try self.socketResponse(allocator, request_bytes);
         }
         if (std.mem.eql(u8, path, get_subchannel_path)) {
-            return error.NotFound;
+            return try self.subchannelResponse(allocator, request_bytes);
         }
         return error.Unimplemented;
     }
@@ -536,6 +645,20 @@ pub const Registry = struct {
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(allocator);
         try encodeChannel(&encoded, allocator, channel);
+        try putBytesField(&out, allocator, 1, encoded.items);
+        return out.toOwnedSlice(allocator);
+    }
+
+    fn subchannelResponse(self: *Registry, allocator: std.mem.Allocator, request_bytes: []const u8) Error![]u8 {
+        const id = try parseId(request_bytes, 1);
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(allocator);
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        const subchannel = self.findSubchannel(id) orelse return error.NotFound;
+        var encoded: std.ArrayList(u8) = .empty;
+        defer encoded.deinit(allocator);
+        try encodeSubchannel(&encoded, allocator, subchannel);
         try putBytesField(&out, allocator, 1, encoded.items);
         return out.toOwnedSlice(allocator);
     }
@@ -612,6 +735,11 @@ pub const Registry = struct {
 
     fn findChannel(self: *Registry, id: i64) ?*Channel {
         for (self.channels.items) |channel| if (channel.id == id) return channel;
+        return null;
+    }
+
+    fn findSubchannel(self: *Registry, id: i64) ?*Subchannel {
+        for (self.subchannels.items) |subchannel| if (subchannel.id == id) return subchannel;
         return null;
     }
 
@@ -698,7 +826,20 @@ pub const TraceInfo = struct {
     events: []TraceEventInfo = &.{},
 };
 
+pub const SubchannelRefInfo = struct {
+    id: i64 = 0,
+    name: []const u8 = "",
+};
+
 pub const ChannelInfo = struct {
+    id: i64 = 0,
+    name: []const u8 = "",
+    data: ChannelData = .{},
+    trace: ?TraceInfo = null,
+    subchannels: []SubchannelRefInfo = &.{},
+};
+
+pub const SubchannelInfo = struct {
     id: i64 = 0,
     name: []const u8 = "",
     data: ChannelData = .{},
@@ -748,6 +889,16 @@ pub const OwnedChannel = struct {
     value: ChannelInfo,
 
     pub fn deinit(self: *OwnedChannel) void {
+        self.arena.deinit();
+        self.* = undefined;
+    }
+};
+
+pub const OwnedSubchannel = struct {
+    arena: std.heap.ArenaAllocator,
+    value: SubchannelInfo,
+
+    pub fn deinit(self: *OwnedSubchannel) void {
         self.arena.deinit();
         self.* = undefined;
     }
@@ -983,6 +1134,7 @@ fn decodeAddress(allocator: std.mem.Allocator, bytes: []const u8) Error!Address 
 
 fn decodeChannelInfo(allocator: std.mem.Allocator, bytes: []const u8) Error!ChannelInfo {
     var value = ChannelInfo{};
+    var subchannels: std.ArrayList(SubchannelRefInfo) = .empty;
     var reader = pb.Reader{ .bytes = bytes };
     while (try reader.next()) |field| switch (field.number) {
         1 => {
@@ -1021,9 +1173,80 @@ fn decodeChannelInfo(allocator: std.mem.Allocator, bytes: []const u8) Error!Chan
                 else => try data.skip(item),
             };
         },
+        4 => try subchannels.append(
+            allocator,
+            try decodeSubchannelRef(allocator, try reader.bytesValue()),
+        ),
+        else => try reader.skip(field),
+    };
+    value.subchannels = try subchannels.toOwnedSlice(allocator);
+    return value;
+}
+
+fn decodeSubchannelRef(allocator: std.mem.Allocator, bytes: []const u8) Error!SubchannelRefInfo {
+    var value = SubchannelRefInfo{};
+    var reader = pb.Reader{ .bytes = bytes };
+    while (try reader.next()) |field| switch (field.number) {
+        7 => value.id = @bitCast(try reader.varint()),
+        8 => value.name = try allocator.dupe(u8, try reader.string()),
         else => try reader.skip(field),
     };
     return value;
+}
+
+fn decodeSubchannelInfo(allocator: std.mem.Allocator, bytes: []const u8) Error!SubchannelInfo {
+    var value = SubchannelInfo{};
+    var reader = pb.Reader{ .bytes = bytes };
+    while (try reader.next()) |field| switch (field.number) {
+        1 => {
+            const ref = try decodeSubchannelRef(allocator, try reader.bytesValue());
+            value.id = ref.id;
+            value.name = ref.name;
+        },
+        2 => {
+            var data = pb.Reader{ .bytes = try reader.bytesValue() };
+            while (try data.next()) |item| switch (item.number) {
+                1 => {
+                    var state = pb.Reader{ .bytes = try data.bytesValue() };
+                    while (try state.next()) |entry| switch (entry.number) {
+                        1 => {
+                            const raw = std.math.cast(
+                                u32,
+                                try state.varint(),
+                            ) orelse 0;
+                            value.data.state = std.enums.fromInt(
+                                ConnectivityState,
+                                raw,
+                            ) orelse .unknown;
+                        },
+                        else => try state.skip(entry),
+                    };
+                },
+                2 => value.data.target = try allocator.dupe(u8, try data.string()),
+                3 => value.trace = try decodeTrace(allocator, try data.bytesValue()),
+                4 => value.data.calls_started = @bitCast(try data.varint()),
+                5 => value.data.calls_succeeded = @bitCast(try data.varint()),
+                6 => value.data.calls_failed = @bitCast(try data.varint()),
+                7 => value.data.last_call_started = try decodeTimestamp(try data.bytesValue()),
+                else => try data.skip(item),
+            };
+        },
+        else => try reader.skip(field),
+    };
+    return value;
+}
+
+pub fn decodeSubchannelResponse(allocator: std.mem.Allocator, bytes: []const u8) Error!OwnedSubchannel {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+    const owned = arena.allocator();
+    var value: ?SubchannelInfo = null;
+    var reader = pb.Reader{ .bytes = bytes };
+    while (try reader.next()) |field| switch (field.number) {
+        1 => value = try decodeSubchannelInfo(owned, try reader.bytesValue()),
+        else => try reader.skip(field),
+    };
+    return .{ .arena = arena, .value = value orelse return error.InvalidRequest };
 }
 
 fn decodeServerInfo(allocator: std.mem.Allocator, bytes: []const u8) Error!ServerInfo {
@@ -1188,6 +1411,15 @@ pub const Client = struct {
         return decodeChannelResponse(self.allocator, message.payload);
     }
 
+    pub fn getSubchannel(self: *Client, id: i64) ClientError!OwnedSubchannel {
+        const request = try encodeIdRequest(self.allocator, id);
+        defer self.allocator.free(request);
+        var response = try self.unary(get_subchannel_path, request);
+        defer response.deinit();
+        const message = response.message orelse return error.InvalidResponse;
+        return decodeSubchannelResponse(self.allocator, message.payload);
+    }
+
     pub fn getServerSockets(
         self: *Client,
         server_id: i64,
@@ -1303,6 +1535,34 @@ fn encodeTraceMessage(out: *std.ArrayList(u8), allocator: std.mem.Allocator, tra
     }
 }
 
+fn encodeChannelData(
+    out: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    state: u32,
+    target: []const u8,
+    started: i64,
+    succeeded: i64,
+    failed: i64,
+    last_call_started_ns: i64,
+    trace: *const TraceRing,
+) !void {
+    var state_message: std.ArrayList(u8) = .empty;
+    defer state_message.deinit(allocator);
+    try putVarintField(&state_message, allocator, 1, state);
+    try putBytesField(out, allocator, 1, state_message.items);
+    if (target.len != 0) try putBytesField(out, allocator, 2, target);
+    var trace_message: std.ArrayList(u8) = .empty;
+    defer trace_message.deinit(allocator);
+    try encodeTraceMessage(&trace_message, allocator, trace);
+    try putBytesField(out, allocator, 3, trace_message.items);
+    if (started != 0) try putVarintField(out, allocator, 4, @bitCast(started));
+    if (succeeded != 0) try putVarintField(out, allocator, 5, @bitCast(succeeded));
+    if (failed != 0) try putVarintField(out, allocator, 6, @bitCast(failed));
+    if (last_call_started_ns != 0) {
+        try putTimestampField(out, allocator, 7, last_call_started_ns);
+    }
+}
+
 fn encodeChannel(out: *std.ArrayList(u8), allocator: std.mem.Allocator, channel: *const Channel) !void {
     var ref: std.ArrayList(u8) = .empty;
     defer ref.deinit(allocator);
@@ -1312,23 +1572,60 @@ fn encodeChannel(out: *std.ArrayList(u8), allocator: std.mem.Allocator, channel:
 
     var data: std.ArrayList(u8) = .empty;
     defer data.deinit(allocator);
-    var state: std.ArrayList(u8) = .empty;
-    defer state.deinit(allocator);
-    try putVarintField(&state, allocator, 1, channel.state.load(.acquire));
-    try putBytesField(&data, allocator, 1, state.items);
-    if (channel.target.len != 0) try putBytesField(&data, allocator, 2, channel.target);
-    var trace: std.ArrayList(u8) = .empty;
-    defer trace.deinit(allocator);
-    try encodeTraceMessage(&trace, allocator, &channel.trace);
-    try putBytesField(&data, allocator, 3, trace.items);
-    const started = channel.calls_started.load(.monotonic);
-    const succeeded = channel.calls_succeeded.load(.monotonic);
-    const failed = channel.calls_failed.load(.monotonic);
-    if (started != 0) try putVarintField(&data, allocator, 4, @bitCast(started));
-    if (succeeded != 0) try putVarintField(&data, allocator, 5, @bitCast(succeeded));
-    if (failed != 0) try putVarintField(&data, allocator, 6, @bitCast(failed));
-    const last = channel.last_call_started_ns.load(.acquire);
-    if (last != 0) try putTimestampField(&data, allocator, 7, last);
+    try encodeChannelData(
+        &data,
+        allocator,
+        channel.state.load(.acquire),
+        channel.target,
+        channel.calls_started.load(.monotonic),
+        channel.calls_succeeded.load(.monotonic),
+        channel.calls_failed.load(.monotonic),
+        channel.last_call_started_ns.load(.acquire),
+        &channel.trace,
+    );
+    try putBytesField(out, allocator, 2, data.items);
+    for (channel.subchannels.items) |id| {
+        const subchannel = channel.registry.findSubchannel(id) orelse continue;
+        var subchannel_ref: std.ArrayList(u8) = .empty;
+        defer subchannel_ref.deinit(allocator);
+        try encodeSubchannelRef(&subchannel_ref, allocator, subchannel.id, subchannel.name);
+        try putBytesField(out, allocator, 4, subchannel_ref.items);
+    }
+}
+
+fn encodeSubchannelRef(
+    out: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    id: i64,
+    name: []const u8,
+) !void {
+    try putVarintField(out, allocator, 7, @intCast(id));
+    if (name.len != 0) try putBytesField(out, allocator, 8, name);
+}
+
+fn encodeSubchannel(
+    out: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    subchannel: *const Subchannel,
+) !void {
+    var ref: std.ArrayList(u8) = .empty;
+    defer ref.deinit(allocator);
+    try encodeSubchannelRef(&ref, allocator, subchannel.id, subchannel.name);
+    try putBytesField(out, allocator, 1, ref.items);
+
+    var data: std.ArrayList(u8) = .empty;
+    defer data.deinit(allocator);
+    try encodeChannelData(
+        &data,
+        allocator,
+        subchannel.state.load(.acquire),
+        subchannel.target,
+        subchannel.calls_started.load(.monotonic),
+        subchannel.calls_succeeded.load(.monotonic),
+        subchannel.calls_failed.load(.monotonic),
+        subchannel.last_call_started_ns.load(.acquire),
+        &subchannel.trace,
+    );
     try putBytesField(out, allocator, 2, data.items);
 }
 

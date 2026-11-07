@@ -395,6 +395,51 @@ test "Channelz rejects unknown methods, unknown ids and invalid pages" {
     try std.testing.expectError(error.NotFound, registry.handle(gpa, channelz.get_channel_path, &.{ 0x08, 0x01 }));
 }
 
+test "Channelz subchannel lookup and channel refs" {
+    var threaded = std.Io.Threaded.init(gpa, .{});
+    defer threaded.deinit();
+    var registry = channelz.Registry.init(gpa, threaded.io());
+    defer registry.deinit();
+    const channel = try registry.addChannel("parent", "dns:///parent.example");
+    const subchannel = try registry.addSubchannel("child", "dns:///child.example");
+    subchannel.setState(.ready);
+    subchannel.callStarted();
+    subchannel.callSucceeded();
+    try subchannel.addTrace("created", .info);
+    try channel.addSubchannel(subchannel);
+
+    const channel_request = try channelz.encodeIdRequest(gpa, channel.id);
+    defer gpa.free(channel_request);
+    const channel_bytes = (try registry.handle(gpa, channelz.get_channel_path, channel_request)).?;
+    defer gpa.free(channel_bytes);
+    var channel_value = try channelz.decodeChannelResponse(gpa, channel_bytes);
+    defer channel_value.deinit();
+    try std.testing.expectEqual(@as(usize, 1), channel_value.value.subchannels.len);
+    try std.testing.expectEqualStrings("child", channel_value.value.subchannels[0].name);
+
+    const subchannel_request = try channelz.encodeIdRequest(gpa, subchannel.id);
+    defer gpa.free(subchannel_request);
+    const subchannel_bytes = (try registry.handle(gpa, channelz.get_subchannel_path, subchannel_request)).?;
+    defer gpa.free(subchannel_bytes);
+    var subchannel_value = try channelz.decodeSubchannelResponse(gpa, subchannel_bytes);
+    defer subchannel_value.deinit();
+    try std.testing.expectEqualStrings("child", subchannel_value.value.name);
+    try std.testing.expectEqualStrings("dns:///child.example", subchannel_value.value.data.target);
+    try std.testing.expectEqual(channelz.ConnectivityState.ready, subchannel_value.value.data.state);
+    try std.testing.expectEqual(@as(i64, 1), subchannel_value.value.data.calls_succeeded);
+    try std.testing.expectEqualStrings("created", subchannel_value.value.trace.?.events[0].description);
+
+    try std.testing.expectError(
+        error.NotFound,
+        registry.handle(gpa, channelz.get_subchannel_path, &.{ 0x08, 0x7f }),
+    );
+    try std.testing.expect(registry.removeSubchannel(subchannel));
+    try std.testing.expectError(
+        error.NotFound,
+        registry.handle(gpa, channelz.get_subchannel_path, subchannel_request),
+    );
+}
+
 test "Channelz serve dispatches real unary gRPC requests and statuses" {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
@@ -411,6 +456,10 @@ test "Channelz serve dispatches real unary gRPC requests and statuses" {
     try channel.addTrace("created", .info);
     try channel.addTrace("ready", .info);
     try server_info.addTrace("listening", .warning);
+    const subchannel = try registry.addSubchannel("child", "dns:///child.example");
+    subchannel.setState(.ready);
+    try subchannel.addTrace("created", .info);
+    try channel.addSubchannel(subchannel);
 
     var server = try runtime.Server.listen(
         gpa,
@@ -441,7 +490,7 @@ test "Channelz serve dispatches real unary gRPC requests and statuses" {
                 return;
             };
             defer connection.deinit();
-            for (0..10) |_| {
+            for (0..12) |_| {
                 var request = connection.readUnary() catch |err| {
                     self.err = err;
                     return;
@@ -530,6 +579,14 @@ test "Channelz serve dispatches real unary gRPC requests and statuses" {
     var channel_value = try admin.getChannel(1);
     defer channel_value.deinit();
     try std.testing.expectEqualStrings("frontend", channel_value.value.name);
+    try std.testing.expectEqual(@as(usize, 1), channel_value.value.subchannels.len);
+    try std.testing.expectEqualStrings("child", channel_value.value.subchannels[0].name);
+
+    var subchannel_value = try admin.getSubchannel(1);
+    defer subchannel_value.deinit();
+    try std.testing.expectEqualStrings("child", subchannel_value.value.name);
+    try std.testing.expectEqual(channelz.ConnectivityState.ready, subchannel_value.value.data.state);
+    try std.testing.expectEqualStrings("created", subchannel_value.value.trace.?.events[0].description);
 
     var sockets = try admin.getServerSockets(1, 0, 0);
     defer sockets.deinit();
@@ -544,6 +601,7 @@ test "Channelz serve dispatches real unary gRPC requests and statuses" {
     try std.testing.expect(socket_value.value.local != null);
 
     try std.testing.expectError(error.NotFound, admin.getChannel(999));
+    try std.testing.expectError(error.NotFound, admin.getSubchannel(999));
     try std.testing.expectError(error.NotFound, admin.getSocket(999));
 
     thread.join();

@@ -29,15 +29,21 @@ try server.addListenSocket(listen);
 try channel.addTrace("created", .info);
 try channel.addTrace("became ready", .info);
 try server.addTrace("listening", .warning);
+
+const subchannel = try registry.addSubchannel("backend-child", "dns:///child.example");
+subchannel.setState(.ready);
+try subchannel.addTrace("created", .info);
+try channel.addSubchannel(subchannel);
 ```
 
 ## Traces
 
-Channels and servers retain a bounded ring of the most recent 16 trace events.
-Each event owns its description and records a severity (`info`, `warning`,
-`@"error"`) and wall-clock timestamp. `num_events_logged` counts every event
-ever added, including events already evicted from the ring; the creation
-timestamp is always reported. `addTrace` is serialized with registry mutation.
+Channels, subchannels and servers retain a bounded ring of the most recent 16
+trace events. Each event owns its description and records a severity (`info`,
+`warning`, `@"error"`) and wall-clock timestamp. `num_events_logged` counts
+every event ever added, including events already evicted from the ring; the
+creation timestamp is always reported. `addTrace` is serialized with registry
+mutation.
 
 ## Methods
 
@@ -49,7 +55,7 @@ timestamp is always reported. `addTrace` is serialized with registry mutation.
 | `GetChannel` | One channel, or `NOT_FOUND`. |
 | `GetServerSockets` | Paginated listen-socket refs for a known server, or `NOT_FOUND`. |
 | `GetSocket` | One socket, or `NOT_FOUND`. |
-| `GetSubchannel` | `NOT_FOUND`; the library has no stable subchannel object model. |
+| `GetSubchannel` | One subchannel, or `NOT_FOUND`. |
 
 Pagination follows the standard request fields. `start_*_id` is inclusive,
 `max_results = 0` selects a default page of 100 entries, the page is capped at
@@ -107,15 +113,16 @@ after removal or registry `deinit`.
 
 ## Limits
 
-The implementation reports channel/server ids, names, targets, connectivity
-state, call started/succeeded/failed counters, the last call-start timestamp
-and a bounded trace ring with a creation timestamp. Sockets report ids, names,
-TCP/IP, Unix or opaque addresses, and stream/message/keep-alive counters. Socket
-security details, socket options, flow-control windows, subchannel inventories
-and server connection sockets are not synthesized. `GetSubchannel` returns
-`NOT_FOUND`. Server connection sockets can be registered explicitly when the
-application owns them; the listener socket alone is enough for the standard
-listen-socket page.
+The implementation reports channel/server/subchannel ids, names, targets,
+connectivity state, call started/succeeded/failed counters, the last call-start
+timestamp and a bounded trace ring with a creation timestamp. Channels can
+reference explicitly attached subchannels. Sockets report ids, names, TCP/IP,
+Unix or opaque addresses, and stream/message/keep-alive counters. Socket
+security details, socket options, flow-control windows and server connection
+sockets are not synthesized. Server connection sockets can be registered
+explicitly when the application owns them; the listener socket alone is enough
+for the standard listen-socket page. Subchannels are application-registered;
+the library does not discover internal transport subchannels automatically.
 
 Focused coverage is available with:
 
