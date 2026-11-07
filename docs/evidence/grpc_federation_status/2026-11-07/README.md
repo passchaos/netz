@@ -8,9 +8,14 @@ payloads actually retained by that authority.
 
 | Gate | Result | Evidence |
 | --- | --- | --- |
+| CSDS codec, timer and partial-publication Debug | 198/198 tests | `csds.Debug.passing.log` |
 | CSDS and delta transaction Debug | 209/209 tests | `transactions.Debug.final.log` |
 | Complete xDS module plus affected unified HTTP pool ReleaseSafe | 537/537 tests | `xds-http.ReleaseSafe.log` |
-| Independent federated ADS/LRS/CSDS ReleaseSafe | SotW and delta | `federation.ReleaseSafe/report.json` |
+| Independent federated ADS/LRS/CSDS ReleaseSafe | SotW and delta | `federation.ReleaseSafe.passing/report.json` |
+
+The earlier `csds.Debug.final` and `federation.ReleaseSafe` artifacts are
+retained. They were captured before the final source state; the passing reruns
+above use the current source manifests.
 
 Counts are Zig's reported focused/module test counts, including imported
 dependencies. The ReleaseSafe count is one combined xDS/HTTP gate. `gates.json`

@@ -156,5 +156,42 @@
     "log": "docs/evidence/grpc_federation_status/2026-11-07/federation.ReleaseSafe.log",
     "source_manifest": "docs/evidence/grpc_federation_status/2026-11-07/sources.73bf1359c84a.json",
     "source_manifest_sha256": "73bf1359c84ad112cfe59e10745ddaf3c5a9d7a83c82d9043337f52d5a676a27"
+  },
+  {
+    "name": "csds.Debug.passing",
+    "command": [
+      "zig",
+      "build",
+      "test-lib",
+      "-Dtest-filter=CSDS",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 1.12,
+    "summary": "8/8 steps succeeded; 198/198 tests passed",
+    "log": "docs/evidence/grpc_federation_status/2026-11-07/csds.Debug.passing.log",
+    "source_manifest": "docs/evidence/grpc_federation_status/2026-11-07/sources.bd199ade6f8f.json",
+    "source_manifest_sha256": "bd199ade6f8fc2ba7bb9cb37b228c6f1cbd40528f454f78e22d1410c2ed443f4"
+  },
+  {
+    "name": "federation.ReleaseSafe.passing",
+    "command": [
+      "zig",
+      "build",
+      "interop-grpc-federation",
+      "-Doptimize=ReleaseSafe",
+      "--summary",
+      "all",
+      "--",
+      "--output",
+      "docs/evidence/grpc_federation_status/2026-11-07/federation.ReleaseSafe.passing/report.json"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 180.11,
+    "summary": "8/8 steps succeeded",
+    "log": "docs/evidence/grpc_federation_status/2026-11-07/federation.ReleaseSafe.passing.log",
+    "source_manifest": "docs/evidence/grpc_federation_status/2026-11-07/sources.e77886473ad9.json",
+    "source_manifest_sha256": "e77886473ad9a9c94dce54fdffaf716ef5fb1b53e0079c56b4d56131fd879d95"
   }
 ]
