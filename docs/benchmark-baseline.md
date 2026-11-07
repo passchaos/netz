@@ -8811,7 +8811,11 @@ staging buffer without changing the borrowed Writer contract or HTTP/2
 packetization. Eight fixed-binary pairs improve persistent and per-call
 256-KiB throughput by a further 10.33% and 7.33%, while zero-byte instructions
 improve 0.56%. Seven clean CPU-1 samples refresh the official grpc-cpp
-comparison to 2.079x and 1.846x for those large-message modes. Small-message
+comparison to 2.079x and 1.846x for those large-message modes. SharedChannel
+borrowed request storage then removed the remaining queued 256-KiB client copy:
+five clean CPU-0 official samples at `8b83e575` measured 1.670x and 1.530x for
+the same persistent and per-call modes, while small messages remained 1.8-2.4x
+faster than grpc-cpp. Small-message
 native times remain lower in this fixture, but broad gRPC performance
 completion is still open: the default borrowed Writer still clones its caller
 payload, while generic ClientDuplex, ServerDuplex and SharedChannel owned-write
