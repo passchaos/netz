@@ -1,0 +1,20 @@
+[
+  {
+    "name": "test-lib.Debug",
+    "command": [
+      "zig",
+      "build",
+      "test-lib",
+      "-j1",
+      "--seed",
+      "0x4a337f0d",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 0,
+    "summary": "8/8 steps succeeded; 6758/6758 tests passed",
+    "log": "docs/evidence/full_library/2026-11-07-channelz-client/test-lib.Debug.log",
+    "source_manifest": "docs/evidence/full_library/2026-11-07-channelz-client/sources.92c7a73227d9.json",
+    "source_manifest_sha256": "92c7a73227d9eb33fe3c2a54cb36cb6efa18f814c96c5013fd41b8d2a32b7b1a"
+  }
+]
