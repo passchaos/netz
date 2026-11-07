@@ -5,11 +5,11 @@
   "src/http/client/types.zig": "bb65382e9aeb4f2e3f4ca4d3592ceccd4b3de4b64a7e2f17a03204de68b1f1c9",
   "src/http/client_pool.zig": "e55fbb02c639e092f1e9344936a89d4cab753edb4ad578a45de7eaab685a1be3",
   "src/http/client_pool/requests.zig": "8129256f51c0ea445a91760fb60ad11a3e8034ea793c640319d3bf36f8b16cf4",
-  "src/http/client_proxy_tests.zig": "172a87c73906b5c107eb3f358399c7f88a8edf92d9638360ddb742191d438ea4",
+  "src/http/client_proxy_tests.zig": "539a18a53a5a70c52ac858edf3c2f4fc49ba41bf2d2839243285f0054e632d6a",
   "src/http/mod.zig": "24750c9d7852be26e46a8ba79c121144343787e320dd2ce6c046e6c64538849f",
   "src/http1/runtime.zig": "27a486cbb9b911a78b0ae704ea3048187853729387172d372eb8a89c88d583a4",
   "src/http2/runtime.zig": "0575b01e2a2bbcfe070d19c1c796506b2b43a32ac219b0f4b9e4de07c0b0124b",
-  "docs/http_proxy.md": "1296bb970386700ab05ec4055c69f95832bf5ea78d50dabd1abae7f927f49baa",
+  "docs/http_proxy.md": "717a163529d7d3699358755a87b4f0b4036b3476bcdb62f3ed0f3c0434c16926",
   "docs/http_client_pool.md": "36c90653bc1430086e742ddde530dec1071e1d484f6e538fb6c5829022797a39",
   "README.md": "ba4cf2c652d1d4c3fbf78b1852778e844a96988759fa95dbf253d1242dbf0b12"
 }

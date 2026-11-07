@@ -2,6 +2,8 @@
 const std = @import("std");
 const http = @import("mod.zig");
 const http1_runtime = @import("../http1/runtime.zig");
+const http2 = @import("../http2/mod.zig");
+const http2_runtime = @import("../http2/runtime.zig");
 const tls_testing = @import("../tls/testing.zig");
 const net = std.Io.net;
 const gpa = std.testing.allocator;
@@ -266,4 +268,185 @@ test "unified HTTP client CONNECTs through an HTTP proxy before origin TLS" {
     thread.join();
     joined = true;
     if (shared.err) |err| return err;
+}
+
+test "unified HTTP pool reuses one h2 connection through CONNECT" {
+    var threaded = std.Io.Threaded.init(gpa, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+    const key_pair = try tls_testing.serverKeyPair();
+    const limits = http2_runtime.Limits{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    };
+    var origin = try http2_runtime.TlsServer.listen(
+        gpa,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{ .ecdsa_p256_sha256 = .{ .key_pair = key_pair } },
+            },
+            .protocol_policy = .tls13_only,
+            .limits = limits,
+        },
+    );
+    defer origin.deinit();
+
+    const Shared = struct {
+        io: std.Io,
+        listener: *net.Server,
+        origin: *http2_runtime.TlsServer,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            const stream = try self.listener.accept(self.io);
+            var owned = true;
+            defer if (owned) stream.close(self.io);
+            var connect = try http1_runtime.readRequestFromStream(
+                gpa,
+                self.io,
+                stream,
+                .{ .max_head_bytes = 4096, .max_body_bytes = 4096 },
+                .{},
+            );
+            defer connect.deinit(gpa);
+            try std.testing.expect(connect.request.method == .CONNECT);
+            const expected_authority = try std.fmt.allocPrint(
+                gpa,
+                "localhost:{d}",
+                .{self.origin.address().getPort()},
+            );
+            defer gpa.free(expected_authority);
+            try std.testing.expectEqualStrings(
+                expected_authority,
+                connect.request.target,
+            );
+            try std.testing.expectEqualStrings(
+                "Basic cHJveHk=",
+                connect.request.header("proxy-authorization").?,
+            );
+            try http1_runtime.writeResponseToStream(
+                gpa,
+                self.io,
+                stream,
+                .{ .status = 200, .request_method = .CONNECT },
+            );
+
+            var connection = try self.origin.acceptStreamWithTimeout(
+                stream,
+                .fromSeconds(3),
+            );
+            owned = false;
+            defer connection.close();
+            const paths = [_][]const u8{ "/one", "/two" };
+            for (paths, 0..) |path, index| {
+                var request = try connection.readRequest();
+                defer request.deinit(gpa);
+                try std.testing.expectEqualStrings(path, request.path);
+                try std.testing.expectEqualStrings("https", request.scheme);
+                try std.testing.expectEqualStrings(
+                    expected_authority,
+                    request.authority.?,
+                );
+                try std.testing.expect(
+                    headerValue(request.headers, "proxy-authorization") == null,
+                );
+                try connection.writeResponse(request.stream_id, .{
+                    .status = 200,
+                    .body = if (index == 0) "h2-one" else "h2-two",
+                    .request_method = request.method,
+                });
+            }
+        }
+    };
+    var shared = Shared{
+        .io = io,
+        .listener = &listener,
+        .origin = &origin,
+    };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var proxy_uri_buffer: [64]u8 = undefined;
+    const proxy_uri = try std.fmt.bufPrint(
+        &proxy_uri_buffer,
+        "http://127.0.0.1:{d}",
+        .{listener.socket.address.getPort()},
+    );
+    var pool = try http.Pool.init(gpa, io, .{
+        .max_connections = 4,
+        .client = .{
+            .protocol_policy = .http2_only,
+            .http_proxy = .{
+                .uri = proxy_uri,
+                .headers = &.{.{
+                    .name = "Proxy-Authorization",
+                    .value = "Basic cHJveHk=",
+                }},
+            },
+            .tls = .{
+                .protocol_policy = .tls13_only,
+                .server_verifier = .{
+                    .pinned_ecdsa_p256_public_key = key_pair.public_key.toUncompressedSec1(),
+                },
+            },
+        },
+    });
+    defer pool.deinit();
+
+    const first_uri = try std.fmt.allocPrint(
+        gpa,
+        "https://localhost:{d}/one",
+        .{origin.address().getPort()},
+    );
+    defer gpa.free(first_uri);
+    const second_uri = try std.fmt.allocPrint(
+        gpa,
+        "https://localhost:{d}/two",
+        .{origin.address().getPort()},
+    );
+    defer gpa.free(second_uri);
+
+    var first = try pool.requestUri(first_uri, .{});
+    defer first.deinit();
+    try std.testing.expectEqual(http.Protocol.http2, first.protocol());
+    try std.testing.expectEqual(@as(u16, 200), first.status());
+    try std.testing.expectEqualStrings("h2-one", first.body());
+
+    var second = try pool.requestUri(second_uri, .{});
+    defer second.deinit();
+    try std.testing.expectEqual(http.Protocol.http2, second.protocol());
+    try std.testing.expectEqual(@as(u16, 200), second.status());
+    try std.testing.expectEqualStrings("h2-two", second.body());
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+fn headerValue(headers: []const http2.Hpack.HeaderField, name: []const u8) ?[]const u8 {
+    for (headers) |field| {
+        if (std.ascii.eqlIgnoreCase(field.name, name)) return field.value;
+    }
+    return null;
 }

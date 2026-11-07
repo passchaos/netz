@@ -49,6 +49,10 @@ absolute-form or origin-form target automatically. Direct users of
 `Client.connectUri` plus `Connection.request` must pass the full absolute URI
 when `Connection.isForwardProxy()` is true.
 
+HTTPS CONNECT negotiates the origin protocol normally, including `h2`. The
+pool's shared HTTP/2 owner can reuse one tunneled connection for later requests
+to the same origin, with independent streams and deadlines.
+
 ## Limits
 
 The proxy transport is cleartext HTTP/1.1. HTTPS-to-proxy, proxy

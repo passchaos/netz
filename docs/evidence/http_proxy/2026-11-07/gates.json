@@ -10,11 +10,11 @@
       "all"
     ],
     "exit_code": 0,
-    "elapsed_seconds": 7.63,
-    "summary": "8/8 steps succeeded; 216/216 tests passed",
+    "elapsed_seconds": 7.65,
+    "summary": "8/8 steps succeeded; 217/217 tests passed",
     "log": "docs/evidence/http_proxy/2026-11-07/http-proxy.Debug.log",
-    "source_manifest": "docs/evidence/http_proxy/2026-11-07/sources.aa5f9bea60e5.json",
-    "source_manifest_sha256": "aa5f9bea60e59bab3803ffd1aa1bbcab0642da4ecb63baececebfd080bbfb107"
+    "source_manifest": "docs/evidence/http_proxy/2026-11-07/sources.6620f99dff5b.json",
+    "source_manifest_sha256": "6620f99dff5bdb6a98adc51f7ee30e2b69d5ae5496a9b64d114347873263a667"
   },
   {
     "name": "http.Debug",
@@ -27,9 +27,9 @@
       "all"
     ],
     "exit_code": 0,
-    "summary": "8/8 steps succeeded; 2558/2558 tests passed",
+    "summary": "8/8 steps succeeded; 2559/2559 tests passed",
     "log": "docs/evidence/http_proxy/2026-11-07/http.Debug.log",
-    "source_manifest": "docs/evidence/http_proxy/2026-11-07/sources.aa5f9bea60e5.json",
-    "source_manifest_sha256": "aa5f9bea60e59bab3803ffd1aa1bbcab0642da4ecb63baececebfd080bbfb107"
+    "source_manifest": "docs/evidence/http_proxy/2026-11-07/sources.6620f99dff5b.json",
+    "source_manifest_sha256": "6620f99dff5bdb6a98adc51f7ee30e2b69d5ae5496a9b64d114347873263a667"
   }
 ]
