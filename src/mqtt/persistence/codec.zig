@@ -55,10 +55,14 @@ pub fn appendProperties(
     allocator: std.mem.Allocator,
     properties: []const mqtt.Property,
 ) Error!void {
-    var encoded: std.ArrayList(u8) = .empty;
-    defer encoded.deinit(allocator);
-    try mqtt.writeProperties(&encoded, allocator, properties);
-    try appendBlob(out, allocator, encoded.items);
+    const original_len = out.items.len;
+    errdefer out.items.len = original_len;
+    try appendInt(out, allocator, u32, 0);
+    const start = out.items.len;
+    try mqtt.writeProperties(out, allocator, properties);
+    const length = out.items.len - start;
+    if (length > max_blob_bytes) return error.SnapshotLimitExceeded;
+    std.mem.writeInt(u32, out.items[original_len..][0..4], @intCast(length), .big);
 }
 
 pub const Cursor = struct {

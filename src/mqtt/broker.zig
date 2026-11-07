@@ -3648,19 +3648,32 @@ pub const Broker = struct {
         allow_provisional_registration: bool,
     ) Error!void {
         if (self.commit_log == null) return;
-        self.persistence_mutex.lockUncancelable(self.io);
-        defer self.persistence_mutex.unlock(self.io);
-        const log = &self.commit_log.?;
-        const encoded = blk: {
-            self.state_mutex.lockUncancelable(self.io);
-            defer self.state_mutex.unlock(self.io);
-            break :blk try self.encodeLiveStateLocked(
-                allow_provisional_registration,
-            );
-        };
-        defer self.allocator.free(encoded);
-        _ = try log.append(encoded);
-        if (!allow_provisional_registration) self.registration_rollback_commit_pending = false;
+        while (true) {
+            const waiting_for_admission = append: {
+                self.persistence_mutex.lockUncancelable(self.io);
+                defer self.persistence_mutex.unlock(self.io);
+                const log = &self.commit_log.?;
+                const encoded = state: {
+                    self.state_mutex.lockUncancelable(self.io);
+                    defer self.state_mutex.unlock(self.io);
+                    if (!allow_provisional_registration and self.hasProvisionalRegistrationLocked()) {
+                        break :append true;
+                    }
+                    break :state try self.encodeLiveStateLocked(
+                        allow_provisional_registration,
+                    );
+                };
+                defer self.allocator.free(encoded);
+                _ = try log.append(encoded);
+                if (!allow_provisional_registration) self.registration_rollback_commit_pending = false;
+                break :append false;
+            };
+            if (!waiting_for_admission) return;
+            // The other CONNECT must be able to attach or roll back while a
+            // protocol transition waits for its coherent journal boundary.
+            // Both mutexes above are released before this cancelable wait.
+            try std.Io.sleep(self.io, .fromMilliseconds(1), .awake);
+        }
     }
 
     /// Record one externally meaningful persistent transition. Callers group
@@ -4004,17 +4017,8 @@ pub const Broker = struct {
         self: *Broker,
         allow_provisional_registration: bool,
     ) Error![]u8 {
-        for (self.slots) |slot| {
-            // Registration becomes durable only once CONNACK succeeds and the
-            // accepted connection is attached. Retrying while this short
-            // transaction is in flight prevents a failed accept from
-            // manufacturing Session Present after restart.
-            if (!allow_provisional_registration and
-                slot.state.active and slot.connection == null and
-                !slot.state.registration_aborted)
-            {
-                return error.SnapshotBusy;
-            }
+        if (!allow_provisional_registration and self.hasProvisionalRegistrationLocked()) {
+            return error.SnapshotBusy;
         }
         return persistence_mod.encodeLive(
             self.allocator,
@@ -4029,6 +4033,21 @@ pub const Broker = struct {
             std.Io.Clock.awake.now(self.io),
             std.Io.Clock.real.now(self.io),
         );
+    }
+
+    fn hasProvisionalRegistrationLocked(self: *const Broker) bool {
+        for (self.slots) |slot| {
+            // Registration becomes durable only once CONNACK succeeds and the
+            // accepted connection is attached. Retrying while this short
+            // transaction is in flight prevents a failed accept from
+            // manufacturing Session Present after restart.
+            if (slot.state.active and slot.connection == null and
+                !slot.state.registration_aborted)
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     /// Restore a snapshot before accepting clients and rebuild Session routes.
@@ -4706,9 +4725,6 @@ pub const Broker = struct {
         storage.adopt(&accepted.connection);
         accepted_owns_connection = false;
         errdefer accepted.connect.deinit(self.allocator);
-        if (registration.replaced_owner_id) |owner_id| {
-            self.disconnectReplacedSessionOwner(owner_id);
-        }
         self.attachConnection(
             index,
             registration.subscriber_id,
@@ -4717,6 +4733,12 @@ pub const Broker = struct {
         );
         _ = storage.take();
         registration_needs_rollback = false;
+        // CONNACK has succeeded and register already detached the prior
+        // Session/Will owner. Attach before waiting on its writer: that writer
+        // can itself be awaiting a journal snapshot of this admission.
+        if (registration.replaced_owner_id) |owner_id| {
+            self.disconnectReplacedSessionOwner(owner_id);
+        }
         // A threshold reached during the provisional CONNECT window was left
         // pending by SnapshotBusy. Attachment retries that snapshot and any
         // journal correction deferred by a concurrent CONNECT rollback.

@@ -1,0 +1,84 @@
+test-lib
++- run test 241 pass, 3 fail (244 total)
+error: 'grpc.xds.runtime.lrs_automatic_tests.test.gRPC automatic SotW and delta LRS enable disabled destination stats and drain retired calls' failed:
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/lrs_automatic_tests.zig:58:5: 0x3f69cc2 in runAutomatic__anon_11175717 (root.zig)
+           try task.await(io);
+           ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/lrs_automatic_tests.zig:274:9: 0x3f6d6d9 in test.gRPC automatic SotW and delta LRS enable disabled destination stats and drain retired calls (root.zig)
+               try runAutomatic(mode, false);
+               ^
+error: 'grpc.xds.runtime.lrs_automatic_tests.test.gRPC automatic LRS preserves accepted CDS provenance through rebind NACK and OOM' failed:
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/std/mem/Allocator.zig:300:82: 0x1465093 in allocBytesWithAlignment__anon_46944 (std.zig)
+           const byte_ptr = self.rawAlloc(byte_count, alignment, return_address) orelse return error.OutOfMemory;
+                                                                                        ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/std/mem/Allocator.zig:286:5: 0x2cd68de in allocWithSizeAndAlignment__anon_10830117 (std.zig)
+           return self.allocBytesWithAlignment(alignment, byte_count, return_address);
+           ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/std/mem/Allocator.zig:274:55: 0x2cd6363 in allocAdvancedWithRetAddr (std.zig)
+           const ptr: [*]align(a.toByteUnits()) T = @ptrCast(try self.allocWithSizeAndAlignment(@sizeOf(T), a, n, return_address));
+                                                             ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/std/mem/Allocator.zig:198:5: 0x2cd643e in alloc__anon_10827712 (std.zig)
+           return self.allocAdvancedWithRetAddr(T, null, n, @returnAddress());
+           ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/std/mem/Allocator.zig:454:21: 0x2cd65c6 in dupe__anon_10827710 (std.zig)
+           const new_buf = try allocator.alloc(T, m.len);
+                           ^
+       /home/passchaos/project-z/netz/src/grpc/channel/shared/update.zig:80:33: 0x2c38c40 in snapshot (root.zig)
+               .resolved => |resolved| try state.allocator.dupe(channel.Endpoint, resolved.endpoints),
+                                       ^
+       /home/passchaos/project-z/netz/src/grpc/channel/shared/update.zig:40:20: 0x168f92c in apply (root.zig)
+           var prepared = try snapshot(state, update, deadline);
+                          ^
+       /home/passchaos/project-z/netz/src/grpc/channel/shared.zig:220:9: 0x168bda7 in updateWithDeadline (root.zig)
+               return @import("shared/update.zig").apply(self.state, change, deadline);
+               ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/target.zig:281:26: 0x3cfe64b in publish (root.zig)
+               const revision = try destination.updateWithDeadline(.{ .target = .{ .resolved = .{ .endpoints = self.endpoints } }, .target_lifetime = self.lifetime(), .service_config = .{ .replace = self.json }, .call_selector = .{ .replace = selector }, .lrs_selection = .{ .replace = self.lrs_selection }, .enable_lrs_stats = enable_lrs_stats }, deadline);
+                                ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/controller.zig:307:26: 0x3cfcf06 in publishPlan (root.zig)
+               const revision = try target.publish(destination, projection.descriptor(), deadline, automatic and bindings.has_sources);
+                                ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/controller.zig:409:26: 0x3ccbe32 in publishDelta (root.zig)
+               const revision = try self.publishPlan(plan, projection, new_projection, destination, deadline);
+                                ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/apply_delta_cds.zig:147:9: 0x3f324fd in apply (root.zig)
+           _ = try self.publishDelta(client, &plan, self.latest.?, false, destination, deadline);
+               ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/controller.zig:530:13: 0x3f08d18 in applyDeltaWithDeadline (root.zig)
+                   try @import("apply_delta_cds.zig").apply(self, client, update, destination, deadline)
+                   ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/lrs_automatic/testing.zig:212:13: 0x3efe498 in applyUntil (root.zig)
+                   return if (mode == .sotw) self.controller.applyWithDeadline(&self.client, value, self.channel, until) else self.controller.applyDeltaWithDeadline(&self.client, value, self.channel, until);
+                   ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/lrs_automatic/testing.zig:209:13: 0x3efe689 in apply (root.zig)
+                   return self.applyUntil(value, deadline(self.io));
+                   ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/lrs_automatic_tests.zig:142:5: 0x3f64da5 in runProvenance__anon_11175705 (root.zig)
+           try task_b.await(io);
+           ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/lrs_automatic_tests.zig:280:5: 0x3f67bb8 in test.gRPC automatic LRS preserves accepted CDS provenance through rebind NACK and OOM (root.zig)
+           try runProvenance(.delta);
+           ^
+error: 'grpc.xds.runtime.lrs_automatic_tests.test.gRPC automatic LRS source inventory limit preserves the published source and calls' failed:
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/lrs_automatic_tests.zig:269:5: 0x3efa41a in runSourceLimit__anon_11174273 (root.zig)
+           try task_a.await(io);
+           ^
+       /home/passchaos/project-z/netz/src/grpc/xds/runtime/lrs_automatic_tests.zig:293:5: 0x3f07c37 in test.gRPC automatic LRS source inventory limit preserves the published source and calls (root.zig)
+           try runSourceLimit(.sotw);
+           ^
+failed command: ./.zig-cache/o/a6be2de47444036aabe872fb3fe554f7/test --cache-dir=./.zig-cache --seed=0x3462a064 --listen=-
+
+Build Summary: 6/8 steps succeeded (1 failed); 241/244 tests passed (3 failed)
+test-lib transitive failure
++- run test 241 pass, 3 fail (244 total)
+   +- compile test Debug native success 34s MaxRSS:2G
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 6ms MaxRSS:38M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 7ms MaxRSS:38M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options cached
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/4c7319f4d9d37c88c7b21e5bc8c48121/build /home/passchaos/Temp/zig-x86_64-linux-0.16.0/zig /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib /home/passchaos/project-z/netz .zig-cache /home/passchaos/.cache/zig --seed 0x3462a064 -Z892aa30fe64d7440 test-lib -Dtest-filter=MQTT v7 snapshot encoding -Dtest-filter=MQTT persistence property blob -Dtest-filter=LRS -Dtest-filter=discovery source -Dtest-filter=received update -Dtest-filter=control plane -Dtest-filter=ADS source validation --summary all

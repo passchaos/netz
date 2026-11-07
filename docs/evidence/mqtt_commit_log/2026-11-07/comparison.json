@@ -1,0 +1,35 @@
+[
+  {
+    "sessions": 1,
+    "baseline_ns": 16683,
+    "optimized_ns": 13008,
+    "baseline_allocations": 23.0,
+    "optimized_allocations": 5.0,
+    "baseline_peak": 12235,
+    "optimized_peak": 3965,
+    "same_snapshot_sha256": true,
+    "speedup": 1.282518450184502
+  },
+  {
+    "sessions": 32,
+    "baseline_ns": 471264,
+    "optimized_ns": 402783,
+    "baseline_allocations": 274.0,
+    "optimized_allocations": 9.0,
+    "baseline_peak": 251514,
+    "optimized_peak": 112938,
+    "same_snapshot_sha256": true,
+    "speedup": 1.1700195887115394
+  },
+  {
+    "sessions": 256,
+    "baseline_ns": 3644431,
+    "optimized_ns": 3377576,
+    "baseline_allocations": 2066.0,
+    "optimized_allocations": 9.0,
+    "baseline_peak": 1965323,
+    "optimized_peak": 860646,
+    "same_snapshot_sha256": true,
+    "speedup": 1.0790078446791427
+  }
+]

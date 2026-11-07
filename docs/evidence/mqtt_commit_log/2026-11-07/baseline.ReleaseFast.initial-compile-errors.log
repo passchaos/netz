@@ -1,0 +1,27 @@
+bench-mqtt-commit-log
++- run exe netz-bench-mqtt-commit-log
+   +- compile exe netz-bench-mqtt-commit-log ReleaseFast native 2 errors
+src/grpc/xds/control_plane.zig:165:53: error: capture shadows declaration of 'server'
+        const servers = if (options.pinned_server) |server| blk: {
+                                                    ^~~~~~
+src/grpc/xds/control_plane.zig:207:9: note: declared here
+    pub fn server(self: *const ControlPlane) *const bootstrap.Server {
+    ~~~~^~
+examples/support/mqtt_commit_log_bench/fixture.zig:76:14: error: expected type '[]mqtt.mod.Property', found '*const [1]mqtt.mod.Property'
+            .properties = &will_properties,
+            ~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+examples/support/mqtt_commit_log_bench/fixture.zig:76:14: note: cast discards const qualifier
+referenced by:
+    runCase: examples/bench_mqtt_commit_log.zig:49:51
+    main: examples/bench_mqtt_commit_log.zig:37:36
+    4 reference(s) hidden; use '-freference-trace=6' to see all references
+error: 2 compilation errors
+failed command: /home/passchaos/Temp/zig-x86_64-linux-0.16.0/zig build-exe -OReleaseFast --dep netz -Mroot=/home/passchaos/project-z/netz/examples/bench_mqtt_commit_log.zig -OReleaseFast --dep vail --dep vort --dep zio -Mnetz=/home/passchaos/project-z/netz/src/root.zig -OReleaseFast --dep vort -Mvail=/home/passchaos/project-z/vail/src/root.zig .zig-cache/o/461167bf3e7774a4ac52f4f7fa32e581/vort-br-record-optimal.o .zig-cache/o/a175a69bc70452f84ab1d11b327e93a3/vort-zstd-huffman-x2.o -OReleaseFast -I .zig-cache/o/2fb5824d4233e9fe32370ab196a5b16d -I .zig-cache/o/2fb5824d4233e9fe32370ab196a5b16d --dep vail_archive_crypto -Mvort=/home/passchaos/project-z/vort/src/root.zig -OReleaseFast --dep zio_build_options -Mzio=/home/passchaos/project-z/netz/zig-pkg/zio-0.19.1-xHbVVHZNLABUkjHyJHQiljEahUaadEy3x1_4vyCvFxjw/src/zio.zig -OReleaseFast -Mvail_archive_crypto=/home/passchaos/project-z/vail/archive_crypto/src/root.zig -Mzio_build_options=.zig-cache/c/320401b06d5c6c293b0e48afbc96afbe/options.zig -lc --cache-dir .zig-cache --global-cache-dir /home/passchaos/.cache/zig --name netz-bench-mqtt-commit-log --zig-lib-dir /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/ --listen=-
+
+Build Summary: 5/8 steps succeeded (1 failed)
+bench-mqtt-commit-log transitive failure
++- run exe netz-bench-mqtt-commit-log transitive failure
+   +- compile exe netz-bench-mqtt-commit-log ReleaseFast native 2 errors
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/4c7319f4d9d37c88c7b21e5bc8c48121/build /home/passchaos/Temp/zig-x86_64-linux-0.16.0/zig /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib /home/passchaos/project-z/netz .zig-cache /home/passchaos/.cache/zig --seed 0xa671253 -Zae236493363ed7d5 bench-mqtt-commit-log -Doptimize=ReleaseFast -- --iterations=3 --samples=3 --metadata-bytes=64 --snapshot-output=src/mqtt/persistence/testdata/v7_all_sections.bin

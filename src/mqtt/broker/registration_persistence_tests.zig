@@ -331,3 +331,7 @@ test "broker retries rollback journal after concurrent CONNECT settles" {
     server_joined = true;
     if (service.err) |err| return err;
 }
+
+test {
+    _ = @import("registration_persistence/overlap_tests.zig");
+}

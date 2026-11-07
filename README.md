@@ -1439,7 +1439,9 @@ Current protocol coverage includes:
   out-of-order ACKs and incoming QoS 2 deduplication, atomic versioned broker
   snapshots whose file contents and, on supported POSIX targets, replacement
   directory entry are synced, matching identity-bound reconnect-client
-  snapshot file save/load with bounded transactional restore, and an opt-in
+  snapshot file save/load with bounded transactional restore, direct v7 section
+  and property encoding with byte-identical compatibility evidence in
+  [MQTT commit-log costs](docs/mqtt_commit_log_costs.md), and an opt-in
   fsynced append journal with
   CRC/sequence/footer validation,
   torn-tail recovery, directory-synced atomic compaction, and protocol-visible

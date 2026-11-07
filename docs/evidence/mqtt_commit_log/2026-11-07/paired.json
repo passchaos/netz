@@ -1,0 +1,149 @@
+{
+  "runs": [
+    {
+      "pair": 0,
+      "variant": "baseline",
+      "command": [
+        "/home/passchaos/project-z/netz/.zig-cache/o/75188d7de6bf71b8b6129e0307f275e1/netz-bench-mqtt-commit-log",
+        "--iterations=5",
+        "--samples=3",
+        "--metadata-bytes=64"
+      ],
+      "elapsed_seconds": 1.51,
+      "log": "docs/evidence/mqtt_commit_log/2026-11-07/paired.0.75188d7d.log",
+      "sha256": "6b04047f1222a98ea097dcc91a8ce1b28c38d28da72022c8787afbfd9e48f09e"
+    },
+    {
+      "pair": 0,
+      "variant": "optimized",
+      "command": [
+        "/home/passchaos/project-z/netz/.zig-cache/o/22cdf269009c264cfd6eac7f57224ef9/netz-bench-mqtt-commit-log",
+        "--iterations=5",
+        "--samples=3",
+        "--metadata-bytes=64"
+      ],
+      "elapsed_seconds": 1.585,
+      "log": "docs/evidence/mqtt_commit_log/2026-11-07/paired.0.22cdf269.log",
+      "sha256": "6b735003b0c5a0ab2655078f7e2d8be3898a03f098eb3fe65add1b5e51bfa5c2"
+    },
+    {
+      "pair": 1,
+      "variant": "optimized",
+      "command": [
+        "/home/passchaos/project-z/netz/.zig-cache/o/22cdf269009c264cfd6eac7f57224ef9/netz-bench-mqtt-commit-log",
+        "--iterations=5",
+        "--samples=3",
+        "--metadata-bytes=64"
+      ],
+      "elapsed_seconds": 4.225,
+      "log": "docs/evidence/mqtt_commit_log/2026-11-07/paired.1.22cdf269.log",
+      "sha256": "6b735003b0c5a0ab2655078f7e2d8be3898a03f098eb3fe65add1b5e51bfa5c2"
+    },
+    {
+      "pair": 1,
+      "variant": "baseline",
+      "command": [
+        "/home/passchaos/project-z/netz/.zig-cache/o/75188d7de6bf71b8b6129e0307f275e1/netz-bench-mqtt-commit-log",
+        "--iterations=5",
+        "--samples=3",
+        "--metadata-bytes=64"
+      ],
+      "elapsed_seconds": 1.416,
+      "log": "docs/evidence/mqtt_commit_log/2026-11-07/paired.1.75188d7d.log",
+      "sha256": "6b04047f1222a98ea097dcc91a8ce1b28c38d28da72022c8787afbfd9e48f09e"
+    },
+    {
+      "pair": 2,
+      "variant": "baseline",
+      "command": [
+        "/home/passchaos/project-z/netz/.zig-cache/o/75188d7de6bf71b8b6129e0307f275e1/netz-bench-mqtt-commit-log",
+        "--iterations=5",
+        "--samples=3",
+        "--metadata-bytes=64"
+      ],
+      "elapsed_seconds": 1.576,
+      "log": "docs/evidence/mqtt_commit_log/2026-11-07/paired.2.75188d7d.log",
+      "sha256": "6b04047f1222a98ea097dcc91a8ce1b28c38d28da72022c8787afbfd9e48f09e"
+    },
+    {
+      "pair": 2,
+      "variant": "optimized",
+      "command": [
+        "/home/passchaos/project-z/netz/.zig-cache/o/22cdf269009c264cfd6eac7f57224ef9/netz-bench-mqtt-commit-log",
+        "--iterations=5",
+        "--samples=3",
+        "--metadata-bytes=64"
+      ],
+      "elapsed_seconds": 1.708,
+      "log": "docs/evidence/mqtt_commit_log/2026-11-07/paired.2.22cdf269.log",
+      "sha256": "6b735003b0c5a0ab2655078f7e2d8be3898a03f098eb3fe65add1b5e51bfa5c2"
+    },
+    {
+      "pair": 3,
+      "variant": "optimized",
+      "command": [
+        "/home/passchaos/project-z/netz/.zig-cache/o/22cdf269009c264cfd6eac7f57224ef9/netz-bench-mqtt-commit-log",
+        "--iterations=5",
+        "--samples=3",
+        "--metadata-bytes=64"
+      ],
+      "elapsed_seconds": 1.82,
+      "log": "docs/evidence/mqtt_commit_log/2026-11-07/paired.3.22cdf269.log",
+      "sha256": "6b735003b0c5a0ab2655078f7e2d8be3898a03f098eb3fe65add1b5e51bfa5c2"
+    },
+    {
+      "pair": 3,
+      "variant": "baseline",
+      "command": [
+        "/home/passchaos/project-z/netz/.zig-cache/o/75188d7de6bf71b8b6129e0307f275e1/netz-bench-mqtt-commit-log",
+        "--iterations=5",
+        "--samples=3",
+        "--metadata-bytes=64"
+      ],
+      "elapsed_seconds": 1.492,
+      "log": "docs/evidence/mqtt_commit_log/2026-11-07/paired.3.75188d7d.log",
+      "sha256": "6b04047f1222a98ea097dcc91a8ce1b28c38d28da72022c8787afbfd9e48f09e"
+    }
+  ],
+  "comparisons": [
+    {
+      "sessions": 1,
+      "paired_ratios": [
+        1.5843871975019517,
+        1.4797552124101616,
+        1.5882582559138105,
+        1.6252036936447583
+      ],
+      "median_speedup": 1.586322726707881,
+      "optimized_wins": 4,
+      "pairs": 4,
+      "all_snapshot_hashes_equal": true
+    },
+    {
+      "sessions": 32,
+      "paired_ratios": [
+        1.0205846121964979,
+        1.1297769242688178,
+        1.1040425117416623,
+        1.1102908293119234
+      ],
+      "median_speedup": 1.1071666705267929,
+      "optimized_wins": 4,
+      "pairs": 4,
+      "all_snapshot_hashes_equal": true
+    },
+    {
+      "sessions": 256,
+      "paired_ratios": [
+        1.069269355699608,
+        1.0821221652832826,
+        1.0864175256438158,
+        1.081237317715089
+      ],
+      "median_speedup": 1.0816797414991859,
+      "optimized_wins": 4,
+      "pairs": 4,
+      "all_snapshot_hashes_equal": true
+    }
+  ]
+}

@@ -1,0 +1,92 @@
+[
+  {
+    "sessions": 1,
+    "phase": "encode_live",
+    "snapshot_bytes": 3271,
+    "median_ns_per_op": 16683,
+    "max_ns_per_op": 36096,
+    "allocations_per_op": 23.0,
+    "peak_extra_bytes": 12235,
+    "fixture_sha256": "dcf225eed61a7218c8f6aa9e0efe31f7484f99377ec0318f7e7b8a8d54eb2bd1"
+  },
+  {
+    "sessions": 1,
+    "phase": "log_append",
+    "snapshot_bytes": 3271,
+    "median_ns_per_op": 5790510,
+    "max_ns_per_op": 6063930,
+    "allocations_per_op": 0.0,
+    "peak_extra_bytes": 0,
+    "fixture_sha256": "dcf225eed61a7218c8f6aa9e0efe31f7484f99377ec0318f7e7b8a8d54eb2bd1"
+  },
+  {
+    "sessions": 1,
+    "phase": "broker_append_commit",
+    "snapshot_bytes": 3271,
+    "median_ns_per_op": 5923737,
+    "max_ns_per_op": 5956541,
+    "allocations_per_op": 23.0,
+    "peak_extra_bytes": 12235,
+    "fixture_sha256": "dcf225eed61a7218c8f6aa9e0efe31f7484f99377ec0318f7e7b8a8d54eb2bd1"
+  },
+  {
+    "sessions": 32,
+    "phase": "encode_live",
+    "snapshot_bytes": 92935,
+    "median_ns_per_op": 471264,
+    "max_ns_per_op": 497361,
+    "allocations_per_op": 274.0,
+    "peak_extra_bytes": 251514,
+    "fixture_sha256": "6747e99f10d70ed882a11ac1b76587a71b767c971e225088bda6fad714f9d450"
+  },
+  {
+    "sessions": 32,
+    "phase": "log_append",
+    "snapshot_bytes": 92935,
+    "median_ns_per_op": 3244504,
+    "max_ns_per_op": 6409380,
+    "allocations_per_op": 0.0,
+    "peak_extra_bytes": 0,
+    "fixture_sha256": "6747e99f10d70ed882a11ac1b76587a71b767c971e225088bda6fad714f9d450"
+  },
+  {
+    "sessions": 32,
+    "phase": "broker_append_commit",
+    "snapshot_bytes": 92935,
+    "median_ns_per_op": 5821207,
+    "max_ns_per_op": 6623427,
+    "allocations_per_op": 274.0,
+    "peak_extra_bytes": 251514,
+    "fixture_sha256": "6747e99f10d70ed882a11ac1b76587a71b767c971e225088bda6fad714f9d450"
+  },
+  {
+    "sessions": 256,
+    "phase": "encode_live",
+    "snapshot_bytes": 742819,
+    "median_ns_per_op": 3644431,
+    "max_ns_per_op": 3732986,
+    "allocations_per_op": 2066.0,
+    "peak_extra_bytes": 1965323,
+    "fixture_sha256": "8c67ac5cdea60cca001c00a3867bffb5c9ea5fdebdfcdf89e0a3b008f4b954cf"
+  },
+  {
+    "sessions": 256,
+    "phase": "log_append",
+    "snapshot_bytes": 742819,
+    "median_ns_per_op": 6805692,
+    "max_ns_per_op": 6845943,
+    "allocations_per_op": 0.0,
+    "peak_extra_bytes": 0,
+    "fixture_sha256": "8c67ac5cdea60cca001c00a3867bffb5c9ea5fdebdfcdf89e0a3b008f4b954cf"
+  },
+  {
+    "sessions": 256,
+    "phase": "broker_append_commit",
+    "snapshot_bytes": 742819,
+    "median_ns_per_op": 27556835,
+    "max_ns_per_op": 38923241,
+    "allocations_per_op": 2066.0,
+    "peak_extra_bytes": 1965323,
+    "fixture_sha256": "8c67ac5cdea60cca001c00a3867bffb5c9ea5fdebdfcdf89e0a3b008f4b954cf"
+  }
+]

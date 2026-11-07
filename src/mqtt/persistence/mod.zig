@@ -169,39 +169,43 @@ fn encodeMode(
     realtime_now: std.Io.Timestamp,
     live_checkpoint: bool,
 ) Error![]u8 {
-    var retained_bytes: std.ArrayList(u8) = .empty;
-    defer retained_bytes.deinit(allocator);
+    var encoded: std.ArrayList(u8) = .empty;
+    errdefer encoded.deinit(allocator);
+    try encoded.appendSlice(allocator, magic);
+    try codec.appendInt(&encoded, allocator, u32, version);
+    try codec.appendInt(&encoded, allocator, i64, clampI96ToI64(realtime_now.nanoseconds));
+    var section = try beginSection(&encoded, allocator, 1);
     try state.retained.writeSnapshot(
-        &retained_bytes,
+        &encoded,
         allocator,
         monotonic_now,
     );
-    var session_bytes: std.ArrayList(u8) = .empty;
-    defer session_bytes.deinit(allocator);
+    try finishSection(&encoded, section);
+    section = try beginSection(&encoded, allocator, 2);
     try state.sessions.writeSnapshot(
-        &session_bytes,
+        &encoded,
         allocator,
         monotonic_now,
     );
-    var will_bytes: std.ArrayList(u8) = .empty;
-    defer will_bytes.deinit(allocator);
+    try finishSection(&encoded, section);
+    section = try beginSection(&encoded, allocator, 3);
     if (live_checkpoint) {
         try state.wills.writeLiveSnapshot(
-            &will_bytes,
+            &encoded,
             allocator,
             monotonic_now,
             state.will_publishers,
         );
     } else {
         try state.wills.writeSnapshot(
-            &will_bytes,
+            &encoded,
             allocator,
             monotonic_now,
             state.will_publishers,
         );
     }
-    var qos2_bytes: std.ArrayList(u8) = .empty;
-    defer qos2_bytes.deinit(allocator);
+    try finishSection(&encoded, section);
+    section = try beginSection(&encoded, allocator, 4);
     const PublisherLookup = struct {
         fn exists(
             sessions: *session.Store,
@@ -216,7 +220,7 @@ fn encodeMode(
     };
     if (live_checkpoint) {
         try state.pending_qos2.writeLiveSnapshot(
-            &qos2_bytes,
+            &encoded,
             allocator,
             monotonic_now,
             state.sessions,
@@ -224,36 +228,22 @@ fn encodeMode(
         );
     } else {
         try state.pending_qos2.writeSnapshot(
-            &qos2_bytes,
+            &encoded,
             allocator,
             monotonic_now,
             state.sessions,
             PublisherLookup.exists,
         );
     }
-    var bridge_qos2_bytes: std.ArrayList(u8) = .empty;
-    defer bridge_qos2_bytes.deinit(allocator);
+    try finishSection(&encoded, section);
+    section = try beginSection(&encoded, allocator, 5);
     try state.bridge_qos2.writeSnapshot(
-        &bridge_qos2_bytes,
+        &encoded,
         allocator,
         monotonic_now,
     );
 
-    var encoded: std.ArrayList(u8) = .empty;
-    errdefer encoded.deinit(allocator);
-    try encoded.appendSlice(allocator, magic);
-    try codec.appendInt(&encoded, allocator, u32, version);
-    try codec.appendInt(
-        &encoded,
-        allocator,
-        i64,
-        clampI96ToI64(realtime_now.nanoseconds),
-    );
-    try appendSection(&encoded, allocator, 1, retained_bytes.items);
-    try appendSection(&encoded, allocator, 2, session_bytes.items);
-    try appendSection(&encoded, allocator, 3, will_bytes.items);
-    try appendSection(&encoded, allocator, 4, qos2_bytes.items);
-    try appendSection(&encoded, allocator, 5, bridge_qos2_bytes.items);
+    try finishSection(&encoded, section);
     try codec.appendInt(
         &encoded,
         allocator,
@@ -261,6 +251,11 @@ fn encodeMode(
         std.hash.crc.Crc32.hash(encoded.items),
     );
     return encoded.toOwnedSlice(allocator);
+}
+
+test {
+    _ = @import("encoding_tests.zig");
+    _ = @import("codec_tests.zig");
 }
 
 pub fn decode(
@@ -404,24 +399,23 @@ fn sessionRouteId(id: u64) ?u64 {
     return id & ~tag;
 }
 
-fn appendSection(
+fn beginSection(
     out: *std.ArrayList(u8),
     allocator: std.mem.Allocator,
     kind: u32,
-    bytes: []const u8,
-) codec.Error!void {
-    if (bytes.len > max_section_bytes) {
-        return error.SnapshotLimitExceeded;
-    }
+) codec.Error!usize {
+    const header = out.items.len;
     try codec.appendInt(out, allocator, u32, kind);
-    try codec.appendInt(out, allocator, u32, @intCast(bytes.len));
-    try codec.appendInt(
-        out,
-        allocator,
-        u32,
-        std.hash.crc.Crc32.hash(bytes),
-    );
-    try out.appendSlice(allocator, bytes);
+    try codec.appendInt(out, allocator, u32, 0);
+    try codec.appendInt(out, allocator, u32, 0);
+    return header;
+}
+
+fn finishSection(out: *std.ArrayList(u8), header: usize) codec.Error!void {
+    const bytes = out.items[header + 12 ..];
+    if (bytes.len > max_section_bytes) return error.SnapshotLimitExceeded;
+    std.mem.writeInt(u32, out.items[header + 4 ..][0..4], @intCast(bytes.len), .big);
+    std.mem.writeInt(u32, out.items[header + 8 ..][0..4], std.hash.crc.Crc32.hash(bytes), .big);
 }
 
 fn readSection(

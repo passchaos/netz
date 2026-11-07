@@ -3665,6 +3665,12 @@ pub fn build(b: *std.Build) void {
             .description = "Benchmark shared MQTT Session metadata allocations and logical ownership",
         },
         .{
+            .exe_name = "netz-bench-mqtt-commit-log",
+            .path = "examples/bench_mqtt_commit_log.zig",
+            .run_step = "bench-mqtt-commit-log",
+            .description = "Measure MQTT snapshot serialization, journal append and fsync costs",
+        },
+        .{
             .exe_name = "netz-bench-mqtt-session",
             .path = "examples/bench_mqtt_session.zig",
             .run_step = "bench-mqtt-session",

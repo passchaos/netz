@@ -1,0 +1,137 @@
+[
+  {
+    "name": "focused.Debug",
+    "command": [
+      "zig",
+      "build",
+      "test-lib",
+      "-Dtest-filter=MQTT v7 snapshot encoding",
+      "-Dtest-filter=MQTT persistence property blob",
+      "-Dtest-filter=LRS",
+      "-Dtest-filter=discovery source",
+      "-Dtest-filter=received update",
+      "-Dtest-filter=control plane",
+      "-Dtest-filter=ADS source validation",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 1,
+    "elapsed_seconds": 41.827,
+    "summary": "6/8 steps succeeded (1 failed); 241/244 tests passed (3 failed)",
+    "log": "docs/evidence/mqtt_commit_log/2026-11-07/focused.Debug.log"
+  },
+  {
+    "name": "persistence.Debug",
+    "command": [
+      "zig",
+      "build",
+      "test-lib",
+      "-Dtest-filter=snapshot",
+      "-Dtest-filter=commit log",
+      "-Dtest-filter=property blob",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 36.157,
+    "summary": "8/8 steps succeeded; 291/291 tests passed",
+    "log": "docs/evidence/mqtt_commit_log/2026-11-07/persistence.Debug.log"
+  },
+  {
+    "name": "persistence.ReleaseSafe",
+    "command": [
+      "zig",
+      "build",
+      "test-lib",
+      "-Doptimize=ReleaseSafe",
+      "-Dtest-filter=snapshot",
+      "-Dtest-filter=commit log",
+      "-Dtest-filter=property blob",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 199.181,
+    "summary": "8/8 steps succeeded; 291/291 tests passed",
+    "log": "docs/evidence/mqtt_commit_log/2026-11-07/persistence.ReleaseSafe.log"
+  },
+  {
+    "name": "durable.ReleaseSafe",
+    "command": [
+      "zig",
+      "build",
+      "interop-mqtt-commit-log",
+      "-Doptimize=ReleaseSafe",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 1,
+    "elapsed_seconds": 244.034,
+    "summary": "6/8 steps succeeded (1 failed)",
+    "log": "docs/evidence/mqtt_commit_log/2026-11-07/durable.ReleaseSafe.log",
+    "source_manifest": "docs/evidence/mqtt_commit_log/2026-11-07/sources.041295c208a3.json",
+    "source_manifest_sha256": "041295c208a37c89b750694557f33eb1f42b81ebd8ccd611187ccb5c8426e81b"
+  },
+  {
+    "name": "admission.Debug",
+    "command": [
+      "zig",
+      "build",
+      "test-lib",
+      "-Dtest-filter=snapshot",
+      "-Dtest-filter=commit log",
+      "-Dtest-filter=property blob",
+      "-Dtest-filter=CONNACK",
+      "-Dtest-filter=takeover",
+      "-Dtest-filter=durable DISCONNECT",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 42.54,
+    "summary": "8/8 steps succeeded; 355/355 tests passed",
+    "log": "docs/evidence/mqtt_commit_log/2026-11-07/admission.Debug.log",
+    "source_manifest": "docs/evidence/mqtt_commit_log/2026-11-07/sources.79cc3bcfd8fa.json",
+    "source_manifest_sha256": "79cc3bcfd8faba0f53555977f6c11a4459714a4ed72523828dcfda89d80fa411"
+  },
+  {
+    "name": "admission.ReleaseSafe",
+    "command": [
+      "zig",
+      "build",
+      "test-lib",
+      "-Doptimize=ReleaseSafe",
+      "-Dtest-filter=snapshot",
+      "-Dtest-filter=commit log",
+      "-Dtest-filter=property blob",
+      "-Dtest-filter=CONNACK",
+      "-Dtest-filter=takeover",
+      "-Dtest-filter=durable DISCONNECT",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 297.327,
+    "summary": "8/8 steps succeeded; 355/355 tests passed",
+    "log": "docs/evidence/mqtt_commit_log/2026-11-07/admission.ReleaseSafe.log",
+    "source_manifest": "docs/evidence/mqtt_commit_log/2026-11-07/sources.79cc3bcfd8fa.json",
+    "source_manifest_sha256": "79cc3bcfd8faba0f53555977f6c11a4459714a4ed72523828dcfda89d80fa411"
+  },
+  {
+    "name": "durable.ReleaseSafe.corrected",
+    "command": [
+      "zig",
+      "build",
+      "interop-mqtt-commit-log",
+      "-Doptimize=ReleaseSafe",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 241.502,
+    "summary": "8/8 steps succeeded",
+    "log": "docs/evidence/mqtt_commit_log/2026-11-07/durable.ReleaseSafe.corrected.log",
+    "source_manifest": "docs/evidence/mqtt_commit_log/2026-11-07/sources.79cc3bcfd8fa.json",
+    "source_manifest_sha256": "79cc3bcfd8faba0f53555977f6c11a4459714a4ed72523828dcfda89d80fa411"
+  }
+]
