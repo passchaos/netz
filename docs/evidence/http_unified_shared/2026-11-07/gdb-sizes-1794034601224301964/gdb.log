@@ -1,0 +1,39 @@
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+
+Program received signal SIGSEGV, Segmentation fault.
+0x00000000027c217d in http.client_pool.shared_tcp.driver.Driver(http.client_pool.shared_tcp.state.State(http.client_pool.Pool,http.client_pool.Lease),http.client_pool.Pool,http.client_pool.Lease).acquire (self=0x0)
+=> 0x27c217d <http.client_pool.shared_tcp.driver.Driver(http.client_pool.shared_tcp.state.State(http.client_pool.Pool,http.client_pool.Lease),http.client_pool.Pool,http.client_pool.Lease).acquire+13>:	test   %esp,-0x1000(%rsp,%r10,1)
+rsp            0x7fffd819ece0      0x7fffd819ece0
+rbp            0x7fffd81d81b0      0x7fffd81d81b0
+#0  0x00000000027c217d in http.client_pool.shared_tcp.driver.Driver(http.client_pool.shared_tcp.state.State(http.client_pool.Pool,http.client_pool.Lease),http.client_pool.Pool,http.client_pool.Lease).acquire (self=0x0)
+Stack level 0, frame at 0x7fffd81d81c0:
+ rip = 0x27c217d in http.client_pool.shared_tcp.driver.Driver(http.client_pool.shared_tcp.state.State(http.client_pool.Pool,http.client_pool.Lease),http.client_pool.Pool,http.client_pool.Lease).acquire; saved rip = 0x27c7fb2
+ called by frame at 0x7fffd81dec80
+ Arglist at 0x7fffd81d81b0, args: self=0x0
+ Locals at 0x7fffd81d81b0, Previous frame's sp is 0x7fffd81d81c0
+ Saved registers:
+  rbp at 0x7fffd81d81b0, rip at 0x7fffd81d81b8
+$1 = 4448
+$2 = 2186
+$3 = (struct http.client_pool.shared_tcp.driver.Driver(http.client_pool.shared_tcp.state.State(http.client_pool.Pool,http.client_pool.Lease),http.client_pool.Pool,http.client_pool.Lease) *) 0x0
+#1  0x00000000027c7fb2 in http.client_pool.shared_tcp.driver.Driver(http.client_pool.shared_tcp.state.State(http.client_pool.Pool,http.client_pool.Lease),http.client_pool.Pool,http.client_pool.Lease).drive (self=0x37ab320)
+$4 = 2327
+$5 = 2186
+Stack level 1, frame at 0x7fffd81dec80:
+ rip = 0x27c7fb2 in http.client_pool.shared_tcp.driver.Driver(http.client_pool.shared_tcp.state.State(http.client_pool.Pool,http.client_pool.Lease),http.client_pool.Pool,http.client_pool.Lease).drive; saved rip = 0x27c9edd
+ called by frame at 0x7fffd81dece0, caller of frame at 0x7fffd81d81c0
+ Arglist at 0x7fffd81dec70, args: self=0x37ab320
+ Locals at 0x7fffd81dec70, Previous frame's sp is 0x7fffd81dec80
+ Saved registers:
+  rbp at 0x7fffd81dec70, rip at 0x7fffd81dec78
+
+Thread 1 (Thread 0x7ffff7bfd900 (LWP 1703763) "netz-http-unifi"):
+#0  0x00000000027c217d in http.client_pool.shared_tcp.driver.Driver(http.client_pool.shared_tcp.state.State(http.client_pool.Pool,http.client_pool.Lease),http.client_pool.Pool,http.client_pool.Lease).acquire (self=0x0)
+#1  0x00000000027c7fb2 in http.client_pool.shared_tcp.driver.Driver(http.client_pool.shared_tcp.state.State(http.client_pool.Pool,http.client_pool.Lease),http.client_pool.Pool,http.client_pool.Lease).drive (self=0x37ab320)
+#2  0x00000000027c9edd in http.client_pool.shared_tcp.driver.Driver(http.client_pool.shared_tcp.state.State(http.client_pool.Pool,http.client_pool.Lease),http.client_pool.Pool,http.client_pool.Lease).run (self=0x37ab320)
+#3  0x00000000027c2058 in Io.Group.concurrent__anon_10750325.TypeErased.start (context=0x37abe90)
+#4  0x0000000002d3813a in task.Closure.call__anon_10832266 (self=0x37abe60, TaskType=<optimized out>, task=0x37abdc0)
+#5  0x0000000002d37eed in task.AnyTask.startFn (coro=0x37abe18)
+#6  0x0000000002d3852b in coro.coroutines.Coroutine.setup.CoroutineData.entrypointFn (context_ptr=0x7fffd81defd8)
+#7  0x0000000000000000 in ?? ()

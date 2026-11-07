@@ -22,6 +22,7 @@ pub fn closeWithDeadline(pool: anytype, deadline: std.Io.Clock.Timestamp) Error!
 fn closeBefore(pool: anytype, deadline: ?std.Io.Clock.Timestamp) Error!void {
     var guard = try Guard.initBefore(&pool.mutex, pool.io, deadline);
     defer guard.unlock();
+    try pool.tcp_requests.closeBefore(deadline);
     pool.retired_connections.apply(&pool.connections, &pool.capacity_waiters, pool.io);
     pool.closed = true;
     pool.capacity_waiters.notifyAll(pool.io);

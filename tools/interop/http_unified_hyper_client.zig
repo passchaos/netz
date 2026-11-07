@@ -10,7 +10,7 @@ pub fn main(init: std.process.Init) !void {
     if (port == 0) return error.InvalidArgument;
     const expected: netz.http.Protocol = if (std.mem.eql(u8, args[2], "h1"))
         .http1
-    else if (std.mem.eql(u8, args[2], "h2"))
+    else if (std.mem.eql(u8, args[2], "h2") or std.mem.eql(u8, args[2], "h2-shared"))
         .http2
     else
         return error.InvalidArgument;
@@ -21,6 +21,10 @@ pub fn main(init: std.process.Init) !void {
     const io = backend.io();
     const key_pair = try netz.tls.testing.serverKeyPair();
     const public_key = key_pair.public_key.toUncompressedSec1();
+    if (std.mem.eql(u8, args[2], "h2-shared")) {
+        try sharedH2(allocator, io, port, public_key);
+        return;
+    }
     var pool = try netz.http.Pool.init(allocator, io, .{
         .client = .{ .tls = .{ .server_verifier = .{
             .pinned_ecdsa_p256_public_key = public_key,
@@ -99,6 +103,98 @@ pub fn main(init: std.process.Init) !void {
         "netz unified HTTP pool selected Hyper protocol={s} alpn={s} requests=2 connections=1 reusable=true admission_timeout=isolated queued_timeout=isolated failed_retirement=isolated completed_return=isolated collector_timeout=retained setup_cache_timeout=retained close_deadline=complete client_io=zio-std-io server_io=hyper-tokio\n",
         .{ label, if (expected == .http2) "h2" else "http/1.1" },
     );
+}
+
+fn sharedRequest(pool: *netz.http.Pool, uri: []const u8) !netz.http.OwnedResponse {
+    return pool.requestUriWithTimeout(uri, .{ .headers = &.{.{ .name = "x-netz-unified", .value = "h2-shared" }} }, .fromSeconds(5));
+}
+
+fn sharedVerify(response: netz.http.OwnedResponse, body: []const u8) !void {
+    if (response.protocol() != .http2 or response.status() != 200 or !std.mem.eql(u8, response.body(), body)) return error.InvalidSharedResponse;
+}
+
+fn sharedBarrier(pool: *netz.http.Pool, uri: []const u8, body: []const u8) !void {
+    var response = try sharedRequest(pool, uri);
+    defer response.deinit();
+    try sharedVerify(response, body);
+}
+
+fn sharedH2(allocator: std.mem.Allocator, io: std.Io, port: u16, public_key: anytype) !void {
+    var pool = try netz.http.Pool.init(allocator, io, .{
+        .max_connections = 1,
+        .max_total_connections = 1,
+        .max_idle_connections = 1,
+        .max_idle_per_origin = 1,
+        .client = .{ .protocol_policy = .http2_only, .tls = .{ .server_verifier = .{ .pinned_ecdsa_p256_public_key = public_key } } },
+    });
+    defer pool.deinit();
+    const paths = [_][]const u8{ "/shared-first", "/shared-entered", "/shared-second", "/shared-cancel", "/shared-survivor", "/shared-pending", "/shared-later" };
+    var uris: [paths.len][]u8 = undefined;
+    var filled: usize = 0;
+    defer for (uris[0..filled]) |uri| allocator.free(uri);
+    for (paths, &uris) |path, *uri| {
+        uri.* = try std.fmt.allocPrint(allocator, "https://localhost:{d}{s}", .{ port, path });
+        filled += 1;
+    }
+    var first = try io.concurrent(sharedRequest, .{ &pool, uris[0] });
+    var first_consumed = false;
+    defer if (!first_consumed) if (first.cancel(io)) |owned| {
+        var response = owned;
+        response.deinit();
+    } else |_| {};
+    // Hyper returns this barrier only while its first handler is waiting for
+    // the second request, before the second is even submitted by this client.
+    try sharedBarrier(&pool, uris[1], "first-entered");
+    var second = try io.concurrent(sharedRequest, .{ &pool, uris[2] });
+    var second_consumed = false;
+    defer if (!second_consumed) if (second.cancel(io)) |owned| {
+        var response = owned;
+        response.deinit();
+    } else |_| {};
+    var second_response = try second.await(io);
+    second_consumed = true;
+    defer second_response.deinit();
+    try sharedVerify(second_response, "second");
+    var first_response = try first.await(io);
+    first_consumed = true;
+    defer first_response.deinit();
+    try sharedVerify(first_response, "first");
+
+    var canceled = try io.concurrent(sharedRequest, .{ &pool, uris[3] });
+    var canceled_consumed = false;
+    defer if (!canceled_consumed) if (canceled.cancel(io)) |owned| {
+        var response = owned;
+        response.deinit();
+    } else |_| {};
+    var survivor = try io.concurrent(sharedRequest, .{ &pool, uris[4] });
+    var survivor_consumed = false;
+    defer if (!survivor_consumed) if (survivor.cancel(io)) |owned| {
+        var response = owned;
+        response.deinit();
+    } else |_| {};
+    try sharedBarrier(&pool, uris[5], "both-pending");
+    if (canceled.cancel(io)) |owned| {
+        var response = owned;
+        response.deinit();
+        canceled_consumed = true;
+        return error.UnexpectedCanceledSuccess;
+    } else |err| {
+        canceled_consumed = true;
+        if (err != error.Canceled) return err;
+    }
+    // Hyper releases this response only when it drops the canceled first
+    // response body, so successful completion proves server-observed CANCEL.
+    var survived = try survivor.await(io);
+    survivor_consumed = true;
+    defer survived.deinit();
+    try sharedVerify(survived, "survivor");
+    try sharedBarrier(&pool, uris[6], "later");
+    const stats = pool.stats();
+    if (pool.connectionCount() != 1 or pool.totalConnectionCount() != 1 or pool.idleCount() != 1 or
+        stats.total_misses != 1 or stats.total_reused != 2) return error.InvalidSharedPoolState;
+    try pool.closeWithTimeout(.fromSeconds(1));
+    if (pool.connectionCount() != 0 or pool.totalConnectionCount() != 0) return error.IncompleteSharedClose;
+    std.debug.print("netz unified HTTP shared Hyper protocol=h2 alpn=h2 requests=7 connections=1 late_sibling=true canceled_first=true surviving_second=true later_reuse=true shared_budget=1 tls=pinned client_io=zio-std-io server_io=hyper-tokio\n", .{});
 }
 
 fn verifyTlsSetupBudget(pool: *netz.http.Pool, io: std.Io) !void {

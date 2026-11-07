@@ -1,0 +1,4 @@
+
+thread 'main' (1711077) panicked at src/bin/unified_server.rs:82:14:
+serve h2: hyper::Error(Io, Kind(ConnectionReset))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

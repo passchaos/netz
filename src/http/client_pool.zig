@@ -4,6 +4,11 @@
 //! protocol. The total budget covers idle, leased, and connecting sockets;
 //! waiters use intrusive FIFO admission so a newly arriving caller cannot
 //! bypass an older capacity wait.
+//!
+//! Ordinary HTTP/2 URI requests use a shared per-origin frame owner. CONNECT
+//! and clients with HTTP/2 push explicitly enabled keep exclusive aggregation
+//! so their existing response and promised-stream semantics remain intact.
+//! See docs/http_client_pool.md for routing and the remaining duplex work.
 
 const std = @import("std");
 const client = @import("client.zig");
@@ -17,6 +22,8 @@ const http1_runtime = @import("../http1/runtime.zig");
 const http3 = @import("../http3/mod.zig");
 const origin_pool = @import("../http3/origin_pool.zig");
 const request_ops = @import("client_pool/requests.zig");
+const shared_tcp = @import("client_pool/shared_tcp.zig");
+const TcpRequests = shared_tcp.State(Pool, Lease);
 const pool_tickets = @import("client_pool/tickets.zig");
 const return_tickets = @import("../internal/pool_returns/tickets.zig");
 const timed_mutex = @import("../internal/timed_mutex.zig");
@@ -33,7 +40,7 @@ pub const Error = client.Error || http3_runtime.Error ||
     PoolClosed,
     ConnectionLimitReached,
     InvalidPoolOptions,
-};
+} || shared_tcp.Error;
 pub const OperationError = Error || std.Io.Timeout.Error ||
     std.Io.ConcurrentError;
 
@@ -50,6 +57,9 @@ pub const Options = struct {
     /// Null disables age-based eviction.
     idle_timeout: ?std.Io.Duration = .fromSeconds(90),
     client: client.Options = .{},
+    /// Ordinary H2 requests share one frame owner per active origin. Raw
+    /// acquireUri leases retain exclusive ownership of their connections.
+    http2_shared_requests: shared_tcp.Options = .{},
     /// Maximum cached RFC 5077 TLS 1.2 tickets across origin/ALPN keys.
     max_tls12_session_tickets: usize = 32,
     /// Maximum cached RFC 8446 TLS 1.3 tickets across origin/ALPN keys.
@@ -60,6 +70,7 @@ pub const Options = struct {
 };
 
 pub const Http3Options = h3_support.Options;
+pub const Http2SharedRequestOptions = shared_tcp.Options;
 pub const Http3FallbackPolicy = h3_support.FallbackPolicy;
 pub const Http3EarlyDataOptions = h3_support.EarlyDataOptions;
 pub const Http3RememberedSettingsStats = h3_support.RememberedSettingsStats;
@@ -97,6 +108,7 @@ pub const Pool = struct {
     shared_budget: *connection_budget.Budget,
     tickets: pool_tickets.Manager,
     http3: ?*h3_support.State,
+    tcp_requests: *TcpRequests,
     closed: bool = false,
 
     pub fn init(
@@ -136,6 +148,8 @@ pub const Pool = struct {
             );
         } else null;
         errdefer if (http3_state) |state| state.deinit();
+        const tcp_requests = try TcpRequests.create(allocator, io, options.http2_shared_requests);
+        errdefer tcp_requests.deinit();
         return .{
             .allocator = allocator,
             .io = io,
@@ -154,6 +168,7 @@ pub const Pool = struct {
             ),
             .shared_budget = shared_budget,
             .http3 = http3_state,
+            .tcp_requests = tcp_requests,
         };
     }
 
@@ -161,6 +176,7 @@ pub const Pool = struct {
         // Leases and in-flight acquisitions retain a pointer to this pool and
         // must finish before destruction.
         self.close();
+        self.tcp_requests.deinit();
         std.debug.assert(self.connections == 0);
         std.debug.assert(self.capacity_waiters.count(self.io) == 0);
         self.idle.deinit();
@@ -202,6 +218,7 @@ pub const Pool = struct {
                 &blocked_on_shared,
                 null,
                 isolate_origin_state,
+                false,
             ) catch |err| switch (err) {
                 error.ConnectionLimitReached => {
                     if (blocked_on_shared and
@@ -269,6 +286,7 @@ pub const Pool = struct {
                 &blocked_on_shared,
                 deadline,
                 isolate_origin_state,
+                false,
             ) catch |err| switch (err) {
                 error.ConnectionLimitReached => {
                     if (blocked_on_shared and
@@ -355,6 +373,27 @@ pub const Pool = struct {
     }
 
     pub const Internal = struct {
+        pub fn requestOriginKey(allocator: std.mem.Allocator, uri: []const u8) Error!http3.OriginKey {
+            return originKeyForUri(allocator, uri);
+        }
+        /// The shared owner may cancel a pending connection attempt even when
+        /// its caller supplied no deadline. Public raw leases keep their API.
+        pub fn acquireRequestBefore(pool: *Pool, uri: []const u8, deadline: ?std.Io.Clock.Timestamp, isolate_origin: bool) OperationError!Lease {
+            if (deadline) |absolute| return pool.acquireUriWithDeadlineAndOriginIsolation(uri, absolute, isolate_origin);
+            var key = try originKeyForUri(pool.allocator, uri);
+            var key_owned = true;
+            defer if (key_owned) key.deinit();
+            while (true) {
+                var blocked_on_shared = false;
+                return pool.acquireMaybeBefore(uri, &key, &key_owned, null, null, &blocked_on_shared, null, isolate_origin, true) catch |err| switch (err) {
+                    error.ConnectionLimitReached => {
+                        if (blocked_on_shared and pool.reclaimHttp3IdleIfEligible(null)) continue;
+                        return err;
+                    },
+                    else => return err,
+                };
+            }
+        }
         /// Split-module HTTP/3 admission hook. The callback target is valid for
         /// one Pool request, during which moving the Pool is forbidden by the
         /// same lease ownership contract as every other operation.
@@ -415,10 +454,11 @@ pub const Pool = struct {
         blocked_on_shared: *bool,
         deadline: ?std.Io.Clock.Timestamp,
         isolate_origin_state: bool,
+        cancelable: bool,
     ) OperationError!Lease {
         blocked_on_shared.* = false;
         var displaced: ?IdleConnection = null;
-        var admission_lock = try MutexGuard.initBefore(&self.mutex, self.io, deadline);
+        var admission_lock = try self.requestAdmissionGuard(deadline, cancelable);
         defer admission_lock.unlock();
         self.retired_connections.apply(&self.connections, &self.capacity_waiters, self.io);
         if (self.closed) {
@@ -557,7 +597,7 @@ pub const Pool = struct {
         else
             try connector.connectUri(uri_text);
         errdefer if (deadline != null) connection.closeWithoutCloseNotify() else connection.close();
-        var publication = try MutexGuard.initBefore(&self.mutex, self.io, deadline);
+        var publication = try self.requestAdmissionGuard(deadline, cancelable);
         defer publication.unlock();
         if (self.closed) return error.PoolClosed;
         if (secure) {
@@ -573,6 +613,14 @@ pub const Pool = struct {
             .return_node = return_node,
             .origin_key = owned_key,
         };
+    }
+
+    fn requestAdmissionGuard(self: *Pool, deadline: ?std.Io.Clock.Timestamp, cancelable: bool) timed_mutex.Error!MutexGuard {
+        if (cancelable and deadline == null) {
+            try self.mutex.lock(self.io);
+            return .{ .mutex = &self.mutex, .io = self.io };
+        }
+        return MutexGuard.initBefore(&self.mutex, self.io, deadline);
     }
 
     fn release(
@@ -901,4 +949,9 @@ test "unified HTTP pool isolates explicit TLS tickets across origins" {
     const cross_origin = clientOptionsForOriginIsolation(options, true);
     try std.testing.expect(cross_origin.tls.tls12_ticket_resumption == null);
     try std.testing.expect(cross_origin.tls.tls13_ticket_resumption == null);
+}
+
+test {
+    _ = @import("client_pool/shared_tcp/tests.zig");
+    _ = @import("client_pool/shared_tcp/fallback_tests.zig");
 }

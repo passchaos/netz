@@ -17,13 +17,7 @@ pub fn requestUri(
     uri_text: []const u8,
     request: client.RequestOptions,
 ) !client.OwnedResponse {
-    return requestUriBefore(pool, uri_text, request, null, false, false) catch |err| switch (err) {
-        error.Timeout,
-        error.Canceled,
-        error.ConcurrencyUnavailable,
-        => unreachable,
-        else => |other| return other,
-    };
+    return requestUriBefore(pool, uri_text, request, null, false, false);
 }
 
 pub fn requestUriWithTimeout(
@@ -64,7 +58,7 @@ pub fn requestUriBefore(
     deadline: ?std.Io.Clock.Timestamp,
     crossed_origin: bool,
     forward_client_identity: bool,
-) !client.OwnedResponse {
+) @typeInfo(@TypeOf(pool)).pointer.child.RequestOperationError!client.OwnedResponse {
     if (pool.http3 != null) {
         var guard = try @import("../../internal/mutex_guard.zig").Guard.initBefore(&pool.mutex, pool.io, deadline);
         defer guard.unlock();
@@ -122,7 +116,25 @@ pub fn requestUriBefore(
     }
     var retry_stale = true;
     while (true) {
-        var lease = if (deadline) |absolute|
+        const shared = pool.tcp_requests.request(pool, uri_text, target, request, deadline, crossed_origin) catch |err| return @errorCast(err);
+        const fallback = switch (shared) {
+            .response => |owned| {
+                var result = owned;
+                if (pool.http3) |h3_state| if (h3_origin) |origin| observeAltSvc(h3_state, origin, &result);
+                return result;
+            },
+            .failure => |failure| {
+                if (retry_stale and failure.was_reused and http_method.isIdempotent(request.method) and
+                    retryableStaleConnectionError(failure.err))
+                {
+                    retry_stale = false;
+                    continue;
+                }
+                return @errorCast(failure.err);
+            },
+            .fallback => |lease| lease,
+        };
+        var lease = fallback orelse if (deadline) |absolute|
             try pool.acquireUriWithDeadlineAndOriginIsolation(
                 uri_text,
                 absolute,

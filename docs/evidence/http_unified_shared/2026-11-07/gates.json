@@ -1,0 +1,124 @@
+[
+  {
+    "name": "ordinary-h2.Debug",
+    "command": [
+      "zig",
+      "build",
+      "test-lib",
+      "-Dtest-filter=unified HTTP ordinary H2",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 1,
+    "elapsed_seconds": 22.045,
+    "summary": "5/8 steps succeeded (1 failed)",
+    "log": "docs/evidence/http_unified_shared/2026-11-07/ordinary-h2.Debug.log",
+    "source_manifest": "docs/evidence/http_unified_shared/2026-11-07/sources.936c53899fef.json",
+    "source_manifest_sha256": "936c53899fef5e20b645de83999d3cab421dc8198be1a67347bf93a37a3891fc"
+  },
+  {
+    "name": "ordinary-exclusive.Debug.final",
+    "command": [
+      "zig",
+      "build",
+      "test-lib",
+      "-Dtest-filter=unified HTTP ordinary H2",
+      "-Dtest-filter=unified HTTP exclusive",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 34.369,
+    "summary": "8/8 steps succeeded; 175/175 tests passed",
+    "log": "docs/evidence/http_unified_shared/2026-11-07/ordinary-exclusive.Debug.final.log",
+    "source_manifest": "docs/evidence/http_unified_shared/2026-11-07/sources.d1b8d67456f1.json",
+    "source_manifest_sha256": "d1b8d67456f1793f8dbf632e41b2ab3d589b102a8fcaff1ba07141aea8288813"
+  },
+  {
+    "name": "pool-regressions.Debug",
+    "command": [
+      "zig",
+      "build",
+      "test-lib",
+      "-Dtest-filter=unified HTTP pool",
+      "-Dtest-filter=HTTP pool close",
+      "-Dtest-filter=HTTP pool deadline close",
+      "-Dtest-filter=HTTP closed pool",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 43.314,
+    "summary": "8/8 steps succeeded; 204/204 tests passed",
+    "log": "docs/evidence/http_unified_shared/2026-11-07/pool-regressions.Debug.log",
+    "source_manifest": "docs/evidence/http_unified_shared/2026-11-07/sources.d1b8d67456f1.json",
+    "source_manifest_sha256": "d1b8d67456f1793f8dbf632e41b2ab3d589b102a8fcaff1ba07141aea8288813"
+  },
+  {
+    "name": "hyper.Debug",
+    "command": [
+      "zig",
+      "build",
+      "interop-http-unified-hyper",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 1,
+    "elapsed_seconds": 118.234,
+    "summary": "6/8 steps succeeded (1 failed)",
+    "log": "docs/evidence/http_unified_shared/2026-11-07/hyper.Debug.log",
+    "source_manifest": "docs/evidence/http_unified_shared/2026-11-07/sources.f647681700b6.json",
+    "source_manifest_sha256": "f647681700b691dffad46937417628d4f14e1e975f2b57f3288acef4600b532d"
+  },
+  {
+    "name": "ownership.Debug.corrected",
+    "command": [
+      "zig",
+      "build",
+      "test-lib",
+      "-Dtest-filter=unified HTTP ordinary H2",
+      "-Dtest-filter=unified HTTP exclusive",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 31.02,
+    "summary": "8/8 steps succeeded; 176/176 tests passed",
+    "log": "docs/evidence/http_unified_shared/2026-11-07/ownership.Debug.corrected.log",
+    "source_manifest": "docs/evidence/http_unified_shared/2026-11-07/sources.3a0810c823bb.json",
+    "source_manifest_sha256": "3a0810c823bbca07c2c917b0f6d900e89ca798bc931185ef86c0f8be0b727508"
+  },
+  {
+    "name": "hyper.Debug.corrected",
+    "command": [
+      "zig",
+      "build",
+      "interop-http-unified-hyper",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 34.377,
+    "summary": "8/8 steps succeeded",
+    "log": "docs/evidence/http_unified_shared/2026-11-07/hyper.Debug.corrected.log",
+    "source_manifest": "docs/evidence/http_unified_shared/2026-11-07/sources.3a0810c823bb.json",
+    "source_manifest_sha256": "3a0810c823bbca07c2c917b0f6d900e89ca798bc931185ef86c0f8be0b727508"
+  },
+  {
+    "name": "hyper.ReleaseSafe",
+    "command": [
+      "zig",
+      "build",
+      "interop-http-unified-hyper",
+      "-Doptimize=ReleaseSafe",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 142.29,
+    "summary": "8/8 steps succeeded",
+    "log": "docs/evidence/http_unified_shared/2026-11-07/hyper.ReleaseSafe.log",
+    "source_manifest": "docs/evidence/http_unified_shared/2026-11-07/sources.3a0810c823bb.json",
+    "source_manifest_sha256": "3a0810c823bbca07c2c917b0f6d900e89ca798bc931185ef86c0f8be0b727508"
+  }
+]

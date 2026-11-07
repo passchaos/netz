@@ -1,0 +1,9 @@
+{
+  "client": "/home/passchaos/project-z/netz/.zig-cache/o/ccce5ec79557af1ec58a5558159b9cd0/netz-http-unified-hyper-client",
+  "client_sha256": "27e982dea57a0b9de18f502c1c601ac12225161780af2d4cc9a4d9e6c9fee76e",
+  "server": "/home/passchaos/project-z/netz/tools/hyper_http2_flow/target/release/netz-hyper-unified-server",
+  "server_sha256": "c117eedb373e77e5643ff03ad322b4529814dded9d7a4e69f87a5355756b1489",
+  "gdb_status": 0,
+  "server_status": -15,
+  "port": 55859
+}

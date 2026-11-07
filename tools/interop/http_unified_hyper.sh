@@ -8,9 +8,22 @@ server="$repo_root/tools/hyper_http2_flow/target/release/netz-hyper-unified-serv
 work=$(mktemp -d)
 server_pid=
 cleanup() {
+  local status=$?
   if [[ -n "$server_pid" ]]; then
     kill "$server_pid" 2>/dev/null || true
     wait "$server_pid" 2>/dev/null || true
+  fi
+  if [[ $status -ne 0 ]]; then
+    local artifact_root=${NETZ_HTTP_UNIFIED_ARTIFACT_DIR:-"$repo_root/docs/evidence/http_unified_shared/$(date -u +%Y-%m-%d)"}
+    if mkdir -p "$artifact_root"; then
+      local retained
+      retained=$(mktemp -d "$artifact_root/failed.XXXXXXXX")
+      cp -a "$work/." "$retained/"
+      printf 'Retained failed unified Hyper artifacts: %s\n' "$retained" >&2
+    else
+      printf 'Retained failed unified Hyper work directory: %s\n' "$work" >&2
+      return
+    fi
   fi
   rm -rf "$work"
 }
@@ -57,7 +70,7 @@ cargo build --release --offline --locked \
   --manifest-path "$manifest" \
   --bin netz-hyper-unified-server
 
-for protocol in h1 h2; do
+for protocol in h1 h2 h2-shared; do
   port=$(free_tcp_port)
   "$server" "$port" "$work/cert.pem" "$work/key.pem" "$protocol" \
     >"$work/server-$protocol.log" 2>&1 &
@@ -75,7 +88,18 @@ for protocol in h1 h2; do
   wait "$server_pid"
   server_pid=
   expected_alpn=http/1.1
-  if [[ $protocol == h2 ]]; then expected_alpn=h2; fi
+  if [[ $protocol == h2 || $protocol == h2-shared ]]; then expected_alpn=h2; fi
+  if [[ $protocol == h2-shared ]]; then
+    grep -Fq \
+      "netz unified HTTP shared Hyper protocol=h2 alpn=h2 requests=7 connections=1 late_sibling=true canceled_first=true surviving_second=true later_reuse=true shared_budget=1 tls=pinned client_io=zio-std-io server_io=hyper-tokio" \
+      "$work/client-$protocol.log"
+    grep -Fq \
+      "Hyper unified shared server completed protocol=h2 alpn=h2 requests=7 connections=1 late_sibling=true cancellations=1 surviving_second=true later_reuse=true tls=pinned client_io=zio-std-io server_io=hyper-tokio" \
+      "$work/server-$protocol.log"
+    cat "$work/client-$protocol.log"
+    cat "$work/server-$protocol.log"
+    continue
+  fi
   grep -Fq \
     "netz unified HTTP pool selected Hyper protocol=$protocol alpn=$expected_alpn requests=2 connections=1 reusable=true admission_timeout=isolated queued_timeout=isolated failed_retirement=isolated completed_return=isolated collector_timeout=retained setup_cache_timeout=retained close_deadline=complete client_io=zio-std-io server_io=hyper-tokio" \
     "$work/client-$protocol.log"

@@ -1,0 +1,27 @@
+    Finished `release` profile [optimized] target(s) in 0.12s
+debug(zio): Spawning thread 0
+netz unified HTTP pool selected Hyper protocol=h1 alpn=http/1.1 requests=2 connections=1 reusable=true admission_timeout=isolated queued_timeout=isolated failed_retirement=isolated completed_return=isolated collector_timeout=retained setup_cache_timeout=retained close_deadline=complete client_io=zio-std-io server_io=hyper-tokio
+debug(zio): Removing thread 0
+Hyper unified server listening protocol=h1 port=57563
+Hyper unified server completed protocol=h1 alpn=http/1.1 requests=2 connections=1 client_io=zio-std-io server_io=hyper-tokio
+debug(zio): Spawning thread 0
+netz unified HTTP pool selected Hyper protocol=h2 alpn=h2 requests=2 connections=1 reusable=true admission_timeout=isolated queued_timeout=isolated failed_retirement=isolated completed_return=isolated collector_timeout=retained setup_cache_timeout=retained close_deadline=complete client_io=zio-std-io server_io=hyper-tokio
+debug(zio): Removing thread 0
+Hyper unified server listening protocol=h2 port=53225
+Hyper unified server completed protocol=h2 alpn=h2 requests=2 connections=1 client_io=zio-std-io server_io=hyper-tokio
+debug(zio): Spawning thread 0
+netz unified HTTP shared Hyper protocol=h2 alpn=h2 requests=7 connections=1 late_sibling=true canceled_first=true surviving_second=true later_reuse=true shared_budget=1 tls=pinned client_io=zio-std-io server_io=hyper-tokio
+debug(zio): Removing thread 0
+Hyper unified server listening protocol=h2-shared port=59765
+Hyper unified shared server completed protocol=h2 alpn=h2 requests=7 connections=1 late_sibling=true cancellations=1 surviving_second=true later_reuse=true tls=pinned client_io=zio-std-io server_io=hyper-tokio
+Build Summary: 8/8 steps succeeded
+interop-http-unified-hyper success
++- run tools/interop/http_unified_hyper.sh success 817ms
+   +- compile exe netz-http-unified-hyper-client Debug native success 33s MaxRSS:2G
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 5ms MaxRSS:38M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 6ms MaxRSS:38M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options cached

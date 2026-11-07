@@ -1,0 +1,97 @@
+   Compiling libc v0.2.189
+   Compiling find-msvc-tools v0.1.11
+   Compiling shlex v2.0.1
+   Compiling fs_extra v1.3.0
+   Compiling dunce v1.0.5
+   Compiling pkg-config v0.3.34
+   Compiling bytes v1.12.1
+   Compiling pin-project-lite v0.2.17
+   Compiling once_cell v1.21.4
+   Compiling proc-macro2 v1.0.107
+   Compiling futures-core v0.3.34
+   Compiling zeroize v1.9.0
+   Compiling aws-lc-rs v1.18.0
+   Compiling itoa v1.0.18
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.47
+   Compiling slab v0.4.12
+   Compiling equivalent v1.0.2
+   Compiling rustls v0.23.43
+   Compiling futures-sink v0.3.34
+   Compiling untrusted v0.9.0
+   Compiling hashbrown v0.17.1
+   Compiling httparse v1.10.1
+   Compiling try-lock v0.2.5
+   Compiling fnv v1.0.7
+   Compiling subtle v2.6.1
+   Compiling atomic-waker v1.1.2
+   Compiling httpdate v1.0.3
+   Compiling cfg-if v1.0.4
+   Compiling smallvec v1.15.2
+   Compiling futures-task v0.3.34
+   Compiling want v0.3.1
+   Compiling futures-channel v0.3.34
+   Compiling rustls-pki-types v1.15.1
+   Compiling http v1.5.0
+   Compiling tracing-core v0.1.36
+   Compiling indexmap v2.14.0
+   Compiling rustls-pemfile v2.2.0
+   Compiling tracing v0.1.44
+   Compiling http-body v1.1.0
+   Compiling jobserver v0.1.35
+   Compiling mio v1.2.2
+   Compiling socket2 v0.6.5
+   Compiling getrandom v0.2.17
+   Compiling http-body-util v0.1.5
+   Compiling cc v1.4.4
+   Compiling syn v3.0.3
+   Compiling tokio v1.53.1
+   Compiling cmake v0.1.58
+   Compiling aws-lc-sys v0.44.0
+   Compiling futures-macro v0.3.34
+   Compiling futures-util v0.3.34
+   Compiling tokio-util v0.7.19
+   Compiling h2 v0.4.15
+   Compiling hyper v1.11.0 (/home/passchaos/Work/hyper)
+   Compiling rustls-webpki v0.103.15
+   Compiling tokio-rustls v0.26.4
+   Compiling netz-hyper-http2-flow v0.0.0 (/home/passchaos/project-z/netz/tools/hyper_http2_flow)
+    Finished `release` profile [optimized] target(s) in 1m 18s
+grep: /tmp/tmp.Jg2pD49Fe2/server-h1.log: No such file or directory
+debug(zio): Spawning thread 0
+netz unified HTTP pool selected Hyper protocol=h1 alpn=http/1.1 requests=2 connections=1 reusable=true admission_timeout=isolated queued_timeout=isolated failed_retirement=isolated completed_return=isolated collector_timeout=retained setup_cache_timeout=retained close_deadline=complete client_io=zio-std-io server_io=hyper-tokio
+debug(zio): Removing thread 0
+Hyper unified server listening protocol=h1 port=47495
+Hyper unified server completed protocol=h1 alpn=http/1.1 requests=2 connections=1 client_io=zio-std-io server_io=hyper-tokio
+debug(zio): Spawning thread 0
+netz unified HTTP pool selected Hyper protocol=h2 alpn=h2 requests=2 connections=1 reusable=true admission_timeout=isolated queued_timeout=isolated failed_retirement=isolated completed_return=isolated collector_timeout=retained setup_cache_timeout=retained close_deadline=complete client_io=zio-std-io server_io=hyper-tokio
+debug(zio): Removing thread 0
+Hyper unified server listening protocol=h2 port=56261
+Hyper unified server completed protocol=h2 alpn=h2 requests=2 connections=1 client_io=zio-std-io server_io=hyper-tokio
+tools/interop/http_unified_hyper.sh: line 60: 1640904 Aborted                 timeout 15s "$client" "$port" "$protocol" > "$work/client-$protocol.log" 2>&1
+debug(zio): Spawning thread 0
+double free or corruption (out)
+Hyper unified server listening protocol=h2-shared port=33015
+
+thread 'main' (1640901) panicked at src/bin/unified_server.rs:82:14:
+serve h2: hyper::Error(Io, Kind(ConnectionReset))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+interop-http-unified-hyper
++- run tools/interop/http_unified_hyper.sh failure
+error: process exited with error code 134
+failed command: tools/interop/http_unified_hyper.sh ./.zig-cache/o/ccce5ec79557af1ec58a5558159b9cd0/netz-http-unified-hyper-client
+
+Build Summary: 6/8 steps succeeded (1 failed)
+interop-http-unified-hyper transitive failure
++- run tools/interop/http_unified_hyper.sh failure
+   +- compile exe netz-http-unified-hyper-client Debug native success 32s MaxRSS:2G
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 5ms MaxRSS:38M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 6ms MaxRSS:38M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options cached
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/65217f301ebe7d981036cdc93a2778b5/build /home/passchaos/Temp/zig-x86_64-linux-0.16.0/zig /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib /home/passchaos/project-z/netz .zig-cache /home/passchaos/.cache/zig --seed 0xc870d2aa -Zc75d81e66bc5d815 interop-http-unified-hyper --summary all

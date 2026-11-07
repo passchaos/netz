@@ -1,0 +1,23 @@
+    Finished `release` profile [optimized] target(s) in 3.75s
+netz unified HTTP pool selected Hyper protocol=h1 alpn=http/1.1 requests=2 connections=1 reusable=true admission_timeout=isolated queued_timeout=isolated failed_retirement=isolated completed_return=isolated collector_timeout=retained setup_cache_timeout=retained close_deadline=complete client_io=zio-std-io server_io=hyper-tokio
+Hyper unified server listening protocol=h1 port=50029
+Hyper unified server completed protocol=h1 alpn=http/1.1 requests=2 connections=1 client_io=zio-std-io server_io=hyper-tokio
+netz unified HTTP pool selected Hyper protocol=h2 alpn=h2 requests=2 connections=1 reusable=true admission_timeout=isolated queued_timeout=isolated failed_retirement=isolated completed_return=isolated collector_timeout=retained setup_cache_timeout=retained close_deadline=complete client_io=zio-std-io server_io=hyper-tokio
+Hyper unified server listening protocol=h2 port=48801
+Hyper unified server completed protocol=h2 alpn=h2 requests=2 connections=1 client_io=zio-std-io server_io=hyper-tokio
+netz unified HTTP shared Hyper protocol=h2 alpn=h2 requests=7 connections=1 late_sibling=true canceled_first=true surviving_second=true later_reuse=true shared_budget=1 tls=pinned client_io=zio-std-io server_io=hyper-tokio
+Hyper unified server listening protocol=h2-shared port=52415
+Hyper unified shared server completed protocol=h2 alpn=h2 requests=7 connections=1 late_sibling=true cancellations=1 surviving_second=true later_reuse=true tls=pinned client_io=zio-std-io server_io=hyper-tokio
+Build Summary: 8/8 steps succeeded
+interop-http-unified-hyper success
++- run tools/interop/http_unified_hyper.sh success 4s
+   +- compile exe netz-http-unified-hyper-client ReleaseSafe native success 2m MaxRSS:3G
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal ReleaseSafe native cached 5ms MaxRSS:40M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 ReleaseSafe native cached 6ms MaxRSS:40M
+      +- compile obj vort-br-record-optimal ReleaseSafe native (reused)
+      +- compile obj vort-zstd-huffman-x2 ReleaseSafe native (reused)
+      +- options cached
+
+EXIT:0
