@@ -100,6 +100,12 @@ const RegistrationPersistenceContext = struct {
     pub const autosavePersistentChangesIfNeededLocked = Broker.autosavePersistentChangesIfNeededLocked;
 };
 
+const persistence_admission = @import("broker/persistence_admission.zig");
+const PersistenceAdmissionContext = struct {
+    pub const BrokerType = Broker;
+    pub const hasProvisionalRegistration = Broker.hasProvisionalRegistrationLocked;
+};
+
 const prepareLocalConsumerProperties = prepareRetainedDeliveryProperties;
 
 pub const LocalConsumer = local_consumer_mod.Handle;
@@ -3131,7 +3137,7 @@ pub const Broker = struct {
         if (self.payloadTooLarge(staged.payload)) return error.PacketTooLarge;
         staged.dup = options.duplicate;
 
-        self.persistence_mutex.lockUncancelable(self.io);
+        try persistence_admission.lockTransaction(PersistenceAdmissionContext, self);
         defer self.persistence_mutex.unlock(self.io);
         self.state_mutex.lockUncancelable(self.io);
         const result = self.bridge_qos2.stage(
@@ -3183,7 +3189,7 @@ pub const Broker = struct {
         key: BridgeQoS2Key,
         consumer: ?*const LocalConsumer,
     ) Error!BridgeQoS2Release {
-        self.persistence_mutex.lockUncancelable(self.io);
+        try persistence_admission.lockTransaction(PersistenceAdmissionContext, self);
         var persistence_locked = true;
         defer if (persistence_locked) self.persistence_mutex.unlock(self.io);
         self.state_mutex.lockUncancelable(self.io);
@@ -3319,7 +3325,7 @@ pub const Broker = struct {
         self: *Broker,
         key: BridgeQoS2Key,
     ) Error!bool {
-        self.persistence_mutex.lockUncancelable(self.io);
+        try persistence_admission.lockTransaction(PersistenceAdmissionContext, self);
         defer self.persistence_mutex.unlock(self.io);
         self.state_mutex.lockUncancelable(self.io);
         if (self.bridge_qos2.getPhase(key) == .pending) {
@@ -3388,7 +3394,7 @@ pub const Broker = struct {
         self: *Broker,
         bridge_id: [16]u8,
     ) Error!u64 {
-        self.persistence_mutex.lockUncancelable(self.io);
+        try persistence_admission.lockTransaction(PersistenceAdmissionContext, self);
         defer self.persistence_mutex.unlock(self.io);
         self.state_mutex.lockUncancelable(self.io);
         const epoch = self.bridge_qos2.advanceSession(bridge_id) catch |err| {
@@ -4585,17 +4591,7 @@ pub const Broker = struct {
     }
 
     fn claimSlot(self: *Broker) Error!usize {
-        self.state_mutex.lockUncancelable(self.io);
-        defer self.state_mutex.unlock(self.io);
-        for (self.slots, 0..) |slot, index| {
-            if (!slot.state.active) {
-                self.slots[index].state.active = true;
-                self.slots[index].state.registration_aborted = false;
-                self.connections_received +|= 1;
-                return index;
-            }
-        }
-        return error.BrokerFull;
+        return persistence_admission.claimSlot(PersistenceAdmissionContext, self);
     }
 
     fn releaseClaimedSlot(self: *Broker, slot_index: usize) void {
@@ -6429,7 +6425,7 @@ pub const Broker = struct {
         // transaction. Acquiring persistence before state preserves the global
         // lock order and prevents a checkpoint from observing the gap between
         // removal of the inbound QoS 2 record and installation of its effects.
-        self.persistence_mutex.lockUncancelable(self.io);
+        try persistence_admission.lockTransaction(PersistenceAdmissionContext, self);
         var persistence_locked = true;
         defer if (persistence_locked) self.persistence_mutex.unlock(self.io);
         self.state_mutex.lockUncancelable(self.io);

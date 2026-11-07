@@ -133,5 +133,124 @@
     "log": "docs/evidence/mqtt_commit_log/2026-11-07/durable.ReleaseSafe.corrected.log",
     "source_manifest": "docs/evidence/mqtt_commit_log/2026-11-07/sources.79cc3bcfd8fa.json",
     "source_manifest_sha256": "79cc3bcfd8faba0f53555977f6c11a4459714a4ed72523828dcfda89d80fa411"
+  },
+  {
+    "name": "locked-admission.Debug",
+    "command": [
+      "zig",
+      "build",
+      "test-lib",
+      "-Dtest-filter=broker locked PUBREL",
+      "-Dtest-filter=broker bridge transaction entry",
+      "-Dtest-filter=gRPC xDS client target",
+      "-Dtest-filter=gRPC xDS URI",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 1,
+    "elapsed_seconds": 1.626,
+    "summary": "5/8 steps succeeded (1 failed)",
+    "log": "docs/evidence/mqtt_commit_log/2026-11-07/locked-admission.Debug.log",
+    "source_manifest": "docs/evidence/mqtt_commit_log/2026-11-07/sources.d0c2b6440b7a.json",
+    "source_manifest_sha256": "d0c2b6440b7a0a149ce9e8304649354df878785022fdc6bd507db48c804fdf2f"
+  },
+  {
+    "name": "locked-admission.Debug.corrected",
+    "command": [
+      "zig",
+      "build",
+      "test-lib",
+      "-Dtest-filter=broker locked PUBREL",
+      "-Dtest-filter=broker bridge transaction entry",
+      "-Dtest-filter=gRPC xDS client target",
+      "-Dtest-filter=gRPC xDS URI",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 1.426,
+    "summary": "8/8 steps succeeded; 173/173 tests passed",
+    "log": "docs/evidence/mqtt_commit_log/2026-11-07/locked-admission.Debug.corrected.log",
+    "source_manifest": "docs/evidence/mqtt_commit_log/2026-11-07/sources.41be999c4aeb.json",
+    "source_manifest_sha256": "41be999c4aebc3bb43f261d6237458121d999e1290bb10c5fb41a88392adee6c"
+  },
+  {
+    "name": "locked-admission.ReleaseSafe",
+    "command": [
+      "zig",
+      "build",
+      "test-lib",
+      "-Doptimize=ReleaseSafe",
+      "-Dtest-filter=broker locked PUBREL",
+      "-Dtest-filter=broker bridge transaction entry",
+      "-Dtest-filter=gRPC xDS client target",
+      "-Dtest-filter=gRPC xDS URI",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 40.566,
+    "summary": "8/8 steps succeeded; 173/173 tests passed",
+    "log": "docs/evidence/mqtt_commit_log/2026-11-07/locked-admission.ReleaseSafe.log",
+    "source_manifest": "docs/evidence/mqtt_commit_log/2026-11-07/sources.b0cc9e369e08.json",
+    "source_manifest_sha256": "b0cc9e369e0807e3aaf52e156915a8927bccaa7cbafe36432d19fdb2ee07dc7c"
+  },
+  {
+    "name": "transaction-broker.Debug",
+    "command": [
+      "zig",
+      "build",
+      "test-lib",
+      "-Dtest-filter=broker",
+      "-Dtest-filter=snapshot",
+      "-Dtest-filter=commit log",
+      "-Dtest-filter=property blob",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 66.49,
+    "summary": "8/8 steps succeeded; 648/648 tests passed",
+    "log": "docs/evidence/mqtt_commit_log/2026-11-07/transaction-broker.Debug.log",
+    "source_manifest": "docs/evidence/mqtt_commit_log/2026-11-07/sources.9a6a82f4465f.json",
+    "source_manifest_sha256": "9a6a82f4465f105808907679c6639ef0c7a9dd2749c7284a01e81aa2affc62fe"
+  },
+  {
+    "name": "transaction-broker.ReleaseSafe",
+    "command": [
+      "zig",
+      "build",
+      "test-lib",
+      "-Doptimize=ReleaseSafe",
+      "-Dtest-filter=broker",
+      "-Dtest-filter=snapshot",
+      "-Dtest-filter=commit log",
+      "-Dtest-filter=property blob",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 294.365,
+    "summary": "8/8 steps succeeded; 648/648 tests passed",
+    "log": "docs/evidence/mqtt_commit_log/2026-11-07/transaction-broker.ReleaseSafe.log",
+    "source_manifest": "docs/evidence/mqtt_commit_log/2026-11-07/sources.90b011b1ef0a.json",
+    "source_manifest_sha256": "90b011b1ef0a5ed9d7795d4f35c5ff1a55cf93df25105a2537eb6f388e7ed7fe"
+  },
+  {
+    "name": "locked-durable.ReleaseSafe",
+    "command": [
+      "zig",
+      "build",
+      "interop-mqtt-commit-log",
+      "-Doptimize=ReleaseSafe",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 232.905,
+    "summary": "8/8 steps succeeded",
+    "log": "docs/evidence/mqtt_commit_log/2026-11-07/locked-durable.ReleaseSafe.log",
+    "source_manifest": "docs/evidence/mqtt_commit_log/2026-11-07/sources.acec27aaae85.json",
+    "source_manifest_sha256": "acec27aaae85382f0c472b1c98d9d5d5cef17dd935a67cada34f7b14e87f005f"
   }
 ]

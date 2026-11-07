@@ -1,0 +1,22 @@
+MQTT incremental commit-log SIGKILL recovery passed with reduced Message Expiry and Subscription Identifier 53
+MQTT retained-source authorization survived commit-log SIGKILL recovery
+MQTT 3.1.1/5 retained deletion survived commit-log SIGKILL recovery
+MQTT expired Session deletion survived commit-log SIGKILL recovery
+MQTT outgoing QoS 2 resumed at PUBREL and completed across commit-log SIGKILL recovery
+MQTT 3.1.1/5 incoming QoS 2 routed once across commit-log SIGKILL recovery
+MQTT 3.1.1/5 outgoing QoS 1 DUP state completed across commit-log SIGKILL recovery
+MQTT delayed retained Will survived commit-log SIGKILL recovery
+MQTT delayed Will cancellation survived commit-log SIGKILL recovery
+MQTT clean Session retained Will survived commit-log SIGKILL recovery
+MQTT clean Session normal DISCONNECT Will cancellation survived commit-log SIGKILL recovery
+Build Summary: 8/8 steps succeeded
+interop-mqtt-commit-log success
++- run python3 success 16s
+   +- compile exe netz-mqtt-vector-broker ReleaseSafe native success 3m MaxRSS:5G
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal ReleaseSafe native cached 6ms MaxRSS:39M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 ReleaseSafe native cached 5ms MaxRSS:39M
+      +- compile obj vort-br-record-optimal ReleaseSafe native (reused)
+      +- compile obj vort-zstd-huffman-x2 ReleaseSafe native (reused)
+      +- options cached

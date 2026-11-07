@@ -38,6 +38,13 @@ observe broker retirement through a delegated socket-close callback, and reopen
 the journal to verify Session and Will state. Raw MQTT packets keep the test
 client's transport open while observing the peer.
 
+Locked incoming QoS 2 release and bridge transactions wait for admission before
+any durable store mutation. CONNECT reservation publication uses the same
+persistence-to-state lock order, preventing a new provisional slot from
+appearing halfway through a transaction. Each transaction keeps persistence
+ownership through its existing mutation, rollback and fsync. Cancellation
+before slot publication leaves the active-slot and CONNECT counters unchanged.
+
 Four alternating pairs of fixed old/new ReleaseFast executables produced:
 
 | Offline Sessions | Snapshot bytes | Allocations per encode, old/new | Extra peak bytes, old/new | Paired median encoding speedup |
@@ -75,3 +82,10 @@ also passed the full `interop-mqtt-commit-log` SIGKILL recovery gate, including
 QoS 1/2, retained deletion/authorization, Session expiry, delayed Wills and
 clean-Session normal-DISCONNECT Will cancellation. The independent Python wire
 fixture and its existing deadlines were unchanged.
+
+The subsequent locked-transaction admission regression covers PUBREL/PUBCOMP,
+all four bridge transaction APIs, cancellation before reservation publication,
+and new CONNECT exclusion during a held fsync. Expanded broker/snapshot gates
+passed 648/648 in Debug and ReleaseSafe. The production SIGKILL recovery gate
+also passed after these changes; synchronous pending-state and completion
+boundaries remain enforced.

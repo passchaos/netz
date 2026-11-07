@@ -334,4 +334,5 @@ test "broker retries rollback journal after concurrent CONNECT settles" {
 
 test {
     _ = @import("registration_persistence/overlap_tests.zig");
+    _ = @import("registration_persistence/transaction_tests.zig");
 }
