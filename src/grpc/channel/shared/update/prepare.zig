@@ -14,6 +14,7 @@ pub const Prepared = struct {
     circuit: ?channel.circuit_breaker.Policy = null,
     endpoints: []channel.Endpoint,
     lrs_selection: ?*@import("../lrs_stats.zig").Selection = null,
+    enable_lrs_stats: bool = false,
     target_lifetime: ?@import("../target_lifetime.zig").Lifetime = null,
     sources: []*State.Source = &.{},
     policy: channel.SelectionPolicy,

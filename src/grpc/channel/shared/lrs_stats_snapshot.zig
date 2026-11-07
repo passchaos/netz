@@ -16,14 +16,17 @@ fn markReported(value: anytype) void {
     value.reported_count = value.count;
 }
 
-pub fn takeLocked(self: anytype, gpa: std.mem.Allocator, comptime delta: bool) std.mem.Allocator.Error!stats.Snapshot {
+pub fn takeLocked(self: anytype, gpa: std.mem.Allocator, comptime delta: bool, source_key: ?[]const u8) std.mem.Allocator.Error!stats.Snapshot {
     var storage_bytes: usize = 0;
+    var entry_count: usize = 0;
     var category_count: usize = 0;
     var endpoint_count: usize = 0;
     var metric_count: usize = 0;
     var iterator = self.map.iterator();
     while (iterator.next()) |entry| {
-        storage_bytes += entry.value_ptr.*.cluster.len + entry.value_ptr.*.service_name.len;
+        if (source_key) |key| if (!std.mem.eql(u8, key, entry.value_ptr.*.source_key)) continue;
+        entry_count += 1;
+        storage_bytes += entry.value_ptr.*.source_key.len + entry.value_ptr.*.cluster.len + entry.value_ptr.*.service_name.len;
         category_count += entry.value_ptr.*.dropped_categories.count();
         endpoint_count += entry.value_ptr.*.endpoints.count();
         metric_count += entry.value_ptr.*.named_metrics.count();
@@ -34,7 +37,7 @@ pub fn takeLocked(self: anytype, gpa: std.mem.Allocator, comptime delta: bool) s
         var metrics = entry.value_ptr.*.named_metrics.iterator();
         while (metrics.next()) |metric| storage_bytes += metric.key_ptr.*.len;
     }
-    const entries = try gpa.alloc(Entry, self.map.count());
+    const entries = try gpa.alloc(Entry, entry_count);
     errdefer gpa.free(entries);
     const categories = try gpa.alloc(CategoryCount, category_count);
     errdefer gpa.free(categories);
@@ -51,6 +54,11 @@ pub fn takeLocked(self: anytype, gpa: std.mem.Allocator, comptime delta: bool) s
     var metric_index: usize = 0;
     iterator = self.map.iterator();
     while (iterator.next()) |entry| {
+        if (source_key) |key| if (!std.mem.eql(u8, key, entry.value_ptr.*.source_key)) continue;
+        const source = entry.value_ptr.*.source_key;
+        const source_copy = storage[offset..][0..source.len];
+        @memcpy(source_copy, source);
+        offset += source.len;
         const name = entry.value_ptr.*.cluster;
         const copy = storage[offset..][0..name.len];
         @memcpy(copy, name);
@@ -119,6 +127,7 @@ pub fn takeLocked(self: anytype, gpa: std.mem.Allocator, comptime delta: bool) s
         entries[index] = .{
             .cluster = copy,
             .service_name = service_copy,
+            .source_key = source_copy,
             .issued = issued,
             .successful = successful,
             .error_requests = error_requests,

@@ -9,6 +9,8 @@ pub const Error = @import("client.zig").Error || std.mem.Allocator.Error;
 pub const Options = struct {
     interval_ns: u64 = std.time.ns_per_s,
     locality: codec.Locality = .{},
+    /// Automatic runners own this immutable discovery-source key.
+    source_key: ?[]const u8 = null,
 };
 
 /// `source` and `client` are borrowed; keep both alive for the reporter's
@@ -19,6 +21,7 @@ pub const Reporter = struct {
     source: channel.SharedChannel,
     locality: codec.Locality,
     interval_ns: u64,
+    source_key: ?[]const u8,
     endpoint_granularity: bool = false,
     last_report_ns: ?i96 = null,
     /// True when the previous report contained only zero counters. A second
@@ -35,6 +38,7 @@ pub const Reporter = struct {
             .client = client,
             .source = source,
             .locality = options.locality,
+            .source_key = options.source_key,
             .interval_ns = @max(options.interval_ns, std.time.ns_per_ms),
             .last_report_ns = std.Io.Clock.Timestamp.now(client.sender.state.io, .awake).raw.nanoseconds,
         };
@@ -92,7 +96,10 @@ pub const Reporter = struct {
             const elapsed = now.raw.nanoseconds - last;
             break :blk if (elapsed > 0) @intCast(elapsed) else 0;
         } else self.interval_ns;
-        var snapshot = try self.source.lrsStatsDeltaSnapshot(self.allocator);
+        var snapshot = if (self.source_key) |key|
+            try self.source.state.lrs_stats.snapshotDeltaForSource(self.allocator, io, key)
+        else
+            try self.source.lrsStatsDeltaSnapshot(self.allocator);
         defer snapshot.deinit();
         const zero = snapshotIsZero(&snapshot, self.filter);
         if (zero and self.last_report_zero) {

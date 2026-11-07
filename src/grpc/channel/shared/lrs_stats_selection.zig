@@ -1,5 +1,6 @@
 //! Immutable CDS reporting registrations, copied before channel publication.
 const std = @import("std");
+const Source = @import("../../xds/discovery_source.zig").Source;
 
 pub const Propagation = struct {
     cpu_utilization: bool = false,
@@ -7,12 +8,17 @@ pub const Propagation = struct {
     application_utilization: bool = false,
     named_metrics_all: bool = false,
     named_metrics: []const []const u8 = &.{},
+    /// CDS named_metrics selectors retain this namespace on the LRS wire.
+    /// Direct/manual propagation keeps caller-provided metric names by default.
+    prefix_named_metrics: bool = false,
 };
 
 pub const Identity = struct {
     cluster: []const u8,
     service_name: []const u8 = "",
     propagation: Propagation = .{},
+    source: ?*Source = null,
+    source_key: []const u8 = "",
 };
 
 pub const Selection = struct {
@@ -28,13 +34,16 @@ pub const Selection = struct {
         errdefer self.release();
         const arena = self.arena.allocator();
         const copies = try arena.alloc(Identity, identities.len);
-        for (identities, copies) |source, *copy| {
+        for (identities, copies, 0..) |source, *copy, position| {
             copy.* = source;
             copy.cluster = try arena.dupe(u8, source.cluster);
             copy.service_name = try arena.dupe(u8, source.service_name);
+            copy.source_key = try arena.dupe(u8, source.source_key);
             const names = try arena.alloc([]const u8, source.propagation.named_metrics.len);
             for (source.propagation.named_metrics, names) |name, *owned| owned.* = try arena.dupe(u8, name);
             copy.propagation.named_metrics = names;
+            copy.source = if (source.source) |owner| owner.retain() else null;
+            self.identities = copies[0 .. position + 1];
         }
         self.identities = copies;
         const index = try arena.alloc(usize, copies.len);
@@ -52,6 +61,7 @@ pub const Selection = struct {
 
     pub fn release(self: *Selection) void {
         if (self.refs.fetchSub(1, .acq_rel) != 1) return;
+        for (self.identities) |identity| if (identity.source) |source| source.release();
         self.arena.deinit();
         self.allocator.destroy(self);
     }

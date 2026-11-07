@@ -296,4 +296,5 @@ test {
     _ = @import("shared/lrs_stats_tests.zig");
     _ = @import("shared/lrs_stats_registration_tests.zig");
     _ = @import("shared/lrs_stats_lookup_tests.zig");
+    _ = @import("shared/lrs_stats_source_tests.zig");
 }

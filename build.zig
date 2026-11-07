@@ -2150,6 +2150,20 @@ pub fn build(b: *std.Build) void {
     const grpc_lrs_step = b.step("interop-grpc-lrs", "Verify Load Reporting Service envelopes and counters against official Envoy schemas");
     grpc_lrs_step.dependOn(&grpc_lrs.step);
 
+    const grpc_lrs_automatic_client = b.addExecutable(.{
+        .name = "netz-grpc-lrs-automatic-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/interop/grpc_lrs_automatic/client.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const grpc_lrs_automatic = b.addSystemCommand(&.{ "python3", "tools/interop/grpc_lrs_automatic/run.py" });
+    grpc_lrs_automatic.addArtifactArg(grpc_lrs_automatic_client);
+    if (b.args) |args| grpc_lrs_automatic.addArgs(args);
+    b.step("interop-grpc-lrs-automatic", "Verify managed CDS LRS source provenance, migration and nonblocking reporting transport").dependOn(&grpc_lrs_automatic.step);
+
     const grpc_impl_client = b.addExecutable(.{
         .name = "netz-grpc-cluster-impl-client",
         .root_module = b.createModule(.{

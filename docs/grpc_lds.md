@@ -191,6 +191,7 @@ route report is `docs/evidence/grpc_lds/2026-11-06-rbac-route-interop.json`.
 subscriptions and publishes CDS/EDS children from these listener/RDS snapshots.
 Typed delta listener/RDS publication and TTL expiry are available through the
 same runtime. Bootstrap parsing and control-plane failover are
-available; certificate providers and automatic refresh scheduling, authority-specific control planes, controller-owned LRS scheduling,
-non-router HTTP filters, server listener/filter-chain interpretation and full
-security/rewriting configuration remain open.
+available, and [automatic controller-owned LRS](grpc_lrs_automatic.md) binds
+managed self-CDS to its accepted discovery source. Server listener/filter-chain
+interpretation and broader security/rewriting configuration remain outside this
+client LDS adapter.

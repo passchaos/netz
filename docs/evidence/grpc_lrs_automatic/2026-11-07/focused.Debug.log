@@ -1,0 +1,23 @@
+test-lib
++- run test w
+automatic LRS peer initial/sotw/automatic: expected transport close error=ConnectionClosed phase=shutdown initial=1 reports=2 events=3 last=messages closing=true counts=.{ .issued = 2, .successful = 1, .failed = 1, .dropped = 1 }
+automatic LRS peer late/sotw/automatic: expected transport close error=ConnectionClosed phase=shutdown initial=1 reports=2 events=3 last=messages closing=true counts=.{ .issued = 2, .successful = 1, .failed = 1, .dropped = 1 }
+automatic LRS peer late/delta/automatic: expected transport close error=ConnectionClosed phase=shutdown initial=1 reports=2 events=3 last=messages closing=true counts=.{ .issued = 2, .successful = 1, .failed = 1, .dropped = 1 }
+automatic LRS peer provenance/sotw/source-b: expected transport close error=ConnectionClosed phase=shutdown initial=1 reports=1 events=2 last=messages closing=true counts=.{ .issued = 1, .successful = 0, .failed = 1, .dropped = 1 }
+automatic LRS peer provenance/delta/source-b: expected transport close error=ConnectionClosed phase=shutdown initial=1 reports=1 events=2 last=messages closing=true counts=.{ .issued = 1, .successful = 0, .failed = 1, .dropped = 1 }
+automatic LRS peer source-limit/sotw/source-a: expected transport close error=ConnectionClosed phase=shutdown initial=1 reports=7 events=8 last=messages closing=true counts=.{ .issued = 2, .successful = 1, .failed = 1, .dropped = 1 }
+automatic LRS peer source-limit/sotw/source-b: failed error=Canceled phase=accepting initial=0 reports=0 events=0 last=none closing=false counts=.{ .issued = 0, .successful = 0, .failed = 0, .dropped = 0 }
+automatic LRS peer source-limit/delta/source-b: failed error=Canceled phase=accepting initial=0 reports=0 events=0 last=none closing=false counts=.{ .issued = 0, .successful = 0, .failed = 0, .dropped = 0 }
+failed command: ./.zig-cache/o/e436e1e8929148ba30e743a0aaf75d19/test --cache-dir=./.zig-cache --seed=0xcc408761 --listen=-
+
+Build Summary: 8/8 steps succeeded; 246/246 tests passed
+test-lib success
++- run test 246 pass (246 total) 6s MaxRSS:53M
+   +- compile test Debug native success 34s MaxRSS:2G
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 7ms MaxRSS:35M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 7ms MaxRSS:35M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options cached

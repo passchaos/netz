@@ -3602,10 +3602,14 @@ per-cluster/locality/endpoint reports built from SharedChannel counters, an
 interval scheduler that emits deltas and skips all-zero intervals, and
 reconnect plus control-plane failover (`lrs/tests.zig`,
 `lrs/scheduler_tests.zig`, `lrs/transport_tests.zig`). The runtime Controller
-owns an optional runner through `Options.lrs` for both SotW and delta discovery.
+owns automatic source-pinned runners for bootstrap-managed SotW and delta
+discovery; `Options.lrs` supplies an explicit transport override.
 Accepted CDS reporting registrations now control collection and retain each
 call's admitted identity through completion; see
-[CDS-controlled LRS registrations](grpc_lrs_registration.md).
+[CDS-controlled LRS registrations](grpc_lrs_registration.md) and
+[automatic source binding](grpc_lrs_automatic.md). Cached CDS keeps the server
+that supplied it after discovery failover. Accepted replacement CDS migrates
+new calls, while old calls and their final deltas finish on the old source.
 
 
 ## Typed CDS and transactional CDS/EDS application
@@ -3641,8 +3645,9 @@ retention when ACK has no active stream. See [CDS behavior](grpc_cds.md) and
 
 The selected-cluster CDS/EDS gate above is complemented by the multi-cluster
 runtime Controller and its SotW/delta publication paths described below.
-CDS `lrs_server: self` controls per-cluster collection in the configured LRS
-runner. Other LRS config sources are rejected. Reporting-only delta changes
+CDS `lrs_server: self` controls per-cluster collection and automatically binds
+reporting to the accepted discovery source for managed clients. Other LRS
+config sources are rejected. Reporting-only delta changes
 publish, and old admitted calls retain their EDS identity and propagation until
 completion. See [CDS-controlled LRS registrations](grpc_lrs_registration.md).
 LOGICAL_DNS clusters are decoded and expanded into a priority tree whose child
@@ -3718,10 +3723,10 @@ admission priority. Existing ADS/CDS and RE2 gates remain regression evidence.
 See [RDS behavior and boundaries](grpc_rds.md) and
 `docs/evidence/grpc_rds/2026-11-03.json`.
 
-LDS/HCM/bootstrap and automatic CDS/EDS child orchestration, expiry, failover,
-Delta xDS, LRS, HTTP filters and non-router filters remain required work for
-complete xDS integration. Current RDS publication uses the application's
-existing cluster-manager topology.
+This standalone RDS adapter uses the application's existing cluster-manager
+topology. The following sections cover listener-driven and automatic typed
+discovery integration; [automatic LRS](grpc_lrs_automatic.md) covers reporting
+from the accepted discovery source.
 
 
 ## Client LDS/HCM and listener-driven RDS
@@ -3787,8 +3792,9 @@ permitted calls per ordinary/shared mode and no rejected payloads. The full
 suite also exposed a size-matching fault injector locking twice after unrelated
 stream/job layout changes; it now enters once and preserves the original
 cleanup-lock assertion. See [cluster admission](grpc_cluster_impl.md) and
-`docs/evidence/grpc_cluster_impl/2026-11-03.json`. Automatic LDS/RDS dependencies
-to CDS/EDS publication and broader bootstrap/failover/expiry/LRS remain open.
+`docs/evidence/grpc_cluster_impl/2026-11-03.json`. The following runtime section
+connects LDS/RDS dependencies to CDS/EDS publication; automatic reporting is
+described in [source-pinned LRS](grpc_lrs_automatic.md).
 
 
 ## Automatic typed discovery and multi-cluster publication

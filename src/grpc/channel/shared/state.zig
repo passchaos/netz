@@ -377,18 +377,16 @@ pub const State = struct {
         self.finishLocked(job, result, err);
         self.wakeAllLocked();
     }
-    fn lrsCluster(worker: *Worker) ?[]const u8 {
-        return lrs_stats.clusterName(worker.source.endpoint);
-    }
     pub fn captureLrs(self: *State, worker: *Worker) ?lrs_stats.Registration {
-        const cluster = lrsCluster(worker) orelse return null;
+        const key = lrs_stats.clusterKey(worker.source.endpoint) orelse return null;
         self.lock();
         defer self.unlock();
-        return self.lrs_stats.capture(self.io, cluster, self.lrsServiceName(cluster));
+        return self.lrs_stats.capture(self.io, lrs_stats.stripCluster(key), self.lrsServiceName(key));
     }
-    pub fn lrsServiceName(self: *State, cluster: []const u8) []const u8 {
+    /// Manager lookup uses the route key; only the report cluster is stripped.
+    pub fn lrsServiceName(self: *State, cluster_key: []const u8) []const u8 {
         const runtime = if (self.weighted_target) |*value| value else return "";
-        const policy = @import("../cluster_impl.zig").forCluster(runtime.root, cluster) catch return "";
+        const policy = @import("../cluster_impl.zig").forCluster(runtime.root, cluster_key) catch return "";
         return if (policy) |value| value.eds_service_name else "";
     }
     pub fn finishAttempt(

@@ -7,6 +7,60 @@ const fixture = @import("../cds/testing.zig");
 
 const gpa = std.testing.allocator;
 
+test "gRPC LRS explicit override keeps one reporting bucket across discovery sources" {
+    const bootstrap = @import("../bootstrap.zig");
+    const Source = @import("../discovery_source.zig").Source;
+    const stats = @import("../../channel/shared/lrs_stats.zig");
+    const lrs = @import("../lrs.zig");
+    const configuration = try bootstrap.parse(gpa, "{\"xds_servers\":[{\"server_uri\":\"http://127.0.0.1:1111\",\"channel_creds\":[{\"type\":\"insecure\"}]}],\"node\":{\"id\":\"node\"}}", .{});
+    defer configuration.deinit();
+    const a = try Source.create(gpa, configuration, configuration.servers[0], .{ .id = "node" }, .{ .path = "/ads" });
+    defer a.release();
+    var next_server = configuration.servers[0];
+    next_server.target.port = 2222;
+    const b = try Source.create(gpa, configuration, next_server, .{ .id = "node" }, .{ .path = "/ads" });
+    defer b.release();
+    const bytes = try fixture.cluster(gpa, "a", "eds", "\xd2\x02\x02\x2a\x00");
+    defer gpa.free(bytes);
+    const resource = try entry.Cluster.create(gpa, try cds.decode(gpa, bytes, .{}));
+    defer resource.release();
+    resource.discovery_source = a.retain();
+    const identity = try entry.Identity.create(gpa, "a");
+    defer identity.release();
+    const entries = [_]entry.Entry{.{ .identity = identity, .cluster = resource, .cds_seen = true }};
+    const first = try target.Target.createWithReporting(gpa, std.testing.io, &entries, null, false);
+    defer first.release();
+    var counters: stats.Stats = .{ .allocator = gpa };
+    defer counters.deinit();
+    try std.testing.expect(counters.swapSelection(std.testing.io, first.lrs_selection.?.retain()) == null);
+    const held = counters.begin(std.testing.io, "a", "eds", null) orelse return error.MissingRegistration;
+    defer held.release();
+    resource.discovery_source.?.release();
+    resource.discovery_source = b.retain();
+    const second = try target.Target.createWithReporting(gpa, std.testing.io, &entries, null, false);
+    defer second.release();
+    counters.swapSelection(std.testing.io, second.lrs_selection.?.retain()).?.release();
+    const current = counters.begin(std.testing.io, "a", "eds", null) orelse return error.MissingRegistration;
+    defer current.release();
+    counters.complete(std.testing.io, held, null, true);
+    counters.complete(std.testing.io, current, null, false);
+    var snapshot = try counters.snapshotDelta(gpa, std.testing.io);
+    defer snapshot.deinit();
+    try std.testing.expectEqual(@as(usize, 1), snapshot.entries.len);
+    try std.testing.expectEqualStrings("", snapshot.entries[0].source_key);
+    var reports = try lrs.integration.build(gpa, &snapshot, .{}, std.time.ns_per_s);
+    defer reports.deinit();
+    const encoded = try lrs.codec.encodeRequest(gpa, .{ .clusters = reports.clusters }, .{});
+    defer gpa.free(encoded);
+    var decoded = try lrs.codec.decodeRequest(gpa, encoded, .{});
+    defer decoded.deinit();
+    try std.testing.expectEqual(@as(usize, 1), decoded.value.clusters.len);
+    const locality = decoded.value.clusters[0].localities[0];
+    try std.testing.expectEqual(@as(u64, 2), locality.issued);
+    try std.testing.expectEqual(@as(u64, 1), locality.successful);
+    try std.testing.expectEqual(@as(u64, 1), locality.error_requests);
+}
+
 fn aggregateCluster(leaves: []const []const u8) ![]u8 {
     var config = fixture.Builder{ .allocator = gpa };
     defer config.deinit();

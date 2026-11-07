@@ -13,7 +13,7 @@ pub fn rejectIfSaturated(state: anytype, job: anytype) @TypeOf(state.*).Failure!
     policy.recordRejection();
     if (comptime @hasField(@TypeOf(state.*), "lrs_stats") and @hasDecl(@TypeOf(state.*), "lrsServiceName")) if (@import("../cluster_route.zig").jobCluster(job)) |key| {
         const cluster = lrs_stats.stripCluster(key);
-        state.lrs_stats.recordDropped(state.io, cluster, state.lrsServiceName(cluster), "circuit_breaking");
+        state.lrs_stats.recordDropped(state.io, cluster, state.lrsServiceName(key), "circuit_breaking");
     };
     if (job.stream != null) return error.CallDropped;
     return try call.circuitBreakerResponse(state.allocator);

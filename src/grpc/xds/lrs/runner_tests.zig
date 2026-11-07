@@ -76,6 +76,53 @@ const UnaryPeer = struct {
     }
 };
 
+test "gRPC LRS runner publishes terminal failure through the live getter" {
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var control = try grpc.runtime.Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{}, 4096);
+    defer control.deinit();
+    var hold: std.Io.Event = .unset;
+    const MalformedPeer = struct {
+        fn run(listener: *grpc.runtime.Server, release: *std.Io.Event, run_io: std.Io) !void {
+            var connection = try listener.acceptWithTimeout(.fromSeconds(5));
+            defer connection.deinit();
+            var duplex = try connection.acceptDuplexWithTimeout(.fromSeconds(5));
+            defer duplex.deinit();
+            var initial = try nextRequest(&duplex);
+            defer initial.deinit();
+            try duplex.startResponse(.{});
+            // LoadStatsResponse.clusters contains an invalid UTF-8 name.
+            try std.testing.expectEqual(grpc.DuplexWriteResult.complete, try duplex.writeMessage("\x0a\x01\xff"));
+            try release.wait(run_io);
+        }
+    };
+    var peer = try io.concurrent(MalformedPeer.run, .{ &control, &hold, io });
+    defer _ = peer.cancel(io) catch {};
+    const json = try std.fmt.allocPrint(allocator, "{{\"xds_servers\":[{{\"server_uri\":\"http://127.0.0.1:{d}\",\"channel_creds\":[{{\"type\":\"insecure\"}}]}}],\"node\":{{\"id\":\"node\"}}}}", .{control.address().getPort()});
+    defer allocator.free(json);
+    const configuration = try bootstrap.parse(allocator, json, .{});
+    defer configuration.deinit();
+    const plane = try control_plane.ControlPlane.init(allocator, io, configuration, .{});
+    defer plane.deinit();
+    var sender = plane.sender();
+    defer sender.deinit();
+    var data = try grpc.SharedChannel.init(allocator, io, .{ .cleartext_ip = .{ .address = .{ .ip4 = .loopback(1) } } }, .{ .enable_lrs_stats = true });
+    defer data.deinit();
+    const runner = try lrs.Runner.create(allocator, io, sender, plane, data, .{ .client = .{ .node = .{ .id = "node" } } });
+    defer runner.deinit();
+    try std.testing.expect(runner.failureReason() == null);
+    try runner.start();
+    if (runner.task) |*task| task.await(io) else return error.RunnerNotStarted;
+    try std.testing.expect(runner.finished.load(.acquire));
+    const failure = runner.failureReason() orelse return error.MissingTerminalFailure;
+    try std.testing.expectEqual(@as(anyerror, error.InvalidUtf8), failure);
+    runner.stop();
+    try std.testing.expectEqual(@as(?anyerror, error.InvalidUtf8), runner.failureReason());
+    hold.set(io);
+    try peer.await(io);
+}
+
 test "gRPC LRS runner owns a background report loop" {
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
     defer threaded.deinit();

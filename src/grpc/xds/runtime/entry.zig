@@ -32,6 +32,7 @@ pub const Cluster = struct {
     allocator: std.mem.Allocator,
     refs: std.atomic.Value(usize) = .init(1),
     resource: cds.resource.Owned,
+    discovery_source: ?*@import("../discovery_source.zig").Source = null,
     /// SDS material copied into this cluster's own arena. Kept separate from
     /// the immutable CDS resource so a secret rotation can replace it without
     /// rebuilding the cluster identity.
@@ -128,6 +129,7 @@ pub const Cluster = struct {
     pub fn release(self: *Cluster) void {
         if (self.refs.fetchSub(1, .acq_rel) != 1) return;
         if (self.pending_eds) |value| self.allocator.free(value);
+        if (self.discovery_source) |source| source.release();
         self.tls_arena.deinit();
         self.resource.deinit();
         self.allocator.destroy(self);

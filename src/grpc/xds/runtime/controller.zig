@@ -52,6 +52,7 @@ pub const Controller = struct {
     local_json: ?[]const u8 = null,
     local_captured: bool = false,
     lrs_runner: ?*lrs.Runner = null,
+    lrs_bindings: @import("lrs_bindings.zig").Bindings = .{},
     /// Accepted xdstp authorities; empty accepts only old-style names.
     authorities: []const []const u8 = &.{},
     /// SotW/delta SDS cache keyed by secret name. Secrets are copied into each
@@ -60,7 +61,8 @@ pub const Controller = struct {
     /// Owned initial-fetch timers, refreshed from the client's desired names.
     resource_timers: std.ArrayList(ResourceTimer) = .empty,
     pub fn create(gpa: std.mem.Allocator, options: Options) Error!*Controller {
-        if (options.limits.max_clusters == 0 or options.limits.max_projections == 0 or options.limits.max_storage_bytes == 0 or options.target.authority.len == 0 or options.target.attempt_delay.nanoseconds <= 0) return error.InvalidXdsOptions;
+        if (options.limits.max_clusters == 0 or options.limits.max_projections == 0 or options.limits.max_storage_bytes == 0 or options.limits.max_lrs_sources == 0 or options.target.authority.len == 0 or options.target.attempt_delay.nanoseconds <= 0) return error.InvalidXdsOptions;
+        if (options.automatic_lrs.poll_interval.nanoseconds <= 0 or options.automatic_lrs.connect_timeout.nanoseconds <= 0) return error.InvalidXdsOptions;
         if (options.lrs) |value| {
             if (value.poll_interval.nanoseconds <= 0 or value.connect_timeout.nanoseconds <= 0) return error.InvalidXdsOptions;
         }
@@ -114,6 +116,7 @@ pub const Controller = struct {
     }
     pub fn deinit(self: *Controller) void {
         if (self.lrs_runner) |runner| runner.deinit();
+        self.lrs_bindings.deinit(self.allocator);
         var secrets = self.sds_secrets.iterator();
         while (secrets.next()) |item| {
             item.value_ptr.*.owned.deinit();
@@ -285,16 +288,24 @@ pub const Controller = struct {
             if (self.projections.items.len >= self.options.limits.max_projections) return error.XdsLimitExceeded;
             try self.projections.ensureUnusedCapacity(self.allocator, 1);
         }
-        const target = try Target.create(self.allocator, destination.state.io, plan.entries.items, self.local_json);
+        const target = try Target.createWithReporting(self.allocator, destination.state.io, plan.entries.items, self.local_json, self.options.lrs == null);
         defer target.release();
+        const automatic = self.options.lrs == null and !self.options.disable_automatic_lrs;
+        var bindings = if (automatic)
+            try self.lrs_bindings.prepare(self.allocator, destination.state.io, destination, target.lrs_selection, self.options.automatic_lrs, self.options.limits.max_lrs_sources)
+        else
+            @import("lrs_bindings.zig").Prepared{ .allocator = self.allocator, .owner = &self.lrs_bindings };
+        defer bindings.deinit();
         var storage = std.math.add(usize, plan.route_storage, target.arena.queryCapacity()) catch return error.XdsLimitExceeded;
+        storage = std.math.add(usize, storage, bindings.storageBytes()) catch return error.XdsLimitExceeded;
         if (target.lrs_selection) |selection| storage = std.math.add(usize, storage, selection.arena.queryCapacity()) catch return error.XdsLimitExceeded;
         for (plan.entries.items) |entry| {
             if (entry.cluster) |cluster| storage = std.math.add(usize, storage, cluster.resource.arena.queryCapacity()) catch return error.XdsLimitExceeded;
             if (entry.snapshot) |snapshot| storage = std.math.add(usize, storage, snapshot.resource.arena.queryCapacity()) catch return error.XdsLimitExceeded;
         }
         if (storage > self.options.limits.max_storage_bytes) return error.XdsLimitExceeded;
-        const revision = try target.publish(destination, projection.descriptor(), deadline);
+        const revision = try target.publish(destination, projection.descriptor(), deadline, automatic and bindings.has_sources);
+        bindings.commit();
         // Clusters that leave the inventory must not keep a stale ORCA
         // propagation selection; new/kept selections were applied above.
         for (self.entries.items) |old_entry| {

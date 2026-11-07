@@ -91,6 +91,7 @@ pub const Authority = struct {
 pub const Bootstrap = struct {
     allocator: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
+    refs: std.atomic.Value(usize) = .init(1),
     servers: []Server,
     node: ?Node = null,
     authorities: []Authority = &.{},
@@ -98,7 +99,14 @@ pub const Bootstrap = struct {
     client_default_listener_resource_name_template: []const u8 = "",
     server_listener_resource_name_template: []const u8 = "",
 
+    pub fn retain(self: *Bootstrap) *Bootstrap {
+        _ = self.refs.fetchAdd(1, .monotonic);
+        return self;
+    }
+
+    /// Release one owner; retained discovery sources keep the arena alive.
     pub fn deinit(self: *Bootstrap) void {
+        if (self.refs.fetchSub(1, .acq_rel) != 1) return;
         self.arena.deinit();
         self.allocator.destroy(self);
     }

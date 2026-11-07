@@ -1,0 +1,24 @@
+test-lib
++- run test w
+automatic LRS peer initial/sotw/automatic: expected transport close error=ConnectionClosed phase=shutdown initial=1 reports=2 events=3 last=messages closing=true counts=.{ .issued = 2, .successful = 1, .failed = 1, .dropped = 1 }
+automatic LRS peer late/sotw/automatic: expected transport close error=ConnectionClosed phase=shutdown initial=1 reports=2 events=3 last=messages closing=true counts=.{ .issued = 2, .successful = 1, .failed = 1, .dropped = 1 }
+automatic LRS peer provenance/sotw/source-a: expected transport close error=ConnectionClosed phase=shutdown initial=1 reports=14 events=15 last=messages closing=true counts=.{ .issued = 4, .successful = 4, .failed = 0, .dropped = 3 }
+automatic LRS peer provenance/sotw/source-b: expected transport close error=ConnectionClosed phase=shutdown initial=1 reports=1 events=2 last=messages closing=true counts=.{ .issued = 1, .successful = 0, .failed = 1, .dropped = 1 }
+automatic LRS peer provenance/delta/source-b: expected transport close error=ConnectionClosed phase=shutdown initial=1 reports=1 events=2 last=messages closing=true counts=.{ .issued = 1, .successful = 0, .failed = 1, .dropped = 1 }
+automatic LRS peer source-limit/sotw/source-a: expected transport close error=ConnectionClosed phase=shutdown initial=1 reports=7 events=8 last=messages closing=true counts=.{ .issued = 2, .successful = 1, .failed = 1, .dropped = 1 }
+automatic LRS peer source-limit/sotw/source-b: failed error=Canceled phase=accepting initial=0 reports=0 events=0 last=none closing=false counts=.{ .issued = 0, .successful = 0, .failed = 0, .dropped = 0 }
+automatic LRS peer source-limit/delta/source-a: expected transport close error=ConnectionClosed phase=shutdown initial=1 reports=7 events=8 last=messages closing=true counts=.{ .issued = 2, .successful = 1, .failed = 1, .dropped = 1 }
+automatic LRS peer source-limit/delta/source-b: failed error=Canceled phase=accepting initial=0 reports=0 events=0 last=none closing=false counts=.{ .issued = 0, .successful = 0, .failed = 0, .dropped = 0 }
+failed command: ./.zig-cache/o/944ce5825b5ebac6915299e382bc0123/test --cache-dir=./.zig-cache --seed=0xed4749bb --listen=-
+
+Build Summary: 8/8 steps succeeded; 387/387 tests passed
+test-lib success
++- run test 387 pass (387 total) 12s MaxRSS:22M
+   +- compile test ReleaseSafe native success 4m MaxRSS:5G
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal ReleaseSafe native cached 7ms MaxRSS:38M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 ReleaseSafe native cached 7ms MaxRSS:38M
+      +- compile obj vort-br-record-optimal ReleaseSafe native (reused)
+      +- compile obj vort-zstd-huffman-x2 ReleaseSafe native (reused)
+      +- options cached

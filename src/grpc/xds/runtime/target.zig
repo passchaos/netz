@@ -105,6 +105,10 @@ pub const Target = struct {
         propagation: lrs_stats.Propagation,
     };
     pub fn create(gpa: std.mem.Allocator, io: std.Io, entries: []const entry.Entry, local_json: ?[]const u8) (std.mem.Allocator.Error || @import("../../service_config.zig").Error || tls_material.Error)!*Target {
+        return createWithReporting(gpa, io, entries, local_json, true);
+    }
+
+    pub fn createWithReporting(gpa: std.mem.Allocator, io: std.Io, entries: []const entry.Entry, local_json: ?[]const u8, source_scoped: bool) (std.mem.Allocator.Error || @import("../../service_config.zig").Error || tls_material.Error)!*Target {
         const self = try gpa.create(Target);
         self.* = .{ .allocator = gpa, .arena = .init(gpa) };
         errdefer self.release();
@@ -123,6 +127,7 @@ pub const Target = struct {
             var implementation = object();
             try field(arena, &implementation, "clusterName", string(value.identity.name));
             const cluster = if (value.cluster) |resource| resource.resource.value else null;
+            const discovery_source = if (value.cluster) |resource| resource.discovery_source else null;
             // Publish a selection for every retained identity so a cluster
             // whose CDS resource disappeared also loses any stale propagation.
             try propagations.append(arena, .{
@@ -133,15 +138,19 @@ pub const Target = struct {
                     .application_utilization = resource.lrs_propagation.application_utilization,
                     .named_metrics_all = resource.lrs_propagation.named_metrics_all,
                     .named_metrics = resource.lrs_propagation.named_metrics,
+                    .prefix_named_metrics = true,
                 } else .{},
             });
             if (cluster) |resource| if (resource.lrs_self) {
-                try registrations.append(arena, .{ .cluster = value.identity.name, .service_name = resource.edsName(), .propagation = .{
+                // An explicit transport override has one logical reporting
+                // destination, so discovery failover keeps its shared bucket.
+                try registrations.append(arena, .{ .cluster = value.identity.name, .service_name = resource.edsName(), .source = discovery_source, .source_key = if (source_scoped and discovery_source != null) discovery_source.?.key else "", .propagation = .{
                     .cpu_utilization = resource.lrs_propagation.cpu_utilization,
                     .memory_utilization = resource.lrs_propagation.memory_utilization,
                     .application_utilization = resource.lrs_propagation.application_utilization,
                     .named_metrics_all = resource.lrs_propagation.named_metrics_all,
                     .named_metrics = resource.lrs_propagation.named_metrics,
+                    .prefix_named_metrics = true,
                 } });
             };
             try field(arena, &implementation, "edsServiceName", string(if (cluster) |resource| resource.edsName() else ""));
@@ -270,8 +279,8 @@ pub const Target = struct {
     pub fn lifetime(self: *Target) @import("../../channel/shared/target_lifetime.zig").Lifetime {
         return .{ .context = self, .retain_fn = retainContext, .release_fn = releaseContext };
     }
-    pub fn publish(self: *Target, destination: shared.SharedChannel, selector: @import("../../channel/call_selector.zig").Selector, deadline: std.Io.Clock.Timestamp) shared.Error!u64 {
-        const revision = try destination.updateWithDeadline(.{ .target = .{ .resolved = .{ .endpoints = self.endpoints } }, .target_lifetime = self.lifetime(), .service_config = .{ .replace = self.json }, .call_selector = .{ .replace = selector }, .lrs_selection = .{ .replace = self.lrs_selection } }, deadline);
+    pub fn publish(self: *Target, destination: shared.SharedChannel, selector: @import("../../channel/call_selector.zig").Selector, deadline: std.Io.Clock.Timestamp, enable_lrs_stats: bool) shared.Error!u64 {
+        const revision = try destination.updateWithDeadline(.{ .target = .{ .resolved = .{ .endpoints = self.endpoints } }, .target_lifetime = self.lifetime(), .service_config = .{ .replace = self.json }, .call_selector = .{ .replace = selector }, .lrs_selection = .{ .replace = self.lrs_selection }, .enable_lrs_stats = enable_lrs_stats }, deadline);
         for (self.propagations) |value| destination.setLrsPropagation(value.cluster, value.propagation);
         return revision;
     }

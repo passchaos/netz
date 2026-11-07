@@ -7,18 +7,20 @@ const allocator = std.testing.allocator;
 test "gRPC LRS borrowed identity hash matches stored keys across split boundaries" {
     const inputs = [_]keys.Borrowed{
         .{ .cluster = "a", .service_name = "bc" },
-        .{ .cluster = "ab", .service_name = "c" },
-        .{ .cluster = "a\x00b", .service_name = "c" },
+        .{ .cluster = "ab", .service_name = "c", .source_key = "source-a" },
+        .{ .cluster = "a\x00b", .service_name = "c", .source_key = "source\x00a" },
         .{ .cluster = "a", .service_name = "b\x00c" },
-        .{ .cluster = "long-cluster-with-more-than-48-bytes-to-cross-wyhash-block", .service_name = "another-long-service-name-to-cross-a-second-wyhash-block" },
+        .{ .source_key = "long-source-key-across-the-wyhash-48-byte-update-boundary", .cluster = "long-cluster-with-more-than-48-bytes-to-cross-wyhash-block", .service_name = "another-long-service-name-to-cross-a-second-wyhash-block" },
     };
     const context: keys.Adapted = .{};
     for (inputs, 0..) |input, index| {
-        const owned = try allocator.alloc(u8, 8 + input.cluster.len + input.service_name.len);
+        const owned = try allocator.alloc(u8, 16 + input.source_key.len + input.cluster.len + input.service_name.len);
         defer allocator.free(owned);
-        std.mem.writeInt(u64, owned[0..8], @intCast(input.cluster.len), .little);
-        @memcpy(owned[8..][0..input.cluster.len], input.cluster);
-        @memcpy(owned[8 + input.cluster.len ..], input.service_name);
+        std.mem.writeInt(u64, owned[0..8], @intCast(input.source_key.len), .little);
+        std.mem.writeInt(u64, owned[8..16], @intCast(input.cluster.len), .little);
+        @memcpy(owned[16..][0..input.source_key.len], input.source_key);
+        @memcpy(owned[16 + input.source_key.len ..][0..input.cluster.len], input.cluster);
+        @memcpy(owned[16 + input.source_key.len + input.cluster.len ..], input.service_name);
         try std.testing.expectEqual(std.hash.Wyhash.hash(0, owned), context.hash(input));
         try std.testing.expect(context.eql(input, owned));
         for (inputs[0..index]) |previous| try std.testing.expect(!context.eql(previous, owned));
@@ -30,7 +32,7 @@ test "gRPC LRS warmed identity endpoint and metric lookups survive allocation fa
     var counters: stats.Stats = .{ .allocator = failing.allocator() };
     defer counters.deinit();
     const identities = [_]stats.Identity{
-        .{ .cluster = "ab", .service_name = "c", .propagation = .{ .cpu_utilization = true, .named_metrics_all = true } },
+        .{ .cluster = "ab", .service_name = "c", .source_key = "warmed-source", .propagation = .{ .cpu_utilization = true, .named_metrics_all = true, .prefix_named_metrics = true } },
         .{ .cluster = "a\x00b", .service_name = "c" },
         .{ .cluster = "a", .service_name = "b\x00c" },
         .{ .cluster = "a", .service_name = "bc" },
@@ -75,6 +77,7 @@ test "gRPC LRS warmed identity endpoint and metric lookups survive allocation fa
         try std.testing.expectEqual(expected, entry.endpoints[0].issued);
         try std.testing.expectEqual(expected, entry.endpoints[0].error_requests);
         if (index == 0) {
+            try std.testing.expectEqualStrings("named_metrics.load", entry.load_metrics[0].name);
             try std.testing.expectEqual(expected, entry.cpu_utilization.count);
             try std.testing.expectEqual(expected, entry.load_metrics[0].count);
         }

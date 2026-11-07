@@ -96,5 +96,6 @@ subscribe/unsubscribe diffs, explicit removals, TTL/heartbeat resources,
 Typed delta publication and resource-expiry enforcement are implemented.
 [The bootstrap parser and control-plane failover](grpc_bootstrap.md)
 select and retry `http://` xDS servers while preserving accepted versions.
-certificate providers and automatic refresh scheduling, authority-specific control planes, controller-owned LRS scheduling remain
-required follow-up work for full xDS integration.
+Managed ADS factories also retain discovery provenance for
+[automatic controller-owned LRS](grpc_lrs_automatic.md). Reporting remains
+bound to each accepted CDS source when discovery reconnects or fails over.

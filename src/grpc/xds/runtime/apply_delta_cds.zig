@@ -14,6 +14,11 @@ fn removedName(names: []const []const u8, name: []const u8) bool {
     return false;
 }
 
+fn sameSource(a: ?*@import("../discovery_source.zig").Source, b: ?*@import("../discovery_source.zig").Source) bool {
+    if (a == null or b == null) return a == b;
+    return std.mem.eql(u8, a.?.key, b.?.key);
+}
+
 pub fn apply(self: *ctl.Controller, client: *delta.Client, update: delta.Update, destination: shared.SharedChannel, deadline: std.Io.Clock.Timestamp) ctl.Error!u64 {
     const response = update.response.value;
     var candidates: std.ArrayList(Candidate) = .empty;
@@ -41,6 +46,7 @@ pub fn apply(self: *ctl.Controller, client: *delta.Client, update: delta.Update,
             return err;
         };
         errdefer resource.release();
+        resource.discovery_source = if (update.source) |source| source.retain() else null;
         if (!std.mem.eql(u8, resource.resource.value.name, raw.name)) return error.InvalidDiscoveryMessage;
         try self.resolveClusterTls(resource);
         storage = std.math.add(usize, storage, owned.arena.queryCapacity()) catch return error.XdsLimitExceeded;
@@ -77,7 +83,7 @@ pub fn apply(self: *ctl.Controller, client: *delta.Client, update: delta.Update,
                 if (after.tls != null or after.tls_sds != null or before.tls != null or before.tls_sds != null) break :blk false;
                 break :blk same_identity and before.max_concurrent_requests == after.max_concurrent_requests and before.policy.locality_weighted == after.policy.locality_weighted and std.mem.eql(u8, before.policy.child_json, after.policy.child_json);
             } else false;
-            const same_reporting = if (item.cluster) |old| entry.sameReporting(old.resource.value, after) else false;
+            const same_reporting = if (item.cluster) |old| entry.sameReporting(old.resource.value, after) and sameSource(old.discovery_source, resource.discovery_source) else false;
             if (same_config and same_reporting and item.snapshot != null and item.cds_seen and entry.sameDeadline(item.cds_deadline, cds_deadline)) {
                 item.cds_deadline = cds_deadline;
                 continue;

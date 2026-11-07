@@ -1,9 +1,10 @@
 # CDS-controlled LRS registrations
 
-The xDS runtime Controller owns an optional LRS runner configured through
-`Options.lrs`. Its transport and server-requested cluster filter remain the
-reporting boundary. Accepted CDS `lrs_server: self` now controls which cluster
-and EDS service identities collect counters in that channel.
+The xDS runtime Controller automatically binds managed CDS `lrs_server: self`
+to the source that delivered that resource. `Options.lrs` remains an explicit
+transport override. Accepted CDS controls which cluster and EDS service
+identities collect counters in that channel; the LRS server's requested cluster
+filter selects the wire report. See [automatic source binding](grpc_lrs_automatic.md).
 
 The target stages an immutable selection of reporting identities and ORCA
 metric propagation fields. It copies all strings before channel publication
@@ -24,8 +25,8 @@ opening failure releases its unstarted pin, so an interval snapshot cannot
 publish a phantom issued request or hide a later successful request. Completion
 uses the captured counter and metric propagation rather than re-reading CDS.
 
-Counter storage is keyed by the `(cluster name, EDS service name)` pair and
-remains stable while a call holds a registration. Retired identities stay
+Counter storage is keyed by discovery source and the `(cluster name, EDS
+service name)` pair and remains stable while a call holds a registration. Retired identities stay
 reportable through their final delta and are reclaimed after their pins and
 unreported counters drain. LRS request decoding accepts the same cluster name
 with different EDS service names and rejects duplicate pairs. This matches
@@ -33,6 +34,12 @@ grpc-core's LRS load-report map, which also keys statistics by that pair.
 The request decoder retains CPU, memory, application and named metrics,
 enforces the metric count bound and releases partially parsed children on
 truncated input or allocation failure.
+
+CDS metric selectors use the grpc-core LRS naming convention: ORCA's raw
+`load` named metric reports as `named_metrics.load`, for both an individual
+selector and `named_metrics.*`. Calls retain that naming mode with their
+admitted metric selection. Manual propagation and direct codec reports keep
+the names supplied by the caller.
 
 Delta CDS equality includes both `lrs_self` and metric propagation, so a change
 that affects only reporting still publishes. The encoded reports continue to

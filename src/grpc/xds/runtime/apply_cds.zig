@@ -29,6 +29,7 @@ pub fn apply(self: *ctl.Controller, client: *ads.Client, update: ads.Update, des
             return err;
         };
         errdefer resource.release();
+        resource.discovery_source = if (update.source) |source| source.retain() else null;
         try self.resolveClusterTls(resource);
         storage = std.math.add(usize, storage, owned.arena.queryCapacity()) catch return error.XdsLimitExceeded;
         if (storage > self.options.limits.max_storage_bytes) return error.XdsLimitExceeded;

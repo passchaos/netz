@@ -32,6 +32,8 @@ test {
     _ = @import("sotw_tests.zig");
     _ = @import("bootstrap_tests.zig");
     _ = @import("control_plane_tests.zig");
+    _ = @import("control_plane_provenance_tests.zig");
+    _ = @import("control_plane_inventory_tests.zig");
     _ = @import("csds_tests.zig");
     _ = @import("csds_service_tests.zig");
 }

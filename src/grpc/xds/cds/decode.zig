@@ -28,6 +28,8 @@ pub const LrsPropagation = struct {
     memory_utilization: bool = false,
     application_utilization: bool = false,
     named_metrics_all: bool = false,
+    /// Raw ORCA keys selected by named_metrics.<key>; the LRS wire keeps that
+    /// selector namespace, including for wildcard-selected names.
     named_metrics: []const []const u8 = &.{},
 };
 pub const Http2Limits = struct {

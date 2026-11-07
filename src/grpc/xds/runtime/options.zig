@@ -13,6 +13,7 @@ pub const Limits = struct {
     max_clusters: usize = 4096,
     max_projections: usize = 4096,
     max_storage_bytes: usize = 64 * 1024 * 1024,
+    max_lrs_sources: usize = 64,
 };
 pub const LrsOptions = struct {
     /// Borrowed by the controller-owned runner; keep it alive until deinit.
@@ -20,6 +21,11 @@ pub const LrsOptions = struct {
     /// Dedicated to LRS: the runner mutates it from a background task.
     control_plane: *control_plane.ControlPlane,
     client: lrs.Options,
+    reporter: lrs.ReporterOptions = .{},
+    poll_interval: std.Io.Duration = .fromSeconds(1),
+    connect_timeout: std.Io.Duration = .fromSeconds(5),
+};
+pub const AutomaticLrsOptions = struct {
     reporter: lrs.ReporterOptions = .{},
     poll_interval: std.Io.Duration = .fromSeconds(1),
     connect_timeout: std.Io.Duration = .fromSeconds(5),
@@ -59,6 +65,10 @@ pub const Options = struct {
     /// Optional controller-owned LRS reporting. The destination channel must
     /// have LRS statistics enabled.
     lrs: ?LrsOptions = null,
+    /// Managed ADS provenance enables self reporting unless explicitly disabled.
+    /// Existing lrs options take precedence as an explicit transport override.
+    disable_automatic_lrs: bool = false,
+    automatic_lrs: AutomaticLrsOptions = .{},
 
     /// Copy the bootstrap `server_features` booleans for the control plane's
     /// current server. Call it after `ControlPlane.init`; `plane.server()`

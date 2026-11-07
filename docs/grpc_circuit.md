@@ -90,6 +90,7 @@ Typed CDS now extracts the first DEFAULT request threshold through
 [the CDS controller](grpc_cds.md), publishing its limit and identity with EDS
 targets. [Per-child cluster-impl](grpc_cluster_impl.md) now applies selected
 cluster budgets independently and composes channel/cluster permits.
-Automatic child orchestration and LRS reporting remain required steps in
-full xDS configuration integration; the APIs above explicitly attach one circuit
+[Automatic child orchestration](grpc_xds_runtime.md) and
+[source-pinned LRS reporting](grpc_lrs_automatic.md) connect these identities
+to accepted CDS. The standalone APIs above explicitly attach one circuit
 identity to each channel or EDS projection.

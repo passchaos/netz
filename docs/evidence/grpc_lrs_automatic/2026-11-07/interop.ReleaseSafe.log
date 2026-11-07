@@ -1,0 +1,2003 @@
+{
+  "status": "passed",
+  "mode": "sotw",
+  "managed_factory": true,
+  "real_application_traffic": true,
+  "source_pinned_reports": true,
+  "unavailable_lrs_did_not_block_publication": true,
+  "provenance": {
+    "source_a": "694695356e2b0efa53f3890c2a3dbc91472d960ee502417acfa1abfbd4e7ae94",
+    "source_b": "8fd8909834dac162d6fdd185c779aec271d110168b86bce76acf89d9a1bf634c",
+    "cached_cds_retained_a": true,
+    "identical_replacement_moved_to_b": true,
+    "held_completion_retained_a": true,
+    "nack_preserved_a": true,
+    "default_stats_enabled_automatically": true,
+    "explicit_lrs_options": false
+  },
+  "refused_network": {
+    "accepted_cds_before_lrs_network": true,
+    "publication_budget_ms": 250,
+    "collection_issued": 1,
+    "collection_successful": 1,
+    "source_key": "8f92c67e8742884ca0ff24bdd1c08f687bd51aba7aa0e88a48953a6c8f76530f",
+    "existing_ads_connections": 1,
+    "listener_closed_before_cds": true
+  },
+  "source_reports": {
+    "A": {
+      "ads": [
+        {
+          "type": "type.googleapis.com/envoy.config.listener.v3.Listener",
+          "version": "",
+          "nonce": "",
+          "names": [
+            "frontend"
+          ],
+          "node": "managed-automatic-node",
+          "nack": ""
+        },
+        {
+          "type": "type.googleapis.com/envoy.config.listener.v3.Listener",
+          "version": "l-a",
+          "nonce": "l-a",
+          "names": [
+            "frontend"
+          ],
+          "node": "",
+          "nack": ""
+        },
+        {
+          "type": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+          "version": "",
+          "nonce": "",
+          "names": [
+            "eligible",
+            "ignored"
+          ],
+          "node": "",
+          "nack": ""
+        },
+        {
+          "type": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+          "version": "c-a",
+          "nonce": "c-a",
+          "names": [
+            "eligible",
+            "ignored"
+          ],
+          "node": "",
+          "nack": ""
+        },
+        {
+          "type": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+          "version": "",
+          "nonce": "",
+          "names": [
+            "eds-eligible",
+            "eds-ignored"
+          ],
+          "node": "",
+          "nack": ""
+        },
+        {
+          "type": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+          "version": "e-a",
+          "nonce": "e-a",
+          "names": [
+            "eds-eligible",
+            "eds-ignored"
+          ],
+          "node": "",
+          "nack": ""
+        }
+      ],
+      "raw_ads": [
+        {
+          "resource_names": [
+            "frontend"
+          ],
+          "resource_locators": [],
+          "version_info": "",
+          "node": {
+            "extensions": [],
+            "client_features": [
+              "fixture.automatic_lrs"
+            ],
+            "listening_addresses": [],
+            "dynamic_parameters": {},
+            "id": "managed-automatic-node",
+            "cluster": "",
+            "metadata": null,
+            "locality": null,
+            "user_agent_name": "netz",
+            "user_agent_version": "0.1.0"
+          },
+          "type_url": "type.googleapis.com/envoy.config.listener.v3.Listener",
+          "response_nonce": "",
+          "error_detail": null
+        },
+        {
+          "resource_names": [
+            "frontend"
+          ],
+          "resource_locators": [],
+          "version_info": "l-a",
+          "node": null,
+          "type_url": "type.googleapis.com/envoy.config.listener.v3.Listener",
+          "response_nonce": "l-a",
+          "error_detail": null
+        },
+        {
+          "resource_names": [
+            "eligible",
+            "ignored"
+          ],
+          "resource_locators": [],
+          "version_info": "",
+          "node": null,
+          "type_url": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+          "response_nonce": "",
+          "error_detail": null
+        },
+        {
+          "resource_names": [
+            "eligible",
+            "ignored"
+          ],
+          "resource_locators": [],
+          "version_info": "c-a",
+          "node": null,
+          "type_url": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+          "response_nonce": "c-a",
+          "error_detail": null
+        },
+        {
+          "resource_names": [
+            "eds-eligible",
+            "eds-ignored"
+          ],
+          "resource_locators": [],
+          "version_info": "",
+          "node": null,
+          "type_url": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+          "response_nonce": "",
+          "error_detail": null
+        },
+        {
+          "resource_names": [
+            "eds-eligible",
+            "eds-ignored"
+          ],
+          "resource_locators": [],
+          "version_info": "e-a",
+          "node": null,
+          "type_url": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+          "response_nonce": "e-a",
+          "error_detail": null
+        }
+      ],
+      "lrs": [
+        {
+          "cluster_stats": [
+            {
+              "upstream_locality_stats": [
+                {
+                  "load_metric_stats": [
+                    {
+                      "metric_name": "named_metrics.load",
+                      "num_requests_finished_with_metric": "2",
+                      "total_metric_value": 4
+                    }
+                  ],
+                  "upstream_endpoint_stats": [
+                    {
+                      "load_metric_stats": [],
+                      "address": {
+                        "socket_address": {
+                          "protocol": "TCP",
+                          "address": "127.0.0.1",
+                          "resolver_name": "",
+                          "ipv4_compat": false,
+                          "port_value": 45803
+                        }
+                      },
+                      "total_successful_requests": "2",
+                      "total_requests_in_progress": "1",
+                      "total_error_requests": "0",
+                      "metadata": null,
+                      "total_issued_requests": "3"
+                    }
+                  ],
+                  "locality": {
+                    "region": "r",
+                    "zone": "z",
+                    "sub_zone": ""
+                  },
+                  "total_successful_requests": "2",
+                  "total_requests_in_progress": "1",
+                  "total_error_requests": "0",
+                  "priority": 0,
+                  "total_issued_requests": "3",
+                  "total_active_connections": "0",
+                  "total_new_connections": "0",
+                  "total_fail_connections": "0",
+                  "cpu_utilization": {
+                    "num_requests_finished_with_metric": "2",
+                    "total_metric_value": 1
+                  },
+                  "mem_utilization": {
+                    "num_requests_finished_with_metric": "2",
+                    "total_metric_value": 0.5
+                  },
+                  "application_utilization": {
+                    "num_requests_finished_with_metric": "2",
+                    "total_metric_value": 2
+                  }
+                }
+              ],
+              "dropped_requests": [],
+              "cluster_name": "eligible",
+              "total_dropped_requests": "0",
+              "load_report_interval": {
+                "seconds": "0",
+                "nanos": 100014606
+              },
+              "cluster_service_name": "eds-eligible"
+            }
+          ],
+          "node": null
+        },
+        {
+          "cluster_stats": [
+            {
+              "upstream_locality_stats": [
+                {
+                  "load_metric_stats": [
+                    {
+                      "metric_name": "named_metrics.load",
+                      "num_requests_finished_with_metric": "0",
+                      "total_metric_value": 0
+                    }
+                  ],
+                  "upstream_endpoint_stats": [
+                    {
+                      "load_metric_stats": [],
+                      "address": {
+                        "socket_address": {
+                          "protocol": "TCP",
+                          "address": "127.0.0.1",
+                          "resolver_name": "",
+                          "ipv4_compat": false,
+                          "port_value": 45803
+                        }
+                      },
+                      "total_successful_requests": "0",
+                      "total_requests_in_progress": "1",
+                      "total_error_requests": "0",
+                      "metadata": null,
+                      "total_issued_requests": "0"
+                    }
+                  ],
+                  "locality": {
+                    "region": "r",
+                    "zone": "z",
+                    "sub_zone": ""
+                  },
+                  "total_successful_requests": "0",
+                  "total_requests_in_progress": "1",
+                  "total_error_requests": "0",
+                  "priority": 0,
+                  "total_issued_requests": "0",
+                  "total_active_connections": "0",
+                  "total_new_connections": "0",
+                  "total_fail_connections": "0",
+                  "cpu_utilization": null,
+                  "mem_utilization": null,
+                  "application_utilization": null
+                }
+              ],
+              "dropped_requests": [],
+              "cluster_name": "eligible",
+              "total_dropped_requests": "0",
+              "load_report_interval": {
+                "seconds": "0",
+                "nanos": 100015340
+              },
+              "cluster_service_name": "eds-eligible"
+            }
+          ],
+          "node": null
+        },
+        {
+          "cluster_stats": [
+            {
+              "upstream_locality_stats": [
+                {
+                  "load_metric_stats": [
+                    {
+                      "metric_name": "named_metrics.load",
+                      "num_requests_finished_with_metric": "1",
+                      "total_metric_value": 2
+                    }
+                  ],
+                  "upstream_endpoint_stats": [
+                    {
+                      "load_metric_stats": [],
+                      "address": {
+                        "socket_address": {
+                          "protocol": "TCP",
+                          "address": "127.0.0.1",
+                          "resolver_name": "",
+                          "ipv4_compat": false,
+                          "port_value": 45803
+                        }
+                      },
+                      "total_successful_requests": "1",
+                      "total_requests_in_progress": "0",
+                      "total_error_requests": "0",
+                      "metadata": null,
+                      "total_issued_requests": "0"
+                    }
+                  ],
+                  "locality": {
+                    "region": "r",
+                    "zone": "z",
+                    "sub_zone": ""
+                  },
+                  "total_successful_requests": "1",
+                  "total_requests_in_progress": "0",
+                  "total_error_requests": "0",
+                  "priority": 0,
+                  "total_issued_requests": "0",
+                  "total_active_connections": "0",
+                  "total_new_connections": "0",
+                  "total_fail_connections": "0",
+                  "cpu_utilization": {
+                    "num_requests_finished_with_metric": "1",
+                    "total_metric_value": 0.5
+                  },
+                  "mem_utilization": {
+                    "num_requests_finished_with_metric": "1",
+                    "total_metric_value": 0.25
+                  },
+                  "application_utilization": {
+                    "num_requests_finished_with_metric": "1",
+                    "total_metric_value": 1
+                  }
+                }
+              ],
+              "dropped_requests": [],
+              "cluster_name": "eligible",
+              "total_dropped_requests": "0",
+              "load_report_interval": {
+                "seconds": "0",
+                "nanos": 100027216
+              },
+              "cluster_service_name": "eds-eligible"
+            }
+          ],
+          "node": null
+        }
+      ],
+      "initial_messages": [
+        {
+          "cluster_stats": [],
+          "node": {
+            "extensions": [],
+            "client_features": [
+              "fixture.automatic_lrs",
+              "envoy.lrs.supports_send_all_clusters"
+            ],
+            "listening_addresses": [],
+            "dynamic_parameters": {},
+            "id": "managed-automatic-node",
+            "cluster": "",
+            "metadata": null,
+            "locality": null,
+            "user_agent_name": "netz",
+            "user_agent_version": "0.1.0"
+          }
+        }
+      ],
+      "initial_requests": 1,
+      "report_requests": 3,
+      "lrs_request_count": 4,
+      "totals": {
+        "issued": 3,
+        "successful": 3,
+        "failed": 0,
+        "dropped": 0,
+        "in_progress": 0,
+        "cpu": {
+          "count": 3,
+          "sum": 1.5
+        },
+        "memory": {
+          "count": 3,
+          "sum": 0.75
+        },
+        "application": {
+          "count": 3,
+          "sum": 3
+        },
+        "load": {
+          "count": 3,
+          "sum": 6
+        }
+      }
+    },
+    "B": {
+      "ads": [
+        {
+          "type": "type.googleapis.com/envoy.config.listener.v3.Listener",
+          "version": "l-a",
+          "nonce": "",
+          "names": [
+            "frontend"
+          ],
+          "node": "managed-automatic-node",
+          "nack": ""
+        },
+        {
+          "type": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+          "version": "c-a",
+          "nonce": "",
+          "names": [
+            "eligible",
+            "ignored"
+          ],
+          "node": "",
+          "nack": ""
+        },
+        {
+          "type": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+          "version": "e-a",
+          "nonce": "",
+          "names": [
+            "eds-eligible",
+            "eds-ignored"
+          ],
+          "node": "",
+          "nack": ""
+        },
+        {
+          "type": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+          "version": "e-b",
+          "nonce": "e-b",
+          "names": [
+            "eds-eligible",
+            "eds-ignored"
+          ],
+          "node": "",
+          "nack": ""
+        },
+        {
+          "type": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+          "version": "c-a",
+          "nonce": "c-bad",
+          "names": [
+            "eligible",
+            "ignored"
+          ],
+          "node": "",
+          "nack": "UnsupportedCdsFeature"
+        },
+        {
+          "type": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+          "version": "c-b",
+          "nonce": "c-b",
+          "names": [
+            "eligible",
+            "ignored"
+          ],
+          "node": "",
+          "nack": ""
+        }
+      ],
+      "raw_ads": [
+        {
+          "resource_names": [
+            "frontend"
+          ],
+          "resource_locators": [],
+          "version_info": "l-a",
+          "node": {
+            "extensions": [],
+            "client_features": [
+              "fixture.automatic_lrs"
+            ],
+            "listening_addresses": [],
+            "dynamic_parameters": {},
+            "id": "managed-automatic-node",
+            "cluster": "",
+            "metadata": null,
+            "locality": null,
+            "user_agent_name": "netz",
+            "user_agent_version": "0.1.0"
+          },
+          "type_url": "type.googleapis.com/envoy.config.listener.v3.Listener",
+          "response_nonce": "",
+          "error_detail": null
+        },
+        {
+          "resource_names": [
+            "eligible",
+            "ignored"
+          ],
+          "resource_locators": [],
+          "version_info": "c-a",
+          "node": null,
+          "type_url": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+          "response_nonce": "",
+          "error_detail": null
+        },
+        {
+          "resource_names": [
+            "eds-eligible",
+            "eds-ignored"
+          ],
+          "resource_locators": [],
+          "version_info": "e-a",
+          "node": null,
+          "type_url": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+          "response_nonce": "",
+          "error_detail": null
+        },
+        {
+          "resource_names": [
+            "eds-eligible",
+            "eds-ignored"
+          ],
+          "resource_locators": [],
+          "version_info": "e-b",
+          "node": null,
+          "type_url": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+          "response_nonce": "e-b",
+          "error_detail": null
+        },
+        {
+          "resource_names": [
+            "eligible",
+            "ignored"
+          ],
+          "resource_locators": [],
+          "version_info": "c-a",
+          "node": null,
+          "type_url": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+          "response_nonce": "c-bad",
+          "error_detail": {
+            "details": [],
+            "code": 3,
+            "message": "UnsupportedCdsFeature"
+          }
+        },
+        {
+          "resource_names": [
+            "eligible",
+            "ignored"
+          ],
+          "resource_locators": [],
+          "version_info": "c-b",
+          "node": null,
+          "type_url": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+          "response_nonce": "c-b",
+          "error_detail": null
+        }
+      ],
+      "lrs": [
+        {
+          "cluster_stats": [
+            {
+              "upstream_locality_stats": [
+                {
+                  "load_metric_stats": [
+                    {
+                      "metric_name": "named_metrics.load",
+                      "num_requests_finished_with_metric": "1",
+                      "total_metric_value": 4.5
+                    }
+                  ],
+                  "upstream_endpoint_stats": [
+                    {
+                      "load_metric_stats": [],
+                      "address": {
+                        "socket_address": {
+                          "protocol": "TCP",
+                          "address": "127.0.0.1",
+                          "resolver_name": "",
+                          "ipv4_compat": false,
+                          "port_value": 45803
+                        }
+                      },
+                      "total_successful_requests": "0",
+                      "total_requests_in_progress": "0",
+                      "total_error_requests": "1",
+                      "metadata": null,
+                      "total_issued_requests": "1"
+                    }
+                  ],
+                  "locality": {
+                    "region": "r",
+                    "zone": "z",
+                    "sub_zone": ""
+                  },
+                  "total_successful_requests": "0",
+                  "total_requests_in_progress": "0",
+                  "total_error_requests": "1",
+                  "priority": 0,
+                  "total_issued_requests": "1",
+                  "total_active_connections": "0",
+                  "total_new_connections": "0",
+                  "total_fail_connections": "0",
+                  "cpu_utilization": {
+                    "num_requests_finished_with_metric": "1",
+                    "total_metric_value": 0.75
+                  },
+                  "mem_utilization": {
+                    "num_requests_finished_with_metric": "1",
+                    "total_metric_value": 0.5
+                  },
+                  "application_utilization": {
+                    "num_requests_finished_with_metric": "1",
+                    "total_metric_value": 1.5
+                  }
+                }
+              ],
+              "dropped_requests": [],
+              "cluster_name": "eligible",
+              "total_dropped_requests": "0",
+              "load_report_interval": {
+                "seconds": "0",
+                "nanos": 100016298
+              },
+              "cluster_service_name": "eds-eligible"
+            }
+          ],
+          "node": null
+        }
+      ],
+      "initial_messages": [
+        {
+          "cluster_stats": [],
+          "node": {
+            "extensions": [],
+            "client_features": [
+              "fixture.automatic_lrs",
+              "envoy.lrs.supports_send_all_clusters"
+            ],
+            "listening_addresses": [],
+            "dynamic_parameters": {},
+            "id": "managed-automatic-node",
+            "cluster": "",
+            "metadata": null,
+            "locality": null,
+            "user_agent_name": "netz",
+            "user_agent_version": "0.1.0"
+          }
+        }
+      ],
+      "initial_requests": 1,
+      "report_requests": 1,
+      "lrs_request_count": 2,
+      "totals": {
+        "issued": 1,
+        "successful": 0,
+        "failed": 1,
+        "dropped": 0,
+        "in_progress": 0,
+        "cpu": {
+          "count": 1,
+          "sum": 0.75
+        },
+        "memory": {
+          "count": 1,
+          "sum": 0.5
+        },
+        "application": {
+          "count": 1,
+          "sum": 1.5
+        },
+        "load": {
+          "count": 1,
+          "sum": 4.5
+        }
+      }
+    },
+    "C": {
+      "ads": [
+        {
+          "type": "type.googleapis.com/envoy.config.listener.v3.Listener",
+          "version": "",
+          "nonce": "",
+          "names": [
+            "frontend"
+          ],
+          "node": "managed-automatic-node",
+          "nack": ""
+        },
+        {
+          "type": "type.googleapis.com/envoy.config.listener.v3.Listener",
+          "version": "l-c",
+          "nonce": "l-c",
+          "names": [
+            "frontend"
+          ],
+          "node": "",
+          "nack": ""
+        },
+        {
+          "type": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+          "version": "",
+          "nonce": "",
+          "names": [
+            "eligible",
+            "ignored"
+          ],
+          "node": "",
+          "nack": ""
+        },
+        {
+          "type": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+          "version": "c-c",
+          "nonce": "c-c",
+          "names": [
+            "eligible",
+            "ignored"
+          ],
+          "node": "",
+          "nack": ""
+        },
+        {
+          "type": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+          "version": "",
+          "nonce": "",
+          "names": [
+            "eds-eligible",
+            "eds-ignored"
+          ],
+          "node": "",
+          "nack": ""
+        },
+        {
+          "type": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+          "version": "e-c",
+          "nonce": "e-c",
+          "names": [
+            "eds-eligible",
+            "eds-ignored"
+          ],
+          "node": "",
+          "nack": ""
+        }
+      ],
+      "raw_ads": [
+        {
+          "resource_names": [
+            "frontend"
+          ],
+          "resource_locators": [],
+          "version_info": "",
+          "node": {
+            "extensions": [],
+            "client_features": [
+              "fixture.automatic_lrs"
+            ],
+            "listening_addresses": [],
+            "dynamic_parameters": {},
+            "id": "managed-automatic-node",
+            "cluster": "",
+            "metadata": null,
+            "locality": null,
+            "user_agent_name": "netz",
+            "user_agent_version": "0.1.0"
+          },
+          "type_url": "type.googleapis.com/envoy.config.listener.v3.Listener",
+          "response_nonce": "",
+          "error_detail": null
+        },
+        {
+          "resource_names": [
+            "frontend"
+          ],
+          "resource_locators": [],
+          "version_info": "l-c",
+          "node": null,
+          "type_url": "type.googleapis.com/envoy.config.listener.v3.Listener",
+          "response_nonce": "l-c",
+          "error_detail": null
+        },
+        {
+          "resource_names": [
+            "eligible",
+            "ignored"
+          ],
+          "resource_locators": [],
+          "version_info": "",
+          "node": null,
+          "type_url": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+          "response_nonce": "",
+          "error_detail": null
+        },
+        {
+          "resource_names": [
+            "eligible",
+            "ignored"
+          ],
+          "resource_locators": [],
+          "version_info": "c-c",
+          "node": null,
+          "type_url": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+          "response_nonce": "c-c",
+          "error_detail": null
+        },
+        {
+          "resource_names": [
+            "eds-eligible",
+            "eds-ignored"
+          ],
+          "resource_locators": [],
+          "version_info": "",
+          "node": null,
+          "type_url": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+          "response_nonce": "",
+          "error_detail": null
+        },
+        {
+          "resource_names": [
+            "eds-eligible",
+            "eds-ignored"
+          ],
+          "resource_locators": [],
+          "version_info": "e-c",
+          "node": null,
+          "type_url": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+          "response_nonce": "e-c",
+          "error_detail": null
+        }
+      ],
+      "lrs": [],
+      "initial_messages": [],
+      "initial_requests": 0,
+      "report_requests": 0,
+      "lrs_request_count": 0,
+      "totals": {
+        "issued": 0,
+        "successful": 0,
+        "failed": 0,
+        "dropped": 0,
+        "in_progress": 0,
+        "cpu": {
+          "count": 0,
+          "sum": 0
+        },
+        "memory": {
+          "count": 0,
+          "sum": 0
+        },
+        "application": {
+          "count": 0,
+          "sum": 0
+        },
+        "load": {
+          "count": 0,
+          "sum": 0
+        }
+      }
+    }
+  },
+  "application_calls": [
+    {
+      "label": "first",
+      "eligible": true,
+      "metadata": {
+        "x-call": "first"
+      },
+      "deadline_ms": 1794018987408
+    },
+    {
+      "label": "ignored-a",
+      "eligible": false,
+      "metadata": {
+        "x-call": "ignored-a"
+      },
+      "deadline_ms": 1794018987415
+    },
+    {
+      "label": "held",
+      "eligible": true,
+      "metadata": {
+        "x-call": "held"
+      },
+      "deadline_ms": 1794018997415
+    },
+    {
+      "label": "cached",
+      "eligible": true,
+      "metadata": {
+        "x-call": "cached"
+      },
+      "deadline_ms": 1794018987418
+    },
+    {
+      "label": "new",
+      "eligible": true,
+      "metadata": {
+        "x-call": "new"
+      },
+      "deadline_ms": 1794018987515
+    },
+    {
+      "label": "ignored-b",
+      "eligible": false,
+      "metadata": {
+        "x-call": "ignored-b"
+      },
+      "deadline_ms": 1794018987516
+    },
+    {
+      "label": "refused-lrs-published",
+      "eligible": true,
+      "metadata": {
+        "x-call": "refused-lrs-published"
+      },
+      "deadline_ms": 1794018987837
+    }
+  ],
+  "events": [
+    {
+      "order": 0,
+      "event": "discovery_request",
+      "source": "A",
+      "type": "type.googleapis.com/envoy.config.listener.v3.Listener",
+      "version": "",
+      "nonce": "",
+      "names": [
+        "frontend"
+      ],
+      "node": "managed-automatic-node",
+      "nack": ""
+    },
+    {
+      "order": 1,
+      "event": "discovery_response",
+      "source": "A",
+      "type": "type.googleapis.com/envoy.config.listener.v3.Listener",
+      "version": "l-a",
+      "resource_sha256": [
+        "446ba485972c870a11e48ec1e0d2ef695788bd471ca3b0ffeeb2565bd3435f0b"
+      ]
+    },
+    {
+      "order": 2,
+      "event": "discovery_request",
+      "source": "A",
+      "type": "type.googleapis.com/envoy.config.listener.v3.Listener",
+      "version": "l-a",
+      "nonce": "l-a",
+      "names": [
+        "frontend"
+      ],
+      "node": "",
+      "nack": ""
+    },
+    {
+      "order": 3,
+      "event": "discovery_request",
+      "source": "A",
+      "type": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+      "version": "",
+      "nonce": "",
+      "names": [
+        "eligible",
+        "ignored"
+      ],
+      "node": "",
+      "nack": ""
+    },
+    {
+      "order": 4,
+      "event": "discovery_response",
+      "source": "A",
+      "type": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+      "version": "c-a",
+      "resource_sha256": [
+        "777a6514bba56300f698c604ff5ea9f33eea5eafad9da0c1e66180f2a4e8a870",
+        "0830dcd4870e3f685d61f01f91a8820ecd3cabc8d0626c288eb21bfa4641f7cd"
+      ]
+    },
+    {
+      "order": 5,
+      "event": "discovery_request",
+      "source": "A",
+      "type": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+      "version": "c-a",
+      "nonce": "c-a",
+      "names": [
+        "eligible",
+        "ignored"
+      ],
+      "node": "",
+      "nack": ""
+    },
+    {
+      "order": 6,
+      "event": "discovery_request",
+      "source": "A",
+      "type": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+      "version": "",
+      "nonce": "",
+      "names": [
+        "eds-eligible",
+        "eds-ignored"
+      ],
+      "node": "",
+      "nack": ""
+    },
+    {
+      "order": 7,
+      "event": "discovery_response",
+      "source": "A",
+      "type": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+      "version": "e-a",
+      "resource_sha256": [
+        "41a3cf71f1342f88b423989a861dd1bd63c245be881d5350e076581c11f292b6",
+        "1f3d766978698915fd6018f5d3430623a36c5895789ac29d77d6557111c193ec"
+      ]
+    },
+    {
+      "order": 8,
+      "event": "discovery_request",
+      "source": "A",
+      "type": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+      "version": "e-a",
+      "nonce": "e-a",
+      "names": [
+        "eds-eligible",
+        "eds-ignored"
+      ],
+      "node": "",
+      "nack": ""
+    },
+    {
+      "order": 9,
+      "event": "lrs_initial_request",
+      "source": "A",
+      "metadata": {
+        "x-source": "A"
+      },
+      "node": {
+        "extensions": [],
+        "client_features": [
+          "fixture.automatic_lrs",
+          "envoy.lrs.supports_send_all_clusters"
+        ],
+        "listening_addresses": [],
+        "dynamic_parameters": {},
+        "id": "managed-automatic-node",
+        "cluster": "",
+        "metadata": null,
+        "locality": null,
+        "user_agent_name": "netz",
+        "user_agent_version": "0.1.0"
+      }
+    },
+    {
+      "order": 10,
+      "event": "application_started",
+      "label": "first",
+      "eligible": true
+    },
+    {
+      "order": 11,
+      "event": "application_completed",
+      "label": "first",
+      "status": 0
+    },
+    {
+      "order": 12,
+      "event": "application_started",
+      "label": "ignored-a",
+      "eligible": false
+    },
+    {
+      "order": 13,
+      "event": "application_completed",
+      "label": "ignored-a",
+      "status": 0
+    },
+    {
+      "order": 14,
+      "event": "application_started",
+      "label": "held",
+      "eligible": true
+    },
+    {
+      "order": 15,
+      "event": "barrier_completed",
+      "source": "A",
+      "label": "held-entered"
+    },
+    {
+      "order": 16,
+      "event": "discovery_request",
+      "source": "B",
+      "type": "type.googleapis.com/envoy.config.listener.v3.Listener",
+      "version": "l-a",
+      "nonce": "",
+      "names": [
+        "frontend"
+      ],
+      "node": "managed-automatic-node",
+      "nack": ""
+    },
+    {
+      "order": 17,
+      "event": "discovery_request",
+      "source": "B",
+      "type": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+      "version": "c-a",
+      "nonce": "",
+      "names": [
+        "eligible",
+        "ignored"
+      ],
+      "node": "",
+      "nack": ""
+    },
+    {
+      "order": 18,
+      "event": "discovery_request",
+      "source": "B",
+      "type": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+      "version": "e-a",
+      "nonce": "",
+      "names": [
+        "eds-eligible",
+        "eds-ignored"
+      ],
+      "node": "",
+      "nack": ""
+    },
+    {
+      "order": 19,
+      "event": "discovery_response",
+      "source": "B",
+      "type": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+      "version": "e-b",
+      "resource_sha256": [
+        "41a3cf71f1342f88b423989a861dd1bd63c245be881d5350e076581c11f292b6",
+        "1f3d766978698915fd6018f5d3430623a36c5895789ac29d77d6557111c193ec"
+      ]
+    },
+    {
+      "order": 20,
+      "event": "discovery_request",
+      "source": "B",
+      "type": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+      "version": "e-b",
+      "nonce": "e-b",
+      "names": [
+        "eds-eligible",
+        "eds-ignored"
+      ],
+      "node": "",
+      "nack": ""
+    },
+    {
+      "order": 21,
+      "event": "application_started",
+      "label": "cached",
+      "eligible": true
+    },
+    {
+      "order": 22,
+      "event": "application_completed",
+      "label": "cached",
+      "status": 0
+    },
+    {
+      "order": 23,
+      "event": "lrs_report",
+      "source": "A",
+      "totals": {
+        "issued": 3,
+        "successful": 2,
+        "failed": 0,
+        "dropped": 0,
+        "in_progress": 1,
+        "cpu": {
+          "count": 2,
+          "sum": 1
+        },
+        "memory": {
+          "count": 2,
+          "sum": 0.5
+        },
+        "application": {
+          "count": 2,
+          "sum": 2
+        },
+        "load": {
+          "count": 2,
+          "sum": 4
+        }
+      }
+    },
+    {
+      "order": 24,
+      "event": "barrier_completed",
+      "source": "A",
+      "label": "cached-source-a"
+    },
+    {
+      "order": 25,
+      "event": "discovery_response",
+      "source": "B",
+      "type": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+      "version": "c-bad",
+      "resource_sha256": [
+        "98975bec23ca802ee047de74caf3b29a89c07b631f42003d2eaebca6be121543",
+        "0830dcd4870e3f685d61f01f91a8820ecd3cabc8d0626c288eb21bfa4641f7cd"
+      ]
+    },
+    {
+      "order": 26,
+      "event": "barrier_completed",
+      "source": "B",
+      "label": "send-b-nack"
+    },
+    {
+      "order": 27,
+      "event": "discovery_request",
+      "source": "B",
+      "type": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+      "version": "c-a",
+      "nonce": "c-bad",
+      "names": [
+        "eligible",
+        "ignored"
+      ],
+      "node": "",
+      "nack": "UnsupportedCdsFeature"
+    },
+    {
+      "order": 28,
+      "event": "discovery_response",
+      "source": "B",
+      "type": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+      "version": "c-b",
+      "resource_sha256": [
+        "777a6514bba56300f698c604ff5ea9f33eea5eafad9da0c1e66180f2a4e8a870",
+        "0830dcd4870e3f685d61f01f91a8820ecd3cabc8d0626c288eb21bfa4641f7cd"
+      ]
+    },
+    {
+      "order": 29,
+      "event": "barrier_completed",
+      "source": "B",
+      "label": "send-b-replacement"
+    },
+    {
+      "order": 30,
+      "event": "discovery_request",
+      "source": "B",
+      "type": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+      "version": "c-b",
+      "nonce": "c-b",
+      "names": [
+        "eligible",
+        "ignored"
+      ],
+      "node": "",
+      "nack": ""
+    },
+    {
+      "order": 31,
+      "event": "application_started",
+      "label": "new",
+      "eligible": true
+    },
+    {
+      "order": 32,
+      "event": "application_completed",
+      "label": "new",
+      "status": 14
+    },
+    {
+      "order": 33,
+      "event": "lrs_initial_request",
+      "source": "B",
+      "metadata": {
+        "x-source": "B"
+      },
+      "node": {
+        "extensions": [],
+        "client_features": [
+          "fixture.automatic_lrs",
+          "envoy.lrs.supports_send_all_clusters"
+        ],
+        "listening_addresses": [],
+        "dynamic_parameters": {},
+        "id": "managed-automatic-node",
+        "cluster": "",
+        "metadata": null,
+        "locality": null,
+        "user_agent_name": "netz",
+        "user_agent_version": "0.1.0"
+      }
+    },
+    {
+      "order": 34,
+      "event": "application_started",
+      "label": "ignored-b",
+      "eligible": false
+    },
+    {
+      "order": 35,
+      "event": "application_completed",
+      "label": "ignored-b",
+      "status": 0
+    },
+    {
+      "order": 36,
+      "event": "lrs_report",
+      "source": "A",
+      "totals": {
+        "issued": 3,
+        "successful": 2,
+        "failed": 0,
+        "dropped": 0,
+        "in_progress": 1,
+        "cpu": {
+          "count": 2,
+          "sum": 1
+        },
+        "memory": {
+          "count": 2,
+          "sum": 0.5
+        },
+        "application": {
+          "count": 2,
+          "sum": 2
+        },
+        "load": {
+          "count": 2,
+          "sum": 4
+        }
+      }
+    },
+    {
+      "order": 37,
+      "event": "lrs_report",
+      "source": "B",
+      "totals": {
+        "issued": 1,
+        "successful": 0,
+        "failed": 1,
+        "dropped": 0,
+        "in_progress": 0,
+        "cpu": {
+          "count": 1,
+          "sum": 0.75
+        },
+        "memory": {
+          "count": 1,
+          "sum": 0.5
+        },
+        "application": {
+          "count": 1,
+          "sum": 1.5
+        },
+        "load": {
+          "count": 1,
+          "sum": 4.5
+        }
+      }
+    },
+    {
+      "order": 38,
+      "event": "held_released_after_b_report"
+    },
+    {
+      "order": 39,
+      "event": "application_completed",
+      "label": "held",
+      "status": 0
+    },
+    {
+      "order": 40,
+      "event": "barrier_completed",
+      "source": "B",
+      "label": "release-held-after-b-report"
+    },
+    {
+      "order": 41,
+      "event": "lrs_report",
+      "source": "A",
+      "totals": {
+        "issued": 3,
+        "successful": 3,
+        "failed": 0,
+        "dropped": 0,
+        "in_progress": 0,
+        "cpu": {
+          "count": 3,
+          "sum": 1.5
+        },
+        "memory": {
+          "count": 3,
+          "sum": 0.75
+        },
+        "application": {
+          "count": 3,
+          "sum": 3
+        },
+        "load": {
+          "count": 3,
+          "sum": 6
+        }
+      }
+    },
+    {
+      "order": 42,
+      "event": "barrier_completed",
+      "source": "A",
+      "label": "final-source-reports"
+    },
+    {
+      "order": 43,
+      "event": "lrs_stream_canceled",
+      "source": "A"
+    },
+    {
+      "order": 44,
+      "event": "lrs_stream_canceled",
+      "source": "B"
+    },
+    {
+      "order": 45,
+      "event": "discovery_request",
+      "source": "C",
+      "type": "type.googleapis.com/envoy.config.listener.v3.Listener",
+      "version": "",
+      "nonce": "",
+      "names": [
+        "frontend"
+      ],
+      "node": "managed-automatic-node",
+      "nack": ""
+    },
+    {
+      "order": 46,
+      "event": "discovery_response",
+      "source": "C",
+      "type": "type.googleapis.com/envoy.config.listener.v3.Listener",
+      "version": "l-c",
+      "resource_sha256": [
+        "446ba485972c870a11e48ec1e0d2ef695788bd471ca3b0ffeeb2565bd3435f0b"
+      ]
+    },
+    {
+      "order": 47,
+      "event": "discovery_request",
+      "source": "C",
+      "type": "type.googleapis.com/envoy.config.listener.v3.Listener",
+      "version": "l-c",
+      "nonce": "l-c",
+      "names": [
+        "frontend"
+      ],
+      "node": "",
+      "nack": ""
+    },
+    {
+      "order": 48,
+      "event": "discovery_request",
+      "source": "C",
+      "type": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+      "version": "",
+      "nonce": "",
+      "names": [
+        "eligible",
+        "ignored"
+      ],
+      "node": "",
+      "nack": ""
+    },
+    {
+      "order": 49,
+      "event": "lrs_listener_closed_before_cds"
+    },
+    {
+      "order": 50,
+      "event": "discovery_response",
+      "source": "C",
+      "type": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+      "version": "c-c",
+      "resource_sha256": [
+        "777a6514bba56300f698c604ff5ea9f33eea5eafad9da0c1e66180f2a4e8a870",
+        "0830dcd4870e3f685d61f01f91a8820ecd3cabc8d0626c288eb21bfa4641f7cd"
+      ]
+    },
+    {
+      "order": 51,
+      "event": "discovery_request",
+      "source": "C",
+      "type": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+      "version": "c-c",
+      "nonce": "c-c",
+      "names": [
+        "eligible",
+        "ignored"
+      ],
+      "node": "",
+      "nack": ""
+    },
+    {
+      "order": 52,
+      "event": "discovery_request",
+      "source": "C",
+      "type": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+      "version": "",
+      "nonce": "",
+      "names": [
+        "eds-eligible",
+        "eds-ignored"
+      ],
+      "node": "",
+      "nack": ""
+    },
+    {
+      "order": 53,
+      "event": "discovery_response",
+      "source": "C",
+      "type": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+      "version": "e-c",
+      "resource_sha256": [
+        "41a3cf71f1342f88b423989a861dd1bd63c245be881d5350e076581c11f292b6",
+        "1f3d766978698915fd6018f5d3430623a36c5895789ac29d77d6557111c193ec"
+      ]
+    },
+    {
+      "order": 54,
+      "event": "discovery_request",
+      "source": "C",
+      "type": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+      "version": "e-c",
+      "nonce": "e-c",
+      "names": [
+        "eds-eligible",
+        "eds-ignored"
+      ],
+      "node": "",
+      "nack": ""
+    },
+    {
+      "order": 55,
+      "event": "application_started",
+      "label": "refused-lrs-published",
+      "eligible": true
+    },
+    {
+      "order": 56,
+      "event": "application_completed",
+      "label": "refused-lrs-published",
+      "status": 0
+    }
+  ],
+  "schema": {
+    "status": "passed",
+    "self_field": 42,
+    "propagation_field": 57,
+    "named_metric_key": "named_metrics.load",
+    "resource_bytes": {
+      "lds": 328,
+      "cds": [
+        122,
+        32
+      ],
+      "orca": 67
+    }
+  },
+  "identical_cds_sha256": [
+    "777a6514bba56300f698c604ff5ea9f33eea5eafad9da0c1e66180f2a4e8a870",
+    "0830dcd4870e3f685d61f01f91a8820ecd3cabc8d0626c288eb21bfa4641f7cd"
+  ],
+  "grpc_js": "1.14.7",
+  "source_sha256": {
+    "build.zig": "2e1c85f115635da4999a4a8f1b53b3aba0d7579d4f2d8ce428085d37303079d6",
+    "src/grpc/call.zig": "198596a1577ebf9de8a8c051fdc43eb49c7ca9d38993ba62e2eab6b1c4e0f9fe",
+    "src/grpc/call/early_response_tests.zig": "7a1d1149257b20b683b67581ba951ec8ba0953d1464bb82055e7720e4dbb07a6",
+    "src/grpc/call/output_deadline_tests.zig": "84d20439acc6bc0fbe778e29eee97517841593c7479398d5a88148c2481bfdea",
+    "src/grpc/call/per_attempt_timeout_tests.zig": "ca282b375a57a235d533d6aeae27ffa10a9fa8e5c04a300f707c01942394f926",
+    "src/grpc/call/refused_retry_tests.zig": "95c51c69d66f910069973e0b1b5c3da4450bda219a736e7c7da9437da2a96851",
+    "src/grpc/call/retry.zig": "40bda42266b7dd0fbff2f1392489f849200cbb4c83720adbc1176b13bf743db4",
+    "src/grpc/call/retry_lifecycle_tests.zig": "b51e85b713507c09aa409a8e524a521963ab3f7bcf1142a87833fda6b7e28049",
+    "src/grpc/call/retry_peer.zig": "aa756700dcc4957039810e7f4dae7b9cfb55c3e665c79e44eeff899ed25db236",
+    "src/grpc/call/transparent_retry.zig": "54f4fefc13c749a66aad52a32fae61ca60b0c40661f5af5c2148cd021a6a6bf8",
+    "src/grpc/channel.zig": "617287f161c9d8232ad0eb12a1435e5318e75fddd68d88905efaa42e66da3a54",
+    "src/grpc/channel/backoff.zig": "d97eaf11f0977d8e567cd7c5d6beb139eb9e5deada4d93ea85a48d0fd38e3984",
+    "src/grpc/channel/call_selector.zig": "1170112f4bb60419da45a066206440e7c3cfecd79751e4c0fd1c214b1902a8eb",
+    "src/grpc/channel/circuit_breaker.zig": "1ebed5d2fe9d5aa7eb75154923b0b9e7ca14c303e9763244ceb1ec4b2677ae83",
+    "src/grpc/channel/circuit_runtime_tests.zig": "9dd858b5ee16b207fef794f71c2813ae8be70bbcf89943101960fa8e2c01237c",
+    "src/grpc/channel/circuit_stream_tests.zig": "6e033607eee554b75130741095a075f9b2fb772ae75f8a69dbfa097aef57dfdf",
+    "src/grpc/channel/cluster_impl.zig": "ebba2e5e15addad2ba3ceac7cf2f7c8b4276fb15d5542691e5db536b6b07b595",
+    "src/grpc/channel/cluster_impl/stream_tests.zig": "6f1645cd97046511a0372d7688adc36a5f8cbc417abcc42754319de4047f31d0",
+    "src/grpc/channel/cluster_impl/tests.zig": "2ad990f73a4919329806ef2b21318ccc8d3310af48bc552571a8060a9e8f87f7",
+    "src/grpc/channel/cluster_impl/update_tests.zig": "25fcbe6d3a3f0bbaab7c2370c0f719409e612bd635a19273507f6ab49603f934",
+    "src/grpc/channel/cluster_manager_lifecycle_tests.zig": "224c455e984b050ef9ac33291e4110654576fbb40c4145d6e6a2f2425a13fc4f",
+    "src/grpc/channel/cluster_manager_tests.zig": "173b6911e643c5eb760e48edbad0228160235ad6f87a32a4e1fe5c7bfc690c9b",
+    "src/grpc/channel/cluster_route.zig": "0055cc7c3e8eb69da65e9100cb014d26c35567ac4fd922b844a0c0d76150ac01",
+    "src/grpc/channel/connect_race.zig": "f7ff734849236b687f284d3cbbc3890cb5c245d30f3992eb2d2a82454277a260",
+    "src/grpc/channel/connect_race/allocator.zig": "d982612b74751eafe6dffc6869ae0309a0a366ca121ea39cadee1796c67eafee",
+    "src/grpc/channel/connect_race/context.zig": "87892e663f9b7bcf5d6d83be7319cd5eba9b94bf8d270aeb347cf239468a8f38",
+    "src/grpc/channel/connect_race/ownership_tests.zig": "3a19c2d2c2e3cfc2e1fddf47b21abbfa732e23a67143309a2a126b88bacf7fd3",
+    "src/grpc/channel/connect_race/test_support.zig": "912a100b73baa0a797924c392dbc737746e61cd515d0845afc88c0f186bf6783",
+    "src/grpc/channel/connect_race/tests.zig": "4171ede2a3a181b5328eadd31822fbf8944fb39adb48ac6472a4160ab60f81aa",
+    "src/grpc/channel/connectivity.zig": "c901ecee9b392f3ed17263f85eedab7b4088bacf7b6ebaa7d5181bd231936f98",
+    "src/grpc/channel/connectivity/deadline_tests.zig": "eb187ae2eae720e4b595cdb47777cf7078911714ef853fe914f97b6a068575fe",
+    "src/grpc/channel/connectivity/lifetime_tests.zig": "f83c6217b8c457ffafe9d9d2cd43731aaa9eaf9052dcdf7daa504c5e86f6023c",
+    "src/grpc/channel/connectivity/waiter.zig": "4ad99104ba2c5fa8802c9fbc1007fe4d3a356f4bf149dd79bad9faa0f4bd8fab",
+    "src/grpc/channel/drop_policy.zig": "67be2b7c66bc0ced0ed4a63b45646280dda04dd081dbdb2da27ccf7ed3f7d8b5",
+    "src/grpc/channel/drop_runtime_tests.zig": "a3de065be9841b0577ca7913ff4fe9c09306d15418a78142f51b9451c886a555",
+    "src/grpc/channel/health_gate.zig": "59a77c070b00ab61a4703b32eb3e024e7b3f745543f1249c470c92739ccbae04",
+    "src/grpc/channel/health_gate/admission.zig": "11bc7b025cf7c1723418f6ac2191a22c5a6ae8a0050e71459c784b676cf04842",
+    "src/grpc/channel/health_gate/admission_tests.zig": "e93a03c53355bb97b9dfbe5ef0f1441c3e30f4cb5f76432c8f4f632a509166c3",
+    "src/grpc/channel/health_gate/cancellation_tests.zig": "872b396c00c43acd3f6dc6f4b781289ee6a25dff5e27b9bc0ab6da54c727253c",
+    "src/grpc/channel/health_gate/disabled_tests.zig": "e4206ccc9acf3b5bfafd8472bbcb8155c7e8634a60808c1cd0427fd65bfb476a",
+    "src/grpc/channel/health_gate/read_interruption_tests.zig": "af006511d8b316ae8a81b42799f76edc524da1f9321144a78d2de64640911aba",
+    "src/grpc/channel/health_gate/resource_tests.zig": "bf8ca8876309ca578546511d82fae803311ead2ea96a721c2c501174bc83c19c",
+    "src/grpc/channel/health_gate/restart_tests.zig": "763c3a5daa1058d83ad9e5bdaa9839091109ac579553ee9be9450ab0fbe79763",
+    "src/grpc/channel/health_gate/retry_tests.zig": "1e79de3ca1c6633766500dbb440634046531c7631e83c26c8f33869f4f7085c3",
+    "src/grpc/channel/health_gate/sync.zig": "0643ff389d52d1b391f688680483908778fa53f4814a806ef0e7c278f8f44950",
+    "src/grpc/channel/health_gate/sync_tests.zig": "d847a9d0cd191d7e1c9fb2928d0121f6848bd413c4d515630107af8c3116a764",
+    "src/grpc/channel/health_gate/testing/resource_faults.zig": "ff4c358b0513f53b113fe120f3695c53b6f47f804a78622d0cfc730a478e3edf",
+    "src/grpc/channel/health_gate_tests.zig": "543ee13c8b81d043c3e566fec0bb83deedf5c4f2cb234dbf8e4d71171f1f1f6b",
+    "src/grpc/channel/host_tests.zig": "21a05bf90eaee7aa3fd59974fb69c2cc85405de3d37d4ae99adc4e63c1443dba",
+    "src/grpc/channel/least_request.zig": "85cfe46c9e1fe5fefe8f4397f3f863fe85894407b86a1a6c140c623a3899fcaa",
+    "src/grpc/channel/least_request_channel_tests.zig": "80993f9b2fc5cc7e8857183d5f24c59eeb4a649e8c105d2ec34481f6a38dbf48",
+    "src/grpc/channel/locality.zig": "7b66334a431f09e3b90a36177ff97c7b9e664563ffaad2ec957072e1eda08f71",
+    "src/grpc/channel/locality_runtime_tests.zig": "697caacde8ff81eb853aa91c7cfab5d40c05252c662d472d2d209535a85b5e79",
+    "src/grpc/channel/locality_tests.zig": "4ddc64907264cc451a07ad2b6834f8869d7105ca71c3537a691d9a4fc9dc1a16",
+    "src/grpc/channel/outlier_detection.zig": "16b59aa65b7d0286ec8aa6755520c9fe25005a637e0a8b1a41b9aa4ca2d34dc9",
+    "src/grpc/channel/outlier_detection_tests.zig": "90b72ceb2aa5be9adf163a9c7e38dd3986296b099359155c1833f47f1961019d",
+    "src/grpc/channel/proxy_policy.zig": "1c156c9fce8757ef04c73146d6f00d1df7a013af5fccc644888721812a9a9aa8",
+    "src/grpc/channel/proxy_policy_tests.zig": "58ff95d13deb4774358e74156b5c744db46fd5110ab4879080cc9d43d228be07",
+    "src/grpc/channel/proxy_tests.zig": "560d9cf1c1f05855fd671907fb86736498c988104420fb02d28b9d384d4e1db2",
+    "src/grpc/channel/resolver.zig": "406f74f5e73fbe2f0de773b77f16d8d3d0e8f10c9460fe49a35ebb09a216ec7e",
+    "src/grpc/channel/ring_hash.zig": "7a3bf0259aa97f960856381b7594110fcdb007987254e42d257ff2e9728bee49",
+    "src/grpc/channel/ring_hash_tests.zig": "4f2dbb38c602444a94af27bbd31bdb02ffbc16c2959f0aca355f14ea73e54eaa",
+    "src/grpc/channel/shared.zig": "48ed9040e4c5260b00e0597275547d173ffb6ead4b820cc8fc600eebf34ce75a",
+    "src/grpc/channel/shared/active.zig": "416fcd0ee00e0be4b8e9c2206c81bd58d505ed9138af52902b9d7bcc7467c64d",
+    "src/grpc/channel/shared/admission_tests.zig": "2fcd60155efe71cee4ecbcb7e799bbcf929c2feb43f8d92aadabecb78aa3cd0e",
+    "src/grpc/channel/shared/backoff_control.zig": "ee1b11d5feb22e4f60729d91a51a1c1cfe2fded15d05ba5e48e2d9ef2cf9b693",
+    "src/grpc/channel/shared/backoff_tests.zig": "565efddd2e558c85c719e687e36439dcb591e74b21c9663ecfa5a27d3572c0d1",
+    "src/grpc/channel/shared/balancing.zig": "d4a0a421d328d692a863a87884fb9a80c670a679b37338a6a777e0b7295d40e2",
+    "src/grpc/channel/shared/circuit_admission.zig": "65f5ee95be8c4de0bb2c404a1dcdc5db50045903be81e2250bf385307ebb94a6",
+    "src/grpc/channel/shared/cluster_dispatch.zig": "68a84c4c4c2c8e729c78e90963eba92fdf3f378bbae0dcad8d5f9a4129b13c55",
+    "src/grpc/channel/shared/config_generation.zig": "a5661e1321318082e081b7d97b8f3456cbfaa4814c739d7c34a167970c671851",
+    "src/grpc/channel/shared/config_storage.zig": "0900c7408e8aa0e2d5820433ebf6f44528305a604e06d03c9c29386d1cd4d918",
+    "src/grpc/channel/shared/control_deadline_tests.zig": "ba47d7b357e98ff34638ac4e255abb981d1461f3f55d7b05e749a7ff60e5af78",
+    "src/grpc/channel/shared/drop_admission.zig": "0fce40307472ecc6304ba49ff0ffddafa416a3867af6b0f45f4ad48f3bf131de",
+    "src/grpc/channel/shared/hedging.zig": "60b5fa2ba4be9759683526aca95120e2eb5a51192317075945bba1ca0a36a009",
+    "src/grpc/channel/shared/hedging/control.zig": "10a985a34a69522a99ab2dd1d0f23e422bb7b98d5ca7c92297c9212b49464efe",
+    "src/grpc/channel/shared/hedging/lifecycle_tests.zig": "606fbe539f920d12110b41092b0c5d8e0cbd08e32161c97bf904a20db194f465",
+    "src/grpc/channel/shared/hedging/recovery_tests.zig": "1c74826685e88556c6ebc3836e90dfcb4c75b5632fb6cd00752b22789af050e5",
+    "src/grpc/channel/shared/hedging/stats.zig": "60b4c36c353cdb6da755ba9392ce948d6fe57585ba3a320da77d018cd6d19f6a",
+    "src/grpc/channel/shared/hedging_tests.zig": "a4a88e1de9f793a22b36c19e28400997e516550bcb95c0105db7d998eda565ec",
+    "src/grpc/channel/shared/init.zig": "3f404798415f8861f0274f4692ae85e507d75070b3b7c9942a7952247a50bbdb",
+    "src/grpc/channel/shared/job.zig": "b296e19aa82c65cb9e3f1af98a2664931a6d2206dafa8ba5621b6446cb498d54",
+    "src/grpc/channel/shared/job_tests.zig": "dbef5552a343f71b248547df50f395786c49de45242108dabddd2208386c6113",
+    "src/grpc/channel/shared/keepalive.zig": "3a2ead47d5ddee899dbccffab238695338e5818a6de789ea58f17c6667b0fdca",
+    "src/grpc/channel/shared/keepalive_tests.zig": "925660b07463af247c046afa78b71639412411999b55808bcfa67cdba45dadb6",
+    "src/grpc/channel/shared/keepalive_throttle_tests.zig": "b0d5e5b6981495302231c665ff28af7a1d0ce83895a2d280136c07708286dce2",
+    "src/grpc/channel/shared/layout.zig": "d9e73d9293adebad5ae3ca5f5f2d3461a30d60aa2e21e9d22468244dd69df514",
+    "src/grpc/channel/shared/lrs_stats.zig": "5548f38709fa4b6af00826415038bdf97f7a5a4eaefbfc56c8cd2ff7f200383c",
+    "src/grpc/channel/shared/lrs_stats_key.zig": "9bd0e2a7e86a6ebfd55af4cccc3e279b00d11a07c0f65b39c7a7fdd6d43f2f72",
+    "src/grpc/channel/shared/lrs_stats_lookup_tests.zig": "17abb63085efe93943794623cb05989dc02da2b1ac4c4d56da3575646ab0d502",
+    "src/grpc/channel/shared/lrs_stats_registration_tests.zig": "c36a7ba533cd9a99decdcdfaf1189869f7b76005fb37576cbba605daa439a104",
+    "src/grpc/channel/shared/lrs_stats_selection.zig": "7b81001895d8615a09d75f5f2e97236890717bba404d0024cecd46f85c7fac11",
+    "src/grpc/channel/shared/lrs_stats_snapshot.zig": "bdc76e894a0894a5dfce7e9d9554873ebf7f102f5814ea6552004187194c1b8e",
+    "src/grpc/channel/shared/lrs_stats_source_tests.zig": "88e2521df8d230953f3619b03721af4233e7f26f9bc1e7aa3e6c9e68f1e010ad",
+    "src/grpc/channel/shared/lrs_stats_tests.zig": "7ec33c65e8bafbe7877d69b99d6fd66f15862159dc123802e491868484c7917a",
+    "src/grpc/channel/shared/membership.zig": "b7f9de2f3e1bf1aced6c93f52d1bec30f95d56a4eaa0d95cc6b15038705d1554",
+    "src/grpc/channel/shared/options.zig": "75bd2e5d0bfa9e00d3cb86052cc4c8a2be78d59a8a620a9165fd8553132e34fb",
+    "src/grpc/channel/shared/orca/config.zig": "52faaafa186c579e94a377a046cee5f7cd53b2d1eaba7b8409fde2d5be005e1c",
+    "src/grpc/channel/shared/orca/tests.zig": "3bcaa9aa0a0bcc8c104e28d72aca31c81bf56e95466e5ae8c269bef87bc116e9",
+    "src/grpc/channel/shared/orca/tracker.zig": "e9aeb6b9d35c8df6bf899c6296607e891143f6652b6376f8c8e06f1d25324e7d",
+    "src/grpc/channel/shared/orca/tracker_tests.zig": "3ac5e0f51a19981b8eb9d36912a8bc0108655705b42b98ee76c0963a1441c8ce",
+    "src/grpc/channel/shared/outlier_detection_tests.zig": "94477ac4fcdee28f20ac468beabdc4eae309f1deab136b84c4d0a7924c6569c5",
+    "src/grpc/channel/shared/request_inputs.zig": "251542c647089520f0a58dfc2a7d8d913413a685d66b005bd32d2cf6ce6de3b5",
+    "src/grpc/channel/shared/request_inputs_tests.zig": "864dddcf2287ef01c8e2f2f8e537f4207f0454e8783a747eb83a8b4a5b378684",
+    "src/grpc/channel/shared/resolution.zig": "42bacca22b4454b77e28beaf1cf70681828a815033c11caf5b5829de4d791e3c",
+    "src/grpc/channel/shared/resolution/allocation_failure_tests.zig": "2d05790a230b685bb0dff0dfa6f734c6008d59f9a32a6725743b11e69e82a052",
+    "src/grpc/channel/shared/resolution/deadline_tests.zig": "ffba730105c1ffe574afdfe7e94815a4d0bea4f705ae84826a04bed1075ee482",
+    "src/grpc/channel/shared/resolution/test_support.zig": "4afe6dce6adf83c7373c436e0b3abdd747db16749e2e91d14ee7c754d6fc3354",
+    "src/grpc/channel/shared/resolution/tests.zig": "802c60500ba759033e1b7354205124918296d320731adf4e0e6b7a0499b145bd",
+    "src/grpc/channel/shared/retention/admission_tests.zig": "3198144598a0089354da886b7cc61f8dd185b50c12f62402df2adee753e7590c",
+    "src/grpc/channel/shared/retention/cache.zig": "27a72c0eae1fee129fb4d3756a47db4eb6fa038da9a22ce38415126ceae26fa9",
+    "src/grpc/channel/shared/retention/completion_tests.zig": "c4b5bcdb1e93cb0c239fade1fa2a3c41ceb10702a711707489bb042b20adb5a7",
+    "src/grpc/channel/shared/retention/control_tests.zig": "2dc2975ebbee0602c823f9fa449fa0c06e3b32ec15121e6a9e6551d3a5d33557",
+    "src/grpc/channel/shared/retention/deadline_tests.zig": "58fc7765dfc0adeb2298f98acfb8dbc8c1f8a44dc39c420a55c91a922444f937",
+    "src/grpc/channel/shared/retention/duplicate_tests.zig": "43d10f5092a0b796b8a330c17a1b0ec8edb552163203dc3daff1a9fffa5698f7",
+    "src/grpc/channel/shared/retention/lifecycle_tests.zig": "9d3679baf30e3852118af16d9888c99a9ce7ca8ad913b86813fcbd86b58a6169",
+    "src/grpc/channel/shared/retention/manager.zig": "99d287a9a1cc4355f97409a77336ab7c31bf18339b8f9911f36bfeb63aa4ed1b",
+    "src/grpc/channel/shared/retention/nested_tests.zig": "6f151590324720db8ff0531cd55e2cb44b28ae1650a29c74960fc427217fca80",
+    "src/grpc/channel/shared/retention/plan.zig": "447f2014c3ecb21ac187a6629500ce65edbb53bde5bc369112e528a6e711bc96",
+    "src/grpc/channel/shared/retention/priority_tests.zig": "c70f8c9d51830acf92df660ca9a0b4a83ea0a066c2ee1b9b819ae274e2bc5099",
+    "src/grpc/channel/shared/retention/test_support.zig": "de37e4f741650c50eb3f1a561577538bc70752c5cf8d2845515be76ea1123b98",
+    "src/grpc/channel/shared/retention/tests.zig": "7eb0c15d700d20d1b6d2abe6f220aed8ab56383afd35cada6cb059ce119e30bd",
+    "src/grpc/channel/shared/retirement_tests.zig": "ea4aeb5ad80f2edac3619ce2798b54f6d7c379f185a2fa11bb3fb79e6299a771",
+    "src/grpc/channel/shared/selector.zig": "84560f53c1cc55126049afd66fc10e792fd3ea2c837aed5293a4c48c1df8b76d",
+    "src/grpc/channel/shared/source.zig": "8e90497197e22a0c4f98b1154c7f3f271f23c77cbdebd57d2c55249191eb93d2",
+    "src/grpc/channel/shared/state.zig": "e070bb02cd18925c111092b46210b054ed141aa58731c359aef893b36b1841bb",
+    "src/grpc/channel/shared/stream.zig": "81371c407ab796da83cd6ceb6aaaaebb8dbed66056ba42d2be021e046d82cf53",
+    "src/grpc/channel/shared/stream/call.zig": "49f322e7183a7ef5fc3c57df5e37561622dd745e6aef288e61e230db1d5ce247",
+    "src/grpc/channel/shared/stream/open.zig": "6c8200ab9341384c43e162b7aeec083d705d8b8136834b49f49147f55a261c48",
+    "src/grpc/channel/shared/stream/owner.zig": "317835462dd9da16284cc8012380a17206330847570b9cc27594f97c5e49561a",
+    "src/grpc/channel/shared/stream/read.zig": "9c343187b95d22254ed3b390be2d1f5418f2ff90b7c5b3af64b5e105b7f962bf",
+    "src/grpc/channel/shared/stream/testing.zig": "49f907d61d8f2d05ad76e5da24200179af854dd73902510ed1191abfcdfed3e1",
+    "src/grpc/channel/shared/stream/tests.zig": "fb78d7b033584c782ad0ee8a8e0189afb4554939a96af74ab0d3b7e3e24f10f8",
+    "src/grpc/channel/shared/stream/tests/cancellation.zig": "bc10785f3909650fb7df305ee529aa1ea6388476bc2c78ec8286bd6a30b4c9bf",
+    "src/grpc/channel/shared/stream/tests/lifecycle.zig": "43fd1f74e8ec377308a107ae2c5f006b93b2dc25e0458bfdd4de0007856ceef3",
+    "src/grpc/channel/shared/stream/tests/multiplex.zig": "b0e24cc2401f3b3674b06aa241fbb087f14ce1e395afd55d4299f2082b2ced6c",
+    "src/grpc/channel/shared/stream/tests/operation_deadlines.zig": "f053f3d1e595f60baac037c5476c197fc3457a7325081532eafcf04fd440a485",
+    "src/grpc/channel/shared/stream/tests/resolution.zig": "02311e1a9e927988ea38b68f853947d223f0fa986a920d8cdbaf5e880dd30d1b",
+    "src/grpc/channel/shared/stream/tests/rpc_shapes.zig": "4fe3b71e101424ff1c32f9dd80b2496bc760039d5f3bc3f9c403a14803bce8a3",
+    "src/grpc/channel/shared/stream/tests/streaming.zig": "60713e987a5b0936000e5a53cb49c0a86c6eaaefbf8dd6951098f6c4f6496738",
+    "src/grpc/channel/shared/stream/tests/terminal_deadline.zig": "485b6e3aa4a8479eaab772faf4cae8f7adc696c2cae9796a6357f3f01a6c1c0a",
+    "src/grpc/channel/shared/stream/write.zig": "351ec6b1e94259eedffa14dd625f76c8633c26f4506b242e0bd4254e8e8c6dbb",
+    "src/grpc/channel/shared/target_lifetime.zig": "5b3b6ecfbe2749196b6dbe271906f0a2b472442f4bb2b6114192a7148ddbb7a4",
+    "src/grpc/channel/shared/tests.zig": "9a37783cf70b30ffd145b9e7ed5c4efa17e2e2a7a9b43c1bf6308a9c17086070",
+    "src/grpc/channel/shared/update.zig": "124ff63fe880a7ee7e79393db77bb49c9edb4721a89e4cd7bfb7596fc712fa93",
+    "src/grpc/channel/shared/update/admission_tests.zig": "e9a73c2771e28aa1f78706c82ac5030e52ddf48cec63f7481cafcc26240f008e",
+    "src/grpc/channel/shared/update/child_state_tests.zig": "403c408ca54a750a25e9f16b18c9476455f5111c7d2ef0ddba2539483f979863",
+    "src/grpc/channel/shared/update/health_tests.zig": "ad050213888b60e24598c6490cbfcacd3ea0bfd7423367646dbb34f832ac7c4a",
+    "src/grpc/channel/shared/update/late_admission_tests.zig": "cc8e640aeaa0f76e99ffe0863f61a8e0f48915d99f82ded0715f26c7dbdf580f",
+    "src/grpc/channel/shared/update/override_tests.zig": "43cb74924fab736316b1c160d6900dd50a811dcecc9208ab6a036e6fd9f00b7a",
+    "src/grpc/channel/shared/update/policy_tests.zig": "09dfaba532e6c15d436f0904f7ee461890fd627c31c513bf0b90277384187041",
+    "src/grpc/channel/shared/update/prepare.zig": "f70198288a0fb44530856992804984a6ead8ad2bd5e00d5ea8eede4bfd9114e9",
+    "src/grpc/channel/shared/update/publish.zig": "c50c6d9dd097bf105c07779bc4fc629e5f79e1883aba25db34ec7957dab39311",
+    "src/grpc/channel/shared/update/selection_tests.zig": "3fa3cee73ebc9f1e4e4f6efb0ca6a2ba27dd17c6f282f3af9ecc97adc09ad413",
+    "src/grpc/channel/shared/update/stream_tests.zig": "9bd565ccd855ae6e5c000d2bef72b661020e4f6f5131e5f55b01032863b805b7",
+    "src/grpc/channel/shared/update/tests.zig": "b25a18c4b4b2a81bf9483964509a30885f3dbfea1e85a12e0fdb3af6a9436ac6",
+    "src/grpc/channel/shared/wake.zig": "238f2abcbbea8e29bff1894d2acaa58b56dd46a70c4e592305e6826b57c03b17",
+    "src/grpc/channel/shared/weighted_round_robin_tests.zig": "4e119f0772884e0a388e97ba66a3ee2b1d468667cd369e65212863a498be3bf3",
+    "src/grpc/channel/shared/weighted_target.zig": "7d0dd59275dc784fd4c7cf95816e6a7f9600124654faaf4be74c3cf3504e0a0d",
+    "src/grpc/channel/shared/weighted_target/least_request_tests.zig": "32373e4be6d922f9f12f07838309fde7737b6245dd427d60ffe76e749767383c",
+    "src/grpc/channel/shared/weighted_target/outlier.zig": "244f4cbc961597395e183d7368fe0a7c2ab6064c6fef4264ae5a41bb30abbbf8",
+    "src/grpc/channel/shared/weighted_target/outlier_tests.zig": "7a5df02f6d50c3adb95388ef508ee66a22a53500ec302e71fc9b6c3c2f25a907",
+    "src/grpc/channel/shared/weighted_target/resolution_tests.zig": "ef0d75c7ede044bcab0c88cb248a49195456f818ff8dd6792207a4f57f186bd7",
+    "src/grpc/channel/shared/weighted_target/ring_hash.zig": "135deb701a40603e25a3b7a3fe6f7f70df7a4e0ce65a586c22f928c8fa8752ad",
+    "src/grpc/channel/shared/weighted_target/ring_hash_tests.zig": "043f58bfcb110d291b63cc1bb2c2c33cc5a560d48022c6789ac092db95f89ce4",
+    "src/grpc/channel/shared/weighted_target/selection_tests.zig": "eaf7c49a7c1d78788ad2e1b800603b673f7e0a4eb2c185e1705527b7df624cea",
+    "src/grpc/channel/shared/weighted_target/state_transfer.zig": "23ebe76146147cd7127985c666cb5bb1a51c5fb850e696e80f341cd9199c5d7b",
+    "src/grpc/channel/shared/weighted_target/test_support.zig": "ecf6d992098079e193850b4d61828142a7d2a181ddb79e604e44feb7ad5fc8fa",
+    "src/grpc/channel/shared/weighted_target/weighted_round_robin.zig": "fcc419c1d21ba45daa1e64836bc1c86df92cba9b273e7e813b6cd81b7845d00d",
+    "src/grpc/channel/shared/weighted_target/weighted_round_robin_tests.zig": "66fc0342ec48b0aebf4b2be6a5b204c43da76639bc570b4cd61c3d79e4840f72",
+    "src/grpc/channel/shared/weighted_target_tests.zig": "eaf5d2a30d1f16eb7017c3b083600a7cc3550ece4ab1272c26a57edfb05deffc",
+    "src/grpc/channel/shared/worker.zig": "c23f17340b3953d455647cbd96dcf12215a2a0e190ccd6082226b3245951e194",
+    "src/grpc/channel/shared/worker_settings.zig": "c78ba41b02574c2c8938226d7b1c47b35d3f2944d5a187069f9773002f957be8",
+    "src/grpc/channel/socks5_tests.zig": "7df16fb374321604a8a99f081b3b2b1c22c6e5179aa2764070e3036b1844ca85",
+    "src/grpc/channel/tree_query.zig": "626abd44518a0a738271a48ac65149d3d0175ccb5a18324025ffcd908591d3d7",
+    "src/grpc/channel/weighted_round_robin.zig": "bcf2e59fee863e816be704a943383c2a44d9a349cb127b3a707323ffa05ece7b",
+    "src/grpc/channel/weighted_round_robin_tests.zig": "bf41cf7a1fcf6c9d4d5f1b5e12befb22b5b4bc85aa551faea2c692c2a4125e2d",
+    "src/grpc/channel/weighted_target.zig": "13b766062daca6508b4d6dd90191cfed1273244f93e663bef7e91b981efce220",
+    "src/grpc/channel/weighted_target/outlier.zig": "b869d16f6ed95b4d3d8e000855303ca4207c139c708e78ea457ce18667f68cb6",
+    "src/grpc/channel/weighted_target/ring_hash.zig": "0a09b08be64fd0a890842d07be2fa6639a1760fd98bfc2f90a6c00d3f92eb7da",
+    "src/grpc/channel/weighted_target/weighted_round_robin.zig": "e010a855448b77184f4d8c159bea01adde69dc22abe946f9f86fb5d70a7c4133",
+    "src/grpc/channel/weighted_target_tests.zig": "8315418ec6107007f2961f2d0a836f1416bdfad86f9ea8d882ab859349c57266",
+    "src/grpc/mod.zig": "76b169d8190152692b4fa0724f2cf8807d64b1de7c72d5b2c233c646973c029f",
+    "src/grpc/orca.zig": "6ff5851ba33431a7928908ae73fcb3a9bb4e34de7ff3fe30a2a031d154e6d3b1",
+    "src/grpc/orca/oob.zig": "bb28dfac7fbc54bf4618bc1daf192e2708ee57e84b8b8b7735202ad5b529e5b7",
+    "src/grpc/orca/oob_tests.zig": "a7b5d6370525d255f4e78fd3521e4f713bdd1bf91463a2cb6165abdc763499cc",
+    "src/grpc/orca/tests.zig": "f2eaf8824a287c22bea307282fab03e92a5c47f9dc41073cb97e9216af3ec4a8",
+    "src/grpc/protobuf.zig": "7140156bfd8522253ad2b67fcfdb191f8ec0553872bfc81ef0a9ff040cf1d543",
+    "src/grpc/runtime.zig": "62601134b1cc21d94a8919f500396c8d871472e560971f255340bb77b5bc0783",
+    "src/grpc/service_config.zig": "b8ac8b22549758c4843c62560063a6fe9bbd742bc08b4efbc60c31448d981d3e",
+    "src/grpc/service_config/cluster_impl.zig": "8def1ca02ba92edd96b51c1234ec3c289b62d853936fea59959157a12b63c296",
+    "src/grpc/service_config/cluster_manager.zig": "b7878b73277819afe592d8ed36f4eb27b130bc86cbe7fd3a978a08fa8e47fbde",
+    "src/grpc/service_config/health.zig": "2c2915f2c1d39802cdee4fa862338ae9e4b28a01e427a6d6aac98ba29bd8d234",
+    "src/grpc/service_config/health_tests.zig": "ef9c8e153c61ead30ee4a9da92b688188f699c438810527c45f9c263e060d66e",
+    "src/grpc/service_config/hedging_tests.zig": "e57c04dbd92fbf90d141e23c0b2c6c93a45a3bf782d838430563c94956ba608f",
+    "src/grpc/service_config/least_request_tests.zig": "7f8fa1c79d01f36dd085f7d54a1298f1a33b79731335b6c7febea44c8c8c3e53",
+    "src/grpc/service_config/locality.zig": "8d1c3c8761a75bd8c5122bb89c3d2df14820b1d74e362de3ecc992a5606c8643",
+    "src/grpc/service_config/ring_hash_tests.zig": "cb30efe96a52c111211e5b1cd65d27acf4d8acbeec8c91705cc9902019921de8",
+    "src/grpc/service_config/weighted_target_tests.zig": "a7c734c9d33a211629bf7aad9d13a108289a92b52b1a79960fd08e2293fd902e",
+    "src/grpc/stream/codec.zig": "16c7e6efcba0804d3d21022bb83d362afa92d0cdf8fc73205a5240c8ac306496",
+    "src/grpc/stream/completion.zig": "b0de043ed89ef37cf7cece1a72bd5437bf014620f39c69bf76e557b83d976373",
+    "src/grpc/stream/duplex.zig": "867e0dfdd8e2784edbbf901d3a2e131791f2870dd84bb58ab3134ca4a764a9b5",
+    "src/grpc/stream/duplex/client_receive.zig": "31d80fbf3958bcb6c023e1531f489ee13061764570b8cf6bd249dc0414441d85",
+    "src/grpc/stream/duplex/limited_receive_tests.zig": "f7441ec4deb3b3dfb668b57494fed5ad90b65773c96afbe33f40e45eef2699ad",
+    "src/grpc/stream/duplex/outbound_ownership.zig": "68d82707f141d0cb810af636071950372d2b803e972ebce199b71bdd887f8b1a",
+    "src/grpc/stream/duplex/raw_receive_tests.zig": "05ae07f54aee5923e4c46fdc0105c3f435ca7ca477ed60e9073f313447338a83",
+    "src/grpc/stream/mod.zig": "806790c07eaee53d7cd7af5f6b06b7c859d1b65d7c04bf57ab4ef4931c653c9c",
+    "src/grpc/stream/runtime.zig": "ae27768e340fbc4e9dd7caf57450186a5ea796915981c3257c82b99a390b9d74",
+    "src/grpc/stream/terminal.zig": "89e3707310974222e56b9a852764e3242d69bee1bddcefd8cda679e6097eb07a",
+    "src/grpc/stream/termination_tests.zig": "6b3618a61959968ce59b88846686c2ae9cca990383f78876a94f17297cb08dd0",
+    "src/grpc/stream/termination_tls_tests.zig": "064b0833dd42669d77fb184de3aaebb5e2c0f5929cc1b549a75b0b75d02c19ce",
+    "src/grpc/stream/tests.zig": "f79f44d17bb975e5206753d4d23ad0a6446eb26bfad8298fd72a2aa0ffb13e0c",
+    "src/grpc/xds/ads.zig": "816b6a1f8fe8db089614ea8fa64a970f2cd4e0869ef647d8bba0f966bbed688e",
+    "src/grpc/xds/ads/batch_tests.zig": "be92dcdc03c6b7a10e8d9b8d286986a004e49db5192ae0a36d36c9867b35e7e1",
+    "src/grpc/xds/ads/client.zig": "4a576a2a0e80fce26826f5b6694c467b1353a4217ef324bb98320c08a31b11f4",
+    "src/grpc/xds/ads/codec.zig": "388e81d3b66d1113c99e8b50790ad01a401f041b1825e59f03b7ed66a3fd90e3",
+    "src/grpc/xds/ads/delta.zig": "77a0f0c73fc22b5f8adabe664c1463fa574e5e8349dcafd6b4d7f7205a6fc6d9",
+    "src/grpc/xds/ads/delta_client.zig": "8a34c810e25b5d2c703f509b9cf6ac3fadf8e4b11ebbb062dfb08ffacd0616c5",
+    "src/grpc/xds/ads/delta_codec.zig": "74b9d77c6f4ff42aa7a9ee8d0d429be8e8a4f553482c0b14d9f89a3deec2116a",
+    "src/grpc/xds/ads/delta_subscriptions.zig": "0351b020c2a46fc71c4ee856fc8176d281c00945ae70018f7b58c3cd7ea5009d",
+    "src/grpc/xds/ads/delta_tests.zig": "d6a875f29168bd5429bc0404f93d734bc7bc658a5013a4f6d889bcd9dcb0dea4",
+    "src/grpc/xds/ads/delta_transport_tests.zig": "65f95011c3369f88bbbfb33e72f9466d273671283b54dc1c34320e076b73c7b8",
+    "src/grpc/xds/ads/prepared_batch.zig": "61a6cd4ae3f626b2110bd709b749b4d92aefe5172c2ff04e761c9961c703f2a3",
+    "src/grpc/xds/ads/subscriptions.zig": "58a934accd1352ca5caad4a5677224da0875049bb7bd4462da47cf18885de2e7",
+    "src/grpc/xds/ads/tests.zig": "d0a6cf330668e3ff9b586f2ad3399939cbc072c1cd140c7719cc74a39c104f7b",
+    "src/grpc/xds/ads/transport_tests.zig": "f99c3ea76c3684fdfea11407c2bc0c94c697f6ab950a3f764bbc608e55289f2a",
+    "src/grpc/xds/bootstrap.zig": "972a2a95c4b4c83a908a33efa5fbaaca2b2fcdf4b91113b164d55181b9fb984d",
+    "src/grpc/xds/bootstrap_tests.zig": "d345e06fba91f5077dcb344a7f3bf6fa78439957393d84419815d8dba2540fa9",
+    "src/grpc/xds/cds.zig": "905e33352315090c5fca795109cc3b897947ee506d2369664b5da7e3d8e4dd0f",
+    "src/grpc/xds/cds/controller.zig": "dd0eb46710e5b0f2cc3d58320308e694d46e9e458603be0fad7d73488b543fc4",
+    "src/grpc/xds/cds/controller_tests.zig": "c0244b1caab6844e244afb565932650f83b62b3587f5b11d38f6de7d9b40449a",
+    "src/grpc/xds/cds/decode.zig": "f9ad360dcb6446cd03c9573445c6c3eeb3c23255eb915adeb5ac3f3e9a77d538",
+    "src/grpc/xds/cds/policy.zig": "758f05c3bf2694dd00e3c61cc8b94ed5c5bcaeec577f939b9b73b8bb7b8c4079",
+    "src/grpc/xds/cds/protobuf.zig": "087dd1d033bdf8878de5267b8a8159fee82894e673c3aaba6111c660ee3f3ff5",
+    "src/grpc/xds/cds/testing.zig": "cea2c2ffc5d9b5c9fa1d07beb44cc48b0c76e1ad0ac90ca3d5243cc9a1ba3f14",
+    "src/grpc/xds/cds/tests.zig": "13483c5e55caffd7fae50e283b8130c8afcc319d8f73ae4cea2f19070b86e2ee",
+    "src/grpc/xds/config_source.zig": "aa64598661abfdafd79cbdb6abb0b4a8194d1cf50541f9bc8278c796c18aea59",
+    "src/grpc/xds/control_plane.zig": "e02b112e404e34eb64aba10bc26bc25bbcc01b494062ddf7b9dfed45bddff219",
+    "src/grpc/xds/control_plane_inventory_tests.zig": "a24cdf46d939368a82b47ef1e79b74782bb0d0c141fe8a44d19fa5c677d83689",
+    "src/grpc/xds/control_plane_provenance_tests.zig": "7b10d04618e587948dbb24689907e749f5023098dd2a197b1b1ab6e495628cee",
+    "src/grpc/xds/control_plane_tests.zig": "610ef899976d061fedff57dd875a5188db88bc79c8c11837889966937efa2342",
+    "src/grpc/xds/csds.zig": "091ca123c24c60e06fd455f7cb3287c4c16610308f35596c9d1ceaa66fce814c",
+    "src/grpc/xds/csds_service.zig": "3bbccfedebad66e300b80a1c94a276c67ceb5b7ade9110afd2651a219cba7688",
+    "src/grpc/xds/csds_service_tests.zig": "312ed5d9fa36ee4b5bb8456a09ff8f0166e05a8aec2fe3d4491dbef5c7249cfe",
+    "src/grpc/xds/csds_tests.zig": "c9fd22c63ca92274be13cdb633614a3135d66a5ede9a9d70a2599386ec38d7ef",
+    "src/grpc/xds/discovery_source.zig": "7f29d2ec9f7c299aa93f5180ed8fef611937a17b4535648601b2507bc80c2558",
+    "src/grpc/xds/eds.zig": "fd3de33a5e2a66c6755e23e3fe8c154e275db09d9e6373252e5758d90df8da9d",
+    "src/grpc/xds/eds/apply.zig": "eeaf92518eedac5429bd1529f46d8f7ebeba73aa0012c18ef333ba9941b11ca0",
+    "src/grpc/xds/eds/decode.zig": "ca05dc0d76a0edab53c6eb732e67db42e7ad1335bd1c1b529d2e80f6231b60e4",
+    "src/grpc/xds/eds/target.zig": "0c11f6e3faec6c6375281dc2a4cf4aebd4cbfcd24ba508b560fa96417f27eb54",
+    "src/grpc/xds/eds/testing.zig": "d2428b5cfd07052e2c46ed53ddcc32fda4ed8105856e1608c659d32d63e5a254",
+    "src/grpc/xds/eds/tests.zig": "4a1fbeb0c2bf113511c27c600ddec521b06409673d7b87a57918b56f660824cc",
+    "src/grpc/xds/eds/transport_tests.zig": "84a190f6109e3077361304ab336cb54444240847d81038337adc06eac59a467f",
+    "src/grpc/xds/lds.zig": "38bfae63f0f710769a825aa9912811a4cd7e84293de3d832fa80dab6297a120a",
+    "src/grpc/xds/lds/apply_delta.zig": "b3d5af839cab6c33d35661c4501a6d10f997524c8a5d2db37c21c3d6842915d6",
+    "src/grpc/xds/lds/apply_listener.zig": "97eb44d8ae3ff43587f6d6ac3a27a125b1238efb58f7640de12834ae72a2b66c",
+    "src/grpc/xds/lds/apply_routes.zig": "37ca0b91c3429cfc64cb781fcb1e9e663f05d3a1212969f7a1f6211f1968a339",
+    "src/grpc/xds/lds/controller.zig": "42e8760695f1cd6f3848af184f4350984801733269711e71bbabecb7a2a943b5",
+    "src/grpc/xds/lds/controller_tests.zig": "06545dced580ab73ddf3dc23ad89b295e0e91cb537a1aec9bb93332303555d84",
+    "src/grpc/xds/lds/decode.zig": "3ab761ed59835577f8be2b3889e0542e69e3b6e9fe3dd612441a2d7c08a38140",
+    "src/grpc/xds/lds/filter.zig": "74fceedea03657c674e2d48f5aaed5d1dc711e7fd5fc0967b728a61aedf8d620",
+    "src/grpc/xds/lds/hcm.zig": "0243037d1313c044347728dd2d3110440f8ef1348e990652271d9011f4bd996e",
+    "src/grpc/xds/lds/model.zig": "e8a4afb6d7bc24ac665e6446db78254161fb3a3ba0f051ab844df05b43c8db45",
+    "src/grpc/xds/lds/projection.zig": "9dc8efb229e44d5e62c6f332124d520aff1e6d0d281eb3a9263fd798ce8dbe17",
+    "src/grpc/xds/lds/protobuf.zig": "5ea141bdb003ce36d42fa2223783622685a560495647ebce759ec31802ba5839",
+    "src/grpc/xds/lds/rbac.zig": "781d9baef310175c216f78796735d6bbf049c0093b77aafc6154870a18889ad2",
+    "src/grpc/xds/lds/rollback_tests.zig": "f4996052df49ebf143ff2e1f33868a0c0696cfe710dc4cc0dedb90ae380251d8",
+    "src/grpc/xds/lds/testing.zig": "84d064433d7ffe6c1ebf5bb7b568cc097f0702e0aaf84585cab02b4528ff56fa",
+    "src/grpc/xds/lds/tests.zig": "1e155251d5aa2f70f12f5d240a051f8e023e85406d4dfa6d7023dbe0aa2fedbe",
+    "src/grpc/xds/lrs.zig": "6d8d59172278cd9e2f99d807301805e3fffa2b32a3275a1d06c1474b7face89c",
+    "src/grpc/xds/lrs/client.zig": "feea9671ede9ffe120b9f3ce781b937b04f20ca7fe7cdd8bbf07b32d7a2797b4",
+    "src/grpc/xds/lrs/codec.zig": "ffb35262db13c94bd78e681169d00798e2b2adf426df7c6990e3c1f390d784c7",
+    "src/grpc/xds/lrs/control_plane_tests.zig": "46b2d685422cca5fc649fc6b8961007eda93911a402477204cd6d61dd59c857c",
+    "src/grpc/xds/lrs/integration.zig": "ecd363a352864c77067b9da52d6eb66e2587d21fa828310784cfc8d9b5884757",
+    "src/grpc/xds/lrs/reporter.zig": "43a4fd1fc0a95b7635f4f001851e8e220d7aef3753baec4f905f42aaf5cc85bc",
+    "src/grpc/xds/lrs/runner.zig": "32dab2272f882a5485adc24a753cb1175a2d2f1dca0bc6b43d255b25fdc68b0b",
+    "src/grpc/xds/lrs/runner_tests.zig": "ba3a9b901df08c267fc2246d95f4b7e22cb046dc84a20776cecd1c2c3d64b6ce",
+    "src/grpc/xds/lrs/scheduler.zig": "0f591ea82e93514d23b16c051c852e9052f5dde4bdfda209c0255249436106c1",
+    "src/grpc/xds/lrs/scheduler_tests.zig": "313202257995e6cacb7e1b378b40c4fca106eabd2961ab7067f59888e7b862ad",
+    "src/grpc/xds/lrs/tests.zig": "e873bb7d4addd85047770bc7242055140a34cca152044aca595957b7a9689530",
+    "src/grpc/xds/lrs/transport_tests.zig": "af4f6ee7e4f1f61cf224d171763f9118a645dbfad9c7fb04d5d6af9f0faf9aae",
+    "src/grpc/xds/mod.zig": "1f8112997326fa35e0b35569d3a0e28eccaef0e8b6445f25d5cfb0dd4ef05990",
+    "src/grpc/xds/publication.zig": "218402c62522c923422dddbe4524a826a164c1ccc12d63f893276427bf3ccb41",
+    "src/grpc/xds/raw_name.zig": "b4ea587ffa089efbf058302ee9187cd506289a0156a383b9f769bb027c6d2b39",
+    "src/grpc/xds/rds.zig": "8fea5e4f2db53c1e86c29488cf90c36335a70ffb24286b8888269cdae09a7017",
+    "src/grpc/xds/rds/action.zig": "e4ebb2644fb69ef424fd357970e1be9b33f48f6fe1ae11b3e32a5a576fe6e999",
+    "src/grpc/xds/rds/apply.zig": "5fa5e77b90647adac226bedd46e01f6487db35406cb8010d91527534fbfffd4c",
+    "src/grpc/xds/rds/decode.zig": "c883ecdb7a5c0fd9423bf52ecc040e47bb6db5a5b611ad93478e5d9064eca513",
+    "src/grpc/xds/rds/lifecycle_tests.zig": "11d2fb60d7014de5530b05ec391f0dc38159fee37071330c5331877fb0aeedc2",
+    "src/grpc/xds/rds/match.zig": "5793927e40b30ac297edce7ca5cc679a776975d0b83890b82b8d2c755bffdf81",
+    "src/grpc/xds/rds/model.zig": "b7a48e5a6f74ef5e389fc5bd4526559c0e654a10ed9bd30be115034b67b0a4d8",
+    "src/grpc/xds/rds/protobuf.zig": "6b98d9fe99f144c8fabd5c6fbb9713af76c8652d77bc32e9c0579ad80595823b",
+    "src/grpc/xds/rds/retry.zig": "0d9cb1229b3b74f8d345384870af689d0e77e01e619b496a9e463b5dcf5d2050",
+    "src/grpc/xds/rds/snapshot.zig": "65f8f5b53b5f87c2d8618149fa822d57e7af76a6dae7e6881116b97b56b9463a",
+    "src/grpc/xds/rds/testing.zig": "9e5bf3b1363b04961aa6d8c74505fdb3a706cdd0b39ce4c0b4c587a3ebf330ce",
+    "src/grpc/xds/rds/tests.zig": "19df02b1ef6f0a3547448dc5c5e6c401b3f8cf74c6133e011fd9f2862f962e60",
+    "src/grpc/xds/rds/transport_tests.zig": "fdfd1443577e290e67d456280b1ad401cce76a88e2ee506010cd1ace477202a9",
+    "src/grpc/xds/resource_name.zig": "1b77a6eb1b5b8ffa83a784b85c949b5bba0e9efd44ed6390ea3ab49ffa287107",
+    "src/grpc/xds/routing/domain.zig": "456603136723630e6ccde68d2b3ed1651813670cf75bd87946cbde3ba0faf215",
+    "src/grpc/xds/routing/header.zig": "f0b9fa646dd5cbc0cffa6be39a4eb86bf36242b9c06cdcf68c5516f27ee0e2fe",
+    "src/grpc/xds/routing/mod.zig": "7ea6a2269fa426a876e91a8525221cfe8c6c3ec69f4317b5ecaaa5d6b13364ca",
+    "src/grpc/xds/routing/regex.zig": "7afd9a93b6d46cdeaa203811f805a333b10c9e48be883b4e6fdc14a948ca6e2a",
+    "src/grpc/xds/routing/regex/budget.zig": "69dcffa2490dbcf9de098713e6d24ed2d965db9cfce3388fa7fcad6c287fed0c",
+    "src/grpc/xds/routing/regex/budget_tests.zig": "e9a73e9ecf29751e5db7a024f5c69ecace24a7a24dbcd9cc415ee34a902f2fe1",
+    "src/grpc/xds/routing/regex/classes.zig": "37fc8c80ff0c6a6b0f5ace2bf455901d29aa9e4e30159fc9466076d6d660e63c",
+    "src/grpc/xds/routing/regex/compile.zig": "5d77fd643a75b9c91d832fba7b31789b236df4650b01bf244277029ac1f9b1bb",
+    "src/grpc/xds/routing/regex/escape.zig": "6a3d3a063069a5db34621b9be9cd52554db15512196f577f3122882e636326cf",
+    "src/grpc/xds/routing/regex/execute.zig": "170cd4a0ea974b260d51e9ca1be0929852e7c82dda1dc86eb67e9f6861f6c10c",
+    "src/grpc/xds/routing/regex/model.zig": "de9997c7c2e9fe293fa1e5229e7dccaf41b1a5974c82c1c70084d59b90e0fcd6",
+    "src/grpc/xds/routing/regex/parse.zig": "7395136c35f75a26155679adb16e05041d285121c3ee9e2ff5a9f68c58c561c2",
+    "src/grpc/xds/routing/regex/replace.zig": "62c25016a93993218acb0789edacd6db4211745effbfec8ee87d0c22acb876b7",
+    "src/grpc/xds/routing/regex/replace_tests.zig": "bd46676f0d88c685502064e0178c0d785d06a707a07c99e952b2edbe2c3ef408",
+    "src/grpc/xds/routing/regex/tests.zig": "cd3a312308b3dcc5f1e5fa442930e119c676a137f3b8a2e3e2ccf189538238de",
+    "src/grpc/xds/routing/regex/unicode.zig": "fc0cc1a9e8c6965db4de0c7383a647760aa17174ac4131c53fa7ef539cf685f4",
+    "src/grpc/xds/routing/regex/unicode/groups.zig": "f65ff584956d795d5ed6039c24d1ece22287b6e381790ac6388c0b66aea41413",
+    "src/grpc/xds/routing/string.zig": "8d8e3b6dba94f543e55e5cc74c2a757de758cf31cb9dbf5c71c297eee29104e3",
+    "src/grpc/xds/routing/template.zig": "7417b5f512f6bc1d05b840b7d4626a26f22c29f8f98691a3e3f2f7a649ee72d6",
+    "src/grpc/xds/routing/template_tests.zig": "47edab8b5bd99f5293127466fa794c8a671fbb65cee0b5db4b8c2957672dd79f",
+    "src/grpc/xds/routing/tests.zig": "6045dae47fcf59cd2edbda1b63aa43e9c31e2eaad833f01b7f6e8e1341e98751",
+    "src/grpc/xds/runtime.zig": "026d68b9b6cfffb1e0112e1ccffb4166a14b092c3be8af19ba858f4ba55b506a",
+    "src/grpc/xds/runtime/apply_cds.zig": "27c34fc27988de752908455f23389978423a8931fb268798e8997f771b0f4f37",
+    "src/grpc/xds/runtime/apply_delta_cds.zig": "163da9bc970b7d5ce9c45a7476e187c79b4baa3464dffc3ce3ed2e4a59c8c6bf",
+    "src/grpc/xds/runtime/apply_delta_eds.zig": "8bbb9792f4fcfd162e662a72c237ad57b1065eadd6a957d0dd5c3404ce8c16f2",
+    "src/grpc/xds/runtime/apply_delta_sds.zig": "e356d98db1493355d17920c9b90765b3c4d7f4372e7ed0d047ae413553e9ce18",
+    "src/grpc/xds/runtime/apply_eds.zig": "547f3fc0fd37e10d4841950fa50fea4ea51958e17484a2ec395de325d67a7d9a",
+    "src/grpc/xds/runtime/apply_sds.zig": "27228508252b8b7b103184a87d63649f74f0ff62f66866bb14dfdb7711c97709",
+    "src/grpc/xds/runtime/authority_tests.zig": "a6a84aa56864b39524c48c4275671c969cc412e6721bb36d5b61f299c0312217",
+    "src/grpc/xds/runtime/constructor_tests.zig": "c33c1965451729f2a5c6552779559efcd185e1014f5cfcf996bbe88511f2845a",
+    "src/grpc/xds/runtime/controller.zig": "eaae5e52bc96736dc41d4e57ef867c81867296ea566d54291b89529a2ace7181",
+    "src/grpc/xds/runtime/delta_tests.zig": "4b13cbddeb7a96239ebf98247fa24fbcf06cf4c5e6a6084057e903680b6471bb",
+    "src/grpc/xds/runtime/delta_ttl_tests.zig": "76c1c2103bffa0fcd33915a52afde6464cae59f175adf788f625bd4999061096",
+    "src/grpc/xds/runtime/entry.zig": "27c7124ebd68ef24be63a00332966842d91f6b6d8c1104b00fc96e37d2ec44c0",
+    "src/grpc/xds/runtime/errors.zig": "c4fa4ff763a24dadb09b15c179776f94df8af3a9653f5dd907926949b8b248eb",
+    "src/grpc/xds/runtime/fail_on_data_errors_tests.zig": "104174c525e616bfde7836c1ab3de47fef0176a1a462a1adc6c7b560c22119c8",
+    "src/grpc/xds/runtime/ignore_deletion_tests.zig": "8f0b564068a4b8fd1d411416fe83818e2c6a9907165e0b70ab5e2f82f4cbb0cb",
+    "src/grpc/xds/runtime/lrs_automatic/routing_tests.zig": "7b886a89bfc7b19f9e34a08aa3be3e8ea9ac87385fa4825bcd38d60b63a05fbe",
+    "src/grpc/xds/runtime/lrs_automatic/testing.zig": "37e38cfd24d9f2ea8c44ae602e1086bfb58da882abd76695fff59b45e91e259b",
+    "src/grpc/xds/runtime/lrs_automatic_tests.zig": "2364b35649b64d630632df82f5dcd2135120ec562a916cfa1245f64d637f8d2a",
+    "src/grpc/xds/runtime/lrs_bindings.zig": "d6196127343f11d01c6c327d62d572c12fc9d05b256696ee58f49587dcee4215",
+    "src/grpc/xds/runtime/lrs_named_metric_tests.zig": "1db734be536106250df4219acc0c334543202a0fcb4396cd596cf206a64e34e7",
+    "src/grpc/xds/runtime/lrs_selection_tests.zig": "9718c08a11978a69f519a4dc33ebf9f54dc9fabfd66d65b84c24cfde9da488ef",
+    "src/grpc/xds/runtime/lrs_tests.zig": "5a1b947833fc06621098e3f972e01f089bf881aba7e0d5c45469c67688060749",
+    "src/grpc/xds/runtime/options.zig": "1be533c71207026c404e45b0a07051bf0d787fff3ed387e65fc5c0d027f33094",
+    "src/grpc/xds/runtime/plan.zig": "ec1f871d5e5ef1daa9aab0e4ef52373e2fd02fc1f5680c6972d8a0686017e8f4",
+    "src/grpc/xds/runtime/resource_timer_tests.zig": "c1e7b5702825cc690e36fddc80dc384f579cc8084e76351dd385bf738cf4fdf0",
+    "src/grpc/xds/runtime/rollback_tests.zig": "a716de6fc76b7a7832b2f9b92879e2bad2bc45162e408f21859be711a0fbdd5a",
+    "src/grpc/xds/runtime/sds_tests.zig": "df1c8e212b15f96a971fa2683696b2d29be9e066d234258ef4c47985dc571689",
+    "src/grpc/xds/runtime/target.zig": "4b0440b0ab5b1f665e41269008f86e6b4ce70816c5f1d43c2721c31a2a1b4dac",
+    "src/grpc/xds/runtime/target_tests.zig": "af68a5d123e5ffa6938d1055049137393f23e911772d25290c936107e1e9717d",
+    "src/grpc/xds/runtime/tests.zig": "da70a5ebbe33ff6103f735e8dbba576860c28ef384dab4d17ac6f3a19d783e01",
+    "src/grpc/xds/sds.zig": "ab53a1d0a6d5d5f3a9943f573fa29731d8c278a5ba984a3352d0bcb1d3ab35d1",
+    "src/grpc/xds/sds/secret.zig": "064479db880848204dd9cf2fccf0e43e2fef603e4ac806fb2d3caa738636da1c",
+    "src/grpc/xds/sds/secret_tests.zig": "5220701e0803c7a63d72eaf8238d95cc6129eba8a71d553e594b5283f5040e9e",
+    "src/grpc/xds/sds/testing.zig": "1f01f4b90dc45db1a20fb2e96e08291a208115af029ef9967e001b56dd61bda5",
+    "src/grpc/xds/sotw_tests.zig": "c80becb1e7608b8624fe494ee546e6f89af15a30331cebe8a5d144624d904987",
+    "src/grpc/xds/tls_material.zig": "a0ff8b4dbce76f83d1beb0c9ac063d3076a8f2dae1545bfad24142ae7e5448ef",
+    "src/http2/runtime.zig": "0575b01e2a2bbcfe070d19c1c796506b2b43a32ac219b0f4b9e4de07c0b0124b",
+    "src/runtime.zig": "38674f1922fa837c126a05895234b3f944d519f67b5018add734e98599f81002",
+    "src/runtime/ip_listener.zig": "04d09964ea49af077227d54143c2ff5bd5609275f27a009c7cff5f3be5644724",
+    "src/runtime/timed_socket.zig": "36dc7859b594063643f9b3ad5e9081d450868d7e9526bb8b627b0eadafd4cb90",
+    "src/runtime/timed_socket_tests.zig": "a3e0a3a899575e7113e8e7e4923367cc0b3aadbddf48536b2c485dab9c41796e",
+    "tools/interop/grpc_locality/package-lock.json": "9cae21a36a38e30b732bfb139abca82bf77ea326fd9ce981f22867c7c01ccb2b",
+    "tools/interop/grpc_locality/package.json": "8db54803ab44c882d2063b5e271764ea3b4901da17c3d065d5036e6a36c7ef53",
+    "tools/interop/grpc_lrs_automatic/README.md": "1f20aae7acf6c5ffb0538893d0f8855805708021783a0e2ddd60ee2bbb311279",
+    "tools/interop/grpc_lrs_automatic/client.zig": "f54d6e22a0f37eff2242844f024dac5629a8d835ba3307884809a13e7ea5c544",
+    "tools/interop/grpc_lrs_automatic/peer.js": "0b116c94ae5887de435b759d501c25b0db0e87cf06b8dbfd2b8d3273bd79ee67",
+    "tools/interop/grpc_lrs_automatic/relay.js": "f8f88b4e3b2191d50786e58769a752e9666b7131b3276c61aae3e5d796cd48ca",
+    "tools/interop/grpc_lrs_automatic/run.py": "068c6732b54910f81732b70cc640b36c0d60c6908f9976f1c725df5a1175d068",
+    "tools/interop/grpc_lrs_automatic/schema.js": "b5cc876774eff8cafe5626c18f75b503c08653350e622f65b7196f2132bb0730"
+  },
+  "client_sha256": "3ce45e874f3d5afb07154e26dd1d70daa1cc29c060a6a6defb74cb92ec215281",
+  "reference_proto_sha256": {
+    "envoy/service/discovery/v3/ads.proto": "b4455efa45f868f04ce11d415d9a712104edbe6ec476ce7df6da57d3997fe0af",
+    "envoy/service/load_stats/v3/lrs.proto": "f3ec006ea4b739ccbc9976c5f092952d8b8b2d1cfe8684c09512eb0515c10611",
+    "envoy/config/listener/v3/listener.proto": "8f1fc0f065aefb9ee95345f08cf3fdd9124bb12478621d5e31827ac465b4d241",
+    "envoy/config/cluster/v3/cluster.proto": "a163a314125ed9f1a6d966426c5cf42ae8be726c826ddd05df3dc69f4ab09942",
+    "envoy/config/core/v3/config_source.proto": "221023ecf8ce8c89a992afd3aa5507165a3f3fe6956127d35421c6bfc72eb35a",
+    "envoy/config/endpoint/v3/endpoint.proto": "2110b9d177d0e986174bde50647b6694b3f665168c82f35db9bb2444b32c835d",
+    "envoy/config/endpoint/v3/load_report.proto": "f0981c753710fe83f845c09d0e06d217c713c5799508c9c17766fa7bbc3482b0",
+    "envoy/config/route/v3/route.proto": "872fbd2d981201efd64c461d674fb61ee893fa4a04f203384bf95c808fece12e",
+    "envoy/extensions/filters/network/http_connection_manager/v3/http_connection_manager.proto": "992a37c41bf728d2cbd80834373b59d8b969f0f84b577ae5c053960343a68e9f",
+    "grpc-js/xds/data/orca/v3/orca_load_report.proto": "3a4d5f9a51e4562a1ad3f46d59f995b5d132323922375e084ce86d5e0af26a58"
+  }
+}
+Build Summary: 8/8 steps succeeded
+interop-grpc-lrs-automatic success
++- run python3 success 897ms
+   +- compile exe netz-grpc-lrs-automatic-client ReleaseSafe native success 2m MaxRSS:4G
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal ReleaseSafe native cached 7ms MaxRSS:35M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 ReleaseSafe native cached 7ms MaxRSS:35M
+      +- compile obj vort-br-record-optimal ReleaseSafe native (reused)
+      +- compile obj vort-zstd-huffman-x2 ReleaseSafe native (reused)
+      +- options cached

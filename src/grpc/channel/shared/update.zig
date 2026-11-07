@@ -25,6 +25,8 @@ pub const Update = struct {
     /// Copied CDS registrations, retained and committed with the topology.
     /// Null replacement restores standalone collect-all behavior.
     lrs_selection: union(enum) { keep, replace: ?*@import("lrs_stats.zig").Selection } = .keep,
+    /// Activate collection for automatic bootstrap-managed reporting at commit.
+    enable_lrs_stats: bool = false,
     /// Immutable per-RPC selector, retained with the service-config epoch.
     call_selector: union(enum) { keep, replace: ?@import("../call_selector.zig").Selector } = .keep,
 };
@@ -135,6 +137,7 @@ fn snapshot(state: *State, update: Update, deadline: ?std.Io.Clock.Timestamp) St
     circuit = null;
     var prepared = try Prepared.create(state.allocator, state.io, owned_endpoints, resolver_policy, options, owned_config, owned_orca, owned_lifetime, owned_drop, owned_circuit);
     prepared.lrs_selection = lrs_selection;
+    prepared.enable_lrs_stats = update.enable_lrs_stats;
     lrs_selection = null;
     return prepared;
 }

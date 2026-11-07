@@ -223,7 +223,16 @@ remaining deadline; an expired deadline fails the start rather than blocking
 it. Later starts and synchronizations are no-ops, and `Controller.deinit` stops
 and joins the runner before releasing the destination channel.
 
-The LRS `ControlPlane` must be dedicated to the runner: its background task
+Bootstrap-managed clients also support automatic `lrs_server: self` without
+`Options.lrs`. The Controller retains the accepted CDS source, stages an
+independent reporting transport before publication, and opens it afterward.
+It enables collection even when the channel's local statistics option was
+initially disabled. `Options.lrs` overrides that automatic transport, and
+`disable_automatic_lrs` opts out. See
+[automatic discovery-source binding](grpc_lrs_automatic.md) for failover,
+source migration, source limits and ownership.
+
+An explicitly supplied LRS `ControlPlane` must be dedicated to the runner: its background task
 mutates the plane, so sharing it with the ADS client would race. The destination
 channel must have `enable_lrs_stats` enabled, and the caller-supplied
 `control_plane` and channel must outlive the controller. A loopback test starts

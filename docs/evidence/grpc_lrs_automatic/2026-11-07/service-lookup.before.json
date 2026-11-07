@@ -1,0 +1,823 @@
+{
+  "status": "failed",
+  "reason": "Error: barrier timeout: cached-source-a",
+  "stack": "Error: barrier timeout: cached-source-a\n    at Timeout._onTimeout (/home/passchaos/project-z/netz/tools/interop/grpc_lrs_automatic/peer.js:50:67)\n    at listOnTimeout (node:internal/timers:605:17)\n    at process.processTimers (node:internal/timers:541:7)",
+  "pending_barriers": [
+    {
+      "label": "cached-source-a",
+      "checks": [
+        {
+          "name": "A.successful",
+          "actual": 0,
+          "expected": 2,
+          "matches": false
+        },
+        {
+          "name": "A.issued",
+          "actual": 0,
+          "expected": 3,
+          "matches": false
+        },
+        {
+          "name": "A.cpu.count",
+          "actual": 0,
+          "expected": 2,
+          "matches": false
+        },
+        {
+          "name": "B.initial_requests",
+          "actual": 0,
+          "expected": 0,
+          "matches": true
+        },
+        {
+          "name": "A.in_progress",
+          "actual": 0,
+          "expected": 1,
+          "matches": false
+        }
+      ]
+    }
+  ],
+  "source_reports": {
+    "A": {
+      "ads": [
+        {
+          "type": "type.googleapis.com/envoy.config.listener.v3.Listener",
+          "version": "",
+          "nonce": "",
+          "names": [
+            "frontend"
+          ],
+          "node": "managed-automatic-node",
+          "nack": ""
+        },
+        {
+          "type": "type.googleapis.com/envoy.config.listener.v3.Listener",
+          "version": "l-a",
+          "nonce": "l-a",
+          "names": [
+            "frontend"
+          ],
+          "node": "",
+          "nack": ""
+        },
+        {
+          "type": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+          "version": "",
+          "nonce": "",
+          "names": [
+            "eligible",
+            "ignored"
+          ],
+          "node": "",
+          "nack": ""
+        },
+        {
+          "type": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+          "version": "c-a",
+          "nonce": "c-a",
+          "names": [
+            "eligible",
+            "ignored"
+          ],
+          "node": "",
+          "nack": ""
+        },
+        {
+          "type": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+          "version": "",
+          "nonce": "",
+          "names": [
+            "eds-eligible",
+            "eds-ignored"
+          ],
+          "node": "",
+          "nack": ""
+        },
+        {
+          "type": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+          "version": "e-a",
+          "nonce": "e-a",
+          "names": [
+            "eds-eligible",
+            "eds-ignored"
+          ],
+          "node": "",
+          "nack": ""
+        }
+      ],
+      "raw_ads": [
+        {
+          "resource_names": [
+            "frontend"
+          ],
+          "resource_locators": [],
+          "version_info": "",
+          "node": {
+            "extensions": [],
+            "client_features": [
+              "fixture.automatic_lrs"
+            ],
+            "listening_addresses": [],
+            "dynamic_parameters": {},
+            "id": "managed-automatic-node",
+            "cluster": "",
+            "metadata": null,
+            "locality": null,
+            "user_agent_name": "netz",
+            "user_agent_version": "0.1.0"
+          },
+          "type_url": "type.googleapis.com/envoy.config.listener.v3.Listener",
+          "response_nonce": "",
+          "error_detail": null
+        },
+        {
+          "resource_names": [
+            "frontend"
+          ],
+          "resource_locators": [],
+          "version_info": "l-a",
+          "node": null,
+          "type_url": "type.googleapis.com/envoy.config.listener.v3.Listener",
+          "response_nonce": "l-a",
+          "error_detail": null
+        },
+        {
+          "resource_names": [
+            "eligible",
+            "ignored"
+          ],
+          "resource_locators": [],
+          "version_info": "",
+          "node": null,
+          "type_url": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+          "response_nonce": "",
+          "error_detail": null
+        },
+        {
+          "resource_names": [
+            "eligible",
+            "ignored"
+          ],
+          "resource_locators": [],
+          "version_info": "c-a",
+          "node": null,
+          "type_url": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+          "response_nonce": "c-a",
+          "error_detail": null
+        },
+        {
+          "resource_names": [
+            "eds-eligible",
+            "eds-ignored"
+          ],
+          "resource_locators": [],
+          "version_info": "",
+          "node": null,
+          "type_url": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+          "response_nonce": "",
+          "error_detail": null
+        },
+        {
+          "resource_names": [
+            "eds-eligible",
+            "eds-ignored"
+          ],
+          "resource_locators": [],
+          "version_info": "e-a",
+          "node": null,
+          "type_url": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+          "response_nonce": "e-a",
+          "error_detail": null
+        }
+      ],
+      "lrs": [
+        {
+          "cluster_stats": [],
+          "node": null
+        }
+      ],
+      "initial_messages": [
+        {
+          "cluster_stats": [],
+          "node": {
+            "extensions": [],
+            "client_features": [
+              "fixture.automatic_lrs",
+              "envoy.lrs.supports_send_all_clusters"
+            ],
+            "listening_addresses": [],
+            "dynamic_parameters": {},
+            "id": "managed-automatic-node",
+            "cluster": "",
+            "metadata": null,
+            "locality": null,
+            "user_agent_name": "netz",
+            "user_agent_version": "0.1.0"
+          }
+        }
+      ],
+      "initial_requests": 1,
+      "report_requests": 1,
+      "lrs_request_count": 2,
+      "totals": {
+        "issued": 0,
+        "successful": 0,
+        "failed": 0,
+        "dropped": 0,
+        "in_progress": 0,
+        "cpu": {
+          "count": 0,
+          "sum": 0
+        },
+        "memory": {
+          "count": 0,
+          "sum": 0
+        },
+        "application": {
+          "count": 0,
+          "sum": 0
+        },
+        "load": {
+          "count": 0,
+          "sum": 0
+        }
+      }
+    },
+    "B": {
+      "ads": [
+        {
+          "type": "type.googleapis.com/envoy.config.listener.v3.Listener",
+          "version": "l-a",
+          "nonce": "",
+          "names": [
+            "frontend"
+          ],
+          "node": "managed-automatic-node",
+          "nack": ""
+        },
+        {
+          "type": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+          "version": "c-a",
+          "nonce": "",
+          "names": [
+            "eligible",
+            "ignored"
+          ],
+          "node": "",
+          "nack": ""
+        },
+        {
+          "type": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+          "version": "e-a",
+          "nonce": "",
+          "names": [
+            "eds-eligible",
+            "eds-ignored"
+          ],
+          "node": "",
+          "nack": ""
+        },
+        {
+          "type": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+          "version": "e-b",
+          "nonce": "e-b",
+          "names": [
+            "eds-eligible",
+            "eds-ignored"
+          ],
+          "node": "",
+          "nack": ""
+        }
+      ],
+      "raw_ads": [
+        {
+          "resource_names": [
+            "frontend"
+          ],
+          "resource_locators": [],
+          "version_info": "l-a",
+          "node": {
+            "extensions": [],
+            "client_features": [
+              "fixture.automatic_lrs"
+            ],
+            "listening_addresses": [],
+            "dynamic_parameters": {},
+            "id": "managed-automatic-node",
+            "cluster": "",
+            "metadata": null,
+            "locality": null,
+            "user_agent_name": "netz",
+            "user_agent_version": "0.1.0"
+          },
+          "type_url": "type.googleapis.com/envoy.config.listener.v3.Listener",
+          "response_nonce": "",
+          "error_detail": null
+        },
+        {
+          "resource_names": [
+            "eligible",
+            "ignored"
+          ],
+          "resource_locators": [],
+          "version_info": "c-a",
+          "node": null,
+          "type_url": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+          "response_nonce": "",
+          "error_detail": null
+        },
+        {
+          "resource_names": [
+            "eds-eligible",
+            "eds-ignored"
+          ],
+          "resource_locators": [],
+          "version_info": "e-a",
+          "node": null,
+          "type_url": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+          "response_nonce": "",
+          "error_detail": null
+        },
+        {
+          "resource_names": [
+            "eds-eligible",
+            "eds-ignored"
+          ],
+          "resource_locators": [],
+          "version_info": "e-b",
+          "node": null,
+          "type_url": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+          "response_nonce": "e-b",
+          "error_detail": null
+        }
+      ],
+      "lrs": [],
+      "initial_messages": [],
+      "initial_requests": 0,
+      "report_requests": 0,
+      "lrs_request_count": 0,
+      "totals": {
+        "issued": 0,
+        "successful": 0,
+        "failed": 0,
+        "dropped": 0,
+        "in_progress": 0,
+        "cpu": {
+          "count": 0,
+          "sum": 0
+        },
+        "memory": {
+          "count": 0,
+          "sum": 0
+        },
+        "application": {
+          "count": 0,
+          "sum": 0
+        },
+        "load": {
+          "count": 0,
+          "sum": 0
+        }
+      }
+    },
+    "C": {
+      "ads": [],
+      "raw_ads": [],
+      "lrs": [],
+      "initial_messages": [],
+      "initial_requests": 0,
+      "report_requests": 0,
+      "lrs_request_count": 0,
+      "totals": {
+        "issued": 0,
+        "successful": 0,
+        "failed": 0,
+        "dropped": 0,
+        "in_progress": 0,
+        "cpu": {
+          "count": 0,
+          "sum": 0
+        },
+        "memory": {
+          "count": 0,
+          "sum": 0
+        },
+        "application": {
+          "count": 0,
+          "sum": 0
+        },
+        "load": {
+          "count": 0,
+          "sum": 0
+        }
+      }
+    }
+  },
+  "application_calls": [
+    {
+      "label": "first",
+      "eligible": true,
+      "metadata": {
+        "x-call": "first"
+      },
+      "deadline_ms": 1794018106768
+    },
+    {
+      "label": "ignored-a",
+      "eligible": false,
+      "metadata": {
+        "x-call": "ignored-a"
+      },
+      "deadline_ms": 1794018106773
+    },
+    {
+      "label": "held",
+      "eligible": true,
+      "metadata": {
+        "x-call": "held"
+      },
+      "deadline_ms": 1794018116774
+    },
+    {
+      "label": "cached",
+      "eligible": true,
+      "metadata": {
+        "x-call": "cached"
+      },
+      "deadline_ms": 1794018106777
+    }
+  ],
+  "events": [
+    {
+      "order": 0,
+      "event": "discovery_request",
+      "source": "A",
+      "type": "type.googleapis.com/envoy.config.listener.v3.Listener",
+      "version": "",
+      "nonce": "",
+      "names": [
+        "frontend"
+      ],
+      "node": "managed-automatic-node",
+      "nack": ""
+    },
+    {
+      "order": 1,
+      "event": "discovery_response",
+      "source": "A",
+      "type": "type.googleapis.com/envoy.config.listener.v3.Listener",
+      "version": "l-a",
+      "resource_sha256": [
+        "446ba485972c870a11e48ec1e0d2ef695788bd471ca3b0ffeeb2565bd3435f0b"
+      ]
+    },
+    {
+      "order": 2,
+      "event": "discovery_request",
+      "source": "A",
+      "type": "type.googleapis.com/envoy.config.listener.v3.Listener",
+      "version": "l-a",
+      "nonce": "l-a",
+      "names": [
+        "frontend"
+      ],
+      "node": "",
+      "nack": ""
+    },
+    {
+      "order": 3,
+      "event": "discovery_request",
+      "source": "A",
+      "type": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+      "version": "",
+      "nonce": "",
+      "names": [
+        "eligible",
+        "ignored"
+      ],
+      "node": "",
+      "nack": ""
+    },
+    {
+      "order": 4,
+      "event": "discovery_response",
+      "source": "A",
+      "type": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+      "version": "c-a",
+      "resource_sha256": [
+        "777a6514bba56300f698c604ff5ea9f33eea5eafad9da0c1e66180f2a4e8a870",
+        "0830dcd4870e3f685d61f01f91a8820ecd3cabc8d0626c288eb21bfa4641f7cd"
+      ]
+    },
+    {
+      "order": 5,
+      "event": "discovery_request",
+      "source": "A",
+      "type": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+      "version": "c-a",
+      "nonce": "c-a",
+      "names": [
+        "eligible",
+        "ignored"
+      ],
+      "node": "",
+      "nack": ""
+    },
+    {
+      "order": 6,
+      "event": "discovery_request",
+      "source": "A",
+      "type": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+      "version": "",
+      "nonce": "",
+      "names": [
+        "eds-eligible",
+        "eds-ignored"
+      ],
+      "node": "",
+      "nack": ""
+    },
+    {
+      "order": 7,
+      "event": "discovery_response",
+      "source": "A",
+      "type": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+      "version": "e-a",
+      "resource_sha256": [
+        "b54c755087b83bcf4ca0590f35c6b32b65276bd0446e99d1fa40c01e4e525f88",
+        "ef069cebd0b5377268c7ec899d18d11031b0c835bc828e2191ca8648b3518236"
+      ]
+    },
+    {
+      "order": 8,
+      "event": "discovery_request",
+      "source": "A",
+      "type": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+      "version": "e-a",
+      "nonce": "e-a",
+      "names": [
+        "eds-eligible",
+        "eds-ignored"
+      ],
+      "node": "",
+      "nack": ""
+    },
+    {
+      "order": 9,
+      "event": "lrs_initial_request",
+      "source": "A",
+      "metadata": {
+        "x-source": "A"
+      },
+      "node": {
+        "extensions": [],
+        "client_features": [
+          "fixture.automatic_lrs",
+          "envoy.lrs.supports_send_all_clusters"
+        ],
+        "listening_addresses": [],
+        "dynamic_parameters": {},
+        "id": "managed-automatic-node",
+        "cluster": "",
+        "metadata": null,
+        "locality": null,
+        "user_agent_name": "netz",
+        "user_agent_version": "0.1.0"
+      }
+    },
+    {
+      "order": 10,
+      "event": "application_started",
+      "label": "first",
+      "eligible": true
+    },
+    {
+      "order": 11,
+      "event": "application_completed",
+      "label": "first",
+      "status": 0
+    },
+    {
+      "order": 12,
+      "event": "application_started",
+      "label": "ignored-a",
+      "eligible": false
+    },
+    {
+      "order": 13,
+      "event": "application_completed",
+      "label": "ignored-a",
+      "status": 0
+    },
+    {
+      "order": 14,
+      "event": "application_started",
+      "label": "held",
+      "eligible": true
+    },
+    {
+      "order": 15,
+      "event": "barrier_completed",
+      "source": "A",
+      "label": "held-entered"
+    },
+    {
+      "order": 16,
+      "event": "discovery_request",
+      "source": "B",
+      "type": "type.googleapis.com/envoy.config.listener.v3.Listener",
+      "version": "l-a",
+      "nonce": "",
+      "names": [
+        "frontend"
+      ],
+      "node": "managed-automatic-node",
+      "nack": ""
+    },
+    {
+      "order": 17,
+      "event": "discovery_request",
+      "source": "B",
+      "type": "type.googleapis.com/envoy.config.cluster.v3.Cluster",
+      "version": "c-a",
+      "nonce": "",
+      "names": [
+        "eligible",
+        "ignored"
+      ],
+      "node": "",
+      "nack": ""
+    },
+    {
+      "order": 18,
+      "event": "discovery_request",
+      "source": "B",
+      "type": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+      "version": "e-a",
+      "nonce": "",
+      "names": [
+        "eds-eligible",
+        "eds-ignored"
+      ],
+      "node": "",
+      "nack": ""
+    },
+    {
+      "order": 19,
+      "event": "discovery_response",
+      "source": "B",
+      "type": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+      "version": "e-b",
+      "resource_sha256": [
+        "b54c755087b83bcf4ca0590f35c6b32b65276bd0446e99d1fa40c01e4e525f88",
+        "ef069cebd0b5377268c7ec899d18d11031b0c835bc828e2191ca8648b3518236"
+      ]
+    },
+    {
+      "order": 20,
+      "event": "discovery_request",
+      "source": "B",
+      "type": "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment",
+      "version": "e-b",
+      "nonce": "e-b",
+      "names": [
+        "eds-eligible",
+        "eds-ignored"
+      ],
+      "node": "",
+      "nack": ""
+    },
+    {
+      "order": 21,
+      "event": "application_started",
+      "label": "cached",
+      "eligible": true
+    },
+    {
+      "order": 22,
+      "event": "application_completed",
+      "label": "cached",
+      "status": 0
+    },
+    {
+      "order": 23,
+      "event": "lrs_report",
+      "source": "A",
+      "totals": {
+        "issued": 0,
+        "successful": 0,
+        "failed": 0,
+        "dropped": 0,
+        "in_progress": 0,
+        "cpu": {
+          "count": 0,
+          "sum": 0
+        },
+        "memory": {
+          "count": 0,
+          "sum": 0
+        },
+        "application": {
+          "count": 0,
+          "sum": 0
+        },
+        "load": {
+          "count": 0,
+          "sum": 0
+        }
+      }
+    }
+  ],
+  "native_output": "",
+  "relay": {
+    "connections": 0,
+    "listener_stopped": false
+  },
+  "phase": {
+    "cached_verified": false,
+    "nack_seen": false,
+    "replacement_sent": false,
+    "held_present": true
+  },
+  "schema": {
+    "status": "passed",
+    "self_field": 42,
+    "propagation_field": 57,
+    "named_metric_key": "named_metrics.load",
+    "resource_bytes": {
+      "lds": 328,
+      "cds": [
+        122,
+        32
+      ],
+      "orca": 67
+    }
+  },
+  "source_sha256": {
+    "build.zig": "2e1c85f115635da4999a4a8f1b53b3aba0d7579d4f2d8ce428085d37303079d6",
+    "src/runtime.zig": "38674f1922fa837c126a05895234b3f944d519f67b5018add734e98599f81002",
+    "src/grpc/xds/control_plane.zig": "e02b112e404e34eb64aba10bc26bc25bbcc01b494062ddf7b9dfed45bddff219",
+    "src/grpc/xds/discovery_source.zig": "7f29d2ec9f7c299aa93f5180ed8fef611937a17b4535648601b2507bc80c2558",
+    "src/grpc/xds/ads/client.zig": "4a576a2a0e80fce26826f5b6694c467b1353a4217ef324bb98320c08a31b11f4",
+    "src/grpc/xds/ads/subscriptions.zig": "58a934accd1352ca5caad4a5677224da0875049bb7bd4462da47cf18885de2e7",
+    "src/grpc/channel/shared.zig": "48ed9040e4c5260b00e0597275547d173ffb6ead4b820cc8fc600eebf34ce75a",
+    "src/grpc/channel/shared/state.zig": "0334a97e9a3b4cfb71921eed41c2f7370e5393abbdcdd31e74cd4f2d4f910646",
+    "src/grpc/channel/shared/worker.zig": "c23f17340b3953d455647cbd96dcf12215a2a0e190ccd6082226b3245951e194",
+    "src/grpc/channel/shared/job.zig": "b296e19aa82c65cb9e3f1af98a2664931a6d2206dafa8ba5621b6446cb498d54",
+    "src/grpc/channel/shared/lrs_stats.zig": "f4f500026b9213a87598463b1770a86820b52274e8f7561493d2a9ab0b233534",
+    "src/grpc/channel/shared/lrs_stats_snapshot.zig": "bdc76e894a0894a5dfce7e9d9554873ebf7f102f5814ea6552004187194c1b8e",
+    "src/grpc/channel/shared/request_inputs.zig": "251542c647089520f0a58dfc2a7d8d913413a685d66b005bd32d2cf6ce6de3b5",
+    "src/grpc/orca.zig": "6ff5851ba33431a7928908ae73fcb3a9bb4e34de7ff3fe30a2a031d154e6d3b1",
+    "src/grpc/protobuf.zig": "7140156bfd8522253ad2b67fcfdb191f8ec0553872bfc81ef0a9ff040cf1d543",
+    "src/grpc/xds/runtime/apply_cds.zig": "27c34fc27988de752908455f23389978423a8931fb268798e8997f771b0f4f37",
+    "src/grpc/xds/runtime/apply_delta_cds.zig": "163da9bc970b7d5ce9c45a7476e187c79b4baa3464dffc3ce3ed2e4a59c8c6bf",
+    "src/grpc/xds/runtime/apply_delta_eds.zig": "8bbb9792f4fcfd162e662a72c237ad57b1065eadd6a957d0dd5c3404ce8c16f2",
+    "src/grpc/xds/runtime/apply_delta_sds.zig": "e356d98db1493355d17920c9b90765b3c4d7f4372e7ed0d047ae413553e9ce18",
+    "src/grpc/xds/runtime/apply_eds.zig": "547f3fc0fd37e10d4841950fa50fea4ea51958e17484a2ec395de325d67a7d9a",
+    "src/grpc/xds/runtime/apply_sds.zig": "27228508252b8b7b103184a87d63649f74f0ff62f66866bb14dfdb7711c97709",
+    "src/grpc/xds/runtime/authority_tests.zig": "a6a84aa56864b39524c48c4275671c969cc412e6721bb36d5b61f299c0312217",
+    "src/grpc/xds/runtime/constructor_tests.zig": "c33c1965451729f2a5c6552779559efcd185e1014f5cfcf996bbe88511f2845a",
+    "src/grpc/xds/runtime/controller.zig": "eaae5e52bc96736dc41d4e57ef867c81867296ea566d54291b89529a2ace7181",
+    "src/grpc/xds/runtime/delta_tests.zig": "4b13cbddeb7a96239ebf98247fa24fbcf06cf4c5e6a6084057e903680b6471bb",
+    "src/grpc/xds/runtime/delta_ttl_tests.zig": "76c1c2103bffa0fcd33915a52afde6464cae59f175adf788f625bd4999061096",
+    "src/grpc/xds/runtime/entry.zig": "27c7124ebd68ef24be63a00332966842d91f6b6d8c1104b00fc96e37d2ec44c0",
+    "src/grpc/xds/runtime/errors.zig": "c4fa4ff763a24dadb09b15c179776f94df8af3a9653f5dd907926949b8b248eb",
+    "src/grpc/xds/runtime/fail_on_data_errors_tests.zig": "104174c525e616bfde7836c1ab3de47fef0176a1a462a1adc6c7b560c22119c8",
+    "src/grpc/xds/runtime/ignore_deletion_tests.zig": "8f0b564068a4b8fd1d411416fe83818e2c6a9907165e0b70ab5e2f82f4cbb0cb",
+    "src/grpc/xds/runtime/lrs_automatic_tests.zig": "2364b35649b64d630632df82f5dcd2135120ec562a916cfa1245f64d637f8d2a",
+    "src/grpc/xds/runtime/lrs_bindings.zig": "d6196127343f11d01c6c327d62d572c12fc9d05b256696ee58f49587dcee4215",
+    "src/grpc/xds/runtime/lrs_named_metric_tests.zig": "1db734be536106250df4219acc0c334543202a0fcb4396cd596cf206a64e34e7",
+    "src/grpc/xds/runtime/lrs_selection_tests.zig": "9718c08a11978a69f519a4dc33ebf9f54dc9fabfd66d65b84c24cfde9da488ef",
+    "src/grpc/xds/runtime/lrs_tests.zig": "5a1b947833fc06621098e3f972e01f089bf881aba7e0d5c45469c67688060749",
+    "src/grpc/xds/runtime/options.zig": "1be533c71207026c404e45b0a07051bf0d787fff3ed387e65fc5c0d027f33094",
+    "src/grpc/xds/runtime/plan.zig": "ec1f871d5e5ef1daa9aab0e4ef52373e2fd02fc1f5680c6972d8a0686017e8f4",
+    "src/grpc/xds/runtime/resource_timer_tests.zig": "c1e7b5702825cc690e36fddc80dc384f579cc8084e76351dd385bf738cf4fdf0",
+    "src/grpc/xds/runtime/rollback_tests.zig": "a716de6fc76b7a7832b2f9b92879e2bad2bc45162e408f21859be711a0fbdd5a",
+    "src/grpc/xds/runtime/sds_tests.zig": "df1c8e212b15f96a971fa2683696b2d29be9e066d234258ef4c47985dc571689",
+    "src/grpc/xds/runtime/target.zig": "4b0440b0ab5b1f665e41269008f86e6b4ce70816c5f1d43c2721c31a2a1b4dac",
+    "src/grpc/xds/runtime/target_tests.zig": "af68a5d123e5ffa6938d1055049137393f23e911772d25290c936107e1e9717d",
+    "src/grpc/xds/runtime/tests.zig": "da70a5ebbe33ff6103f735e8dbba576860c28ef384dab4d17ac6f3a19d783e01",
+    "src/grpc/xds/lrs/client.zig": "feea9671ede9ffe120b9f3ce781b937b04f20ca7fe7cdd8bbf07b32d7a2797b4",
+    "src/grpc/xds/lrs/codec.zig": "ffb35262db13c94bd78e681169d00798e2b2adf426df7c6990e3c1f390d784c7",
+    "src/grpc/xds/lrs/control_plane_tests.zig": "46b2d685422cca5fc649fc6b8961007eda93911a402477204cd6d61dd59c857c",
+    "src/grpc/xds/lrs/integration.zig": "ecd363a352864c77067b9da52d6eb66e2587d21fa828310784cfc8d9b5884757",
+    "src/grpc/xds/lrs/reporter.zig": "43a4fd1fc0a95b7635f4f001851e8e220d7aef3753baec4f905f42aaf5cc85bc",
+    "src/grpc/xds/lrs/runner.zig": "26163a3d0ede9fff46fd0d6391c26d08d49ee00197bff3507ccba98ff8a6e006",
+    "src/grpc/xds/lrs/runner_tests.zig": "83e942d3cf58122bbf38ae701d6e42c68e9507603389b45e7042865aebe44a41",
+    "src/grpc/xds/lrs/scheduler.zig": "0f591ea82e93514d23b16c051c852e9052f5dde4bdfda209c0255249436106c1",
+    "src/grpc/xds/lrs/scheduler_tests.zig": "313202257995e6cacb7e1b378b40c4fca106eabd2961ab7067f59888e7b862ad",
+    "src/grpc/xds/lrs/tests.zig": "e873bb7d4addd85047770bc7242055140a34cca152044aca595957b7a9689530",
+    "src/grpc/xds/lrs/transport_tests.zig": "af4f6ee7e4f1f61cf224d171763f9118a645dbfad9c7fb04d5d6af9f0faf9aae",
+    "tools/interop/grpc_lrs_automatic/README.md": "1f20aae7acf6c5ffb0538893d0f8855805708021783a0e2ddd60ee2bbb311279",
+    "tools/interop/grpc_lrs_automatic/client.zig": "f54d6e22a0f37eff2242844f024dac5629a8d835ba3307884809a13e7ea5c544",
+    "tools/interop/grpc_lrs_automatic/peer.js": "0b116c94ae5887de435b759d501c25b0db0e87cf06b8dbfd2b8d3273bd79ee67",
+    "tools/interop/grpc_lrs_automatic/relay.js": "f8f88b4e3b2191d50786e58769a752e9666b7131b3276c61aae3e5d796cd48ca",
+    "tools/interop/grpc_lrs_automatic/run.py": "5b204a36d50440aa8d387c478bc53601305a995ef614135b447125e93e54e2f3",
+    "tools/interop/grpc_lrs_automatic/schema.js": "b5cc876774eff8cafe5626c18f75b503c08653350e622f65b7196f2132bb0730",
+    "tools/interop/grpc_locality/package.json": "8db54803ab44c882d2063b5e271764ea3b4901da17c3d065d5036e6a36c7ef53",
+    "tools/interop/grpc_locality/package-lock.json": "9cae21a36a38e30b732bfb139abca82bf77ea326fd9ce981f22867c7c01ccb2b"
+  },
+  "client_sha256": "2d91deebc37aa68758fa869f3324113f88bb1b43fa7524c8c8e2a0f6d1d992cf"
+}

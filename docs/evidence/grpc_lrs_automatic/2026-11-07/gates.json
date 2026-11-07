@@ -1,0 +1,142 @@
+[
+  {
+    "name": "focused.Debug",
+    "command": [
+      "zig",
+      "build",
+      "test-lib",
+      "-Dtest-filter=LRS",
+      "-Dtest-filter=discovery source",
+      "-Dtest-filter=received update",
+      "-Dtest-filter=control plane",
+      "-Dtest-filter=ADS source validation",
+      "-Dtest-filter=MQTT v7 snapshot encoding",
+      "-Dtest-filter=MQTT persistence property blob",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 41.542,
+    "summary": "8/8 steps succeeded; 246/246 tests passed",
+    "log": "docs/evidence/grpc_lrs_automatic/2026-11-07/focused.Debug.log"
+  },
+  {
+    "name": "interop.Debug",
+    "command": [
+      "zig",
+      "build",
+      "interop-grpc-lrs-automatic",
+      "--summary",
+      "all",
+      "--",
+      "--output",
+      "docs/evidence/grpc_lrs_automatic/2026-11-07.Debug.json"
+    ],
+    "exit_code": 1,
+    "elapsed_seconds": 38.975,
+    "summary": "6/8 steps succeeded (1 failed)",
+    "log": "docs/evidence/grpc_lrs_automatic/2026-11-07/interop.Debug.log"
+  },
+  {
+    "name": "interop.Debug.corrected",
+    "command": [
+      "zig",
+      "build",
+      "interop-grpc-lrs-automatic",
+      "--summary",
+      "all",
+      "--",
+      "--output",
+      "docs/evidence/grpc_lrs_automatic/2026-11-07/sotw.Debug.json"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 33.097,
+    "summary": "8/8 steps succeeded",
+    "log": "docs/evidence/grpc_lrs_automatic/2026-11-07/interop.Debug.corrected.log",
+    "source_manifest": "docs/evidence/grpc_lrs_automatic/2026-11-07/sources.84e6d0c0ec0e.json",
+    "source_manifest_sha256": "84e6d0c0ec0e73d957d8825eebfd4fe749e812937efb2da2b4fefe83b6e5fec0"
+  },
+  {
+    "name": "interop.ReleaseSafe",
+    "command": [
+      "zig",
+      "build",
+      "interop-grpc-lrs-automatic",
+      "-Doptimize=ReleaseSafe",
+      "--summary",
+      "all",
+      "--",
+      "--output",
+      "docs/evidence/grpc_lrs_automatic/2026-11-07/sotw.ReleaseSafe.json"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 175.916,
+    "summary": "8/8 steps succeeded",
+    "log": "docs/evidence/grpc_lrs_automatic/2026-11-07/interop.ReleaseSafe.log",
+    "source_manifest": "docs/evidence/grpc_lrs_automatic/2026-11-07/sources.84e6d0c0ec0e.json",
+    "source_manifest_sha256": "84e6d0c0ec0e73d957d8825eebfd4fe749e812937efb2da2b4fefe83b6e5fec0"
+  },
+  {
+    "name": "native.Debug.corrected",
+    "command": [
+      "zig",
+      "build",
+      "test-lib",
+      "-Dtest-filter=LRS",
+      "-Dtest-filter=discovery source",
+      "-Dtest-filter=control plane",
+      "-Dtest-filter=ADS",
+      "-Dtest-filter=CDS",
+      "-Dtest-filter=xDS",
+      "-Dtest-filter=SharedChannel",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 52.4,
+    "summary": "8/8 steps succeeded; 387/387 tests passed",
+    "log": "docs/evidence/grpc_lrs_automatic/2026-11-07/native.Debug.corrected.log",
+    "source_manifest": "docs/evidence/grpc_lrs_automatic/2026-11-07/sources.84e6d0c0ec0e.json",
+    "source_manifest_sha256": "84e6d0c0ec0e73d957d8825eebfd4fe749e812937efb2da2b4fefe83b6e5fec0"
+  },
+  {
+    "name": "manual.Debug",
+    "command": [
+      "zig",
+      "build",
+      "interop-grpc-lrs",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 34.003,
+    "summary": "8/8 steps succeeded",
+    "log": "docs/evidence/grpc_lrs_automatic/2026-11-07/manual.Debug.log",
+    "source_manifest": "docs/evidence/grpc_lrs_automatic/2026-11-07/sources.84e6d0c0ec0e.json",
+    "source_manifest_sha256": "84e6d0c0ec0e73d957d8825eebfd4fe749e812937efb2da2b4fefe83b6e5fec0"
+  },
+  {
+    "name": "native.ReleaseSafe",
+    "command": [
+      "zig",
+      "build",
+      "test-lib",
+      "-Doptimize=ReleaseSafe",
+      "-Dtest-filter=LRS",
+      "-Dtest-filter=discovery source",
+      "-Dtest-filter=control plane",
+      "-Dtest-filter=ADS",
+      "-Dtest-filter=CDS",
+      "-Dtest-filter=xDS",
+      "-Dtest-filter=SharedChannel",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 273.942,
+    "summary": "8/8 steps succeeded; 387/387 tests passed",
+    "log": "docs/evidence/grpc_lrs_automatic/2026-11-07/native.ReleaseSafe.log",
+    "source_manifest": "docs/evidence/grpc_lrs_automatic/2026-11-07/sources.98c690c3db20.json",
+    "source_manifest_sha256": "98c690c3db20ee128aad9e27b778dbdfe49226ea6660429e5ee2df414da63e50"
+  }
+]

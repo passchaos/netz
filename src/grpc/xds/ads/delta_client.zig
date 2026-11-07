@@ -6,9 +6,10 @@ const duplex_response = @import("../../stream/duplex.zig").Response;
 const deadline_policy = @import("../../../internal/deadline.zig");
 const codec = @import("delta_codec.zig");
 const sotw = @import("codec.zig");
+const Source = @import("../discovery_source.zig").Source;
 const subscriptions = @import("delta_subscriptions.zig");
 pub const path = "/envoy.service.discovery.v3.AggregatedDiscoveryService/DeltaAggregatedResources";
-pub const Error = shared.Error || subscriptions.Error || error{ AdsNotConnected, InvalidAdsOptions };
+pub const Error = shared.Error || subscriptions.Error || @import("../discovery_source.zig").Error || error{ AdsNotConnected, InvalidAdsOptions };
 
 /// Wall-clock nanoseconds since the epoch for CSDS `last_updated`.
 fn acceptedNow(io: std.Io) i128 {
@@ -16,6 +17,8 @@ fn acceptedNow(io: std.Io) i128 {
 }
 pub const Options = struct {
     node: codec.Node,
+    /// Immutable origin for automatic reporting; raw clients leave this null.
+    source: ?*Source = null,
     subscriptions: subscriptions.Options = .{},
     limits: codec.Limits = .{},
     request: streaming.RequestOptions = .{ .path = path, .wait_for_ready = true },
@@ -23,8 +26,11 @@ pub const Options = struct {
 pub const Update = struct {
     response: codec.OwnedResponse,
     token: subscriptions.Token,
+    /// The source retained when this response was received.
+    source: ?*Source = null,
     pub fn deinit(self: *Update) void {
         self.response.deinit();
+        if (self.source) |source| source.release();
         self.* = undefined;
     }
     /// Heartbeat resources without a payload carry no type to compare.
@@ -53,6 +59,7 @@ pub const Client = struct {
     inputs: @import("../../channel/shared/request_inputs.zig").Inputs,
     request: streaming.RequestOptions,
     node: []u8,
+    source: ?*Source = null,
     limits: codec.Limits,
     subscriptions: subscriptions.State,
     stream: ?shared.Duplex = null,
@@ -62,13 +69,14 @@ pub const Client = struct {
         if (options.subscriptions.max_types == 0 or options.subscriptions.max_names_per_type == 0 or options.subscriptions.max_name_bytes == 0 or options.limits.max_message_bytes == 0 or options.limits.max_resources == 0 or options.limits.max_name_bytes == 0 or options.limits.max_resource_bytes > options.limits.max_message_bytes) return error.InvalidAdsOptions;
         const node = try sotw.encodeNode(gpa, options.node);
         errdefer gpa.free(node);
+        if (options.source) |source| if (!std.mem.eql(u8, source.node_bytes, node)) return error.InvalidAdsOptions;
         if (node.len > options.limits.max_message_bytes) return error.DiscoveryLimitExceeded;
         var request = options.request;
         request.path = path;
         request.max_message_size = @min(request.max_message_size, options.limits.max_message_bytes);
         var owned = try @import("../../channel/shared/request_inputs.zig").clone(gpa, request);
         errdefer owned.inputs.deinit();
-        return .{ .allocator = gpa, .sender = sender.clone(), .inputs = owned.inputs, .request = owned.options, .node = node, .limits = options.limits, .subscriptions = .{ .allocator = gpa, .options = options.subscriptions } };
+        return .{ .allocator = gpa, .sender = sender.clone(), .inputs = owned.inputs, .request = owned.options, .node = node, .source = if (options.source) |source| source.retain() else null, .limits = options.limits, .subscriptions = .{ .allocator = gpa, .options = options.subscriptions } };
     }
     pub fn deinit(self: *Client) void {
         self.disconnect();
@@ -76,6 +84,7 @@ pub const Client = struct {
         self.allocator.free(self.node);
         self.inputs.deinit();
         self.sender.deinit();
+        if (self.source) |source| source.release();
         self.* = undefined;
     }
     pub fn disconnect(self: *Client) void {
@@ -84,20 +93,28 @@ pub const Client = struct {
         self.node_sent = false;
         self.subscriptions.resetStream();
     }
-    /// Move the client to another channel while retaining desired names and
-    /// accepted versions. Ownership of `sender` transfers to the client.
+    /// Move to another channel while retaining subscriptions and accepted
+    /// versions. Ownership of `sender` transfers only on success. Explicit
+    /// rebinding without a source returns the client to manual provenance.
     pub fn rebind(self: *Client, sender: shared.Sender, request: streaming.RequestOptions) Error!void {
+        return self.rebindWithSource(sender, request, null);
+    }
+    pub fn rebindWithSource(self: *Client, sender: shared.Sender, request: streaming.RequestOptions, source: ?*Source) Error!void {
+        if (source) |value| if (!std.mem.eql(u8, value.node_bytes, self.node)) return error.InvalidAdsOptions;
         var owned_request = request;
         owned_request.path = path;
         owned_request.max_message_size = @min(owned_request.max_message_size, self.limits.max_message_bytes);
         var owned = try @import("../../channel/shared/request_inputs.zig").clone(self.allocator, owned_request);
         errdefer owned.inputs.deinit();
+        const retained_source = if (source) |value| value.retain() else null;
         self.disconnect();
         self.inputs.deinit();
         self.sender.deinit();
+        if (self.source) |value| value.release();
         self.inputs = owned.inputs;
         self.request = owned.options;
         self.sender = sender;
+        self.source = retained_source;
     }
     pub fn setSubscription(self: *Client, type_url: []const u8, names: []const []const u8) Error!void {
         try self.subscriptions.set(type_url, names);
@@ -252,7 +269,7 @@ pub const Client = struct {
                         self.disconnect();
                         return err;
                     };
-                    return .{ .update = .{ .response = response, .token = token } };
+                    return .{ .update = .{ .response = response, .token = token, .source = if (self.source) |source| source.retain() else null } };
                 },
                 .terminal => |terminal| {
                     const owned = terminal;
