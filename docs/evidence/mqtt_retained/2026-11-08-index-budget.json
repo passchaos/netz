@@ -1,0 +1,79 @@
+{
+  "schema": 1,
+  "date": "2026-11-08",
+  "head": "working-tree",
+  "subject": "MQTT retained index is memory-bounded and matching avoids per-entry copies",
+  "change": "The retained topic trie gained an explicit memory budget. Options.max_index_bytes (64 MiB default) bounds the trie nodes and edge-map slots; Store.index_bytes is charged with the exact new-level cost before an insert commits and returned when removal frees nodes. This closes an amplification path where a bounded 64 KiB Topic Name with tens of thousands of levels could allocate gigabytes of index nodes. Trie links moved from optional usize fields to u32 sentinels, shrinking TrieNode from 112 to 40 bytes, and the root/free-list accounting uses the same sentinel. Hot read helpers (remainingExpiry, remainingExpiryNs, matchForEntry, deliveryForEntry, skipNoLocal) now take *const Entry and the match/delivery emission loops borrow the stored entry instead of copying its header for every result. Matching semantics, ordering, the '$' reservation, and the deep-filter fallback are unchanged.",
+  "benchmark": {
+    "command": "taskset -c 2 <bench-mqtt-retained>",
+    "pairs": 8,
+    "order": "alternating before/after",
+    "workload": "4,096 state-only retained messages for the broad scenarios and 16,384 mixed retained messages (state/temp/config/meta per device) for the selective scenarios",
+    "before_sha256": "e5c8e6f2507bb8d6d7b3ecef94f4f31aa8bc72c4ee88a690ce5c7eaa67f26490",
+    "after_sha256": "6164addb85cff6bdac246be84e714b52e5c5b4e441dd072fb2de657b267272b5",
+    "results": {
+      "exact lookup": {
+        "before_ns_per_op": 40.0,
+        "after_ns_per_op": 40.0,
+        "speedup": 1.0,
+        "wins": "3/8"
+      },
+      "wildcard full-scan": {
+        "before_ns_per_op": 70502.5,
+        "after_ns_per_op": 70477.5,
+        "speedup": 0.991,
+        "wins": "2/8",
+        "matches_per_op": 4096
+      },
+      "wildcard hash": {
+        "before_ns_per_op": 45886.0,
+        "after_ns_per_op": 30810.5,
+        "speedup": 1.455,
+        "wins": "8/8",
+        "matches_per_op": 4096
+      },
+      "selective wildcard": {
+        "before_ns_per_op": 113058.5,
+        "after_ns_per_op": 106876.0,
+        "speedup": 1.06,
+        "wins": "8/8",
+        "matches_per_op": 4096
+      },
+      "selective subtree": {
+        "before_ns_per_op": 592.0,
+        "after_ns_per_op": 549.0,
+        "speedup": 1.078,
+        "wins": "8/8",
+        "matches_per_op": 4
+      }
+    }
+  },
+  "tests": {
+    "mqtt_retained_focused": {
+      "command": "zig build test-lib -Dtest-filter=mqtt -Dtest-filter=retained --summary all",
+      "passed": 1448,
+      "total": 1448
+    },
+    "full_library": {
+      "command": "zig build test-lib --summary all (isolated caches)",
+      "passed": 6774,
+      "total": 6774
+    },
+    "mqtt_interop": {
+      "command": "zig build interop-mqtt-broker-config --summary all",
+      "status": "passed",
+      "note": "full Mosquitto-derived broker configuration matrix, including retained state, shared subscriptions, ACL reloads and persistence."
+    },
+    "portable_compile": {
+      "command": "zig build test-compile -Dtarget=x86_64-windows-gnu --summary all",
+      "steps_passed": 8,
+      "steps_total": 8
+    }
+  },
+  "source_sha256": {
+    "src/mqtt/retained/mod.zig": "0c38b4e1a40a8989e73eb74726272a84ced4bb4271e61599450f36a015b2744f",
+    "src/mqtt/retained/tests.zig": "611a150b0d24ea777c51894cda3cd3349bd90932108cc06ced7a58a70a3a8456",
+    "examples/bench_mqtt_retained.zig": "bc0f04b9ad5921d9888bdb4bd4d81031f185b845e63f9c1a590227cdad7e3fbd"
+  },
+  "notes": "An intermediate build that only shrank the nodes to u32 sentinels regressed the broad devices/+/state scan to 0.901x (0/8 wins) while improving devices/# to 1.205x. Adding the Entry-pointer hot path recovered the broad scan to neutral (0.991x, 2/8) and kept the hash win, so the combined change has no maintained-scenario regression. The index cost is an approximation (node plus one edge-map key/value slot with metadata headroom); the budget is conservative and independent of payload bytes. The cost walk runs before the insert commit, so a rejected insert allocates no trie nodes; removal returns the exact per-level charge. The host was loaded during the batches (load average roughly 5 to 12), so only interleaved ratios are claimed."
+}

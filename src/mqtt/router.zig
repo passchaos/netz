@@ -75,6 +75,38 @@ const SharedGroup = struct {
     }
 };
 
+const SharedGroupKey = struct {
+    name: []const u8,
+    filter: []const u8,
+};
+
+const SharedGroupContext = struct {
+    pub fn hash(_: @This(), key: SharedGroupKey) u64 {
+        var hasher = std.hash.Wyhash.init(0);
+        hasher.update(key.name);
+        hasher.update(&.{0});
+        hasher.update(key.filter);
+        return hasher.final();
+    }
+
+    pub fn eql(_: @This(), a: SharedGroupKey, b: SharedGroupKey) bool {
+        return std.mem.eql(u8, a.name, b.name) and
+            std.mem.eql(u8, a.filter, b.filter);
+    }
+};
+
+const SharedGroupMap = std.HashMapUnmanaged(
+    SharedGroupKey,
+    usize,
+    SharedGroupContext,
+    std.hash_map.default_max_load_percentage,
+);
+
+const SubscriberEntries = union(enum) {
+    one: usize,
+    many: std.ArrayList(usize),
+};
+
 const Node = tree.Node;
 
 /// MQTT topic-filter trie with configurable shared-subscription selection.
@@ -89,6 +121,15 @@ pub const Router = struct {
     nodes: std.ArrayList(Node) = .empty,
     recycled_node: ?usize = null,
     entries: std.ArrayList(?Entry) = .empty,
+    /// Recycled entry slots. Subscription churn reuses these instead of
+    /// rescanning the tombstone-preserving entry table from index zero.
+    free_entries: std.ArrayList(usize) = .empty,
+    /// Per-subscriber entry lists. Disconnect cleanup walks only this client's
+    /// subscriptions instead of scanning every stored entry.
+    subscriber_entries: std.AutoHashMapUnmanaged(
+        SubscriberId,
+        SubscriberEntries,
+    ) = .empty,
     /// Live entry counts are maintained transactionally so broker hot paths do
     /// not rescan the tombstone-preserving entry table before every PUBLISH.
     active_entry_count: usize = 0,
@@ -97,6 +138,8 @@ pub const Router = struct {
     // remain stable across unsubscribe.  Empty groups become tombstones that a
     // later group can reuse instead of compacting and invalidating indexes.
     shared_groups: std.ArrayList(?SharedGroup) = .empty,
+    shared_group_map: SharedGroupMap = .empty,
+    free_shared_groups: std.ArrayList(usize) = .empty,
 
     pub fn init(allocator: std.mem.Allocator) Error!Router {
         return initWithOptions(allocator, .{});
@@ -120,10 +163,21 @@ pub const Router = struct {
             if (maybe_entry.*) |*entry| entry.deinit(self.allocator);
         }
         self.entries.deinit(self.allocator);
+        self.free_entries.deinit(self.allocator);
+        var subscriber_iterator = self.subscriber_entries.iterator();
+        while (subscriber_iterator.next()) |subscriber| {
+            switch (subscriber.value_ptr.*) {
+                .one => {},
+                .many => |*list| list.deinit(self.allocator),
+            }
+        }
+        self.subscriber_entries.deinit(self.allocator);
         for (self.shared_groups.items) |*maybe_group| {
             if (maybe_group.*) |*group| group.deinit(self.allocator);
         }
         self.shared_groups.deinit(self.allocator);
+        self.shared_group_map.deinit(self.allocator);
+        self.free_shared_groups.deinit(self.allocator);
         for (self.nodes.items) |*node| node.deinit(self.allocator);
         self.nodes.deinit(self.allocator);
         self.* = undefined;
@@ -184,7 +238,9 @@ pub const Router = struct {
         subscription_identifier: ?usize,
     ) Error!bool {
         try mqtt.validateSubscription(subscription, subscription_identifier);
-        if (self.findEntry(subscriber_id, subscription.topic_filter)) |entry_index| {
+        const parsed_input = parseFilter(subscription.topic_filter) orelse
+            return error.InvalidSubscription;
+        if (self.findEntryForSubscription(subscriber_id, parsed_input)) |entry_index| {
             // MQTT requires a repeated SUBSCRIBE for the same client/filter to
             // replace the prior subscription options. The routing path and
             // shared-group cursor stay stable; only delivery policy changes.
@@ -201,6 +257,10 @@ pub const Router = struct {
         var owns_filter = true;
         errdefer if (owns_filter) self.allocator.free(filter_owned);
         const parsed = parseFilter(filter_owned) orelse return error.InvalidSubscription;
+
+        // Reserve the eventual recycle slot now. Rollback and normal
+        // unsubscribe then never allocate, which the batch contracts require.
+        try self.free_entries.ensureUnusedCapacity(self.allocator, 1);
 
         const entry_index = try self.insertEntry(Entry{
             .subscriber_id = subscriber_id,
@@ -219,7 +279,26 @@ pub const Router = struct {
         errdefer {
             self.entries.items[entry_index].?.deinit(self.allocator);
             self.entries.items[entry_index] = null;
+            self.free_entries.append(self.allocator, entry_index) catch {};
         }
+
+        const subscriber_slot = try self.subscriber_entries.getOrPut(
+            self.allocator,
+            subscriber_id,
+        );
+        if (!subscriber_slot.found_existing) {
+            subscriber_slot.value_ptr.* = .{ .one = entry_index };
+        } else switch (subscriber_slot.value_ptr.*) {
+            .one => |existing| {
+                var list: std.ArrayList(usize) = .empty;
+                errdefer list.deinit(self.allocator);
+                try list.append(self.allocator, existing);
+                try list.append(self.allocator, entry_index);
+                subscriber_slot.value_ptr.* = .{ .many = list };
+            },
+            .many => |*list| try list.append(self.allocator, entry_index),
+        }
+        errdefer self.removeSubscriberEntry(subscriber_id, entry_index);
 
         if (parsed.group) |group| {
             const node_index, const multi_level = try self.insertFilterPath(parsed.effective_filter);
@@ -246,9 +325,10 @@ pub const Router = struct {
     }
 
     pub fn unsubscribe(self: *Router, subscriber_id: SubscriberId, topic_filter: []const u8) Error!void {
-        const entry_index = self.findEntry(subscriber_id, topic_filter) orelse return error.SubscriptionNotFound;
-        const entry = &self.entries.items[entry_index].?;
         const parsed = parseFilter(topic_filter) orelse return error.InvalidSubscription;
+        const entry_index = self.findEntryForSubscription(subscriber_id, parsed) orelse
+            return error.SubscriptionNotFound;
+        const entry = &self.entries.items[entry_index].?;
         const node_index, const multi_level = self.findFilterPath(parsed.effective_filter) orelse return error.SubscriptionNotFound;
         if (entry.shared_group != null) {
             const group_index = entry.shared_group_index orelse return error.SubscriptionNotFound;
@@ -270,8 +350,10 @@ pub const Router = struct {
             self.removeRouteEntry(node_index, multi_level, entry_index);
         }
         const was_shared = entry.shared_group != null;
+        self.removeSubscriberEntry(subscriber_id, entry_index);
         entry.deinit(self.allocator);
         self.entries.items[entry_index] = null;
+        self.free_entries.append(self.allocator, entry_index) catch {};
         self.active_entry_count -= 1;
         self.shared_entry_count -= @intFromBool(was_shared);
         tree.pruneEmpty(self, node_index);
@@ -287,10 +369,20 @@ pub const Router = struct {
         subscriber_id: SubscriberId,
     ) Error!usize {
         var removed: usize = 0;
-        var index: usize = 0;
-        while (index < self.entries.items.len) : (index += 1) {
-            const entry = self.entries.items[index] orelse continue;
-            if (entry.subscriber_id != subscriber_id) continue;
+        while (true) {
+            const slot = self.subscriber_entries.getPtr(subscriber_id) orelse
+                break;
+            const entry_index = switch (slot.*) {
+                .one => |value| value,
+                .many => |list| if (list.items.len == 0)
+                    break
+                else
+                    list.items[0],
+            };
+            const entry = self.entries.items[entry_index] orelse {
+                self.removeSubscriberEntry(subscriber_id, entry_index);
+                continue;
+            };
             try self.unsubscribe(
                 subscriber_id,
                 entry.subscription.topic_filter,
@@ -298,6 +390,36 @@ pub const Router = struct {
             removed += 1;
         }
         return removed;
+    }
+
+    fn removeSubscriberEntry(
+        self: *Router,
+        subscriber_id: SubscriberId,
+        entry_index: usize,
+    ) void {
+        const slot = self.subscriber_entries.getPtr(subscriber_id) orelse
+            return;
+        switch (slot.*) {
+            .one => |value| {
+                if (value != entry_index) return;
+                _ = self.subscriber_entries.remove(subscriber_id);
+            },
+            .many => |*list| {
+                for (list.items, 0..) |value, index| {
+                    if (value != entry_index) continue;
+                    _ = list.orderedRemove(index);
+                    break;
+                }
+                if (list.items.len == 0) {
+                    list.deinit(self.allocator);
+                    _ = self.subscriber_entries.remove(subscriber_id);
+                } else if (list.items.len == 1) {
+                    const remaining = list.items[0];
+                    list.deinit(self.allocator);
+                    slot.* = .{ .one = remaining };
+                }
+            },
+        }
     }
 
     /// Match into caller storage without allocation. Shared-group cursors only
@@ -328,32 +450,37 @@ pub const Router = struct {
         publisher_id: ?SubscriberId,
         out: []Match,
     ) Error![]Match {
-        // Broker callers reserve `subscriptionCount()` entries before
-        // matching. Without shared groups there is no cursor to protect, so a
-        // complete-capacity output can emit in one traversal instead of
-        // repeating the trie walk for count and commit.
-        if (self.shared_entry_count == 0 and
-            out.len >= self.active_entry_count)
-        {
-            const capacity = out[0..self.active_entry_count];
+        // Without shared groups there is no cursor to protect, so emit
+        // optimistically in one traversal instead of a count pass followed by
+        // an emit pass. If the caller buffer fills, return MatchBufferTooSmall;
+        // partial output is discarded by the caller.
+        if (self.shared_entry_count == 0) {
             if (self.matchTrie(
                 topic,
                 publisher_id,
-                capacity,
+                out,
                 null,
+                true,
             )) |counts| {
+                if (counts.overflow) return error.MatchBufferTooSmall;
                 std.debug.assert(counts.shared == 0);
-                return capacity[0..counts.normal];
+                return out[0..counts.normal];
             }
-            const written = self.matchNormalLinear(
+            const written = self.matchNormalLinearChecked(
                 topic,
                 publisher_id,
-                capacity,
-            );
-            return capacity[0..written];
+                out,
+            ) orelse return error.MatchBufferTooSmall;
+            return out[0..written];
         }
 
-        const trie_counts = self.matchTrie(topic, publisher_id, null, null);
+        const trie_counts = self.matchTrie(
+            topic,
+            publisher_id,
+            null,
+            null,
+            false,
+        );
         const normal_count = if (trie_counts) |counts|
             counts.normal
         else
@@ -373,6 +500,7 @@ pub const Router = struct {
                 publisher_id,
                 out[0..normal_count],
                 out[normal_count..required],
+                false,
             ) orelse unreachable;
             std.debug.assert(written.normal == normal_count);
             std.debug.assert(written.shared == shared_group_count);
@@ -449,7 +577,7 @@ pub const Router = struct {
     /// a loopback delivery. This query deliberately does not emit matches, so
     /// shared-subscription round-robin cursors are not advanced.
     pub fn hasTopicMatch(self: *Router, topic: []const u8) bool {
-        if (self.matchTrie(topic, null, null, null)) |counts| {
+        if (self.matchTrie(topic, null, null, null, false)) |counts| {
             return counts.normal != 0 or counts.shared != 0;
         }
         return self.matchNormalLinear(topic, null, null) != 0 or
@@ -459,17 +587,19 @@ pub const Router = struct {
     const MatchCounts = struct {
         normal: usize = 0,
         shared: usize = 0,
+        overflow: bool = false,
     };
 
     /// Traverse the topic trie once for both ordinary and shared routes.
     /// Separate output slices preserve ordinary-before-shared ordering while
     /// halving both count-pass and emit-pass trie traversal work.
     fn matchTrie(
-        self: *Router,
+        self: *const Router,
         topic: []const u8,
         publisher_id: ?SubscriberId,
         normal_out: ?[]Match,
         shared_out: ?[]Match,
+        checked: bool,
     ) ?MatchCounts {
         const has_shared = self.shared_entry_count != 0;
         var current: [128]usize = undefined;
@@ -489,14 +619,20 @@ pub const Router = struct {
                         publisher_id,
                         normal_out,
                         counts.normal,
+                        checked,
+                        &counts.overflow,
                     );
+                    if (counts.overflow) return counts;
                     if (has_shared) {
                         counts.shared = self.emitSharedEntries(
                             topic,
                             node.multi_wildcard_entries.items,
                             shared_out,
                             counts.shared,
+                            checked,
+                            &counts.overflow,
                         );
+                        if (counts.overflow) return counts;
                     }
                 }
                 if (depth == 0 and std.mem.startsWith(u8, topic, "$")) {
@@ -524,42 +660,54 @@ pub const Router = struct {
                 publisher_id,
                 normal_out,
                 counts.normal,
+                checked,
+                &counts.overflow,
             );
+            if (counts.overflow) return counts;
             if (has_shared) {
                 counts.shared = self.emitSharedEntries(
                     topic,
                     node.terminal_entries.items,
                     shared_out,
                     counts.shared,
+                    checked,
+                    &counts.overflow,
                 );
+                if (counts.overflow) return counts;
             }
             counts.normal = self.emitNormalEntries(
                 node.multi_wildcard_entries.items,
                 publisher_id,
                 normal_out,
                 counts.normal,
+                checked,
+                &counts.overflow,
             );
+            if (counts.overflow) return counts;
             if (has_shared) {
                 counts.shared = self.emitSharedEntries(
                     topic,
                     node.multi_wildcard_entries.items,
                     shared_out,
                     counts.shared,
+                    checked,
+                    &counts.overflow,
                 );
+                if (counts.overflow) return counts;
             }
         }
         return counts;
     }
 
     fn matchNormalLinear(
-        self: Router,
+        self: *const Router,
         topic: []const u8,
         publisher_id: ?SubscriberId,
         out: ?[]Match,
     ) usize {
         var written: usize = 0;
-        for (self.entries.items) |maybe_entry| {
-            const entry = maybe_entry orelse continue;
+        for (self.entries.items) |*maybe_entry| {
+            const entry = if (maybe_entry.*) |*value| value else continue;
             if (entry.shared_group != null or !mqtt.topicMatchesFilter(topic, entry.effective_filter)) continue;
             if (publisher_id != null and entry.subscription.no_local and entry.subscriber_id == publisher_id.?) continue;
             if (out) |storage| storage[written] = entryMatch(entry);
@@ -569,18 +717,49 @@ pub const Router = struct {
     }
 
     fn emitNormalEntries(
-        self: Router,
+        self: *const Router,
         entry_indices: []const usize,
         publisher_id: ?SubscriberId,
         out: ?[]Match,
         start: usize,
+        checked: bool,
+        overflow: *bool,
     ) usize {
         var written = start;
         for (entry_indices) |entry_index| {
-            const entry = self.entries.items[entry_index] orelse continue;
+            const entry = if (self.entries.items[entry_index]) |*value|
+                value
+            else
+                continue;
             if (entry.shared_group != null) continue;
             if (publisher_id != null and entry.subscription.no_local and entry.subscriber_id == publisher_id.?) continue;
-            if (out) |storage| storage[written] = entryMatch(entry);
+            if (out) |storage| {
+                if (checked and written >= storage.len) {
+                    overflow.* = true;
+                    return written;
+                }
+                storage[written] = entryMatch(entry);
+            }
+            written += 1;
+        }
+        return written;
+    }
+
+    /// Single-pass non-shared fallback when the trie cannot be used. Returns
+    /// null if the caller buffer is too small.
+    fn matchNormalLinearChecked(
+        self: *const Router,
+        topic: []const u8,
+        publisher_id: ?SubscriberId,
+        out: []Match,
+    ) ?usize {
+        var written: usize = 0;
+        for (self.entries.items) |*maybe_entry| {
+            const entry = if (maybe_entry.*) |*value| value else continue;
+            if (entry.shared_group != null or !mqtt.topicMatchesFilter(topic, entry.effective_filter)) continue;
+            if (publisher_id != null and entry.subscription.no_local and entry.subscriber_id == publisher_id.?) continue;
+            if (written >= out.len) return null;
+            out[written] = entryMatch(entry);
             written += 1;
         }
         return written;
@@ -594,7 +773,7 @@ pub const Router = struct {
         var written: usize = 0;
         for (self.shared_groups.items) |*maybe_group| {
             if (maybe_group.*) |*group| {
-                const representative = self.firstLiveGroupEntry(group.*) orelse continue;
+                const representative = self.firstLiveGroupEntry(group) orelse continue;
                 if (!mqtt.topicMatchesFilter(topic, representative.effective_filter)) continue;
                 if (out) |storage| {
                     const entry = self.selectGroupEntry(
@@ -610,19 +789,28 @@ pub const Router = struct {
     }
 
     fn emitSharedEntries(
-        self: *Router,
+        self: *const Router,
         topic: []const u8,
         entry_indices: []const usize,
         out: ?[]Match,
         start: usize,
+        checked: bool,
+        overflow: *bool,
     ) usize {
         var written = start;
         for (entry_indices) |entry_index| {
-            const representative = self.entries.items[entry_index] orelse continue;
+            const representative = if (self.entries.items[entry_index]) |*value|
+                value
+            else
+                continue;
             const group_index = representative.shared_group_index orelse continue;
             if (group_index >= self.shared_groups.items.len) continue;
             if (self.shared_groups.items[group_index]) |*group| {
                 if (out) |storage| {
+                    if (checked and written >= storage.len) {
+                        overflow.* = true;
+                        return written;
+                    }
                     const entry = self.selectGroupEntry(
                         group,
                         topic,
@@ -635,46 +823,46 @@ pub const Router = struct {
         return written;
     }
 
-    fn firstLiveGroupEntry(self: Router, group: SharedGroup) ?Entry {
+    fn firstLiveGroupEntry(self: *const Router, group: *const SharedGroup) ?*const Entry {
         for (group.entry_indices.items) |entry_index| {
-            if (self.entries.items[entry_index]) |entry| return entry;
+            if (self.entries.items[entry_index]) |*entry| return entry;
         }
         return null;
     }
 
     fn selectGroupEntry(
-        self: *Router,
+        self: *const Router,
         group: *SharedGroup,
         topic: []const u8,
-    ) ?Entry {
+    ) ?*const Entry {
         if (group.entry_indices.items.len == 0) return null;
         return switch (group.strategy) {
             .round_robin => self.nextRoundRobinGroupEntry(group),
             .random => self.randomGroupEntry(group),
             .sticky => self.stickyGroupEntry(group),
-            .rendezvous_hash => self.rendezvousGroupEntry(group.*, topic),
+            .rendezvous_hash => self.rendezvousGroupEntry(group, topic),
         };
     }
 
     fn nextRoundRobinGroupEntry(
-        self: Router,
+        self: *const Router,
         group: *SharedGroup,
-    ) ?Entry {
+    ) ?*const Entry {
         var checked: usize = 0;
         while (checked < group.entry_indices.items.len) : (checked += 1) {
             const index = group.cursor % group.entry_indices.items.len;
             group.cursor = (index + 1) % group.entry_indices.items.len;
-            if (self.entries.items[group.entry_indices.items[index]]) |entry| return entry;
+            if (self.entries.items[group.entry_indices.items[index]]) |*entry| return entry;
         }
         return null;
     }
 
-    fn stickyGroupEntry(self: Router, group: *SharedGroup) ?Entry {
+    fn stickyGroupEntry(self: *const Router, group: *SharedGroup) ?*const Entry {
         var checked: usize = 0;
         while (checked < group.entry_indices.items.len) : (checked += 1) {
             const index =
                 (group.cursor + checked) % group.entry_indices.items.len;
-            if (self.entries.items[group.entry_indices.items[index]]) |entry| {
+            if (self.entries.items[group.entry_indices.items[index]]) |*entry| {
                 group.cursor = index;
                 return entry;
             }
@@ -682,7 +870,7 @@ pub const Router = struct {
         return null;
     }
 
-    fn randomGroupEntry(self: Router, group: *SharedGroup) ?Entry {
+    fn randomGroupEntry(self: *const Router, group: *SharedGroup) ?*const Entry {
         var checked: usize = 0;
         const first = std.math.cast(
             usize,
@@ -691,7 +879,7 @@ pub const Router = struct {
         ) orelse 0;
         while (checked < group.entry_indices.items.len) : (checked += 1) {
             const index = (first + checked) % group.entry_indices.items.len;
-            if (self.entries.items[group.entry_indices.items[index]]) |entry| {
+            if (self.entries.items[group.entry_indices.items[index]]) |*entry| {
                 return entry;
             }
         }
@@ -699,15 +887,31 @@ pub const Router = struct {
     }
 
     fn rendezvousGroupEntry(
-        self: Router,
-        group: SharedGroup,
+        self: *const Router,
+        group: *const SharedGroup,
         topic: []const u8,
-    ) ?Entry {
-        var selected: ?Entry = null;
+    ) ?*const Entry {
+        // The topic prefix is identical for every member; hash it once and
+        // copy the hasher state for each subscriber-id suffix.
+        var base = std.hash.Wyhash.init(group.selection_seed);
+        base.update(topic);
+        var id_bytes: [@sizeOf(SubscriberId)]u8 = undefined;
+        var selected: ?*const Entry = null;
         var selected_score: u64 = 0;
         for (group.entry_indices.items) |entry_index| {
-            const entry = self.entries.items[entry_index] orelse continue;
-            const score = rendezvousScore(group, topic, entry.subscriber_id);
+            const entry = if (self.entries.items[entry_index]) |*value|
+                value
+            else
+                continue;
+            std.mem.writeInt(
+                SubscriberId,
+                &id_bytes,
+                entry.subscriber_id,
+                .little,
+            );
+            var hasher = base;
+            hasher.update(&id_bytes);
+            const score = hasher.final();
             if (selected == null or
                 score > selected_score or
                 (score == selected_score and
@@ -724,8 +928,7 @@ pub const Router = struct {
     const findFilterPath = tree.find;
 
     fn insertEntry(self: *Router, entry: Entry) Error!usize {
-        for (self.entries.items, 0..) |value, index| {
-            if (value != null) continue;
+        if (self.free_entries.pop()) |index| {
             self.entries.items[index] = entry;
             return index;
         }
@@ -733,14 +936,51 @@ pub const Router = struct {
         return self.entries.items.len - 1;
     }
 
+    /// Source-compatible value receiver used by the batched subscription
+    /// helpers. The lookup itself is the indexed form below.
     fn findEntry(self: Router, subscriber_id: SubscriberId, topic_filter: []const u8) ?usize {
         const parsed = parseFilter(topic_filter) orelse return null;
-        for (self.entries.items, 0..) |maybe_entry, i| {
-            const entry = maybe_entry orelse continue;
-            if (entry.subscriber_id != subscriber_id) continue;
-            if (!std.mem.eql(u8, entry.effective_filter, parsed.effective_filter)) continue;
-            if (!optionalEql(entry.shared_group, parsed.group)) continue;
-            return i;
+        var copy = self;
+        return copy.findEntryForSubscription(subscriber_id, parsed);
+    }
+
+    /// Find a subscription without scanning every stored entry. Non-shared
+    /// filters scan only the trie route list for that exact filter; shared
+    /// filters scan the group's member list, which includes members that are
+    /// not the current round-robin representative.
+    fn findEntryForSubscription(
+        self: *Router,
+        subscriber_id: SubscriberId,
+        parsed: ParsedFilter,
+    ) ?usize {
+        if (parsed.group) |group_name| {
+            const group_index = self.findSharedGroup(
+                group_name,
+                parsed.effective_filter,
+            ) orelse return null;
+            const group = &self.shared_groups.items[group_index].?;
+            for (group.entry_indices.items) |entry_index| {
+                const entry = self.entries.items[entry_index] orelse
+                    continue;
+                if (entry.subscriber_id == subscriber_id) return entry_index;
+            }
+            return null;
+        }
+
+        const node_index, const multi_level = self.findFilterPath(
+            parsed.effective_filter,
+        ) orelse return null;
+        const values = if (multi_level)
+            self.nodes.items[node_index].multi_wildcard_entries.items
+        else
+            self.nodes.items[node_index].terminal_entries.items;
+        for (values) |entry_index| {
+            const entry = self.entries.items[entry_index] orelse continue;
+            if (entry.shared_group == null and
+                entry.subscriber_id == subscriber_id)
+            {
+                return entry_index;
+            }
         }
         return null;
     }
@@ -754,56 +994,55 @@ pub const Router = struct {
         var owns_filter = true;
         errdefer if (owns_filter) self.allocator.free(owned_filter);
 
-        for (self.shared_groups.items, 0..) |maybe_group, i| {
-            if (maybe_group != null) continue;
-            const selection_seed = sharedGroupSeed(
-                self.options.random_seed,
-                name,
-                filter,
-            );
-            self.shared_groups.items[i] = .{
-                .name = owned_name,
-                .effective_filter = owned_filter,
-                .strategy = self.options.shared_subscription_strategy,
-                .selection_seed = selection_seed,
-                .random_state = selection_seed,
-            };
-            owns_name = false;
-            owns_filter = false;
-            return .{ i, true };
-        }
+        // Reserve the map bucket and the eventual recycle slot before the
+        // group becomes visible, so rollback never allocates.
+        try self.shared_group_map.ensureUnusedCapacity(self.allocator, 1);
+        try self.free_shared_groups.ensureUnusedCapacity(self.allocator, 1);
 
+        const index = if (self.free_shared_groups.pop()) |recycled|
+            recycled
+        else blk: {
+            try self.shared_groups.append(self.allocator, null);
+            break :blk self.shared_groups.items.len - 1;
+        };
         const selection_seed = sharedGroupSeed(
             self.options.random_seed,
             name,
             filter,
         );
-        try self.shared_groups.append(self.allocator, .{
+        self.shared_groups.items[index] = .{
             .name = owned_name,
             .effective_filter = owned_filter,
             .strategy = self.options.shared_subscription_strategy,
             .selection_seed = selection_seed,
             .random_state = selection_seed,
-        });
+        };
+        self.shared_group_map.putAssumeCapacity(
+            .{ .name = owned_name, .filter = owned_filter },
+            index,
+        );
         owns_name = false;
         owns_filter = false;
-        return .{ self.shared_groups.items.len - 1, true };
+        return .{ index, true };
     }
 
     fn findSharedGroup(self: Router, name: []const u8, filter: []const u8) ?usize {
-        for (self.shared_groups.items, 0..) |maybe_group, i| {
-            const group = maybe_group orelse continue;
-            if (!std.mem.eql(u8, group.name, name)) continue;
-            if (std.mem.eql(u8, group.effective_filter, filter)) return i;
-        }
-        return null;
+        return self.shared_group_map.get(.{ .name = name, .filter = filter });
     }
 
     fn removeSharedGroupAt(self: *Router, group_index: usize) void {
         if (group_index >= self.shared_groups.items.len) return;
         if (self.shared_groups.items[group_index]) |*group| {
+            _ = self.shared_group_map.remove(.{
+                .name = group.name,
+                .filter = group.effective_filter,
+            });
             group.deinit(self.allocator);
             self.shared_groups.items[group_index] = null;
+            self.free_shared_groups.append(
+                self.allocator,
+                group_index,
+            ) catch {};
         }
     }
 
@@ -900,30 +1139,12 @@ fn replaceIndexValue(values: []usize, old_value: usize, new_value: usize) void {
     }
 }
 
-fn optionalEql(a: ?[]const u8, b: ?[]const u8) bool {
-    if (a == null or b == null) return a == null and b == null;
-    return std.mem.eql(u8, a.?, b.?);
-}
-
-fn entryMatch(entry: Entry) Match {
+fn entryMatch(entry: *const Entry) Match {
     return .{
         .subscriber_id = entry.subscriber_id,
         .subscription = entry.subscription,
         .subscription_identifier = entry.subscription_identifier,
     };
-}
-
-fn rendezvousScore(
-    group: SharedGroup,
-    topic: []const u8,
-    subscriber_id: SubscriberId,
-) u64 {
-    var hasher = std.hash.Wyhash.init(group.selection_seed);
-    hasher.update(topic);
-    var id_bytes: [@sizeOf(SubscriberId)]u8 = undefined;
-    std.mem.writeInt(SubscriberId, &id_bytes, subscriber_id, .little);
-    hasher.update(&id_bytes);
-    return hasher.final();
 }
 
 fn sharedGroupSeed(

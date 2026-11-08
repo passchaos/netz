@@ -39,17 +39,25 @@ pub fn encodeAssumeCapacity(list: *std.ArrayList(u8), value: u64) Error!void {
 pub fn encodeWithLenAssumeCapacity(list: *std.ArrayList(u8), value: u64, len: u8) void {
     const start = list.items.len;
     list.items.len = start + len;
-    encodeIntoWithLen(list.items[start..], value, len);
+    writeIntoWithLen(list.items[start..], value, len);
 }
 
 pub fn encodeInto(out: []u8, value: u64) Error![]u8 {
     const len = try length(value);
     if (out.len < len) return error.BufferTooShort;
-    encodeIntoWithLen(out, value, len);
+    writeIntoWithLen(out, value, len);
     return out[0..len];
 }
 
-fn encodeIntoWithLen(out: []u8, value: u64, len: u8) void {
+/// Encode with a caller-supplied length that was already validated against
+/// `length(value)`. Bounds are checked against `len`.
+pub fn encodeIntoWithLen(out: []u8, value: u64, len: u8) Error![]u8 {
+    if (out.len < len) return error.BufferTooShort;
+    writeIntoWithLen(out, value, len);
+    return out[0..len];
+}
+
+fn writeIntoWithLen(out: []u8, value: u64, len: u8) void {
     switch (len) {
         1 => out[0] = @truncate(value),
         2 => {

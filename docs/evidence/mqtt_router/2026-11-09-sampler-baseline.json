@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "date": "2026-11-09",
+  "head": "working-tree",
+  "subject": "MQTT router match and shared selection join the harnessz baseline gate",
+  "change": "The router benchmark was a fixed-loop executable with destructive subscription churn and no baseline support. A new examples/bench_mqtt_router_match.zig keeps the same 4,098-filter trie and 64-member shared-group setup but samples only the read-only scenarios with harnessz: router-match, the linear-scan comparison, and the round-robin, sticky, random and rendezvous shared selections. The benchmark is registered in build.zig as bench-mqtt-router-match and in the bench-record/bench-gate sets with benchmarks/baselines/mqtt-router.json. Destructive churn scenarios remain in the original bench-mqtt-router executable.",
+  "benchmark": {
+    "command": "zig build bench-record -Doptimize=ReleaseFast (records all sampler-backed baselines)",
+    "entries": 6,
+    "recorded_medians_ns_per_callback": {
+      "match": 1492399,
+      "linear": 10328479,
+      "shared-round-robin": 13555927,
+      "shared-sticky": 13009177,
+      "shared-random": 13890248,
+      "shared-rendezvous": 104062493
+    },
+    "iterations_per_callback": {
+      "match": 20000,
+      "linear": 100,
+      "shared": 100000
+    },
+    "environment_fingerprint": "x86_64/linux/cpu32/ReleaseFast"
+  },
+  "tests": {
+    "benchmark_build_and_run": {
+      "command": "zig build bench-mqtt-router-match -Doptimize=ReleaseFast",
+      "status": "passed"
+    },
+    "direct_gate": {
+      "command": "<netz-bench-mqtt-router-match> --baseline=benchmarks/baselines/mqtt-router.json",
+      "status": "passed",
+      "note": "all six entries compared within noise immediately after recording; router-match 1.030x and rendezvous 1.093x were faster than the recorded medians"
+    },
+    "full_gate": {
+      "command": "zig build bench-gate -Doptimize=ReleaseFast -- --warn-only",
+      "status": "passed",
+      "note": "the serialized gate ran all eight sampler-backed benchmarks, including the six router entries"
+    }
+  },
+  "source_sha256": {
+    "examples/bench_mqtt_router_match.zig": "74e23accbdad26f17d29b82a79559d52c93d8866ef38dc52005115cc244a9d20",
+    "build.zig": "2f561d956c587e959a7f9b7b13787b2cee73ddaab727e789b5636ad9ac61a055"
+  },
+  "notes": "The linear scenario uses 100 iterations per callback because one 4,098-filter scan is about 103 us; ten samples still give a stable median. The shared routers are recreated per strategy so the cursor and random state start from the same point as the fixed-loop benchmark. The benchmark records ns per callback; dividing by the iteration count gives 74 ns for router-match, 103.3 us for the linear scan, 130-138 ns for round-robin/sticky/random, and 1.04 us for rendezvous. Baseline files under benchmarks/baselines/ are local generated artifacts. The gate remains host-load sensitive and should be judged on a quiet host; this run used --warn-only while other sessions were active."
+}

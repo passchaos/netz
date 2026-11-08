@@ -32,7 +32,7 @@ jobs:
           DEPENDENCIES_TOKEN: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
         run: |
           if [ -z "$DEPENDENCIES_TOKEN" ]; then
-            echo "::error::Configure NETZ_DEPENDENCIES_TOKEN with read access to passchaos/vail and passchaos/vort"
+            echo "::error::Configure NETZ_DEPENDENCIES_TOKEN with read access to passchaos/vail, passchaos/vort and passchaos/harnessz"
             exit 1
           fi
 
@@ -60,6 +60,15 @@ jobs:
           repository: passchaos/pbz
           ref: 6513ef1f8b130b308bd86ba0bd02f6acc2be64e8
           path: pbz
+          persist-credentials: false
+
+      - name: Checkout pinned harnessz
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: passchaos/harnessz
+          ref: e626f26b0a7ead0377254ed3a04b43b25fb2d270
+          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
+          path: harnessz
           persist-credentials: false
 
       - name: Install Zig 0.16.0

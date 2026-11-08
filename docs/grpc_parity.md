@@ -641,10 +641,11 @@ is rejected with `ConnectionGoAway`.
    `outlier_detection_experimental` composite policy described below.
    The xDS locality adapter now expands resolver locality weights through
    `xds_wrr_locality_experimental`, as described below. ADS transport now has
-   owned v3 envelopes and subscription/version state as described below; typed
-   resource/config integration, cluster implementation and other xDS control
-   plane work remain open. Cluster
-   manager selection now follows each RPC-local cluster attribute below.
+   owned v3 envelopes and subscription/version state; typed LDS/RDS/CDS/EDS
+   application, bootstrap failover, federation and the cluster-impl policy are
+   covered by the xDS docs below. Broader control-plane orchestration and the
+   remaining route-filter breadth stay open. Cluster manager selection now
+   follows each RPC-local cluster attribute below.
 
 Machine-readable SharedChannel ORCA evidence is recorded in
 `docs/evidence/grpc_cpp_shared_orca_oob/2026-10-31.json`.
@@ -778,11 +779,17 @@ timer. `Channel.Options.priority_deactivation_timeout` overrides the default
 being attempted and a deterministic runtime state test for activation,
 recovery and deactivation.
 
-The ordinary Channel still does not apply `healthCheckConfig`. A
-connection-time Health/Check gate was evaluated and rejected: grpc-core-compatible
-health servers and the existing fixtures implement Watch rather than Check, and
-the same gate would also double-check SharedChannel's endpoint owners. A
-Watch-based concurrent subchannel manager remains the correct integration.
+The ordinary Channel now applies `healthCheckConfig` through per-endpoint
+Watch gates. Each resolved endpoint owns a dedicated Health Watch connection,
+so the application Channel's single HTTP/2 frame reader is never shared;
+`disable_health_check` suppresses ServiceConfig inheritance while an explicit
+`health_check_service` still wins. `healthServing()` and `healthServingAt()`
+expose aggregate and per-endpoint state, UNIMPLEMENTED is terminal serving, and
+NOT_SERVING rejects calls before a business connection is opened. A
+connection-time Health/Check gate was evaluated and rejected because
+grpc-core-compatible servers and the existing fixtures implement Watch rather
+than Check. Evidence is recorded in
+`docs/evidence/grpc_ordinary_health_gate/`.
 
 SharedChannel now executes the first production subset of that tree: arbitrary
 nested weighted targets whose leaves are `pick_first` or `round_robin`.
@@ -1579,12 +1586,15 @@ The HTTPS gate also abandons an authenticated idle TLS connection without
 close_notify and requires the endpoint to continue serving all RPCs. Partial
 HTTP requests retain their failure behavior. The HTTPS gate pins only its
 temporary certificate's SPKI in Chromium. The
-runner defaults to `/usr/bin/chromium`; set `CHROME` to another compatible
-Chromium executable. Fresh headless Chromium 149.0.7827.196 HTTP/1.1, TLS
-HTTP/1.1 and TLS HTTP/2 runs on 2026-11-01 passed binary/text unary,
-incremental text streaming, the blocked foreign-Origin preflight, and
-trailers-only UNAUTHENTICATED; the HTTP/2 run reports `protocol=h2` with four
-preflights. See `docs/evidence/browser_interop/2026-11-01.json`.
+runner defaults to `/usr/bin/google-chrome` like the WebSocket and WebTransport
+browser gates; set `CHROME` to another compatible Chromium executable. Fresh
+headless Chromium 149.0.7827.196 HTTP/1.1, TLS HTTP/1.1 and TLS HTTP/2 runs on
+2026-11-01 passed binary/text unary, incremental text streaming, the blocked
+foreign-Origin preflight, and trailers-only UNAUTHENTICATED; the HTTP/2 run
+reports `protocol=h2` with four preflights. A 2026-11-08 headless Google Chrome
+146.0.7680.164 run repeated the HTTP/1.1 and TLS HTTP/2 matrices with the same
+results. See `docs/evidence/browser_interop/2026-11-01.json` and
+`docs/evidence/browser_interop/2026-11-08.json`.
 
 `grpc.web.http2` now provides the same owned-request/handled-status dispatch on
 HTTP/2. `grpc.runtime.ServerConnection.readWebRequest`, `readWebRequestWithTimeout`
@@ -1731,8 +1741,10 @@ the fixture's HTML body as an oversized message envelope. Netz applies the
 documented UNKNOWN fallback and discards that non-gRPC entity. The gate checks
 the pinned SDK's actual outcomes alongside netz's required behavior and does
 not claim those malformed responses have identical SDK results. A fresh
-2026-11-01 run passed all 26 cases, 74 native RPCs and 2 shared RPCs; see
-`docs/evidence/grpc_response/2026-11-01.json`.
+2026-11-01 run passed all 26 cases, 74 native RPCs and 2 shared RPCs, and a
+2026-11-08 rerun on the current tree passed the same 26 cases with 76 native
+RPCs and 2 shared RPCs; see `docs/evidence/grpc_response/2026-11-01.json` and
+`docs/evidence/grpc_response/2026-11-08.json`.
 
 The owning h2c client's IP-address connection now also supplies its numeric
 `address:port` authority automatically through the HTTP/2 runtime. Unary,
@@ -1931,9 +1943,10 @@ try health_watch.waitForServingWithTimeout(.fromSeconds(30));
 
 The caller must continue driving the handle to observe later state changes.
 This dedicated connection preserves single-owner HTTP/2 frame reading; it
-does not modify another application's Channel picker. A concurrent per-backend
-health-gated picker and standard `healthCheckConfig` integration remain work
-for the subchannel manager.
+does not modify another application's Channel picker. The ordinary Channel now
+builds on the same Watch primitive with per-endpoint gates and
+`healthCheckConfig` inheritance, while SharedChannel keeps its same-connection
+health owner; see `docs/evidence/grpc_ordinary_health_gate/`.
 
 `health.startWatchWith{Timeout,Deadline}` and the matching runtime.Client
 methods also bound request HEADERS and DATA output. They intentionally omit
@@ -2065,9 +2078,11 @@ business RPC completes, then sends the health update on that same connection.
 Other gates cover HPACK order and partial sections, transport-prefix retention,
 concurrency admission failure, task cancellation/join, command/frame races,
 synthetic completion and GOAWAY. The pinned grpc-cpp dual-stream gate also
-uses this poll/pump path for h2c and verified TLS. A complete background
-subchannel manager and health-driven application picker remain integration
-work on top of this primitive.
+uses this poll/pump path for h2c and verified TLS. SharedChannel integrates it
+into same-connection endpoint admission, and the ordinary Channel builds
+per-endpoint Watch gates with `healthCheckConfig` inheritance on top of it; a
+generalized reusable background subchannel manager remains future integration
+work.
 
 
 The final pump/poll verification passed 1060/1060 combined HTTP/2 and gRPC
@@ -3434,9 +3449,10 @@ a/b select their exact children, while unknown and removed clusters report
 INTERNAL. Three official grpc-js servers independently verify native unary and
 duplex payloads, complete call counts, absence of selector headers and exactly
 one HTTP/2 session per backend across config changes. This supplies policy and
-transport evidence; the cluster implementation, ADS discovery, load reporting
-and other xDS control-plane integration remain open. Machine-readable logs and
-source/reference digests are recorded in
+transport evidence; the cluster-impl policy, ADS transport, automatic typed
+discovery and LRS are covered by their dedicated docs and evidence. Remaining
+control-plane orchestration and route-filter breadth stay open.
+Machine-readable logs and source/reference digests are recorded in
 `docs/evidence/grpc_cluster_manager/2026-11-03.json`.
 
 

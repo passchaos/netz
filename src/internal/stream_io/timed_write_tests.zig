@@ -1,4 +1,5 @@
 const std = @import("std");
+const test_socket = @import("../test_socket.zig");
 const writer = @import("timed_write.zig");
 
 const Observer = struct {
@@ -38,7 +39,7 @@ const Observer = struct {
 };
 
 fn socket() std.Io.net.Stream {
-    return .{ .socket = .{ .handle = 0, .address = .{ .ip4 = .loopback(0) } } };
+    return test_socket.stream();
 }
 
 test "stream timed scatter writer advances within and across empty slice boundaries" {

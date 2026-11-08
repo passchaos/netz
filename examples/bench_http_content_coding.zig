@@ -1,12 +1,37 @@
 const std = @import("std");
+const sampling = @import("support/bench_sampling.zig");
 const netz = @import("netz");
 
 const payload_len: usize = 4096;
 const default_iterations: usize = 200_000;
 
+const Options = struct {
+    iterations: usize = default_iterations,
+    samples: usize = 10,
+    warmup: usize = 1,
+    baseline_path: ?[]const u8 = null,
+    update_baseline: bool = false,
+    max_regression_ratio: f64 = 1.05,
+    warn_only: bool = false,
+};
+
+const DecodeContext = struct {
+    chain: netz.http.content_coding.Chain,
+    encoded: []const u8,
+    output: []u8,
+    iterations: usize,
+};
+
+const StreamContext = struct {
+    decoder: *netz.http.content_coding.StreamDecoder,
+    encoded: []const u8,
+    output: []u8,
+    iterations: usize,
+};
+
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.smp_allocator;
-    const iterations = try parseIterations(init, allocator);
+    const options = try parseOptions(init, allocator);
     var backend = try netz.runtime.Backend.init(allocator);
     defer backend.deinit();
     const io = backend.io();
@@ -30,17 +55,19 @@ pub fn main(init: std.process.Init) !void {
     var output: [payload_len]u8 = undefined;
     _ = try chain.decodeInto(encoded.bytes, &output, &.{});
 
-    const started = nowNs(io);
-    var checksum: u64 = 0;
-    for (0..iterations) |iteration| {
-        const decoded = try chain.decodeInto(
-            encoded.bytes,
-            &output,
-            &.{},
-        );
-        checksum +%= decoded[iteration % decoded.len];
-    }
-    const elapsed = nowNs(io) -| started;
+    var decode_run = try sampling.run(
+        allocator,
+        io,
+        samplingOptions(options),
+        DecodeContext{
+            .chain = chain,
+            .encoded = encoded.bytes,
+            .output = &output,
+            .iterations = options.iterations,
+        },
+        decodeWork,
+    );
+    defer decode_run.deinit(allocator);
 
     var stream_decoder = try chain.streamDecoder(allocator, .{
         .max_encoded_bytes = encoded.bytes.len,
@@ -48,22 +75,26 @@ pub fn main(init: std.process.Init) !void {
     });
     defer stream_decoder.deinit();
     _ = try decodeStreaming(&stream_decoder, encoded.bytes, &output);
-    const streaming_started = nowNs(io);
-    var streaming_checksum: u64 = 0;
-    for (0..iterations) |iteration| {
-        const decoded = try decodeStreaming(
-            &stream_decoder,
-            encoded.bytes,
-            &output,
-        );
-        streaming_checksum +%= decoded[iteration % decoded.len];
-    }
-    const streaming_elapsed = nowNs(io) -| streaming_started;
+
+    var stream_run = try sampling.run(
+        allocator,
+        io,
+        samplingOptions(options),
+        StreamContext{
+            .decoder = &stream_decoder,
+            .encoded = encoded.bytes,
+            .output = &output,
+            .iterations = options.iterations,
+        },
+        streamWork,
+    );
+    defer stream_run.deinit(allocator);
 
     std.debug.print(
         \\HTTP content-coding benchmark
         \\  io backend: zio-std-io
         \\  coding: gzip, iterations: {d}
+        \\  samples: {d}, warmup: {d}
         \\  payload: {d} bytes, encoded: {d} bytes
         \\  caller-buffer decode: {d} ns/representation
         \\  incremental decode: {d} ns/representation
@@ -71,14 +102,83 @@ pub fn main(init: std.process.Init) !void {
         \\  checksum: {d}
         \\
     , .{
-        iterations,
+        options.iterations,
+        options.samples,
+        options.warmup,
         payload.len,
         encoded.bytes.len,
-        elapsed / iterations,
-        streaming_elapsed / iterations,
+        sampling.nsPerOp(decode_run, options.iterations),
+        sampling.nsPerOp(stream_run, options.iterations),
         @sizeOf(netz.http.content_coding.StreamDecoder),
-        checksum +% streaming_checksum,
+        decode_run.last_result +% stream_run.last_result,
     });
+    sampling.printDistribution("caller-buffer", decode_run);
+    sampling.printDistribution("incremental", stream_run);
+
+    if (options.baseline_path) |path| {
+        const entries = [_]sampling.BaselineEntry{
+            .{
+                .name = "bench-http-content-coding/decode",
+                .stats = decode_run,
+            },
+            .{
+                .name = "bench-http-content-coding/incremental",
+                .stats = stream_run,
+            },
+        };
+        try sampling.checkBaselines(allocator, io, &entries, .{
+            .path = path,
+            .max_regression_ratio = options.max_regression_ratio,
+            .update = options.update_baseline,
+            .warn_only = options.warn_only,
+        });
+    }
+}
+
+fn samplingOptions(options: Options) sampling.Options {
+    return .{
+        .iterations = options.iterations,
+        .samples = options.samples,
+        .warmup = options.warmup,
+    };
+}
+
+fn decodeWork(
+    context: DecodeContext,
+    allocator: std.mem.Allocator,
+    io: std.Io,
+) anyerror!u64 {
+    _ = allocator;
+    _ = io;
+    var checksum: u64 = 0;
+    for (0..context.iterations) |iteration| {
+        const decoded = try context.chain.decodeInto(
+            context.encoded,
+            context.output,
+            &.{},
+        );
+        checksum +%= decoded[iteration % decoded.len];
+    }
+    return checksum;
+}
+
+fn streamWork(
+    context: StreamContext,
+    allocator: std.mem.Allocator,
+    io: std.Io,
+) anyerror!u64 {
+    _ = allocator;
+    _ = io;
+    var checksum: u64 = 0;
+    for (0..context.iterations) |iteration| {
+        const decoded = try decodeStreaming(
+            context.decoder,
+            context.encoded,
+            context.output,
+        );
+        checksum +%= decoded[iteration % decoded.len];
+    }
+    return checksum;
 }
 
 fn decodeStreaming(
@@ -110,33 +210,61 @@ fn decodeStreaming(
     return output[0..output_offset];
 }
 
-fn parseIterations(
+fn parseOptions(
     init: std.process.Init,
     allocator: std.mem.Allocator,
-) !usize {
+) !Options {
     var args = try std.process.Args.Iterator.initAllocator(
         init.minimal.args,
         allocator,
     );
     defer args.deinit();
     _ = args.next();
-    var iterations = default_iterations;
+    var options: Options = .{};
     while (args.next()) |arg| {
-        if (!std.mem.startsWith(u8, arg, "--iterations=")) {
+        if (std.mem.startsWith(u8, arg, "--iterations=")) {
+            options.iterations = try std.fmt.parseInt(
+                usize,
+                arg["--iterations=".len..],
+                10,
+            );
+            if (options.iterations == 0) return error.InvalidArgument;
+        } else if (std.mem.startsWith(u8, arg, "--samples=")) {
+            options.samples = try std.fmt.parseInt(
+                usize,
+                arg["--samples=".len..],
+                10,
+            );
+            if (options.samples == 0) return error.InvalidArgument;
+        } else if (std.mem.startsWith(u8, arg, "--warmup=")) {
+            options.warmup = try std.fmt.parseInt(
+                usize,
+                arg["--warmup=".len..],
+                10,
+            );
+        } else if (std.mem.startsWith(u8, arg, "--baseline=")) {
+            options.baseline_path = arg["--baseline=".len..];
+            if (options.baseline_path.?.len == 0) return error.InvalidArgument;
+        } else if (std.mem.eql(u8, arg, "--update-baseline")) {
+            options.update_baseline = true;
+        } else if (std.mem.eql(u8, arg, "--warn-only")) {
+            options.warn_only = true;
+        } else if (std.mem.startsWith(u8, arg, "--max-regression-ratio=")) {
+            options.max_regression_ratio = try std.fmt.parseFloat(
+                f64,
+                arg["--max-regression-ratio=".len..],
+            );
+            if (!std.math.isFinite(options.max_regression_ratio) or
+                options.max_regression_ratio <= 0)
+            {
+                return error.InvalidArgument;
+            }
+        } else {
             return error.InvalidArgument;
         }
-        iterations = try std.fmt.parseInt(
-            usize,
-            arg["--iterations=".len..],
-            10,
-        );
-        if (iterations == 0) return error.InvalidArgument;
     }
-    return iterations;
-}
-
-fn nowNs(io: std.Io) u64 {
-    const timestamp = std.Io.Clock.awake.now(io).nanoseconds;
-    if (timestamp <= 0) return 0;
-    return std.math.cast(u64, timestamp) orelse std.math.maxInt(u64);
+    if (options.update_baseline and options.baseline_path == null) {
+        return error.InvalidArgument;
+    }
+    return options;
 }

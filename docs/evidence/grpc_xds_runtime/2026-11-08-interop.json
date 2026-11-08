@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "date": "2026-11-08",
+  "head": "working-tree",
+  "subject": "gRPC parity verification: typed xDS runtime and ordinary health gates",
+  "change": "No source change. Re-ran the official Node peer gate after correcting docs/grpc_parity.md, which still claimed that typed LDS/RDS/CDS/EDS application and cluster-impl integration were open.",
+  "command": "zig build interop-grpc-xds-runtime --summary all",
+  "result": {
+    "steps_passed": 8,
+    "steps_total": 8,
+    "python_step": "success 876ms",
+    "client_compile": "success 36s",
+    "exit": 0
+  },
+  "notes": "The gate drives automatic listener/route/cluster/endpoint discovery through the pinned grpc-js-xds peer and verifies isolated cluster RPC admission. It passes against the current working tree, which confirms that the corrected parity text describes implemented behavior rather than an aspirational plan. The focused health suite also passes 245/245, covering the per-endpoint Watch gates and ServiceConfig inheritance described in the corrected parity text.",
+  "source_sha256": {
+    "src/grpc/xds/runtime/controller.zig": "f3294a85a7106b997f689810a211f59fa1a30a2efb40fd1991e6584d1f4fc49c",
+    "tools/interop/grpc_xds_runtime/client.zig": "499042763dc394e7796086075df8d91246b3d9f2b0af783bab060c4c772c06af",
+    "tools/interop/grpc_xds_runtime/peer.js": "3a07deb2c0218809df9d3360dd6f1165c9ae5223030f34f077d41f0093170a98"
+  },
+  "tests": {
+    "health": {
+      "command": "zig build test-lib -Dtest-filter=health --summary all",
+      "passed": 245,
+      "total": 245,
+      "note": "backs the corrected ordinary-Channel healthCheckConfig/per-endpoint Watch text"
+    }
+  }
+}

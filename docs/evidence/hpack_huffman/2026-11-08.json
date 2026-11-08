@@ -1,0 +1,289 @@
+{
+  "schema": 1,
+  "date": "2026-11-08",
+  "head": "working-tree",
+  "subject": "12-bit table-driven HPACK/QPACK Huffman decoding and single-pass HPACK string decode",
+  "change": "decodeHuffmanInto and decodedLen now decode through a 12-bit root table. Each entry emits up to two completed symbols and reports the consumed bit count, or stores the live trie node for codes longer than 12 bits. The existing bit-by-bit trie remains the fallback for long codes and for the final buffered suffix. A single table build validates every 12-bit prefix at comptime, including EOS rejection and invalid-prefix detection. New tests cover every single byte, all 65,536 byte pairs, 512 random strings, EOS rejection, non-one padding rejection, and a 20,000-input differential comparison against the original bit-by-bit decoder. A follow-up adds decodeHuffmanIntoBounded, which reports BufferTooShort for undersized storage, and uses it to decode each HPACK string once into a 512-byte stack scratch buffer. The written length then feeds header-list accounting and the owned/caller-buffer output paths, so strings that fit the scratch no longer run a separate Huffman length walk. Larger strings keep the exact-length two-pass fallback, and non-Huffman literals keep their borrowed representation. Scratch decoding validates without allocating, so a field that crosses the header-list limit still causes no output allocation. A follow-up adds encodeHuffmanIntoBounded, which encodes into a worst-case-sized buffer and returns the exact length. HPACK encodeString uses a 512-byte scratch buffer for values up to 320 bytes, so the Huffman length walk and the encode are one pass; larger values keep the exact-length path. If the encoded form is not smaller than the literal, the scratch result is discarded and the literal representation is written.",
+  "benchmark": {
+    "command": "taskset -c 0 <bench-http2-hpack> --iterations=20000 --samples=5",
+    "pairs": 8,
+    "order": "alternating before/after",
+    "before_sha256": "1e999ee068c6fbd2f2ee6fb02e9b8d36ac4c09d80f5a2da57a987c2841bc8c4b",
+    "after_sha256": "a3736954fe759ed38ec11ac10bee3882fba0d954f81227e1444444bf8c9be778",
+    "results": {
+      "stateful decode-only": {
+        "before_ns_per_op": 1280.5,
+        "after_ns_per_op": 509.5,
+        "speedup": 2.513
+      },
+      "stateful decode-into": {
+        "before_ns_per_op": 1204.0,
+        "after_ns_per_op": 451.0,
+        "speedup": 2.67
+      },
+      "stateful decode-owned": {
+        "before_ns_per_op": 1235.0,
+        "after_ns_per_op": 481.0,
+        "speedup": 2.568
+      },
+      "stateful roundtrip": {
+        "before_ns_per_op": 733,
+        "after_ns_per_op": 506,
+        "speedup": 1.449
+      },
+      "stateless roundtrip": {
+        "before_ns_per_op": 2048,
+        "after_ns_per_op": 1170,
+        "speedup": 1.75
+      },
+      "encode-only": {
+        "before_ns_per_op": 257,
+        "after_ns_per_op": 250,
+        "speedup": 1.028
+      },
+      "encoder table churn": {
+        "before_ns_per_insert": 265,
+        "after_ns_per_insert": 266,
+        "speedup": 0.996
+      },
+      "decoder table churn": {
+        "before_ns_per_insert": 50,
+        "after_ns_per_insert": 48,
+        "speedup": 1.042
+      }
+    }
+  },
+  "decode_once_benchmark": {
+    "command": "taskset -c 0 <bench-http2-hpack> --iterations=20000 --samples=5 --warmup=1",
+    "pairs": 8,
+    "order": "alternating before/after",
+    "before_sha256": "a3736954fe759ed38ec11ac10bee3882fba0d954f81227e1444444bf8c9be778",
+    "after_sha256": "e6d7d1de6a08995bfa6c33684c9709704f671bcf4ef825179d45607e0ef357c2",
+    "results": {
+      "stateful decode-only": {
+        "before_ns_per_op": 515.0,
+        "after_ns_per_op": 420.0,
+        "speedup": 1.226
+      },
+      "stateful decode-into": {
+        "before_ns_per_op": 452.5,
+        "after_ns_per_op": 361.0,
+        "speedup": 1.253
+      },
+      "stateful decode-owned": {
+        "before_ns_per_op": 483.0,
+        "after_ns_per_op": 387.5,
+        "speedup": 1.246
+      },
+      "stateful roundtrip": {
+        "before_ns_per_op": 512.5,
+        "after_ns_per_op": 495.5,
+        "speedup": 1.034
+      },
+      "stateless roundtrip": {
+        "before_ns_per_op": 1172.0,
+        "after_ns_per_op": 1123.0,
+        "speedup": 1.044
+      },
+      "encode-only": {
+        "before_ns_per_op": 250.0,
+        "after_ns_per_op": 256.0,
+        "speedup": 0.977
+      },
+      "encoder table churn": {
+        "before_ns_per_insert": 265.5,
+        "after_ns_per_insert": 267.0,
+        "speedup": 0.994
+      },
+      "decoder table churn": {
+        "before_ns_per_insert": 49.0,
+        "after_ns_per_insert": 50.0,
+        "speedup": 0.98
+      }
+    },
+    "whole_benchmark_perf": {
+      "command": "perf stat -e instructions,cycles taskset -c 0 <bench-http2-hpack> --iterations=20000 --samples=3 --warmup=1",
+      "before_instructions": 5145297541,
+      "after_instructions": 4717653117,
+      "instructions_delta": -8.3,
+      "before_cycles": 1386212821,
+      "after_cycles": 1248705963,
+      "cycles_delta": -9.9
+    }
+  },
+  "qpack_decode_once_benchmark": {
+    "command": "taskset -c 0 <bench-http3-qpack> --iterations=20000 --samples=5 --warmup=1",
+    "pairs": 8,
+    "order": "alternating before/after",
+    "before_sha256": "78f6dfa76980c4d06e1000cd6d542e01139b8954d53e30646262cbf0eba42947",
+    "after_sha256": "54f4837cc5e8ea850e275ebf26d5cab17bf04f3e3ddcbeaca275832144a2a8df",
+    "results": {
+      "32-field encode": {
+        "before_ns_per_block": 723.0,
+        "after_ns_per_block": 725.0,
+        "speedup": 0.997
+      },
+      "512-reference encode": {
+        "before_ns_per_block": 9354.0,
+        "after_ns_per_block": 9309.0,
+        "speedup": 1.005
+      },
+      "dynamic table churn": {
+        "before_ns_per_insert": 854.0,
+        "after_ns_per_insert": 858.5,
+        "speedup": 0.995
+      },
+      "owned dynamic decode": {
+        "before_ns_per_block": 518.0,
+        "after_ns_per_block": 515.0,
+        "speedup": 1.006
+      }
+    },
+    "baseline": "HEAD hpack_huffman.zig (7ab37721f5329ec3c8ee0193b50665c42e24b875b419a9b77427aef84fa7b88a); the 12-bit table and decode-once changes are both uncommitted, so this compares the complete Huffman series against the original bit-by-bit decoder",
+    "note": "QPACK keeps the exact-length two-pass path, so this is a neutrality check for the whole Huffman series rather than only the decode-once follow-up."
+  },
+  "qpack_benchmark": {
+    "command": "taskset -c 0 <bench-http3-qpack> --iterations=20000 --samples=5",
+    "pairs": 8,
+    "order": "alternating before/after",
+    "results": {
+      "32-field encode": {
+        "before_ns_per_block": 720.0,
+        "after_ns_per_block": 723.5,
+        "speedup": 0.995
+      },
+      "512-reference encode": {
+        "before_ns_per_block": 9315.5,
+        "after_ns_per_block": 9345.5,
+        "speedup": 0.997
+      },
+      "dynamic table churn": {
+        "before_ns_per_insert": 849.5,
+        "after_ns_per_insert": 852.5,
+        "speedup": 0.997
+      },
+      "owned dynamic decode": {
+        "before_ns_per_block": 515.0,
+        "after_ns_per_block": 512.5,
+        "speedup": 1.005
+      }
+    }
+  },
+  "grpc_shared_benchmark": {
+    "command": "taskset -c 0 <bench-grpc-shared> --mode=<mode> --payload=1024 --warmup=100 --iterations=2000",
+    "pairs": 8,
+    "order": "alternating before/after",
+    "results": {
+      "persistent": {
+        "before_ns_per_roundtrip": 14258.5,
+        "after_ns_per_roundtrip": 14263.5,
+        "speedup": 0.9996
+      },
+      "calls": {
+        "before_ns_per_roundtrip": 48786.5,
+        "after_ns_per_roundtrip": 48038.0,
+        "speedup": 1.0156
+      }
+    }
+  },
+  "tests": {
+    "focused": {
+      "command": "zig build test-lib -Dtest-filter=huffman -Dtest-filter=hpack -Dtest-filter=qpack",
+      "passed": 265,
+      "total": 265
+    },
+    "protocol": {
+      "command": "zig build test-lib -Dtest-filter=http2 -Dtest-filter=http3 -Dtest-filter=grpc",
+      "status": "passed"
+    },
+    "fuzz_replay": {
+      "command": "zig build fuzz-parsers fuzz-stateful",
+      "passed": 4,
+      "total": 4
+    },
+    "connection_fuzz": {
+      "command": "zig build fuzz-http2-connection fuzz-http2-tls-connection fuzz-http3-connection",
+      "passed": 9,
+      "total": 9
+    },
+    "full_library": {
+      "command": "zig build test-lib --summary all",
+      "passed": 6771,
+      "total": 6771,
+      "note": "run with isolated build caches after the decode-once change; the project cache was blocked by concurrent host builds"
+    },
+    "full_suite": {
+      "command": "zig build test -j1 --summary all",
+      "steps_passed": 186,
+      "steps_total": 189,
+      "tests_passed": 6959,
+      "tests_total": 6962,
+      "failed": [
+        "fuzz-mqtt-tls-bridge-qos2: three subscriber-connect or incoming-PUBLISH timeouts under host load; the same target passed 3/3 in isolation immediately after the gate",
+        "interop-webtransport-socks5: python peer command failed under host load; the same target passed immediately after the gate"
+      ]
+    }
+  },
+  "interop": {
+    "http_external_clients": {
+      "command": "zig build interop-http-external-clients",
+      "status": "passed",
+      "peers": "curl 8.5.0 (nghttp2 1.59.0) and nghttp2 1.68.1 clients against netz, plus netz h2 against nghttpd; cleartext and certificate-verified TLS, multiplexed body/trailer traffic",
+      "note": "validates the table-driven HPACK Huffman decoder and encoder against independent HTTP/2 peers; re-run after the decode-once and encode-once changes and passed again"
+    },
+    "http3_qpack_quic_zig": {
+      "command": "zig build interop-http3-qpack-quic-zig",
+      "status": "passed",
+      "note": "quic-zig decoded a netz speculative QPACK field section"
+    },
+    "http3_quic_go": {
+      "command": "GO_BIN=/home/passchaos/.cache/netz-go/go/bin/go zig build interop-http3-quic-go",
+      "status": "passed",
+      "note": "QUIC v1 and v2 peer/cancel/redirect/pool/informational matrix. The fixture's go.mod requires Go 1.24 and the script sets GOTOOLCHAIN=local; the host default is go1.22.2 and cannot download a toolchain, so the gate was run with a locally extracted go1.24.7. Both QUIC versions passed."
+    }
+  },
+  "notes": "The earlier mask-loop/current-node rewrite without a table regressed decode by about 1.3x and remains recorded under 'Rejected Huffman loop rewrite (2026-11-08)' in docs/benchmark-baseline.md. A 13-bit root table was also measured and rejected: doubling the table to 8,192 entries regressed decode-only/into/owned by about 6% (0.938-0.939x) and stateless roundtrip by 2.6% (0.974x), so 12 bits remains the retained configuration. The table-driven change is retained because it wins every HPACK decode scenario while encode and table-churn remain neutral. A 20,000-input differential test compares the new decoder's decoded length, exact output, and error result against the original bit-by-bit implementation on random bytes, including invalid prefixes and padding. The QPACK dynamic-reference benchmark is neutral (0.995-1.005x) because its block is dominated by dynamic references rather than Huffman literals; the shared decoder still benefits literal-heavy QPACK field sections. The end-to-end gRPC SharedChannel benchmark is neutral in persistent mode (0.9996x, repeated headers are dynamically indexed) and 1.6% faster in per-call mode (1.0156x), where more header blocks are decoded. The root table adds about 22 KiB to the benchmark binary. The full library suite passed 6768/6768 before the final two test-only additions, and the HTTP/2/HTTP/3 connection fuzz replays passed 9/9. The complete `zig build test -j1` gate passed 186/189 steps and 6959/6962 tests; the three failed tests were TLS MQTT QoS2 timeouts and the WebTransport SOCKS5 step, and both focused gates passed immediately in isolation (TLS QoS2 3/3, WebTransport SOCKS5 passed), so the failures are host-load sensitivity. Coverage-guided `--fuzz` runs could not start on this host because the Zig fuzzer reported `corrupted coverage file ... pcs_len was zero` for both fuzz-parsers and fuzz-quic-wire, including with fresh cache directories; bounded replay mode passed, and the same failure is independent of this change. Independent peer validation of the retained decoder passed in all three external gates: curl/nghttp2 HTTP/2 (cleartext and TLS), quic-zig QPACK, and the full quic-go HTTP/3 QUIC v1/v2 matrix. The quic-go gate needs Go 1.24 because its fixture pins `go 1.24` and the script forces `GOTOOLCHAIN=local`; the host default go1.22.2 cannot download a toolchain, so the gate was run with a locally extracted go1.24.7. The single-pass string decode then removed the separate Huffman length walk from all three HPACK decode shapes. Eight alternating fixed-binary pairs improved decode-only 515.0 -> 420.0 ns/op (1.226x), decode-into 452.5 -> 361.0 (1.253x), and decode-owned 483.0 -> 387.5 (1.246x), while the stateful and stateless roundtrips improved 3.4% and 4.4%. The encode-only path is unchanged; its 250.0 -> 256.0 ns/op delta is attributed to code layout because the encodeBlock symbol moved by 224 bytes between these binaries, and whole-benchmark instructions and cycles fell 8.3% and 9.9%. QPACK stayed neutral (0.995-1.006x) because it still uses the exact-length path. The caller-buffer decoder keeps its no-allocation-after-limit contract: the scratch pass validates without allocating and only retained fields allocate. The bounded encoder checks every write, so the scratch size is a safety bound rather than an unchecked assertion. QPACK keeps its existing exact-length plan path; its benchmark is dominated by dynamic references.",
+  "source_sha256": {
+    "src/http2/mod.zig": "d666a605f7f8a96a3a1a65c50aa34ed97aa198e9e2487ba2f31ae43d4ed66af5",
+    "src/internal/hpack_huffman.zig": "df4236f92fe485ae6a7bff8346991f56949381eefb3267dea53059062fd11463"
+  },
+  "encode_once_benchmark": {
+    "command": "taskset -c 0 <bench-http2-hpack> --iterations=20000 --samples=5 --warmup=1",
+    "pairs": 8,
+    "order": "alternating before/after",
+    "before_sha256": "e6d7d1de6a08995bfa6c33684c9709704f671bcf4ef825179d45607e0ef357c2",
+    "after_sha256": "09204f956d27e6132053af11e4f81f1dfd8b18fe44169d8b1f2e4f2b2c660edb",
+    "results": {
+      "encode-only": {
+        "before_ns_per_op": 255.5,
+        "after_ns_per_op": 249.0,
+        "speedup": 1.026
+      },
+      "stateful decode-only": {
+        "before_ns_per_op": 412.0,
+        "after_ns_per_op": 411.0,
+        "speedup": 1.002
+      },
+      "stateful decode-into": {
+        "before_ns_per_op": 354.0,
+        "after_ns_per_op": 356.0,
+        "speedup": 0.994
+      },
+      "stateful decode-owned": {
+        "before_ns_per_op": 384.5,
+        "after_ns_per_op": 383.5,
+        "speedup": 1.003
+      },
+      "stateful roundtrip": {
+        "before_ns_per_op": 488.0,
+        "after_ns_per_op": 482.0,
+        "speedup": 1.012
+      },
+      "stateless roundtrip": {
+        "before_ns_per_op": 1097.5,
+        "after_ns_per_op": 1061.5,
+        "speedup": 1.034
+      }
+    }
+  }
+}

@@ -26,7 +26,71 @@ const Rule = struct {
     filter: []const u8,
     access: Access,
     pattern: bool,
+    /// End offset of each filter level, computed once at parse time. ACL
+    /// authorization checks every rule for each publish/delivery, so
+    /// re-splitting the same filter on every check is pure repeated work.
+    /// Filters deeper than this inline bound set `levels_complete = false`
+    /// and use the original split-based matcher.
+    level_ends: [8]usize = undefined,
+    level_count: u8 = 0,
+    levels_complete: bool = true,
 };
+
+fn initRule(
+    username: ?[]const u8,
+    filter: []const u8,
+    access: Access,
+    pattern: bool,
+) Rule {
+    var rule = Rule{
+        .username = username,
+        .filter = filter,
+        .access = access,
+        .pattern = pattern,
+    };
+    var start: usize = 0;
+    while (true) {
+        const end = std.mem.indexOfScalarPos(u8, filter, start, '/') orelse
+            filter.len;
+        if (rule.level_count == rule.level_ends.len) {
+            rule.levels_complete = false;
+            rule.level_count = 0;
+            return rule;
+        }
+        rule.level_ends[rule.level_count] = end;
+        rule.level_count += 1;
+        if (end == filter.len) break;
+        start = end + 1;
+    }
+    return rule;
+}
+
+/// Topic level ends computed once per authorization. Every rule check uses
+/// the same topic, so re-splitting it for each rule is pure repeated work.
+const TopicLevels = struct {
+    ends: [8]usize = undefined,
+    count: u8 = 0,
+    complete: bool = true,
+};
+
+fn computeTopicLevels(topic: []const u8) TopicLevels {
+    var levels = TopicLevels{};
+    var start: usize = 0;
+    while (true) {
+        const end = std.mem.indexOfScalarPos(u8, topic, start, '/') orelse
+            topic.len;
+        if (levels.count == levels.ends.len) {
+            levels.complete = false;
+            levels.count = 0;
+            break;
+        }
+        levels.ends[levels.count] = end;
+        levels.count += 1;
+        if (end == topic.len) break;
+        start = end + 1;
+    }
+    return levels;
+}
 
 pub const Identity = struct {
     client_id: []const u8,
@@ -55,7 +119,15 @@ pub const File = struct {
         identity: Identity,
         topic: []const u8,
     ) bool {
-        if (decision(self.rules, operation, identity, topic, false)) |allowed| {
+        const levels = computeTopicLevels(topic);
+        if (decision(
+            self.rules,
+            operation,
+            identity,
+            topic,
+            &levels,
+            false,
+        )) |allowed| {
             return allowed;
         }
         if (!self.has_patterns) return false;
@@ -69,8 +141,14 @@ pub const File = struct {
         {
             return false;
         }
-        return decision(self.rules, operation, identity, topic, true) orelse
-            false;
+        return decision(
+            self.rules,
+            operation,
+            identity,
+            topic,
+            &levels,
+            true,
+        ) orelse false;
     }
 };
 
@@ -177,12 +255,12 @@ pub fn parse(allocator: std.mem.Allocator, source: []const u8) Error!File {
         try mqtt.validateTopicFilter(filter);
         if (pattern and !validPattern(filter)) return error.InvalidPattern;
         if (rules.items.len == max_rules) return error.TooManyRules;
-        try rules.append(allocator, .{
-            .username = if (pattern) null else current_user,
-            .filter = filter,
-            .access = access,
-            .pattern = pattern,
-        });
+        try rules.append(allocator, initRule(
+            if (pattern) null else current_user,
+            filter,
+            access,
+            pattern,
+        ));
         has_patterns = has_patterns or pattern;
     }
     return .{
@@ -268,6 +346,7 @@ fn decision(
     operation: Operation,
     identity: Identity,
     topic: []const u8,
+    levels: *const TopicLevels,
     pattern: bool,
 ) ?bool {
     for (rules) |rule| {
@@ -276,7 +355,7 @@ fn decision(
         {
             continue;
         }
-        if (topicMatchesRule(rule, identity, topic)) return false;
+        if (topicMatchesRule(rule, identity, topic, levels)) return false;
     }
     for (rules) |rule| {
         if (rule.pattern != pattern or rule.access == .deny or
@@ -284,7 +363,7 @@ fn decision(
         {
             continue;
         }
-        if (topicMatchesRule(rule, identity, topic)) return true;
+        if (topicMatchesRule(rule, identity, topic, levels)) return true;
     }
     return null;
 }
@@ -298,9 +377,58 @@ fn scopeMatches(rule: Rule, identity: Identity) bool {
     return identity.username == null;
 }
 
-fn topicMatchesRule(rule: Rule, identity: Identity, topic: []const u8) bool {
+fn topicMatchesRule(
+    rule: Rule,
+    identity: Identity,
+    topic: []const u8,
+    levels: *const TopicLevels,
+) bool {
     if (topic.len == 0) return false;
     if (topic[0] == '$' and rule.filter[0] != '$') return false;
+    if (!rule.levels_complete or !levels.complete) {
+        return topicMatchesRuleSplit(rule, identity, topic);
+    }
+
+    var filter_start: usize = 0;
+    var topic_exhausted = false;
+    var index: usize = 0;
+    while (index < rule.level_count) : (index += 1) {
+        const filter_end = rule.level_ends[index];
+        const filter_level = rule.filter[filter_start..filter_end];
+        if (std.mem.eql(u8, filter_level, "#")) return true;
+        if (topic_exhausted or index >= @as(usize, levels.count)) {
+            return false;
+        }
+
+        const topic_start = if (index == 0)
+            0
+        else
+            levels.ends[index - 1] + 1;
+        const topic_end = levels.ends[index];
+        const topic_level = topic[topic_start..topic_end];
+        if (!std.mem.eql(u8, filter_level, "+")) {
+            if (rule.pattern and std.mem.eql(u8, filter_level, "%c")) {
+                if (!std.mem.eql(u8, topic_level, identity.client_id)) {
+                    return false;
+                }
+            } else if (rule.pattern and
+                std.mem.eql(u8, filter_level, "%u"))
+            {
+                const username = identity.username orelse return false;
+                if (!std.mem.eql(u8, topic_level, username)) return false;
+            } else if (!std.mem.eql(u8, filter_level, topic_level)) {
+                return false;
+            }
+        }
+        if (topic_end == topic.len) {
+            topic_exhausted = true;
+        }
+        filter_start = filter_end + 1;
+    }
+    return topic_exhausted;
+}
+
+fn topicMatchesRuleSplit(rule: Rule, identity: Identity, topic: []const u8) bool {
     var filter_levels = std.mem.splitScalar(u8, rule.filter, '/');
     var topic_levels = std.mem.splitScalar(u8, topic, '/');
     while (filter_levels.next()) |filter_level| {

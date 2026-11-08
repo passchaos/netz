@@ -1,4 +1,5 @@
 const std = @import("std");
+const test_socket = @import("test_socket.zig");
 const builtin = @import("builtin");
 const stream_io = @import("stream_io.zig");
 
@@ -29,7 +30,7 @@ const Observer = struct {
 };
 
 fn dummyStream() std.Io.net.Stream {
-    return .{ .socket = .{ .handle = 0, .address = .{ .ip4 = .loopback(0) } } };
+    return test_socket.stream();
 }
 
 test "stream timed socket writer preserves prefix before a network error" {
@@ -102,6 +103,7 @@ test "stream timed socket writer preserves cancellation after committed progress
 }
 
 test "stream timed socket writer reports an abortive TCP peer reset" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
     if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();

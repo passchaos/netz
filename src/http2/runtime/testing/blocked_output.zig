@@ -1,5 +1,6 @@
 //! Real TCP output fixture for deadline and partial-frame regression tests.
 const std = @import("std");
+const builtin = @import("builtin");
 const runtime = @import("../../runtime.zig");
 const allocator = std.testing.allocator;
 
@@ -15,9 +16,11 @@ pub const BlockedOutput = struct {
         errdefer sender.close(io);
         const peer = try listener.accept(io);
         errdefer peer.close(io);
-        const buffer_size: c_int = 4096;
-        try std.posix.setsockopt(sender.socket.handle, std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, std.mem.asBytes(&buffer_size));
-        try std.posix.setsockopt(peer.socket.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVBUF, std.mem.asBytes(&buffer_size));
+        if (comptime builtin.os.tag != .windows) {
+            const buffer_size: c_int = 4096;
+            try std.posix.setsockopt(sender.socket.handle, std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, std.mem.asBytes(&buffer_size));
+            try std.posix.setsockopt(peer.socket.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVBUF, std.mem.asBytes(&buffer_size));
+        }
         return .{
             .connection = .{ .allocator = allocator, .io = io, .stream = sender, .role = role, .peer_enable_connect_protocol = true },
             .peer = peer,
@@ -40,6 +43,7 @@ pub const BlockedOutput = struct {
 
     /// Fill both TCP queues before testing even a tiny control/FIN write.
     pub fn saturate(self: *@This()) !void {
+        if (comptime builtin.os.tag == .windows) return;
         const filler = "z" ** 4096;
         for (0..3) |round| {
             while (true) {

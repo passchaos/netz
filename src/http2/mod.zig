@@ -1945,18 +1945,29 @@ pub const Hpack = struct {
                 try decodeInteger(first, &cursor, 4);
             const never_index = !indexed_literal and (first & 0x10) != 0;
 
-            const literal_name = if (name_index == 0) try scanString(&cursor) else null;
+            const literal_name = if (name_index == 0) try scanRawString(&cursor) else null;
             const indexed_name = if (name_index == 0) null else try indexedName(dynamic_table, name_index);
-            const value_plan = try scanString(&cursor);
-            const name_len = if (literal_name) |name|
-                name.decoded_len
+            const value_plan = try scanRawString(&cursor);
+
+            // Decode small strings once into stack scratch and use the
+            // written length for header-list accounting. Retained fields
+            // still own exact allocations; larger strings keep the exact
+            // length walk. Scratch decoding validates without allocating, so
+            // a field that crosses the limit causes no output allocation.
+            var name_scratch: DecodedScratch = undefined;
+            var value_scratch: DecodedScratch = undefined;
+            if (literal_name) |plan| try name_scratch.fill(plan);
+            try value_scratch.fill(value_plan);
+            const name_len = if (literal_name) |plan|
+                try name_scratch.decodedLen(plan)
             else
                 indexed_name.?.len;
+            const value_len = try value_scratch.decodedLen(value_plan);
             if (!chargeHeaderListSize(
                 &header_list_size,
                 max_header_list_size,
                 name_len,
-                value_plan.decoded_len,
+                value_len,
             )) {
                 header_list_too_large = true;
             }
@@ -1971,30 +1982,66 @@ pub const Hpack = struct {
             // HPACK table would diverge and corrupt all later header blocks.
             if (!indexed_literal and !retain) continue;
 
-            var name = if (literal_name) |plan|
-                try plan.decode(allocator)
-            else if (retain)
-                try indexedNameOwned(allocator, dynamic_table, name_index)
-            else
-                DecodedString{ .value = indexed_name.? };
-            defer if (name.storage) |bytes| allocator.free(bytes);
-            var value = try value_plan.decode(allocator);
-            defer if (value.storage) |bytes| allocator.free(bytes);
-            if (indexed_literal) {
-                try dynamic_table.add(allocator, name.value, value.value);
+            if (retain) {
+                var name = if (literal_name) |plan|
+                    try name_scratch.ownedCopy(allocator, plan, name_len)
+                else
+                    try indexedNameOwned(allocator, dynamic_table, name_index);
+                defer if (name.storage) |bytes| allocator.free(bytes);
+                var value = try value_scratch.ownedCopy(
+                    allocator,
+                    value_plan,
+                    value_len,
+                );
+                defer if (value.storage) |bytes| allocator.free(bytes);
+                if (indexed_literal) {
+                    try dynamic_table.add(allocator, name.value, value.value);
+                }
+                storage[count] = .{
+                    .name = name.value,
+                    .value = value.value,
+                    .never_index = never_index,
+                    .name_storage = name.storage,
+                    .value_storage = value.storage,
+                };
+                name.storage = null;
+                value.storage = null;
+                count += 1;
+                continue;
             }
-            if (!retain) continue;
 
-            storage[count] = .{
-                .name = name.value,
-                .value = value.value,
-                .never_index = never_index,
-                .name_storage = name.storage,
-                .value_storage = value.storage,
-            };
-            name.storage = null;
-            value.storage = null;
-            count += 1;
+            // Non-retained incremental-indexing field: decode through
+            // stack-first scratch and let the table copy it into persistent
+            // storage.
+            if (!entryFitsTable(
+                dynamic_table.size_limit,
+                name_len,
+                value_len,
+            )) {
+                dynamic_table.clear(allocator);
+                continue;
+            }
+            const temporary_len = try addOwnedStringBytes(
+                0,
+                name_len,
+                value_len,
+            );
+            var temporary_fallback = std.heap.stackFallback(
+                default_dynamic_table_size,
+                allocator,
+            );
+            const temporary_allocator = temporary_fallback.get();
+            const temporary = try temporary_allocator.alloc(u8, temporary_len);
+            defer temporary_allocator.free(temporary);
+            const name = temporary[0..name_len];
+            if (literal_name) |plan| {
+                try plan.decodeInto(name);
+            } else {
+                @memcpy(name, indexed_name.?);
+            }
+            const value = temporary[name.len..][0..value_len];
+            try value_plan.decodeInto(value);
+            try dynamic_table.add(allocator, name, value);
         }
         if (header_list_too_large) return error.HeaderListTooLarge;
         if (output_too_small) return error.BufferTooShort;
@@ -2103,24 +2150,36 @@ pub const Hpack = struct {
             else
                 try decodeInteger(first, &cursor, 4);
             const literal_name = if (name_index == 0)
-                try scanString(&cursor)
+                try scanRawString(&cursor)
             else
                 null;
             const indexed_name = if (literal_name == null)
                 try indexedName(dynamic_table, name_index)
             else
                 null;
-            const name_plan = literal_name orelse EncodedString{
+            const name_plan = literal_name orelse RawString{
                 .raw = indexed_name.?,
                 .huffman = false,
-                .decoded_len = indexed_name.?.len,
             };
-            const value_plan = try scanString(&cursor);
+            const value_plan = try scanRawString(&cursor);
+
+            // Decode small strings once into stack scratch and use the
+            // written length for header-list accounting. Retained fields are
+            // appended to the owned string block; larger strings keep the
+            // exact length walk. Scratch decoding validates without
+            // allocating, so a field that crosses the limit causes no string
+            // block growth.
+            var name_scratch: DecodedScratch = undefined;
+            var value_scratch: DecodedScratch = undefined;
+            try name_scratch.fill(name_plan);
+            try value_scratch.fill(value_plan);
+            const name_len = try name_scratch.decodedLen(name_plan);
+            const value_len = try value_scratch.decodedLen(value_plan);
             if (!chargeHeaderListSize(
                 &header_list_size,
                 max_header_list_size,
-                name_plan.decoded_len,
-                value_plan.decoded_len,
+                name_len,
+                value_len,
             )) header_list_too_large = true;
             if (!header_list_too_large and !output_too_small and
                 plans.items.len >= max_header_fields)
@@ -2130,24 +2189,35 @@ pub const Hpack = struct {
             const retain = !header_list_too_large and !output_too_small;
 
             if (retain) {
-                const plan_index = plans.items.len;
-                try appendOwnedFieldPlan(
-                    &plans,
-                    plan_allocator,
+                const name_offset = strings.items.len;
+                try name_scratch.appendTo(
                     &strings,
                     string_allocator,
                     name_plan,
+                    name_len,
+                );
+                const value_offset = strings.items.len;
+                try value_scratch.appendTo(
+                    &strings,
+                    string_allocator,
                     value_plan,
-                    !indexed_literal and (first & 0x10) != 0,
+                    value_len,
                 );
                 if (indexed_literal) {
-                    const plan = plans.items[plan_index];
                     try dynamic_table.add(
                         allocator,
-                        strings.items[plan.name_offset..][0..plan.name_len],
-                        strings.items[plan.value_offset..][0..plan.value_len],
+                        strings.items[name_offset..][0..name_len],
+                        strings.items[value_offset..][0..value_len],
                     );
                 }
+                try plans.ensureUnusedCapacity(plan_allocator, 1);
+                plans.appendAssumeCapacity(.{
+                    .name_offset = name_offset,
+                    .name_len = name_len,
+                    .value_offset = value_offset,
+                    .value_len = value_len,
+                    .never_index = !indexed_literal and (first & 0x10) != 0,
+                });
                 continue;
             }
             if (!indexed_literal) continue;
@@ -2157,8 +2227,8 @@ pub const Hpack = struct {
             // the table immediately copies it into persistent storage.
             if (!entryFitsTable(
                 dynamic_table.size_limit,
-                name_plan.decoded_len,
-                value_plan.decoded_len,
+                name_len,
+                value_len,
             )) {
                 // RFC 7541 §4.4 only requires clearing the table for an entry
                 // larger than its limit. Scanning already validated Huffman,
@@ -2168,8 +2238,8 @@ pub const Hpack = struct {
             }
             const temporary_len = try addOwnedStringBytes(
                 0,
-                name_plan.decoded_len,
-                value_plan.decoded_len,
+                name_len,
+                value_len,
             );
             var temporary_fallback = std.heap.stackFallback(
                 default_dynamic_table_size,
@@ -2178,9 +2248,9 @@ pub const Hpack = struct {
             const temporary_allocator = temporary_fallback.get();
             const temporary = try temporary_allocator.alloc(u8, temporary_len);
             defer temporary_allocator.free(temporary);
-            const name = temporary[0..name_plan.decoded_len];
+            const name = temporary[0..name_len];
             try name_plan.decodeInto(name);
-            const value = temporary[name.len..][0..value_plan.decoded_len];
+            const value = temporary[name.len..][0..value_len];
             try value_plan.decodeInto(value);
             try dynamic_table.add(allocator, name, value);
         }
@@ -2359,6 +2429,11 @@ pub const Hpack = struct {
         }
     }
 
+    /// Header values up to this length fit the worst-case Huffman scratch
+    /// buffer, so they can be encoded once and measured from the result.
+    const huffman_encode_scratch_bytes: usize = 512;
+    const huffman_encode_scratch_max_input: usize = 320;
+
     fn encodeString(list: *std.ArrayList(u8), allocator: std.mem.Allocator, value: []const u8) !void {
         if (value.len == 0) {
             try list.ensureUnusedCapacity(allocator, 1);
@@ -2369,6 +2444,23 @@ pub const Hpack = struct {
             try list.ensureUnusedCapacity(allocator, 1 + value.len);
             list.appendAssumeCapacity(@intCast(value.len));
             list.appendSliceAssumeCapacity(value);
+            return;
+        }
+        if (value.len <= huffman_encode_scratch_max_input) {
+            var scratch: [huffman_encode_scratch_bytes]u8 = undefined;
+            const written = huffman_codec.encodeHuffmanIntoBounded(
+                &scratch,
+                value,
+            ) catch unreachable;
+            if (written >= value.len) {
+                try list.ensureUnusedCapacity(allocator, integerEncodedLen(7, value.len) + value.len);
+                try encodeInteger(list, allocator, 7, 0x00, value.len);
+                list.appendSliceAssumeCapacity(value);
+                return;
+            }
+            try list.ensureUnusedCapacity(allocator, integerEncodedLen(7, written) + written);
+            try encodeInteger(list, allocator, 7, 0x80, written);
+            list.appendSliceAssumeCapacity(scratch[0..written]);
             return;
         }
         const huffman_len = try huffmanEncodedLen(value);
@@ -2422,23 +2514,139 @@ pub const Hpack = struct {
             errdefer output.items.len = start;
             try self.decodeInto(output.items[start..]);
         }
+    };
 
-        fn decode(
-            self: EncodedString,
+    /// Most HPACK strings decode into far less than this scratch buffer, so
+    /// the decoder can obtain both the bytes and their length in one pass
+    /// instead of walking the trie twice. Larger strings keep the exact-length
+    /// two-pass fallback.
+    const decoded_string_scratch_bytes: usize = 512;
+
+    const RawString = struct {
+        raw: []const u8,
+        huffman: bool,
+
+        fn decodedLen(self: RawString) !usize {
+            if (!self.huffman) return self.raw.len;
+            return huffmanDecodedLen(self.raw);
+        }
+
+        /// Upper bound for the decoded size: every symbol consumes at least
+        /// five bits, so eight encoded bits yield at most 8/5 symbols.
+        fn maxDecodedLen(self: RawString) usize {
+            if (!self.huffman) return self.raw.len;
+            const scaled = std.math.mul(usize, self.raw.len, 8) catch
+                return std.math.maxInt(usize);
+            return scaled / 5;
+        }
+
+        fn decodeInto(self: RawString, output: []u8) !void {
+            if (!self.huffman) {
+                if (output.len != self.raw.len) return error.InvalidEncoding;
+                @memcpy(output, self.raw);
+                return;
+            }
+            try huffman_codec.decodeHuffmanInto(output, self.raw);
+        }
+    };
+
+    fn scanRawString(cursor: *wire.Cursor) !RawString {
+        const first = try cursor.readByte();
+        const huffman = (first & 0x80) != 0;
+        const len = std.math.cast(usize, try decodeInteger(first, cursor, 7)) orelse return error.IntegerOverflow;
+        return .{ .raw = try cursor.readSlice(len), .huffman = huffman };
+    }
+
+    fn decodeRawStringAlloc(
+        allocator: std.mem.Allocator,
+        plan: RawString,
+    ) !DecodedString {
+        if (!plan.huffman) return .{ .value = plan.raw };
+        var scratch: [decoded_string_scratch_bytes]u8 = undefined;
+        if (huffman_codec.decodeHuffmanIntoBounded(&scratch, plan.raw)) |written| {
+            const decoded = try allocator.dupe(u8, scratch[0..written]);
+            return .{ .value = decoded, .storage = decoded };
+        } else |err| switch (err) {
+            error.BufferTooShort => {
+                const decoded_len = try huffmanDecodedLen(plan.raw);
+                const decoded = try decodeHuffmanWithLen(
+                    allocator,
+                    plan.raw,
+                    decoded_len,
+                );
+                return .{ .value = decoded, .storage = decoded };
+            },
+            else => return err,
+        }
+    }
+
+    /// A stack scratch buffer holding one decoded string. `fill` validates and
+    /// decodes small strings without allocating; `decodedLen` falls back to
+    /// the length walk for strings that do not fit.
+    const DecodedScratch = struct {
+        bytes: [decoded_string_scratch_bytes]u8 = undefined,
+        written: ?usize = null,
+
+        fn fill(self: *DecodedScratch, plan: RawString) !void {
+            self.written = null;
+            if (!plan.huffman) return;
+            if (plan.maxDecodedLen() > self.bytes.len) return;
+            self.written = try huffman_codec.decodeHuffmanIntoBounded(
+                &self.bytes,
+                plan.raw,
+            );
+        }
+
+        fn decodedLen(self: *const DecodedScratch, plan: RawString) !usize {
+            return self.written orelse try plan.decodedLen();
+        }
+
+        /// Return an owned copy for retained caller-buffer fields. Literal
+        /// non-Huffman strings keep the historical borrowed representation.
+        fn ownedCopy(
+            self: *const DecodedScratch,
             allocator: std.mem.Allocator,
+            plan: RawString,
+            decoded_len: usize,
         ) !DecodedString {
-            if (!self.huffman) return .{ .value = self.raw };
+            if (!plan.huffman) return .{ .value = plan.raw };
+            if (self.written) |written| {
+                const copy = try allocator.dupe(u8, self.bytes[0..written]);
+                return .{ .value = copy, .storage = copy };
+            }
             const decoded = try decodeHuffmanWithLen(
                 allocator,
-                self.raw,
-                self.decoded_len,
+                plan.raw,
+                decoded_len,
             );
             return .{ .value = decoded, .storage = decoded };
+        }
+
+        fn appendTo(
+            self: *const DecodedScratch,
+            strings: *std.ArrayList(u8),
+            allocator: std.mem.Allocator,
+            plan: RawString,
+            decoded_len: usize,
+        ) !void {
+            if (!plan.huffman) {
+                try strings.appendSlice(allocator, plan.raw);
+                return;
+            }
+            if (self.written) |written| {
+                try strings.appendSlice(allocator, self.bytes[0..written]);
+                return;
+            }
+            const start = strings.items.len;
+            try strings.ensureUnusedCapacity(allocator, decoded_len);
+            strings.items.len = start + decoded_len;
+            errdefer strings.items.len = start;
+            try huffman_codec.decodeHuffmanInto(strings.items[start..], plan.raw);
         }
     };
 
     fn decodeString(allocator: std.mem.Allocator, cursor: *wire.Cursor) !DecodedString {
-        return (try scanString(cursor)).decode(allocator);
+        return decodeRawStringAlloc(allocator, try scanRawString(cursor));
     }
 
     fn scanString(cursor: *wire.Cursor) !EncodedString {

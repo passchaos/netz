@@ -2,7 +2,7 @@
 const std = @import("std");
 const http1 = @import("../mod.zig");
 const wire = @import("../../internal/wire.zig");
-const Lines = std.mem.SplitIterator(u8, .sequence);
+const Lines = http1.LineIterator;
 
 pub fn Parser(comptime Context: type) type {
     return struct {

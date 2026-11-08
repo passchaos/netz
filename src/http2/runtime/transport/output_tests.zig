@@ -1,4 +1,5 @@
 const std = @import("std");
+const test_socket = @import("../../../internal/test_socket.zig");
 const output = @import("output.zig");
 
 const Tls = struct {
@@ -57,7 +58,7 @@ test "HTTP/2 transport deadline scatter output borrows TCP slices without alloca
     var vtable = delegate.vtable.*;
     vtable.netWrite = Observer.write;
     const io = std.Io{ .userdata = delegate.userdata, .vtable = &vtable };
-    const transport = Transport{ .tcp = .{ .io = io, .stream = .{ .socket = .{ .handle = 0, .address = .{ .ip4 = .loopback(0) } } } } };
+    const transport = Transport{ .tcp = .{ .io = io, .stream = test_socket.stream() } };
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
     var batch: std.ArrayList(u8) = .empty;
     defer batch.deinit(std.testing.allocator);

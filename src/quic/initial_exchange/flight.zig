@@ -913,14 +913,9 @@ fn insertInitialHandshakeCryptoPayload(
         try validateFrameTypeEncoding(frame_type, frame_type_len);
 
         if (frame_type == @intFromEnum(quic.FrameType.padding)) {
-            // Long runs of Initial datagram padding are common.  Skip the
-            // entire run with one library scan instead of looping byte-wise.
-            cursor.pos = std.mem.indexOfNonePos(
-                u8,
-                cursor.buf,
-                cursor.pos,
-                &.{@intFromEnum(quic.FrameType.padding)},
-            ) orelse cursor.buf.len;
+            // Long runs of Initial datagram padding are common. Use the
+            // shared word-at-a-time skip instead of a scalar scan.
+            cursor.pos = quic.skipPadding(cursor.buf, cursor.pos);
             continue;
         }
         if (frame_type == @intFromEnum(quic.FrameType.ping)) continue;

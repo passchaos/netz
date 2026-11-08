@@ -1,0 +1,53 @@
+{
+  "schema": 1,
+  "date": "2026-11-08",
+  "feature": "real-browser protocol interop",
+  "browser": {
+    "product": "Google Chrome",
+    "version": "146.0.7680.164",
+    "user_agent": "HeadlessChrome/146.0.0.0",
+    "launcher_sha256": "a75e953fc0fa6108e4fbe67fc9ab8ff8800b851f914b63504a4e26a431b7b22f",
+    "process_sha256": "5ff9045f25d1e3e8f618ab86235e42a94e68cb9da8bda6d458625fc642adf1d6"
+  },
+  "gates": {
+    "webtransport": {
+      "command": "zig build interop-webtransport-chrome",
+      "result": "passed",
+      "evidence": "CONNECT, DATAGRAM max_datagram_size=1024, bidi, uni, reset=71, stop=72, concurrent_sibling=true, reuse=true, drain-before-close=true, close=77/netz-done",
+      "server_side": "max_datagram_size=1178 oversized_rejected=true, reset=71, stop=72, concurrent_sibling=true, reuse=true, drain-before-close=true, client_io=chromium-network-service server_io=zio-std-io"
+    },
+    "websocket_cleartext": {
+      "command": "zig build interop-websocket-chrome",
+      "result": "passed",
+      "evidence": "scheme=ws, rejected-origin, accepted-origin, subprotocol, compressed-text, binary, ping-pong, close=1001/netz-browser-done"
+    },
+    "websocket_tls": {
+      "command": "zig build interop-websocket-chrome -- --tls",
+      "result": "passed",
+      "evidence": "scheme=wss, rejected-origin, accepted-origin, subprotocol, compressed-text, binary, automatic-pong, close=1001/netz-browser-done"
+    },
+    "grpc_web_http1": {
+      "command": "zig build interop-grpc-web-chrome",
+      "result": "passed",
+      "evidence": "grpc-web-2.1.1, unary binary/text, streaming incremental-text, error UNAUTHENTICATED, details google.rpc.Status, rejectedOrigin=true, protocols=http/1.1"
+    },
+    "grpc_web_h2": {
+      "command": "zig build interop-grpc-web-chrome -- --tls --http2",
+      "result": "passed",
+      "evidence": "grpc-web-2.1.1, unary binary/text, streaming incremental-text, error UNAUTHENTICATED, details google.rpc.Status, rejectedOrigin=true, protocols=h2"
+    }
+  },
+  "tooling_change": "tools/interop/grpc_web_chrome/client.js now defaults to /usr/bin/google-chrome like the WebSocket and WebTransport browser gates; CHROME still overrides the executable.",
+  "blocked_environment": {
+    "firefox": {
+      "status": "not run",
+      "reason": "/usr/bin/firefox is an Ubuntu snap launcher and the firefox snap is not installed; this is an environment limitation, not a protocol result."
+    }
+  },
+  "conclusion": "Chrome 146 passes the WebTransport, WebSocket (ws/wss) and gRPC-Web (HTTP/1.1 and h2) browser gates, including Origin rejection, compression, cancellation codes, session reuse, DATAGRAM size limits and terminal close. The runs also exercise the current HTTP/1 Upgrade parser.",
+  "source_sha256": {
+    "tools/interop/grpc_web_chrome/client.js": "a231f26c4ede285485b4791119e93c2696b05d02921a47c41999364e9e5b516f",
+    "tools/interop/websocket_chrome.sh": "97c2dfbb9c5fd1e29cfb3d8cb299547b132b3a8b6bddf40a2b80c6434a9311aa",
+    "tools/interop/webtransport_chrome.sh": "fa2b239e93e29a0b26167b09ad59c94052b845fce31cf54a8a4537f0edf01b7f"
+  }
+}

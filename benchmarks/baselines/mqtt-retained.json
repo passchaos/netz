@@ -1,0 +1,134 @@
+{
+  "entries": [
+    {
+      "name": "bench-mqtt-retained/exact",
+      "environment_fingerprint": "x86_64/linux/cpu32/ReleaseFast",
+      "samples_ns": [
+        2094763,
+        2085382,
+        2082464,
+        2102316,
+        2083038,
+        2094591,
+        2082384,
+        2076676,
+        2094724,
+        2075114
+      ],
+      "summary": {
+        "count": 10,
+        "min": 2075114,
+        "max": 2102316,
+        "mean": 2087145.2,
+        "stddev": 8485.144333480735,
+        "median": 2084210,
+        "p90": 2095518.3,
+        "p99": 2101636.23
+      }
+    },
+    {
+      "name": "bench-mqtt-retained/wildcard",
+      "environment_fingerprint": "x86_64/linux/cpu32/ReleaseFast",
+      "samples_ns": [
+        70629724,
+        68059259,
+        68113333,
+        73742346,
+        74646621,
+        67989432,
+        67965942,
+        67927486,
+        67904796,
+        67987690
+      ],
+      "summary": {
+        "count": 10,
+        "min": 67904796,
+        "max": 74646621,
+        "mean": 69496662.9,
+        "stddev": 2483941.615679375,
+        "median": 68024345.5,
+        "p90": 73832773.5,
+        "p99": 74565236.25
+      }
+    },
+    {
+      "name": "bench-mqtt-retained/hash",
+      "environment_fingerprint": "x86_64/linux/cpu32/ReleaseFast",
+      "samples_ns": [
+        30278309,
+        30264400,
+        30251372,
+        30299800,
+        43627602,
+        30987748,
+        30144692,
+        30137328,
+        30170067,
+        30949338
+      ],
+      "summary": {
+        "count": 10,
+        "min": 30137328,
+        "max": 43627602,
+        "mean": 31711065.6,
+        "stddev": 3983467.3196339943,
+        "median": 30271354.5,
+        "p90": 32251733.399999995,
+        "p99": 42490015.14
+      }
+    },
+    {
+      "name": "bench-mqtt-retained/selective",
+      "environment_fingerprint": "x86_64/linux/cpu32/ReleaseFast",
+      "samples_ns": [
+        54930150,
+        52945892,
+        52380388,
+        53357328,
+        53183034,
+        52537388,
+        52783401,
+        53103407,
+        52475799,
+        52490529
+      ],
+      "summary": {
+        "count": 10,
+        "min": 52380388,
+        "max": 54930150,
+        "mean": 53018731.6,
+        "stddev": 712458.2184450116,
+        "median": 52864646.5,
+        "p90": 53514610.2,
+        "p99": 54788596.02
+      }
+    },
+    {
+      "name": "bench-mqtt-retained/subtree",
+      "environment_fingerprint": "x86_64/linux/cpu32/ReleaseFast",
+      "samples_ns": [
+        27401816,
+        27274163,
+        27508560,
+        27418799,
+        27335198,
+        27310284,
+        27352496,
+        27407044,
+        27382134,
+        27395095
+      ],
+      "summary": {
+        "count": 10,
+        "min": 27274163,
+        "max": 27508560,
+        "mean": 27378558.9,
+        "stddev": 61868.794660071035,
+        "median": 27388614.5,
+        "p90": 27427775.1,
+        "p99": 27500481.51
+      }
+    }
+  ]
+}

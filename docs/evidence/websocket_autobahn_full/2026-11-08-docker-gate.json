@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "date": "2026-11-08",
+  "head": "working-tree",
+  "subject": "digest-locked Autobahn WebSocket fuzzingclient gate",
+  "status": "passed",
+  "scope": "strict zig build interop-websocket-autobahn gate using the pinned amd64 Docker image on an amd64 host",
+  "image": "crossbario/autobahn-testsuite:25.10.1@sha256:519915fb568b04c9383f70a1c405ae3ff44ab9e35835b085239c258b6fac3074",
+  "command": "zig build interop-websocket-autobahn --summary all",
+  "result": {
+    "steps_passed": 8,
+    "steps_total": 8,
+    "run_seconds": 2400,
+    "exit": 0,
+    "cases": 517,
+    "behavior": {
+      "OK": 514,
+      "INFORMATIONAL": 3
+    },
+    "close_behavior": {
+      "OK": 514,
+      "INFORMATIONAL": 3
+    },
+    "non_ok": [
+      "7.1.6",
+      "7.13.1",
+      "7.13.2"
+    ]
+  },
+  "notes": "The strict report checker verified the exact versioned 25.10.1 manifest: all 517 case IDs, the pinned image digest, the single netz agent, and the expected status baseline. The three non-OK cases are the manifest's allowed close-behavior INFORMATIONAL cases. This run uses the dedicated long-lived zio-std-io echo endpoint with 64 workers and exercises the HTTP/1 Upgrade handshake path, including the 2026-11-08 HTTP/1 parser changes. It supersedes the earlier note that no Docker runtime was available on this host.",
+  "source_sha256": {
+    "tools/interop/websocket_autobahn_server.zig": "289f8c8a946bd403c3d6197d054b2a2e71e4af50a67383fdba0185d30bc113c3",
+    "tools/interop/websocket_autobahn.sh": "6ba6b25ac219603b42b141ab1b60ed60c2358c5404b8bf1d85378fcfc057cfd0",
+    "tools/interop/websocket_autobahn_cases_25_10_1.json": "9b59ffe9db9674792bd3ec66a607059abfc7a2867ad3919a3e6ccfbd8aa1c65a"
+  }
+}

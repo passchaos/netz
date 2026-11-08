@@ -1,4 +1,5 @@
 const std = @import("std");
+const test_socket = @import("../../../../internal/test_socket.zig");
 const http2 = @import("../../../mod.zig");
 const runtime = @import("../../../runtime.zig");
 const budget = @import("../../data_frame_budget.zig");
@@ -69,7 +70,7 @@ fn exercise(mode: Mode) !void {
     var connection = runtime.Connection{
         .io = .{ .userdata = threaded.io().userdata, .vtable = &vtable },
         .allocator = allocator,
-        .stream = .{ .socket = .{ .handle = 0, .address = .{ .ip4 = .loopback(0) } } },
+        .stream = test_socket.stream(),
         .role = .server,
         .last_peer_processed_stream_id = 1,
     };

@@ -1,5 +1,6 @@
 const content_digest = @import("../http/digest.zig");
 const std = @import("std");
+const test_socket = @import("../internal/test_socket.zig");
 const builtin = @import("builtin");
 const http2 = @import("mod.zig");
 const http3 = @import("../http3/mod.zig");
@@ -130,7 +131,10 @@ const requestShouldDefaultContentLength =
 const stripSuccessfulConnectContentLength =
     message_headers.stripSuccessfulConnectContentLength;
 const validateHeaderListSize = message_headers.validateHeaderListSize;
-const validateHeaderBlock = message_headers.validateHeaderBlock;
+/// Validate one decoded header block (names, values, pseudo-header ordering
+/// and required request/response fields). Exposed for callers that decode an
+/// HPACK block themselves and want the runtime's semantic checks.
+pub const validateHeaderBlock = message_headers.validateHeaderBlock;
 const methodIsHead = message_headers.methodIsHead;
 const methodIsConnect = message_headers.methodIsConnect;
 const responseForbidsBody = message_headers.responseForbidsBody;
@@ -27275,6 +27279,7 @@ test "HTTP/2 graceful shutdown write failure is terminal" {
 }
 
 test "HTTP/2 graceful shutdown deadline bounds a blocked GOAWAY write" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
     if (comptime @import("builtin").os.tag == .windows) return;
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
@@ -27340,6 +27345,7 @@ test "HTTP/2 graceful shutdown deadline bounds a blocked GOAWAY write" {
 }
 
 test "HTTP/2 graceful shutdown fails closed when PING ACK write times out" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
     if (comptime @import("builtin").os.tag == .windows) return;
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
@@ -38888,7 +38894,7 @@ test "HTTP/2 local protocol error reset budget emits terminal GOAWAY" {
     var connection = Connection{
         .io = .{ .userdata = threaded.io().userdata, .vtable = &vtable },
         .allocator = allocator,
-        .stream = .{ .socket = .{ .handle = 0, .address = .{ .ip4 = .loopback(0) } } },
+        .stream = test_socket.stream(),
         .role = .server,
         .limits = .{ .max_local_error_reset_streams = 1 },
         .last_peer_processed_stream_id = 3,
@@ -38996,7 +39002,7 @@ test "HTTP/2 excessive padded empty DATA emits terminal GOAWAY" {
     var connection = Connection{
         .io = .{ .userdata = threaded.io().userdata, .vtable = &vtable },
         .allocator = allocator,
-        .stream = .{ .socket = .{ .handle = 0, .address = .{ .ip4 = .loopback(0) } } },
+        .stream = test_socket.stream(),
         .role = .server,
         .last_peer_processed_stream_id = 1,
     };

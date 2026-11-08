@@ -6,6 +6,7 @@ const tls = @import("../../../tls/mod.zig");
 const allocator = std.testing.allocator;
 
 test "HTTP/2 batch output deadlines bound real TLS12 and TLS13 records" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
     if (comptime builtin.os.tag != .linux) return;
     for ([_]bool{ false, true }) |tls12| {
         try exercise(tls12, false);

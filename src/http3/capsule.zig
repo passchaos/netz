@@ -97,6 +97,28 @@ pub fn parse(bytes: []const u8) ParseError!Parsed {
     };
 }
 
+pub const Header = struct {
+    capsule_type: u64,
+    value_len: usize,
+    header_len: usize,
+};
+
+/// Parse only the capsule type and value length. Incremental readers use this
+/// to cache the expected total length while the value bytes are still
+/// arriving, avoiding a full `parse` attempt for every fragment.
+pub fn parseHeader(bytes: []const u8) ParseError!Header {
+    var cursor = wire.Cursor.init(bytes);
+    const capsule_type = try quic.varint.decode(&cursor);
+    const value_len = try quic.varint.decode(&cursor);
+    const payload_len = std.math.cast(usize, value_len) orelse
+        return error.IntegerOverflow;
+    return .{
+        .capsule_type = capsule_type,
+        .value_len = payload_len,
+        .header_len = cursor.pos,
+    };
+}
+
 pub fn encodedLen(capsule_type: u64, value_len: usize) Error!usize {
     const value_len_u64 = std.math.cast(u64, value_len) orelse return error.IntegerOverflow;
     const type_len = try quic.varint.length(capsule_type);
@@ -134,15 +156,26 @@ pub fn writeInto(
     capsule_type: u64,
     value: []const u8,
 ) Error![]u8 {
-    const total_len = try encodedLen(capsule_type, value.len);
+    const value_len = std.math.cast(u64, value.len) orelse return error.IntegerOverflow;
+    const type_len = try quic.varint.length(capsule_type);
+    const length_len = try quic.varint.length(value_len);
+    const header_len = std.math.add(usize, type_len, length_len) catch
+        return error.IntegerOverflow;
+    const total_len = std.math.add(usize, header_len, value.len) catch
+        return error.IntegerOverflow;
     if (out.len < total_len) return error.BufferTooShort;
 
     var offset: usize = 0;
-    const type_bytes = try quic.varint.encodeInto(out[offset..], capsule_type);
-    offset += type_bytes.len;
-    const value_len = std.math.cast(u64, value.len) orelse return error.IntegerOverflow;
-    const length_bytes = try quic.varint.encodeInto(out[offset..], value_len);
-    offset += length_bytes.len;
+    offset += (try quic.varint.encodeIntoWithLen(
+        out[offset..],
+        capsule_type,
+        type_len,
+    )).len;
+    offset += (try quic.varint.encodeIntoWithLen(
+        out[offset..],
+        value_len,
+        length_len,
+    )).len;
     std.mem.copyForwards(u8, out[offset..][0..value.len], value);
     offset += value.len;
     return out[0..offset];

@@ -362,10 +362,29 @@ fn validateMqttUtf8StringWithPolicy(
     // prefix once and return without constructing a UTF-8 iterator when the
     // whole string is ASCII. Starting the general decoder at the first
     // non-ASCII byte also avoids rescanning a valid prefix on mixed strings.
+    // Sixteen-byte chunks keep the common ASCII prefix off the scalar loop;
+    // a chunk containing any high byte falls through to the scalar scan.
     var first_non_ascii = value.len;
-    for (value, 0..) |byte, index| {
+    var index: usize = 0;
+    const Vec = @Vector(16, u8);
+    const high: Vec = @splat(0x80);
+    const zero: Vec = @splat(0);
+    const space: Vec = @splat(0x20);
+    const del: Vec = @splat(0x7f);
+    while (index + 16 <= value.len) : (index += 16) {
+        const chunk: Vec = value[index..][0..16].*;
+        if (@reduce(.Or, chunk >= high)) break;
+        if (@reduce(.Or, chunk == zero)) return error.InvalidUtf8;
+        if (reject_discouraged_controls and
+            (@reduce(.Or, chunk < space) or
+                @reduce(.Or, chunk == del)))
+        {
+            return error.InvalidUtf8;
+        }
+    }
+    for (value[index..], index..) |byte, byte_index| {
         if (byte >= 0x80) {
-            first_non_ascii = index;
+            first_non_ascii = byte_index;
             break;
         }
         if (byte == 0 or
@@ -499,10 +518,33 @@ pub fn hasWildcards(value: []const u8) bool {
 }
 
 pub fn validTopicName(topic: []const u8) bool {
-    return topic.len > 0 and
-        topic.len <= std.math.maxInt(u16) and
-        validMqttUtf8(topic) and
-        !hasWildcards(topic);
+    if (topic.len == 0 or topic.len > std.math.maxInt(u16)) return false;
+
+    // One vector pass rejects NUL, '+' and '#' for ASCII topic names. A high
+    // byte falls back to the general UTF-8 validator and a wildcard scan.
+    var index: usize = 0;
+    const Vec = @Vector(16, u8);
+    const high: Vec = @splat(0x80);
+    const zero: Vec = @splat(0);
+    const plus: Vec = @splat('+');
+    const hash: Vec = @splat('#');
+    while (index + 16 <= topic.len) : (index += 16) {
+        const chunk: Vec = topic[index..][0..16].*;
+        if (@reduce(.Or, chunk >= high)) break;
+        if (@reduce(.Or, chunk == zero) or
+            @reduce(.Or, chunk == plus) or
+            @reduce(.Or, chunk == hash))
+        {
+            return false;
+        }
+    }
+    for (topic[index..]) |byte| {
+        if (byte >= 0x80) {
+            return validMqttUtf8(topic) and !hasWildcards(topic);
+        }
+        if (byte == 0 or byte == '+' or byte == '#') return false;
+    }
+    return true;
 }
 
 pub fn validateTopicName(topic: []const u8) Error!void {
@@ -512,12 +554,22 @@ pub fn validateTopicName(topic: []const u8) Error!void {
 pub fn validTopicFilter(filter: []const u8) bool {
     if (filter.len == 0 or filter.len > std.math.maxInt(u16)) return false;
     if (!validMqttUtf8(filter)) return false;
-    if (std.mem.startsWith(u8, filter, "$share/")) return validSharedTopicFilter(filter);
-    return validTopicFilterLevels(filter);
+    if (std.mem.startsWith(u8, filter, "$share/")) {
+        return validSharedTopicFilterKind(filter) != null;
+    }
+    return validTopicFilterLevelsKind(filter) != null;
 }
 
-fn validSharedTopicFilter(filter: []const u8) bool {
-    return sharedTopicFilterInner(filter) != null;
+fn validSharedTopicFilterKind(filter: []const u8) ?bool {
+    if (!std.mem.startsWith(u8, filter, "$share/")) return null;
+    const rest = filter["$share/".len..];
+    const slash = std.mem.indexOfScalar(u8, rest, '/') orelse return null;
+    const group = rest[0..slash];
+    const shared_filter = rest[slash + 1 ..];
+    if (group.len == 0 or !validMqttUtf8(group) or hasWildcards(group)) {
+        return null;
+    }
+    return validTopicFilterLevelsKind(shared_filter);
 }
 
 fn sharedTopicFilterInner(filter: []const u8) ?[]const u8 {
@@ -540,33 +592,56 @@ fn validMqttUtf8(value: []const u8) bool {
 }
 
 fn validTopicFilterLevels(filter: []const u8) bool {
-    if (filter.len == 0) return false;
+    return validTopicFilterLevelsKind(filter) orelse false;
+}
 
-    var start: usize = 0;
-    while (true) {
-        const end = std.mem.indexOfScalarPos(u8, filter, start, '/') orelse filter.len;
-        const level = filter[start..end];
-        const last = end == filter.len;
+/// Validate wildcard placement and report whether any wildcard is present.
+/// A null result is invalid; `false` is a valid literal filter; `true` is a
+/// valid filter containing '+' or '#'. One scan serves both questions.
+fn validTopicFilterLevelsKind(filter: []const u8) ?bool {
+    if (filter.len == 0) return null;
 
-        if (std.mem.indexOfScalar(u8, level, '#')) |_| {
+    // Validate wildcard placement directly from each wildcard position instead
+    // of splitting every level. A wildcard is legal only when it occupies the
+    // complete level; '#' must also be the final level and final byte. A
+    // filter with no wildcard needs one SIMD search and no level walk.
+    var has_wildcards = false;
+    var search: usize = 0;
+    while (std.mem.indexOfAnyPos(u8, filter, search, "+#")) |position| {
+        const level_start = position == 0 or filter[position - 1] == '/';
+        const level_end = position + 1 == filter.len or
+            filter[position + 1] == '/';
+        if (!level_start or !level_end) return null;
+        if (filter[position] == '#') {
             // Multi-level wildcard is legal only when it occupies the complete
-            // final level.  This mirrors rumqtt's broker/client validation and
+            // final level. This mirrors rumqtt's broker/client validation and
             // prevents ambiguous filters such as `sport/#/rank` or `sport#`.
-            return level.len == 1 and last;
+            if (position + 1 != filter.len) return null;
+            return true;
         }
-        if (std.mem.indexOfScalar(u8, level, '+')) |_| {
-            // Single-level wildcard must occupy a whole level.
-            if (level.len != 1) return false;
-        }
-
-        if (last) break;
-        start = end + 1;
+        has_wildcards = true;
+        search = position + 1;
     }
-    return true;
+    return has_wildcards;
 }
 
 pub fn validateTopicFilter(filter: []const u8) Error!void {
-    if (!validTopicFilter(filter)) return error.InvalidSubscription;
+    _ = try validateTopicFilterKind(filter);
+}
+
+/// Validate a Topic Filter and report whether its effective filter contains
+/// '+' or '#'. Retained lookups need both answers, so this avoids a second
+/// wildcard scan after validation.
+pub fn validateTopicFilterKind(filter: []const u8) Error!bool {
+    if (filter.len == 0 or filter.len > std.math.maxInt(u16)) {
+        return error.InvalidSubscription;
+    }
+    if (!validMqttUtf8(filter)) return error.InvalidSubscription;
+    const kind = if (std.mem.startsWith(u8, filter, "$share/"))
+        validSharedTopicFilterKind(filter)
+    else
+        validTopicFilterLevelsKind(filter);
+    return kind orelse error.InvalidSubscription;
 }
 
 pub fn topicMatchesFilter(topic: []const u8, filter: []const u8) bool {

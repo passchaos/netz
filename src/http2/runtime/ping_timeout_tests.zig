@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const http2 = @import("../mod.zig");
 const runtime = @import("../runtime.zig");
 const tls_testing = @import("../../tls/testing.zig");
@@ -3127,6 +3128,7 @@ test "HTTP/2 PING deadline validates before writing" {
 }
 
 test "HTTP/2 PING deadline bounds a blocked probe write" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
     if (comptime @import("builtin").os.tag == .windows) return;
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

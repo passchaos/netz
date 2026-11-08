@@ -1,0 +1,138 @@
+{
+  "schema": 1,
+  "date": "2026-11-08",
+  "head": "working-tree",
+  "subject": "MQTT topic-filter validation checks wildcard positions directly",
+  "change": "validTopicFilterLevels previously split the filter on every slash and ran separate '#' and '+' searches per level. It now uses indexOfAnyPos to find each wildcard and checks only that position: the wildcard must occupy a complete level, and '#' must also be the final byte. Filters without wildcards need one SIMD search and no level walk, while wildcard filters avoid the per-level split and repeated scalar searches. The accepted grammar is unchanged. The shared MQTT UTF-8 validator also checks sixteen-byte ASCII chunks with vector comparisons before falling back to the scalar prefix scan, so ordinary ASCII topic names and filters avoid a byte-at-a-time loop. Retained wildcard lookups now build one mqtt.FilterMatcher per filter: the filter's level boundaries are computed once, and each stored topic is matched against those boundaries instead of re-splitting the filter for every entry. Filters deeper than the inline 32-level bound fall back to topicMatchesFilter. FilterMatcher also recognizes filters whose only wildcard is a final '#': the preceding levels must be literal, so matching reduces to one prefix comparison instead of walking every filter and topic level. '#' alone matches every non-'$'-reserved topic, and 'prefix/#' accepts the prefix itself or any topic below it. The retained Store now keeps a parallel LevelIndex array with the end offset of up to four levels per stored topic, computed once on insert. Wildcard matching passes those ends to FilterMatcher.matchesEntry, so a repeated scan no longer splits every topic on '/' for every filter. The index lives outside Entry so ordinary entry copies and exact lookups keep their original size; topics deeper than four levels fall back to the split matcher.",
+  "benchmark": {
+    "command": "taskset -c 0 <bench-mqtt-retained>",
+    "pairs": 8,
+    "order": "alternating before/after",
+    "before_sha256": "90fb0cf1998cb8789fb647186381de2855f153d8c61e96c3b8aab8dcda674497",
+    "after_sha256": "6c4ca2380a1f904fbe35d27ded2895d4c5d9f2a859d1ecc8914b364a7b9b7684",
+    "results": {
+      "exact lookup": {
+        "before_ns_per_op": 84.5,
+        "after_ns_per_op": 44.0,
+        "speedup": 1.92
+      },
+      "wildcard full-scan": {
+        "before_ns_per_op": 182448.0,
+        "after_ns_per_op": 167343.0,
+        "speedup": 1.09
+      }
+    }
+  },
+  "tests": {
+    "mqtt_router": {
+      "command": "zig build test-lib -Dtest-filter=mqtt -Dtest-filter=router --summary all",
+      "passed": 1410,
+      "total": 1410
+    },
+    "full_library": {
+      "command": "zig build test-lib --summary all (isolated caches)",
+      "passed": 6771,
+      "total": 6771
+    },
+    "mqtt_interop": {
+      "command": "zig build interop-mqtt-broker-config --summary all",
+      "status": "passed",
+      "note": "full Mosquitto-derived broker configuration matrix, including retained state, shared subscriptions, ACL reloads and persistence. It passed again after the parallel topic level-index change."
+    }
+  },
+  "notes": "The retained store exact-lookup path calls validateTopicFilter, effectiveFilter and hasWildcards before its hash-map lookup. Removing the per-level split cuts the validation portion enough to nearly halve the exact lookup time. The wildcard full-scan case improves because validation no longer splits every level before matching. Empty filters are still rejected before any scan, and the wildcard-position checks preserve the exact grammar: '+' must be a complete level, and '#' must be a complete final level. The full broker-config matrix passes in isolation; the one earlier timeout occurred while the complete library test was running concurrently and is attributed to host-load contention rather than the filter change. The vector UTF-8 prefix check preserves the scalar error semantics for NUL, high bytes and the strict-control policy; a chunk with any non-ASCII byte falls back to the scalar scan from that chunk. The retained matcher preserves splitScalar semantics for empty levels and trailing slashes, the MQTT '$' leading-wildcard reservation, and '#' termination. Exact retained lookups stay on the hash index and are unaffected. The trailing-'#' fast path preserves the '$' leading-wildcard reservation, the zero-level '#' match on the prefix itself, and filters with '+' before '#' still use the level walk. The LevelIndex array is parallel to the tombstone-preserving entry table; remove leaves the slot for reuse and insert overwrites it. Exact retained lookups still use the hash index and do not touch the level array.",
+  "source_sha256": {
+    "src/mqtt/mod.zig": "02f87e27afbb9d6d2276b94c6d34312afc2ea01c75a5e9389c8a075f63ee30fe",
+    "src/mqtt/retained/mod.zig": "1437273d8e1b3d2070ea0ab2c25828e829212ca54fa68a69223728e8ad4e8e1b",
+    "examples/bench_mqtt_retained.zig": "4ca521e8a27c019681ef2911394b0cda7716240b5a68d0702b6f1469421cec0f"
+  },
+  "utf8_vector_benchmark": {
+    "command": "taskset -c 0 <bench-mqtt-retained>",
+    "pairs": 8,
+    "order": "alternating before/after",
+    "before_sha256": "6c4ca2380a1f904fbe35d27ded2895d4c5d9f2a859d1ecc8914b364a7b9b7684",
+    "after_sha256": "57902562eea7d57373b76b757728af3aaee7bb98147df7af3bedaaedd9e21a55",
+    "results": {
+      "exact lookup": {
+        "before_ns_per_op": 71.0,
+        "after_ns_per_op": 63.0,
+        "speedup": 1.127
+      },
+      "wildcard full-scan": {
+        "before_ns_per_op": 239860.5,
+        "after_ns_per_op": 240606.5,
+        "speedup": 0.997
+      }
+    },
+    "note": "The host was loaded during this batch; only the interleaved ratio is claimed."
+  },
+  "matcher_benchmark": {
+    "command": "taskset -c 0 <bench-mqtt-retained>",
+    "pairs": 8,
+    "order": "alternating before/after",
+    "before_sha256": "57902562eea7d57373b76b757728af3aaee7bb98147df7af3bedaaedd9e21a55",
+    "after_sha256": "ffb407bccf1aff277191f3bc7cb74babfd3138723adfd70c84c3e1dc4d730813",
+    "results": {
+      "exact lookup": {
+        "before_ns_per_op": 40.0,
+        "after_ns_per_op": 40.0,
+        "speedup": 1.0
+      },
+      "wildcard full-scan": {
+        "before_ns_per_op": 166125.5,
+        "after_ns_per_op": 113688.5,
+        "speedup": 1.461
+      }
+    }
+  },
+  "hash_filter_benchmark": {
+    "command": "taskset -c 0 <bench-mqtt-retained>",
+    "pairs": 8,
+    "order": "alternating before/after",
+    "before_sha256": "29d71090e1611ffcf7eaeba01c7f5a6759d4b5313cc424ed8a67d6d9010b9c16",
+    "after_sha256": "c028aba59c02c7312760ff871aa528b3478b98744329a1382315328df83b97b3",
+    "results": {
+      "exact lookup": {
+        "before_ns_per_op": 41.0,
+        "after_ns_per_op": 40.0,
+        "speedup": 1.025
+      },
+      "wildcard full-scan (devices/+/state)": {
+        "before_ns_per_op": 115311.5,
+        "after_ns_per_op": 119530.0,
+        "speedup": 0.965
+      },
+      "wildcard hash (devices/#)": {
+        "before_ns_per_op": 62956.5,
+        "after_ns_per_op": 44990.5,
+        "speedup": 1.399
+      }
+    },
+    "note": "The benchmark now includes a devices/# scenario. A first batch under host load showed the same hash direction with a larger ratio; the reported values are the quieter repeat batch."
+  },
+  "level_index_benchmark": {
+    "command": "taskset -c 0 <bench-mqtt-retained>",
+    "pairs": 8,
+    "order": "alternating before/after",
+    "before_sha256": "c028aba59c02c7312760ff871aa528b3478b98744329a1382315328df83b97b3",
+    "after_sha256": "cb5aa20126ca9da806c9b9fe675b5112123ce4b3aeb7e7eac3256eb154bd6b80",
+    "results": {
+      "exact lookup": {
+        "before_ns_per_op": 40.5,
+        "after_ns_per_op": 41.0,
+        "speedup": 0.988
+      },
+      "wildcard full-scan (devices/+/state)": {
+        "before_ns_per_op": 118646.0,
+        "after_ns_per_op": 81605.0,
+        "speedup": 1.454
+      },
+      "wildcard hash (devices/#)": {
+        "before_ns_per_op": 43635.0,
+        "after_ns_per_op": 44736.5,
+        "speedup": 0.975
+      }
+    },
+    "note": "A first batch measured exact 0.952x, wildcard 1.440x and hash 0.989x; the reported quieter repeat batch keeps the same wildcard direction."
+  }
+}

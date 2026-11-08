@@ -1,0 +1,160 @@
+{
+  "entries": [
+    {
+      "name": "bench-mqtt-router/match",
+      "environment_fingerprint": "x86_64/linux/cpu32/ReleaseFast",
+      "samples_ns": [
+        1514138,
+        1496680,
+        1504566,
+        1490200,
+        1471700,
+        1464714,
+        1585566,
+        1494598,
+        1468877,
+        1458347
+      ],
+      "summary": {
+        "count": 10,
+        "min": 1458347,
+        "max": 1585566,
+        "mean": 1494938.6,
+        "stddev": 34888.312361591765,
+        "median": 1492399,
+        "p90": 1521280.8,
+        "p99": 1579137.48
+      }
+    },
+    {
+      "name": "bench-mqtt-router/linear",
+      "environment_fingerprint": "x86_64/linux/cpu32/ReleaseFast",
+      "samples_ns": [
+        10539658,
+        10240140,
+        10273403,
+        10330263,
+        10317572,
+        10340933,
+        10360298,
+        10345808,
+        10317498,
+        10326696
+      ],
+      "summary": {
+        "count": 10,
+        "min": 10240140,
+        "max": 10539658,
+        "mean": 10339226.900000002,
+        "stddev": 74827.99814701623,
+        "median": 10328479.5,
+        "p90": 10378234,
+        "p99": 10523515.6
+      }
+    },
+    {
+      "name": "bench-mqtt-router/shared-round-robin",
+      "environment_fingerprint": "x86_64/linux/cpu32/ReleaseFast",
+      "samples_ns": [
+        13531785,
+        13410408,
+        13542977,
+        13632186,
+        13577575,
+        13618499,
+        13510410,
+        13700946,
+        13540573,
+        13568877
+      ],
+      "summary": {
+        "count": 10,
+        "min": 13410408,
+        "max": 13700946,
+        "mean": 13563423.600000001,
+        "stddev": 74208.76602154195,
+        "median": 13555927,
+        "p90": 13639062,
+        "p99": 13694757.6
+      }
+    },
+    {
+      "name": "bench-mqtt-router/shared-sticky",
+      "environment_fingerprint": "x86_64/linux/cpu32/ReleaseFast",
+      "samples_ns": [
+        13024327,
+        12979741,
+        12994027,
+        12975590,
+        13040487,
+        13096529,
+        13166094,
+        12966120,
+        12977278,
+        13086986
+      ],
+      "summary": {
+        "count": 10,
+        "min": 12966120,
+        "max": 13166094,
+        "mean": 13030717.9,
+        "stddev": 63224.07038533653,
+        "median": 13009177,
+        "p90": 13103485.5,
+        "p99": 13159833.15
+      }
+    },
+    {
+      "name": "bench-mqtt-router/shared-random",
+      "environment_fingerprint": "x86_64/linux/cpu32/ReleaseFast",
+      "samples_ns": [
+        13899860,
+        13791032,
+        13855161,
+        13952842,
+        13880636,
+        13853512,
+        13912591,
+        13950616,
+        13810038,
+        14000479
+      ],
+      "summary": {
+        "count": 10,
+        "min": 13791032,
+        "max": 14000479,
+        "mean": 13890676.7,
+        "stddev": 62652.550261022756,
+        "median": 13890248,
+        "p90": 13957605.7,
+        "p99": 13996191.67
+      }
+    },
+    {
+      "name": "bench-mqtt-router/shared-rendezvous",
+      "environment_fingerprint": "x86_64/linux/cpu32/ReleaseFast",
+      "samples_ns": [
+        104076565,
+        104115652,
+        104100307,
+        103998720,
+        103998712,
+        104001189,
+        104383294,
+        103998163,
+        104048422,
+        104203220
+      ],
+      "summary": {
+        "count": 10,
+        "min": 103998163,
+        "max": 104383294,
+        "mean": 104092424.39999999,
+        "stddev": 115949.04742101279,
+        "median": 104062493.5,
+        "p90": 104221227.4,
+        "p99": 104367087.34
+      }
+    }
+  ]
+}

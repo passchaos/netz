@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "date": "2026-11-09",
+  "head": "working-tree",
+  "subject": "HTTP/1 field-value validation uses the shared control-byte table",
+  "change": "HTTP/1 had four copies of the field-value control-byte check: the streaming head scan, parseHeaderLine, validateHeaderValue, and validateReasonPhrase each compared every byte against 0x20 and 0x7f. The shared src/http/field_value.zig now exposes inline invalidByte backed by the same 256-byte table already used by HTTP/2 and HTTP/3, and all four HTTP/1 sites use it. The accepted grammar and error types are unchanged; HTTP/1 already had its own field-name table.",
+  "benchmark": {
+    "command": "taskset -c 2 <bench-http1-parse>",
+    "pairs": 8,
+    "order": "alternating before/after",
+    "before_sha256": "5ec96bac36a57f3930a33695a2e4bd11de3d6631469e7704a274b52844565951",
+    "after_sha256": "02505cb5a5a27ff474dd7ac6bdc98b0a8086bddcf78a256583515276fae5d617",
+    "results": {
+      "borrowed": {
+        "before_ns_per_op": 185.0,
+        "after_ns_per_op": 185.0,
+        "speedup": 1.003,
+        "wins": "4/8"
+      },
+      "owned": {
+        "before_ns_per_op": 255.0,
+        "after_ns_per_op": 235.5,
+        "speedup": 1.085,
+        "wins": "8/8"
+      },
+      "owned+host": {
+        "before_ns_per_op": 278.0,
+        "after_ns_per_op": 257.0,
+        "speedup": 1.078,
+        "wins": "8/8"
+      }
+    }
+  },
+  "tests": {
+    "http1_focused": {
+      "command": "zig build test-lib -Dtest-filter=http1 --summary all",
+      "passed": 578,
+      "total": 578
+    },
+    "full_library": {
+      "command": "zig build test-lib --summary all (isolated caches)",
+      "passed": 6777,
+      "total": 6777
+    }
+  },
+  "source_sha256": {
+    "src/http/field_value.zig": "249f39b9c5f7044740e327f9cf62fd789fd888ac41ec991a881d38163ad237ae",
+    "src/http1/mod.zig": "4a1e1f75439cb42c8934b1e17e6110fbf58314ed7eb6eb560b04c70f4f2c4921"
+  },
+  "notes": "The borrowed scenario is neutral because its measured cost is dominated by header-storage and start-line work; the value scan share is smaller there. The owned paths improved 7.8-8.5% with every pair faster. The bench-http1-parse baseline was re-recorded with the three existing entries under the unpinned cpu32 fingerprint. The host was loaded during the batch (load average roughly 10 to 30), so only interleaved ratios are claimed."
+}

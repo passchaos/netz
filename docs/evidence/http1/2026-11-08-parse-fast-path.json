@@ -1,0 +1,190 @@
+{
+  "schema": 1,
+  "date": "2026-11-08",
+  "head": "working-tree",
+  "subject": "HTTP/1 request-head parsing fast paths",
+  "change": "Method.parse dispatches on the method length and first byte before comparing registered method names, so a parsed start line no longer tests up to ten full slices. A shared LineIterator replaces std.mem.splitSequence for HTTP/1 head and trailer lines: it scans for the first CR with the SIMD single-byte search and checks the next byte for LF, preserving exact split-on-CRLF semantics without the generic two-byte substring search. The head terminator search scans for the first CR and checks the following bytes for CRLFCRLF instead of using the generic four-byte substring search; the request, response and owned-head entry points share the helper. All changes preserve the accepted grammar and first-match semantics. The strict request-line parser now locates its two SP delimiters with the SIMD scalar search and rejects empty fields or extra separators directly, keeping the generic multi-space loop only for the opt-in compatibility mode.",
+  "benchmark": {
+    "command": "taskset -c 0 <bench-http1-parse> --iterations=50000 --samples=5 --warmup=1",
+    "pairs": 8,
+    "order": "alternating before/after",
+    "before_sha256": "4d4081267cd59473df327cd64fc5ae31c7fee1ad86a7732df7989f161edd94ea",
+    "after_sha256": "c5a3faf4e2783d83f6acfd24a0a7a8eae07e8277a6d059d5f30c90641aa25f70",
+    "results": {
+      "borrowed": {
+        "before_ns_per_op": 210.5,
+        "after_ns_per_op": 184.0,
+        "speedup": 1.144
+      },
+      "owned": {
+        "before_ns_per_op": 532.5,
+        "after_ns_per_op": 254.0,
+        "speedup": 2.096
+      },
+      "owned + Host": {
+        "before_ns_per_op": 555.0,
+        "after_ns_per_op": 279.0,
+        "speedup": 1.989
+      }
+    }
+  },
+  "isolated_benchmarks": {
+    "method_dispatch": {
+      "before_sha256": "4d4081267cd59473df327cd64fc5ae31c7fee1ad86a7732df7989f161edd94ea",
+      "after_sha256": "587f3a7da5ceb3204e3707031ab217b9efc5a86a3fd6ef7f76bf0028d079bd4f",
+      "pairs": 8,
+      "results": {
+        "borrowed": {
+          "before_ns_per_op": 210.5,
+          "after_ns_per_op": 206.0,
+          "speedup": 1.022
+        },
+        "owned": {
+          "before_ns_per_op": 533.5,
+          "after_ns_per_op": 530.5,
+          "speedup": 1.006
+        },
+        "owned + Host": {
+          "before_ns_per_op": 555.5,
+          "after_ns_per_op": 554.5,
+          "speedup": 1.002
+        }
+      }
+    },
+    "head_end_scan": {
+      "before_sha256": "587f3a7da5ceb3204e3707031ab217b9efc5a86a3fd6ef7f76bf0028d079bd4f",
+      "after_sha256": "a824711c3ecc3493ebed45068569c35c3ed40b07e595fd0c7d11458763e6072f",
+      "pairs": 8,
+      "results": {
+        "borrowed": {
+          "before_ns_per_op": 205.0,
+          "after_ns_per_op": 194.0,
+          "speedup": 1.057
+        },
+        "owned": {
+          "before_ns_per_op": 529.5,
+          "after_ns_per_op": 522.5,
+          "speedup": 1.013
+        },
+        "owned + Host": {
+          "before_ns_per_op": 554.0,
+          "after_ns_per_op": 541.5,
+          "speedup": 1.023
+        }
+      }
+    },
+    "line_iterator": {
+      "before_sha256": "a824711c3ecc3493ebed45068569c35c3ed40b07e595fd0c7d11458763e6072f",
+      "after_sha256": "c5a3faf4e2783d83f6acfd24a0a7a8eae07e8277a6d059d5f30c90641aa25f70",
+      "pairs": 8,
+      "results": {
+        "borrowed": {
+          "before_ns_per_op": 193.0,
+          "after_ns_per_op": 184.0,
+          "speedup": 1.049
+        },
+        "owned": {
+          "before_ns_per_op": 519.0,
+          "after_ns_per_op": 254.0,
+          "speedup": 2.043
+        },
+        "owned + Host": {
+          "before_ns_per_op": 540.5,
+          "after_ns_per_op": 278.0,
+          "speedup": 1.944
+        }
+      }
+    },
+    "rejected_scalar_line_iterator": {
+      "before_sha256": "c5a3faf4e2783d83f6acfd24a0a7a8eae07e8277a6d059d5f30c90641aa25f70",
+      "after_sha256": "0db40362a1a74dc6a5474987b362204d496471a0d5ce01ed512ce5d7e2a0e477",
+      "pairs": 8,
+      "results": {
+        "borrowed": {
+          "before_ns_per_op": 184.0,
+          "after_ns_per_op": 193.0,
+          "speedup": 0.953
+        },
+        "owned": {
+          "before_ns_per_op": 255.0,
+          "after_ns_per_op": 272.0,
+          "speedup": 0.938
+        },
+        "owned + Host": {
+          "before_ns_per_op": 278.5,
+          "after_ns_per_op": 295.0,
+          "speedup": 0.944
+        }
+      },
+      "note": "A byte-at-a-time CR scan was slower than the SIMD single-byte search and was reverted."
+    }
+  },
+  "tests": {
+    "http1": {
+      "command": "zig build test-lib -Dtest-filter=http1 --summary all",
+      "passed": 577,
+      "total": 577
+    },
+    "fuzz_parsers": {
+      "command": "zig build fuzz-parsers fuzz-stateful --summary all",
+      "passed": 4,
+      "total": 4
+    },
+    "full_library": {
+      "command": "zig build test-lib --summary all (isolated caches)",
+      "passed": 6771,
+      "total": 6771
+    },
+    "http_external_clients": {
+      "command": "zig build interop-http-external-clients",
+      "status": "passed",
+      "note": "curl/nghttp2 HTTP/1.1 and h2 clients against netz after the parser change"
+    }
+  },
+  "notes": "One earlier eight-pair head-end batch ran while unrelated ReleaseSafe builds saturated the host and reported inflated absolute times; it was discarded. The reported pairs were repeated on a quieter host with alternating fixed binaries. The owned scenarios include header and body cloning, so the parse-only gain is diluted there. Replacing the CRLF split iterator removed the generic two-byte substring search: the profile's mem.eql share fell from 31% to 1.7% and findPos disappeared, while the SIMD single-byte CR scan became the remaining line-scan cost. A byte-at-a-time CR scan was measured and rejected at 0.938-0.953x. The method dispatch preserves the case-sensitive registered-method set and still routes unknown tokens through the existing extension validation. The head-end helper and LineIterator return the same first match as the standard split/search implementations; the HTTP/1 suite, parser fuzz replay and external curl/nghttp2 interop pass. The strict request-line fast path is neutral on the short origin-form target and improves the longer absolute-form target by 1.2-2.8%, because the delimiter search no longer walks the target byte by byte.",
+  "source_sha256": {
+    "src/http1/mod.zig": "d427e593f96692d158f83bcec070dee2d4f6c550c8d1abfffdd1f79b9050b9c2",
+    "src/http1/head/folded.zig": "3d127d50262169b62a07c89a6666a776d76605c4168fda4ea9a31b21f894dfc1"
+  },
+  "request_line_benchmark": {
+    "command": "taskset -c 0 <bench-http1-parse> --iterations=50000 --samples=5 --warmup=1 [--target-form=absolute]",
+    "pairs": 8,
+    "order": "alternating before/after",
+    "before_sha256": "c5a3faf4e2783d83f6acfd24a0a7a8eae07e8277a6d059d5f30c90641aa25f70",
+    "after_sha256": "71f3f89e322ea34eb5707708851c8b269fa49a85fe53c26e397c715c8784d515",
+    "origin_form": {
+      "borrowed": {
+        "before_ns_per_op": 184.0,
+        "after_ns_per_op": 182.5,
+        "speedup": 1.008
+      },
+      "owned": {
+        "before_ns_per_op": 255.0,
+        "after_ns_per_op": 255.0,
+        "speedup": 1.0
+      },
+      "owned + Host": {
+        "before_ns_per_op": 279.0,
+        "after_ns_per_op": 277.0,
+        "speedup": 1.007
+      }
+    },
+    "absolute_form": {
+      "borrowed": {
+        "before_ns_per_op": 259.5,
+        "after_ns_per_op": 256.5,
+        "speedup": 1.012
+      },
+      "owned": {
+        "before_ns_per_op": 330.5,
+        "after_ns_per_op": 321.5,
+        "speedup": 1.028
+      },
+      "owned + Host": {
+        "before_ns_per_op": 397.0,
+        "after_ns_per_op": 388.0,
+        "speedup": 1.023
+      }
+    }
+  }
+}

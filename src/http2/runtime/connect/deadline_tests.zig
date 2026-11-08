@@ -72,6 +72,7 @@ test "HTTP/2 CONNECT deadline bounds blocked duplex DATA output" {
 }
 
 test "HTTP/2 CONNECT response deadline bounds blocked credit refund" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
     if (comptime builtin.os.tag != .linux) return;
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
     defer threaded.deinit();
@@ -156,6 +157,7 @@ test "HTTP/2 CONNECT response deadlines validate before output or stream mutatio
 }
 
 test "HTTP/2 CONNECT staged output allocation failures preserve HPACK and admitted stream" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
     if (comptime builtin.os.tag != .linux) return;
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
     defer threaded.deinit();

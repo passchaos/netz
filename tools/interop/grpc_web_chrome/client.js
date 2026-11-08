@@ -32,7 +32,7 @@ function acknowledgeStream() {
   await esbuild.build({entryPoints: [path.join(__dirname, 'browser.js')], bundle: true, platform: 'browser', outfile: bundle});
   const args = ['--no-sandbox', '--no-proxy-server', '--disable-dev-shm-usage'];
   if (process.env.CERTIFICATE_SPKI_SHA256) args.push(`--ignore-certificate-errors-spki-list=${process.env.CERTIFICATE_SPKI_SHA256}`);
-  const browser = await puppeteer.launch({executablePath: process.env.CHROME || '/usr/bin/chromium', headless: true, args});
+  const browser = await puppeteer.launch({executablePath: process.env.CHROME || '/usr/bin/google-chrome', headless: true, args});
   try {
     const page = await browser.newPage();
     const protocols = new Set();

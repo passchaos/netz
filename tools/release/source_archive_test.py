@@ -65,10 +65,19 @@ class SourceArchiveTest(unittest.TestCase):
         self.vort = base / "vort"
         self.pbz = base / "pbz"
         self.zio = base / "zio"
-        for path in (self.root, self.vail, self.vort, self.pbz, self.zio):
+        self.harnessz = base / "harnessz"
+        for path in (
+            self.root,
+            self.vail,
+            self.vort,
+            self.pbz,
+            self.zio,
+            self.harnessz,
+        ):
             path.mkdir()
         manifest = b""".{
     .dependencies = .{
+        .harnessz = .{ .path = \"../harnessz\" },
         .vail = .{ .path = \"../vail\" },
         .vort = .{ .path = \"../vort\" },
         .zio = .{
@@ -117,6 +126,14 @@ class SourceArchiveTest(unittest.TestCase):
                 "src/root.zig": b"pub const value = 3;\n",
             },
         )
+        self.harnessz_revision = initialize_repository(
+            self.harnessz,
+            {
+                "build.zig": b"pub fn build() void {}\n",
+                "build.zig.zon": b".{}\n",
+                "src/root.zig": b"pub const value = 6;\n",
+            },
+        )
         (self.zio / "src").mkdir()
         (self.zio / "build.zig").write_text(
             "pub fn build() void {}\n", encoding="utf-8"
@@ -147,10 +164,12 @@ class SourceArchiveTest(unittest.TestCase):
             self.vort,
             self.pbz,
             self.zio,
+            self.harnessz,
             output,
             expected_vail_revision=self.vail_revision,
             expected_vort_revision=self.vort_revision,
             expected_pbz_revision=self.pbz_revision,
+            expected_harnessz_revision=self.harnessz_revision,
             expected_zio_package_hash=self.zio_hash,
         )
 
@@ -167,6 +186,7 @@ class SourceArchiveTest(unittest.TestCase):
             self.assertIn("netz-0.1.0/deps/vail/src/root.zig", names)
             self.assertIn("netz-0.1.0/deps/vort/src/root.zig", names)
             self.assertIn("netz-0.1.0/deps/pbz/src/root.zig", names)
+            self.assertIn("netz-0.1.0/deps/harnessz/src/root.zig", names)
             self.assertIn("netz-0.1.0/deps/zio/src/root.zig", names)
             package = archive.extractfile(
                 "netz-0.1.0/build.zig.zon"
@@ -180,16 +200,22 @@ class SourceArchiveTest(unittest.TestCase):
                 )
             )
 
+        self.assertIn('.path = "deps/harnessz"', package)
         self.assertIn('.path = "deps/vail"', package)
         self.assertIn('.path = "deps/vort"', package)
         self.assertIn('.path = "deps/pbz"', package)
         self.assertIn('.path = "deps/zio"', package)
         self.assertIn('"deps"', package)
+        self.assertNotIn("../harnessz", package)
         self.assertNotIn("../vail", package)
         self.assertNotIn("../vort", package)
         self.assertNotIn("../pbz", package)
         self.assertNotIn("git+https://github.com/passchaos/zio", package)
         self.assertEqual(self.netz_revision, metadata["source_revision"])
+        self.assertEqual(
+            self.harnessz_revision,
+            metadata["vendored_dependencies"]["harnessz"]["revision"],
+        )
         self.assertEqual(
             self.vail_revision,
             metadata["vendored_dependencies"]["vail"]["revision"],
@@ -223,10 +249,12 @@ class SourceArchiveTest(unittest.TestCase):
                 self.vort,
                 self.pbz,
                 self.zio,
+                self.harnessz,
                 Path(self.temporary.name) / "mismatch.tar.gz",
                 expected_vail_revision="0" * 40,
                 expected_vort_revision=self.vort_revision,
                 expected_pbz_revision=self.pbz_revision,
+                expected_harnessz_revision=self.harnessz_revision,
                 expected_zio_package_hash=self.zio_hash,
             )
 
@@ -295,6 +323,7 @@ class RepositoryDependencyPinTest(unittest.TestCase):
             encoding="utf-8"
         )
         sibling_pins = {
+            "harnessz": SOURCE_ARCHIVE.HARNESSZ_REVISION,
             "vail": SOURCE_ARCHIVE.VAIL_REVISION,
             "vort": SOURCE_ARCHIVE.VORT_REVISION,
             "pbz": SOURCE_ARCHIVE.PBZ_REVISION,
@@ -304,7 +333,7 @@ class RepositoryDependencyPinTest(unittest.TestCase):
                 f"repository: passchaos/{name}",
                 f"          ref: {revision}",
             ]
-            if name in ("vail", "vort"):
+            if name in ("harnessz", "vail", "vort"):
                 checkout_lines.append(
                     "          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}"
                 )

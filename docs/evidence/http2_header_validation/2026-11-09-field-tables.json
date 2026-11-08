@@ -1,0 +1,137 @@
+{
+  "schema": 1,
+  "date": "2026-11-09",
+  "head": "working-tree",
+  "subject": "HTTP/2 and HTTP/3 field-name/value validation use shared byte tables",
+  "change": "HTTP/2 and HTTP/3 each carried their own field-name validator: a range check for uppercase plus a switch over lowercase letters, digits and token punctuation, per byte. A new src/http/field_name.zig exposes one shared validator backed by a 256-byte table that already excludes uppercase, and both runtimes use it. The shared src/http/field_value.zig control-byte check also moved from two comparisons per byte to a 256-byte invalid-byte table (0x00-0x1f except tab, and 0x7f). The accepted grammar and error contract are unchanged; the shared module has its own tests for pseudo names, uppercase, control bytes and non-token punctuation.",
+  "benchmark": {
+    "command": "taskset -c 2 <bench-http2-hpack>",
+    "pairs": 8,
+    "order": "alternating before/after",
+    "stages": {
+      "name_table": {
+        "before_sha256": "c47355a5b6ddaf2a89cafe5f119cba8735567263aec5e82bc4578fed2dbd6443",
+        "after_sha256": "440bfd1f8e4329225a40b2e06cc3138c7f14ea5e4e93c61cd7868eb76157146c",
+        "results": {
+          "request header validation": {
+            "before_ns_per_block": 154.0,
+            "after_ns_per_block": 137.5,
+            "speedup": 1.124,
+            "wins": "7/8"
+          },
+          "stateful encode-only": {
+            "before_ns_per_op": 256.0,
+            "after_ns_per_op": 258.0,
+            "speedup": 0.973,
+            "wins": "2/8"
+          },
+          "stateful decode-only": {
+            "before_ns_per_op": 434.5,
+            "after_ns_per_op": 416.5,
+            "speedup": 1.001,
+            "wins": "4/8"
+          },
+          "stateful decode-into": {
+            "before_ns_per_op": 358.0,
+            "after_ns_per_op": 353.5,
+            "speedup": 1.01,
+            "wins": "5/8"
+          },
+          "stateful decode-owned": {
+            "before_ns_per_op": 388.0,
+            "after_ns_per_op": 413.0,
+            "speedup": 0.95,
+            "wins": "4/8"
+          },
+          "stateful roundtrip": {
+            "before_ns_per_op": 483.0,
+            "after_ns_per_op": 487.5,
+            "speedup": 0.987,
+            "wins": "2/8"
+          },
+          "stateless roundtrip": {
+            "before_ns_per_op": 1108.5,
+            "after_ns_per_op": 1073.0,
+            "speedup": 1.019,
+            "wins": "6/8"
+          }
+        }
+      },
+      "value_table": {
+        "before_sha256": "440bfd1f8e4329225a40b2e06cc3138c7f14ea5e4e93c61cd7868eb76157146c",
+        "after_sha256": "92a0c8171b1db8ff53cbaf0792863f648b0fdde0d8ee475e84ae791ddaf892a0",
+        "results": {
+          "request header validation": {
+            "before_ns_per_block": 135.0,
+            "after_ns_per_block": 131.5,
+            "speedup": 1.038,
+            "wins": "8/8"
+          },
+          "stateful encode-only": {
+            "before_ns_per_op": 256.0,
+            "after_ns_per_op": 252.0,
+            "speedup": 1.01,
+            "wins": "7/8"
+          },
+          "stateful decode-only": {
+            "before_ns_per_op": 412.0,
+            "after_ns_per_op": 411.5,
+            "speedup": 1.0,
+            "wins": "3/8"
+          },
+          "stateful decode-into": {
+            "before_ns_per_op": 353.0,
+            "after_ns_per_op": 355.0,
+            "speedup": 0.996,
+            "wins": "2/8"
+          },
+          "stateful decode-owned": {
+            "before_ns_per_op": 382.0,
+            "after_ns_per_op": 384.0,
+            "speedup": 0.996,
+            "wins": "3/8"
+          },
+          "stateful roundtrip": {
+            "before_ns_per_op": 485.5,
+            "after_ns_per_op": 481.5,
+            "speedup": 1.01,
+            "wins": "8/8"
+          },
+          "stateless roundtrip": {
+            "before_ns_per_op": 1063.0,
+            "after_ns_per_op": 1063.5,
+            "speedup": 0.999,
+            "wins": "4/8"
+          }
+        }
+      }
+    }
+  },
+  "tests": {
+    "field_name_direct": {
+      "command": "zig test src/http/field_name_tests.zig",
+      "passed": 3,
+      "total": 3
+    },
+    "http2_http3_focused": {
+      "command": "zig build test-lib -Dtest-filter=http2 -Dtest-filter=http3 --summary all",
+      "passed": 1827,
+      "total": 1827
+    },
+    "full_library": {
+      "command": "zig build test-lib --summary all (isolated caches)",
+      "passed": 6777,
+      "total": 6777,
+      "note": "The first run under a host-load spike reported an unrelated gRPC connect-race failure with the same Huffman error-trace shape seen in earlier loaded-host runs; the immediate rerun with the same binary passed 6777/6777. The total includes the three new shared field-name tests."
+    }
+  },
+  "source_sha256": {
+    "src/http/field_name.zig": "90ffc43727a60c52cff9a9e217ac06871038e1d1151e456b0cd6545cdbf86b2e",
+    "src/http/field_name_tests.zig": "15068a40ed6447c5f159b2ac15b409d567a23af5666eb57e3ba8fa4743895b13",
+    "src/http/field_value.zig": "674bbb6e0027ff7bdb6952feb0db9f54e58f4ee0d17c4c120d3be96e4322da6e",
+    "src/http2/runtime/headers/message.zig": "a2dd2f17d65a02367d19b9b0b970534c9860854014d41382940963b00618ca51",
+    "src/http3/mod.zig": "9d3ed0fcc3707e010b8f3b70c0eaca37ade6f7484646b6236213d992a52904d5",
+    "examples/bench_http2_hpack.zig": "28dd7db056428cdbbaee8d29e02ff4a2d2d896894b35f5da6c7d3d8f22b7d9ab"
+  },
+  "notes": "The two stages are sequential: the name-table stage compares the tag-based validator with the old per-byte switch, and the value-table stage compares the name-table binary with the added value table. Combined with the earlier pseudo-header tag change, request header validation moved from 167.0 ns/block in the pre-tag binary to 131.5 ns/block after both tables. The non-target HPACK rows in each batch are layout noise; the two roundtrip rows moved by about 1% in opposite directions across the stages. HTTP/2 and HTTP/3 now share one name validator, so the grammar cannot drift between the two runtimes. The http2-hpack baseline was re-recorded with nine entries, including header-validation, under the unpinned cpu32 fingerprint. The host was loaded during the batches (load average roughly 5 to 20), so only interleaved ratios are claimed."
+}

@@ -116,7 +116,11 @@ close metadata. Browser coverage for RFC 8441/9220 remains limited by the
 standard browser WebSocket API's HTTP version selection and current browser
 support. A fresh headless Chromium 149.0.7827.196 run on 2026-11-01 passed both
 the `ws` and `wss` matrices with exact launcher/process-image SHA-256 and
-User-Agent binding; see `docs/evidence/browser_interop/2026-11-01.json`.
+User-Agent binding; see `docs/evidence/browser_interop/2026-11-01.json`. A
+2026-11-08 headless Google Chrome 146.0.7680.164 run repeated both matrices,
+including Origin rejection, subprotocol selection, permessage-deflate text,
+binary frames, Ping/Pong and the 1001 browser close, against the current HTTP/1
+Upgrade parser; see `docs/evidence/browser_interop/2026-11-08.json`.
 
 `websocket.runtime.TlsServer` negotiates TLS 1.2 or TLS 1.3 before the same transport-neutral
 HTTP Upgrade parser and frame state machine used by cleartext `Server`.
@@ -1825,13 +1829,19 @@ applying TCP-only socket options.
    the published digest-locked image is amd64-only and no Docker/Podman runtime
    is installed. The real-socket smoke remains green over cleartext and TLS
    with eight concurrent peers plus protocol-error isolation and worker reuse,
-   while the strict report-checker unit suite passes 14/14. Supplemental
-   2026-11-01 fuzzingclient runs in a CPython 2.7.15 environment with the same
-   Autobahn 0.10.9 / Testsuite 25.10.1 versions executed all 517 manifest
-   cases over both cleartext and WSS: each run reported 514 OK, 3
-   INFORMATIONAL (7.1.6, 7.13.1 and 7.13.2), 0 failed and 0 non-strict.
-   Because that environment is not the digest-locked PyPy identity, these runs
-   are recorded separately and do not replace the strict gate; see
+   while the strict report-checker unit suite passes 14/14. The strict
+   digest-locked Docker gate now runs on this x86_64 host with Docker 29.3.0.
+   A 2026-11-08 cleartext run completed all 517 manifest cases in 40 minutes:
+   514 OK, 3 INFORMATIONAL (7.1.6, 7.13.1 and 7.13.2), 0 failed and 0
+   non-strict, with the exact manifest, image-digest and single-agent checks
+   passing. It also exercises the HTTP/1 Upgrade handshake path against the
+   current parser; see
+   `docs/evidence/websocket_autobahn_full/2026-11-08-docker-gate.json`.
+   Supplemental 2026-11-01 fuzzingclient runs in a CPython 2.7.15 environment
+   with the same Autobahn 0.10.9 / Testsuite 25.10.1 versions executed all 517
+   manifest cases over both cleartext and WSS with the same status
+   distribution. Because that environment is not the digest-locked PyPy
+   identity, those runs remain historical supplemental evidence; see
    `docs/evidence/websocket_autobahn_full/2026-11-01.json` and
    `docs/evidence/websocket_autobahn_full_tls/2026-11-01.json`. A companion
    2026-11-01 fuzzingserver run drove the netz client through the same 517

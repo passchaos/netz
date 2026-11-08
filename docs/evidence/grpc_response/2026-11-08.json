@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "date": "2026-11-08",
+  "head": "working-tree",
+  "subject": "native gRPC response fallback interop regression",
+  "command": "zig build interop-grpc-response --summary all",
+  "status": "passed",
+  "result": {
+    "cases": 26,
+    "native_rpcs": 76,
+    "shared_rpcs": 2,
+    "reference": "grpc-js-1.14.0",
+    "shared_read_after_rpc_deadline": true,
+    "transparent_retries": 2,
+    "max_concurrent_streams": 1,
+    "no_error_after_end_stream": 2,
+    "health_gate": {
+      "watch_attempts": 2,
+      "business_rpcs": 2,
+      "fail_fast": "unary+streaming+duplex",
+      "restarted_connecting": "unary+streaming+duplex-deadlines",
+      "zero_capacity_recovered": true,
+      "control_pings": 0,
+      "wait_for_ready": true,
+      "disabled_connection_closed": true
+    },
+    "health_read_retention": {
+      "watch_attempts": 1,
+      "canceled_read_retained": true,
+      "executor_read_retained": true,
+      "statuses": "SERVING+NOT_SERVING",
+      "terminal": "UNIMPLEMENTED",
+      "resets": 0
+    },
+    "known_reference_differences": [
+      "grpc-js maps DATA FIN without grpc-status to INTERNAL; netz applies the documented UNKNOWN fallback (netz=2 vs grpc-js=13 status observations).",
+      "grpc-js maps the HTML fixture body to RESOURCE_EXHAUSTED as an oversized message envelope; netz discards the non-gRPC entity (netz=2 vs grpc-js=8)."
+    ]
+  },
+  "log": "2026-11-08/response.log",
+  "notes": "Re-ran the independent HTTP/2 peer plus official grpc-js response-policy matrix on the current tree after the HTTP/1, HTTP/2, QUIC and MQTT changes. The matrix covers unary, streaming, duplex and shared shapes, transparent retries, max-concurrent-stream admission, end-stream error suppression, and the health Watch gate/read-retention cases. No source change was required for this run.",
+  "source_sha256": {
+    "tools/interop/grpc_response.py": "c6a08c953c863c580ca48eb19556d9eb00e34492ec7e42a3a71f7c011d006fd1",
+    "tools/interop/grpc_response_client.zig": "52d974235c67f58e6a4d1887bda45f7dcdc1112eb09b57656ac22eae471ddfda"
+  }
+}

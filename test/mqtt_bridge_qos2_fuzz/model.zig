@@ -1,7 +1,9 @@
 const std = @import("std");
 
 pub const max_operations = 6;
-pub const packet_timeout = std.Io.Duration.fromSeconds(2);
+/// Loopback packet operations stay bounded but tolerate scheduler delays on a
+/// loaded host; the QoS2 suites contain no latency assertions.
+pub const packet_timeout = std.Io.Duration.fromSeconds(5);
 pub const coordination_timeout = std.Io.Duration.fromSeconds(5);
 pub const bridge_id = [_]u8{0xd2} ** 16;
 pub const remote_topics = [2][]const u8{

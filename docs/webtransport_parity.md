@@ -1960,8 +1960,10 @@ A malformed RESET must remain scoped to its CONNECT, with a succeeding Session
 on the same connection. This gate also exposed and now guards rejected CONNECT
 request DATA interfering with later admission: a complete rejection now ends
 the request direction with RFC 9113's NO_ERROR reset, while late DATA/trailers
-retain connection credit and HPACK ordering. Browser/proxy draft-15 protocol
-coverage comparable to the HTTP/3 matrix remains open.
+retain connection credit and HPACK ordering. Browsers ship WebTransport over
+HTTP/3 only; the HTTP/2 draft-15 path targets non-browser proxy and
+server-to-server legs, and broader external coverage of that path remains
+open.
 The HTTP/2 connection now exposes
 `startExtendedConnectDuplexWith{Timeout,Deadline}` as the transport foundation
 for a pooled endpoint: multiple CONNECT request/response halves register with

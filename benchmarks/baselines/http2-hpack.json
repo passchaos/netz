@@ -1,0 +1,238 @@
+{
+  "entries": [
+    {
+      "name": "bench-http2-hpack/encode",
+      "environment_fingerprint": "x86_64/linux/cpu32/ReleaseFast",
+      "samples_ns": [
+        32311153,
+        32386231,
+        32568748,
+        31953853,
+        31716858,
+        31696158,
+        31735561,
+        31710869,
+        31894443,
+        31852847
+      ],
+      "summary": {
+        "count": 10,
+        "min": 31696158,
+        "max": 32568748,
+        "mean": 31982672.1,
+        "stddev": 304532.7905771227,
+        "median": 31873645,
+        "p90": 32404482.7,
+        "p99": 32552321.47
+      }
+    },
+    {
+      "name": "bench-http2-hpack/decode",
+      "environment_fingerprint": "x86_64/linux/cpu32/ReleaseFast",
+      "samples_ns": [
+        53583211,
+        53712889,
+        53305821,
+        53296309,
+        53236131,
+        53220847,
+        53238954,
+        53226955,
+        53204492,
+        53254117
+      ],
+      "summary": {
+        "count": 10,
+        "min": 53204492,
+        "max": 53712889,
+        "mean": 53327972.6,
+        "stddev": 165391.14284640507,
+        "median": 53246535.5,
+        "p90": 53596178.8,
+        "p99": 53701217.98
+      }
+    },
+    {
+      "name": "bench-http2-hpack/decode-into",
+      "environment_fingerprint": "x86_64/linux/cpu32/ReleaseFast",
+      "samples_ns": [
+        47203761,
+        47205659,
+        47208246,
+        47203657,
+        47218073,
+        47209243,
+        47193198,
+        47180155,
+        47184037,
+        47186639
+      ],
+      "summary": {
+        "count": 10,
+        "min": 47180155,
+        "max": 47218073,
+        "mean": 47199266.80000001,
+        "stddev": 11864.463922145565,
+        "median": 47203709,
+        "p90": 47210126,
+        "p99": 47217278.3
+      }
+    },
+    {
+      "name": "bench-http2-hpack/decode-owned",
+      "environment_fingerprint": "x86_64/linux/cpu32/ReleaseFast",
+      "samples_ns": [
+        51349804,
+        51693174,
+        51674174,
+        51633463,
+        51763167,
+        51696866,
+        51741400,
+        51665880,
+        51695197,
+        51706240
+      ],
+      "summary": {
+        "count": 10,
+        "min": 51349804,
+        "max": 51763167,
+        "mean": 51661936.5,
+        "stddev": 109649.31357217919,
+        "median": 51694185.5,
+        "p90": 51743576.7,
+        "p99": 51761207.97
+      }
+    },
+    {
+      "name": "bench-http2-hpack/stateful-roundtrip",
+      "environment_fingerprint": "x86_64/linux/cpu32/ReleaseFast",
+      "samples_ns": [
+        59369143,
+        59365240,
+        59360890,
+        59688601,
+        59707321,
+        59690027,
+        59713808,
+        59577085,
+        59875349,
+        59925524
+      ],
+      "summary": {
+        "count": 10,
+        "min": 59360890,
+        "max": 59925524,
+        "mean": 59627298.8,
+        "stddev": 195156.77256288208,
+        "median": 59689314,
+        "p90": 59880366.5,
+        "p99": 59921008.25
+      }
+    },
+    {
+      "name": "bench-http2-hpack/stateless-roundtrip",
+      "environment_fingerprint": "x86_64/linux/cpu32/ReleaseFast",
+      "samples_ns": [
+        105958370,
+        105760844,
+        105764047,
+        105752590,
+        106014520,
+        106788258,
+        111322749,
+        107226022,
+        106034625,
+        106428303
+      ],
+      "summary": {
+        "count": 10,
+        "min": 105752590,
+        "max": 111322749,
+        "mean": 106705032.8,
+        "stddev": 1607671.9939611314,
+        "median": 106024572.5,
+        "p90": 107635694.7,
+        "p99": 110954043.57000001
+      }
+    },
+    {
+      "name": "bench-http2-hpack/encoder-churn",
+      "environment_fingerprint": "x86_64/linux/cpu32/ReleaseFast",
+      "samples_ns": [
+        13497306,
+        13379660,
+        13402731,
+        13308048,
+        13319088,
+        13354966,
+        13429317,
+        13480041,
+        13322008,
+        13327850
+      ],
+      "summary": {
+        "count": 10,
+        "min": 13308048,
+        "max": 13497306,
+        "mean": 13382101.5,
+        "stddev": 65015.74771738,
+        "median": 13367313,
+        "p90": 13481767.5,
+        "p99": 13495752.15
+      }
+    },
+    {
+      "name": "bench-http2-hpack/decoder-churn",
+      "environment_fingerprint": "x86_64/linux/cpu32/ReleaseFast",
+      "samples_ns": [
+        2444107,
+        2460544,
+        2460081,
+        2479599,
+        2459569,
+        2453031,
+        2461587,
+        2469317,
+        2459832,
+        2477317
+      ],
+      "summary": {
+        "count": 10,
+        "min": 2444107,
+        "max": 2479599,
+        "mean": 2462498.4000000004,
+        "stddev": 10062.679635166713,
+        "median": 2460312.5,
+        "p90": 2477545.2,
+        "p99": 2479393.62
+      }
+    },
+    {
+      "name": "bench-http2-hpack/header-validation",
+      "environment_fingerprint": "x86_64/linux/cpu32/ReleaseFast",
+      "samples_ns": [
+        13178499,
+        13007173,
+        13259065,
+        13255045,
+        13060817,
+        13199620,
+        13001004,
+        13449298,
+        13456062,
+        13337437
+      ],
+      "summary": {
+        "count": 10,
+        "min": 13001004,
+        "max": 13456062,
+        "mean": 13220402,
+        "stddev": 156709.40771440635,
+        "median": 13227332.5,
+        "p90": 13449974.4,
+        "p99": 13455453.24
+      }
+    }
+  ]
+}

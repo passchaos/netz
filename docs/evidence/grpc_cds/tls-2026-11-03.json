@@ -33,7 +33,6 @@
     "src/grpc/xds/cds/decode.zig": "1b4ec209c81c3b1db44e70a11a6fad81769cdd5f1189d27e69725944c01c6f33",
     "src/grpc/xds/cds/testing.zig": "3264764e37da85523b95944949856825599012abbd55f8a672991973fb0e1fca",
     "src/grpc/xds/cds/tests.zig": "116496b4b7df7bb5cf7ec128820e5a742cbf773068a09e164a238db86f92e246",
-    "src/grpc/xds/runtime/tests.zig": "a74d766104ee96e1a73f8561962a8bf4ae76e93f87f97bbef7996a32380ae82a",
     "src/grpc/xds/eds/target.zig": "0c11f6e3faec6c6375281dc2a4cf4aebd4cbfcd24ba508b560fa96417f27eb54",
     "src/grpc/xds/runtime/controller.zig": "6f97f7c1d855fc634d097003efee0489e68d6601778a8c6b54f77a5e55630ffa",
     "src/grpc/xds/runtime/target.zig": "e1334fd97ffbc662da2c1aac1be6f7e8effb084e43f872a7bb759bd5f7b00358",

@@ -1,0 +1,75 @@
+{
+  "schema": 1,
+  "date": "2026-11-08",
+  "head": "working-tree",
+  "subject": "MQTT retained wildcard lookups traverse a topic trie",
+  "change": "The retained store previously matched every wildcard filter by scanning all retained entries and comparing the filter against each stored Topic Name. It now maintains a topic trie alongside the exact-lookup hash index. Each trie node stores one topic level, a child list (child_head/next_sibling/prev_sibling) for wildcard enumeration, and an optional entry index. A global edge map keyed by (parent node, level bytes) provides O(1) literal descent; literal lookups first scan up to eight siblings because real topic trees are narrow away from their branch points. Trie edge keys borrow the owning Entry's Topic Name allocation, so replacement reuses the old Topic Name allocation instead of freeing it, and removal unlinks the trie path before the Entry is released. Empty nodes are unlinked upward and recycled through an intrusive free list. Wildcard matching walks the filter levels with an explicit fixed-size frame stack (no allocation), marks matched entries in a preallocated bitmap, and emits results in entry-table order so match ordering is unchanged. '#' collects a subtree with a stackless pre-order walk, '+' enumerates children, and the MQTT '$' leading-wildcard reservation is applied to the first filter level. Filters deeper than the 64-level inline bound fall back to the existing linear topicMatchesFilter scan. The now-unused mqtt.FilterMatcher was removed. Exact retained lookups still use the hash index and do not touch the trie. The benchmark gained two selective scenarios on a 16,384-message mixed store: 'devices/+/state' matches 4,096 entries, and 'devices/1234/#' matches four.",
+  "benchmark": {
+    "command": "taskset -c 2 <bench-mqtt-retained>",
+    "pairs": 8,
+    "order": "alternating before/after",
+    "workload": "4,096 state-only retained messages for the broad scenarios and 16,384 mixed retained messages (state/temp/config/meta per device) for the selective scenarios",
+    "before_sha256": "5d2301411eb3f689d78f1acb06d3b97c9b87c6f76b2e54046751f2dce8077ef8",
+    "after_sha256": "e5c8e6f2507bb8d6d7b3ecef94f4f31aa8bc72c4ee88a690ce5c7eaa67f26490",
+    "results": {
+      "exact lookup": {
+        "before_ns_per_op": 42.0,
+        "after_ns_per_op": 40.0,
+        "speedup": 1.038,
+        "wins": "6/8"
+      },
+      "wildcard full-scan": {
+        "before_ns_per_op": 80846.0,
+        "after_ns_per_op": 71324.5,
+        "speedup": 1.134,
+        "wins": "8/8",
+        "matches_per_op": 4096
+      },
+      "wildcard hash": {
+        "before_ns_per_op": 46672.0,
+        "after_ns_per_op": 46672.0,
+        "speedup": 1.005,
+        "wins": "4/8",
+        "matches_per_op": 4096
+      },
+      "selective wildcard": {
+        "before_ns_per_op": 589204.5,
+        "after_ns_per_op": 112863.0,
+        "speedup": 5.204,
+        "wins": "8/8",
+        "matches_per_op": 4096
+      },
+      "selective subtree": {
+        "before_ns_per_op": 179555.0,
+        "after_ns_per_op": 587.5,
+        "speedup": 305.792,
+        "wins": "8/8",
+        "matches_per_op": 4
+      }
+    }
+  },
+  "tests": {
+    "mqtt_router": {
+      "command": "zig build test-lib -Dtest-filter=mqtt -Dtest-filter=router --summary all",
+      "passed": 1412,
+      "total": 1412
+    },
+    "full_library": {
+      "command": "zig build test-lib --summary all (isolated caches)",
+      "passed": 6773,
+      "total": 6773,
+      "note": "Two earlier runs under host load aborted in unrelated HTTP/2, HTTP/3, WebTransport and TLS/Threaded timing paths; the immediate reruns with the same binary passed cleanly."
+    },
+    "mqtt_interop": {
+      "command": "zig build interop-mqtt-broker-config --summary all",
+      "status": "passed",
+      "note": "full Mosquitto-derived broker configuration matrix, including retained state, shared subscriptions, ACL reloads and persistence."
+    }
+  },
+  "source_sha256": {
+    "src/mqtt/retained/mod.zig": "73331bbe13f7b5fcd342c4aa13cadb7e4410c9012730e7f080edf22509e5e9ff",
+    "src/mqtt/mod.zig": "e380cc40a980fd3b7e2603aafabf0976a42ade5b74bbe8e57e20ee80a7be2d28",
+    "examples/bench_mqtt_retained.zig": "bc0f04b9ad5921d9888bdb4bd4d81031f185b845e63f9c1a590227cdad7e3fbd"
+  },
+  "notes": "The host was loaded during the batch (load average roughly 7 to 12), so only interleaved fixed-binary ratios are claimed. The 'devices/#' scenario is neutral because that filter matches nearly every entry: trie subtree traversal visits about one node per stored level, while the previous prefix comparison visited one entry per match, and both then emit the same 4,096 results. The selective 'devices/+/state' scenario scans 16,384 entries in the old implementation but visits only the 4,096 device subtrees in the trie, and the 'devices/1234/#' subtree lookup touches three edges plus four entries instead of scanning the whole store. The exact lookup change is inside noise. Trie matching preserves splitScalar semantics for empty levels and trailing slashes, the '#' match on the parent level itself, and the MQTT '$' reservation for leading wildcards; the 31-filter by 20-topic standalone equivalence check also covered removal, free-node reuse and reinsertion. Filters deeper than 64 levels use the original linear matcher, so no filter is rejected or mis-matched. Wildcard matching remains allocation-free: the bitmap is sized when entries are inserted, and the traversal stack is a fixed array. Replacement reuses the stored Topic Name allocation so borrowed edge keys cannot dangle, and remove unlinks the trie path before freeing the Entry."
+}

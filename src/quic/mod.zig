@@ -1870,6 +1870,34 @@ pub const ParsedFrame = struct {
     }
 };
 
+/// Skip a run of PADDING (zero) bytes. `std.mem.findNonePos` is a scalar
+/// nested loop, so Initial packets padded to 1200 bytes spend most of their
+/// frame-parsing time there. Word-at-a-time scanning preserves the exact
+/// first-non-zero result while processing eight bytes per iteration.
+pub fn skipPadding(buf: []const u8, start: usize) usize {
+    var index = start;
+    const Vec = @Vector(32, u8);
+    const zero: Vec = @splat(0);
+    while (index + 32 <= buf.len) : (index += 32) {
+        const chunk: Vec = buf[index..][0..32].*;
+        if (std.simd.firstTrue(chunk != zero)) |lane| {
+            return index + lane;
+        }
+    }
+    while (index + 16 <= buf.len) : (index += 16) {
+        const word = std.mem.readInt(u128, buf[index..][0..16], .little);
+        if (word != 0) return index + @ctz(word) / 8;
+    }
+    while (index + 8 <= buf.len) : (index += 8) {
+        const word = std.mem.readInt(u64, buf[index..][0..8], .little);
+        if (word != 0) return index + @ctz(word) / 8;
+    }
+    while (index < buf.len) : (index += 1) {
+        if (buf[index] != 0) return index;
+    }
+    return buf.len;
+}
+
 pub fn parseFrame(bytes: []const u8) Error!ParsedFrame {
     return parseFrameWithAllocator(null, bytes);
 }
@@ -1892,12 +1920,7 @@ pub fn parseFrameInto(
     const frame_type = try varint.decode(&cursor);
     try validateFrameTypeEncoding(frame_type, frame_type_len);
     if (frame_type == @intFromEnum(FrameType.padding)) {
-        cursor.pos = std.mem.indexOfNonePos(
-            u8,
-            cursor.buf,
-            cursor.pos,
-            &.{@intFromEnum(FrameType.padding)},
-        ) orelse cursor.buf.len;
+        cursor.pos = skipPadding(cursor.buf, cursor.pos);
         return .{
             .frame = .{ .padding = .{ .len = cursor.pos } },
             .consumed = cursor.pos,
@@ -1926,12 +1949,7 @@ fn parseFrameWithAllocator(allocator: ?std.mem.Allocator, bytes: []const u8) Err
         // DPLPMTUD probes, and anti-deadlock probes). Use std.mem's optimized
         // non-zero search instead of advancing one byte at a time on the frame
         // parser hot path.
-        cursor.pos = std.mem.indexOfNonePos(
-            u8,
-            cursor.buf,
-            cursor.pos,
-            &.{@intFromEnum(FrameType.padding)},
-        ) orelse cursor.buf.len;
+        cursor.pos = skipPadding(cursor.buf, cursor.pos);
         return .{ .frame = .{ .padding = .{ .len = cursor.pos } }, .consumed = cursor.pos };
     }
 

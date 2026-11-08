@@ -18,6 +18,10 @@ pub const Options = struct {
     max_messages: usize = 65_536,
     max_message_bytes: usize = 16 * 1024 * 1024,
     max_total_bytes: usize = 256 * 1024 * 1024,
+    /// Bound on retained topic-index memory. The trie and its edge map are
+    /// shared by every stored Topic Name, so deep or highly fragmented topics
+    /// must not amplify one bounded message into unbounded index nodes.
+    max_index_bytes: usize = 64 * 1024 * 1024,
 };
 
 pub const StoreResult = enum {
@@ -147,6 +151,117 @@ const Entry = struct {
         allocator.free(self.topic);
         self.* = undefined;
     }
+
+    /// Release everything except the Topic Name allocation. Replacement
+    /// keeps the stored Topic Name so trie edge keys that borrow it stay
+    /// valid across the swap.
+    fn deinitExceptTopic(self: *Entry, allocator: std.mem.Allocator) void {
+        owned_properties.deinit(allocator, self.properties);
+        if (self.source_client_id) |value| allocator.free(value);
+        if (self.source_username) |value| allocator.free(value);
+        allocator.free(self.payload);
+        self.* = undefined;
+    }
+};
+
+/// Sentinel for absent trie links. A u32 index keeps one node at 40 bytes, so
+/// wildcard traversal touches far fewer cache lines than optional-usize links.
+const trie_none: u32 = std.math.maxInt(u32);
+
+/// One node in the retained-topic trie. Node 0 is the root and is never
+/// freed. Children are linked through `child_head`/`next_sibling` so wildcard
+/// traversal can enumerate them without a hash map per node; `trie_edges`
+/// provides O(1) literal lookup. `parent_edge` borrows the owning Entry's
+/// topic bytes, so an Entry is only released after its edges are unlinked.
+const TrieNode = struct {
+    entry_index: u32 = trie_none,
+    parent: u32 = trie_none,
+    parent_edge: []const u8 = &.{},
+    child_head: u32 = trie_none,
+    next_sibling: u32 = trie_none,
+    prev_sibling: u32 = trie_none,
+    next_free: u32 = trie_none,
+};
+
+inline fn trieIndex(slot: u32) ?usize {
+    return if (slot == trie_none) null else @intCast(slot);
+}
+
+inline fn trieSlot(index: usize) u32 {
+    std.debug.assert(index < trie_none);
+    return @intCast(index);
+}
+
+const TrieEdge = struct {
+    parent: usize,
+    level: []const u8,
+};
+
+/// Approximate bytes owned by one trie level: the node plus one edge-map
+/// key/value slot with load-factor and metadata headroom.
+const trie_level_bytes = @sizeOf(TrieNode) + @sizeOf(TrieEdge) +
+    @sizeOf(usize) + 8;
+
+const TrieEdgeContext = struct {
+    pub fn hash(_: TrieEdgeContext, edge: TrieEdge) u64 {
+        var hasher = std.hash.Wyhash.init(0);
+        hasher.update(std.mem.asBytes(&edge.parent));
+        hasher.update(edge.level);
+        return hasher.final();
+    }
+
+    pub fn eql(_: TrieEdgeContext, a: TrieEdge, b: TrieEdge) bool {
+        return a.parent == b.parent and
+            std.mem.eql(u8, a.level, b.level);
+    }
+};
+
+const TrieEdges = std.HashMapUnmanaged(
+    TrieEdge,
+    usize,
+    TrieEdgeContext,
+    std.hash_map.default_max_load_percentage,
+);
+
+const max_filter_levels = 64;
+/// Literal child lookups scan this many siblings before hashing. Real topic
+/// trees branch rarely, and the scan is cache-friendlier than a hash probe.
+const max_child_scan = 8;
+
+const FilterLevels = struct {
+    ends: [max_filter_levels]usize = undefined,
+    count: usize = 0,
+    complete: bool = true,
+};
+
+fn computeFilterLevels(filter: []const u8) FilterLevels {
+    var levels = FilterLevels{};
+    var start: usize = 0;
+    while (true) {
+        const end = std.mem.indexOfScalarPos(u8, filter, start, '/') orelse
+            filter.len;
+        if (levels.count == levels.ends.len) {
+            levels.complete = false;
+            return levels;
+        }
+        levels.ends[levels.count] = end;
+        levels.count += 1;
+        if (end == filter.len) break;
+        start = end + 1;
+    }
+    return levels;
+}
+
+const MatchFrame = struct {
+    node: usize,
+    level_index: usize,
+    next_child: ?usize,
+    /// `+` iteration state: distinguishes "not started" from "exhausted",
+    /// both of which have a null `next_child`.
+    started: bool = false,
+    /// Literal levels have exactly one candidate child; this records that the
+    /// frame already descended so returning to it pops instead of repeating.
+    descended: bool = false,
 };
 
 pub const Store = struct {
@@ -154,6 +269,23 @@ pub const Store = struct {
     options: Options,
     entries: std.ArrayList(?Entry) = .empty,
     index: std.StringHashMapUnmanaged(usize) = .empty,
+    /// Retained-topic trie backing wildcard lookups. Edge keys borrow Entry
+    /// topic bytes; replacement reuses the old Topic Name allocation so they
+    /// cannot dangle.
+    trie_nodes: std.ArrayList(TrieNode) = .empty,
+    trie_edges: TrieEdges = .empty,
+    trie_free_head: u32 = trie_none,
+    /// Approximate bytes owned by the trie and edge map, charged against
+    /// `Options.max_index_bytes`.
+    index_bytes: usize = 0,
+    /// Scratch bitmap over `entries` used to order wildcard matches by table
+    /// position without allocating in the lookup path. Capacity is reserved
+    /// when entries are inserted.
+    match_bits: std.ArrayList(u64) = .empty,
+    /// Word range the previous match marked. Clearing only this range keeps
+    /// selective lookups from touching the whole bitmap.
+    match_clear_lo: usize = std.math.maxInt(usize),
+    match_clear_hi: usize = 0,
     message_count: usize = 0,
     total_bytes: usize = 0,
 
@@ -170,6 +302,9 @@ pub const Store = struct {
         }
         self.entries.deinit(self.allocator);
         self.index.deinit(self.allocator);
+        self.trie_edges.deinit(self.allocator);
+        self.trie_nodes.deinit(self.allocator);
+        self.match_bits.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -179,6 +314,11 @@ pub const Store = struct {
 
     pub fn totalBytes(self: Store) usize {
         return self.total_bytes;
+    }
+
+    /// Approximate bytes currently owned by the retained topic index.
+    pub fn indexBytes(self: Store) usize {
+        return self.index_bytes;
     }
 
     /// Encode all unexpired retained Application Messages.
@@ -192,15 +332,15 @@ pub const Store = struct {
         now: std.Io.Timestamp,
     ) (Error || persistence.Error)!void {
         var snapshot_count: u32 = 0;
-        for (self.entries.items) |maybe_entry| {
-            const entry = maybe_entry orelse continue;
+        for (self.entries.items) |*maybe_entry| {
+            const entry = if (maybe_entry.*) |*value| value else continue;
             if (remainingExpiryNs(entry, now.nanoseconds) == 0) continue;
             snapshot_count = std.math.add(u32, snapshot_count, 1) catch
                 return error.SnapshotLimitExceeded;
         }
         try persistence.appendInt(out, allocator, u32, snapshot_count);
-        for (self.entries.items) |maybe_entry| {
-            const entry = maybe_entry orelse continue;
+        for (self.entries.items) |*maybe_entry| {
+            const entry = if (maybe_entry.*) |*value| value else continue;
             const remaining_ns = remainingExpiryNs(
                 entry,
                 now.nanoseconds,
@@ -414,25 +554,23 @@ pub const Store = struct {
         }
 
         if (self.index.get(topic)) |entry_index| {
-            const old = &self.entries.items[entry_index].?;
+            var old_entry = self.entries.items[entry_index].?;
             const prospective_total = self.total_bytes -
-                old.allocation_bytes +
+                old_entry.allocation_bytes +
                 new_entry.allocation_bytes;
             if (prospective_total > self.options.max_total_bytes) {
                 return error.RetainedLimitExceeded;
             }
 
-            const map_value = self.index.getPtr(topic).?;
-            std.debug.assert(map_value.* == entry_index);
-            var old_entry = self.entries.items[entry_index].?;
+            // Trie edge keys borrow the stored Topic Name. Reuse the old
+            // allocation so replacement cannot leave dangling keys, and the
+            // index key pointer therefore stays valid too.
+            self.allocator.free(new_entry.topic);
+            new_entry.topic = old_entry.topic;
             self.entries.items[entry_index] = new_entry;
-            // StringHashMap keys point into the owned Entry. Replace the key
-            // pointer before freeing the old topic, without perturbing table
-            // capacity or probing state.
-            self.index.getEntry(topic).?.key_ptr.* = new_entry.topic;
             self.total_bytes = prospective_total;
             new_entry = undefined;
-            old_entry.deinit(self.allocator);
+            old_entry.deinitExceptTopic(self.allocator);
             return .replaced;
         }
 
@@ -440,6 +578,10 @@ pub const Store = struct {
             new_entry.allocation_bytes >
                 self.options.max_total_bytes - self.total_bytes)
         {
+            return error.RetainedLimitExceeded;
+        }
+        const index_cost = self.trieInsertCost(new_entry.topic);
+        if (index_cost > self.options.max_index_bytes -| self.index_bytes) {
             return error.RetainedLimitExceeded;
         }
         try self.index.ensureUnusedCapacity(self.allocator, 1);
@@ -452,14 +594,36 @@ pub const Store = struct {
             try self.entries.append(self.allocator, null);
             break :blk self.entries.items.len - 1;
         };
+        // Reserve every allocation the commit needs so the trie insert and
+        // bitmap sizing below cannot fail and leave borrowed keys dangling.
+        const previous_words = self.match_bits.items.len;
+        try self.match_bits.resize(
+            self.allocator,
+            (self.entries.items.len + 63) / 64,
+        );
+        // New words start zero so the bitmap is zero at every match boundary.
+        @memset(self.match_bits.items[previous_words..], 0);
+        const trie_levels: u32 = @intCast(
+            std.mem.count(u8, new_entry.topic, "/") + 1,
+        );
+        try self.trie_nodes.ensureUnusedCapacity(
+            self.allocator,
+            trie_levels + @intFromBool(self.trie_nodes.items.len == 0),
+        );
+        try self.trie_edges.ensureUnusedCapacity(
+            self.allocator,
+            trie_levels,
+        );
 
         self.entries.items[entry_index] = new_entry;
+        self.trieInsertAssumeCapacity(new_entry.topic, entry_index);
         self.index.putAssumeCapacityNoClobber(
             new_entry.topic,
             entry_index,
         );
         self.message_count += 1;
         self.total_bytes += new_entry.allocation_bytes;
+        self.index_bytes += index_cost;
         new_entry = undefined;
         return .inserted;
     }
@@ -517,6 +681,10 @@ pub const Store = struct {
         self.entries.items[removed.value] = null;
         self.message_count -= 1;
         self.total_bytes -= entry.allocation_bytes;
+        // Unlink borrowed trie keys before the Topic Name is freed.
+        const freed_index_bytes = self.trieRemove(topic);
+        std.debug.assert(freed_index_bytes <= self.index_bytes);
+        self.index_bytes -= freed_index_bytes;
         entry.deinit(self.allocator);
         return true;
     }
@@ -530,7 +698,7 @@ pub const Store = struct {
         var entry_index: usize = 0;
         while (entry_index < self.entries.items.len) : (entry_index += 1) {
             const entry = &(self.entries.items[entry_index] orelse continue);
-            if (remainingExpiry(entry.*, now.nanoseconds) != 0) {
+            if (remainingExpiry(entry, now.nanoseconds) != 0) {
                 continue;
             }
             std.debug.assert(self.remove(entry.topic));
@@ -539,18 +707,361 @@ pub const Store = struct {
         return removed;
     }
 
+    /// Insert one Topic Name path. All required allocations were reserved by
+    /// the caller, so this cannot fail.
+    fn trieInsertAssumeCapacity(
+        self: *Store,
+        topic: []const u8,
+        entry_index: usize,
+    ) void {
+        if (self.trie_nodes.items.len == 0) {
+            self.trie_nodes.appendAssumeCapacity(.{});
+        }
+        var node: usize = 0;
+        var start: usize = 0;
+        while (true) {
+            const end = std.mem.indexOfScalarPos(u8, topic, start, '/') orelse
+                topic.len;
+            const level = topic[start..end];
+            const slot = self.trie_edges.getOrPutAssumeCapacity(.{
+                .parent = node,
+                .level = level,
+            });
+            if (!slot.found_existing) {
+                slot.value_ptr.* = self.trieNewChildAssumeCapacity(
+                    node,
+                    level,
+                );
+            }
+            node = slot.value_ptr.*;
+            if (end == topic.len) break;
+            start = end + 1;
+        }
+        std.debug.assert(self.trie_nodes.items[node].entry_index == trie_none);
+        self.trie_nodes.items[node].entry_index = trieSlot(entry_index);
+    }
+
+    fn trieNewChildAssumeCapacity(
+        self: *Store,
+        parent: usize,
+        level: []const u8,
+    ) usize {
+        var index: usize = undefined;
+        if (trieIndex(self.trie_free_head)) |free_index| {
+            self.trie_free_head = self.trie_nodes.items[free_index].next_free;
+            index = free_index;
+        } else {
+            self.trie_nodes.appendAssumeCapacity(.{});
+            index = self.trie_nodes.items.len - 1;
+        }
+        const head = self.trie_nodes.items[parent].child_head;
+        self.trie_nodes.items[index] = .{
+            .parent = trieSlot(parent),
+            .parent_edge = level,
+            .next_sibling = head,
+        };
+        if (trieIndex(head)) |head_index| {
+            self.trie_nodes.items[head_index].prev_sibling = trieSlot(index);
+        }
+        self.trie_nodes.items[parent].child_head = trieSlot(index);
+        return index;
+    }
+
+    /// Bytes the trie will allocate for `topic`, counting only levels that do
+    /// not already exist. Runs before the insert commit so an oversized index
+    /// cannot be allocated and then abandoned.
+    fn trieInsertCost(self: *const Store, topic: []const u8) usize {
+        const total_levels = std.mem.count(u8, topic, "/") + 1;
+        if (self.trie_nodes.items.len == 0) {
+            return @sizeOf(TrieNode) + total_levels * trie_level_bytes;
+        }
+        var node: usize = 0;
+        var start: usize = 0;
+        var remaining = total_levels;
+        while (true) {
+            const end = std.mem.indexOfScalarPos(u8, topic, start, '/') orelse
+                topic.len;
+            const child = self.trieChild(node, topic[start..end]) orelse
+                break;
+            node = child;
+            remaining -= 1;
+            if (end == topic.len) return 0;
+            start = end + 1;
+        }
+        return remaining * trie_level_bytes;
+    }
+
+    /// Unlink `topic` from the trie and release empty nodes upward. Returns the
+    /// bytes returned to the index budget. Must run before the Entry's Topic
+    /// Name allocation is freed because edge keys borrow it.
+    fn trieRemove(self: *Store, topic: []const u8) usize {
+        if (self.trie_nodes.items.len == 0) return 0;
+        var node: usize = 0;
+        var start: usize = 0;
+        while (true) {
+            const end = std.mem.indexOfScalarPos(u8, topic, start, '/') orelse
+                topic.len;
+            node = self.trie_edges.get(.{
+                .parent = node,
+                .level = topic[start..end],
+            }) orelse {
+                std.debug.assert(false);
+                return 0;
+            };
+            if (end == topic.len) break;
+            start = end + 1;
+        }
+        std.debug.assert(self.trie_nodes.items[node].entry_index != trie_none);
+        self.trie_nodes.items[node].entry_index = trie_none;
+        var freed: usize = 0;
+        while (node != 0) {
+            const current = self.trie_nodes.items[node];
+            if (current.entry_index != trie_none or
+                current.child_head != trie_none)
+            {
+                break;
+            }
+            const parent = trieIndex(current.parent) orelse break;
+            if (trieIndex(current.prev_sibling)) |prev| {
+                self.trie_nodes.items[prev].next_sibling =
+                    current.next_sibling;
+            } else {
+                self.trie_nodes.items[parent].child_head =
+                    current.next_sibling;
+            }
+            if (trieIndex(current.next_sibling)) |next| {
+                self.trie_nodes.items[next].prev_sibling =
+                    current.prev_sibling;
+            }
+            const removed = self.trie_edges.remove(.{
+                .parent = parent,
+                .level = current.parent_edge,
+            });
+            std.debug.assert(removed);
+            self.trie_nodes.items[node].next_free = self.trie_free_head;
+            self.trie_free_head = trieSlot(node);
+            freed += trie_level_bytes;
+            node = parent;
+        }
+        return freed;
+    }
+
+    /// Literal child lookup. Topic trees are narrow away from their branch
+    /// points, so scanning a few siblings avoids hashing for the common
+    /// `devices/+/state` shape. Wide nodes fall back to the edge map.
+    fn trieChild(
+        self: *const Store,
+        parent: usize,
+        level: []const u8,
+    ) ?usize {
+        var child = trieIndex(self.trie_nodes.items[parent].child_head);
+        var scanned: usize = 0;
+        while (child) |child_index| {
+            const node = &self.trie_nodes.items[child_index];
+            if (std.mem.eql(u8, node.parent_edge, level)) {
+                return child_index;
+            }
+            scanned += 1;
+            if (scanned == max_child_scan) break;
+            child = trieIndex(node.next_sibling);
+        }
+        return self.trie_edges.get(.{ .parent = parent, .level = level });
+    }
+
+    fn setMatchBit(self: *Store, entry_index: usize) void {
+        const word = entry_index / 64;
+        self.match_bits.items[word] |=
+            @as(u64, 1) << @intCast(entry_index % 64);
+        self.match_clear_lo = @min(self.match_clear_lo, word);
+        self.match_clear_hi = @max(self.match_clear_hi, word + 1);
+    }
+
+    /// Clear exactly the words the previous match marked. The bitmap is zero
+    /// at every match boundary, so a selective lookup never touches the rest
+    /// of the table.
+    fn clearMatchBits(self: *Store) void {
+        if (self.match_clear_lo < self.match_clear_hi) {
+            @memset(
+                self.match_bits.items[self.match_clear_lo..self.match_clear_hi],
+                0,
+            );
+        }
+        self.match_clear_lo = std.math.maxInt(usize);
+        self.match_clear_hi = 0;
+    }
+
+    /// Mark every retained entry matching `filter` in `match_bits`.
+    fn collectMatches(self: *Store, filter: []const u8) void {
+        if (self.message_count == 0) return;
+        const levels = computeFilterLevels(filter);
+        if (!levels.complete or self.trie_nodes.items.len == 0) {
+            // Filters deeper than the inline bound are vanishingly rare. A
+            // linear scan keeps the lookup allocation-free instead of growing
+            // a heap traversal stack.
+            for (self.entries.items, 0..) |maybe_entry, entry_index| {
+                const entry = maybe_entry orelse continue;
+                if (mqtt.topicMatchesFilter(entry.topic, filter)) {
+                    self.setMatchBit(entry_index);
+                }
+            }
+            return;
+        }
+        self.traverseFilter(filter, &levels);
+    }
+
+    fn traverseFilter(
+        self: *Store,
+        filter: []const u8,
+        levels: *const FilterLevels,
+    ) void {
+        // One frame per filter level plus the terminal frame. The depth is
+        // bounded by `max_filter_levels`, so this needs no allocation.
+        var stack: [max_filter_levels + 1]MatchFrame = undefined;
+        var depth: usize = 0;
+        stack[0] = .{ .node = 0, .level_index = 0, .next_child = null };
+        while (true) {
+            const frame = &stack[depth];
+            if (frame.level_index == levels.count) {
+                if (trieIndex(self.trie_nodes.items[frame.node].entry_index)) |index| {
+                    self.setMatchBit(index);
+                }
+                if (depth == 0) return;
+                depth -= 1;
+                continue;
+            }
+            const level_start = if (frame.level_index == 0)
+                0
+            else
+                levels.ends[frame.level_index - 1] + 1;
+            const level = filter[level_start..levels.ends[frame.level_index]];
+            if (level.len == 1 and level[0] == '#') {
+                // `#` is validated to be the final level.
+                self.collectSubtree(frame.node, frame.level_index == 0);
+                if (depth == 0) return;
+                depth -= 1;
+                continue;
+            }
+            if (level.len == 1 and level[0] == '+') {
+                var child: ?usize = undefined;
+                if (frame.started) {
+                    child = frame.next_child;
+                } else {
+                    frame.started = true;
+                    child = trieIndex(
+                        self.trie_nodes.items[frame.node].child_head,
+                    );
+                }
+                // MQTT reserves `$` topics from a leading wildcard.
+                if (frame.level_index == 0) {
+                    while (child) |child_index| {
+                        if (!std.mem.startsWith(
+                            u8,
+                            self.trie_nodes.items[child_index].parent_edge,
+                            "$",
+                        )) break;
+                        child = trieIndex(
+                            self.trie_nodes.items[child_index].next_sibling,
+                        );
+                    }
+                }
+                if (child) |child_index| {
+                    frame.next_child = trieIndex(
+                        self.trie_nodes.items[child_index].next_sibling,
+                    );
+                    depth += 1;
+                    stack[depth] = .{
+                        .node = child_index,
+                        .level_index = frame.level_index + 1,
+                        .next_child = null,
+                    };
+                } else if (depth == 0) {
+                    return;
+                } else {
+                    depth -= 1;
+                }
+                continue;
+            }
+            if (frame.descended) {
+                if (depth == 0) return;
+                depth -= 1;
+                continue;
+            }
+            frame.descended = true;
+            if (self.trieChild(frame.node, level)) |child_index| {
+                depth += 1;
+                stack[depth] = .{
+                    .node = child_index,
+                    .level_index = frame.level_index + 1,
+                    .next_child = null,
+                };
+            } else if (depth == 0) {
+                return;
+            } else {
+                depth -= 1;
+            }
+        }
+    }
+
+    fn collectSubtree(self: *Store, start: usize, skip_system: bool) void {
+        if (trieIndex(self.trie_nodes.items[start].entry_index)) |index| {
+            self.setMatchBit(index);
+        }
+        var child = trieIndex(self.trie_nodes.items[start].child_head);
+        while (child) |child_index| {
+            if (skip_system and std.mem.startsWith(
+                u8,
+                self.trie_nodes.items[child_index].parent_edge,
+                "$",
+            )) {
+                child = trieIndex(
+                    self.trie_nodes.items[child_index].next_sibling,
+                );
+                continue;
+            }
+            self.collectSubtreeFrom(child_index);
+            child = trieIndex(
+                self.trie_nodes.items[child_index].next_sibling,
+            );
+        }
+    }
+
+    /// Pre-order walk of one child's subtree using sibling and parent links
+    /// instead of an explicit stack.
+    fn collectSubtreeFrom(self: *Store, root_child: usize) void {
+        var current = root_child;
+        while (true) {
+            if (trieIndex(self.trie_nodes.items[current].entry_index)) |index| {
+                self.setMatchBit(index);
+            }
+            if (trieIndex(self.trie_nodes.items[current].child_head)) |child| {
+                current = child;
+                continue;
+            }
+            while (true) {
+                if (current == root_child) return;
+                if (trieIndex(
+                    self.trie_nodes.items[current].next_sibling,
+                )) |sibling| {
+                    current = sibling;
+                    break;
+                }
+                current = trieIndex(self.trie_nodes.items[current].parent).?;
+            }
+        }
+    }
+
     pub fn matchInto(
         self: *Store,
         filter: []const u8,
         now: std.Io.Timestamp,
         out: []Match,
     ) Error![]Match {
-        try mqtt.validateTopicFilter(filter);
         const effective_filter = effectiveFilter(filter);
-        if (!mqtt.hasWildcards(effective_filter)) {
+        const has_wildcards = try mqtt.validateTopicFilterKind(filter);
+        if (!has_wildcards) {
             const entry_index = self.index.get(effective_filter) orelse
                 return out[0..0];
-            const entry = self.entries.items[entry_index].?;
+            const entry = &self.entries.items[entry_index].?;
             const remaining = remainingExpiry(
                 entry,
                 now.nanoseconds,
@@ -560,47 +1071,41 @@ pub const Store = struct {
             out[0] = matchForEntry(entry, remaining);
             return out[0..1];
         }
-        if (out.len >= self.message_count) {
-            // Every live match is one retained entry. With room for the whole
-            // store, MatchBufferTooSmall is impossible, so retain the API's
-            // transactional guarantee without paying a count-only full scan
-            // before the emit scan.
-            var written: usize = 0;
-            for (self.entries.items) |maybe_entry| {
-                const entry = maybe_entry orelse continue;
+        self.collectMatches(effective_filter);
+        defer self.clearMatchBits();
+        if (out.len < self.message_count) {
+            // With room for the whole live store, MatchBufferTooSmall is
+            // impossible and the emit pass below doubles as the count.
+            var required: usize = 0;
+            for (self.match_bits.items, 0..) |word, word_index| {
+                var bits = word;
+                while (bits != 0) {
+                    const entry_index =
+                        word_index * 64 + @as(usize, @intCast(@ctz(bits)));
+                    bits &= bits - 1;
+                    const entry = &self.entries.items[entry_index].?;
+                    if (remainingExpiry(entry, now.nanoseconds) != 0) {
+                        required += 1;
+                    }
+                }
+            }
+            if (out.len < required) return error.MatchBufferTooSmall;
+        }
+
+        var written: usize = 0;
+        for (self.match_bits.items, 0..) |word, word_index| {
+            var bits = word;
+            while (bits != 0) {
+                const entry_index =
+                    word_index * 64 + @as(usize, @intCast(@ctz(bits)));
+                bits &= bits - 1;
+                const entry = &self.entries.items[entry_index].?;
                 const remaining = remainingExpiry(entry, now.nanoseconds);
-                if (remaining == 0 or !mqtt.topicMatchesFilter(
-                    entry.topic,
-                    effective_filter,
-                )) continue;
+                if (remaining == 0) continue;
                 out[written] = matchForEntry(entry, remaining);
                 written += 1;
             }
-            return out[0..written];
         }
-        var required: usize = 0;
-        for (self.entries.items) |maybe_entry| {
-            const entry = maybe_entry orelse continue;
-            if (remainingExpiry(entry, now.nanoseconds) == 0) continue;
-            if (mqtt.topicMatchesFilter(
-                entry.topic,
-                effective_filter,
-            )) required += 1;
-        }
-        if (out.len < required) return error.MatchBufferTooSmall;
-
-        var written: usize = 0;
-        for (self.entries.items) |maybe_entry| {
-            const entry = maybe_entry orelse continue;
-            const remaining = remainingExpiry(entry, now.nanoseconds);
-            if (remaining == 0 or !mqtt.topicMatchesFilter(
-                entry.topic,
-                effective_filter,
-            )) continue;
-            out[written] = matchForEntry(entry, remaining);
-            written += 1;
-        }
-        std.debug.assert(written == required);
         return out[0..written];
     }
 
@@ -639,7 +1144,9 @@ pub const Store = struct {
         now: std.Io.Timestamp,
         out: []Delivery,
     ) Error![]Delivery {
-        try mqtt.validateTopicFilter(subscription.topic_filter);
+        const has_wildcards = try mqtt.validateTopicFilterKind(
+            subscription.topic_filter,
+        );
         if (subscription.retain_handling > 2) {
             return error.InvalidSubscription;
         }
@@ -659,14 +1166,13 @@ pub const Store = struct {
             return out[0..0];
         }
 
-        var required: usize = 0;
         const effective_filter = effectiveFilter(
             subscription.topic_filter,
         );
-        if (!mqtt.hasWildcards(effective_filter)) {
+        if (!has_wildcards) {
             const entry_index = self.index.get(effective_filter) orelse
                 return out[0..0];
-            const entry = self.entries.items[entry_index].?;
+            const entry = &self.entries.items[entry_index].?;
             const remaining = remainingExpiry(
                 entry,
                 now.nanoseconds,
@@ -685,17 +1191,38 @@ pub const Store = struct {
             );
             return out[0..1];
         }
-        if (out.len >= self.message_count) {
-            var written: usize = 0;
-            for (self.entries.items) |maybe_entry| {
-                const entry = maybe_entry orelse continue;
-                const remaining = remainingExpiry(entry, now.nanoseconds);
-                if (remaining == 0 or
-                    skipNoLocal(entry, subscription, context) or
-                    !mqtt.topicMatchesFilter(entry.topic, effective_filter))
-                {
-                    continue;
+        self.collectMatches(effective_filter);
+        defer self.clearMatchBits();
+        if (out.len < self.message_count) {
+            var required: usize = 0;
+            for (self.match_bits.items, 0..) |word, word_index| {
+                var bits = word;
+                while (bits != 0) {
+                    const entry_index =
+                        word_index * 64 + @as(usize, @intCast(@ctz(bits)));
+                    bits &= bits - 1;
+                    const entry = &self.entries.items[entry_index].?;
+                    if (remainingExpiry(entry, now.nanoseconds) == 0) {
+                        continue;
+                    }
+                    if (skipNoLocal(entry, subscription, context)) continue;
+                    required += 1;
                 }
+            }
+            if (out.len < required) return error.MatchBufferTooSmall;
+        }
+
+        var written: usize = 0;
+        for (self.match_bits.items, 0..) |word, word_index| {
+            var bits = word;
+            while (bits != 0) {
+                const entry_index =
+                    word_index * 64 + @as(usize, @intCast(@ctz(bits)));
+                bits &= bits - 1;
+                const entry = &self.entries.items[entry_index].?;
+                const remaining = remainingExpiry(entry, now.nanoseconds);
+                if (remaining == 0) continue;
+                if (skipNoLocal(entry, subscription, context)) continue;
                 out[written] = deliveryForEntry(
                     entry,
                     subscription.qos,
@@ -705,36 +1232,6 @@ pub const Store = struct {
                 );
                 written += 1;
             }
-            return out[0..written];
-        }
-        for (self.entries.items) |maybe_entry| {
-            const entry = maybe_entry orelse continue;
-            if (remainingExpiry(entry, now.nanoseconds) == 0) continue;
-            if (skipNoLocal(entry, subscription, context)) continue;
-            if (mqtt.topicMatchesFilter(
-                entry.topic,
-                effective_filter,
-            )) required += 1;
-        }
-        if (out.len < required) return error.MatchBufferTooSmall;
-
-        var written: usize = 0;
-        for (self.entries.items) |maybe_entry| {
-            const entry = maybe_entry orelse continue;
-            const remaining = remainingExpiry(entry, now.nanoseconds);
-            if (skipNoLocal(entry, subscription, context)) continue;
-            if (remaining == 0 or !mqtt.topicMatchesFilter(
-                entry.topic,
-                effective_filter,
-            )) continue;
-            out[written] = deliveryForEntry(
-                entry,
-                subscription.qos,
-                context.subscription_identifier,
-                remaining,
-                context.upgrade_outgoing_qos,
-            );
-            written += 1;
         }
         return out[0..written];
     }
@@ -838,7 +1335,7 @@ fn keepRetainedProperty(property: mqtt.Property) bool {
         property.two_byte.id == .topic_alias);
 }
 
-fn remainingExpiry(entry: Entry, now_ns: i96) ?u32 {
+fn remainingExpiry(entry: *const Entry, now_ns: i96) ?u32 {
     const interval = entry.expiry_interval orelse return null;
     if (interval == 0) return 0;
     const elapsed_ns = @max(now_ns - entry.stored_at_ns, 0);
@@ -850,7 +1347,7 @@ fn remainingExpiry(entry: Entry, now_ns: i96) ?u32 {
     return interval - elapsed_seconds;
 }
 
-fn remainingExpiryNs(entry: Entry, now_ns: i96) ?u64 {
+fn remainingExpiryNs(entry: *const Entry, now_ns: i96) ?u64 {
     const interval = entry.expiry_interval orelse return null;
     const lifetime_ns = @as(u64, interval) * std.time.ns_per_s;
     const elapsed_ns: u64 = @intCast(@max(
@@ -872,7 +1369,7 @@ fn remainingAfterDowntimeNs(
     return value -| elapsed;
 }
 
-fn matchForEntry(entry: Entry, remaining: ?u32) Match {
+fn matchForEntry(entry: *const Entry, remaining: ?u32) Match {
     return .{
         .topic = entry.topic,
         .payload = entry.payload,
@@ -887,7 +1384,7 @@ fn matchForEntry(entry: Entry, remaining: ?u32) Match {
 }
 
 fn deliveryForEntry(
-    entry: Entry,
+    entry: *const Entry,
     subscription_qos: mqtt.QoS,
     subscription_identifier: ?usize,
     remaining: ?u32,
@@ -914,7 +1411,7 @@ fn deliveryForEntry(
 }
 
 fn skipNoLocal(
-    entry: Entry,
+    entry: *const Entry,
     subscription: mqtt.Subscription,
     context: DeliveryContext,
 ) bool {

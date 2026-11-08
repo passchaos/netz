@@ -591,6 +591,132 @@ test "retained limits and failed replacement preserve old entry" {
     try std.testing.expectEqualStrings("small", found[0].payload);
 }
 
+test "retained wildcard matching keeps entry order across slot reuse" {
+    const allocator = std.testing.allocator;
+    var store = Store.init(allocator, .{});
+    defer store.deinit();
+    const now = std.Io.Timestamp.zero;
+    _ = try store.applyPublish("a/z", "1", .{ .retain = true, .now = now });
+    _ = try store.applyPublish("a/m", "2", .{ .retain = true, .now = now });
+    _ = try store.applyPublish("a/a", "3", .{ .retain = true, .now = now });
+
+    var matches: [3]Match = undefined;
+    const found = try store.matchInto("a/+", now, &matches);
+    try std.testing.expectEqual(@as(usize, 3), found.len);
+    try std.testing.expectEqualStrings("a/z", found[0].topic);
+    try std.testing.expectEqualStrings("a/m", found[1].topic);
+    try std.testing.expectEqualStrings("a/a", found[2].topic);
+
+    // Removing the middle entry and reusing its slot must keep table order.
+    try std.testing.expect(store.remove("a/m"));
+    _ = try store.applyPublish("a/x", "4", .{ .retain = true, .now = now });
+    const reordered = try store.matchInto("a/#", now, &matches);
+    try std.testing.expectEqual(@as(usize, 3), reordered.len);
+    try std.testing.expectEqualStrings("a/z", reordered[0].topic);
+    try std.testing.expectEqualStrings("a/x", reordered[1].topic);
+    try std.testing.expectEqualStrings("a/a", reordered[2].topic);
+}
+
+test "retained wildcard matching falls back for very deep filters" {
+    const allocator = std.testing.allocator;
+    var store = Store.init(allocator, .{});
+    defer store.deinit();
+    const now = std.Io.Timestamp.zero;
+
+    var topic_buffer: [512]u8 = undefined;
+    var filter_buffer: [512]u8 = undefined;
+    const topic = try writeDeepTopic(&topic_buffer, 70, "leaf");
+    const plus_filter = try writeDeepPlusFilter(&filter_buffer, 70);
+    _ = try store.applyPublish(topic, "deep", .{
+        .retain = true,
+        .now = now,
+    });
+
+    var matches: [1]Match = undefined;
+    const found = try store.matchInto(plus_filter, now, &matches);
+    try std.testing.expectEqual(@as(usize, 1), found.len);
+    try std.testing.expectEqualStrings(topic, found[0].topic);
+
+    const exact = try store.matchInto(topic, now, &matches);
+    try std.testing.expectEqual(@as(usize, 1), exact.len);
+
+    const wrong = try writeDeepTopic(&filter_buffer, 70, "other");
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        (try store.matchInto(wrong, now, &matches)).len,
+    );
+}
+
+test "retained index budget bounds deep topic amplification" {
+    const allocator = std.testing.allocator;
+    var store = Store.init(allocator, .{
+        .max_index_bytes = 1024,
+    });
+    defer store.deinit();
+    const now = std.Io.Timestamp.zero;
+
+    var topic_buffer: [4096]u8 = undefined;
+    const deep = try writeDeepTopic(&topic_buffer, 40, "leaf");
+    try std.testing.expectError(
+        error.RetainedLimitExceeded,
+        store.applyPublish(deep, "payload", .{
+            .retain = true,
+            .now = now,
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 0), store.count());
+    try std.testing.expectEqual(@as(usize, 0), store.indexBytes());
+
+    _ = try store.applyPublish("a/b", "1", .{
+        .retain = true,
+        .now = now,
+    });
+    const shallow_index = store.indexBytes();
+    try std.testing.expect(shallow_index > 0);
+
+    try std.testing.expect(store.remove("a/b"));
+    const retained_root = store.indexBytes();
+    try std.testing.expect(retained_root < shallow_index);
+
+    _ = try store.applyPublish("c/d", "2", .{
+        .retain = true,
+        .now = now,
+    });
+    try std.testing.expectEqual(shallow_index, store.indexBytes());
+}
+
+fn writeDeepTopic(
+    buffer: []u8,
+    levels: usize,
+    last: []const u8,
+) ![]const u8 {
+    var used: usize = 0;
+    for (0..levels - 1) |index| {
+        const piece = try std.fmt.bufPrint(buffer[used..], "{s}l{d}", .{
+            if (index == 0) "" else "/",
+            index,
+        });
+        used += piece.len;
+    }
+    const tail = try std.fmt.bufPrint(buffer[used..], "/{s}", .{last});
+    used += tail.len;
+    return buffer[0..used];
+}
+
+fn writeDeepPlusFilter(buffer: []u8, levels: usize) ![]const u8 {
+    var used: usize = 0;
+    for (0..levels - 1) |index| {
+        const piece = try std.fmt.bufPrint(buffer[used..], "{s}l{d}", .{
+            if (index == 0) "" else "/",
+            index,
+        });
+        used += piece.len;
+    }
+    const tail = try std.fmt.bufPrint(buffer[used..], "/+", .{});
+    used += tail.len;
+    return buffer[0..used];
+}
+
 test "retained store allocation failures leak nothing" {
     try std.testing.checkAllAllocationFailures(
         std.testing.allocator,

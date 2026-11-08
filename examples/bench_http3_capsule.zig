@@ -1,12 +1,39 @@
 const std = @import("std");
+const sampling = @import("support/bench_sampling.zig");
 const netz = @import("netz");
 
-const iterations: usize = 1_000_000;
+const default_iterations: usize = 1_000_000;
 const payload_len: usize = 256;
 const capsules_per_buffer: usize = 8;
 
-pub fn main() !void {
+const Options = struct {
+    iterations: usize = default_iterations,
+    samples: usize = 10,
+    warmup: usize = 1,
+    baseline_path: ?[]const u8 = null,
+    update_baseline: bool = false,
+    max_regression_ratio: f64 = 1.05,
+    warn_only: bool = false,
+};
+
+const SingleParseContext = struct {
+    capsule: []const u8,
+    iterations: usize,
+};
+
+const IteratorContext = struct {
+    stream: []const u8,
+    iterations: usize,
+};
+
+const WriteContext = struct {
+    payload: []const u8,
+    iterations: usize,
+};
+
+pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.smp_allocator;
+    const options = try parseOptions(init, allocator);
     var backend = try netz.runtime.Backend.init(allocator);
     defer backend.deinit();
     const io = backend.io();
@@ -31,52 +58,125 @@ pub fn main() !void {
     }
     const stream = stream_buf[0..stream_len];
 
-    const parse_ns, const parse_checksum = try measureSingleParse(io, capsule);
-    const iter_ns, const iter_checksum = try measureIterator(io, stream);
-    const write_ns, const write_checksum = try measureWriteInto(io, &payload);
+    var parse = try sampling.run(
+        allocator,
+        io,
+        .{
+            .iterations = options.iterations,
+            .samples = options.samples,
+            .warmup = options.warmup,
+        },
+        SingleParseContext{
+            .capsule = capsule,
+            .iterations = options.iterations,
+        },
+        singleParseWork,
+    );
+    defer parse.deinit(allocator);
+
+    var iterator = try sampling.run(
+        allocator,
+        io,
+        .{
+            .iterations = options.iterations,
+            .samples = options.samples,
+            .warmup = options.warmup,
+        },
+        IteratorContext{
+            .stream = stream,
+            .iterations = options.iterations,
+        },
+        iteratorWork,
+    );
+    defer iterator.deinit(allocator);
+
+    var write = try sampling.run(
+        allocator,
+        io,
+        .{
+            .iterations = options.iterations,
+            .samples = options.samples,
+            .warmup = options.warmup,
+        },
+        WriteContext{
+            .payload = &payload,
+            .iterations = options.iterations,
+        },
+        writeIntoWork,
+    );
+    defer write.deinit(allocator);
 
     std.debug.print(
         \\HTTP/3 Capsule Protocol benchmark
         \\  io backend: zio-std-io
         \\  iterations: {d}, payload bytes: {d}, encoded bytes: {d}
+        \\  samples: {d}, warmup: {d}
         \\  parse single capsule:   {d} ns/op
         \\  iterate {d} capsules:    {d} ns/buffer, {d} ns/capsule
         \\  caller-buffer encode:   {d} ns/op
         \\  checksum: {d}
         \\
     , .{
-        iterations,
+        options.iterations,
         payload.len,
         encoded_len,
-        parse_ns / iterations,
+        options.samples,
+        options.warmup,
+        sampling.nsPerOp(parse, options.iterations),
         capsules_per_buffer,
-        iter_ns / iterations,
-        iter_ns / (iterations * capsules_per_buffer),
-        write_ns / iterations,
-        parse_checksum +% iter_checksum +% write_checksum,
+        sampling.nsPerOp(iterator, options.iterations),
+        sampling.nsPerOp(iterator, options.iterations * capsules_per_buffer),
+        sampling.nsPerOp(write, options.iterations),
+        parse.last_result +% iterator.last_result +% write.last_result,
     });
+    sampling.printDistribution("parse", parse);
+    sampling.printDistribution("iterate", iterator);
+    sampling.printDistribution("encode", write);
+    if (options.baseline_path) |path| {
+        const entries = [_]sampling.BaselineEntry{
+            .{ .name = "bench-http3-capsule/parse", .stats = parse },
+            .{ .name = "bench-http3-capsule/iterate", .stats = iterator },
+            .{ .name = "bench-http3-capsule/encode", .stats = write },
+        };
+        try sampling.checkBaselines(allocator, io, &entries, .{
+            .path = path,
+            .max_regression_ratio = options.max_regression_ratio,
+            .update = options.update_baseline,
+            .warn_only = options.warn_only,
+        });
+    }
 }
 
-fn measureSingleParse(io: std.Io, capsule: []const u8) !struct { u64, u64 } {
+fn singleParseWork(
+    context: SingleParseContext,
+    allocator: std.mem.Allocator,
+    io: std.Io,
+) anyerror!u64 {
+    _ = allocator;
+    _ = io;
     var checksum: u64 = 0;
-    const started = nowNs(io);
-    for (0..iterations) |_| {
-        std.mem.doNotOptimizeAway(capsule.ptr);
-        const parsed = try netz.http3.capsule.parse(capsule);
+    for (0..context.iterations) |_| {
+        std.mem.doNotOptimizeAway(context.capsule.ptr);
+        const parsed = try netz.http3.capsule.parse(context.capsule);
         std.mem.doNotOptimizeAway(parsed.consumed);
         checksum +%= parsed.consumed;
         checksum +%= parsed.capsule.value[0];
         checksum +%= parsed.capsule.value[parsed.capsule.value.len - 1];
     }
-    return .{ nowNs(io) -| started, checksum };
+    return checksum;
 }
 
-fn measureIterator(io: std.Io, stream: []const u8) !struct { u64, u64 } {
+fn iteratorWork(
+    context: IteratorContext,
+    allocator: std.mem.Allocator,
+    io: std.Io,
+) anyerror!u64 {
+    _ = allocator;
+    _ = io;
     var checksum: u64 = 0;
-    const started = nowNs(io);
-    for (0..iterations) |_| {
-        std.mem.doNotOptimizeAway(stream.ptr);
-        var iter = netz.http3.capsule.Iterator.init(stream);
+    for (0..context.iterations) |_| {
+        std.mem.doNotOptimizeAway(context.stream.ptr);
+        var iter = netz.http3.capsule.Iterator.init(context.stream);
         while (try iter.next()) |capsule| {
             std.mem.doNotOptimizeAway(capsule.value.ptr);
             checksum +%= capsule.value.len;
@@ -84,25 +184,86 @@ fn measureIterator(io: std.Io, stream: []const u8) !struct { u64, u64 } {
         }
         checksum +%= iter.remaining();
     }
-    return .{ nowNs(io) -| started, checksum };
+    return checksum;
 }
 
-fn measureWriteInto(io: std.Io, payload: []const u8) !struct { u64, u64 } {
+fn writeIntoWork(
+    context: WriteContext,
+    allocator: std.mem.Allocator,
+    io: std.Io,
+) anyerror!u64 {
+    _ = allocator;
+    _ = io;
     var encoded: [payload_len + 8]u8 = undefined;
     var checksum: u64 = 0;
-    const started = nowNs(io);
-    for (0..iterations) |_| {
-        std.mem.doNotOptimizeAway(payload.ptr);
-        const written = try netz.http3.capsule.writeDatagramInto(&encoded, payload);
+    for (0..context.iterations) |_| {
+        std.mem.doNotOptimizeAway(context.payload.ptr);
+        const written = try netz.http3.capsule.writeDatagramInto(
+            &encoded,
+            context.payload,
+        );
         std.mem.doNotOptimizeAway(&encoded);
         checksum +%= written.len;
         checksum +%= written[0];
     }
-    return .{ nowNs(io) -| started, checksum };
+    return checksum;
 }
 
-fn nowNs(io: std.Io) u64 {
-    const timestamp = std.Io.Clock.awake.now(io).nanoseconds;
-    if (timestamp <= 0) return 0;
-    return std.math.cast(u64, timestamp) orelse std.math.maxInt(u64);
+fn parseOptions(
+    init: std.process.Init,
+    allocator: std.mem.Allocator,
+) !Options {
+    var args = try std.process.Args.Iterator.initAllocator(
+        init.minimal.args,
+        allocator,
+    );
+    defer args.deinit();
+    _ = args.next();
+    var options: Options = .{};
+    while (args.next()) |arg| {
+        if (std.mem.startsWith(u8, arg, "--iterations=")) {
+            options.iterations = try std.fmt.parseInt(
+                usize,
+                arg["--iterations=".len..],
+                10,
+            );
+            if (options.iterations == 0) return error.InvalidArgument;
+        } else if (std.mem.startsWith(u8, arg, "--samples=")) {
+            options.samples = try std.fmt.parseInt(
+                usize,
+                arg["--samples=".len..],
+                10,
+            );
+            if (options.samples == 0) return error.InvalidArgument;
+        } else if (std.mem.startsWith(u8, arg, "--warmup=")) {
+            options.warmup = try std.fmt.parseInt(
+                usize,
+                arg["--warmup=".len..],
+                10,
+            );
+        } else if (std.mem.startsWith(u8, arg, "--baseline=")) {
+            options.baseline_path = arg["--baseline=".len..];
+            if (options.baseline_path.?.len == 0) return error.InvalidArgument;
+        } else if (std.mem.eql(u8, arg, "--update-baseline")) {
+            options.update_baseline = true;
+        } else if (std.mem.eql(u8, arg, "--warn-only")) {
+            options.warn_only = true;
+        } else if (std.mem.startsWith(u8, arg, "--max-regression-ratio=")) {
+            options.max_regression_ratio = try std.fmt.parseFloat(
+                f64,
+                arg["--max-regression-ratio=".len..],
+            );
+            if (!std.math.isFinite(options.max_regression_ratio) or
+                options.max_regression_ratio <= 0)
+            {
+                return error.InvalidArgument;
+            }
+        } else {
+            return error.InvalidArgument;
+        }
+    }
+    if (options.update_baseline and options.baseline_path == null) {
+        return error.InvalidArgument;
+    }
+    return options;
 }

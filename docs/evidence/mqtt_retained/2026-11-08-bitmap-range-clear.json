@@ -1,0 +1,75 @@
+{
+  "schema": 1,
+  "date": "2026-11-08",
+  "head": "working-tree",
+  "subject": "MQTT retained wildcard matching clears only the marked bitmap range",
+  "change": "collectMatches used to zero the entire match bitmap before every wildcard lookup. The bitmap scales with the retained table, so a selective subtree lookup on a 16,384-message store cleared 2 KiB to emit four results; profiling showed memset at roughly 15% of the retained benchmark. setMatchBit now records the touched word range, clearMatchBits clears exactly that range after the match, and newly grown bitmap words are zeroed when entries are inserted. The bitmap is therefore zero at every match boundary without an O(table) clear. Match ordering, capacity errors, and the count/emit paths are unchanged.",
+  "benchmark": {
+    "command": "taskset -c 2 <bench-mqtt-retained>",
+    "pairs": 8,
+    "order": "alternating before/after",
+    "workload": "4,096 state-only retained messages for the broad scenarios and 16,384 mixed retained messages (state/temp/config/meta per device) for the selective scenarios",
+    "before_sha256": "6164addb85cff6bdac246be84e714b52e5c5b4e441dd072fb2de657b267272b5",
+    "after_sha256": "9c34ec4cab22866042927ca0e72eb191db62beb7f6e731c20767f5c0350ba9fd",
+    "results": {
+      "exact lookup": {
+        "before_ns_per_op": 39.0,
+        "after_ns_per_op": 41.5,
+        "speedup": 0.963,
+        "wins": "2/8"
+      },
+      "wildcard full-scan": {
+        "before_ns_per_op": 71538.0,
+        "after_ns_per_op": 72793.0,
+        "speedup": 0.997,
+        "wins": "4/8",
+        "matches_per_op": 4096
+      },
+      "wildcard hash": {
+        "before_ns_per_op": 31803.5,
+        "after_ns_per_op": 32202.5,
+        "speedup": 0.985,
+        "wins": "3/8",
+        "matches_per_op": 4096
+      },
+      "selective wildcard": {
+        "before_ns_per_op": 108388.5,
+        "after_ns_per_op": 109584.5,
+        "speedup": 1.001,
+        "wins": "4/8",
+        "matches_per_op": 4096
+      },
+      "selective subtree": {
+        "before_ns_per_op": 551.5,
+        "after_ns_per_op": 288.0,
+        "speedup": 1.925,
+        "wins": "8/8",
+        "matches_per_op": 4
+      }
+    }
+  },
+  "tests": {
+    "mqtt_retained_focused": {
+      "command": "zig build test-lib -Dtest-filter=mqtt -Dtest-filter=retained --summary all",
+      "passed": 1448,
+      "total": 1448
+    },
+    "full_library": {
+      "command": "zig build test-lib --summary all (isolated caches)",
+      "passed": 6774,
+      "total": 6774,
+      "note": "One run under a host-load spike reported an unrelated WebSocket/HTTP3 HPACK error-trace failure; the immediate rerun with the same binary passed 6774/6774."
+    },
+    "mqtt_interop": {
+      "command": "zig build interop-mqtt-broker-config --summary all",
+      "status": "passed",
+      "note": "full Mosquitto-derived broker configuration matrix, including retained state, shared subscriptions, ACL reloads and persistence."
+    }
+  },
+  "source_sha256": {
+    "src/mqtt/retained/mod.zig": "11cae5502faa000e815c1da6707cf287ccd1c303f741e27039f818a517a1f227",
+    "src/mqtt/retained/tests.zig": "611a150b0d24ea777c51894cda3cd3349bd90932108cc06ced7a58a70a3a8456",
+    "examples/bench_mqtt_retained.zig": "bc0f04b9ad5921d9888bdb4bd4d81031f185b845e63f9c1a590227cdad7e3fbd"
+  },
+  "notes": "The selective subtree scenario emits four entries from device 1234 on the mixed store; the previous implementation zeroed 256 words per lookup, while the range clear touches one word. The exact, broad wildcard, prefix-hash, and selective-wildcard scenarios are neutral: their matches span most or all of the bitmap, so the range clear is equivalent to the old full clear. The exact-lookup delta is attributed to code layout because that path never touches the bitmap. The bitmap stays zero at every match boundary: clearMatchBits runs through a defer on both matchInto and deliveriesInto, and insert zeroes newly grown words. Existing tests that issue several different wildcard filters against one store would observe stale matches if this invariant broke. The host was loaded during the batch (load average roughly 5 to 13), so only interleaved ratios are claimed."
+}

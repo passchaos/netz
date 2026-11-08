@@ -1,5 +1,6 @@
 //! Local executor faults retain exactly one encrypted record transaction.
 const std = @import("std");
+const test_socket = @import("../../internal/test_socket.zig");
 const fixture = @import("testing/record_fixture.zig");
 const support = @import("../../internal/testing/write_interruption.zig");
 const record_io = @import("record_io.zig");
@@ -108,7 +109,7 @@ test "TLS bounded write failure keeps real network errors terminal" {
     var vtable = base.vtable.*;
     vtable.netWrite = Failure.write;
     const io: std.Io = .{ .userdata = base.userdata, .vtable = &vtable };
-    const socket: std.Io.net.Stream = .{ .socket = .{ .handle = 0, .address = .{ .ip4 = .loopback(0) } } };
+    const socket: std.Io.net.Stream = test_socket.stream();
     inline for ([_]bool{ false, true }) |old| {
         var sender = try fixture.stream(old, 0x22, 0x11);
         defer sender.deinit();

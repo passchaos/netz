@@ -41,7 +41,7 @@ jobs:
           DEPENDENCIES_TOKEN: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
         run: |
           if [ -z "$DEPENDENCIES_TOKEN" ]; then
-            echo "::error::Configure NETZ_DEPENDENCIES_TOKEN with read access to passchaos/vail and passchaos/vort"
+            echo "::error::Configure NETZ_DEPENDENCIES_TOKEN with read access to passchaos/vail, passchaos/vort and passchaos/harnessz"
             exit 1
           fi
 
@@ -71,6 +71,15 @@ jobs:
           path: pbz
           persist-credentials: false
 
+      - name: Checkout pinned harnessz
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: passchaos/harnessz
+          ref: e626f26b0a7ead0377254ed3a04b43b25fb2d270
+          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
+          path: harnessz
+          persist-credentials: false
+
       - name: Install Zig 0.16.0
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
         with:
@@ -80,7 +89,7 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: ~/.cache/zig
-          key: ${{ runner.os }}-zig-0.16-${{ hashFiles('netz/build.zig.zon', 'vail/build.zig.zon', 'vort/build.zig.zon', 'pbz/build.zig.zon') }}
+          key: ${{ runner.os }}-zig-0.16-${{ hashFiles('netz/build.zig.zon', 'vail/build.zig.zon', 'vort/build.zig.zon', 'pbz/build.zig.zon', 'harnessz/build.zig.zon') }}
           restore-keys: |
             ${{ runner.os }}-zig-0.16-
 
@@ -128,7 +137,7 @@ jobs:
           DEPENDENCIES_TOKEN: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
         run: |
           if [ -z "$DEPENDENCIES_TOKEN" ]; then
-            echo "::error::Configure NETZ_DEPENDENCIES_TOKEN with read access to passchaos/vail and passchaos/vort"
+            echo "::error::Configure NETZ_DEPENDENCIES_TOKEN with read access to passchaos/vail, passchaos/vort and passchaos/harnessz"
             exit 1
           fi
 
@@ -158,6 +167,15 @@ jobs:
           path: pbz
           persist-credentials: false
 
+      - name: Checkout pinned harnessz
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: passchaos/harnessz
+          ref: e626f26b0a7ead0377254ed3a04b43b25fb2d270
+          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
+          path: harnessz
+          persist-credentials: false
+
       - name: Install Zig 0.16.0
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
         with:
@@ -167,7 +185,7 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: ~/.cache/zig
-          key: ${{ runner.os }}-zig-0.16-${{ matrix.target }}-${{ hashFiles('netz/build.zig.zon', 'vail/build.zig.zon', 'vort/build.zig.zon', 'pbz/build.zig.zon') }}
+          key: ${{ runner.os }}-zig-0.16-${{ matrix.target }}-${{ hashFiles('netz/build.zig.zon', 'vail/build.zig.zon', 'vort/build.zig.zon', 'pbz/build.zig.zon', 'harnessz/build.zig.zon') }}
           restore-keys: |
             ${{ runner.os }}-zig-0.16-${{ matrix.target }}-
             ${{ runner.os }}-zig-0.16-
@@ -266,7 +284,7 @@ jobs:
           DEPENDENCIES_TOKEN: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
         run: |
           if [ -z "$DEPENDENCIES_TOKEN" ]; then
-            echo "::error::Configure NETZ_DEPENDENCIES_TOKEN with read access to passchaos/vail and passchaos/vort"
+            echo "::error::Configure NETZ_DEPENDENCIES_TOKEN with read access to passchaos/vail, passchaos/vort and passchaos/harnessz"
             exit 1
           fi
 
@@ -294,6 +312,15 @@ jobs:
           repository: passchaos/pbz
           ref: 6513ef1f8b130b308bd86ba0bd02f6acc2be64e8
           path: pbz
+          persist-credentials: false
+
+      - name: Checkout pinned harnessz
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: passchaos/harnessz
+          ref: e626f26b0a7ead0377254ed3a04b43b25fb2d270
+          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
+          path: harnessz
           persist-credentials: false
 
       - name: Install Zig 0.16.0

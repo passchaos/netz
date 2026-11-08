@@ -1,0 +1,44 @@
+{
+  "schema": 1,
+  "date": "2026-11-08",
+  "head": "working-tree",
+  "subject": "HTTP/3 capsule caller-buffer writer computes varint lengths once",
+  "change": "capsule.writeInto now computes the capsule-type and value-length varint sizes once, checks the total header and payload bounds with checked arithmetic, and writes both varints through a new bounds-checked quic.varint.encodeIntoWithLen. Previously encodedLen computed both lengths, then each quic.varint.encodeInto recomputed its own length, for four length classifications per capsule. The payload copy and overlap-safe copyForwards behavior are unchanged.",
+  "benchmark": {
+    "command": "taskset -c 0 <bench-http3-capsule> --iterations=100000 --samples=5 --warmup=1",
+    "pairs": 8,
+    "order": "alternating before/after",
+    "before_sha256": "a3b53bf647a9271282c6c5d57c6d43546ea3a8f7525c5d56eefd0aa85dbe3d38",
+    "after_sha256": "471b4c2946c7a5764e05cb9bf33b531e4cd9d799bc77601212f46226230cbdba",
+    "results": {
+      "parse single capsule": {
+        "before_ns_per_op": 2.0,
+        "after_ns_per_op": 2.0,
+        "speedup": 1.000
+      },
+      "caller-buffer encode": {
+        "before_ns_per_op": 69.0,
+        "after_ns_per_op": 62.0,
+        "speedup": 1.113
+      }
+    },
+    "note": "The host was loaded during this batch, so absolute times are higher than the quiet-host 39 ns baseline; only the interleaved ratio is claimed."
+  },
+  "tests": {
+    "capsule_varint": {
+      "command": "zig build test-lib -Dtest-filter=capsule -Dtest-filter=varint --summary all",
+      "passed": 222,
+      "total": 222
+    },
+    "full_library": {
+      "command": "zig build test-lib --summary all (isolated caches)",
+      "passed": 6771,
+      "total": 6771
+    }
+  },
+  "notes": "The new public varint helper keeps the existing unchecked internal writer private and adds an explicit output-bound check, so callers cannot overrun a short buffer. The capsule parser path is unchanged at 2 ns/op. A capsule with an empty value still writes the type and zero length varints and returns the exact consumed slice.",
+  "source_sha256": {
+    "src/http3/capsule.zig": "cda41537b5dbd6e2392a130b1c063677176ecfd590012f93c2c8afa23d83a847",
+    "src/quic/varint.zig": "408a6c8f05c7673bce91027d71bb26bcef2b924a042527c9e533c76bb96bbf8a"
+  }
+}

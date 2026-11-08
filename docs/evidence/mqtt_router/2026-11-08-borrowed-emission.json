@@ -1,0 +1,103 @@
+{
+  "schema": 1,
+  "date": "2026-11-08",
+  "head": "working-tree",
+  "subject": "MQTT router match and shared selection borrow state instead of copying it",
+  "change": "Router match and shared-subscription helpers previously took Router, SharedGroup, and Entry by value. matchTrie, emitNormalEntries, emitSharedEntries, matchNormalLinear, matchNormalLinearChecked and the group-selection helpers now take *const Router; group selection receives *const SharedGroup; entryMatch and the emission/selection paths read *const Entry instead of copying the entry header per result. The subscription lookup helpers (findEntry, findEntryForSubscription, findSharedGroup, routeContainsEntry) keep their original receivers: a first variant converted them too and consistently regressed removeSubscriber by about 2.5% (0/8 wins), so that part was reverted while the match-path changes were kept. Benchmark checksums are identical before and after.",
+  "benchmark": {
+    "command": "taskset -c 2 <bench-mqtt-router>",
+    "pairs": 8,
+    "order": "alternating before/after",
+    "before_sha256": "5390f9486ff634dcec3bc5f38ffd2052bf039e432a69b6562922080d123a7a2f",
+    "after_sha256": "08f75c273399d7baee04785cdd53543a07648924845ca3731aa854e5ea45c675",
+    "results": {
+      "router match": {
+        "before_ns_per_op": 76.0,
+        "after_ns_per_op": 69.0,
+        "speedup": 1.029,
+        "wins": "6/8"
+      },
+      "round robin shared selection": {
+        "before_ns_per_op": 139.5,
+        "after_ns_per_op": 130.0,
+        "speedup": 1.069,
+        "wins": "8/8"
+      },
+      "sticky shared selection": {
+        "before_ns_per_op": 143.0,
+        "after_ns_per_op": 130.0,
+        "speedup": 1.1,
+        "wins": "8/8"
+      },
+      "random shared selection": {
+        "before_ns_per_op": 148.5,
+        "after_ns_per_op": 138.0,
+        "speedup": 1.08,
+        "wins": "8/8"
+      },
+      "rendezvous shared selection": {
+        "before_ns_per_op": 1001.5,
+        "after_ns_per_op": 920.5,
+        "speedup": 1.08,
+        "wins": "7/8"
+      },
+      "removeSubscriber": {
+        "before_ns_per_op": 198.5,
+        "after_ns_per_op": 194.5,
+        "speedup": 1.023,
+        "wins": "5/8"
+      },
+      "resubscribe exact": {
+        "before_ns_per_op": 232.5,
+        "after_ns_per_op": 225.0,
+        "speedup": 1.038,
+        "wins": "7/8"
+      },
+      "shared unsubscribe": {
+        "before_ns_per_op": 240.0,
+        "after_ns_per_op": 231.0,
+        "speedup": 1.043,
+        "wins": "6/8"
+      },
+      "initial subscriptions": {
+        "before_ns_per_op": 678.0,
+        "after_ns_per_op": 646.0,
+        "speedup": 0.995,
+        "wins": "3/8"
+      },
+      "unsubscribe exact": {
+        "before_ns_per_op": 196.5,
+        "after_ns_per_op": 198.0,
+        "speedup": 0.995,
+        "wins": "3/8"
+      },
+      "shared subscribe": {
+        "before_ns_per_op": 1034.0,
+        "after_ns_per_op": 1019.0,
+        "speedup": 1.012,
+        "wins": "5/8"
+      }
+    }
+  },
+  "tests": {
+    "mqtt_router_focused": {
+      "command": "zig build test-lib -Dtest-filter=mqtt -Dtest-filter=router --summary all",
+      "passed": 1413,
+      "total": 1413
+    },
+    "full_library": {
+      "command": "zig build test-lib --summary all (isolated caches)",
+      "passed": 6774,
+      "total": 6774
+    },
+    "mqtt_interop": {
+      "command": "zig build interop-mqtt-broker-config --summary all",
+      "status": "passed",
+      "note": "full Mosquitto-derived broker configuration matrix, including retained state, shared subscriptions, ACL reloads and persistence."
+    }
+  },
+  "source_sha256": {
+    "src/mqtt/router.zig": "4117de6a55fca372a2d9ed3a13cd70d955e9361392212cd11366dd1bed99364b"
+  },
+  "notes": "The benchmark checksums (4098000000 subscription counts and 80009428424 shared selections) are identical across both arms, so routing and shared selection semantics are unchanged. The shared-selection scenarios are data-plane hot for shared subscriptions; the subscription churn scenarios are control-plane and mostly neutral. A first variant also changed the lookup helpers to const receivers and measured removeSubscriber at 0.975x with 0/8 wins in a separate eight-pair batch; reverting only those helpers recovered it to 1.023x while keeping the shared-selection wins. The host was loaded during the batches (load average roughly 5 to 13), so only interleaved ratios are claimed."
+}

@@ -11,6 +11,28 @@ Unless a section explicitly identifies a zio-era rerun, measurements captured
 before 2026-09-15 used `std.Io.Threaded` and remain historical evidence only.
 Current benchmark output names the backend so results from different execution
 models cannot be silently combined.
+Since 2026-11-08, `bench-http1-parse`, `bench-quic-padding-parse`,
+`bench-http3-capsule`, `bench-http2-hpack`, `bench-http3-qpack`, and
+`bench-http-content-coding` use the
+shared `harnessz` sampler. `--iterations` is the
+operation count per sample, `--samples` (default 10) is the number of timed
+samples, and `--warmup` (default 1) is the number of untimed samples. Reported
+ns/op is the median sample divided by `--iterations`, and each scenario prints
+its min/p50/p90/p99/mean/stddev. Numeric results recorded before this change
+used one timed block; pass `--samples=1 --warmup=0` for a directly comparable
+single-block measurement. The same six benchmarks accept
+`--baseline=<relative-path>` with `--update-baseline` to record raw samples and
+an environment fingerprint, then `--baseline=<relative-path>` alone to compare
+later runs; `--max-regression-ratio` (default 1.05) sets the median gate, and a
+ratio regression must also be significant under the robust rank-sum test
+before it fails. A fingerprint mismatch reports `EnvironmentMismatch` instead
+of comparing different build modes or machines. The `bench-record` and
+`bench-gate` build steps apply the same flow to all six benchmarks and write
+`benchmarks/baselines/*.json`; record and gate on the same host and build mode.
+Run the gate on a quiet host and re-run a flagged scenario before treating it
+as a regression: a sustained host-state shift can move one scenario without a
+code change. `--warn-only` reports the same regression lines without failing
+the build, which keeps local runs on a loaded host informative.
 The raw QUIC DATAGRAM throughput, 1-RTT send/receive, and UDP GSO/GRO
 benchmarks now obtain endpoint I/O and clocks from zio; the DATAGRAM receiver
 uses `std.Io.async` and cooperative `std.Io` sleeps. Numeric results in those
@@ -3660,6 +3682,41 @@ Future multi-stream payload-buffer work needs per-send or per-stream lifetime
 isolation, not one shared mutable buffer or a change that increases the
 multi-stream send/receive critical section.
 
+#### HTTP/1 request-head parse fast paths (2026-11-08)
+
+Four request-head hot spots were removed. `Method.parse` now dispatches on the
+method length and first byte before comparing registered method names, instead
+of testing up to ten full slices for every start line. The strict request-line
+parser locates its two SP delimiters with the SIMD scalar search instead of
+walking the target byte by byte. A shared `LineIterator`
+replaces `std.mem.splitSequence` for head and trailer lines: it finds the first
+CR with the SIMD single-byte search and checks the next byte for LF, preserving
+exact split-on-CRLF semantics without the generic two-byte substring search.
+The head terminator search uses the same CR-first strategy instead of the
+generic four-byte substring search at the request, response and owned-head
+entry points.
+
+Eight CPU-0 alternating fixed-binary pairs of `bench-http1-parse` at 50,000
+iterations and five samples per arm measured the combined change:
+
+| Scenario | Before ns/op | After ns/op | Speedup |
+| --- | ---: | ---: | ---: |
+| borrowed | 210.5 | 184.0 | 1.144x |
+| owned | 532.5 | 254.0 | 2.096x |
+| owned + Host | 555.0 | 279.0 | 1.989x |
+
+Isolated pairs measured method dispatch at 1.022x borrowed, the head-end scan
+at a further 1.057x borrowed, and the line iterator at 1.049x borrowed and
+2.043x owned. The strict request-line fast path was neutral on the short
+origin-form target (1.008x borrowed, 1.000x owned) and improved the longer
+absolute-form target by 1.2-2.8%. A byte-at-a-time CR scan was measured and
+rejected at 0.938-0.953x. One earlier head-end batch ran under heavy unrelated
+host load and was discarded; the reported pairs were repeated on a quieter
+host. The HTTP/1 suite passed 577/577, `fuzz-parsers`/`fuzz-stateful` replayed
+4/4, `interop-http-external-clients` passed against curl/nghttp2, and the
+complete library suite passed 6771/6771. Evidence is in
+[the HTTP/1 parse evidence](evidence/http1/2026-11-08-parse-fast-path.json).
+
 ## Raw QUIC real-handshake STREAM comparison
 
 Captured on 2026-08-17 with a fresh TLS 1.3/QUIC handshake per iteration:
@@ -7255,6 +7312,30 @@ checkout, so these numbers are recorded as a netz baseline rather than a direct
 whole-broker throughput ratio. See `docs/rumqtt_parity.md` for the feature and
 remaining-work audit.
 
+The router match and shared-selection helpers now borrow state instead of
+copying it: `matchTrie`, the emission helpers and the group-selection helpers
+take `*const Router`, group selection takes `*const SharedGroup`, and emission
+reads `*const Entry`. Eight CPU-2 alternating pairs of `bench-mqtt-router`
+measured router match at 76.0 -> 69.0 ns/op (1.029x), round-robin selection at
+139.5 -> 130.0 (1.069x), sticky at 143.0 -> 130.0 (1.100x), random at
+148.5 -> 138.0 (1.080x) and rendezvous at 1,001.5 -> 920.5 (1.080x). The
+subscription churn scenarios were neutral, and `removeSubscriber` measured
+1.023x after an earlier variant that also changed the lookup helpers was
+reverted for a consistent 2.5% regression. Benchmark checksums are identical
+across both arms. Evidence is in
+[the router borrowed emission evidence](evidence/mqtt_router/2026-11-08-borrowed-emission.json).
+
+The read-only router scenarios now have their own harnessz-sampled benchmark.
+`bench_mqtt_router_match` keeps the 4,098-filter trie and 64-member shared-group
+setup but samples only `match`, the linear-scan comparison, and the four shared
+strategies; destructive subscription churn stays in the fixed-loop
+`bench-mqtt-router`. Six baseline entries were recorded (match 74 ns/op, linear
+103.3 us/op, round-robin 135 ns, sticky 130 ns, random 138 ns, rendezvous
+1.04 us). The benchmark is registered as `bench-mqtt-router-match` and in the
+serialized `bench-record`/`bench-gate` sets with
+`benchmarks/baselines/mqtt-router.json`. Evidence is in
+[the router sampler baseline evidence](evidence/mqtt_router/2026-11-09-sampler-baseline.json).
+
 ## WebTransport runtime smoke and DATAGRAM baseline
 
 Validated on 2026-08-17:
@@ -8795,6 +8876,488 @@ or a materially different crypto backend, followed by runtime scheduling.
 No production candidate was retained: removing validation, recovery,
 ownership, exact clock, or cancellation work to chase sub-1% self symbols
 would not meet the repository's end-to-end evidence threshold.
+
+## Rejected Huffman loop rewrite (2026-11-08)
+
+The HPACK decode hot path was profiled with `perf` on the harnessz-backed
+`bench-http2-hpack` benchmark. `internal/hpack_huffman.decodeHuffmanInto` and
+`decodedLen` walk the decode trie one bit at a time. A rewrite that replaced
+the variable shift with a mask loop, cached the current trie node, and removed
+the per-bit `pending_code` accumulator was measured with fixed binaries and
+eight CPU-0 alternating pairs at 20,000 iterations per arm. The candidate
+regressed `stateful decode-only` from a 1,288.5 ns/op median to 1,701.5 ns/op
+(0.757x before/after), `decode-into` from 1,208.5 to 1,639.0 ns/op (0.737x),
+and `decode-owned` from 1,241.5 to 1,676.0 ns/op (0.741x). The change was
+reverted. A multi-bit table-driven decoder remains a candidate, but it needs
+the same fixed-binary A/B treatment and the full Huffman/HPACK/QPACK and fuzz
+gates before it can be retained.
+
+## Table-driven Huffman decode (2026-11-08)
+
+The follow-up replaced the root-state walk with a 12-bit lookup table. Each
+entry emits up to two completed symbols and records the consumed bit count, or
+stores the live trie node when the code is longer than 12 bits. Long codes and
+the final buffered suffix still use the existing bit-by-bit trie, so the table
+never needs to represent the full 30-bit HPACK code space. The table build
+rejects EOS and invalid prefixes at comptime.
+
+The same fixed-binary, CPU-0, eight-pair alternating A/B at 20,000 iterations
+per arm produced:
+
+| Scenario | Before ns/op | After ns/op | Speedup |
+| --- | ---: | ---: | ---: |
+| stateful decode-only | 1,280.5 | 509.5 | 2.513x |
+| stateful decode-into | 1,204.0 | 451.0 | 2.670x |
+| stateful decode-owned | 1,235.0 | 481.0 | 2.568x |
+| stateful roundtrip | 733 | 506 | 1.449x |
+| stateless roundtrip | 2,048 | 1,170 | 1.750x |
+| encode-only | 257 | 250 | 1.028x |
+| encoder table churn | 265 | 266 | 0.996x |
+| decoder table churn | 50 | 48 | 1.042x |
+
+Encode and table churn are neutral; every decode shape wins. The focused
+Huffman/HPACK/QPACK suite passed 264/264, including a 20,000-input differential
+comparison against the original bit-by-bit decoder, the HTTP/2, HTTP/3 and gRPC
+filters passed, `fuzz-parsers`/`fuzz-stateful` replayed 4/4, the HTTP/2/HTTP/3
+connection fuzzers passed 9/9, and the complete library suite passed
+6768/6768 before the final two test-only additions. The root table adds about
+22 KiB to the benchmark binary. Full rows and binary hashes are in
+[the Huffman evidence](evidence/hpack_huffman/2026-11-08.json).
+
+The QPACK dynamic-reference benchmark is neutral (32-field encode 0.995x,
+512-reference encode 0.997x, churn 0.997x, owned decode 1.005x), because its
+block is dominated by dynamic references rather than Huffman literals; the
+shared decoder still benefits literal-heavy QPACK field sections.
+
+The retained decoder was also validated against independent peers.
+`zig build interop-http-external-clients` passed with curl 8.5.0 (nghttp2
+1.59.0) and nghttp2 1.68.1 clients against netz in cleartext and
+certificate-verified TLS, including multiplexed body/trailer traffic, and with
+netz h2 against nghttpd. `zig build interop-http3-qpack-quic-zig` passed with
+quic-zig decoding a netz speculative QPACK field section. The complete
+`zig build interop-http3-quic-go` QUIC v1/v2 peer/cancel/redirect/pool/
+informational matrix passed as well. That fixture's `go.mod` requires Go 1.24
+and the script forces `GOTOOLCHAIN=local`; the host default go1.22.2 cannot
+download a toolchain, so the gate was run with a locally extracted go1.24.7
+via `GO_BIN`.
+
+The end-to-end gRPC SharedChannel benchmark is neutral in persistent mode
+(14,258.5 -> 14,263.5 ns/roundtrip, 0.9996x) because the HPACK dynamic table
+indexes repeated headers, and 1.6% faster in per-call mode (48,786.5 ->
+48,038.0 ns/roundtrip, 1.0156x) where more header blocks are decoded.
+
+A 13-bit root table was also measured and rejected. Doubling the table from
+4,096 to 8,192 entries regressed decode-only from 510.0 to 543.5 ns/op
+(0.938x), decode-into from 451.0 to 481.0 ns/op (0.938x), decode-owned from
+480.5 to 512.0 ns/op (0.939x), and stateless roundtrip from 1,172.5 to
+1,204.0 ns/op (0.974x). The larger table's cache footprint outweighed the
+reduced long-code fallbacks; 12 bits remains the retained configuration.
+
+## Single-pass HPACK string decode (2026-11-08)
+
+The HPACK decoder previously walked each Huffman string twice: once through
+`decodedLen` to size the output and charge the header-list budget, then again
+through `decodeHuffmanInto` to write the bytes. `decodeHuffmanIntoBounded` now
+reports `BufferTooShort` for undersized storage, so the decoder can decode each
+string once into a 512-byte stack scratch buffer, use the written length for
+header-list accounting, and copy or append the already-decoded bytes only when
+the field is retained. Strings larger than the scratch buffer keep the exact
+length walk, and non-Huffman literals keep their borrowed representation.
+Because the scratch pass validates without allocating, the caller-buffer
+decoder still performs no output allocation after the header-list limit is
+crossed.
+
+Eight CPU-0 alternating fixed-binary pairs of `bench-http2-hpack` at 20,000
+iterations and five samples per arm measured:
+
+| Scenario | Before ns/op | After ns/op | Speedup |
+| --- | ---: | ---: | ---: |
+| stateful decode-only | 515.0 | 420.0 | 1.226x |
+| stateful decode-into | 452.5 | 361.0 | 1.253x |
+| stateful decode-owned | 483.0 | 387.5 | 1.246x |
+| stateful roundtrip | 512.5 | 495.5 | 1.034x |
+| stateless roundtrip | 1,172.0 | 1,123.0 | 1.044x |
+| encode-only | 250.0 | 256.0 | 0.977x |
+| encoder table churn | 265.5 | 267.0 | 0.994x |
+| decoder table churn | 49.0 | 50.0 | 0.980x |
+
+The encode path is untouched; the encode-only delta is attributed to code
+layout because `encodeBlock` moved by 224 bytes between these two binaries.
+Whole-benchmark `perf stat` totals fell from 5,145,297,541 to 4,717,653,117
+instructions (-8.3%) and from 1,386,212,821 to 1,248,705,963 core cycles
+(-9.9%). QPACK keeps the exact-length two-pass path, so a separate eight-pair
+comparison against the committed pre-table decoder measures the complete
+Huffman series: 32-field encode 0.997x, 512-reference encode 1.005x,
+dynamic-table churn 0.995x and owned dynamic decode 1.006x.
+The focused Huffman/HPACK/QPACK suite passed 265/265, the HTTP/2, HTTP/3 and
+gRPC filters passed 2718/2718, `fuzz-parsers`/`fuzz-stateful` replayed 4/4, the
+HTTP/2/HTTP/3 connection fuzzers passed 9/9, and the complete library suite
+passed 6771/6771 with isolated build caches. `interop-http-external-clients`
+passed again against curl/nghttp2 after the change. Full rows and binary
+hashes are in [the Huffman evidence](evidence/hpack_huffman/2026-11-08.json).
+
+A follow-up added `encodeHuffmanIntoBounded`, which encodes into a
+worst-case-sized buffer and returns the exact length. HPACK `encodeString` now
+encodes values up to 320 bytes once into a 512-byte scratch buffer and derives
+the prefix length from the result, instead of walking the table for a length
+first. Eight CPU-0 alternating fixed-binary pairs measured encode-only at
+255.5 -> 249.0 ns/op (1.026x), the stateless roundtrip at 1,097.5 -> 1,061.5
+(1.034x), and the decode shapes within 0.6%. Values above the scratch bound
+keep the exact-length path, and a non-shrinking encoded form is discarded in
+favor of the literal representation.
+
+### HTTP/2 pseudo-header validation (2026-11-09)
+
+`validateHeaderBlock` ran `markRequestPseudo` (up to five name comparisons) and
+then up to five more comparisons to capture the pseudo-header value.
+`markRequestPseudo` now returns the `RequestPseudo` tag, matching the HTTP/3
+classifier, and the caller switches once; the response path also drops a
+duplicate `:status` comparison. `validateHeaderBlock` is public for callers
+that decode an HPACK block themselves, and `bench-http2-hpack` gained a
+`header-validation` scenario over its seven-field request block. Eight CPU-2
+alternating pairs measured request header validation at 167.0 -> 152.0 ns/block
+(1.106x, 8/8 wins). HPACK encode moved 255.0 -> 250.0 ns/op (1.020x, code
+layout); decode-only, decode-into, decode-owned and both roundtrip scenarios
+were neutral. The `http2-hpack` baseline was re-recorded with nine entries,
+including `header-validation`, under the unpinned cpu32 fingerprint. Evidence
+is in
+[the header validation evidence](evidence/http2_header_validation/2026-11-09.json).
+
+Field-name and field-value validation then moved to shared byte tables.
+`src/http/field_name.zig` is used by both HTTP/2 and HTTP/3; its table excludes
+uppercase and non-token bytes, replacing the per-byte switch and the redundant
+uppercase range check. `src/http/field_value.zig` replaced two comparisons per
+byte with a 256-byte invalid-byte table. Eight CPU-2 alternating pairs measured
+header validation at 154.0 -> 137.5 ns/block for the name table (1.124x, 7/8
+wins) and 135.0 -> 131.5 ns/block for the value table (1.038x, 8/8 wins).
+Combined with the pseudo-header tag change, the same block moved from 167.0 to
+131.5 ns/block. The HPACK encode/decode rows moved only with code layout. The
+`http2-hpack` baseline was re-recorded with nine entries. Evidence is in
+[the field table evidence](evidence/http2_header_validation/2026-11-09-field-tables.json).
+
+### HTTP/1 shared value table (2026-11-09)
+
+HTTP/1 carried four copies of the field-value control-byte check: the streaming
+head scan, `parseHeaderLine`, `validateHeaderValue`, and `validateReasonPhrase`.
+All four now use the inline `field_value.invalidByte` table shared with HTTP/2
+and HTTP/3. Eight CPU-2 alternating pairs of `bench-http1-parse` measured owned
+parsing at 255.0 -> 235.5 ns/op (1.085x, 8/8 wins) and owned plus Host at
+278.0 -> 257.0 ns/op (1.078x, 8/8). Borrowed parsing stayed neutral at
+185.0 ns/op because its measured cost is dominated by other work. The
+`http1-parse` baseline was re-recorded with its three entries under the
+unpinned cpu32 fingerprint. Evidence is in
+[the HTTP/1 value table evidence](evidence/http1/2026-11-09-value-table.json).
+
+### Rejected HTTP/1 line-boundary pre-scan (2026-11-08)
+
+A `LineIterator` variant precomputed all CRLF positions once per head with a
+32-byte vector scan, so `next` consumed boundaries instead of restarting the
+SIMD CR search per line. Eight CPU-0 alternating fixed-binary pairs of
+`bench-http1-parse` regressed borrowed from 182.0 to 200.5 ns/op (0.908x) and
+owned plus Host from 276.0 to 286.0 ns/op (0.965x); owned stayed neutral at
+254.0 -> 255.0. The extra scan and larger iterator did not pay for the saved
+per-line calls, so the change was reverted and the rebuilt benchmark binary
+matched the pre-experiment SHA-256 exactly.
+
+### Rejected HTTP/1 manual CR scan (2026-11-09)
+
+Replacing the per-line `std.mem.indexOfScalarPos(..., '\r')` with an inline
+byte loop helped the borrowed scenario (187.5 -> 182.0 ns/op, 1.066x, 7/8 wins)
+but regressed owned to 240.5 -> 313.5 ns/op (0.803x, 0/8) and owned plus Host to
+273.5 -> 336.0 ns/op (0.815x, 0/8). The generic search is SIMD-accelerated and
+the inlined loop changed code layout in the owned path, so the change was
+reverted and the source hash returned to the value-table revision.
+
+### Rejected combined HPACK static lookup (2026-11-08)
+
+A `findStaticIndexes` helper that returned both the exact static index and the
+static name index from one name lookup was measured to avoid the second
+`static_name_index.get` and pseudo-name chain per encoded field. Eight CPU-0
+alternating fixed-binary pairs of `bench-http2-hpack` regressed encode-only from
+554.5 to 589.0 ns/op (0.941x) and the stateful roundtrip from 934.0 to 969.0
+ns/op (0.964x); decode shapes stayed neutral. The helper was reverted and the
+rebuilt benchmark binary matched the pre-experiment SHA-256 exactly.
+
+### Rejected HPACK exact-hash seed rewrite (2026-11-08)
+
+The `DynamicExactContext.hash` path was also measured. Replacing the two
+`std.hash.autoHash` length writes with a single seeded `Wyhash.init` was
+neutral: eight CPU-0 alternating pairs at 20,000 iterations per arm measured
+encode-only 250.0 -> 249.0 ns/op (1.004x), stateful roundtrip 510.0 -> 506.5
+ns/op (1.007x), stateless roundtrip 1,169.5 -> 1,176.5 ns/op (0.994x), and
+decode-only 510.0 -> 509.5 ns/op (1.001x). The change was reverted; the
+remaining encode cost is not dominated by the length-write instructions.
+
+## MQTT router indexed unsubscribe (2026-11-08)
+
+`Router.subscribe` duplicate detection and `Router.unsubscribe` previously
+scanned every stored entry to find a `(subscriber_id, effective_filter,
+shared_group)` match. The lookup now scans only the trie route list for the
+exact filter (normally one entry), or the shared group's member list for shared
+subscriptions, which includes non-representative members. Trie pruning and
+shared representative replacement are unchanged.
+
+Eight CPU-0 alternating fixed-binary pairs of `bench-mqtt-router` measured
+`unsubscribed exact filters` at 829.0 -> 157.5 ns/op (5.263x), while router
+matching stayed at 140.0 ns/op and the shared-selection strategies remained
+within noise (round-robin 1.015x, sticky 1.004x, random 1.000x, rendezvous
+0.987x). The focused MQTT/router suite passed 1410/1410 and the complete
+library suite passed 6770/6770. Full rows and binary hashes are in
+[the router evidence](evidence/mqtt_router/2026-11-08.json).
+
+A second fixed-binary A/B reused the topic-hashed Wyhash state across the 64
+rendezvous members, preserving the exact score mapping while removing 63
+repeated topic hashes. Under a slower host state (router matches 288.5 ns/op),
+the interleaved eight-pair median moved from 2,262.0 to 1,809.0 ns/op (1.25x).
+Only the relative ratio is claimed across the two experiments. The complete
+library suite passed 6770/6770 after all five router changes.
+
+The entry table also gained a recycled-slot free list; each new subscription
+reserves one recycle slot so rollback and normal unsubscribe do not allocate.
+The benchmark now times the initial subscribe phase and a resubscribe phase
+after a full unsubscribe. Eight CPU-0 alternating pairs measured initial
+subscriptions at 1,340.5 -> 605.0 ns/op (2.216x) and resubscribed exact filters
+at 933.5 -> 223.0 ns/op (4.186x); unsubscribe moved from 157.5 to 163.5 ns/op
+(0.963x) because each removal records a recycle index. Router matching stayed
+at 139.0 ns/op.
+
+Shared groups are now indexed by `{name, effective filter}` and their slots are
+recycled, removing the linear group scan. The benchmark now creates and removes
+1,024 distinct shared groups. Eight CPU-0 alternating pairs measured shared
+group subscribe at 3,129.0 -> 1,059.0 ns/op (2.955x) and unsubscribe at
+314.0 -> 208.0 ns/op (1.51x); exact-filter and matching phases stayed neutral.
+
+Disconnect cleanup now walks a per-subscriber entry list (one inline index for
+the common single-subscription case, a list for larger sets) instead of
+scanning every stored entry. The benchmark now calls `removeSubscriber` for
+each of the 4,096 exact subscribers. Eight CPU-0 alternating pairs measured
+`removeSubscriber` at 2,559.0 -> 193.5 ns/op (13.225x); exact-filter subscribe
+moved 610.0 -> 698.5 ns/op (0.873x) because each subscription now updates the
+subscriber map. The inline single-entry form avoids a per-subscriber
+allocation. Router matching stayed neutral. The full Mosquitto-derived
+`interop-mqtt-broker-config` matrix also passed with all five router changes.
+
+Ordinary (non-shared) matching now emits optimistically in one trie traversal
+instead of a count pass followed by an emit pass. The emit helpers bounds-check
+the caller buffer only on this path; an overflow returns `MatchBufferTooSmall`
+with no shared cursor to protect. The trie-stack fallback uses a checked linear
+scan. Shared-group matching keeps the two-pass protocol so cursors never
+advance on a short caller buffer. Eight CPU-0 alternating fixed-binary pairs
+measured router matches at 134.5 -> 74.5 ns/op (1.805x); subscribe,
+resubscribe, unsubscribe and removeSubscriber stayed within about 1.4%.
+
+## QUIC PADDING word-at-a-time skip (2026-11-08)
+
+`parseFrameWithAllocator`, `parseFrameInto` and the Initial-flight CRYPTO
+reassembler skipped PADDING runs with `std.mem.findNonePos`, which is a scalar
+nested loop over each byte. Initial packets are padded to 1200 bytes, so that
+loop dominated frame parsing. A shared helper now compares 32-byte vectors
+against zero, uses `std.simd.firstTrue` to locate the first non-zero lane, and
+finishes with `u128`, `u64` and byte tails. The first-non-zero result and
+consumed length are unchanged.
+
+Eight CPU-0 alternating fixed-binary pairs of `bench-quic-padding-parse` at
+100,000 iterations and five samples per arm measured:
+
+| Scenario | Before ns/op | After ns/op | Speedup |
+| --- | ---: | ---: | ---: |
+| padding-only | 319.0 | 26.0 | 12.269x |
+| padding before PING | 323.0 | 27.0 | 11.963x |
+
+The `u64` intermediate scan measured 5.39x over the scalar loop; widening to
+`u128` added 1.36-1.51x, and the 32-byte vector scan added a further 1.50-1.67x.
+The QUIC suite passed 1230/1230 and the complete library suite passed
+6771/6771. Evidence is in
+[the QUIC padding evidence](evidence/quic_padding_scan/2026-11-08.json).
+
+## HTTP/3 capsule writer length classification (2026-11-08)
+
+`capsule.writeInto` previously classified each varint length four times:
+`encodedLen` computed both lengths, then each `quic.varint.encodeInto`
+recomputed its own. The caller-buffer writer now classifies the capsule type
+and value length once, checks the combined header and payload bounds with
+checked arithmetic, and writes both varints through the new bounds-checked
+`quic.varint.encodeIntoWithLen`. The payload copy keeps the existing
+overlap-safe `copyForwards` behavior.
+
+Eight CPU-0 alternating fixed-binary pairs of `bench-http3-capsule` at 100,000
+iterations and five samples per arm measured caller-buffer encode at 69.0 ->
+62.0 ns/op (1.113x); the parse path stayed at 2.0 ns/op. The host was loaded
+during the batch, so only the interleaved ratio is claimed. The focused
+capsule/varint suite passed 222/222 and the complete library suite passed
+6771/6771. Evidence is in
+[the capsule write evidence](evidence/http3_capsule/2026-11-08-write-fast-path.json).
+
+## MQTT topic-filter validation fast path (2026-11-08)
+
+`validTopicFilterLevels` split every filter on `/` and ran separate `#` and
+`+` searches per level. It now finds each wildcard with `indexOfAnyPos` and
+checks only that position: the wildcard must occupy a complete level, and `#`
+must also be the final byte. Filters without wildcards need one SIMD search and
+no level walk; wildcard filters avoid the per-level split. The accepted grammar
+is unchanged.
+
+Eight CPU-0 alternating fixed-binary pairs of `bench-mqtt-retained` measured
+exact lookup at 84.5 -> 44.0 ns/op (1.920x) and the wildcard full scan at
+182,448 -> 167,343 ns/op (1.090x). A follow-up vectorized the shared MQTT
+UTF-8 ASCII-prefix check in sixteen-byte chunks and measured a further 1.127x
+on exact lookup (71.0 -> 63.0 ns/op in a loaded-host batch) with the wildcard
+scan neutral. Retained wildcard lookups then began building one
+`mqtt.FilterMatcher` per filter, computing its level boundaries once instead of
+re-splitting the filter for every stored topic; eight pairs measured the
+wildcard full scan at 166,125.5 -> 113,688.5 ns/op (1.461x) with exact lookup
+unchanged. A trailing-`#` fast path then reduced literal-prefix filters such as
+`devices/#` to one prefix comparison; a new benchmark scenario measured
+62,956.5 -> 44,990.5 ns/op (1.399x) for a 4,096-entry match, while exact lookup
+and the `devices/+/state` scan stayed neutral. The retained store then gained a
+parallel level-index array with each topic's level ends computed once on
+insert; wildcard matching uses those ends instead of re-splitting every topic.
+Eight pairs measured the `devices/+/state` scan at 118,646.0 -> 81,605.0 ns/op
+(1.454x), with exact lookup and the `devices/#` prefix path neutral. The
+MQTT/router suite passed 1410/1410, the
+complete library suite passed 6771/6771, and the full Mosquitto-derived
+`interop-mqtt-broker-config` matrix passed in isolation. Evidence is in
+[the retained filter evidence](evidence/mqtt_retained/2026-11-08-filter-validation.json).
+
+## MQTT retained topic trie (2026-11-08)
+
+Wildcard retained lookups scanned every retained entry and re-matched the
+filter against each stored Topic Name. The store now keeps a topic trie next to
+the exact-lookup hash index: one node per topic level, child lists for `+`
+enumeration and `#` subtree collection, and a `(parent, level)` edge map for
+literal descent. Literal lookups scan up to eight siblings before hashing
+because topic trees are narrow away from their branch points. Matching walks
+the filter with a fixed-size frame stack and marks matches in a preallocated
+bitmap, so it stays allocation-free and still emits in entry-table order.
+Replacement reuses the stored Topic Name allocation so trie edge keys cannot
+dangle, removal unlinks the trie path before freeing the entry, and the
+now-unused `mqtt.FilterMatcher` was removed.
+
+Eight CPU-2 alternating fixed-binary pairs of `bench-mqtt-retained` measured:
+
+| Scenario | Before ns/op | After ns/op | Speedup |
+| --- | ---: | ---: | ---: |
+| exact lookup | 42.0 | 40.0 | 1.038x |
+| `devices/+/state`, 4,096 entries | 80,846.0 | 71,324.5 | 1.134x |
+| `devices/#`, 4,096 entries | 46,672.0 | 46,672.0 | neutral |
+| `devices/+/state`, 4,096 of 16,384 entries | 589,204.5 | 112,863.0 | 5.204x |
+| `devices/1234/#`, 4 of 16,384 entries | 179,555.0 | 587.5 | 305.792x |
+
+The host was loaded during the batch, so only interleaved ratios are claimed.
+The `devices/#` case is neutral because that filter matches nearly every entry,
+so subtree traversal and prefix comparison visit comparable state before the
+same 4,096 results are emitted. The MQTT/router suite passed 1412/1412, the
+complete library suite passed 6773/6773, and the full Mosquitto-derived
+`interop-mqtt-broker-config` matrix passed in isolation. Evidence is in
+[the retained trie evidence](evidence/mqtt_retained/2026-11-08-trie.json).
+
+A follow-up moved trie links from optional `usize` fields (112-byte nodes) to
+`u32` sentinels (40-byte nodes), added an explicit `max_index_bytes` budget
+charged before an insert commits and returned when removal frees nodes, and
+changed the match/delivery helpers to borrow `*const Entry` instead of copying
+the entry header per result. Eight CPU-2 alternating pairs against the trie
+revision measured `devices/#` at 45,886.0 -> 30,810.5 ns/op (1.455x),
+`devices/+/state` on the mixed store at 113,058.5 -> 106,876.0 (1.060x),
+`devices/1234/#` at 592.0 -> 549.0 (1.078x), the broad `devices/+/state` scan
+neutral at 70,502.5 -> 70,477.5 (0.991x), and exact lookup neutral. An
+intermediate node-only build regressed the broad scan to 0.901x; the
+Entry-pointer pass recovered it, so the combined change has no
+maintained-scenario regression. Evidence is in
+[the index budget evidence](evidence/mqtt_retained/2026-11-08-index-budget.json).
+
+A profile of the same benchmark then showed `memset` at roughly 15%:
+`collectMatches` zeroed the whole match bitmap before every wildcard lookup,
+which scales with the retained table rather than with the matches. `setMatchBit`
+now records the touched word range, `clearMatchBits` clears only that range
+after the match, and insert zeroes newly grown words so the bitmap is zero at
+every match boundary. Eight CPU-2 alternating pairs measured `devices/1234/#`
+at 551.5 -> 288.0 ns/op (1.925x, 8/8 wins); exact lookup, the broad
+`devices/+/state` scan, `devices/#`, and the selective `devices/+/state` scan
+were neutral because their matches span most of the bitmap. Evidence is in
+[the bitmap range clear evidence](evidence/mqtt_retained/2026-11-08-bitmap-range-clear.json).
+
+The retained benchmark itself moved to the harnessz sampler: warmup plus ten
+samples per scenario, min/p50/p90/p99/mean/stddev output, `--scenario`,
+`--baseline`, `--update-baseline` and `--warn-only`, and five baseline entries
+(`exact`, `wildcard`, `hash`, `selective`, `subtree`) under
+`benchmarks/baselines/mqtt-retained.json`. `zig build bench-record` now records
+seven sampler-backed benchmarks and 27 scenario entries. The sampler medians
+agree with the fixed-loop numbers above; exact lookup reports about 20 ns/op
+because the old loop formatted a topic string per iteration and the new loop
+reuses one constant filter. The gate is host-sensitive: the record and gate
+steps are serialized in `build.zig`, but a quiet host is still required, and
+`--warn-only` is for loaded-host diagnostics. Evidence is in
+[the sampler baseline evidence](evidence/mqtt_retained/2026-11-08-sampler-baseline.json).
+
+Filter validation and wildcard detection are now one scan.
+`validTopicFilterLevelsKind` returns invalid/literal/wildcard,
+`validateTopicFilterKind` exposes the combined result, and retained exact and
+wildcard lookups branch on it instead of calling `hasWildcards` after
+validation. Eight CPU-2 alternating pairs measured exact lookup at
+20.0 -> 17.0 ns/op (1.176x, 8/8 wins; 1.206x in the full-scenario batch). The
+wildcard, hash, and subtree scenarios were neutral. The selective
+`devices/+/state` replay measured a consistent 1.8% delta (0.982x in two focused
+batches), attributed to code layout rather than validation cost because
+validation runs once per lookup while the scenario performs 4,096 matches; a
+noinline variant measured the same delta. The change is retained as an explicit
+trade-off for the 17.6-20.6% exact win. Evidence is in
+[the filter kind evidence](evidence/mqtt_retained/2026-11-08-filter-kind-validation.json).
+
+## MQTT ACL filter boundary precomputation (2026-11-08)
+
+Every ACL authorization scans all deny rules and then all matching grant
+rules. `topicMatchesRule` previously re-split each rule's topic filter on every
+check. `Rule` now stores the end offset of up to eight filter levels, computed
+once in `initRule` during ACL parse; `topicMatchesRule` walks those boundaries
+with the same `#`/`+`/`%c`/`%u` semantics and falls back to the split-based
+matcher for deeper filters. The new `bench-mqtt-acl` example measures a
+512-rule ACL with a late-matching topic and a topic that matches no rule.
+
+Eight CPU-0 alternating fixed-binary pairs measured:
+
+| Scenario | Before ns/op | After ns/op | Speedup |
+| --- | ---: | ---: | ---: |
+| late-match | 25,239.5 | 14,270.0 | 1.769x |
+| no-match | 17,066.0 | 10,701.0 | 1.595x |
+
+A follow-up splits the topic once per authorization into up to eight level
+ends and shares them across the deny and grant passes, so each rule no longer
+re-splits the same topic. Eight pairs measured late-match at 14,238.0 ->
+11,381.0 ns/op (1.251x) and no-match at 10,669.0 -> 8,372.5 ns/op (1.274x).
+The MQTT/router suite passed 1410/1410, the complete library suite passed
+6771/6771, and the full Mosquitto-derived `interop-mqtt-broker-config` matrix
+passed. Evidence is in
+[the ACL evidence](evidence/mqtt_acl/2026-11-08-filter-boundaries.json).
+
+## CONNECT-UDP capsule header cache (2026-11-08)
+
+The capsule session receive path previously attempted a full `Capsule.parse`
+for every stream fragment until a datagram's value bytes were complete, so a
+513-byte datagram split into 17-byte fragments re-decoded the same header about
+thirty times. `capsule.parseHeader` now exposes the type/length/header length,
+and the session caches the expected total length for the incomplete capsule at
+the current receive offset. Later fragments return after a length comparison;
+a complete capsule is still parsed once before delivery.
+
+Eight CPU-0 alternating fixed-binary pairs of `bench-connect-udp-capsule`
+measured caller-buffer receive at 475.0 -> 413.0 ns/datagram (1.150x) and owning
+receive at 572.5 -> 506.0 ns/datagram (1.131x); send stayed at 6.0. The host was
+loaded during the batch, so only the interleaved ratios are claimed. The
+capsule/CONNECT-UDP suite passed 224/224 and the complete library suite passed
+6771/6771. Evidence is in
+[the CONNECT-UDP evidence](evidence/connect_udp/2026-11-08-header-cache.json).
+
+## MQTT topic-name validation fast path (2026-11-08)
+
+`validTopicName` previously ran the MQTT UTF-8 validator and a separate
+wildcard search over every topic name. It now checks sixteen-byte ASCII chunks
+once for high bytes, NUL, `+` and `#`; a chunk with a high byte falls back to
+the full UTF-8 validator plus wildcard search. Eight CPU-0 alternating
+fixed-binary pairs of `bench-mqtt-session` measured the public enqueue churn at
+129.0 -> 122.0 ns/op (1.057x); the full-window drain stayed at 8.0 ns/op. The
+MQTT/router suite passed 1410/1410 and the complete library suite passed
+6771/6771. Evidence is in
+[the topic-name evidence](evidence/mqtt_session/2026-11-08-topic-name-validation.json).
 
 ## Gaps before a completion audit can pass
 

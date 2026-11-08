@@ -1,0 +1,76 @@
+{
+  "schema": 1,
+  "date": "2026-11-09",
+  "head": "working-tree",
+  "subject": "HTTP/2 pseudo-header validation classifies each field name once",
+  "change": "validateHeaderBlock called markRequestPseudo (up to five name comparisons) and then ran up to five more comparisons to capture the pseudo-header value, so one pseudo header cost six to ten comparisons. markRequestPseudo now returns the RequestPseudo tag, matching the existing HTTP/3 classifier, and the caller switches once to store the value. The response path drops the duplicate ':status' comparison and stores the value after markResponsePseudo succeeds. validateHeaderBlock is now public for callers that decode an HPACK block themselves, and bench-http2-hpack gained a header-validation scenario over a seven-field request block.",
+  "benchmark": {
+    "command": "taskset -c 2 <bench-http2-hpack>",
+    "pairs": 8,
+    "order": "alternating before/after",
+    "before_sha256": "4ea84cc9a775ce021d5e57229f4e7596c3ac3861297d9eb50226c68e80ad45ab",
+    "after_sha256": "c47355a5b6ddaf2a89cafe5f119cba8735567263aec5e82bc4578fed2dbd6443",
+    "results": {
+      "request header validation": {
+        "before_ns_per_block": 167.0,
+        "after_ns_per_block": 152.0,
+        "speedup": 1.106,
+        "wins": "8/8"
+      },
+      "stateful encode-only": {
+        "before_ns_per_op": 255.0,
+        "after_ns_per_op": 250.0,
+        "speedup": 1.02,
+        "wins": "8/8"
+      },
+      "stateful decode-only": {
+        "before_ns_per_op": 410.0,
+        "after_ns_per_op": 412.0,
+        "speedup": 0.996,
+        "wins": "2/8"
+      },
+      "stateful decode-into": {
+        "before_ns_per_op": 353.5,
+        "after_ns_per_op": 356.0,
+        "speedup": 0.993,
+        "wins": "2/8"
+      },
+      "stateful decode-owned": {
+        "before_ns_per_op": 382.0,
+        "after_ns_per_op": 383.0,
+        "speedup": 1.0,
+        "wins": "3/8"
+      },
+      "stateful roundtrip": {
+        "before_ns_per_op": 484.5,
+        "after_ns_per_op": 483.5,
+        "speedup": 1.002,
+        "wins": "4/8"
+      },
+      "stateless roundtrip": {
+        "before_ns_per_op": 1070.5,
+        "after_ns_per_op": 1071.5,
+        "speedup": 0.999,
+        "wins": "3/8"
+      }
+    }
+  },
+  "tests": {
+    "http2_focused": {
+      "command": "zig build test-lib -Dtest-filter=http2 --summary all",
+      "passed": 1011,
+      "total": 1011
+    },
+    "full_library": {
+      "command": "zig build test-lib --summary all (isolated caches)",
+      "passed": 6774,
+      "total": 6774
+    }
+  },
+  "source_sha256": {
+    "src/http2/runtime/headers/message.zig": "b0d88bdb779bf62512651e346e5886fd3dc668d978c53b2b721f75ec67f810e0",
+    "src/http2/runtime.zig": "302ee5c3f9df07cf24098de34e0867a24eb04f4a5c23a151f01270e39adf348a",
+    "examples/bench_http2_hpack.zig": "28dd7db056428cdbbaee8d29e02ff4a2d2d896894b35f5da6c7d3d8f22b7d9ab"
+  },
+  "notes": "The validation scenario uses the benchmark's seven-field request block (four pseudo headers plus three regular headers). The tag-based classifier is the same shape already used by HTTP/3, so the two runtimes now agree on pseudo-header classification. The encode-only 1.020x is code layout; HPACK decode and roundtrip scenarios are neutral within noise. benchmarks/baselines/http2-hpack.json was re-recorded with the new header-validation entry (nine entries, unpinned cpu32 fingerprint) so bench-gate keeps covering the existing HPACK scenarios. The host was loaded during the batch (load average roughly 5 to 15), so only interleaved ratios are claimed."
+}

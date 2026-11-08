@@ -21,6 +21,7 @@ DEFAULT_PACKAGE_VERSION = "0.1.0"
 VAIL_REVISION = "0199eb833833fa51819c747ba01e4b5850bb0d2b"
 VORT_REVISION = "b661c887e21fb1965db358bc6d12ea379d20178d"
 PBZ_REVISION = "6513ef1f8b130b308bd86ba0bd02f6acc2be64e8"
+HARNESSZ_REVISION = "e626f26b0a7ead0377254ed3a04b43b25fb2d270"
 ZIO_SOURCE = (
     "git+https://github.com/passchaos/zio"
     "#3c2365b88c9b6fef5ba709c36c6b2f8ceb77a789"
@@ -116,6 +117,7 @@ def release_manifest(
     vail_revision: str,
     vort_revision: str,
     pbz_revision: str,
+    harnessz_revision: str,
     file_hashes: dict[str, str],
 ) -> bytes:
     return (
@@ -127,6 +129,10 @@ def release_manifest(
                 "source_revision": netz_revision,
                 "files": file_hashes,
                 "vendored_dependencies": {
+                    "harnessz": {
+                        "path": "deps/harnessz",
+                        "revision": harnessz_revision,
+                    },
                     "pbz": {
                         "path": "deps/pbz",
                         "revision": pbz_revision,
@@ -156,6 +162,8 @@ def release_manifest(
 def rewrite_package_manifest(data: bytes) -> bytes:
     text = data.decode("utf-8")
     replacements = {
+        '.harnessz = .{ .path = "../harnessz" },':
+            '.harnessz = .{ .path = "deps/harnessz" },',
         '.vail = .{ .path = "../vail" },':
             '.vail = .{ .path = "deps/vail" },',
         '.vort = .{ .path = "../vort" },':
@@ -216,11 +224,13 @@ def create_archive(
     vort: Path,
     pbz: Path,
     zio: Path,
+    harnessz: Path,
     output: Path,
     package_version: str = DEFAULT_PACKAGE_VERSION,
     expected_vail_revision: str = VAIL_REVISION,
     expected_vort_revision: str = VORT_REVISION,
     expected_pbz_revision: str = PBZ_REVISION,
+    expected_harnessz_revision: str = HARNESSZ_REVISION,
     expected_zio_package_hash: str = ZIO_PACKAGE_HASH,
     zig: str = "zig",
 ) -> None:
@@ -229,6 +239,7 @@ def create_archive(
         "deps/vail": vail.resolve(),
         "deps/vort": vort.resolve(),
         "deps/pbz": pbz.resolve(),
+        "deps/harnessz": harnessz.resolve(),
     }
     for repo in repositories.values():
         require_clean(repo)
@@ -248,6 +259,12 @@ def create_archive(
         raise RuntimeError(
             "pbz revision mismatch: expected "
             f"{expected_pbz_revision}, found {revisions['deps/pbz']}"
+        )
+    if revisions["deps/harnessz"] != expected_harnessz_revision:
+        raise RuntimeError(
+            "harnessz revision mismatch: expected "
+            f"{expected_harnessz_revision}, "
+            f"found {revisions['deps/harnessz']}"
         )
     actual_zio_hash = package_hash(zio, zig)
     if actual_zio_hash != expected_zio_package_hash:
@@ -284,6 +301,7 @@ def create_archive(
             revisions["deps/vail"],
             revisions["deps/vort"],
             revisions["deps/pbz"],
+            revisions["deps/harnessz"],
             file_hashes,
         ),
         0o100644,
@@ -323,6 +341,7 @@ def main() -> None:
     parser.add_argument("--vort", type=Path, required=True)
     parser.add_argument("--pbz", type=Path, required=True)
     parser.add_argument("--zio", type=Path, required=True)
+    parser.add_argument("--harnessz", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--version", default=DEFAULT_PACKAGE_VERSION)
     parser.add_argument("--zig", default="zig")
@@ -333,6 +352,7 @@ def main() -> None:
         args.vort,
         args.pbz,
         args.zio,
+        args.harnessz,
         args.output,
         package_version=args.version,
         zig=args.zig,

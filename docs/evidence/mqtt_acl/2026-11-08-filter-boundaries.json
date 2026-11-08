@@ -1,0 +1,67 @@
+{
+  "schema": 1,
+  "date": "2026-11-08",
+  "head": "working-tree",
+  "subject": "MQTT ACL filter level boundaries are precomputed at parse time",
+  "change": "Every ACL authorization scans all deny rules and then all matching grant rules, and the previous topicMatchesRule re-split each rule's topic filter on every check. Rule now stores the end offset of up to eight filter levels, computed once in initRule during parse. topicMatchesRule walks those boundaries with the same '#'/'+'/'%c'/'%u' semantics and falls back to the original split-based matcher for filters deeper than the inline bound. The new bench-mqtt-acl example measures a 512-rule ACL with a late-matching topic and a topic that matches no rule. The topic itself is now split once per authorization into up to eight level ends, and topicMatchesRule compares those against the rule's precomputed filter ends. Previously every rule re-split the same topic; deeper topics fall back to the original split matcher. The deny and grant passes share the same topic levels.",
+  "benchmark": {
+    "command": "taskset -c 0 <bench-mqtt-acl>",
+    "pairs": 8,
+    "order": "alternating before/after",
+    "before_sha256": "03c69a36bc54881e5e1d255d12e649b8832643fde9ad925226055a1d062db72d",
+    "after_sha256": "45f36568676c39f552704bf723f4b6bf0a5cacc424a2dc2f3460ed897f478c10",
+    "results": {
+      "late-match": {
+        "before_ns_per_op": 25239.5,
+        "after_ns_per_op": 14270.0,
+        "speedup": 1.769
+      },
+      "no-match": {
+        "before_ns_per_op": 17066.0,
+        "after_ns_per_op": 10701.0,
+        "speedup": 1.595
+      }
+    }
+  },
+  "tests": {
+    "mqtt_router": {
+      "command": "zig build test-lib -Dtest-filter=mqtt -Dtest-filter=router --summary all",
+      "passed": 1410,
+      "total": 1410
+    },
+    "full_library": {
+      "command": "zig build test-lib --summary all (isolated caches)",
+      "passed": 6771,
+      "total": 6771
+    },
+    "mqtt_interop": {
+      "command": "zig build interop-mqtt-broker-config --summary all",
+      "status": "passed",
+      "note": "full Mosquitto-derived broker configuration matrix, including ACL read/write/deny/pattern policy, retained-source ACL replay, live ACL reload and durable queued-delivery reauthorization. It passed again after the per-authorization topic level split."
+    }
+  },
+  "notes": "The deny pass still precedes the grant pass and scopeMatches is unchanged, so precedence and Mosquitto-compatible deny behavior are preserved. The boundary walk preserves splitScalar semantics for empty levels and trailing slashes, the '$' leading-wildcard reservation, and '#' termination. Filters deeper than eight levels use the original matcher without changing results. The new benchmark is wired as `zig build bench-mqtt-acl -Doptimize=ReleaseFast` and listed in README. The complete broker-config interop matrix passes with the precomputed boundaries, including ACL reload and retained-source reauthorization paths. Splitting the topic once per authorization removes the repeated per-rule split while preserving deny-before-grant precedence and scope checks.",
+  "source_sha256": {
+    "src/mqtt/acl_file.zig": "d1f93dc5141a65fc75d9a9872dc6aca4adfc2c5e333f11b37c0d7084661821c9",
+    "examples/bench_mqtt_acl.zig": "277beb6d58683d8e4bce573fb05b40f1dea9c2bc21f5025aa1e6ddab060f9eb7"
+  },
+  "topic_level_benchmark": {
+    "command": "taskset -c 0 <bench-mqtt-acl>",
+    "pairs": 8,
+    "order": "alternating before/after",
+    "before_sha256": "45f36568676c39f552704bf723f4b6bf0a5cacc424a2dc2f3460ed897f478c10",
+    "after_sha256": "f89c2e178084468131f517555fb5b40012a711117330bb13829370e22f0ae819",
+    "results": {
+      "late-match": {
+        "before_ns_per_op": 14238.0,
+        "after_ns_per_op": 11381.0,
+        "speedup": 1.251
+      },
+      "no-match": {
+        "before_ns_per_op": 10669.0,
+        "after_ns_per_op": 8372.5,
+        "speedup": 1.274
+      }
+    }
+  }
+}

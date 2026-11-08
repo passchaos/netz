@@ -1,0 +1,231 @@
+{
+  "schema": 1,
+  "date": "2026-11-08",
+  "head": "working-tree",
+  "subject": "MQTT router indexed subscription lookup",
+  "change": "subscribe duplicate detection and unsubscribe now locate a subscription through the trie route list for non-shared filters or the shared group's member list for shared filters, instead of scanning every stored entry. Rendezvous shared selection now hashes the topic prefix once and copies the Wyhash state for each subscriber-id suffix, preserving the exact score mapping while removing the repeated topic hash. A recycled-entry free list replaces the index-zero scan on insert; each new subscription reserves one recycle slot so rollback and normal unsubscribe never allocate. Shared groups are indexed by {name, effective filter} in a hash map and their slots are recycled, removing the linear group scan on shared subscribe/unsubscribe. Disconnect cleanup walks a per-subscriber entry list (one inline index for the common single-subscription case, a list for larger sets) instead of scanning every stored entry. The value-receiver findEntry wrapper remains for the batched subscription helpers. Ordinary (non-shared) matching now emits optimistically in one trie traversal instead of a count pass followed by an emit pass. The emit helpers bounds-check the caller buffer only on this single-pass path; an overflow returns MatchBufferTooSmall with no shared cursor to protect. The trie-stack fallback uses a checked linear scan with the same behavior. Shared-group matching keeps the two-pass count/emit protocol so cursors never advance when the caller buffer is too small.",
+  "benchmark": {
+    "command": "taskset -c 0 <bench-mqtt-router>",
+    "pairs": 8,
+    "order": "alternating before/after",
+    "before_sha256": "9bb16ec9a5f2e3b940a5a26ea580872c93b278777f1513641ff96a825856dcd8",
+    "after_sha256": "634ef1f27f2053c7f2813d8e9c9f625b4de2a4ccb6e87087f8e37594e7e17afc",
+    "results": {
+      "unsubscribed exact filters": {
+        "before_ns_per_op": 829.0,
+        "after_ns_per_op": 157.5,
+        "speedup": 5.263
+      },
+      "router matches": {
+        "before_ns_per_op": 140.0,
+        "after_ns_per_op": 140.0,
+        "speedup": 1.0
+      },
+      "round-robin shared selection": {
+        "before_ns_per_op": 132.0,
+        "after_ns_per_op": 130.0,
+        "speedup": 1.015
+      },
+      "sticky shared selection": {
+        "before_ns_per_op": 129.5,
+        "after_ns_per_op": 129.0,
+        "speedup": 1.004
+      },
+      "random shared selection": {
+        "before_ns_per_op": 138.0,
+        "after_ns_per_op": 138.0,
+        "speedup": 1.0
+      },
+      "rendezvous shared selection": {
+        "before_ns_per_op": 1184.5,
+        "after_ns_per_op": 1200.0,
+        "speedup": 0.987
+      }
+    }
+  },
+  "rendezvous_benchmark": {
+    "command": "taskset -c 0 <bench-mqtt-router>",
+    "pairs": 8,
+    "order": "alternating before/after",
+    "before_sha256": "634ef1f27f2053c7f2813d8e9c9f625b4de2a4ccb6e87087f8e37594e7e17afc",
+    "after_sha256": "cfbf21140bdf055b9188dff6a0606562bb19094f057e312d01efe892ac0fcfbc",
+    "result": {
+      "metric": "rendezvous shared selection",
+      "before_ns_per_op": 2262.0,
+      "after_ns_per_op": 1809.0,
+      "speedup": 1.25
+    },
+    "note": "The host was slower during this second A/B (router matches 288.5 vs 140.0 ns/op in the earlier run), so absolute values are not comparable across the two experiments; the interleaved relative ratio is."
+  },
+  "free_list_benchmark": {
+    "command": "taskset -c 0 <bench-mqtt-router>",
+    "pairs": 8,
+    "order": "alternating before/after",
+    "before_sha256": "a0896ada9b79548b64f9ca8228aeb996e2d165481bfeb1e7273adcba249836a5",
+    "after_sha256": "cfb8eb7f54b90694c416a92541731ca588add11701cb78fa0c5dc3a5fcc5c0e9",
+    "results": {
+      "initial subscriptions": {
+        "before_ns_per_op": 1340.5,
+        "after_ns_per_op": 605.0,
+        "speedup": 2.216
+      },
+      "resubscribed exact filters": {
+        "before_ns_per_op": 933.5,
+        "after_ns_per_op": 223.0,
+        "speedup": 4.186
+      },
+      "unsubscribed exact filters": {
+        "before_ns_per_op": 157.5,
+        "after_ns_per_op": 163.5,
+        "speedup": 0.963
+      },
+      "router matches": {
+        "before_ns_per_op": 139.0,
+        "after_ns_per_op": 139.0,
+        "speedup": 1.0
+      },
+      "rendezvous shared selection": {
+        "before_ns_per_op": 909.5,
+        "after_ns_per_op": 919.0,
+        "speedup": 0.99
+      }
+    },
+    "note": "The benchmark now times the initial subscribe phase and a resubscribe phase after unsubscribing the 4,096 exact filters. The before binary uses the same benchmark source with the old index-zero insert scan."
+  },
+  "shared_group_benchmark": {
+    "command": "taskset -c 0 <bench-mqtt-router>",
+    "pairs": 8,
+    "order": "alternating before/after",
+    "before_sha256": "26ebc4b1f0617da3e07aeade7652476325410200b795cc7a484722f0884cfffb",
+    "after_sha256": "967b81c6ce8751563d91f5c7d943b08ce8822dcfb7d7484ff4c2cdab659e6084",
+    "results": {
+      "shared group subscriptions": {
+        "before_ns_per_op": 3129.0,
+        "after_ns_per_op": 1059.0,
+        "speedup": 2.955
+      },
+      "shared group unsubscriptions": {
+        "before_ns_per_op": 314.0,
+        "after_ns_per_op": 208.0,
+        "speedup": 1.51
+      },
+      "initial subscriptions": {
+        "before_ns_per_op": 616.5,
+        "after_ns_per_op": 613.5,
+        "speedup": 1.005
+      },
+      "resubscribed exact filters": {
+        "before_ns_per_op": 229.5,
+        "after_ns_per_op": 230.0,
+        "speedup": 0.998
+      },
+      "router matches": {
+        "before_ns_per_op": 139.5,
+        "after_ns_per_op": 140.0,
+        "speedup": 0.996
+      },
+      "rendezvous shared selection": {
+        "before_ns_per_op": 906.5,
+        "after_ns_per_op": 907.5,
+        "speedup": 0.999
+      }
+    },
+    "note": "The benchmark now subscribes and unsubscribes 1,024 distinct shared groups after the exact-filter phases. The before binary uses the same benchmark source with the linear group scan."
+  },
+  "subscriber_index_benchmark": {
+    "command": "taskset -c 0 <bench-mqtt-router>",
+    "pairs": 8,
+    "order": "alternating before/after",
+    "before_sha256": "a2d4ed1125eeabe13a4ce9bac3de32a4cd1e098bcfe7fc610395195c1a55f7c3",
+    "after_sha256": "d82866f387f73daa1b2d5d14b382de1ed0af823f817feaa9575a1e700803a87a",
+    "results": {
+      "removeSubscriber calls": {
+        "before_ns_per_op": 2559.0,
+        "after_ns_per_op": 193.5,
+        "speedup": 13.225
+      },
+      "initial subscriptions": {
+        "before_ns_per_op": 610.0,
+        "after_ns_per_op": 698.5,
+        "speedup": 0.873
+      },
+      "resubscribed exact filters": {
+        "before_ns_per_op": 232.5,
+        "after_ns_per_op": 269.0,
+        "speedup": 0.864
+      },
+      "shared group subscriptions": {
+        "before_ns_per_op": 1037.0,
+        "after_ns_per_op": 1085.0,
+        "speedup": 0.956
+      },
+      "shared group unsubscriptions": {
+        "before_ns_per_op": 210.5,
+        "after_ns_per_op": 230.0,
+        "speedup": 0.915
+      },
+      "router matches": {
+        "before_ns_per_op": 146.5,
+        "after_ns_per_op": 148.0,
+        "speedup": 0.99
+      }
+    },
+    "note": "The benchmark now removes each of the 4,096 exact subscribers through removeSubscriber. The before binary uses the same benchmark source with the old entry-table scan. The inline single-entry representation avoids a per-subscriber allocation; the remaining subscribe cost is the subscriber map lookup."
+  },
+  "tests": {
+    "focused": {
+      "command": "zig build test-lib -Dtest-filter=router -Dtest-filter=mqtt",
+      "passed": 1410,
+      "total": 1410
+    },
+    "full_library": {
+      "command": "zig build test-lib --summary all",
+      "passed": 6770,
+      "total": 6770,
+      "note": "run after the indexed lookup, rendezvous hasher reuse, recycled-entry free list, shared-group map, and per-subscriber index"
+    },
+    "mqtt_interop": {
+      "command": "zig build interop-mqtt-broker-config",
+      "status": "passed",
+      "note": "full Mosquitto-derived broker configuration matrix, including shared subscriptions, retained state, sessions, bridges and ACL reloads. It passed again after the single-pass non-shared matching change. One earlier attempt timed out waiting for the outbound-bridge startup marker with an empty broker log; the immediate isolated rerun passed every step, so the failure is attributed to a startup/log race rather than matching behavior."
+    }
+  },
+  "notes": "The benchmark subscribes 4,098 exact/wildcard filters and then unsubscribes the 4,096 exact filters one by one. The old lookup scanned every stored entry, so the per-op cost grew with subscription count; the old insert also scanned the tombstone-preserving entry table from index zero. The indexed lookup scans the trie route list for that filter (normally one entry) or the shared group's member list, while preserving the shared representative replacement and trie pruning logic. Router matching and shared-selection strategies are unchanged and remained neutral in the first experiment. Reusing the topic-hashed Wyhash state for each rendezvous member removed the repeated topic hash and improved the 64-member rendezvous selection by 1.25x while preserving the exact score mapping. The entry free list removed the insert scan: initial subscriptions improved 2.216x and resubscribing after a full unsubscribe improved 4.186x; unsubscribe moved 3.7% slower because each removal now records a recycle index. Each new subscription reserves one recycle slot so the batched rollback and committed-cleanup no-allocation contracts remain intact. The shared-group map removed the linear {name, filter} scan: 1,024-group subscribe improved 2.955x and unsubscribe improved 1.51x; the other phases stayed neutral. The per-subscriber index made removeSubscriber 13.225x faster (2,559.0 -> 193.5 ns/op) while adding a 12.7-13.6% map-maintenance cost to exact-filter subscribe; the inline single-entry representation keeps that cost below a per-subscriber allocation. The host was slower during the rendezvous experiment, so only interleaved relative ratios are claimed. Non-shared matching now performs one trie traversal with a bounds-checked emit; shared matching retains the two-pass protocol because its selection cursors must not advance on a short caller buffer.",
+  "source_sha256": {
+    "src/mqtt/router.zig": "910dfc62d160b09cfda7ee5d17402ed65485cd2f5a17c1beb40d179df3bd815a"
+  },
+  "single_pass_benchmark": {
+    "command": "taskset -c 0 <bench-mqtt-router> --iterations=20000",
+    "pairs": 8,
+    "order": "alternating before/after",
+    "before_sha256": "375d55102e0317f534119c4bdd1dee2a21d349363be771ecef8056871c758cf8",
+    "after_sha256": "de43ffab9e2dc476397b75598b8b2dc6db17f1b32cac6e70ccf6ea77df1c4259",
+    "results": {
+      "router matches": {
+        "before_ns_per_op": 134.5,
+        "after_ns_per_op": 74.5,
+        "speedup": 1.805
+      },
+      "initial subscriptions": {
+        "before_ns_per_op": 656.5,
+        "after_ns_per_op": 647.5,
+        "speedup": 1.014
+      },
+      "resubscribed exact filters": {
+        "before_ns_per_op": 226.0,
+        "after_ns_per_op": 226.0,
+        "speedup": 1.0
+      },
+      "unsubscribed exact filters": {
+        "before_ns_per_op": 203.0,
+        "after_ns_per_op": 200.5,
+        "speedup": 1.012
+      },
+      "removeSubscriber calls": {
+        "before_ns_per_op": 193.5,
+        "after_ns_per_op": 194.0,
+        "speedup": 0.997
+      }
+    }
+  }
+}

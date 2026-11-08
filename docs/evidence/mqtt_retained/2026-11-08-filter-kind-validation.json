@@ -1,0 +1,92 @@
+{
+  "schema": 1,
+  "date": "2026-11-08",
+  "head": "working-tree",
+  "subject": "MQTT filter validation reports wildcard presence in one scan",
+  "change": "validateTopicFilter and hasWildcards previously scanned a Topic Filter twice: validTopicFilterLevels validated wildcard placement, then retained lookups called hasWildcards on the effective filter. validTopicFilterLevelsKind now returns null for invalid, false for a valid literal filter, and true for a valid wildcard filter; validSharedTopicFilterKind returns the same kind for the nested filter of a shared subscription. validateTopicFilterKind exposes the combined result, validateTopicFilter routes through it, and the retained matchInto/deliveriesInto paths branch on the returned flag instead of calling hasWildcards. The accepted grammar, '$share/' validation, and error precedence are unchanged.",
+  "benchmark": {
+    "command": "taskset -c 2 <bench-mqtt-retained>",
+    "pairs": 8,
+    "order": "alternating before/after",
+    "before_sha256": "d736178466ccaa82b9fa96f7ea5363586716f51565dbf12b2e494ef57c815688",
+    "after_sha256": "b59e06d04e6b30be0dc2381f9ea7cada70a312c681ca412be76b04fe86216516",
+    "results": {
+      "exact lookup": {
+        "before_ns_per_op": 20.0,
+        "after_ns_per_op": 17.0,
+        "speedup": 1.176,
+        "wins": "8/8"
+      },
+      "wildcard full-scan": {
+        "before_ns_per_op": 71006.5,
+        "after_ns_per_op": 72307.0,
+        "speedup": 0.992,
+        "wins": "3/8",
+        "matches_per_op": 4096
+      },
+      "wildcard hash": {
+        "before_ns_per_op": 32134.5,
+        "after_ns_per_op": 33206.0,
+        "speedup": 0.971,
+        "wins": "2/8",
+        "matches_per_op": 4096
+      },
+      "selective wildcard": {
+        "before_ns_per_op": 106032.0,
+        "after_ns_per_op": 109050.5,
+        "speedup": 0.976,
+        "wins": "1/8",
+        "matches_per_op": 4096
+      },
+      "selective subtree": {
+        "before_ns_per_op": 274.0,
+        "after_ns_per_op": 270.5,
+        "speedup": 1.011,
+        "wins": "8/8",
+        "matches_per_op": 4
+      }
+    },
+    "reruns": {
+      "hash_focused": {
+        "before_ns_per_op": 31291.0,
+        "after_ns_per_op": 31756.5,
+        "speedup": 0.991,
+        "wins": "3/8"
+      },
+      "selective_focused": {
+        "before_ns_per_op": 109573.0,
+        "after_ns_per_op": 111454.5,
+        "speedup": 0.982,
+        "wins": "0/8"
+      },
+      "selective_focused_second": {
+        "before_ns_per_op": 109606.0,
+        "after_ns_per_op": 111021.0,
+        "speedup": 0.982,
+        "wins": "2/8"
+      }
+    }
+  },
+  "tests": {
+    "mqtt_retained_focused": {
+      "command": "zig build test-lib -Dtest-filter=mqtt -Dtest-filter=retained --summary all",
+      "passed": 1448,
+      "total": 1448
+    },
+    "full_library": {
+      "command": "zig build test-lib --summary all (isolated caches)",
+      "passed": 6774,
+      "total": 6774
+    },
+    "mqtt_interop": {
+      "command": "zig build interop-mqtt-broker-config --summary all",
+      "status": "passed",
+      "note": "full Mosquitto-derived broker configuration matrix, including retained state, shared subscriptions, ACL reloads and persistence."
+    }
+  },
+  "source_sha256": {
+    "src/mqtt/mod.zig": "bdb8f77cfedd9e155038c53aa21f8e609c559eebc5516fc45adc3bb8496ad4af",
+    "src/mqtt/retained/mod.zig": "a09c97601eec64536ae57db93de6159c1bd4c81c64a0e11056a24227bce4884a"
+  },
+  "notes": "The exact scenario is the direct beneficiary: one wildcard scan instead of two per lookup, measured at 20.0 -> 17.0 ns/op in an exact-only batch (8/8 wins) and 20.5 -> 17.0 in the full batch (1.206x). The selective devices/+/state scenario shows a consistent 1.8% delta in two focused batches. That delta is attributed to code layout, not validation cost: validation runs once per lookup while the scenario performs 4,096 matches, so removing one scan cannot account for a 2 us difference; a noinline variant measured the same 0.982x. The change is retained as an explicit trade-off because the exact win is 17.6-20.6% and the selective replay remains within its historical cross-batch range (105.7-113.1 us). Wildcard, hash, and subtree scenarios are otherwise neutral. The host was loaded during the batches (load average roughly 5 to 20), so only interleaved ratios are claimed."
+}

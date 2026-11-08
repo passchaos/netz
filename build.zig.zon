@@ -4,6 +4,7 @@
     .fingerprint = 0x4f22723793fe4000,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
+        .harnessz = .{ .path = "../harnessz" },
         .vail = .{ .path = "../vail" },
         .vort = .{ .path = "../vort" },
         .zio = .{

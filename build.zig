@@ -30,6 +30,10 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const harnessz_dep = b.dependency("harnessz", .{
+        .target = target,
+        .optimize = optimize,
+    });
 
     const netz_mod = b.addModule("netz", .{
         .root_source_file = b.path("src/root.zig"),
@@ -2687,6 +2691,8 @@ pub fn build(b: *std.Build) void {
         source_archive.addDirectoryArg(vort_dep.path("."));
         source_archive.addArg("--pbz");
         source_archive.addDirectoryArg(pbz_dep.path("."));
+        source_archive.addArg("--harnessz");
+        source_archive.addDirectoryArg(harnessz_dep.path("."));
         source_archive.addArg("--zio");
         source_archive.addDirectoryArg(zio_dep.path("."));
         source_archive.addArgs(&.{ "--zig", b.graph.zig_exe });
@@ -3704,6 +3710,12 @@ pub fn build(b: *std.Build) void {
             .description = "Benchmark MQTT router trie matching against a linear scan",
         },
         .{
+            .exe_name = "netz-bench-mqtt-router-match",
+            .path = "examples/bench_mqtt_router_match.zig",
+            .run_step = "bench-mqtt-router-match",
+            .description = "Sample MQTT router match and shared-selection latency with harnessz",
+        },
+        .{
             .exe_name = "netz-mqtt-broker",
             .path = "examples/mqtt_broker.zig",
             .run_step = "run-mqtt-broker",
@@ -3732,6 +3744,12 @@ pub fn build(b: *std.Build) void {
             .path = "examples/bench_mqtt_retained.zig",
             .run_step = "bench-mqtt-retained",
             .description = "Benchmark MQTT retained-message exact and wildcard lookup",
+        },
+        .{
+            .exe_name = "netz-bench-mqtt-acl",
+            .path = "examples/bench_mqtt_acl.zig",
+            .run_step = "bench-mqtt-acl",
+            .description = "Benchmark MQTT ACL-file authorization across many rules",
         },
         .{
             .exe_name = "netz-bench-mqtt-shared-properties",
@@ -4009,6 +4027,14 @@ pub fn build(b: *std.Build) void {
     var http1_pipeline_bench_exe: ?*std.Build.Step.Compile = null;
     var http1_body_bench_exe: ?*std.Build.Step.Compile = null;
     var grpc_shared_bench_exe: ?*std.Build.Step.Compile = null;
+    var http1_parse_bench_exe: ?*std.Build.Step.Compile = null;
+    var quic_padding_parse_bench_exe: ?*std.Build.Step.Compile = null;
+    var http3_capsule_bench_exe: ?*std.Build.Step.Compile = null;
+    var http2_hpack_bench_exe: ?*std.Build.Step.Compile = null;
+    var http3_qpack_bench_exe: ?*std.Build.Step.Compile = null;
+    var http_content_coding_bench_exe: ?*std.Build.Step.Compile = null;
+    var mqtt_retained_bench_exe: ?*std.Build.Step.Compile = null;
+    var mqtt_router_match_bench_exe: ?*std.Build.Step.Compile = null;
     for (example_specs) |spec| {
         const exe = b.addExecutable(.{
             .name = spec.exe_name,
@@ -4016,7 +4042,10 @@ pub fn build(b: *std.Build) void {
                 .root_source_file = b.path(spec.path),
                 .target = target,
                 .optimize = optimize,
-                .imports = &.{.{ .name = "netz", .module = netz_mod }},
+                .imports = &.{
+                    .{ .name = "netz", .module = netz_mod },
+                    .{ .name = "harnessz", .module = harnessz_dep.module("harnessz") },
+                },
             }),
         });
         if (std.mem.eql(u8, spec.run_step, "bench-http1-pipeline")) {
@@ -4025,6 +4054,22 @@ pub fn build(b: *std.Build) void {
             http1_body_bench_exe = exe;
         } else if (std.mem.eql(u8, spec.run_step, "bench-grpc-shared")) {
             grpc_shared_bench_exe = exe;
+        } else if (std.mem.eql(u8, spec.run_step, "bench-http1-parse")) {
+            http1_parse_bench_exe = exe;
+        } else if (std.mem.eql(u8, spec.run_step, "bench-quic-padding-parse")) {
+            quic_padding_parse_bench_exe = exe;
+        } else if (std.mem.eql(u8, spec.run_step, "bench-http3-capsule")) {
+            http3_capsule_bench_exe = exe;
+        } else if (std.mem.eql(u8, spec.run_step, "bench-http2-hpack")) {
+            http2_hpack_bench_exe = exe;
+        } else if (std.mem.eql(u8, spec.run_step, "bench-http3-qpack")) {
+            http3_qpack_bench_exe = exe;
+        } else if (std.mem.eql(u8, spec.run_step, "bench-http-content-coding")) {
+            http_content_coding_bench_exe = exe;
+        } else if (std.mem.eql(u8, spec.run_step, "bench-mqtt-retained")) {
+            mqtt_retained_bench_exe = exe;
+        } else if (std.mem.eql(u8, spec.run_step, "bench-mqtt-router-match")) {
+            mqtt_router_match_bench_exe = exe;
         }
         examples_step.dependOn(&exe.step);
 
@@ -4042,6 +4087,94 @@ pub fn build(b: *std.Build) void {
             bench_step.dependOn(&run.step);
         }
     }
+
+    const bench_record_step = b.step(
+        "bench-record",
+        "Record harnessz baselines for sampler-backed microbenchmarks (use -Doptimize=ReleaseFast)",
+    );
+    const bench_gate_step = b.step(
+        "bench-gate",
+        "Gate sampler-backed microbenchmarks against recorded baselines (use -Doptimize=ReleaseFast)",
+    );
+    const baseline_benches = [_]struct {
+        exe: *std.Build.Step.Compile,
+        baseline: []const u8,
+    }{
+        .{
+            .exe = http1_parse_bench_exe.?,
+            .baseline = "benchmarks/baselines/http1-parse.json",
+        },
+        .{
+            .exe = quic_padding_parse_bench_exe.?,
+            .baseline = "benchmarks/baselines/quic-padding-parse.json",
+        },
+        .{
+            .exe = http3_capsule_bench_exe.?,
+            .baseline = "benchmarks/baselines/http3-capsule.json",
+        },
+        .{
+            .exe = http2_hpack_bench_exe.?,
+            .baseline = "benchmarks/baselines/http2-hpack.json",
+        },
+        .{
+            .exe = http3_qpack_bench_exe.?,
+            .baseline = "benchmarks/baselines/http3-qpack.json",
+        },
+        .{
+            .exe = http_content_coding_bench_exe.?,
+            .baseline = "benchmarks/baselines/http-content-coding.json",
+        },
+        .{
+            .exe = mqtt_retained_bench_exe.?,
+            .baseline = "benchmarks/baselines/mqtt-retained.json",
+        },
+        .{
+            .exe = mqtt_router_match_bench_exe.?,
+            .baseline = "benchmarks/baselines/mqtt-router.json",
+        },
+    };
+    // Sampling steps run one at a time even when the build runner is parallel:
+    // concurrent benchmarks compete for cores and memory bandwidth, which
+    // turns a recording or gate run into host-noise evidence.
+    var previous_record: ?*std.Build.Step = null;
+    var previous_gate: ?*std.Build.Step = null;
+    for (baseline_benches) |bench| {
+        const record = b.addRunArtifact(bench.exe);
+        record.addArgs(&.{
+            b.fmt("--baseline={s}", .{bench.baseline}),
+            "--update-baseline",
+        });
+        if (b.args) |args| record.addArgs(args);
+        if (previous_record) |previous| record.step.dependOn(previous);
+        bench_record_step.dependOn(&record.step);
+        previous_record = &record.step;
+        const gate = b.addRunArtifact(bench.exe);
+        gate.addArg(b.fmt("--baseline={s}", .{bench.baseline}));
+        if (b.args) |args| gate.addArgs(args);
+        if (previous_gate) |previous| gate.step.dependOn(previous);
+        bench_gate_step.dependOn(&gate.step);
+        previous_gate = &gate.step;
+    }
+
+    const evidence_audit = b.addExecutable(.{
+        .name = "netz-evidence-audit",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/evidence_audit.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{
+                .name = "harnessz",
+                .module = harnessz_dep.module("harnessz"),
+            }},
+        }),
+    });
+    const run_evidence_audit = b.addRunArtifact(evidence_audit);
+    if (b.args) |args| run_evidence_audit.addArgs(args);
+    const evidence_audit_step = b.step(
+        "verify-evidence",
+        "Audit docs/evidence source hashes (report-only unless --strict)",
+    );
+    evidence_audit_step.dependOn(&run_evidence_audit.step);
 
     const grpc_cpp_bench = b.addSystemCommand(&.{ "python3", "tools/interop/grpc_benchmark.py" });
     grpc_cpp_bench.addArtifactArg(grpc_shared_bench_exe.?);

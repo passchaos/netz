@@ -6,6 +6,7 @@ const iterations: usize = 20_000;
 const count_iterations: usize = 1_000_000;
 const shared_member_count: usize = 64;
 const shared_iterations: usize = 100_000;
+const shared_group_count: usize = 1024;
 
 pub fn main() !void {
     const allocator = std.heap.smp_allocator;
@@ -25,6 +26,7 @@ pub fn main() !void {
     try filters.ensureTotalCapacity(allocator, filter_count + 2);
 
     var filter_buf: [64]u8 = undefined;
+    const subscribe_start = nowNs(io);
     for (0..filter_count) |i| {
         const filter = try std.fmt.bufPrint(&filter_buf, "devices/{d}/state", .{i});
         const owned = try allocator.dupe(u8, filter);
@@ -37,6 +39,7 @@ pub fn main() !void {
     const wildcard_many = try allocator.dupe(u8, "devices/#");
     try filters.append(allocator, wildcard_many);
     try router.subscribe(100_001, .{ .topic_filter = wildcard_many });
+    const subscribe_ns = nowNs(io) -| subscribe_start;
 
     var matches: [8]netz.mqtt.router.Match = undefined;
     const topic = "devices/2047/state";
@@ -73,6 +76,50 @@ pub fn main() !void {
         removed += 1;
     }
     const unsubscribe_ns = nowNs(io) -| unsubscribe_start;
+
+    const resubscribe_start = nowNs(io);
+    for (filters.items[0..filter_count], 0..) |filter, i| {
+        try router.subscribe(@intCast(i), .{ .topic_filter = filter });
+    }
+    const resubscribe_ns = nowNs(io) -| resubscribe_start;
+
+    var shared_group_filters: [shared_group_count]struct {
+        buf: [64]u8,
+        len: usize,
+    } = undefined;
+    const shared_group_subscribe_start = nowNs(io);
+    for (0..shared_group_count) |i| {
+        const filter = try std.fmt.bufPrint(
+            &shared_group_filters[i].buf,
+            "$share/g{d}/topics/{d}/state",
+            .{ i, i },
+        );
+        shared_group_filters[i].len = filter.len;
+        try router.subscribe(
+            @intCast(200_000 + i),
+            .{ .topic_filter = filter },
+        );
+    }
+    const shared_group_subscribe_ns = nowNs(io) -|
+        shared_group_subscribe_start;
+
+    const shared_group_unsubscribe_start = nowNs(io);
+    for (0..shared_group_count) |i| {
+        try router.unsubscribe(
+            @intCast(200_000 + i),
+            shared_group_filters[i].buf[0..shared_group_filters[i].len],
+        );
+    }
+    const shared_group_unsubscribe_ns = nowNs(io) -|
+        shared_group_unsubscribe_start;
+
+    const remove_subscriber_start = nowNs(io);
+    var removed_subscribers: usize = 0;
+    for (0..filter_count) |i| {
+        removed_subscribers += try router.removeSubscriber(@intCast(i));
+    }
+    const remove_subscriber_ns = nowNs(io) -| remove_subscriber_start;
+
     const shared = try benchmarkSharedStrategies(allocator, io);
 
     std.debug.print(
@@ -84,7 +131,12 @@ pub fn main() !void {
         \\  router matches: {d}, ns/op: {d}
         \\  linear matches: {d}, ns/op: {d}
         \\  router speedup: {d}.{d:0>2}x
+        \\  initial subscriptions: {d}, ns/op: {d}
         \\  unsubscribed exact filters: {d}, ns/op: {d}
+        \\  resubscribed exact filters: {d}, ns/op: {d}
+        \\  shared group subscriptions: {d}, ns/op: {d}
+        \\  shared group unsubscriptions: {d}, ns/op: {d}
+        \\  removeSubscriber calls: {d}, ns/op: {d}
         \\  shared members: {d}, shared iterations: {d}
         \\  round-robin shared selection: {d} ns/op
         \\  sticky shared selection: {d} ns/op
@@ -105,8 +157,18 @@ pub fn main() !void {
         linear_ns / iterations,
         speedup_x100 / 100,
         speedup_x100 % 100,
+        filters.items.len,
+        subscribe_ns / filters.items.len,
         removed,
         unsubscribe_ns / removed,
+        filter_count,
+        resubscribe_ns / filter_count,
+        shared_group_count,
+        shared_group_subscribe_ns / shared_group_count,
+        shared_group_count,
+        shared_group_unsubscribe_ns / shared_group_count,
+        filter_count,
+        remove_subscriber_ns / filter_count,
         shared_member_count,
         shared_iterations,
         shared.round_robin_ns / shared_iterations,

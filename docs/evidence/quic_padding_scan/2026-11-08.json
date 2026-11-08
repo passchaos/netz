@@ -1,0 +1,103 @@
+{
+  "schema": 1,
+  "date": "2026-11-08",
+  "head": "working-tree",
+  "subject": "QUIC PADDING skip scans sixteen bytes per iteration",
+  "change": "parseFrameWithAllocator, parseFrameInto and the Initial-flight CRYPTO reassembler now skip PADDING runs with one shared scanner instead of std.mem.findNonePos, which is a scalar nested loop over each byte. The helper compares 32-byte vectors against zero, uses std.simd.firstTrue to locate the first non-zero lane, and finishes the tail with u128, u64 and byte loops. The first-non-zero result and consumed length are unchanged, including a payload that is entirely PADDING.",
+  "benchmark": {
+    "command": "taskset -c 0 <bench-quic-padding-parse> --iterations=100000 --samples=5 --warmup=1",
+    "pairs": 8,
+    "order": "alternating before/after",
+    "before_sha256": "9f45bc2b995ae6267bc3bcb7405cc1e985d883e4f7ec39e14e85db8e06f65d84",
+    "after_sha256": "1033dcdbe0c4eb29c401a389681d7dcbce431214dd67f844917dbac2c17b7697",
+    "results": {
+      "padding-only": {
+        "before_ns_per_op": 319.0,
+        "after_ns_per_op": 26.0,
+        "speedup": 12.269
+      },
+      "padding before PING": {
+        "before_ns_per_op": 323.0,
+        "after_ns_per_op": 27.0,
+        "speedup": 11.963
+      }
+    }
+  },
+  "intermediate_benchmarks": {
+    "u64_scan": {
+      "before_sha256": "9f45bc2b995ae6267bc3bcb7405cc1e985d883e4f7ec39e14e85db8e06f65d84",
+      "after_sha256": "955e8e35654c18fa7b2ad27340d76c36f08ecafdcfe9d9857fb3f1f6f579ed34",
+      "pairs": 8,
+      "results": {
+        "padding-only": {
+          "before_ns_per_op": 318.0,
+          "after_ns_per_op": 59.0,
+          "speedup": 5.39
+        },
+        "padding before PING": {
+          "before_ns_per_op": 322.0,
+          "after_ns_per_op": 60.0,
+          "speedup": 5.367
+        }
+      }
+    },
+    "u128_vs_u64": {
+      "before_sha256": "955e8e35654c18fa7b2ad27340d76c36f08ecafdcfe9d9857fb3f1f6f579ed34",
+      "after_sha256": "d678aec35f587540d5de77057243fa7138968b1e78dcb378334e981fffebe50f",
+      "pairs": 8,
+      "results": {
+        "padding-only": {
+          "before_ns_per_op": 57.5,
+          "after_ns_per_op": 38.0,
+          "speedup": 1.513
+        },
+        "padding before PING": {
+          "before_ns_per_op": 60.0,
+          "after_ns_per_op": 44.0,
+          "speedup": 1.364
+        }
+      }
+    },
+    "vec32_vs_u128": {
+      "before_sha256": "d678aec35f587540d5de77057243fa7138968b1e78dcb378334e981fffebe50f",
+      "after_sha256": "1033dcdbe0c4eb29c401a389681d7dcbce431214dd67f844917dbac2c17b7697",
+      "pairs": 8,
+      "results": {
+        "padding-only": {
+          "before_ns_per_op": 39.0,
+          "after_ns_per_op": 26.0,
+          "speedup": 1.5
+        },
+        "padding before PING": {
+          "before_ns_per_op": 45.0,
+          "after_ns_per_op": 27.0,
+          "speedup": 1.667
+        }
+      }
+    }
+  },
+  "tests": {
+    "quic": {
+      "command": "zig build test-lib -Dtest-filter=quic --summary all",
+      "passed": 1230,
+      "total": 1230
+    },
+    "full_library": {
+      "command": "zig build test-lib --summary all (isolated caches)",
+      "passed": 6771,
+      "total": 6771
+    }
+  },
+  "notes": "The benchmark payload is 1200 zero bytes; padding-only measures a full PADDING run and padding-before-PING appends a PING frame. The 32-byte vector comparison uses std.simd.firstTrue, so the lane index is endian-independent; the u128/u64/byte tails preserve the same first-non-zero semantics for short payloads and partial words. The QUIC suite covers overlong and fully padded payloads, and the full library suite passes with the change. The Initial-flight CRYPTO reassembler calls the same public helper, so long datagram padding is skipped with identical semantics there as well. The quic-go HTTP/3 interop matrix was re-run after the vector change and passes 9/9, exercising padded Initial packets in both endpoint roles.",
+  "source_sha256": {
+    "src/quic/mod.zig": "4b275bf93e1a88db768534b8536b4da14d444e063c749ba9ca4a154771f0efad",
+    "src/quic/initial_exchange/flight.zig": "1d53c113b4f84f13ba48eb33143d596ae7d13bbe676c63495f9cac52bfd56298"
+  },
+  "interop": {
+    "command": "GO_BIN=<go1.24.7> zig build interop-http3-quic-go --summary all",
+    "status": "passed",
+    "steps_passed": 9,
+    "steps_total": 9,
+    "note": "QUIC v1/v2 peer, cancel, redirect, pool and informational matrix against quic-go. Initial packets are padded to 1200 bytes, so the vector PADDING skip is exercised in real handshakes in both client and server roles."
+  }
+}

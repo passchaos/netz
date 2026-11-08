@@ -133,8 +133,10 @@ metadata, and explicit WebTransport-Init credit. A second regression preserves
 a complete 429 response entity, proves 400 rejections for invalid CONNECT
 metadata and Init syntax, and then accepts a succeeding sibling Session.
 The later independent Python peer gate described below adds bidirectional
-draft-15 transcript evidence. Browser/proxy protocol interop remains open;
-this original local gate does not claim that evidence.
+draft-15 transcript evidence. Broader external draft-15 interop remains open;
+browsers do not implement WebTransport over HTTP/2, so this path targets proxy
+and server-to-server deployments and this local gate does not claim browser
+evidence.
 
 The multiplexing transport, Session adapters and background endpoints pass
 175/175 focused Debug tests; the combined endpoint ReleaseFast gate passes

@@ -1,0 +1,54 @@
+{
+  "schema": 1,
+  "date": "2026-11-08",
+  "head": "working-tree",
+  "subject": "restore the Windows portable cross-compile gate",
+  "change": "The x86_64-windows-gnu test-compile target failed with nine errors in netz-owned test fixtures: POSIX-only setsockopt/sendto/recvfrom/poll calls and fake socket handles written as the integer 0. Added src/internal/test_socket.zig, which returns a valid std.Io.net.Socket.Handle for either an integer-descriptor or opaque-pointer target, and replaced the fake stream literals. POSIX-only tests now return error.SkipZigTest at comptime on Windows, and BlockedOutput guards its setsockopt/saturate bodies. No production protocol code changed.",
+  "matrix": {
+    "aarch64-linux-gnu": {
+      "command": "zig build test-compile -Dtarget=aarch64-linux-gnu --summary all",
+      "steps_passed": 8,
+      "steps_total": 8
+    },
+    "x86_64-linux-gnu": {
+      "command": "zig build test-compile -Dtarget=x86_64-linux-gnu --summary all",
+      "steps_passed": 8,
+      "steps_total": 8
+    },
+    "x86_64-windows-gnu": {
+      "command": "zig build test-compile -Dtarget=x86_64-windows-gnu --summary all",
+      "steps_passed": 8,
+      "steps_total": 8,
+      "before": "9 compile errors in POSIX-only test fixtures"
+    },
+    "aarch64-macos-none": {
+      "status": "blocked",
+      "reason": "pinned Vort emits linksection(\".vort_br_counted_context\"), which LLVM rejects for Mach-O (a segment and section separated by a comma are required). This is an external dependency limitation, not a netz test error."
+    },
+    "x86_64-macos-none": {
+      "status": "blocked",
+      "reason": "same pinned Vort linksection error"
+    }
+  },
+  "tests": {
+    "full_library": {
+      "command": "zig build test-lib --summary all (isolated caches)",
+      "passed": 6771,
+      "total": 6771
+    }
+  },
+  "notes": "The Linux and Windows portable targets now pass. The macOS targets reach the Vort dependency and fail inside LLVM before netz tests are compiled; updating that would require a Vort change and a new pinned revision. The fake-handle helper is test-only and is never dereferenced.",
+  "source_sha256": {
+    "src/internal/test_socket.zig": "03f5695695d0c1cab316e7ec1e8dbb8395ede3cff9ca7749391d544105d9f183",
+    "src/http2/runtime.zig": "fd8dbba0b3cd45a2f70b3fa17bcd4c20687c4bd80fc824eb8e49fba3dad20601",
+    "src/http2/runtime/testing/blocked_output.zig": "b659a9ede6c27a472333f1512c296692a447d0cfdbe5af0b6c77b0425e098605",
+    "src/http2/runtime/flow/tests/data.zig": "be824b03c897415cd72227ae1831187bd4666b37164f4823b0c603a535273e89",
+    "src/http2/runtime/transport/output_tests.zig": "851f863c8c94b19a48797fd952960c353f02cb5f4e78a358dfec79fded79621c",
+    "src/internal/stream_io/timed_write_tests.zig": "2578e1c8c021c7bcddc6799977db3b3c7cbf4792f0cd71cadd4d16780471c171",
+    "src/internal/stream_io_deadline_tests.zig": "c94f9411af9d5d65bf7cc18442e6fe40a633fc3d43386d1cc73cfcdc970a186f",
+    "src/tls/stream/write_interruption_tests.zig": "5ab910428290e0199b7ef689a9dbe9cee29bea6dabe45068565f80c586d31e9d",
+    "src/http2/runtime/ping_timeout_tests.zig": "77b19b2e2f325cc48a5b013400bd2cdec5da791a33994effd0761948b8130f89",
+    "src/http2/runtime/request/batch_tls_deadline_tests.zig": "b4772492c021a73b351f2d0f4bb2f982ff2edb52fc044e37c32459a7a9822ef7",
+    "src/http2/runtime/connect/deadline_tests.zig": "cb98157efa9badf5fde9217321fc073ec07794fe642ff55b61f86aaa2d202f4f"
+  }
+}

@@ -1,0 +1,56 @@
+{
+  "entries": [
+    {
+      "name": "bench-quic-padding-parse/padding-only",
+      "environment_fingerprint": "x86_64/linux/cpu32/ReleaseFast",
+      "samples_ns": [
+        24896210,
+        25251866,
+        26261264,
+        26137617,
+        26214965,
+        25633483,
+        25492428,
+        26229067,
+        26324125,
+        26175809
+      ],
+      "summary": {
+        "count": 10,
+        "min": 24896210,
+        "max": 26324125,
+        "mean": 25861683.4,
+        "stddev": 479640.5792234847,
+        "median": 26156713,
+        "p90": 26267550.1,
+        "p99": 26318467.51
+      }
+    },
+    {
+      "name": "bench-quic-padding-parse/padding-then-ping",
+      "environment_fingerprint": "x86_64/linux/cpu32/ReleaseFast",
+      "samples_ns": [
+        26412607,
+        26306794,
+        26495128,
+        26350402,
+        26738186,
+        26411256,
+        26071320,
+        25991565,
+        26356441,
+        25964857
+      ],
+      "summary": {
+        "count": 10,
+        "min": 25964857,
+        "max": 26738186,
+        "mean": 26309855.599999998,
+        "stddev": 227966.76096448806,
+        "median": 26353421.5,
+        "p90": 26519433.8,
+        "p99": 26716310.78
+      }
+    }
+  ]
+}

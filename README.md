@@ -7,6 +7,14 @@ wire-integer helpers, and state helpers across four public protocol families.
 Ongoing HTTP development targets the widely used HTTP/1.1, HTTP/2, and HTTP/3
 versions. HTTP/1.0 is outside the supported-feature goal.
 
+The architecture and performance rules are defined in
+[docs/architecture.md](docs/architecture.md): performance beyond the reference
+implementations is the first acceptance requirement, with correctness, protocol
+conformance, and bounded memory as prerequisites. The profiling, benchmark, and
+evidence workflow is in
+[docs/performance-playbook.md](docs/performance-playbook.md), and the complete
+documentation map is in [docs/README.md](docs/README.md).
+
 The four public protocol families share a bounded parser fuzz target.
 `zig build fuzz-parsers` replays valid and hostile HTTP/1, HTTP/2, HTTP/3,
 HPACK, QPACK, WebSocket, WebTransport, and MQTT seeds plus deterministic
@@ -162,7 +170,8 @@ two-session runs, the QUIC path target to 256 runs, the QUIC handshake target
 and QUIC endpoint target to 32 runs, and the in-memory targets to 10,000
 iterations. A manual `fuzz_runs` value overrides all targets. Because
 the source
-checkout currently uses sibling `../vail`, `../vort`, and `../pbz` paths, repository
+checkout currently uses sibling `../vail`, `../vort`, `../pbz`, and
+`../harnessz` paths, repository
 administrators must configure the read-only `NETZ_DEPENDENCIES_TOKEN` secret
 for the private dependency checkouts.
 Pull requests also compile the complete library and public-package test surfaces
@@ -1861,10 +1870,17 @@ authenticate those inputs.
 ```sh
 zig build test
 zig build test-compile -Dtarget=x86_64-windows-gnu
-# Build a deterministic source archive containing pinned vail, vort, pbz, and zio.
+# Linux and Windows portable targets pass. macOS cross-compilation currently
+# stops inside the pinned Vort dependency's Mach-O linksection, before netz
+# tests are compiled; see docs/evidence/portable_compile/2026-11-08.json.
+# Build a deterministic source archive containing pinned harnessz, vail,
+# vort, pbz, and zio.
 zig build release-source
 # Extract the archive in isolation and compile its public-package test.
 zig build verify-release-source
+# Report stale or unresolved source hashes recorded under docs/evidence.
+# Add --strict to fail on any stale hash or unresolved path.
+zig build verify-evidence
 ```
 
 Runnable examples are under `examples/` and are wired into the build:
@@ -2146,7 +2162,36 @@ comparison gaps are recorded in `docs/benchmark-baseline.md`:
 
 ```sh
 zig build bench -Doptimize=ReleaseFast
-zig build bench-http1-parse -Doptimize=ReleaseFast
+# These six microbenchmarks use the shared harnessz sampler: --iterations is
+# the operation count per sample, --samples is the number of timed samples
+# (default 10), and --warmup is the number of untimed samples (default 1).
+# Reported ns/op is the median sample divided by --iterations, and every
+# scenario also prints its sample min/p50/p90/p99/mean/stddev.
+zig build bench-http1-parse -Doptimize=ReleaseFast -- \
+  --iterations=100000 --samples=10
+zig build bench-quic-padding-parse -Doptimize=ReleaseFast
+zig build bench-http3-capsule -Doptimize=ReleaseFast
+zig build bench-http2-hpack -Doptimize=ReleaseFast
+zig build bench-http3-qpack -Doptimize=ReleaseFast
+zig build bench-http-content-coding -Doptimize=ReleaseFast
+# Optional regression gate: record a baseline once, then compare later runs.
+# The JSON store keeps the raw samples plus an environment fingerprint
+# (build mode, architecture and CPU count), so unlike hosts fail loudly.
+zig build bench-http1-parse -Doptimize=ReleaseFast -- \
+  --baseline=benchmarks/baselines/http1-parse.json --update-baseline
+zig build bench-http1-parse -Doptimize=ReleaseFast -- \
+  --baseline=benchmarks/baselines/http1-parse.json
+# --max-regression-ratio=<ratio> (default 1.05) controls the median gate;
+# regressions must also be significant under harnessz's robust rank-sum test.
+# The same flow for all six sampler-backed benchmarks:
+zig build bench-record -Doptimize=ReleaseFast
+zig build bench-gate -Doptimize=ReleaseFast
+# Pass --warn-only to report regressions without failing on a noisy host:
+zig build bench-gate -Doptimize=ReleaseFast -- --warn-only
+# Baselines live in benchmarks/baselines/ and carry an environment
+# fingerprint, so record and gate on the same host/build mode. Run the gate on
+# a quiet host and re-run a flagged scenario before treating it as a
+# regression; sustained host-state shifts can move one scenario at a time.
 taskset -c 0 zig build bench-http-content-coding -Doptimize=ReleaseFast
 # The common owned parser retains up to 16 validated header descriptors during
 # its counting pass, avoiding a second parse while preserving exact allocation
@@ -2201,6 +2246,7 @@ zig build bench-websocket-h3-echo -Doptimize=ReleaseFast -- --warmup=20 --iterat
 zig build bench-websocket-hyper-h2 -Doptimize=ReleaseFast -- --warmup=20 --iterations=1000 --payload-bytes=4096
 zig build bench-websocket-h3-quic-go -Doptimize=ReleaseFast -- --warmup=20 --iterations=1000 --payload-bytes=4096
 zig build bench-mqtt-router -Doptimize=ReleaseFast
+zig build bench-mqtt-acl -Doptimize=ReleaseFast
 zig build bench-mqtt-websocket -Doptimize=ReleaseFast
 taskset -c 0 zig build bench-mqtt-tls -Doptimize=ReleaseFast
 zig build compare-mqtt-mosquitto -Doptimize=ReleaseFast

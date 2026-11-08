@@ -3,6 +3,7 @@ const std = @import("std");
 const wire = @import("../internal/wire.zig");
 const http_method = @import("../internal/http_method.zig");
 const early_data = @import("../http/early_data.zig");
+const field_value = @import("../http/field_value.zig");
 const chunk_size = @import("chunk_size.zig");
 const response_framing = @import("response_framing.zig");
 pub const content_coding = @import("../http/content_coding.zig");
@@ -14,6 +15,34 @@ pub const client_pool = @import("client_pool.zig");
 /// spelling, while `header()`, `findHeader()`, and `eqlName()` still treat names
 /// case-insensitively.
 pub const Header = wire.Header;
+
+/// CRLF line iterator used by the HTTP/1 head and trailer parsers. Searching
+/// for the first CR and checking the next byte avoids the generic substring
+/// search in `std.mem.splitSequence` for every field line while preserving the
+/// exact split-on-CRLF semantics.
+pub const LineIterator = struct {
+    bytes: []const u8,
+    index: usize = 0,
+
+    pub fn init(bytes: []const u8) LineIterator {
+        return .{ .bytes = bytes };
+    }
+
+    pub fn next(self: *LineIterator) ?[]const u8 {
+        if (self.index >= self.bytes.len) return null;
+        const start = self.index;
+        var search = start;
+        while (std.mem.indexOfScalarPos(u8, self.bytes, search, '\r')) |cr| {
+            if (cr + 1 < self.bytes.len and self.bytes[cr + 1] == '\n') {
+                self.index = cr + 2;
+                return self.bytes[start..cr];
+            }
+            search = cr + 1;
+        }
+        self.index = self.bytes.len;
+        return self.bytes[start..];
+    }
+};
 
 test {
     _ = @import("runtime/client_pool_tests.zig");
@@ -96,16 +125,32 @@ pub const Method = union(MethodTag) {
     extension: []const u8,
 
     pub fn parse(bytes: []const u8) Error!Method {
-        if (std.mem.eql(u8, bytes, "GET")) return .GET;
-        if (std.mem.eql(u8, bytes, "HEAD")) return .HEAD;
-        if (std.mem.eql(u8, bytes, "POST")) return .POST;
-        if (std.mem.eql(u8, bytes, "PUT")) return .PUT;
-        if (std.mem.eql(u8, bytes, "DELETE")) return .DELETE;
-        if (std.mem.eql(u8, bytes, "CONNECT")) return .CONNECT;
-        if (std.mem.eql(u8, bytes, "OPTIONS")) return .OPTIONS;
-        if (std.mem.eql(u8, bytes, "TRACE")) return .TRACE;
-        if (std.mem.eql(u8, bytes, "PATCH")) return .PATCH;
-        if (std.mem.eql(u8, bytes, "QUERY")) return .QUERY;
+        // Dispatch on the fixed length and first byte first. Request lines
+        // overwhelmingly carry registered methods, and this avoids up to nine
+        // full slice comparisons for every parsed start line.
+        switch (bytes.len) {
+            3 => {
+                if (bytes[0] == 'G' and std.mem.eql(u8, bytes, "GET")) return .GET;
+                if (bytes[0] == 'P' and std.mem.eql(u8, bytes, "PUT")) return .PUT;
+            },
+            4 => {
+                if (bytes[0] == 'H' and std.mem.eql(u8, bytes, "HEAD")) return .HEAD;
+                if (bytes[0] == 'P' and std.mem.eql(u8, bytes, "POST")) return .POST;
+            },
+            5 => {
+                if (bytes[0] == 'P' and std.mem.eql(u8, bytes, "PATCH")) return .PATCH;
+                if (bytes[0] == 'T' and std.mem.eql(u8, bytes, "TRACE")) return .TRACE;
+                if (bytes[0] == 'Q' and std.mem.eql(u8, bytes, "QUERY")) return .QUERY;
+            },
+            6 => {
+                if (bytes[0] == 'D' and std.mem.eql(u8, bytes, "DELETE")) return .DELETE;
+            },
+            7 => {
+                if (bytes[0] == 'C' and std.mem.eql(u8, bytes, "CONNECT")) return .CONNECT;
+                if (bytes[0] == 'O' and std.mem.eql(u8, bytes, "OPTIONS")) return .OPTIONS;
+            },
+            else => {},
+        }
         try validateBytes(bytes);
         return .{ .extension = bytes };
     }
@@ -775,8 +820,8 @@ pub const parseOwnedResponseHead = OwnedHeadParser.response;
 
 const OwnedHeadFields = struct { start_line: []const u8, head_len: usize, storage: ParsedHeaders };
 fn parseOwnedHeadFields(allocator: std.mem.Allocator, bytes: []const u8, options: ParseOptions, kind: enum { request, response }) Error!OwnedHeadFields {
-    const end = std.mem.indexOf(u8, bytes, "\r\n\r\n") orelse return error.BufferTooShort;
-    var lines = std.mem.splitSequence(u8, bytes[0..end], "\r\n");
+    const end = findHeadEnd(bytes) orelse return error.BufferTooShort;
+    var lines = LineIterator.init(bytes[0..end]);
     const start_line = lines.next() orelse return error.MalformedStartLine;
     const fields = try parseHeaderLines(allocator, &lines, options, .{
         .allow_spaces_before_colon = kind == .response and options.allow_spaces_after_header_name_in_responses,
@@ -957,7 +1002,7 @@ fn parseStrictHeadLines(
                 }
                 break;
             }
-            if ((byte < 0x20 and byte != '\t') or byte == 0x7f) {
+            if (field_value.invalidByte(byte)) {
                 return rejectCompleteHeaderLine(bytes, pos + 1);
             }
             if (byte != ' ' and byte != '\t') value_end = pos + 1;
@@ -973,6 +1018,24 @@ fn parseStrictHeadLines(
         count += 1;
         pos += 2;
     }
+}
+
+/// Locate the end of an HTTP/1 head. Searching for the first CR and then
+/// checking the following bytes avoids the generic multi-byte substring
+/// search on every request while preserving the exact first-match semantics.
+fn findHeadEnd(bytes: []const u8) ?usize {
+    var start: usize = 0;
+    while (std.mem.indexOfScalarPos(u8, bytes, start, '\r')) |index| {
+        if (index + 4 <= bytes.len and
+            bytes[index + 1] == '\n' and
+            bytes[index + 2] == '\r' and
+            bytes[index + 3] == '\n')
+        {
+            return index;
+        }
+        start = index + 1;
+    }
+    return null;
 }
 
 fn rejectCompleteHeaderLine(
@@ -991,9 +1054,9 @@ fn rejectCompleteHeaderLine(
 /// allocating or decoding its body. Absolute-form and CONNECT targets replace
 /// the exposed Host value with their authoritative request-target authority.
 pub fn parseRequest(allocator: std.mem.Allocator, bytes: []const u8, options: ParseOptions) Error!Request {
-    const head_end = std.mem.indexOf(u8, bytes, "\r\n\r\n") orelse return error.BufferTooShort;
+    const head_end = findHeadEnd(bytes) orelse return error.BufferTooShort;
     const head = bytes[0..head_end];
-    var lines = std.mem.splitSequence(u8, head, "\r\n");
+    var lines = LineIterator.init(head);
     const request_line = lines.next() orelse return error.MalformedStartLine;
 
     const request_parts = try parseRequestLine(
@@ -1064,9 +1127,9 @@ pub fn validateRequestHead(
     bytes: []const u8,
     options: ParseOptions,
 ) Error!void {
-    const head_end = std.mem.indexOf(u8, bytes, "\r\n\r\n") orelse
+    const head_end = findHeadEnd(bytes) orelse
         return error.BufferTooShort;
-    var lines = std.mem.splitSequence(u8, bytes[0..head_end], "\r\n");
+    var lines = LineIterator.init(bytes[0..head_end]);
     const request_line = lines.next() orelse return error.MalformedStartLine;
     const parts = try parseRequestLine(
         request_line,
@@ -1138,9 +1201,9 @@ pub fn parseResponseWithContext(
         },
         .incomplete, .http_1_x => {},
     };
-    const head_end = std.mem.indexOf(u8, bytes, "\r\n\r\n") orelse return error.BufferTooShort;
+    const head_end = findHeadEnd(bytes) orelse return error.BufferTooShort;
     const head = bytes[0..head_end];
-    var lines = std.mem.splitSequence(u8, head, "\r\n");
+    var lines = LineIterator.init(head);
     const status_line = lines.next() orelse return error.MalformedStartLine;
 
     const status_parts = try parseStatusLine(status_line);
@@ -1223,7 +1286,7 @@ const ParsedHeaders = struct {
 
 fn parseHeaderLines(
     allocator: std.mem.Allocator,
-    lines: *std.mem.SplitIterator(u8, .sequence),
+    lines: *LineIterator,
     options: ParseOptions,
     policy: HeaderParsePolicy,
 ) Error!ParsedHeaders {
@@ -1270,7 +1333,7 @@ pub fn parseTrailerFields(
     bytes: []const u8,
     options: ParseOptions,
 ) Error!ParsedTrailerFields {
-    var lines = std.mem.splitSequence(u8, bytes, "\r\n");
+    var lines = LineIterator.init(bytes);
     const parsed = try parseHeaderLines(allocator, &lines, options, .{});
     return .{
         .headers = parsed.headers,
@@ -1287,7 +1350,7 @@ pub fn validateTrailerFields(
     options: ParseOptions,
 ) Error!void {
     var count: usize = 0;
-    var lines = std.mem.splitSequence(u8, bytes, "\r\n");
+    var lines = LineIterator.init(bytes);
     while (lines.next()) |line| {
         if (line.len == 0) continue;
         if (line[0] == ' ' or line[0] == '\t') {
@@ -1309,7 +1372,7 @@ pub fn validateTrailerFields(
 
 fn parseHeaderLinesNoFold(
     allocator: std.mem.Allocator,
-    lines: std.mem.SplitIterator(u8, .sequence),
+    lines: LineIterator,
     options: ParseOptions,
     policy: HeaderParsePolicy,
 ) Error!ParsedHeaders {
@@ -1412,6 +1475,33 @@ fn parseRequestLine(
     line: []const u8,
     allow_multiple_spaces: bool,
 ) Error!RequestLineParts {
+    if (!allow_multiple_spaces) {
+        // The strict grammar is three non-empty fields separated by exactly
+        // one SP. Locate the two delimiters with the SIMD scalar search
+        // instead of walking every byte, then reject any extra separator.
+        const first_space = std.mem.indexOfScalar(u8, line, ' ') orelse
+            return error.MalformedStartLine;
+        if (first_space == 0) return error.MalformedStartLine;
+        const target_start = first_space + 1;
+        const second_space = std.mem.indexOfScalarPos(
+            u8,
+            line,
+            target_start,
+            ' ',
+        ) orelse return error.MalformedStartLine;
+        if (second_space == target_start) return error.MalformedStartLine;
+        const version_start = second_space + 1;
+        if (version_start == line.len) return error.MalformedStartLine;
+        if (std.mem.indexOfScalarPos(u8, line, version_start, ' ') != null) {
+            return error.MalformedStartLine;
+        }
+        return .{
+            .method = line[0..first_space],
+            .target = line[target_start..second_space],
+            .version = line[version_start..],
+        };
+    }
+
     var fields: [3][]const u8 = undefined;
     var field_count: usize = 0;
     var cursor: usize = 0;
@@ -1472,7 +1562,7 @@ inline fn parseHeaderLine(
     }
     var value_end = value_start;
     for (line[value_start..], value_start..) |byte, index| {
-        if ((byte < 0x20 and byte != '\t') or byte == 0x7f) {
+        if (field_value.invalidByte(byte)) {
             return error.MalformedHeader;
         }
         if (byte != ' ' and byte != '\t') value_end = index + 1;
@@ -2601,22 +2691,18 @@ pub fn validateHostValue(raw_host: []const u8) Error!void {
     var closing_bracket: ?usize = null;
     var port_colon: ?usize = null;
     for (host, 0..) |byte, index| {
-        if (byte <= 0x20 or byte == 0x7f or byte == ',' or
-            byte == '/' or byte == '\\' or byte == '?' or
-            byte == '#' or byte == '@')
-        {
-            return error.InvalidHost;
-        }
-        if (bracketed) {
-            if (byte == ']' and closing_bracket == null) {
-                closing_bracket = index;
-            }
-            continue;
-        }
-        if (byte == '[' or byte == ']') return error.InvalidHost;
-        if (byte == ':') {
-            if (port_colon != null) return error.InvalidHost;
-            port_colon = index;
+        if (!host_special_bytes[byte]) continue;
+        switch (byte) {
+            '[' => if (!bracketed) return error.InvalidHost,
+            ']' => {
+                if (!bracketed) return error.InvalidHost;
+                if (closing_bracket == null) closing_bracket = index;
+            },
+            ':' => if (!bracketed) {
+                if (port_colon != null) return error.InvalidHost;
+                port_colon = index;
+            },
+            else => return error.InvalidHost,
         }
     }
 
@@ -2659,7 +2745,7 @@ pub fn validateReasonPhrase(reason: []const u8) Error!void {
         // RFC reason-phrases are human-readable text after the status code.
         // They may contain SP/HTAB and obs-text, but never CR/LF or other
         // controls that could append forged fields to the response head.
-        if ((byte < 0x20 and byte != '\t') or byte == 0x7f) return error.MalformedStartLine;
+        if (field_value.invalidByte(byte)) return error.MalformedStartLine;
     }
 }
 
@@ -2683,7 +2769,7 @@ pub fn validateHeaderName(name: []const u8) Error!void {
 
 pub fn validateHeaderValue(value: []const u8) Error!void {
     for (value) |byte| {
-        if ((byte < 0x20 and byte != '\t') or byte == 0x7f) return error.MalformedHeader;
+        if (field_value.invalidByte(byte)) return error.MalformedHeader;
     }
 }
 
@@ -2699,6 +2785,17 @@ const valid_header_name_bytes: [256]bool = blk: {
 inline fn validHeaderNameByte(byte: u8) bool {
     return valid_header_name_bytes[byte];
 }
+
+/// Bytes that need special handling in a Host value: the forbidden delimiters
+/// plus '[', ']' and ':'. Every other byte is a plain host character, so the
+/// common case costs one table lookup instead of eight comparisons.
+const host_special_bytes: [256]bool = blk: {
+    var table = [_]bool{false} ** 256;
+    for (0..0x21) |byte| table[byte] = true;
+    table[0x7f] = true;
+    for (",/\\?#@[]:") |byte| table[byte] = true;
+    break :blk table;
+};
 
 pub fn encodeChunked(list: *std.ArrayList(u8), allocator: std.mem.Allocator, chunks: []const []const u8, trailers: []const Header) !void {
     try validateTrailers(trailers);
@@ -2830,7 +2927,7 @@ fn validateChunkedBodyForWrite(
         .{ .max_headers = std.math.maxInt(usize) },
     );
     if (!hasHeaderNamed(headers, "trailer")) return layout.body_len;
-    var lines = std.mem.splitSequence(u8, trailer_fields, "\r\n");
+    var lines = LineIterator.init(trailer_fields);
     while (lines.next()) |line| {
         if (line.len == 0) continue;
         const trailer = try parseHeaderLine(line, false);
@@ -2882,10 +2979,8 @@ pub fn decodeChunked(allocator: std.mem.Allocator, bytes: []const u8, options: P
         };
     }
 
-    var lines = std.mem.splitSequence(
-        u8,
+    var lines = LineIterator.init(
         bytes[layout.trailer_start..layout.trailer_fields_end],
-        "\r\n",
     );
     // Response-only compatibility must never relax trailer field syntax.
     var parsed_trailers = try parseHeaderLines(
@@ -3884,7 +3979,7 @@ test "HTTP/1 owned headers cross the single-pass stack boundary" {
         "x-13: 13\r\n" ++
         "x-14: 14\r\n" ++
         "x-15: 15\r\n";
-    const common_lines = std.mem.splitSequence(u8, common, "\r\n");
+    const common_lines = LineIterator.init(common);
     var inline_headers = try parseHeaderLinesNoFold(
         std.testing.allocator,
         common_lines,
@@ -3899,7 +3994,7 @@ test "HTTP/1 owned headers cross the single-pass stack boundary" {
     );
 
     const fallback = common ++ "x-16: 16\r\n";
-    const fallback_lines = std.mem.splitSequence(u8, fallback, "\r\n");
+    const fallback_lines = LineIterator.init(fallback);
     var fallback_headers = try parseHeaderLinesNoFold(
         std.testing.allocator,
         fallback_lines,

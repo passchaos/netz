@@ -1,0 +1,47 @@
+{
+  "schema": 1,
+  "date": "2026-11-08",
+  "head": "working-tree",
+  "subject": "MQTT retained benchmark uses harnessz sampling and baseline gating",
+  "change": "bench_mqtt_retained previously used hand-written timing loops with fixed iteration counts and no baseline support. It now uses examples/support/bench_sampling.zig for warmup plus repeated samples and reports min/p50/p90/p99/mean/stddev per scenario. Five named scenarios cover exact lookup, the broad devices/+/state scan, the devices/# prefix hash, the selective devices/+/state scan on the 16,384-message mixed store, and the selective devices/1234/# subtree. The benchmark accepts --scenario, --samples, --warmup, --baseline, --update-baseline, --warn-only and --max-regression-ratio, and is registered in the bench-record and bench-gate sets with benchmarks/baselines/mqtt-retained.json. The exact scenario now uses a constant filter, so it measures the lookup instead of also formatting a topic string per iteration.",
+  "benchmark": {
+    "command": "zig build bench-record -Doptimize=ReleaseFast (records all sampler-backed baselines)",
+    "entries": 5,
+    "recorded_medians_ns_per_callback": {
+      "exact": 2084210,
+      "wildcard": 68024345,
+      "hash": 30271354,
+      "selective": 52864646,
+      "subtree": 27388614
+    },
+    "iterations_per_callback": {
+      "exact": 100000,
+      "wildcard": 1000,
+      "hash": 1000,
+      "selective": 500,
+      "subtree": 100000
+    },
+    "environment_fingerprint": "x86_64/linux/cpu32/ReleaseFast"
+  },
+  "tests": {
+    "benchmark_build_and_run": {
+      "command": "zig build bench-mqtt-retained -Doptimize=ReleaseFast",
+      "status": "passed"
+    },
+    "baseline_record": {
+      "command": "zig build bench-record -Doptimize=ReleaseFast",
+      "status": "passed",
+      "note": "recorded seven baseline files, 27 scenario entries in total, including the five retained scenarios"
+    },
+    "gate": {
+      "command": "zig build bench-gate -j1 -Doptimize=ReleaseFast -- --warn-only",
+      "status": "host-sensitive",
+      "note": "the gate compared all seven benchmarks against the recorded baselines and reported 10-21% apparent slowdowns on unchanged binaries while other host sessions were active; this matches the documented host-load limitation and needs a quiet-host confirmation"
+    }
+  },
+  "source_sha256": {
+    "examples/bench_mqtt_retained.zig": "f4046355ebe888115829b43993c6c710c2f38ae8c711f59b3498010f8e14c3a3",
+    "build.zig": "ee4a64ad6f2667f54d94141781631fb4053e4014ecf7ea529448b1ca5b847327"
+  },
+  "notes": "The sampler medians match the previous fixed-loop benchmark within host noise: devices/+/state 69.5 us/op, devices/# 30.1 us/op, selective devices/+/state 105.7 us/op, devices/1234/# 273 ns/op. Exact lookup reports about 20 ns/op because the old loop formatted devices/<n>/state with std.fmt.bufPrint on every iteration; the new loop reuses one constant filter. The baseline files under benchmarks/baselines/ are local generated artifacts, not tracked sources. Pinning with taskset changes the environment fingerprint because the fingerprint includes the process CPU count, so a pinned gate must be compared against a pinned record. The bench-record and bench-gate steps now depend on each other in build.zig, so the benchmarks run one at a time even when the build runner is parallel; a quiet host is still required for a gate verdict."
+}

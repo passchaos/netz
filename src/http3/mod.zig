@@ -5477,29 +5477,9 @@ fn validateConnectAuthority(authority: []const u8) Error!void {
     authority_semantics.validateConnect(authority) catch return error.InvalidHeader;
 }
 
-fn validateHeaderName(name: []const u8) Error!void {
-    if (name.len == 0) return error.InvalidHeader;
-    if (name[0] == ':') {
-        if (name.len == 1) return error.InvalidHeader;
-        for (name[1..]) |byte| {
-            if (!validHeaderNameByte(byte)) return error.InvalidHeader;
-        }
-        return;
-    }
-    for (name) |byte| {
-        if (!validHeaderNameByte(byte)) return error.InvalidHeader;
-    }
-}
+const validateHeaderName = @import("../http/field_name.zig").validate;
 
 const validateHeaderValue = @import("../http/field_value.zig").validate;
-
-fn validHeaderNameByte(byte: u8) bool {
-    if (byte >= 'A' and byte <= 'Z') return false;
-    return std.ascii.isLower(byte) or std.ascii.isDigit(byte) or switch (byte) {
-        '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~' => true,
-        else => false,
-    };
-}
 
 const RequestPseudo = enum { method, scheme, path, authority, protocol };
 

@@ -195,16 +195,24 @@ pub fn validateHeaderBlock(headers: []const http2.Hpack.HeaderField, kind: Heade
             if (saw_regular) return error.InvalidHeader;
             switch (kind) {
                 .request => {
-                    try markRequestPseudo(header.name, &seen_method, &seen_scheme, &seen_path, &seen_authority, &seen_protocol);
-                    if (std.mem.eql(u8, header.name, ":method")) method_value = header.value;
-                    if (std.mem.eql(u8, header.name, ":scheme")) scheme_value = header.value;
-                    if (std.mem.eql(u8, header.name, ":path")) path_value = header.value;
-                    if (std.mem.eql(u8, header.name, ":authority")) authority_value = header.value;
-                    if (std.mem.eql(u8, header.name, ":protocol")) protocol_value = header.value;
+                    switch (try markRequestPseudo(
+                        header.name,
+                        &seen_method,
+                        &seen_scheme,
+                        &seen_path,
+                        &seen_authority,
+                        &seen_protocol,
+                    )) {
+                        .method => method_value = header.value,
+                        .scheme => scheme_value = header.value,
+                        .path => path_value = header.value,
+                        .authority => authority_value = header.value,
+                        .protocol => protocol_value = header.value,
+                    }
                 },
                 .response => {
                     try markResponsePseudo(header.name, &seen_status);
-                    if (std.mem.eql(u8, header.name, ":status")) status_value = header.value;
+                    status_value = header.value;
                 },
                 .request_trailers, .response_trailers => return error.InvalidHeader,
             }
@@ -286,21 +294,7 @@ pub fn validateHeaderBlock(headers: []const http2.Hpack.HeaderField, kind: Heade
     }
 }
 
-fn validateHeaderName(name: []const u8) Error!void {
-    if (name.len == 0) return error.InvalidHeader;
-    if (name[0] == ':') {
-        if (name.len == 1) return error.InvalidHeader;
-        for (name[1..]) |byte| {
-            if (byte >= 'A' and byte <= 'Z') return error.InvalidHeader;
-            if (!validHeaderNameByte(byte)) return error.InvalidHeader;
-        }
-        return;
-    }
-    for (name) |byte| {
-        if (byte >= 'A' and byte <= 'Z') return error.InvalidHeader;
-        if (!validHeaderNameByte(byte)) return error.InvalidHeader;
-    }
-}
+const validateHeaderName = @import("../../../http/field_name.zig").validate;
 
 const validateHeaderValue = @import("../../../http/field_value.zig").validate;
 
@@ -358,12 +352,7 @@ fn validateRequestAuthority(authority: []const u8) Error!void {
     _ = authority_semantics.parse(authority) catch return error.InvalidHeader;
 }
 
-fn validHeaderNameByte(byte: u8) bool {
-    return std.ascii.isLower(byte) or std.ascii.isDigit(byte) or switch (byte) {
-        '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~' => true,
-        else => false,
-    };
-}
+const RequestPseudo = enum { method, scheme, path, authority, protocol };
 
 fn markRequestPseudo(
     name: []const u8,
@@ -372,12 +361,27 @@ fn markRequestPseudo(
     seen_path: *bool,
     seen_authority: *bool,
     seen_protocol: *bool,
-) Error!void {
-    if (std.mem.eql(u8, name, ":method")) return markOnce(seen_method);
-    if (std.mem.eql(u8, name, ":scheme")) return markOnce(seen_scheme);
-    if (std.mem.eql(u8, name, ":path")) return markOnce(seen_path);
-    if (std.mem.eql(u8, name, ":authority")) return markOnce(seen_authority);
-    if (std.mem.eql(u8, name, ":protocol")) return markOnce(seen_protocol);
+) Error!RequestPseudo {
+    if (std.mem.eql(u8, name, ":method")) {
+        try markOnce(seen_method);
+        return .method;
+    }
+    if (std.mem.eql(u8, name, ":scheme")) {
+        try markOnce(seen_scheme);
+        return .scheme;
+    }
+    if (std.mem.eql(u8, name, ":path")) {
+        try markOnce(seen_path);
+        return .path;
+    }
+    if (std.mem.eql(u8, name, ":authority")) {
+        try markOnce(seen_authority);
+        return .authority;
+    }
+    if (std.mem.eql(u8, name, ":protocol")) {
+        try markOnce(seen_protocol);
+        return .protocol;
+    }
     return error.InvalidHeader;
 }
 

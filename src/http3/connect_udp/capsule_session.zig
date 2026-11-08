@@ -34,12 +34,27 @@ pub fn Session(
         options: Options,
         receive_buffer: std.ArrayList(u8) = .empty,
         receive_offset: usize = 0,
+        /// Cached capsule header for the incomplete capsule at
+        /// `pending_header.offset`. Fragment boundaries are arbitrary, so a
+        /// large datagram can otherwise be re-parsed dozens of times before
+        /// its value bytes finish arriving.
+        pending_header: ?PendingHeader = null,
         peer_finished: bool = false,
         pending_send: ?PendingSend = null,
         configuration: ?*ConfigurationState = null,
 
         const Self = @This();
         pub const supports_blocking_relay = true;
+
+        const PendingHeader = struct {
+            offset: usize,
+            header_len: usize,
+            value_len: usize,
+
+            fn totalLen(self: PendingHeader) usize {
+                return self.header_len + self.value_len;
+            }
+        };
 
         const PendingSend = struct {
             header: [24]u8 = undefined,
@@ -739,8 +754,19 @@ pub fn Session(
         fn pollBuffered(self: *Self) !?BufferedUdpPayload {
             while (self.receive_offset < self.receive_buffer.items.len) {
                 const remaining = self.receive_buffer.items[self.receive_offset..];
+                if (self.pending_header) |pending| {
+                    if (pending.offset == self.receive_offset and
+                        remaining.len < pending.totalLen())
+                    {
+                        return null;
+                    }
+                    self.pending_header = null;
+                }
                 const parsed = Capsule.parse(remaining) catch |err| switch (err) {
-                    error.BufferTooShort => return null,
+                    error.BufferTooShort => {
+                        self.cacheIncompleteHeader(remaining);
+                        return null;
+                    },
                     else => |other| return self.abortMalformed(other),
                 };
                 if (parsed.capsule.capsule_type !=
@@ -782,10 +808,20 @@ pub fn Session(
                 self.receive_offset = 0;
                 return null;
             }
-            const parsed = Capsule.parse(
-                self.receive_buffer.items[self.receive_offset..],
-            ) catch |err| switch (err) {
-                error.BufferTooShort => return null,
+            const remaining = self.receive_buffer.items[self.receive_offset..];
+            if (self.pending_header) |pending| {
+                if (pending.offset == self.receive_offset and
+                    remaining.len < pending.totalLen())
+                {
+                    return null;
+                }
+                self.pending_header = null;
+            }
+            const parsed = Capsule.parse(remaining) catch |err| switch (err) {
+                error.BufferTooShort => {
+                    self.cacheIncompleteHeader(remaining);
+                    return null;
+                },
                 else => |other| return self.abortMalformed(other),
             };
             if (parsed.capsule.value.len >
@@ -797,6 +833,15 @@ pub fn Session(
                 .capsule_type = parsed.capsule.capsule_type,
                 .value = parsed.capsule.value,
                 .consumed = parsed.consumed,
+            };
+        }
+
+        fn cacheIncompleteHeader(self: *Self, remaining: []const u8) void {
+            const header = Capsule.parseHeader(remaining) catch return;
+            self.pending_header = .{
+                .offset = self.receive_offset,
+                .header_len = header.header_len,
+                .value_len = header.value_len,
             };
         }
 

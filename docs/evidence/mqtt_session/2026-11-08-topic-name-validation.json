@@ -1,0 +1,47 @@
+{
+  "schema": 1,
+  "date": "2026-11-08",
+  "head": "working-tree",
+  "subject": "MQTT topic-name validation combines ASCII and wildcard checks",
+  "change": "validTopicName previously ran the MQTT UTF-8 validator and then a separate wildcard search over every topic name. It now checks sixteen-byte ASCII chunks once for high bytes, NUL, '+' and '#'. A chunk containing a high byte falls back to the full UTF-8 validator plus the wildcard search, so mixed/non-ASCII names keep their exact rules; pure ASCII names need one vector pass and a short tail.",
+  "benchmark": {
+    "command": "taskset -c 0 <bench-mqtt-session>",
+    "pairs": 8,
+    "order": "alternating before/after",
+    "before_sha256": "5808998e2f54b5151ecd8803df881e246039feeab62ed724907372b63f8a85ea",
+    "after_sha256": "1c2f1dc5e594a04e4e2af570869b0c80223ffb98122a106f65732f90e0ab3041",
+    "results": {
+      "tail-slot churn": {
+        "before_ns_per_op": 129.0,
+        "after_ns_per_op": 122.0,
+        "speedup": 1.057
+      },
+      "full-window empty drain": {
+        "before_ns_per_op": 8.0,
+        "after_ns_per_op": 8.0,
+        "speedup": 1.0
+      }
+    }
+  },
+  "tests": {
+    "mqtt_router": {
+      "command": "zig build test-lib -Dtest-filter=mqtt -Dtest-filter=router --summary all",
+      "passed": 1410,
+      "total": 1410
+    },
+    "full_library": {
+      "command": "zig build test-lib --summary all (isolated caches)",
+      "passed": 6771,
+      "total": 6771
+    },
+    "mqtt_interop": {
+      "command": "zig build interop-mqtt-broker-config --summary all",
+      "status": "passed",
+      "note": "full Mosquitto-derived broker configuration matrix, including Client ID bounds, topic filters, ACL reloads and retained/shared delivery"
+    }
+  },
+  "notes": "The tail-slot churn workload enqueues a QoS 1 publish per iteration through the public Session API, which validates the topic name. The combined pass preserves the length bound, NUL rejection, wildcard rejection and the general UTF-8/noncharacter rules for non-ASCII names.",
+  "source_sha256": {
+    "src/mqtt/mod.zig": "24fc075632daef74416b009a2fdc6fd4cd6e33445cfda7226984ce1906b219f6"
+  }
+}
