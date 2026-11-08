@@ -15,6 +15,21 @@ evidence workflow is in
 [docs/performance-playbook.md](docs/performance-playbook.md), and the complete
 documentation map is in [docs/README.md](docs/README.md).
 
+## Application proxy protocols
+
+`src/proxy/` owns the application-layer proxy wire codecs, servers, and relay
+lifecycles: SOCKS4/4a/5 (CONNECT, BIND, UDP ASSOCIATE, RFC 1929 auth), HTTP/1
+CONNECT, Shadowsocks AEAD, Trojan, VLESS/VMess with TLS/WebSocket/QUIC/HTTP2/
+gRPC transports, TUIC v5, Hysteria v2/v3, TLS stream adapters, and bounded
+TCP/UDP/TLS/QUIC relay helpers. The `runtime/` submodule contains the generic
+server primitives those implementations need (ACL, destination connect policy,
+connection limits, statistics, rate limiting, and reloadable policy snapshots).
+
+These modules were merged from the former `proxyz` protocol layer. The
+`proxyz` package now owns Clash-style routing, DNS configuration, subscription
+parsing, and health selection on top, and re-exports `netz.proxy` for
+compatibility.
+
 The four public protocol families share a bounded parser fuzz target.
 `zig build fuzz-parsers` replays valid and hostile HTTP/1, HTTP/2, HTTP/3,
 HPACK, QPACK, WebSocket, WebTransport, and MQTT seeds plus deterministic
