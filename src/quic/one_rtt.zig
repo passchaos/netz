@@ -18,6 +18,9 @@ const stream_cancel = @import("one_rtt/stream_cancel.zig");
 const owned_receive_race = @import("owned_receive_race.zig");
 const deadline_policy = @import("../internal/deadline.zig");
 
+/// Direct-mapped stream lookup cache size. Must stay a power of two.
+const stream_lookup_cache_entries = 64;
+
 const net = std.Io.net;
 
 /// ACK_FREQUENCY expresses Requested Max Ack Delay in microseconds, while the
@@ -1186,7 +1189,12 @@ pub const Connection = struct {
     recv_data_total: u64 = 0,
     stream_send_flows: std.ArrayList(StreamFlowEntry) = .empty,
     stream_send_index: std.AutoHashMapUnmanaged(u64, usize) = .empty,
-    last_send_stream_index: ?usize = null,
+    /// Direct-mapped cache over `stream_send_index`. Callers cycle through
+    /// several streams (request, control, credit updates), so a single last
+    /// entry misses almost every time; indexed slots keep the hash lookup off
+    /// the hot path.
+    send_stream_cache: [stream_lookup_cache_entries]?usize =
+        @splat(null),
     stream_recv_flows: std.ArrayList(StreamRecvFlowEntry) = .empty,
     stream_recv_index: std.AutoHashMapUnmanaged(u64, usize) = .empty,
     closed_peer_bidi_streams: closed_streams.Set = .{},
@@ -1212,7 +1220,8 @@ pub const Connection = struct {
     last_receive_credit_stream_id: ?u64 = null,
     receive_credit_retry_deadline_ns: ?u64 = null,
     receive_credit_retry_attempts: u8 = 0,
-    last_recv_stream_index: ?usize = null,
+    recv_stream_cache: [stream_lookup_cache_entries]?usize =
+        @splat(null),
     stream_poll_cursor: usize = 0,
     close_info: ?CloseInfo = null,
     peer_close_frame_received: bool = false,
@@ -8586,7 +8595,7 @@ pub const Connection = struct {
             const moved = self.stream_recv_flows.items[index];
             self.stream_recv_index.getPtr(moved.stream_id).?.* = index;
         }
-        self.last_recv_stream_index = null;
+        self.recv_stream_cache[streamLookupSlot(stream_id)] = null;
         if (self.stream_recv_flows.items.len == 0) {
             self.stream_poll_cursor = 0;
         } else if (index != last_index and next_poll_index == last_index) {
@@ -8621,7 +8630,7 @@ pub const Connection = struct {
             const moved = self.stream_send_flows.items[index];
             self.stream_send_index.getPtr(moved.stream_id).?.* = index;
         }
-        self.last_send_stream_index = null;
+        self.send_stream_cache[streamLookupSlot(stream_id)] = null;
     }
 
     fn flushRequestedPeerStreamCreditsAt(
@@ -15981,7 +15990,7 @@ pub const Connection = struct {
             .flow = .init(self.initialSendStreamDataLimit(stream_id)),
         });
         slot.value_ptr.* = index;
-        self.last_send_stream_index = index;
+        self.send_stream_cache[streamLookupSlot(stream_id)] = index;
         return &self.stream_send_flows.items[self.stream_send_flows.items.len - 1];
     }
 
@@ -16203,8 +16212,18 @@ pub const Connection = struct {
         return if (entry.stream_id == stream_id) entry else null;
     }
 
+    fn streamLookupSlot(stream_id: u64) usize {
+        // Keep the low two stream-type bits so the four stream ID spaces
+        // (client/server x bidi/uni) land in different slots.
+        return @intCast(
+            (stream_id ^ (stream_id >> 3)) &
+                (stream_lookup_cache_entries - 1),
+        );
+    }
+
     fn findSendStreamEntry(self: *Connection, stream_id: u64) ?*StreamFlowEntry {
-        if (self.last_send_stream_index) |index| {
+        const slot = streamLookupSlot(stream_id);
+        if (self.send_stream_cache[slot]) |index| {
             if (index < self.stream_send_flows.items.len and
                 self.stream_send_flows.items[index].stream_id == stream_id)
             {
@@ -16215,7 +16234,7 @@ pub const Connection = struct {
         const index = self.stream_send_index.get(stream_id) orelse return null;
         if (index >= self.stream_send_flows.items.len) return null;
         if (self.stream_send_flows.items[index].stream_id != stream_id) return null;
-        self.last_send_stream_index = index;
+        self.send_stream_cache[slot] = index;
         return &self.stream_send_flows.items[index];
     }
 
@@ -16253,7 +16272,7 @@ pub const Connection = struct {
             ),
         });
         slot.value_ptr.* = index;
-        self.last_recv_stream_index = index;
+        self.recv_stream_cache[streamLookupSlot(stream_id)] = index;
         if (!streamInitiatedByLocal(self.config.local_endpoint, stream_id)) {
             self.incoming_streams_created_count +|= 1;
         }
@@ -16261,7 +16280,8 @@ pub const Connection = struct {
     }
 
     fn findRecvStreamEntry(self: *Connection, stream_id: u64) ?*StreamRecvFlowEntry {
-        if (self.last_recv_stream_index) |index| {
+        const slot = streamLookupSlot(stream_id);
+        if (self.recv_stream_cache[slot]) |index| {
             if (index < self.stream_recv_flows.items.len and
                 self.stream_recv_flows.items[index].stream_id == stream_id)
             {
@@ -16272,7 +16292,7 @@ pub const Connection = struct {
         const index = self.stream_recv_index.get(stream_id) orelse return null;
         if (index >= self.stream_recv_flows.items.len) return null;
         if (self.stream_recv_flows.items[index].stream_id != stream_id) return null;
-        self.last_recv_stream_index = index;
+        self.recv_stream_cache[slot] = index;
         return &self.stream_recv_flows.items[index];
     }
 
