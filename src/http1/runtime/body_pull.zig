@@ -116,6 +116,9 @@ pub fn Reader(comptime ConnectionType: type, comptime RuntimeError: type) type {
         current: ?[]u8 = null,
         current_offset: usize = 0,
         producer: ?std.Io.Future(anyerror!void) = null,
+        /// True for a reader completed on the calling task with no producer.
+        /// All state is already final, so the mutex and condition are skipped.
+        synchronous: bool = false,
 
         pub fn init(allocator: std.mem.Allocator, connection: *ConnectionType, options: http1.ParseOptions, max_buffered_bytes: usize) !*Self {
             const self = try allocator.create(Self);
@@ -150,15 +153,18 @@ pub fn Reader(comptime ConnectionType: type, comptime RuntimeError: type) type {
                 .head_value = head_value,
                 .finished = true,
                 .request = request,
+                .synchronous = true,
             };
             return self;
         }
 
         pub fn deinit(self: *Self) void {
-            self.mutex.lockUncancelable(self.io);
-            self.canceled = true;
-            self.cond.broadcast(self.io);
-            self.mutex.unlock(self.io);
+            if (!self.synchronous) {
+                self.mutex.lockUncancelable(self.io);
+                self.canceled = true;
+                self.cond.broadcast(self.io);
+                self.mutex.unlock(self.io);
+            }
             if (self.producer) |*producer| {
                 _ = producer.cancel(self.io) catch {};
                 _ = producer.await(self.io) catch {};
@@ -175,8 +181,12 @@ pub fn Reader(comptime ConnectionType: type, comptime RuntimeError: type) type {
         /// Wait for the parsed request head. The returned value remains valid
         /// until `deinit`.
         pub fn head(self: *Self) !*const Head {
-            self.mutex.lockUncancelable(self.io);
-            defer self.mutex.unlock(self.io);
+            if (!self.synchronous) {
+                self.mutex.lockUncancelable(self.io);
+            }
+            defer {
+                if (!self.synchronous) self.mutex.unlock(self.io);
+            }
             while (self.head_value == null and self.failure == null and !self.finished) {
                 try self.cond.wait(self.io, &self.mutex);
             }
@@ -189,8 +199,12 @@ pub fn Reader(comptime ConnectionType: type, comptime RuntimeError: type) type {
         /// `next` call or `deinit`; the caller must consume it before calling
         /// again. Returns null after the body is complete.
         pub fn next(self: *Self) !?[]const u8 {
-            self.mutex.lockUncancelable(self.io);
-            defer self.mutex.unlock(self.io);
+            if (!self.synchronous) {
+                self.mutex.lockUncancelable(self.io);
+            }
+            defer {
+                if (!self.synchronous) self.mutex.unlock(self.io);
+            }
             while (true) {
                 if (self.current) |chunk| {
                     if (self.current_offset < chunk.len) {
@@ -218,8 +232,12 @@ pub fn Reader(comptime ConnectionType: type, comptime RuntimeError: type) type {
         /// (or `requestReady` must be true); calling early returns
         /// `error.RequestNotComplete` instead of blocking behind a full queue.
         pub fn takeRequest(self: *Self) !Streaming.Request {
-            self.mutex.lockUncancelable(self.io);
-            defer self.mutex.unlock(self.io);
+            if (!self.synchronous) {
+                self.mutex.lockUncancelable(self.io);
+            }
+            defer {
+                if (!self.synchronous) self.mutex.unlock(self.io);
+            }
             if (self.failure) |err| return err;
             if (!self.finished) return error.RequestNotComplete;
             const request = self.request orelse return error.ConnectionClosed;
@@ -230,6 +248,7 @@ pub fn Reader(comptime ConnectionType: type, comptime RuntimeError: type) type {
         /// True once the producer has completed the body and stored the request
         /// metadata. Body chunks may still be pending; `next` drains them.
         pub fn requestReady(self: *Self) bool {
+            if (self.synchronous) return self.finished;
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
             return self.finished;

@@ -6178,23 +6178,39 @@ pub const Connection = struct {
             head.headers,
         );
         errdefer self.allocator.free(owned_headers);
-        const owned = try http1.parseRequestHead(
-            head_bytes,
-            owned_headers,
-            options,
-        );
+
+        // Rebase the parsed slices into the copied head instead of parsing the
+        // copy again. `inbuf` is not modified between the parse and the copy.
+        const inbuf_base = @intFromPtr(self.inbuf.items.ptr);
+        const head_base = @intFromPtr(head_bytes.ptr);
+        const rebase = struct {
+            fn slice(base: usize, target: usize, source: []const u8) []const u8 {
+                const offset = @intFromPtr(source.ptr) - base;
+                return @as(
+                    [*]const u8,
+                    @ptrFromInt(target + offset),
+                )[0..source.len];
+            }
+        }.slice;
+        const target = rebase(inbuf_base, head_base, head.target);
+        for (head.headers, owned_headers) |field, *copy| {
+            copy.* = .{
+                .name = rebase(inbuf_base, head_base, field.name),
+                .value = rebase(inbuf_base, head_base, field.value),
+            };
+        }
         self.consumeRequestBatch(head.head_len) catch |err| return err;
         self.request_continue.reset();
 
         var request = StreamingRequest{
             .head_bytes = head_bytes,
-            .method = owned.method,
-            .target = owned.target,
-            .version = owned.version,
+            .method = head.method,
+            .target = target,
+            .version = head.version,
             .headers = owned_headers,
-            .body_framing = owned.body_framing,
+            .body_framing = head.body_framing,
             .body_bytes = 0,
-            .must_close = owned.must_close,
+            .must_close = head.must_close,
         };
         errdefer request.deinit(self.allocator);
         // The head view borrows the request's owned bytes and header array;
@@ -6202,7 +6218,7 @@ pub const Connection = struct {
         const head_value = RequestBodyReader.Head.borrow(
             self.allocator,
             &request,
-            owned.content_length,
+            head.content_length,
         );
 
         succeeded = true;
