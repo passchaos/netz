@@ -26,9 +26,15 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const scheduling = b.option(
+        []const u8,
+        "scheduling",
+        "zio scheduling discipline: single_executor, pinned, or work_stealing",
+    );
     const zio_dep = b.dependency("zio", .{
         .target = target,
         .optimize = optimize,
+        .scheduling = scheduling orelse "work_stealing",
     });
     const harnessz_dep = b.dependency("harnessz", .{
         .target = target,
