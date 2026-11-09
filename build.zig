@@ -31,10 +31,16 @@ pub fn build(b: *std.Build) void {
         "scheduling",
         "zio scheduling discipline: single_executor, pinned, or work_stealing",
     );
+    const zio_backend = b.option(
+        []const u8,
+        "zio-backend",
+        "zio event loop backend: poll, linux, epoll, kqueue, io_uring, or iocp",
+    );
     const zio_dep = b.dependency("zio", .{
         .target = target,
         .optimize = optimize,
         .scheduling = scheduling orelse "work_stealing",
+        .backend = zio_backend,
     });
     const harnessz_dep = b.dependency("harnessz", .{
         .target = target,
