@@ -6088,7 +6088,135 @@ pub const Connection = struct {
     }
 
     pub fn readRequestBodyWithBuffer(self: *Connection, options: http1.ParseOptions, max_buffered_bytes: usize) !*RequestBodyReader {
+        if (try self.completeBodylessRequest(options)) |reader| return reader;
         return RequestBodyReader.init(self.allocator, self, options, max_buffered_bytes);
+    }
+
+    /// Complete a request with no body without spawning the background
+    /// producer. The head is read and parsed on the calling task, the owned
+    /// request is built directly, and the returned reader reports completion
+    /// immediately. Requests with a body (or an `Expect` field) fall back to
+    /// the regular producer path with the buffered head untouched.
+    fn completeBodylessRequest(
+        self: *Connection,
+        options: http1.ParseOptions,
+    ) !?*RequestBodyReader {
+        // Obs-fold parsing needs the owned-head path in the streaming reader.
+        if (options.allow_obs_fold) return null;
+        var headers_stack: [128]http1.Header = undefined;
+        if (options.max_headers > headers_stack.len) return null;
+
+        try self.writer_state.beginRead();
+        var succeeded = false;
+        defer if (!succeeded) self.writer_state.failRead();
+
+        self.beginRequestHeadDeadline() catch |err| return err;
+        defer self.request_head_deadline = null;
+
+        const headers = headers_stack[0..options.max_headers];
+        var head: http1.RequestHead = undefined;
+        while (true) {
+            head = http1.parseRequestHead(
+                self.inbuf.items,
+                headers,
+                options,
+            ) catch |err| switch (err) {
+                error.BufferTooShort => {
+                    _ = findHttpHeadEndWithinLimit(
+                        self.inbuf.items,
+                        self.limits.max_head_bytes,
+                    ) catch |limit_err| return limit_err;
+                    if (self.inbuf.items.len >= self.limits.max_head_bytes) {
+                        return error.HeadersTooLarge;
+                    }
+                    var read_buffer: [16 * 1024]u8 = undefined;
+                    const remaining =
+                        self.limits.max_head_bytes - self.inbuf.items.len;
+                    const destination =
+                        read_buffer[0..@min(remaining, read_buffer.len)];
+                    const count = connectionReadHeadSome(
+                        self,
+                        destination,
+                    ) catch |read_err| {
+                        if (read_err == error.Timeout) {
+                            self.writer_state.phase = .unusable;
+                        }
+                        return read_err;
+                    };
+                    if (count == 0) return error.ConnectionClosed;
+                    try self.inbuf.appendSlice(
+                        self.allocator,
+                        read_buffer[0..count],
+                    );
+                    continue;
+                },
+                else => |parse_err| return parse_err,
+            };
+            break;
+        }
+
+        // Only a request that cannot carry a body is completed here. An
+        // Expect field is left to the producer so 100-continue handling stays
+        // in one place. Falling back must release the read phase without
+        // poisoning the connection; the producer starts a fresh read.
+        const bodyless = head.body_framing == .none or
+            (head.body_framing == .content_length and
+                (head.content_length orelse 0) == 0);
+        if (!bodyless or head.header("expect") != null) {
+            succeeded = true;
+            self.writer_state.finishRead();
+            return null;
+        }
+
+        const head_bytes = try self.allocator.dupe(
+            u8,
+            self.inbuf.items[0..head.head_len],
+        );
+        errdefer self.allocator.free(head_bytes);
+        const owned_headers = try self.allocator.dupe(
+            http1.Header,
+            head.headers,
+        );
+        errdefer self.allocator.free(owned_headers);
+        const owned = try http1.parseRequestHead(
+            head_bytes,
+            owned_headers,
+            options,
+        );
+        self.consumeRequestBatch(head.head_len) catch |err| return err;
+        self.request_continue.reset();
+
+        var request = StreamingRequest{
+            .head_bytes = head_bytes,
+            .method = owned.method,
+            .target = owned.target,
+            .version = owned.version,
+            .headers = owned_headers,
+            .body_framing = owned.body_framing,
+            .body_bytes = 0,
+            .must_close = owned.must_close,
+        };
+        errdefer request.deinit(self.allocator);
+        var head_value = try RequestBodyReader.Head.copy(self.allocator, .{
+            .method = owned.method,
+            .target = owned.target,
+            .version = owned.version,
+            .headers = owned_headers,
+            .body_framing = owned.body_framing,
+            .content_length = owned.content_length,
+            .must_close = owned.must_close,
+        });
+        errdefer head_value.deinit();
+
+        succeeded = true;
+        self.writer_state.finishRead();
+        return RequestBodyReader.initCompleted(
+            self.allocator,
+            self,
+            options,
+            head_value,
+            request,
+        );
     }
 
     /// Read a request while delivering body bytes without aggregation.

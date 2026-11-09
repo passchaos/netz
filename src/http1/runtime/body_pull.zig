@@ -19,7 +19,7 @@ pub fn Reader(comptime ConnectionType: type, comptime RuntimeError: type) type {
             content_length: ?usize,
             must_close: bool,
 
-            fn copy(allocator: std.mem.Allocator, request_head: Streaming.RequestHead) !Head {
+            pub fn copy(allocator: std.mem.Allocator, request_head: Streaming.RequestHead) !Head {
                 var storage_bytes: usize = request_head.target.len;
                 for (request_head.headers) |field| storage_bytes += field.name.len + field.value.len;
                 const storage = try allocator.alloc(u8, storage_bytes);
@@ -100,6 +100,30 @@ pub fn Reader(comptime ConnectionType: type, comptime RuntimeError: type) type {
                 .max_buffered_bytes = @max(max_buffered_bytes, 1),
             };
             self.producer = self.io.async(Self.produce, .{self});
+            return self;
+        }
+
+        /// Build an already-complete reader for a request that has no body.
+        /// The caller has consumed the head from the connection buffer and
+        /// owns `head_value` and `request`; the reader releases both.
+        pub fn initCompleted(
+            allocator: std.mem.Allocator,
+            connection: *ConnectionType,
+            options: http1.ParseOptions,
+            head_value: Head,
+            request: Streaming.Request,
+        ) !*Self {
+            const self = try allocator.create(Self);
+            self.* = .{
+                .allocator = allocator,
+                .io = connection.io,
+                .connection = connection,
+                .options = options,
+                .max_buffered_bytes = 1,
+                .head_value = head_value,
+                .finished = true,
+                .request = request,
+            };
             return self;
         }
 
