@@ -876,7 +876,10 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                         return;
                     }
                     // A complete buffered response fits in one QUIC packet, so
-                    // skip the separate HEADERS and DATA submissions.
+                    // skip the separate HEADERS and DATA submissions. The fast
+                    // path requires the endpoint control streams to be ready;
+                    // a very early first response falls back to the regular
+                    // head+body path instead of failing the stream.
                     if (self.active <= 1 and
                         value.fin and
                         value.data.len != 0 and
@@ -884,7 +887,7 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                         (value.body_length == null or
                             value.body_length.? == value.data.len))
                     {
-                        try Adapter.sendCompleteResponse(
+                        if (Adapter.sendCompleteResponse(
                             self.session,
                             slot.from,
                             slot.stream_id,
@@ -892,9 +895,13 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                             value.body_length,
                             value.data,
                             slot.head.method,
-                        );
-                        slot.response_finished = true;
-                        return;
+                        )) |_| {
+                            slot.response_finished = true;
+                            return;
+                        } else |err| switch (err) {
+                            error.MissingSettings => {},
+                            else => return err,
+                        }
                     }
                     try Adapter.startResponse(
                         self.session,
