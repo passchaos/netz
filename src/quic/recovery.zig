@@ -74,6 +74,35 @@ const StreamRefs = struct {
         self.count += 1;
         return true;
     }
+
+    /// Build references from the frames the packetizer already knows. Send
+    /// paths use this so recovery never has to decode its own payload to
+    /// answer per-stream delivery queries.
+    fn fromFrames(frames: []const quic.Frame) StreamRefs {
+        var refs: StreamRefs = .{ .state = .ready };
+        for (frames) |frame| switch (frame) {
+            .stream => |stream| {
+                if (!refs.push(.{
+                    .stream_id = stream.stream_id,
+                    .reset = false,
+                })) return refs;
+            },
+            .reset_stream => |reset| {
+                if (!refs.push(.{
+                    .stream_id = reset.stream_id,
+                    .reset = true,
+                })) return refs;
+            },
+            .reset_stream_at => |reset| {
+                if (!refs.push(.{
+                    .stream_id = reset.stream_id,
+                    .reset = true,
+                })) return refs;
+            },
+            else => {},
+        };
+        return refs;
+    }
 };
 
 const PendingDatagram = struct {
@@ -90,8 +119,9 @@ const PendingDatagram = struct {
     /// receives the original allocation size.
     payload_storage: []u8,
     payload_len: usize,
-    /// Cached STREAM/RESET_STREAM frame references. Populated lazily by
-    /// `hasPendingStreamFrame`; payload bytes never change after encoding.
+    /// Cached STREAM/RESET_STREAM frame references. Populated eagerly by the
+    /// send path (or lazily for callers that only provide encoded bytes);
+    /// payload bytes never change after encoding.
     stream_refs: StreamRefs = .{},
 
     fn initOwned(
@@ -119,13 +149,6 @@ const PendingDatagram = struct {
 
     fn payload(self: PendingDatagram) []const u8 {
         return self.payload_storage[0..self.payload_len];
-    }
-
-    fn cachedStreamRefs(self: *PendingDatagram) *const StreamRefs {
-        if (self.stream_refs.state == .unknown) {
-            Queue.parseStreamRefs(self.payload(), &self.stream_refs);
-        }
-        return &self.stream_refs;
     }
 
     fn newestPacketNumber(self: PendingDatagram) u64 {
@@ -204,6 +227,19 @@ pub const Queue = struct {
     retransmission_copies: usize = 0,
     payload_bytes: usize = 0,
     next_group_id: u64 = 0,
+    /// Number of pending payloads carrying a STREAM frame per stream. Close
+    /// and credit queries run many times per acknowledgement, so the queue
+    /// keeps these counters instead of decoding every pending payload.
+    pending_data_streams: std.AutoHashMapUnmanaged(u64, u32) = .empty,
+    /// Number of pending payloads carrying a RESET_STREAM(_AT) frame per
+    /// stream.
+    pending_reset_streams: std.AutoHashMapUnmanaged(u64, u32) = .empty,
+    /// Pending payloads whose stream references have not been decoded yet.
+    unknown_stream_refs: usize = 0,
+    /// Pending payloads with more stream references than fit inline. While
+    /// nonzero every per-stream query answers conservatively, matching the
+    /// previous scan behavior.
+    overflow_stream_refs: usize = 0,
     payload_cache: payload_cache.Cache,
 
     pub fn init(allocator: std.mem.Allocator) Queue {
@@ -214,6 +250,8 @@ pub const Queue = struct {
     }
 
     pub fn deinit(self: *Queue) void {
+        self.pending_data_streams.deinit(self.allocator);
+        self.pending_reset_streams.deinit(self.allocator);
         for (self.pending.items) |*entry| entry.deinit(self.allocator);
         self.payload_cache.deinit();
         self.pending.deinit(self.allocator);
@@ -247,9 +285,12 @@ pub const Queue = struct {
         packet_number: u64,
         payload: []const u8,
     ) Error!u64 {
-        const tracked = try self.trackSentUninitialized(
+        var refs: StreamRefs = .{};
+        Queue.parseStreamRefs(payload, &refs);
+        const tracked = try self.trackSentWithRefs(
             packet_number,
             payload.len,
+            &refs,
         );
         @memcpy(tracked.payload, payload);
         return tracked.group_id;
@@ -266,6 +307,36 @@ pub const Queue = struct {
         packet_number: u64,
         payload_len: usize,
     ) Error!UninitializedPayload {
+        return self.trackSentWithRefs(
+            packet_number,
+            payload_len,
+            &.{},
+        );
+    }
+
+    /// Track a packet whose retransmittable frames the packetizer already
+    /// knows. Deriving the stream references from `frames` keeps close-time
+    /// delivery queries O(1) without decoding the encoded payload.
+    pub fn trackSentUninitializedWithFrames(
+        self: *Queue,
+        packet_number: u64,
+        payload_len: usize,
+        frames: []const quic.Frame,
+    ) Error!UninitializedPayload {
+        const refs = StreamRefs.fromFrames(frames);
+        return self.trackSentWithRefs(
+            packet_number,
+            payload_len,
+            &refs,
+        );
+    }
+
+    fn trackSentWithRefs(
+        self: *Queue,
+        packet_number: u64,
+        payload_len: usize,
+        refs: *const StreamRefs,
+    ) Error!UninitializedPayload {
         if (payload_len == 0) return error.EmptyPayload;
         if (self.packetNumberExists(packet_number)) {
             return error.InvalidRetransmission;
@@ -278,16 +349,18 @@ pub const Queue = struct {
             1,
         ) catch return error.InvalidRetransmission;
         try self.pending.ensureUnusedCapacity(self.allocator, 1);
+        try self.reserveStreamRefCapacity(refs);
         const payload_storage = self.payload_cache.acquire(
             payload_len,
         ) catch return error.OutOfMemory;
         errdefer self.payload_cache.release(payload_storage);
-        const entry = PendingDatagram.initOwned(
+        var entry = PendingDatagram.initOwned(
             group_id,
             packet_number,
             payload_storage,
             payload_len,
         );
+        entry.stream_refs = refs.*;
         self.appendGroupAssumeCapacity(entry);
         self.next_group_id = next_group_id;
         self.largest_packet_number = if (self.largest_packet_number) |old|
@@ -348,8 +421,52 @@ pub const Queue = struct {
         stream_id: u64,
         reset_only: bool,
     ) bool {
+        if (self.unknown_stream_refs != 0 and
+            !self.materializeUnknownStreamRefs())
+        {
+            return self.scanPendingStreamFrame(stream_id, reset_only);
+        }
+        if (self.overflow_stream_refs != 0) return true;
+        const map = if (reset_only)
+            &self.pending_reset_streams
+        else
+            &self.pending_data_streams;
+        return (map.get(stream_id) orelse 0) != 0;
+    }
+
+    /// Decode and count every payload whose references are still unknown.
+    /// Returns false only when growing the counters fails; the caller then
+    /// falls back to scanning so OOM never changes a delivery answer.
+    fn materializeUnknownStreamRefs(self: *Queue) bool {
         for (self.pending.items) |*entry| {
-            const refs = entry.cachedStreamRefs();
+            if (entry.stream_refs.state != .unknown) continue;
+            var refs: StreamRefs = .{};
+            Queue.parseStreamRefs(entry.payload(), &refs);
+            self.reserveStreamRefCapacity(&refs) catch return false;
+            self.uncountStreamRefs(&entry.stream_refs);
+            entry.stream_refs = refs;
+            self.countStreamRefsAssumeCapacity(&entry.stream_refs);
+        }
+        return true;
+    }
+
+    /// Conservative fallback used only when counter growth fails. Unknown
+    /// entries are parsed into a local so the counter bookkeeping stays
+    /// consistent (`unknown_stream_refs` still covers them).
+    fn scanPendingStreamFrame(
+        self: *Queue,
+        stream_id: u64,
+        reset_only: bool,
+    ) bool {
+        var index = self.pending.items.len;
+        while (index != 0) {
+            index -= 1;
+            const entry = &self.pending.items[index];
+            var parsed: StreamRefs = .{};
+            const refs = if (entry.stream_refs.state == .unknown) blk: {
+                Queue.parseStreamRefs(entry.payload(), &parsed);
+                break :blk &parsed;
+            } else &entry.stream_refs;
             if (refs.state == .overflow) return true;
             for (refs.refs[0..refs.count]) |ref| {
                 if (ref.reset != reset_only) continue;
@@ -357,6 +474,61 @@ pub const Queue = struct {
             }
         }
         return false;
+    }
+
+    fn streamRefMap(
+        self: *Queue,
+        reset: bool,
+    ) *std.AutoHashMapUnmanaged(u64, u32) {
+        return if (reset)
+            &self.pending_reset_streams
+        else
+            &self.pending_data_streams;
+    }
+
+    fn reserveStreamRefCapacity(
+        self: *Queue,
+        refs: *const StreamRefs,
+    ) Error!void {
+        switch (refs.state) {
+            .unknown, .overflow => {},
+            .ready => for (refs.refs[0..refs.count]) |ref| {
+                try self.streamRefMap(ref.reset).ensureUnusedCapacity(
+                    self.allocator,
+                    1,
+                );
+            },
+        }
+    }
+
+    fn countStreamRefsAssumeCapacity(
+        self: *Queue,
+        refs: *const StreamRefs,
+    ) void {
+        switch (refs.state) {
+            .unknown => self.unknown_stream_refs += 1,
+            .overflow => self.overflow_stream_refs += 1,
+            .ready => for (refs.refs[0..refs.count]) |ref| {
+                const map = self.streamRefMap(ref.reset);
+                const result = map.getOrPutAssumeCapacity(ref.stream_id);
+                if (!result.found_existing) result.value_ptr.* = 0;
+                result.value_ptr.* += 1;
+            },
+        }
+    }
+
+    fn uncountStreamRefs(self: *Queue, refs: *const StreamRefs) void {
+        switch (refs.state) {
+            .unknown => self.unknown_stream_refs -= 1,
+            .overflow => self.overflow_stream_refs -= 1,
+            .ready => for (refs.refs[0..refs.count]) |ref| {
+                const map = self.streamRefMap(ref.reset);
+                const count = map.getPtr(ref.stream_id) orelse continue;
+                std.debug.assert(count.* != 0);
+                count.* -= 1;
+                if (count.* == 0) _ = map.remove(ref.stream_id);
+            },
+        }
     }
 
     /// Parse one pending payload into its cached stream references. Returns
@@ -530,7 +702,11 @@ pub const Queue = struct {
             entry.payload_len = write;
             // Compaction rewrote the encoded frames, so the parsed stream
             // references must be recomputed on the next query.
-            entry.stream_refs.state = .unknown;
+            if (entry.stream_refs.state != .unknown) {
+                self.uncountStreamRefs(&entry.stream_refs);
+                entry.stream_refs = .{};
+                self.countStreamRefsAssumeCapacity(&entry.stream_refs);
+            }
             index += 1;
         }
         return removed_frames;
@@ -860,6 +1036,9 @@ pub const Queue = struct {
             }
         }
         self.pending.appendAssumeCapacity(entry);
+        self.countStreamRefsAssumeCapacity(
+            &self.pending.items[self.pending.items.len - 1].stream_refs,
+        );
         self.addEntryStats(entry);
     }
 
@@ -908,6 +1087,7 @@ pub const Queue = struct {
     }
 
     fn recycleEntry(self: *Queue, entry: *PendingDatagram) void {
+        self.uncountStreamRefs(&entry.stream_refs);
         entry.retransmission_packet_numbers.deinit(self.allocator);
         self.payload_cache.release(entry.payload_storage);
         entry.* = undefined;

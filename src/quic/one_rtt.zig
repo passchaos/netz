@@ -2927,10 +2927,11 @@ pub const Connection = struct {
                     // is retransmittable. RFC 9221 DATAGRAM bytes are omitted
                     // from this stable payload.
                     const tracked = try self.recovery
-                        .trackSentUninitialized(
-                        packet.packet_number,
-                        packet.recovery_payload_len,
-                    );
+                        .trackSentUninitializedWithFrames(
+                            packet.packet_number,
+                            packet.recovery_payload_len,
+                            packet.frames,
+                        );
                     tracked_recovery_packets[tracked_recovery_count] =
                         packet.packet_number;
                     tracked_recovery_count += 1;
@@ -5430,10 +5431,12 @@ pub const Connection = struct {
         var recovery_payload: ?[]const u8 = null;
         var recovery_group_id: ?u64 = null;
         if (prepared.recovery_payload_len != 0) {
-            const tracked = try self.recovery.trackSentUninitialized(
-                packet_number,
-                prepared.recovery_payload_len,
-            );
+            const tracked = try self.recovery
+                .trackSentUninitializedWithFrames(
+                    packet_number,
+                    prepared.recovery_payload_len,
+                    prepared.frames,
+                );
             tracked_recovery = true;
             var payload_list = std.ArrayList(u8).initBuffer(
                 tracked.payload,
