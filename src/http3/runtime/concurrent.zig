@@ -121,6 +121,10 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
             /// The request stream ended with the head, so no body events are
             /// needed before running the handler.
             request_finished: bool = false,
+            /// A small declared body is being buffered before the handler
+            /// runs on the owner.
+            deferred_inline: bool = false,
+            deferred_since: ?std.Io.Clock.Timestamp = null,
             trailers: ?http3.DecodedTrailers = null,
             body_mutex: std.Io.Mutex = .init,
             /// Request DATA copied by the owner before `.finished` can retire
@@ -160,6 +164,12 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
             /// `error.InlineDeclined` before side effects.
             pub fn isInline(self: Stream) bool {
                 return self.engine.inline_active;
+            }
+
+            /// True when the whole request body is already buffered, so a
+            /// streaming reader cannot block on `nextBody`.
+            pub fn inlineBodyComplete(self: Stream) bool {
+                return self.slot.body_finished;
             }
 
             pub fn head(self: Stream) *const http3.DecodedRequestHead {
@@ -324,6 +334,9 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
         stopping: bool = false,
         max_buffered_body_bytes: usize = 1,
         active: usize = 0,
+        /// Slots waiting for a small declared body so the handler can run on
+        /// the owner without a worker handoff.
+        deferred_slots: std.ArrayList(*Slot) = .empty,
         /// True while a handler runs on the owner. Stream command submissions
         /// then execute in place instead of crossing to the owner.
         inline_active: bool = false,
@@ -353,6 +366,7 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
             self.cancelCommands();
             self.cancelActive();
             self.slots.deinit(self.allocator);
+            self.deferred_slots.deinit(self.allocator);
             for (self.pending_heads.items) |*event| event.deinit(self.allocator);
             self.pending_heads.deinit(self.allocator);
             for (self.pending_events.items) |*event| event.deinit(self.allocator);
@@ -447,6 +461,13 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
             self.pending_heads.clearRetainingCapacity();
         }
 
+        fn deferredExpired(self: *const Self, slot: *const Slot) bool {
+            const since = slot.deferred_since orelse return true;
+            const now = std.Io.Clock.Timestamp.now(self.io, .awake);
+            return now.raw.nanoseconds - since.raw.nanoseconds >
+                std.time.ns_per_ms;
+        }
+
         fn spawnPending(
             self: *Self,
             limit: usize,
@@ -454,6 +475,33 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
             context: *Context,
             comptime handler: *const fn (*Context, *Stream) anyerror!void,
         ) !void {
+            var deferred_index: usize = 0;
+            while (deferred_index < self.deferred_slots.items.len) {
+                const slot = self.deferred_slots.items[deferred_index];
+                const complete = slot.body_finished and !slot.body_blocked and
+                    slot.body_error == null and slot.reset_code == null;
+                const fallback = slot.body_blocked or slot.body_error != null or
+                    slot.reset_code != null or
+                    self.deferredExpired(slot);
+                if (complete and !fallback) {
+                    if (self.inline_active or self.active >= limit) {
+                        deferred_index += 1;
+                        continue;
+                    }
+                    _ = self.deferred_slots.orderedRemove(deferred_index);
+                    slot.deferred_inline = false;
+                    try self.runInline(slot, limit, Context, context, handler);
+                    continue;
+                }
+                if (!fallback) {
+                    deferred_index += 1;
+                    continue;
+                }
+                _ = self.deferred_slots.orderedRemove(deferred_index);
+                slot.deferred_inline = false;
+                try self.enqueue(slot, limit, Context, context, handler);
+            }
+
             while (self.active < limit and self.pending_heads.items.len != 0) {
                 const event = self.pending_heads.orderedRemove(0);
                 const slot = try self.createSlot(event);
@@ -623,6 +671,29 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                 .message => |*message| {
                     switch (message.value) {
                         .head => {
+                            const request = message.value.head.request;
+                            if (self.options.inline_bodyless and
+                                !self.inline_active and
+                                !request.request_finished and
+                                request.content_length != null and
+                                request.content_length.? != 0 and
+                                request.content_length.? <=
+                                    self.max_buffered_body_bytes)
+                            {
+                                // The body is small and bounded; buffer it on
+                                // the owner and run the handler inline once
+                                // the stream finishes.
+                                moved = true;
+                                const slot = try self.createSlot(owned);
+                                slot.deferred_inline = true;
+                                slot.deferred_since =
+                                    std.Io.Clock.Timestamp.now(self.io, .awake);
+                                try self.deferred_slots.append(
+                                    self.allocator,
+                                    slot,
+                                );
+                                return;
+                            }
                             try self.pending_heads.append(self.allocator, owned);
                             moved = true;
                         },
