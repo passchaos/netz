@@ -27,6 +27,12 @@ pub const Options = struct {
     /// scheduling contention for CPU-bound handlers; queued handlers wait in
     /// arrival order. Values are clamped to `1..max_streams`.
     max_worker_threads: ?usize = null,
+    /// Run handlers for already-complete requests on the connection owner
+    /// instead of a worker thread. The handler may return
+    /// `error.InlineDeclined` before producing side effects to fall back to
+    /// the worker path. Requires the stream type to expose
+    /// `requestFinished()`.
+    inline_bodyless: bool = false,
 };
 
 pub const Summary = struct {
@@ -127,6 +133,14 @@ pub fn Engine(
 
             pub fn streamId(self: Stream) u31 {
                 return self.slot.stream.stream_id;
+            }
+
+            /// True when this handler runs on the connection owner. Handlers
+            /// that cannot finish without blocking (streaming bodies, long
+            /// I/O) must return `error.InlineDeclined` before side effects so
+            /// the engine can move the stream to a worker.
+            pub fn isInline(self: Stream) bool {
+                return self.engine.inline_active;
             }
 
             pub fn nextBody(
@@ -251,6 +265,14 @@ pub fn Engine(
         idle_workers: usize = 0,
         stopping: bool = false,
         active: usize = 0,
+        /// True while a handler runs on the owner. Stream command submissions
+        /// then execute in place instead of crossing to the owner.
+        inline_active: bool = false,
+        /// Pumps one inbound event while an inline command waits for send
+        /// capacity. Installed per inline handler because it needs the
+        /// handler context type.
+        inline_pump: ?*const fn (*Self, *anyopaque) anyerror!void = null,
+        inline_pump_state: ?*anyopaque = null,
         summary: Summary = .{},
 
         pub fn init(
@@ -402,7 +424,116 @@ pub fn Engine(
                 try self.pending.append(self.allocator, stream);
                 return;
             }
+            if (self.options.inline_bodyless and !self.inline_active and
+                streamRequestComplete(stream))
+            {
+                return self.runInline(
+                    stream,
+                    limit,
+                    Context,
+                    context,
+                    handler,
+                );
+            }
             try self.enqueue(stream, limit, Context, context, handler);
+        }
+
+        /// Run one complete (bodyless) request on the owner. The handler may
+        /// return `error.InlineDeclined` before side effects, in which case
+        /// the stream moves to the worker queue unchanged.
+        fn runInline(
+            self: *Self,
+            stream: StreamType,
+            limit: usize,
+            comptime Context: type,
+            context: *Context,
+            comptime handler: *const fn (*Context, *Stream) anyerror!void,
+        ) !void {
+            const slot = try self.createSlot(stream);
+            errdefer {
+                self.active -|= 1;
+                _ = self.slots.pop();
+                slot.deinit(self.allocator);
+                self.allocator.destroy(slot);
+            }
+            self.active += 1;
+            self.summary.accepted += 1;
+
+            const Pump = struct {
+                limit: usize,
+                context: *Context,
+
+                fn pump(engine: *Self, raw: *anyopaque) anyerror!void {
+                    const state: *@This() = @ptrCast(@alignCast(raw));
+                    const read_until = std.Io.Clock.Timestamp.addDuration(
+                        std.Io.Clock.Timestamp.now(engine.io, .awake),
+                        .{ .raw = engine.options.poll_interval, .clock = .awake },
+                    );
+                    const event = engine.connection.pumpServerUntilOrWake(
+                        read_until,
+                        engine.options.output_timeout,
+                        &engine.wake,
+                    ) catch |err| switch (err) {
+                        error.Timeout => return,
+                        else => return err,
+                    };
+                    switch (event) {
+                        .request => |next| try engine.accept(
+                            next,
+                            state.limit,
+                            Context,
+                            state.context,
+                            handler,
+                        ),
+                        .stream => |stream_id| try engine.drainSlot(
+                            stream_id,
+                        ),
+                        .progress, .wake => {},
+                    }
+                }
+            };
+
+            var pump_state = Pump{
+                .limit = limit,
+                .context = context,
+            };
+            self.inline_active = true;
+            self.inline_pump = Pump.pump;
+            self.inline_pump_state = &pump_state;
+            defer {
+                self.inline_active = false;
+                self.inline_pump = null;
+                self.inline_pump_state = null;
+            }
+
+            var declined = false;
+            handler(context, &slot.public_stream) catch |err| {
+                if (err == error.InlineDeclined) {
+                    declined = true;
+                } else {
+                    slot.handler_error = err;
+                }
+            };
+            if (declined) {
+                // Drop inline mode before the worker can pick the slot up.
+                self.inline_active = false;
+                self.inline_pump = null;
+                self.inline_pump_state = null;
+                try self.queueSlot(slot, limit, Context, context, handler);
+                return;
+            }
+
+            slot.body_mutex.lockUncancelable(self.io);
+            slot.handler_done = true;
+            slot.body_mutex.unlock(self.io);
+            self.reap();
+        }
+
+        fn streamRequestComplete(stream: StreamType) bool {
+            if (comptime @hasDecl(StreamType, "requestFinished")) {
+                return stream.requestFinished();
+            }
+            return false;
         }
 
         fn spawnPending(
@@ -423,18 +554,7 @@ pub fn Engine(
             return @max(1, @min(max_streams, configured));
         }
 
-        /// Admit one accepted stream into the worker queue. The first worker is
-        /// started lazily; additional workers are added only while every
-        /// existing worker is busy, so a sequential connection keeps one
-        /// reusable thread instead of spawning one thread per request.
-        fn enqueue(
-            self: *Self,
-            stream: StreamType,
-            limit: usize,
-            comptime Context: type,
-            context: *Context,
-            comptime handler: *const fn (*Context, *Stream) anyerror!void,
-        ) !void {
+        fn createSlot(self: *Self, stream: StreamType) !*Slot {
             const slot = try self.allocator.create(Slot);
             errdefer self.allocator.destroy(slot);
             slot.* = .{
@@ -444,9 +564,18 @@ pub fn Engine(
             };
             slot.public_stream = .{ .engine = self, .slot = slot };
             errdefer slot.deinit(self.allocator);
-            self.slots.append(self.allocator, slot) catch |err| return err;
-            errdefer _ = self.slots.pop();
+            try self.slots.append(self.allocator, slot);
+            return slot;
+        }
 
+        fn queueSlot(
+            self: *Self,
+            slot: *Slot,
+            limit: usize,
+            comptime Context: type,
+            context: *Context,
+            comptime handler: *const fn (*Context, *Stream) anyerror!void,
+        ) !void {
             self.task_mutex.lockUncancelable(self.io);
             const need_worker = self.idle_workers == 0 and
                 self.workers.items.len < self.workerLimit(limit);
@@ -460,6 +589,27 @@ pub fn Engine(
             };
             self.task_mutex.unlock(self.io);
             self.task_cond.signal(self.io);
+        }
+
+        /// Admit one accepted stream into the worker queue. The first worker is
+        /// started lazily; additional workers are added only while every
+        /// existing worker is busy, so a sequential connection keeps one
+        /// reusable thread instead of spawning one thread per request.
+        fn enqueue(
+            self: *Self,
+            stream: StreamType,
+            limit: usize,
+            comptime Context: type,
+            context: *Context,
+            comptime handler: *const fn (*Context, *Stream) anyerror!void,
+        ) !void {
+            const slot = try self.createSlot(stream);
+            errdefer {
+                _ = self.slots.pop();
+                slot.deinit(self.allocator);
+                self.allocator.destroy(slot);
+            }
+            try self.queueSlot(slot, limit, Context, context, handler);
             self.active += 1;
             self.summary.accepted += 1;
         }
@@ -669,6 +819,7 @@ pub fn Engine(
         }
 
         fn submit(self: *Self, command: *Command, deadline: ?std.Io.Clock.Timestamp) anyerror!void {
+            if (self.inline_active) return self.submitInline(command);
             self.mutex.lockUncancelable(self.io);
             self.commands.append(self.allocator, command) catch |err| {
                 self.mutex.unlock(self.io);
@@ -685,6 +836,30 @@ pub fn Engine(
                 return err;
             };
             if (command.result) |failure| return failure;
+        }
+
+        /// Execute a command from the owner thread. Flow-control, congestion,
+        /// and pacing limits are retried after pumping one inbound event,
+        /// which is the same progress the normal command loop gets between
+        /// re-queues.
+        fn submitInline(
+            self: *Self,
+            command: *Command,
+        ) anyerror!void {
+            while (true) {
+                self.execute(command) catch |err| switch (err) {
+                    error.FlowControlBlocked,
+                    error.CongestionLimited,
+                    error.PacingLimited,
+                    => {
+                        const pump = self.inline_pump orelse return err;
+                        try pump(self, self.inline_pump_state orelse return err);
+                        continue;
+                    },
+                    else => return err,
+                };
+                return;
+            }
         }
 
         fn drainCommands(self: *Self) !void {
