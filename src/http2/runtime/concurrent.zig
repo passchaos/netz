@@ -906,6 +906,16 @@ pub fn Engine(
                     try slot.stream.startResponse(options);
                 },
                 .start_response_with_body => |value| {
+                    if (value.fin and
+                        comptime @hasDecl(StreamType, "startResponseWithBody"))
+                    {
+                        try slot.stream.startResponseWithBody(
+                            value.options,
+                            value.data,
+                        );
+                        slot.response_finished = true;
+                        return;
+                    }
                     try slot.stream.startResponse(value.options);
                     if (slot.stream.responseFinished()) {
                         // HEAD/204/304: the head already ended the stream, so

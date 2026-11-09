@@ -21966,6 +21966,34 @@ pub const ServerDuplexStream = struct {
         return self.startResponseUntil(options, null);
     }
 
+    /// Send a buffered response head and body as one logical write. The
+    /// connection combines the HEADERS block and the first DATA burst when
+    /// flow-control credit permits, avoiding a second tiny submission for
+    /// the common hello/JSON response.
+    pub fn startResponseWithBody(
+        self: *ServerDuplexStream,
+        options: StreamingResponseOptions,
+        data: []const u8,
+    ) Error!void {
+        if (self.response_started or self.released) {
+            return error.UnexpectedFrame;
+        }
+        try self.connection.writeResponse(self.stream_id, .{
+            .status = options.status,
+            .headers = options.headers,
+            .body = data,
+            .request_method = options.request_method,
+            .extended_connect = options.extended_connect,
+        });
+        self.response_started = true;
+        self.response_finished = true;
+        self.response_written = data.len;
+        // `writeResponse` retires the peer stream; finish the duplex owner
+        // bookkeeping without releasing the same stream twice.
+        self.releaseOwnership();
+        self.released = true;
+    }
+
     pub fn startResponseWithDeadline(self: *ServerDuplexStream, options: StreamingResponseOptions, deadline: std.Io.Clock.Timestamp) ResponseTimeoutError!void {
         _ = try deadline_policy.usableAwake(self.connection.io, deadline);
         return self.startResponseUntil(options, deadline);
