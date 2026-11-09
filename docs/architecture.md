@@ -12,7 +12,8 @@ error semantics are prerequisites for measuring speed at all.
 ## 1. Mission and non-goals
 
 netz is a Zig 0.16 protocol toolkit for HTTP/1.1, HTTP/2, HTTP/3, WebSocket,
-WebTransport, MQTT 3.1/3.1.1/5, and gRPC. It provides:
+WebTransport, MQTT 3.1/3.1.1/5, gRPC, WireGuard, and mesh/overlay wire
+protocols. It provides:
 
 - byte-level codecs that are pure Zig and can be fuzzed or embedded directly;
 - state machines that consume only `std.Io` and caller-provided storage;
@@ -54,6 +55,13 @@ L0  transport facade       std.Io streams, TCP/DNS connect, TLS, socket options
 | L2 | `*/runtime.zig`, `src/quic/*`, `src/mqtt/broker*`, `src/mqtt/session/`, `src/mqtt/router.zig`, `src/mqtt/retained/`, `src/grpc/channel/`, `src/grpc/xds/` | One owner per transport or protocol object. State transitions are explicit; blocking and deadline behavior is part of the API. |
 | L3 | `src/http/`, `src/streaming.zig`, `src/mqtt/` client/reconnect/bridge APIs, `src/grpc/` client/server APIs, `src/webtransport/` endpoint APIs | Owns workers only through explicit managed wrappers; exposes bounded queues and four receive modes (blocking, relative timeout, absolute deadline, nonblocking). |
 | cross-cutting | `src/alloc.zig`, `src/internal/`, `src/mqtt/persistence/`, `src/internal/observability*` | Reusable bounded caches, scratch storage, persistence, and metrics. |
+
+`src/vpn/wireguard/` and `src/mesh/` follow the same layering: WireGuard
+handshake/message/session codecs and state machines, mesh discovery messages,
+and DERP frames/relay state machines are protocol code. Product policy (TUN,
+routing, DNS, kill-switch, configuration, credentials, control plane,
+MagicDNS, ACL, NAT/path selection) remains in `vpnz` and `meshz`; netz must
+never import those product layers.
 
 The dependency rule is enforced by convention and by review: a codec module that
 imports `zio`, a socket handle, or an allocator-owning global is an architecture

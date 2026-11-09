@@ -1,4 +1,4 @@
-//! SOCKS4/4a and SOCKS5 server protocols.
+//! SOCKS5 server protocol.
 
 pub const codec = @import("codec.zig");
 pub const auth = @import("auth.zig");

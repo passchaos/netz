@@ -1,4 +1,4 @@
-//! Bounded SOCKS4/4a and SOCKS5 server-side wire codecs.
+//! Bounded SOCKS5 server-side wire codecs.
 //!
 //! Every parser consumes caller-owned bytes and never allocates. Incomplete
 //! input is reported separately from malformed input so streaming servers can
@@ -24,7 +24,6 @@ pub const Error = error{
 };
 
 pub const Version = enum(u8) {
-    v4 = 4,
     v5 = 5,
     _,
 };
@@ -52,20 +51,6 @@ pub const Command = enum(u8) {
     }
 };
 
-pub const Socks4Command = enum(u8) {
-    connect = 0x01,
-    bind = 0x02,
-    _,
-
-    pub fn fromByte(value: u8) Error!Socks4Command {
-        return switch (value) {
-            0x01 => .connect,
-            0x02 => .bind,
-            else => error.UnsupportedCommand,
-        };
-    }
-};
-
 /// RFC 1928 reply codes.
 pub const Reply = enum(u8) {
     succeeded = 0x00,
@@ -78,14 +63,6 @@ pub const Reply = enum(u8) {
     command_not_supported = 0x07,
     address_type_not_supported = 0x08,
     _,
-};
-
-/// SOCKS4 reply codes from the original SOCKS4 specification.
-pub const Socks4Reply = enum(u8) {
-    granted = 90,
-    rejected = 91,
-    identd_unavailable = 92,
-    identd_mismatch = 93,
 };
 
 pub const Domain = struct {
@@ -120,9 +97,6 @@ pub const Address = union(enum) {
     }
 };
 
-pub const max_socks4_user_id_len: usize = 255;
-pub const max_socks4_request_len: usize = 8 + max_socks4_user_id_len + 1 +
-    net.HostName.max_len + 1;
 pub const max_socks5_greeting_len: usize = 2 + 255;
 pub const max_socks5_request_len: usize = 4 + 1 + 255 + 2;
 
@@ -305,114 +279,6 @@ pub fn encodeSocks5Method(
     output[1] = @intFromEnum(method);
 }
 
-pub const Socks4Header = struct {
-    command: Socks4Command,
-    port: u16,
-    /// Header address. For SOCKS4a this is the marker address (0.0.0.x).
-    ip: net.IpAddress,
-    is_4a: bool,
-};
-
-pub fn parseSocks4Header(bytes: [8]u8) Error!Socks4Header {
-    if (bytes[0] != @intFromEnum(Version.v4)) {
-        return error.UnsupportedVersion;
-    }
-    const command = try Socks4Command.fromByte(bytes[1]);
-    const port = std.mem.readInt(u16, bytes[2..4], .big);
-    const ip_bytes = bytes[4..8].*;
-    const is_4a = ip_bytes[0] == 0 and ip_bytes[1] == 0 and
-        ip_bytes[2] == 0 and ip_bytes[3] != 0;
-    return .{
-        .command = command,
-        .port = port,
-        .ip = .{ .ip4 = .{ .bytes = ip_bytes, .port = port } },
-        .is_4a = is_4a,
-    };
-}
-
-pub const Socks4Request = struct {
-    command: Socks4Command,
-    address: Address,
-    user_id: []const u8,
-    is_4a: bool,
-};
-
-pub fn buildSocks4Request(
-    header: Socks4Header,
-    user_id: []const u8,
-    domain: ?[]const u8,
-) Error!Socks4Request {
-    if (user_id.len > max_socks4_user_id_len) return error.NameTooLong;
-    const address: Address = if (header.is_4a) blk: {
-        const host = domain orelse return error.InvalidHostName;
-        try validateHost(host);
-        break :blk .{ .domain = .{
-            .host = host,
-            .port = header.port,
-        } };
-    } else .{ .ip = header.ip };
-    return .{
-        .command = header.command,
-        .address = address,
-        .user_id = user_id,
-        .is_4a = header.is_4a,
-    };
-}
-
-pub const ParsedSocks4Request = struct {
-    request: Socks4Request,
-    consumed: usize,
-};
-
-pub fn parseSocks4Request(bytes: []const u8) Error!ParsedSocks4Request {
-    if (bytes.len < 8) return error.Incomplete;
-    const header = try parseSocks4Header(bytes[0..8].*);
-    const user_end = findNul(bytes, 8) orelse return error.Incomplete;
-    const user_id = bytes[8..user_end];
-    if (user_id.len > max_socks4_user_id_len) return error.NameTooLong;
-    if (!header.is_4a) {
-        return .{
-            .request = try buildSocks4Request(header, user_id, null),
-            .consumed = user_end + 1,
-        };
-    }
-    const domain_start = user_end + 1;
-    const domain_end = findNul(bytes, domain_start) orelse
-        return error.Incomplete;
-    const domain = bytes[domain_start..domain_end];
-    return .{
-        .request = try buildSocks4Request(header, user_id, domain),
-        .consumed = domain_end + 1,
-    };
-}
-
-pub fn encodeSocks4Reply(
-    output: *[8]u8,
-    reply: Socks4Reply,
-    address: Address,
-) void {
-    output[0] = 0;
-    output[1] = @intFromEnum(reply);
-    std.mem.writeInt(u16, output[2..4], address.getPort(), .big);
-    switch (address) {
-        .ip => |ip| switch (ip) {
-            .ip4 => |value| @memcpy(output[4..8], &value.bytes),
-            // SOCKS4 has no IPv6 representation; use the unspecified address.
-            .ip6 => @memset(output[4..8], 0),
-        },
-        // SOCKS4 replies carry a binary IPv4 address, never a hostname.
-        .domain => @memset(output[4..8], 0),
-    }
-}
-
-fn findNul(bytes: []const u8, start: usize) ?usize {
-    var index = start;
-    while (index < bytes.len) : (index += 1) {
-        if (bytes[index] == 0) return index;
-    }
-    return null;
-}
-
 fn validateHost(host: []const u8) Error!void {
     if (host.len == 0 or host.len > net.HostName.max_len) {
         return error.InvalidHostName;
@@ -509,57 +375,6 @@ test "SOCKS5 request parsing rejects malformed and truncated input" {
     );
 }
 
-test "SOCKS4 and SOCKS4a requests are bounded and distinguishable" {
-    const plain = try parseSocks4Request(&.{
-        4,   1,   0,   80,
-        127, 0,   0,   1,
-        'u', 's', 'e', 'r',
-        0,
-    });
-    try std.testing.expect(!plain.request.is_4a);
-    try std.testing.expectEqualStrings("user", plain.request.user_id);
-    try std.testing.expectEqual(@as(u16, 80), plain.request.address.getPort());
-    switch (plain.request.address) {
-        .ip => |ip| try std.testing.expectEqualSlices(
-            u8,
-            &.{ 127, 0, 0, 1 },
-            &ip.ip4.bytes,
-        ),
-        .domain => return error.TestExpectedEqual,
-    }
-
-    const a = try parseSocks4Request(&.{
-        4,   2,   0x01, 0xbb,
-        0,   0,   0,    1,
-        'u', 0,   'o',  'r',
-        'i', 'g', 'i',  'n',
-        '.', 'e', 'x',  'a',
-        'm', 'p', 'l',  'e',
-        0,
-    });
-    try std.testing.expect(a.request.is_4a);
-    switch (a.request.address) {
-        .domain => |domain| try std.testing.expectEqualStrings(
-            "origin.example",
-            domain.host,
-        ),
-        .ip => return error.TestExpectedEqual,
-    }
-
-    try std.testing.expectError(
-        error.Incomplete,
-        parseSocks4Request(&.{ 4, 1, 0, 80, 127, 0, 0, 1 }),
-    );
-    try std.testing.expectError(
-        error.Incomplete,
-        parseSocks4Request(&.{
-            4,   1, 0x01, 0xbb,
-            0,   0, 0,    1,
-            'u', 0, 'o',  'r',
-        }),
-    );
-}
-
 test "SOCKS reply encoders round trip address families" {
     const addresses = [_]Address{
         .{ .ip = .{ .ip4 = .{ .bytes = .{ 192, 0, 2, 1 }, .port = 80 } } },
@@ -585,34 +400,17 @@ test "SOCKS reply encoders round trip address families" {
         try std.testing.expect(decoded.address.eql(address));
         try std.testing.expectEqual(len - 3, decoded.end);
     }
-
-    var socks4_reply: [8]u8 = undefined;
-    encodeSocks4Reply(
-        &socks4_reply,
-        .granted,
-        .{ .ip = .{ .ip4 = .{
-            .bytes = .{ 127, 0, 0, 1 },
-            .port = 1080,
-        } } },
-    );
-    try std.testing.expectEqualSlices(
-        u8,
-        &.{ 0, 90, 0x04, 0x38, 127, 0, 0, 1 },
-        &socks4_reply,
-    );
 }
 
 test "truncated valid requests never panic or succeed early" {
     const valid = [_][]const u8{
         &.{ 5, 1, 0, 1, 192, 0, 2, 1, 0, 80 },
         &.{ 5, 3, 0, 3, 14, 'o', 'r', 'i', 'g', 'i', 'n', '.', 'e', 'x', 'a', 'm', 'p', 'l', 'e', 0, 53 },
-        &.{ 4, 1, 0, 80, 127, 0, 0, 1, 'u', 0 },
     };
     for (valid) |request| {
         var end: usize = 1;
         while (end < request.len) : (end += 1) {
             _ = parseSocks5Request(request[0..end]) catch {};
-            _ = parseSocks4Request(request[0..end]) catch {};
         }
     }
 }

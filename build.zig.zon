@@ -5,6 +5,7 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .harnessz = .{ .path = "../harnessz" },
+        .kron = .{ .path = "../kron" },
         .vail = .{ .path = "../vail" },
         .vort = .{ .path = "../vort" },
         .zio = .{

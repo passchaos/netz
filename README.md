@@ -2,10 +2,11 @@
 
 `netz` is a Zig 0.16 protocol toolkit for modern application networking. It
 starts with deterministic parsers, serializers, preallocated fixed-width
-wire-integer helpers, and state helpers across four public protocol families.
+wire-integer helpers, and state helpers across HTTP, WebSocket, WebTransport,
+MQTT, gRPC, proxy, VPN, and mesh protocol families.
 
 Ongoing HTTP development targets the widely used HTTP/1.1, HTTP/2, and HTTP/3
-versions. HTTP/1.0 is outside the supported-feature goal.
+versions. HTTP/1.0 and HTTP/0.9 are not supported.
 
 The architecture and performance rules are defined in
 [docs/architecture.md](docs/architecture.md): performance beyond the reference
@@ -18,9 +19,9 @@ documentation map is in [docs/README.md](docs/README.md).
 ## Application proxy protocols
 
 `src/proxy/` owns the application-layer proxy wire codecs, servers, and relay
-lifecycles: SOCKS4/4a/5 (CONNECT, BIND, UDP ASSOCIATE, RFC 1929 auth), HTTP/1
+lifecycles: SOCKS5 (CONNECT, BIND, UDP ASSOCIATE, RFC 1929 auth), HTTP/1
 CONNECT, Shadowsocks AEAD, Trojan, VLESS/VMess with TLS/WebSocket/QUIC/HTTP2/
-gRPC transports, TUIC v5, Hysteria v2/v3, TLS stream adapters, and bounded
+gRPC transports, TUIC v5, Hysteria v3, TLS stream adapters, and bounded
 TCP/UDP/TLS/QUIC relay helpers. The `runtime/` submodule contains the generic
 server primitives those implementations need (ACL, destination connect policy,
 connection limits, statistics, rate limiting, and reloadable policy snapshots).
@@ -29,6 +30,28 @@ These modules were merged from the former `proxyz` protocol layer. The
 `proxyz` package now owns Clash-style routing, DNS configuration, subscription
 parsing, and health selection on top, and re-exports `netz.proxy` for
 compatibility.
+
+## VPN and mesh wire protocols
+
+`src/vpn/wireguard/` owns the WireGuard Noise IKpsk2 handshake, message codecs,
+cookie replies, replay protection, transport sessions, timers, and metrics.
+Device orchestration, TUN/routing integration, configuration, credentials, and
+platform runtimes remain in `vpnz`.
+
+`src/mesh/` owns shared mesh identity/endpoint types, bounded byte helpers, the
+disco discovery message codec, and the DERP frame/relay/client state machines
+with their WebSocket transport adapter. Control plane, MagicDNS, ACL, routing,
+NAT classification, and path-selection policy remain in `meshz`.
+
+## Optional logging
+
+netz uses kron directly. Library code calls `kron.info(scope, ...)`,
+`kron.warn(scope, ...)`, and the other top-level functions; the execution layer
+creates one `kron.Logging` and installs it with `kron.setGlobalLogging` before
+starting workers. kron performs level filtering, sampling, and bounded
+asynchronous queueing itself. netz does not use `std.log` and does not ship its
+own logger facade. See [docs/logging.md](docs/logging.md) for setup and overhead
+rules.
 
 The four public protocol families share a bounded parser fuzz target.
 `zig build fuzz-parsers` replays valid and hostile HTTP/1, HTTP/2, HTTP/3,
@@ -369,7 +392,7 @@ Current protocol coverage includes:
   handling for HEAD and successful CONNECT, sender-side RFC 9110 enforcement that 205 responses contain no content while receivers still consume their declared framing, stateful incremental request/response writers with fixed-length or chunked framing, cross-write Content-Length enforcement, announced/merged trailers, exact response handoff, client-side `Expect: 100-continue` gating with early-final-response handoff, and connection-poisoning abandonment semantics, plus callback-based streaming request and response readers with owned heads/trailers, fixed/chunked/close-delimited framing, pipelined-suffix preservation, and no body-sized aggregation, Host/authority delimiter validation, strict authority-form CONNECT target delimiter/userinfo rejection, malformed absolute-form authority validation including bracketed IPv6, deadline-bounded CONNECT/generic-Upgrade opening handoffs spanning request write, informational responses and the final entity, and CONNECT tunnel helpers, interim 1xx response skipping plus
   server-side `Expect: 100-continue` handling even when body bytes are pre-read, with full request-head/Host/framing/size validation before any interim response, pure-digit Content-Length enforcement,
   TE-over-CL precedence with parsed `Content-Length` stripping and mandatory connection retirement on ambiguous requests, shared quote-aware Transfer-Encoding parsing across codecs and runtime message boundaries, ambiguous body-length rejection
-  across repeated/coalesced `Content-Length`, unsupported transfer-coding and HTTP/1.0 transfer-coding rejection, strict-by-default opt-in Hyper-shaped repeated request-line SP, response-only whitespace-before-colon compatibility, and direction-specific invalid-header skipping that still rejects ambiguous NUL/CR boundaries,
+  across repeated/coalesced `Content-Length`, unsupported transfer-coding rejection, strict-by-default opt-in Hyper-shaped repeated request-line SP, response-only whitespace-before-colon compatibility, and direction-specific invalid-header skipping that still rejects ambiguous NUL/CR boundaries,
   owning request/response head APIs with opt-in line unfolding, metadata-derived
   runtime body boundaries, and retained folded values in streaming results,
   complete folded-field validation even in ignored groups, with one owned
@@ -2970,3 +2993,4 @@ or socket I/O; protected rejection does not consume a packet number.
   Required Insert Count is available.
 - WebRTC support is maintained by the sibling `horizon` package; it owns STUN,
   ICE, SDP, DTLS, RTP/RTCP, SRTP/SRTCP, SCTP/DCEP, and the UDP peer runtime.
+the UDP peer runtime.

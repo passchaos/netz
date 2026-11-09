@@ -40,6 +40,10 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const kron_dep = b.dependency("kron", .{
+        .target = target,
+        .optimize = optimize,
+    });
 
     const netz_mod = b.addModule("netz", .{
         .root_source_file = b.path("src/root.zig"),
@@ -49,6 +53,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "vail", .module = vail_dep.module("vail") },
             .{ .name = "vort", .module = vort_dep.module("vort") },
             .{ .name = "zio", .module = zio_dep.module("zio") },
+            .{ .name = "kron", .module = kron_dep.module("kron") },
         },
     });
     const benchmark_counting_allocator_mod = b.createModule(.{
@@ -3650,6 +3655,12 @@ pub fn build(b: *std.Build) void {
         description: []const u8,
     }{
         .{
+            .exe_name = "netz-logging",
+            .path = "examples/logging.zig",
+            .run_step = "run-logging",
+            .description = "Run the process-wide kron logging example",
+        },
+        .{
             .exe_name = "netz-http1-hello",
             .path = "examples/http1_hello.zig",
             .run_step = "run-http1-hello",
@@ -4051,6 +4062,7 @@ pub fn build(b: *std.Build) void {
                 .imports = &.{
                     .{ .name = "netz", .module = netz_mod },
                     .{ .name = "harnessz", .module = harnessz_dep.module("harnessz") },
+                    .{ .name = "kron", .module = kron_dep.module("kron") },
                 },
             }),
         });

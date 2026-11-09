@@ -2381,6 +2381,25 @@ pub const ServeUntilOptions = struct {
     error_observer: ?ServeErrorObserver = null,
 };
 
+/// Optional serve-loop error observer. It forwards to kron's process-wide
+/// logger installed by the execution layer; without one it is a no-op.
+pub fn logErrorObserver() ServeErrorObserver {
+    const Bridge = struct {
+        var context: u8 = 0;
+
+        fn observe(_: *anyopaque, event: ServeErrorEvent) void {
+            @import("kron").warn("netz.http1", "http1 serve error", .{
+                .stage = @tagName(event.stage),
+                .err = @errorName(event.err),
+            });
+        }
+    };
+    return .{
+        .context = @ptrCast(&Bridge.context),
+        .observe = Bridge.observe,
+    };
+}
+
 /// Shared bounded accept loop for TCP, Unix-domain, and TLS listeners.
 /// Each accepted connection moves into exactly one task, which owns teardown
 /// after either the handler response or a connection-local failure.
@@ -7948,20 +7967,6 @@ const BufferedInputReader = buffered_input.Reader(struct {
     pub const readUntil = readTransportUntil;
 });
 
-fn readHttp09Body(
-    allocator: std.mem.Allocator,
-    transport: RuntimeTransport,
-    max_body_bytes: usize,
-    bytes: *std.ArrayList(u8),
-    scratch: []u8,
-    deadline: ?std.Io.Clock.Timestamp,
-) Error![]u8 {
-    try EofBodyReader.collect(allocator, transport, bytes, 0, max_body_bytes, scratch, deadline);
-    // A silent stale socket is not a valid legacy response.
-    if (bytes.items.len == 0) return error.ConnectionClosed;
-    return bytes.toOwnedSlice(allocator);
-}
-
 fn ensureResponseHeadDeadlineForBuffer(
     transport: RuntimeTransport,
     limits: Limits,
@@ -7984,14 +7989,8 @@ fn ensureResponseStartDeadlineForBuffer(
     transport: RuntimeTransport,
     limits: Limits,
     buffered: []const u8,
-    allow_http_0_9_response: bool,
     deadline: *?std.Io.Clock.Timestamp,
 ) Error!void {
-    if (allow_http_0_9_response and
-        http1.classifyResponsePrefix(buffered) == .http_0_9)
-    {
-        return;
-    }
     try ensureResponseHeadDeadlineForBuffer(
         transport,
         limits,
@@ -8082,7 +8081,6 @@ pub fn readRequestFromStreamWithDeadline(
         true,
         options,
         false,
-        false,
         deadline,
         deadline,
     );
@@ -8150,7 +8148,6 @@ pub fn readRequestFromStreamBufferedWithDeadline(
         null,
         true,
         false,
-        false,
         deadline,
         deadline,
         null,
@@ -8202,7 +8199,6 @@ fn readRequestFromTransportBufferedWithStage(
         inbuf,
         null,
         true,
-        false,
         false,
         head_deadline,
         null,
@@ -8271,7 +8267,6 @@ pub fn readResponseFromStreamObserved(
             transport,
             limits,
             &.{},
-            options.allow_http_0_9_responses,
             &response_head_deadline,
         );
         const bytes = try readMessageBytesWithContext(
@@ -8282,7 +8277,6 @@ pub fn readResponseFromStreamObserved(
             false,
             options,
             true,
-            options.allow_http_0_9_responses,
             response_head_deadline,
             null,
         );
@@ -8436,7 +8430,6 @@ fn readResponseFromStreamForRequestObservedUntil(
             transport,
             limits,
             &.{},
-            options.allow_http_0_9_responses,
             &response_head_deadline,
         );
         const effective_head_deadline = if (response_deadline) |deadline|
@@ -8451,7 +8444,6 @@ fn readResponseFromStreamForRequestObservedUntil(
             false,
             options,
             true,
-            options.allow_http_0_9_responses,
             effective_head_deadline,
             response_deadline,
         );
@@ -8537,7 +8529,6 @@ pub fn readResponseFromStreamBufferedObserved(
             transport,
             limits,
             inbuf.items,
-            options.allow_http_0_9_responses,
             &response_head_deadline,
         );
         const bytes = try readMessageBytesBufferedWithContext(
@@ -8549,7 +8540,6 @@ pub fn readResponseFromStreamBufferedObserved(
             null,
             false,
             true,
-            options.allow_http_0_9_responses,
             response_head_deadline,
             null,
             null,
@@ -8716,7 +8706,6 @@ pub fn readResponseFromStreamBufferedForRequestObserved(
             transport,
             limits,
             inbuf.items,
-            options.allow_http_0_9_responses,
             &response_head_deadline,
         );
         const bytes = try readMessageBytesBufferedWithContext(
@@ -8728,7 +8717,6 @@ pub fn readResponseFromStreamBufferedForRequestObserved(
             request_method,
             false,
             true,
-            options.allow_http_0_9_responses,
             response_head_deadline,
             null,
             null,
@@ -8758,27 +8746,6 @@ fn parseResponseForRuntime(
     options: http1.ParseOptions,
     request_method: ?http1.Method,
 ) Error!http1.Response {
-    if (options.allow_http_0_9_responses and bytes.len != 0 and
-        http1.classifyResponsePrefix(bytes) != .http_1_x)
-    {
-        if (request_method != null and request_method.? != .GET) {
-            return error.InvalidResponse;
-        }
-        // Aggregate readers reach this point only after EOF established the
-        // legacy boundary. That distinction lets `parseResponse` itself keep
-        // returning BufferTooShort for a potentially fragmented `HTTP/`
-        // prefix while accepting the same bytes here once EOF is definitive.
-        return .{
-            .version = .http_0_9,
-            .status = 200,
-            .reason = "",
-            .headers = @constCast(&[_]http1.Header{}),
-            .body = bytes,
-            .body_framing = .close_delimited,
-            .trailers = @constCast(&[_]http1.Header{}),
-            .consumed = bytes.len,
-        };
-    }
     return if (request_method) |method|
         try http1.parseResponseForRequest(allocator, bytes, options, method)
     else
@@ -9050,25 +9017,8 @@ fn adjustResponseForServeLoop(
     // trailers when the peer did not advertise support for receiving them.
     out.request_accepts_trailers = request.acceptsTrailers();
     const request_keep_alive = request.keepAlive();
-    const response_wants_keep_alive = responseOptionsKeepAlive(response);
     var adjusted = ServeLoopResponse{ .response = out };
     errdefer adjusted.deinit(allocator);
-
-    if (request.version == .http_1_0) {
-        // Match Hyper's h1 behavior for old peers: speak HTTP/1.0 back to an
-        // HTTP/1.0 request, and only keep the connection alive when both sides
-        // opted in and the response would otherwise be persistent.
-        out.version = .http_1_0;
-        adjusted.response = out;
-        if (request_keep_alive and response_wants_keep_alive) {
-            adjusted = try ensureConnectionTokenForServeLoop(
-                allocator,
-                adjusted,
-                "keep-alive",
-            );
-            out = adjusted.response;
-        }
-    }
 
     if (graceful_shutdown) {
         adjusted = try ensureConnectionTokenForServeLoop(
@@ -9187,36 +9137,6 @@ test "HTTP/1 serve loop preserves hop-by-hop Connection options" {
         close.response.headers[1].value,
     );
     try std.testing.expect(!responseOptionsKeepAlive(close.response));
-
-    var keep_alive_headers = [_]http1.Header{.{
-        .name = "Connection",
-        .value = "keep-alive",
-    }};
-    var http10 = try adjustResponseForServeLoop(
-        allocator,
-        .{
-            .method = .GET,
-            .target = "/",
-            .version = .http_1_0,
-            .headers = &keep_alive_headers,
-            .body = &.{},
-            .consumed = 0,
-        },
-        .{ .headers = &extension_headers },
-        false,
-    );
-    defer http10.deinit(allocator);
-    try std.testing.expectEqual(http1.Version.http_1_0, http10.response.version);
-    try std.testing.expect(wire.anyHeaderContainsToken(
-        http10.response.headers,
-        "connection",
-        "x-hop",
-    ));
-    try std.testing.expect(wire.anyHeaderContainsToken(
-        http10.response.headers,
-        "connection",
-        "keep-alive",
-    ));
 }
 
 fn addConnectionHeaderForServeLoop(allocator: std.mem.Allocator, response: ResponseOptions, value: []const u8) Error!ServeLoopResponse {
@@ -9278,7 +9198,6 @@ fn readRequestMessageBytes(
         true,
         options,
         false,
-        false,
         if (limits.request_head_timeout) |timeout|
             try headReadDeadline(transport, timeout)
         else
@@ -9295,7 +9214,6 @@ fn readMessageBytesWithContext(
     auto_continue: bool,
     options: http1.ParseOptions,
     close_delimited_when_unknown: bool,
-    allow_http_0_9_response: bool,
     head_deadline: ?std.Io.Clock.Timestamp,
     body_deadline: ?std.Io.Clock.Timestamp,
 ) Error![]u8 {
@@ -9305,18 +9223,6 @@ fn readMessageBytesWithContext(
     var scratch: [4096]u8 = undefined;
     var head_end: ?usize = null;
     while (head_end == null) {
-        if (allow_http_0_9_response and
-            (request_method == null or request_method.? == .GET)) switch (http1.classifyResponsePrefix(bytes.items)) {
-            .http_0_9 => return readHttp09Body(
-                allocator,
-                transport,
-                limits.max_body_bytes,
-                &bytes,
-                &scratch,
-                body_deadline,
-            ),
-            .incomplete, .http_1_x => {},
-        };
         head_end = try findHttpHeadEndWithinLimit(bytes.items, limits.max_head_bytes);
         if (head_end != null) break;
         // The non-buffered helpers have nowhere to keep bytes that belong to
@@ -9327,21 +9233,7 @@ fn readMessageBytesWithContext(
             try transport.readWithDeadline(read_buf, deadline)
         else
             try transport.read(read_buf);
-        if (n == 0) {
-            if (allow_http_0_9_response and
-                (request_method == null or request_method.? == .GET) and
-                bytes.items.len != 0 and
-                http1.classifyResponsePrefix(bytes.items) == .incomplete)
-            {
-                // EOF disambiguates a legacy body that happens to be a proper
-                // prefix of `HTTP/`; it does not bypass the body-size budget.
-                if (bytes.items.len > limits.max_body_bytes) {
-                    return error.BodyTooLarge;
-                }
-                return bytes.toOwnedSlice(allocator);
-            }
-            return error.ConnectionClosed;
-        }
+        if (n == 0) return error.ConnectionClosed;
         try bytes.appendSlice(allocator, scratch[0..n]);
     }
     const plan = try message_head.inspect(allocator, bytes.items, options, request_method, auto_continue);
@@ -9413,7 +9305,6 @@ fn readRequestMessageBytesBuffered(
         null,
         true,
         false,
-        false,
         if (limits.request_head_timeout) |timeout|
             try headReadDeadline(transport, timeout)
         else
@@ -9465,7 +9356,6 @@ fn readResponseFromTransportBufferedForRequestObserved(
             transport,
             limits,
             inbuf.items,
-            options.allow_http_0_9_responses,
             &response_head_deadline,
         );
         const effective_head_deadline = if (response_deadline) |deadline|
@@ -9556,7 +9446,6 @@ fn readOneResponseFromTransportBufferedForRequest(
         request_method,
         false,
         true,
-        options.allow_http_0_9_responses,
         head_deadline,
         body_deadline,
         null,
@@ -9582,7 +9471,6 @@ fn readMessageBytesBufferedWithContext(
     request_method: ?http1.Method,
     auto_continue: bool,
     close_delimited_when_unknown: bool,
-    allow_http_0_9_response: bool,
     head_deadline: ?std.Io.Clock.Timestamp,
     body_deadline: ?std.Io.Clock.Timestamp,
     request_stage: ?*RequestReadStage,
@@ -9591,42 +9479,10 @@ fn readMessageBytesBufferedWithContext(
     var scratch: [4096]u8 = undefined;
     var head_end: ?usize = null;
     while (head_end == null) {
-        if (allow_http_0_9_response and
-            (request_method == null or request_method.? == .GET)) switch (http1.classifyResponsePrefix(inbuf.items)) {
-            .http_0_9 => {
-                const bytes = try readHttp09Body(
-                    allocator,
-                    transport,
-                    limits.max_body_bytes,
-                    inbuf,
-                    &scratch,
-                    body_deadline,
-                );
-                inbuf.* = .empty;
-                return bytes;
-            },
-            .incomplete, .http_1_x => {},
-        };
         head_end = try findHttpHeadEndWithinLimit(inbuf.items, limits.max_head_bytes);
         if (head_end != null) break;
         const n = try BufferedInputReader.append(allocator, transport, inbuf, @min(scratch.len, limits.max_head_bytes - inbuf.items.len), head_deadline);
-        if (n == 0) {
-            if (allow_http_0_9_response and
-                (request_method == null or request_method.? == .GET) and
-                inbuf.items.len != 0 and
-                http1.classifyResponsePrefix(inbuf.items) == .incomplete)
-            {
-                // This is the buffered counterpart of the EOF-only prefix
-                // fallback above and must enforce the identical body limit.
-                if (inbuf.items.len > limits.max_body_bytes) {
-                    return error.BodyTooLarge;
-                }
-                const bytes = try inbuf.toOwnedSlice(allocator);
-                inbuf.* = .empty;
-                return bytes;
-            }
-            return error.ConnectionClosed;
-        }
+        if (n == 0) return error.ConnectionClosed;
     }
     const plan = try message_head.inspect(allocator, inbuf.items, options, request_method, auto_continue);
     if (request_stage) |stage| stage.* = .body;
@@ -9691,7 +9547,6 @@ test "HTTP/1 buffered reader transfers exact message buffer ownership" {
         null,
         false,
         true,
-        false,
         null,
         null,
         null,
@@ -13191,66 +13046,6 @@ test "HTTP/1 serveConnection retires TE plus CL requests before pipeline suffix"
     try std.testing.expectEqual(@as(usize, 1), shared.context.count);
 }
 
-test "HTTP/1 serveConnection fixes HTTP/1.0 keep-alive response" {
-    const allocator = std.testing.allocator;
-
-    var backend = try @import("../runtime.zig").Backend.init(allocator);
-    defer backend.deinit();
-    const io = backend.io();
-
-    var server = try Server.listen(
-        allocator,
-        io,
-        .{ .ip4 = .loopback(0) },
-        .{ .max_head_bytes = 4096, .max_body_bytes = 4096 },
-    );
-    defer server.deinit();
-
-    const Context = struct {
-        count: usize = 0,
-        fn handle(ctx: *@This(), _: http1.Request) Error!ResponseOptions {
-            ctx.count += 1;
-            return .{ .body = if (ctx.count == 1) "first" else "second" };
-        }
-    };
-
-    const Shared = struct {
-        server: *Server,
-        context: Context = .{},
-        err: ?anyerror = null,
-        served: usize = 0,
-        fn run(shared: *@This()) void {
-            shared.served = shared.server.serveConnection(&shared.context, Context.handle, 4) catch |err| {
-                shared.err = err;
-                return;
-            };
-        }
-    };
-
-    var shared = Shared{ .server = &server };
-    var server_task = io.async(Shared.run, .{&shared});
-    defer server_task.cancel(io);
-
-    var client = try Client.connectHost(allocator, io, "localhost", server.address().ip4.port, .{ .max_head_bytes = 4096, .max_body_bytes = 4096 });
-    defer client.close();
-    const keep_alive = [_]http1.Header{.{ .name = "Connection", .value = "keep-alive" }};
-    var first = try client.request(.{ .version = .http_1_0, .target = "/first", .headers = &keep_alive });
-    defer first.deinit(allocator);
-    try std.testing.expectEqual(http1.Version.http_1_0, first.response.version);
-    try std.testing.expectEqualStrings("keep-alive", first.response.header("connection").?);
-    try std.testing.expectEqualStrings("first", first.response.body);
-
-    var second = try client.request(.{ .version = .http_1_0, .target = "/second" });
-    defer second.deinit(allocator);
-    try std.testing.expectEqual(http1.Version.http_1_0, second.response.version);
-    try std.testing.expectEqualStrings("close", second.response.header("connection").?);
-    try std.testing.expectEqualStrings("second", second.response.body);
-
-    server_task.await(io);
-    if (shared.err) |err| return err;
-    try std.testing.expectEqual(@as(usize, 2), shared.served);
-}
-
 test "HTTP/1 runtime reuses persistent connection and preserves pipelined bytes" {
     const allocator = std.testing.allocator;
 
@@ -13735,7 +13530,7 @@ test "HTTP/1 client reads close-delimited response body" {
 
             // No Content-Length or Transfer-Encoding: the response body is
             // delimited by closing the connection, which remains common for
-            // simple HTTP/1.0-style origin/proxy responses.
+            // simple origin/proxy responses.
             try writeAllToStream(server_ptr.io, connection.stream, "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nclose-delimited-body");
         }
     };
@@ -13820,61 +13615,6 @@ test "HTTP/1 client treats non-chunked response transfer coding as close-delimit
     try std.testing.expectEqualStrings("yolo", response.response.header("transfer-encoding").?);
     try std.testing.expect(response.response.header("content-length") == null);
     try std.testing.expectEqualStrings("close-delimited-body", response.response.body);
-}
-
-test "HTTP/1 client rejects Transfer-Encoding on HTTP/1.0 response" {
-    const allocator = std.testing.allocator;
-
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    var server = try Server.listen(
-        allocator,
-        io,
-        .{ .ip4 = .loopback(0) },
-        .{ .max_head_bytes = 4096, .max_body_bytes = 4096 },
-    );
-    defer server.deinit();
-
-    const Shared = struct {
-        server: *Server,
-        err: ?anyerror = null,
-
-        fn run(shared: *@This()) void {
-            runFallible(shared.server) catch |err| {
-                shared.err = err;
-            };
-        }
-
-        fn runFallible(server_ptr: *Server) !void {
-            var connection = try server_ptr.accept();
-            defer connection.close();
-            var request = try connection.readRequest(.{});
-            defer request.deinit(server_ptr.allocator);
-            try writeAllToStream(
-                server_ptr.io,
-                connection.stream,
-                "HTTP/1.0 200 OK\r\nTransfer-Encoding: gzip\r\n\r\nbody",
-            );
-        }
-    };
-
-    var shared = Shared{ .server = &server };
-    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
-
-    var client = try Client.connect(allocator, io, server.address(), .{});
-    defer client.close();
-    try std.testing.expectError(
-        error.InvalidTransferEncoding,
-        client.request(.{
-            .target = "/http10-te",
-            .headers = &.{.{ .name = "Host", .value = "127.0.0.1" }},
-        }),
-    );
-
-    thread.join();
-    if (shared.err) |err| return err;
 }
 
 test "HTTP/1 status-forbidden body preserves pipelined response without request context" {
@@ -14368,37 +14108,6 @@ test "HTTP/1 runtime validates outbound request and response framing before writ
     );
 }
 
-test "HTTP/0.9 aggregate body reader is opt in and bounded" {
-    const allocator = std.testing.allocator;
-    // Public parsing keeps legacy responses strict by default and exposes the
-    // same synthetic metadata used by the aggregate runtime after EOF.
-    try std.testing.expectError(error.BufferTooShort, http1.parseResponse(
-        allocator,
-        "legacy",
-        .{},
-    ));
-    var response = try http1.parseResponse(allocator, "legacy", .{
-        .allow_http_0_9_responses = true,
-    });
-    defer response.deinit(allocator);
-    try std.testing.expectEqual(http1.Version.http_0_9, response.version);
-    try std.testing.expectEqualStrings("legacy", response.body);
-    try std.testing.expect(!responseIsReusable(response, .GET));
-
-    var scratch: WriteScratch = .{};
-    defer scratch.deinit(allocator);
-    try std.testing.expectError(error.InvalidVersion, runtime_write.prepareResponse(
-        allocator,
-        .{ .version = .http_0_9, .body = "legacy" },
-        &scratch,
-    ));
-    try std.testing.expectError(error.InvalidVersion, runtime_write.prepareRequest(
-        allocator,
-        .{ .version = .http_0_9 },
-        &scratch,
-    ));
-}
-
 test "HTTP/1 buffered aggregate chunk limit ignores pipeline suffix" {
     const allocator = std.testing.allocator;
     const first = "POST /first HTTP/1.1\r\nHost: example\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
@@ -14415,7 +14124,6 @@ test "HTTP/1 buffered aggregate chunk limit ignores pipeline suffix" {
         &inbuf,
         null,
         true,
-        false,
         false,
         null,
         null,
@@ -14706,7 +14414,6 @@ test {
     _ = @import("runtime/header_compatibility_tests.zig");
     _ = close_delimited;
     _ = @import("runtime/unix_tests.zig");
-    _ = @import("runtime/http09_tests.zig");
     _ = @import("runtime/body_reader_tests.zig");
     _ = @import("runtime/body_pull_tests.zig");
     _ = @import("runtime/close_delimited_limit_tests.zig");

@@ -1,4 +1,4 @@
-//! SOCKS4/4a and SOCKS5 server state machines.
+//! SOCKS5 server state machine.
 
 const std = @import("std");
 
@@ -30,9 +30,6 @@ pub const Config = struct {
     /// BIND opens a listening socket and is therefore opt-in.
     allow_bind: bool = false,
     bind_timeout: std.Io.Duration = .fromSeconds(30),
-    /// Optional allowed SOCKS4 user IDs. SOCKS4 has no password exchange, so
-    /// anonymous access must otherwise be explicitly enabled.
-    socks4_user_ids: []const []const u8 = &.{},
     /// UDP ASSOCIATE is opt-in for deployments that only want TCP.
     allow_udp: bool = true,
     udp_idle_timeout: std.Io.Duration = .fromSeconds(60),
@@ -191,14 +188,6 @@ pub fn processConnection(
         else => return err,
     };
     return switch (version) {
-        @intFromEnum(codec.Version.v4) => handleSocks4(
-            allocator,
-            io,
-            stream,
-            peer,
-            config,
-            &reader,
-        ),
         @intFromEnum(codec.Version.v5) => handleSocks5(
             allocator,
             io,
@@ -287,7 +276,6 @@ fn handleSocks5(
                 config,
                 reader,
                 decoded.address,
-                .socks5,
             );
         },
         .bind => {
@@ -298,7 +286,6 @@ fn handleSocks5(
                 config,
                 reader,
                 decoded.address,
-                .socks5,
             );
         },
         .udp_associate => {
@@ -362,8 +349,6 @@ fn authenticate(
     if (!ok) return error.AuthenticationFailed;
 }
 
-const Protocol = enum { socks5, socks4 };
-
 fn handleConnect(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -371,13 +356,12 @@ fn handleConnect(
     config: Config,
     reader: *io_helpers.BufferedReader,
     address: codec.Address,
-    protocol: Protocol,
 ) !void {
     const target = connectTarget(allocator, io, config, address) catch |err| {
         if (config.stats) |value| {
             if (err == error.DestinationDenied) value.deniedRequest();
         }
-        try sendConnectFailure(io, stream, config, protocol, err);
+        try sendConnectFailure(io, stream, config, err);
         return err;
     };
     defer target.close(io);
@@ -386,26 +370,13 @@ fn handleConnect(
         io,
         config.handshake_timeout,
     );
-    switch (protocol) {
-        .socks5 => {
-            var reply: [64]u8 = undefined;
-            const len = try codec.encodeSocks5Reply(
-                &reply,
-                .succeeded,
-                .{ .ip = .{ .ip4 = .unspecified(0) } },
-            );
-            try io_helpers.writeAll(io, stream, reply[0..len], reply_deadline);
-        },
-        .socks4 => {
-            var reply: [8]u8 = undefined;
-            codec.encodeSocks4Reply(
-                &reply,
-                .granted,
-                .{ .ip = .{ .ip4 = .unspecified(0) } },
-            );
-            try io_helpers.writeAll(io, stream, &reply, reply_deadline);
-        },
-    }
+    var reply: [64]u8 = undefined;
+    const len = try codec.encodeSocks5Reply(
+        &reply,
+        .succeeded,
+        .{ .ip = .{ .ip4 = .unspecified(0) } },
+    );
+    try io_helpers.writeAll(io, stream, reply[0..len], reply_deadline);
 
     return relay.relay(
         allocator,
@@ -429,14 +400,12 @@ fn handleBind(
     config: Config,
     reader: *io_helpers.BufferedReader,
     address: codec.Address,
-    protocol: Protocol,
 ) !void {
     if (!config.allow_bind) {
         try sendConnectFailure(
             io,
             stream,
             config,
-            protocol,
             error.BindNotAllowed,
         );
         return error.BindNotAllowed;
@@ -447,13 +416,12 @@ fn handleBind(
             io,
             stream,
             config,
-            protocol,
             error.InvalidBindRequest,
         );
         return err;
     };
     var listener = bind_address.listen(io, .{ .reuse_address = true }) catch |err| {
-        try sendConnectFailure(io, stream, config, protocol, err);
+        try sendConnectFailure(io, stream, config, err);
         return err;
     };
     defer listener.deinit(io);
@@ -462,33 +430,20 @@ fn handleBind(
         io,
         config.handshake_timeout,
     );
-    switch (protocol) {
-        .socks5 => {
-            var reply: [64]u8 = undefined;
-            const len = try codec.encodeSocks5Reply(
-                &reply,
-                .succeeded,
-                .{ .ip = listener.socket.address },
-            );
-            try io_helpers.writeAll(io, stream, reply[0..len], reply_deadline);
-        },
-        .socks4 => {
-            var reply: [8]u8 = undefined;
-            codec.encodeSocks4Reply(
-                &reply,
-                .granted,
-                .{ .ip = listener.socket.address },
-            );
-            try io_helpers.writeAll(io, stream, &reply, reply_deadline);
-        },
-    }
+    var reply: [64]u8 = undefined;
+    const len = try codec.encodeSocks5Reply(
+        &reply,
+        .succeeded,
+        .{ .ip = listener.socket.address },
+    );
+    try io_helpers.writeAll(io, stream, reply[0..len], reply_deadline);
 
     const bind_deadline = try io_helpers.deadlineFromTimeout(
         io,
         config.bind_timeout,
     );
     const accepted = acceptWithDeadline(io, &listener, bind_deadline) catch |err| {
-        try sendConnectFailure(io, stream, config, protocol, err);
+        try sendConnectFailure(io, stream, config, err);
         return err;
     };
     defer accepted.close(io);
@@ -497,36 +452,17 @@ fn handleBind(
         io,
         config.handshake_timeout,
     );
-    switch (protocol) {
-        .socks5 => {
-            var reply: [64]u8 = undefined;
-            const len = try codec.encodeSocks5Reply(
-                &reply,
-                .succeeded,
-                .{ .ip = accepted.socket.address },
-            );
-            try io_helpers.writeAll(
-                io,
-                stream,
-                reply[0..len],
-                accepted_reply_deadline,
-            );
-        },
-        .socks4 => {
-            var reply: [8]u8 = undefined;
-            codec.encodeSocks4Reply(
-                &reply,
-                .granted,
-                .{ .ip = accepted.socket.address },
-            );
-            try io_helpers.writeAll(
-                io,
-                stream,
-                &reply,
-                accepted_reply_deadline,
-            );
-        },
-    }
+    const accepted_len = try codec.encodeSocks5Reply(
+        &reply,
+        .succeeded,
+        .{ .ip = accepted.socket.address },
+    );
+    try io_helpers.writeAll(
+        io,
+        stream,
+        reply[0..accepted_len],
+        accepted_reply_deadline,
+    );
 
     return relay.relay(
         allocator,
@@ -652,91 +588,6 @@ fn handleUdpAssociate(
     return session.run();
 }
 
-fn handleSocks4(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    stream: net.Stream,
-    peer: net.IpAddress,
-    config: Config,
-    reader: *io_helpers.BufferedReader,
-) !void {
-    _ = peer;
-    var rest: [7]u8 = undefined;
-    try reader.readExact(&rest);
-    var header_bytes: [8]u8 = undefined;
-    header_bytes[0] = @intFromEnum(codec.Version.v4);
-    @memcpy(header_bytes[1..], &rest);
-    const header = try codec.parseSocks4Header(header_bytes);
-
-    var user_storage: [codec.max_socks4_user_id_len]u8 = undefined;
-    const user_id = reader.readUntilNull(&user_storage) catch |err| {
-        try sendSocks4Failure(io, stream, config);
-        return err;
-    };
-
-    var domain_storage: [net.HostName.max_len]u8 = undefined;
-    const domain: ?[]const u8 = if (header.is_4a) blk: {
-        const value = reader.readUntilNull(&domain_storage) catch |err| {
-            try sendSocks4Failure(io, stream, config);
-            return err;
-        };
-        break :blk value;
-    } else null;
-
-    const request = codec.buildSocks4Request(
-        header,
-        user_id,
-        domain,
-    ) catch |err| {
-        try sendSocks4Failure(io, stream, config);
-        return err;
-    };
-
-    if (!socks4Allowed(config, user_id)) {
-        if (config.stats) |value| value.authFailure();
-        try sendSocks4Failure(io, stream, config);
-        return error.AuthenticationFailed;
-    }
-
-    switch (request.command) {
-        .connect => try handleConnect(
-            allocator,
-            io,
-            stream,
-            config,
-            reader,
-            request.address,
-            .socks4,
-        ),
-        .bind => try handleBind(
-            allocator,
-            io,
-            stream,
-            config,
-            reader,
-            request.address,
-            .socks4,
-        ),
-        else => return error.MalformedRequest,
-    }
-}
-
-fn socks4Allowed(config: Config, user_id: []const u8) bool {
-    if (config.socks4_user_ids.len == 0) {
-        return config.auth.allow_anonymous;
-    }
-    var matched = false;
-    for (config.socks4_user_ids) |allowed| {
-        const same_length = allowed.len == user_id.len;
-        var difference: u8 = 0;
-        if (same_length) {
-            for (allowed, user_id) |lhs, rhs| difference |= lhs ^ rhs;
-        }
-        matched = matched or (same_length and difference == 0);
-    }
-    return matched;
-}
-
 fn connectTarget(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -774,51 +625,19 @@ fn sendConnectFailure(
     io: std.Io,
     stream: net.Stream,
     config: Config,
-    protocol: Protocol,
     err: anyerror,
 ) !void {
     const deadline = try io_helpers.deadlineFromTimeout(
         io,
         config.handshake_timeout,
     );
-    switch (protocol) {
-        .socks5 => {
-            var reply: [64]u8 = undefined;
-            const len = try codec.encodeSocks5Reply(
-                &reply,
-                replyForError(err),
-                .{ .ip = .{ .ip4 = .unspecified(0) } },
-            );
-            try io_helpers.writeAll(io, stream, reply[0..len], deadline);
-        },
-        .socks4 => {
-            var reply: [8]u8 = undefined;
-            codec.encodeSocks4Reply(
-                &reply,
-                .rejected,
-                .{ .ip = .{ .ip4 = .unspecified(0) } },
-            );
-            try io_helpers.writeAll(io, stream, &reply, deadline);
-        },
-    }
-}
-
-fn sendSocks4Failure(
-    io: std.Io,
-    stream: net.Stream,
-    config: Config,
-) !void {
-    const deadline = try io_helpers.deadlineFromTimeout(
-        io,
-        config.handshake_timeout,
-    );
-    var reply: [8]u8 = undefined;
-    codec.encodeSocks4Reply(
+    var reply: [64]u8 = undefined;
+    const len = try codec.encodeSocks5Reply(
         &reply,
-        .rejected,
+        replyForError(err),
         .{ .ip = .{ .ip4 = .unspecified(0) } },
     );
-    try io_helpers.writeAll(io, stream, &reply, deadline);
+    try io_helpers.writeAll(io, stream, reply[0..len], deadline);
 }
 
 fn replyForError(err: anyerror) codec.Reply {
@@ -836,17 +655,4 @@ fn replyForError(err: anyerror) codec.Reply {
         => .host_unreachable,
         else => .general_failure,
     };
-}
-
-test "SOCKS4 user ID authorization is opt-in" {
-    const anonymous = Config{ .auth = .{ .allow_anonymous = true } };
-    try std.testing.expect(socks4Allowed(anonymous, "any"));
-
-    const closed = Config{};
-    try std.testing.expect(!socks4Allowed(closed, "any"));
-
-    const ids = [_][]const u8{ "alice", "bob" };
-    const allow_list = Config{ .socks4_user_ids = &ids };
-    try std.testing.expect(socks4Allowed(allow_list, "alice"));
-    try std.testing.expect(!socks4Allowed(allow_list, "carol"));
 }

@@ -346,37 +346,6 @@ pub fn Reader(comptime RuntimeError: type) type {
             const informational_count = self.informational_responses_seen orelse
                 &local_informational_count;
             while (true) {
-                if (self.options.allow_http_0_9_responses and
-                    request_method == .GET)
-                {
-                    if (try self.readResponsePrefix()) |legacy| {
-                        errdefer self.allocator.free(legacy);
-                        begin(callback_context, ResponseHead{
-                            .version = .http_0_9,
-                            .status = 200,
-                            .reason = "",
-                            .headers = &.{},
-                            .body_framing = .close_delimited,
-                            .content_length = null,
-                            .must_close = true,
-                        }) catch |err| return err;
-                        const body = try self.readCloseDelimited(
-                            callback_context,
-                            consume,
-                        );
-                        self.commit();
-                        return .{
-                            .head_bytes = legacy,
-                            .version = .http_0_9,
-                            .status = 200,
-                            .reason = "",
-                            .headers = @constCast(&[_]http1.Header{}),
-                            .body_framing = .close_delimited,
-                            .body_bytes = body.body_bytes,
-                            .must_close = true,
-                        };
-                    }
-                }
                 const head_bytes = try self.readHeadBytes();
                 var head_needs_free = true;
                 defer if (head_needs_free) self.allocator.free(head_bytes);
@@ -498,25 +467,6 @@ pub fn Reader(comptime RuntimeError: type) type {
                     .trailer_value_storage = body.trailers.value_storage,
                 };
             }
-        }
-
-        fn readResponsePrefix(self: *Self) RuntimeError!?[]u8 {
-            while (true) switch (http1.classifyResponsePrefix(self.buffered())) {
-                .http_0_9 => return try self.allocator.dupe(u8, ""),
-                .http_1_x => return null,
-                .incomplete => self.readHeadMore(
-                    self.limits.max_head_bytes,
-                ) catch |err| switch (err) {
-                    error.ConnectionClosed => {
-                        if (self.buffered().len == 0) return err;
-                        // A legacy body can itself be a proper prefix of
-                        // `HTTP/`. EOF proves it is not a fragmented 1.x
-                        // status line, so accept the buffered bytes as body.
-                        return try self.allocator.dupe(u8, "");
-                    },
-                    else => |e| return e,
-                },
-            };
         }
 
         fn readHeadBytes(self: *Self) RuntimeError![]u8 {

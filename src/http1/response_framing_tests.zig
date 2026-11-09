@@ -22,7 +22,6 @@ test "HTTP/1 response persistence metadata agrees across owned and borrowed pars
     const cases = [_]struct { bytes: []const u8, method: http1.Method = .GET, framing: http1.BodyFraming, reusable: bool, close: bool = false, body: []const u8 = "" }{
         .{ .bytes = "HTTP/1.1 200 OK\r\n\r\npayload", .framing = .close_delimited, .reusable = false, .close = true, .body = "payload" },
         .{ .bytes = "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\nConnection: keep-alive\r\n\r\npayload", .framing = .close_delimited, .reusable = false, .close = true, .body = "payload" },
-        .{ .bytes = "HTTP/1.0 200 OK\r\nConnection: keep-alive\r\n\r\n", .framing = .close_delimited, .reusable = false, .close = true },
         .{ .bytes = "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade, keep-alive\r\nUpgrade: netz-test\r\n\r\n", .framing = .none, .reusable = false, .close = true },
         .{ .bytes = "HTTP/1.1 200 Connected\r\nConnection: keep-alive\r\nContent-Length: invalid\r\n\r\n", .method = .CONNECT, .framing = .none, .reusable = false, .close = true },
         .{ .bytes = "HTTP/1.1 299 Connected\r\n\r\n", .method = .CONNECT, .framing = .none, .reusable = false, .close = true },
@@ -33,7 +32,6 @@ test "HTTP/1 response persistence metadata agrees across owned and borrowed pars
         .{ .bytes = "HTTP/1.1 204 No Content\r\n\r\n", .framing = .none, .reusable = true },
         .{ .bytes = "HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\npayload", .framing = .content_length, .reusable = true, .body = "payload" },
         .{ .bytes = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n", .framing = .chunked, .reusable = true },
-        .{ .bytes = "HTTP/1.0 200 OK\r\nConnection: keep-alive\r\nContent-Length: 0\r\n\r\n", .framing = .content_length, .reusable = true },
         .{ .bytes = "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 0\r\n\r\n", .framing = .content_length, .reusable = false },
     };
     for (cases) |case| {

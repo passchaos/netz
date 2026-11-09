@@ -38,7 +38,7 @@ pub fn switchesProtocol(method: http1.Method, status: u16) bool {
 /// boundary or resume HTTP after a protocol switch. CONNECT context is carried
 /// by the parser's must_close flag; HEAD retains ordinary HTTP persistence.
 pub fn keepAlive(response: anytype) bool {
-    return response.version != .http_0_9 and !response.must_close and response.body_framing != .close_delimited and
+    return !response.must_close and response.body_framing != .close_delimited and
         response.status != 101 and http1.headersKeepAlive(response.version, response.headers);
 }
 
@@ -50,11 +50,10 @@ pub fn reusable(response: anytype, method: http1.Method) bool {
 /// Preserve a valid representation length for HEAD/304-style consumers; an
 /// unusable numeric value cannot override the known wire boundary. Responses
 /// that carry content retain normal Transfer-Encoding/Content-Length checks.
-pub fn inspect(version: http1.Version, status: u16, request_method: ?http1.Method, headers: []const http1.Header) http1.Error!Metadata {
+pub fn inspect(status: u16, request_method: ?http1.Method, headers: []const http1.Header) http1.Error!Metadata {
     const body_allowed = !forbidsBody(status, request_method);
     const transfer = wire.findHeader(headers, "transfer-encoding") != null;
     const length_present = wire.findHeader(headers, "content-length") != null;
-    if (body_allowed and version == .http_1_0 and transfer) return error.InvalidTransferEncoding;
     return .{
         .body_allowed = body_allowed,
         .has_transfer_encoding = transfer,

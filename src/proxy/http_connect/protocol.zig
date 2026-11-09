@@ -27,7 +27,7 @@ pub const Error = error{
     BufferTooSmall,
 };
 
-pub const Version = enum { http_1_0, http_1_1 };
+pub const Version = enum { http_1_1 };
 
 pub const Domain = struct {
     host: []const u8,
@@ -130,7 +130,6 @@ pub fn parseRequest(head: []const u8) Error!Request {
 }
 
 fn parseVersion(text: []const u8) Error!Version {
-    if (std.mem.eql(u8, text, "HTTP/1.0")) return .http_1_0;
     if (std.mem.eql(u8, text, "HTTP/1.1")) return .http_1_1;
     return error.UnsupportedVersion;
 }
@@ -259,10 +258,6 @@ test "CONNECT request parsing accepts IPv4 IPv6 and domain authorities" {
         .{
             .head = "CONNECT [2001:db8::1]:8443 HTTP/1.1\r\nHost: [2001:db8::1]:8443\r\n\r\n",
             .port = 8443,
-        },
-        .{
-            .head = "CONNECT origin.example:8080 HTTP/1.0\r\n\r\n",
-            .port = 8080,
         },
     };
     for (cases) |case| {

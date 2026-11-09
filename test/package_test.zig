@@ -429,6 +429,19 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz, "proxy"));
     try std.testing.expect(@hasDecl(netz.proxy, "socks5"));
     try std.testing.expect(@hasDecl(netz.proxy.socks5, "connectHost"));
+    try std.testing.expect(@hasDecl(netz, "vpn"));
+    try std.testing.expect(@hasDecl(netz.vpn, "wireguard"));
+    try std.testing.expect(@hasDecl(netz.vpn.wireguard, "noise"));
+    try std.testing.expect(@hasDecl(netz.vpn.wireguard, "session"));
+    try std.testing.expect(@hasDecl(netz, "mesh"));
+    try std.testing.expect(@hasDecl(netz.mesh, "wire"));
+    try std.testing.expect(@hasDecl(netz.mesh, "types"));
+    try std.testing.expect(@hasDecl(netz.mesh, "disco"));
+    try std.testing.expect(@hasDecl(netz.mesh.disco, "message"));
+    try std.testing.expect(@hasDecl(netz.mesh, "derp"));
+    try std.testing.expect(@hasDecl(netz.mesh.derp, "frame"));
+    try std.testing.expect(@hasDecl(netz.mesh.derp, "relay"));
+    try std.testing.expect(@hasDecl(netz.mesh.derp, "client"));
     try std.testing.expect(@hasDecl(netz.http, "Socks5Proxy"));
     try std.testing.expect(@hasDecl(
         netz.http1.runtime.Client,

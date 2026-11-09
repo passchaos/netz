@@ -169,7 +169,6 @@ fn bufferedLimit(silent: bool, refuse_allocation: bool, maximum: usize, payload:
     const io = threaded.io();
     const heads = [_][]const u8{
         "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n",
-        "HTTP/1.0 200 OK\r\n\r\n",
         "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\nContent-Length: 1\r\n\r\n",
     };
     for (heads) |head| {

@@ -35,6 +35,7 @@ performance record.
 | [native_timed_read_performance.md](native_timed_read_performance.md) | Native timed-read cost. |
 | [stream_read_deadlines.md](stream_read_deadlines.md) | Stream read deadline semantics and cost. |
 | [http_client_pool.md](http_client_pool.md) | HTTP client pooling behavior. |
+| [logging.md](logging.md) | Process-wide kron logging setup and overhead rules. |
 
 ## Design notes
 

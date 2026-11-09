@@ -1,9 +1,8 @@
-//! VMess legacy request/response header codec with security NONE bodies.
+//! VMess request header codec shared by the AEAD path.
 //!
-//! This implements the legacy (non-AEAD) VMess header path documented by
-//! v2fly: HMAC-MD5 timestamp authentication, AES-128-CFB header protection,
-//! FNV-1a checksum, and plaintext bodies. Modern VMess AEAD headers and
-//! encrypted body modes are separate layers.
+//! The AEAD layer owns authentication and header encryption; this module
+//! parses the plaintext request header, its address, padding, and FNV-1a
+//! checksum.
 
 const std = @import("std");
 
@@ -12,14 +11,11 @@ const codec = @import("../socks/codec.zig");
 const crypto = @import("crypto.zig");
 
 pub const version: u8 = 1;
-pub const security_legacy: u8 = 1;
 pub const security_none: u8 = 5;
 pub const security_aes128_gcm: u8 = 3;
 pub const security_chacha20_poly1305: u8 = 4;
-pub const option_chunk_stream: u8 = 0x01;
 
 pub const Error = error{
-    AuthenticationFailed,
     UnsupportedSecurity,
     InvalidHeader,
     TruncatedHeader,
@@ -35,14 +31,6 @@ pub const Command = enum(u8) {
     udp = 2,
 };
 
-pub const ClientSession = struct {
-    body_key: [16]u8,
-    body_iv: [16]u8,
-    response_header: u8,
-    security: u8 = security_none,
-    option: u8 = 0,
-};
-
 pub const ServerSession = struct {
     body_key: [16]u8,
     body_iv: [16]u8,
@@ -56,7 +44,7 @@ pub const Request = struct {
     address: codec.Address,
 };
 
-/// Build the plaintext VMess request header (without auth or encryption).
+/// Build the plaintext VMess request header before AEAD sealing.
 pub fn buildPlainHeader(
     allocator: std.mem.Allocator,
     request: Request,
@@ -93,44 +81,6 @@ pub fn buildPlainHeader(
     return plain.toOwnedSlice(allocator);
 }
 
-/// Encode the complete legacy client header (auth + encrypted request header).
-/// The caller writes payload bytes after this header without encryption.
-pub fn encodeRequestHeader(
-    allocator: std.mem.Allocator,
-    uuid: [16]u8,
-    timestamp: i64,
-    request: Request,
-    padding_len: u8,
-    response_header: u8,
-    body_key: [16]u8,
-    body_iv: [16]u8,
-    security: u8,
-    option: u8,
-) ![]u8 {
-    const plain = try buildPlainHeader(
-        allocator,
-        request,
-        padding_len,
-        response_header,
-        body_key,
-        body_iv,
-        security,
-        option,
-    );
-    defer allocator.free(plain);
-
-    var key: [16]u8 = undefined;
-    crypto.cmdKey(uuid, &key);
-    var encryptor = crypto.Cfb.initEncrypt(key, crypto.timestampIv(timestamp));
-    encryptor.process(plain, plain);
-
-    var output: std.ArrayList(u8) = .empty;
-    errdefer output.deinit(allocator);
-    try output.appendSlice(allocator, &crypto.timestampAuth(uuid, timestamp));
-    try output.appendSlice(allocator, plain);
-    return output.toOwnedSlice(allocator);
-}
-
 pub const DecodedRequest = struct {
     request: Request,
     session: ServerSession,
@@ -151,16 +101,10 @@ pub fn parsePlainHeader(
         .security = bytes[35] & 0x0f,
         .option = bytes[34],
     };
-    const option = bytes[34];
     const security = bytes[35] & 0x0f;
-    if (security != security_legacy and security != security_none and
+    if (security != security_none and
         security != security_aes128_gcm and
         security != security_chacha20_poly1305)
-    {
-        return error.UnsupportedSecurity;
-    }
-    if (security == security_none and
-        option & option_chunk_stream != 0)
     {
         return error.UnsupportedSecurity;
     }
@@ -232,138 +176,6 @@ pub fn parsePlainHeader(
     };
 }
 
-/// Decode a streaming legacy request header after the caller has read the
-/// 16-byte authentication prefix.
-pub fn decodeLegacyHeaderAfterAuth(
-    connection: anytype,
-    uuid: [16]u8,
-    now_seconds: i64,
-    window_seconds: u32,
-    host_storage: []u8,
-    auth: [16]u8,
-) !DecodedRequest {
-    var matched_timestamp: ?i64 = null;
-    const window: i64 = @intCast(window_seconds);
-    var delta: i64 = -window;
-    while (delta <= window) : (delta += 1) {
-        const timestamp = now_seconds + delta;
-        const expected = crypto.timestampAuth(uuid, timestamp);
-        if (timingSafeEql(&auth, &expected)) matched_timestamp = timestamp;
-    }
-    const timestamp = matched_timestamp orelse
-        return error.AuthenticationFailed;
-
-    var key: [16]u8 = undefined;
-    crypto.cmdKey(uuid, &key);
-    var decryptor = crypto.Cfb.initDecrypt(key, crypto.timestampIv(timestamp));
-
-    var header: [512]u8 = undefined;
-    var used: usize = 0;
-    try readDecrypted(connection, &decryptor, header[used..][0..38]);
-    used += 38;
-
-    const padding_len: usize = header[35] >> 4;
-    if (padding_len > 15) return error.InvalidHeader;
-    try readDecrypted(connection, &decryptor, header[used..][0..2]);
-    used += 2;
-    try readDecrypted(connection, &decryptor, header[used..][0..1]);
-    const address_type = header[used];
-    used += 1;
-    const address_len: usize = switch (address_type) {
-        1 => 4,
-        3 => 16,
-        2 => blk: {
-            try readDecrypted(connection, &decryptor, header[used..][0..1]);
-            const host_len = header[used];
-            used += 1;
-            if (host_len == 0) return error.InvalidAddress;
-            break :blk host_len;
-        },
-        else => return error.InvalidAddress,
-    };
-    try readDecrypted(connection, &decryptor, header[used..][0..address_len]);
-    used += address_len;
-    if (padding_len > 0) {
-        try readDecrypted(
-            connection,
-            &decryptor,
-            header[used..][0..padding_len],
-        );
-        used += padding_len;
-    }
-    var checksum_bytes: [4]u8 = undefined;
-    try readDecrypted(connection, &decryptor, &checksum_bytes);
-    @memcpy(header[used..][0..4], &checksum_bytes);
-    used += 4;
-    return parsePlainHeader(header[0..used], host_storage);
-}
-
-/// Decode a streaming request header from a TLS-like connection. Only the
-/// exact header bytes are read; payload bytes remain unread.
-pub fn decodeRequestHeader(
-    connection: anytype,
-    uuid: [16]u8,
-    now_seconds: i64,
-    window_seconds: u32,
-    host_storage: []u8,
-) !DecodedRequest {
-    var auth: [16]u8 = undefined;
-    try readExact(connection, &auth);
-    return decodeLegacyHeaderAfterAuth(
-        connection,
-        uuid,
-        now_seconds,
-        window_seconds,
-        host_storage,
-        auth,
-    );
-}
-
-/// Encode and write the VMess response header. The response body is plaintext.
-pub fn encodeResponseHeader(
-    session: ServerSession,
-    connection: anytype,
-) !void {
-    var key: [16]u8 = undefined;
-    std.crypto.hash.Md5.hash(&session.body_key, &key, .{});
-    var iv: [16]u8 = undefined;
-    std.crypto.hash.Md5.hash(&session.body_iv, &iv, .{});
-
-    var plain = [4]u8{
-        session.response_header,
-        0,
-        0,
-        0,
-    };
-    var encryptor = crypto.Cfb.initEncrypt(key, iv);
-    var wire: [4]u8 = undefined;
-    encryptor.process(&wire, &plain);
-    try writeAll(connection, &wire);
-}
-
-/// Decode the response header on the client side.
-pub fn decodeResponseHeader(
-    session: ClientSession,
-    connection: anytype,
-) !void {
-    var key: [16]u8 = undefined;
-    std.crypto.hash.Md5.hash(&session.body_key, &key, .{});
-    var iv: [16]u8 = undefined;
-    std.crypto.hash.Md5.hash(&session.body_iv, &iv, .{});
-
-    var wire: [4]u8 = undefined;
-    try readExact(connection, &wire);
-    var plain: [4]u8 = undefined;
-    var decryptor = crypto.Cfb.initDecrypt(key, iv);
-    decryptor.process(&plain, &wire);
-    if (plain[0] != session.response_header) return error.InvalidHeader;
-    if (plain[2] != 0) return error.InvalidHeader;
-    if (plain[3] != 0) {
-        var command_bytes: [255]u8 = undefined;
-        try readExact(connection, command_bytes[0..plain[3]]);
-    }
-}
-
 fn encodeAddress(
     allocator: std.mem.Allocator,
     output: *std.ArrayList(u8),
@@ -390,126 +202,14 @@ fn encodeAddress(
     }
 }
 
-fn readDecrypted(
-    connection: anytype,
-    decryptor: *crypto.Cfb,
-    output: []u8,
-) !void {
-    var offset: usize = 0;
-    while (offset < output.len) {
-        const count = try connection.read(output[offset..]);
-        if (count == 0) return error.TruncatedHeader;
-        decryptor.process(output[offset..][0..count], output[offset..][0..count]);
-        offset += count;
-    }
-}
-
-fn readExact(connection: anytype, output: []u8) !void {
-    var offset: usize = 0;
-    while (offset < output.len) {
-        const count = try connection.read(output[offset..]);
-        if (count == 0) return error.TruncatedHeader;
-        offset += count;
-    }
-}
-
-fn writeAll(connection: anytype, bytes: []const u8) !void {
-    try connection.writeAll(bytes);
-}
-
-fn timingSafeEql(a: *const [16]u8, b: *const [16]u8) bool {
-    var difference: u8 = 0;
-    for (a, b) |lhs, rhs| difference |= lhs ^ rhs;
-    return difference == 0;
-}
-
-test "VMess request header round trips through an in-memory stream" {
-    const allocator = std.testing.allocator;
-    const uuid: [16]u8 = .{
-        0xb8, 0x31, 0x38, 0x1d, 0x63, 0x24, 0x4d, 0x53,
-        0xad, 0x4f, 0x8c, 0xda, 0x48, 0xb3, 0x08, 0x11,
-    };
-    const timestamp: i64 = 1700000000;
-    const target = codec.Address{ .ip = .{ .ip4 = .{
-        .bytes = .{ 192, 0, 2, 1 },
-        .port = 443,
-    } } };
-    const body_key = [_]u8{0x11} ** 16;
-    const body_iv = [_]u8{0x22} ** 16;
-    const wire = try encodeRequestHeader(
-        allocator,
-        uuid,
-        timestamp,
-        .{ .command = .tcp, .address = target },
-        0,
-        0x77,
-        body_key,
-        body_iv,
-        security_none,
-        0,
-    );
-    defer allocator.free(wire);
-
-    var connection = MemoryConnection{ .bytes = wire };
-    var host_storage: [255]u8 = undefined;
-    const decoded = try decodeRequestHeader(
-        &connection,
-        uuid,
-        timestamp,
-        0,
-        &host_storage,
-    );
-    try std.testing.expectEqual(Command.tcp, decoded.request.command);
-    try std.testing.expect(decoded.request.address.eql(target));
-    try std.testing.expectEqual(@as(u8, 0x77), decoded.session.response_header);
-    try std.testing.expectEqualSlices(u8, &body_key, &decoded.session.body_key);
-    try std.testing.expectEqualSlices(u8, &body_iv, &decoded.session.body_iv);
-}
-
-test "VMess rejects a corrupted authentication value" {
-    const allocator = std.testing.allocator;
-    const uuid = [_]u8{0x01} ** 16;
-    const wire = try encodeRequestHeader(
-        allocator,
-        uuid,
-        1700000000,
-        .{ .command = .tcp, .address = .{ .ip = .{ .ip4 = .{
-            .bytes = .{ 127, 0, 0, 1 },
-            .port = 80,
-        } } } },
-        0,
-        1,
-        [_]u8{0} ** 16,
-        [_]u8{0} ** 16,
-        security_none,
-        0,
-    );
-    defer allocator.free(wire);
-    wire[0] ^= 1;
-    var connection = MemoryConnection{ .bytes = wire };
+test "VMess plain header rejects an unsupported security mode" {
+    var header: [38]u8 = [_]u8{0} ** 38;
+    header[0] = version;
+    header[35] = 0x0f;
+    header[37] = 1;
     var host_storage: [255]u8 = undefined;
     try std.testing.expectError(
-        error.AuthenticationFailed,
-        decodeRequestHeader(&connection, uuid, 1700000000, 0, &host_storage),
+        error.UnsupportedSecurity,
+        parsePlainHeader(&header, &host_storage),
     );
 }
-
-const MemoryConnection = struct {
-    bytes: []const u8,
-    offset: usize = 0,
-    written: [64]u8 = undefined,
-    written_len: usize = 0,
-
-    fn read(self: *@This(), output: []u8) !usize {
-        const available = self.bytes.len - self.offset;
-        const take = @min(available, output.len);
-        @memcpy(output[0..take], self.bytes[self.offset..][0..take]);
-        self.offset += take;
-        return take;
-    }
-
-    fn writeAll(self: *@This(), bytes: []const u8) !void {
-        @memcpy(self.written[self.written_len..][0..bytes.len], bytes);
-        self.written_len += bytes.len;
-    }
-};

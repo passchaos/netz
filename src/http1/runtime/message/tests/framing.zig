@@ -209,9 +209,6 @@ test "HTTP/1 message framing validates automatic continue eligibility" {
         "POST / HTTP/1.1\r\nHost: example\r\nExpect: 100-continue\r\nContent-Length: 1",
     ));
     try std.testing.expect(!framing.requestShouldSendContinue(
-        "POST / HTTP/1.0\r\nHost: example\r\nExpect: 100-continue\r\nContent-Length: 1",
-    ));
-    try std.testing.expect(!framing.requestShouldSendContinue(
         "POST / HTTP/1.1\r\nHost: example\r\nExpect: other\r\nContent-Length: 1",
     ));
     try std.testing.expect(!framing.requestShouldSendContinue(

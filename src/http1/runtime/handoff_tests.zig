@@ -56,7 +56,6 @@ test "HTTP/1 handoff invalid 101 retires HTTP and aborts the upgraded peer" {
         "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: other\r\n\r\n",
         "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\n\r\n",
         "HTTP/1.1 101 Switching Protocols\r\nUpgrade: netz-test\r\n\r\n",
-        "HTTP/1.0 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: netz-test\r\n\r\n",
         "HTTP/1.1 103 Early Hints\r\n\r\nHTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: other\r\n\r\n\x81\x00",
     };
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -90,7 +89,6 @@ test "HTTP/1 handoff successful CONNECT retires aggregate clients across 2xx" {
 test "HTTP/1 handoff rejection respects response connection and EOF boundaries" {
     const cases = [_]struct { response: []const u8, eof: bool = false }{
         .{ .response = "HTTP/1.1 403 Forbidden\r\nContent-Length: 4\r\nConnection: close\r\n\r\nnope" },
-        .{ .response = "HTTP/1.0 403 Forbidden\r\nContent-Length: 4\r\n\r\nnope" },
         .{ .response = "HTTP/1.1 403 Forbidden\r\nConnection: keep-alive\r\n\r\nnope", .eof = true },
     };
     var threaded = std.Io.Threaded.init(allocator, .{});

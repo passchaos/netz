@@ -1,9 +1,8 @@
-//! VMess AEAD and legacy wire codecs.
+//! VMess AEAD wire codec.
 
 pub const crypto = @import("crypto.zig");
 pub const aead = @import("aead.zig");
 pub const body = @import("body.zig");
-pub const legacy_body = @import("legacy_body.zig");
 pub const protocol = @import("protocol.zig");
 pub const server = @import("server.zig");
 pub const quic_server = @import("quic_server.zig");
@@ -14,7 +13,6 @@ test {
     _ = crypto;
     _ = aead;
     _ = body;
-    _ = legacy_body;
     _ = protocol;
     _ = server;
     _ = quic_server;

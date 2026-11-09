@@ -1,11 +1,10 @@
-//! VMess TLS/WebSocket server with legacy, AEAD, and AES-GCM body support.
+//! VMess AEAD server with AES-GCM/ChaCha20-Poly1305 body support.
 
 const std = @import("std");
 
 const protocol = @import("protocol.zig");
 const aead = @import("aead.zig");
 const body = @import("body.zig");
-const legacy_body = @import("legacy_body.zig");
 const vmess_crypto = @import("crypto.zig");
 const replay = @import("../shadowsocks/replay.zig");
 const acl = @import("../runtime/acl.zig");
@@ -215,50 +214,28 @@ pub fn processTlsConnection(
         auth_info.timestamp - now_seconds
     else
         now_seconds - auth_info.timestamp;
-    const is_aead = auth_info.valid_checksum and timestamp_delta <= 120;
-
-    if (is_aead) {
-        if (config.replay) |cache| {
-            if (!cache.accept(&prefix)) return error.ReplayDetected;
-        }
-        const opened = aead.openHeader(
-            allocator,
-            cmd_key,
-            prefix,
-            connection,
-        ) catch |err| {
-            if (config.stats) |value| value.authFailure();
-            return err;
-        };
-        defer allocator.free(opened.data);
-        const decoded = protocol.parsePlainHeader(
-            opened.data,
-            &host_storage,
-        ) catch |err| {
-            if (config.stats) |value| value.authFailure();
-            return err;
-        };
-        return connectAndRelay(
-            allocator,
-            io,
-            connection,
-            config,
-            decoded,
-            true,
-        );
+    if (!auth_info.valid_checksum or timestamp_delta > 120) {
+        if (config.stats) |value| value.authFailure();
+        return error.AuthenticationFailed;
     }
-
-    const decoded = protocol.decodeLegacyHeaderAfterAuth(
-        connection,
-        config.uuid,
-        now_seconds,
-        30,
-        &host_storage,
+    if (config.replay) |cache| {
+        if (!cache.accept(&prefix)) return error.ReplayDetected;
+    }
+    const opened = aead.openHeader(
+        allocator,
+        cmd_key,
         prefix,
+        connection,
     ) catch |err| {
-        if (config.stats) |value| {
-            if (err == error.AuthenticationFailed) value.authFailure();
-        }
+        if (config.stats) |value| value.authFailure();
+        return err;
+    };
+    defer allocator.free(opened.data);
+    const decoded = protocol.parsePlainHeader(
+        opened.data,
+        &host_storage,
+    ) catch |err| {
+        if (config.stats) |value| value.authFailure();
         return err;
     };
     return connectAndRelay(
@@ -267,7 +244,6 @@ pub fn processTlsConnection(
         connection,
         config,
         decoded,
-        false,
     );
 }
 
@@ -277,7 +253,6 @@ fn connectAndRelay(
     connection: anytype,
     config: Config,
     decoded: protocol.DecodedRequest,
-    is_aead: bool,
 ) !void {
     switch (decoded.request.command) {
         .tcp => {
@@ -303,42 +278,15 @@ fn connectAndRelay(
             };
             defer upstream.close(io);
 
-            if (is_aead) {
-                try aead.encodeResponseHeader(
-                    decoded.session.body_key,
-                    decoded.session.body_iv,
-                    decoded.session.response_header,
-                    connection,
-                );
-            } else {
-                try protocol.encodeResponseHeader(decoded.session, connection);
-            }
+            try aead.encodeResponseHeader(
+                decoded.session.body_key,
+                decoded.session.body_iv,
+                decoded.session.response_header,
+                connection,
+            );
 
             if (decoded.session.security != protocol.security_none) {
-                const keys = responseKeys(decoded.session, is_aead);
-                if (decoded.session.security == protocol.security_legacy) {
-                    const chunked = (decoded.session.option &
-                        legacy_body.chunk_stream_option) != 0;
-                    var encryptor = legacy_body.Encryptor.init(
-                        keys.key,
-                        keys.iv,
-                        chunked,
-                    );
-                    var decryptor = legacy_body.Decryptor.init(
-                        decoded.session.body_key,
-                        decoded.session.body_iv,
-                        chunked,
-                    );
-                    return relayBody(
-                        allocator,
-                        io,
-                        connection,
-                        upstream,
-                        config,
-                        &decryptor,
-                        &encryptor,
-                    );
-                }
+                const keys = responseKeys(decoded.session);
                 const algorithm: body.Algorithm =
                     if (decoded.session.security == protocol.security_aes128_gcm)
                         .aes_128_gcm
@@ -420,16 +368,12 @@ fn connectAndRelay(
             );
             defer socket.close(io);
 
-            if (is_aead) {
-                try aead.encodeResponseHeader(
-                    decoded.session.body_key,
-                    decoded.session.body_iv,
-                    decoded.session.response_header,
-                    connection,
-                );
-            } else {
-                try protocol.encodeResponseHeader(decoded.session, connection);
-            }
+            try aead.encodeResponseHeader(
+                decoded.session.body_key,
+                decoded.session.body_iv,
+                decoded.session.response_header,
+                connection,
+            );
 
             if (decoded.session.security == protocol.security_none) {
                 return udp_relay.relayThreaded(
@@ -444,31 +388,7 @@ fn connectAndRelay(
                 );
             }
 
-            const keys = responseKeys(decoded.session, is_aead);
-            if (decoded.session.security == protocol.security_legacy) {
-                const chunked = (decoded.session.option &
-                    legacy_body.chunk_stream_option) != 0;
-                var encryptor = legacy_body.Encryptor.init(
-                    keys.key,
-                    keys.iv,
-                    chunked,
-                );
-                var decryptor = legacy_body.Decryptor.init(
-                    decoded.session.body_key,
-                    decoded.session.body_iv,
-                    chunked,
-                );
-                return relayUdpBody(
-                    allocator,
-                    io,
-                    connection,
-                    socket,
-                    resolved,
-                    config,
-                    &decryptor,
-                    &encryptor,
-                );
-            }
+            const keys = responseKeys(decoded.session);
             const algorithm: body.Algorithm =
                 if (decoded.session.security == protocol.security_aes128_gcm)
                     .aes_128_gcm
@@ -592,20 +512,12 @@ fn relayUdpBody(
 
 fn responseKeys(
     session: protocol.ServerSession,
-    is_aead: bool,
 ) struct { key: [16]u8, iv: [16]u8 } {
-    if (is_aead) {
-        var key_digest: [32]u8 = undefined;
-        std.crypto.hash.sha2.Sha256.hash(&session.body_key, &key_digest, .{});
-        var iv_digest: [32]u8 = undefined;
-        std.crypto.hash.sha2.Sha256.hash(&session.body_iv, &iv_digest, .{});
-        return .{ .key = key_digest[0..16].*, .iv = iv_digest[0..16].* };
-    }
-    var key: [16]u8 = undefined;
-    std.crypto.hash.Md5.hash(&session.body_key, &key, .{});
-    var iv: [16]u8 = undefined;
-    std.crypto.hash.Md5.hash(&session.body_iv, &iv, .{});
-    return .{ .key = key, .iv = iv };
+    var key_digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(&session.body_key, &key_digest, .{});
+    var iv_digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(&session.body_iv, &iv_digest, .{});
+    return .{ .key = key_digest[0..16].*, .iv = iv_digest[0..16].* };
 }
 
 fn relayBody(

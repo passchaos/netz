@@ -205,22 +205,15 @@ pub const Method = union(MethodTag) {
 };
 
 pub const Version = enum {
-    /// Response-only compatibility representation for an HTTP/0.9 body.
-    /// Request parsing never accepts this version and writers reject it.
-    http_0_9,
-    http_1_0,
     http_1_1,
 
     pub fn parse(bytes: []const u8) Error!Version {
-        if (std.mem.eql(u8, bytes, "HTTP/1.0")) return .http_1_0;
         if (std.mem.eql(u8, bytes, "HTTP/1.1")) return .http_1_1;
         return error.InvalidVersion;
     }
 
     pub fn string(self: Version) []const u8 {
         return switch (self) {
-            .http_0_9 => "HTTP/0.9",
-            .http_1_0 => "HTTP/1.0",
             .http_1_1 => "HTTP/1.1",
         };
     }
@@ -232,10 +225,6 @@ pub const ParseOptions = struct {
     /// caller such as the connection-owning server supplies a policy.
     max_request_target_bytes: usize = std.math.maxInt(usize),
     allow_obs_fold: bool = false,
-    /// Accept a headerless HTTP/0.9 response body on client response paths.
-    /// This is deliberately response-only and disabled by default, matching
-    /// Hyper's `http09_responses` compatibility switch.
-    allow_http_0_9_responses: bool = false,
     /// Compatibility switch matching Hyper's HTTP/1 server builder. Strict
     /// parsing remains the default because accepting a different request-line
     /// grammar at intermediaries can create routing ambiguity.
@@ -251,85 +240,6 @@ pub const ParseOptions = struct {
     /// Response-side counterpart to `ignore_invalid_headers_in_requests`.
     ignore_invalid_headers_in_responses: bool = false,
 };
-
-/// Classification used by client runtimes before they decide whether bytes
-/// belong to an HTTP/1.x response head or an opt-in HTTP/0.9 body. Waiting on
-/// every proper prefix prevents a fragmented `HTTP/` status line from being
-/// mistaken for legacy body bytes. Once `HTTP/` is complete, malformed
-/// versions remain on the strict HTTP/1 parser path instead of being accepted
-/// as HTTP/0.9.
-pub const ResponsePrefix = enum { incomplete, http_1_x, http_0_9 };
-
-pub fn classifyResponsePrefix(bytes: []const u8) ResponsePrefix {
-    const marker = "HTTP/";
-    const compared = @min(bytes.len, marker.len);
-    if (std.mem.eql(u8, bytes[0..compared], marker[0..compared])) {
-        return if (bytes.len < marker.len) .incomplete else .http_1_x;
-    }
-    return .http_0_9;
-}
-
-test "HTTP/1 response prefix classification keeps fragmented versions strict" {
-    const prefixes = [_][]const u8{ "", "H", "HT", "HTT", "HTTP" };
-    for (prefixes) |prefix| {
-        try std.testing.expectEqual(ResponsePrefix.incomplete, classifyResponsePrefix(prefix));
-    }
-    try std.testing.expectEqual(ResponsePrefix.http_1_x, classifyResponsePrefix("HTTP/1.1"));
-    try std.testing.expectEqual(ResponsePrefix.http_1_x, classifyResponsePrefix("HTTP/bad"));
-    try std.testing.expectEqual(ResponsePrefix.http_0_9, classifyResponsePrefix("Hello"));
-
-    try std.testing.expectError(error.BufferTooShort, parseResponse(
-        std.testing.allocator,
-        "HTTP",
-        .{ .allow_http_0_9_responses = true },
-    ));
-    try std.testing.expectError(error.BufferTooShort, parseResponse(
-        std.testing.allocator,
-        "HTTP/bad",
-        .{ .allow_http_0_9_responses = true },
-    ));
-}
-
-test "HTTP/0.9 responses are opt in and writers remain strict" {
-    const allocator = std.testing.allocator;
-    try std.testing.expectError(error.BufferTooShort, parseResponse(allocator, "legacy body", .{}));
-
-    var response = try parseResponse(allocator, "legacy body", .{
-        .allow_http_0_9_responses = true,
-    });
-    defer response.deinit(allocator);
-    try std.testing.expectEqual(Version.http_0_9, response.version);
-    try std.testing.expectEqual(@as(u16, 200), response.status);
-    try std.testing.expectEqualStrings("legacy body", response.body);
-    try std.testing.expect(!response.keepAlive());
-    try std.testing.expectError(error.InvalidResponse, parseResponseForRequest(
-        allocator,
-        "legacy body",
-        .{ .allow_http_0_9_responses = true },
-        .POST,
-    ));
-
-    var encoded: std.ArrayList(u8) = .empty;
-    defer encoded.deinit(allocator);
-    try std.testing.expectError(error.InvalidVersion, writeResponseChecked(
-        &encoded,
-        allocator,
-        .http_0_9,
-        200,
-        "OK",
-        &.{},
-        "body",
-    ));
-    try std.testing.expectError(error.InvalidVersion, writeRequestChecked(
-        &encoded,
-        allocator,
-        .GET,
-        "/",
-        .http_0_9,
-        &.{},
-        "",
-    ));
-}
 
 pub const ResponseContext = struct {
     request_method: ?Method = null,
@@ -717,7 +627,6 @@ fn finishRequestHead(parsed: BorrowedHead, options: ParseOptions) Error!RequestH
     const method = try Method.parse(request_line.method);
     try validateRequestTargetForMethod(method, request_line.target);
     const version = try Version.parse(request_line.version);
-    try validateTransferEncodingForVersion(version, parsed.headers);
     try normalizeParsedRequestHostParts(
         method,
         version,
@@ -764,7 +673,7 @@ fn finishResponseHead(parsed: BorrowedHead, context: ResponseContext) Error!Resp
     const version = try Version.parse(status_line.version);
     const status = try parseStatusCode(status_line.status_code);
     try validateReasonPhrase(status_line.reason);
-    const metadata = try response_framing.inspect(version, status, context.request_method, parsed.headers);
+    const metadata = try response_framing.inspect(status, context.request_method, parsed.headers);
     early_data.validateForbiddenFields(parsed.headers) catch
         return error.InvalidResponse;
     const declared_content_length = try metadata.contentLength(parsed.headers);
@@ -1077,7 +986,6 @@ pub fn parseRequest(allocator: std.mem.Allocator, bytes: []const u8, options: Pa
         .{ .ignore_invalid = options.ignore_invalid_headers_in_requests },
     );
     errdefer parsed_headers.deinit(allocator);
-    try validateTransferEncodingForVersion(version, parsed_headers.headers);
     try normalizeParsedRequestHostParts(
         method,
         version,
@@ -1148,7 +1056,6 @@ pub fn validateRequestHead(
         .{ .ignore_invalid = options.ignore_invalid_headers_in_requests },
     );
     defer parsed.deinit(allocator);
-    try validateTransferEncodingForVersion(version, parsed.headers);
     try normalizeParsedRequestHostParts(
         method,
         version,
@@ -1180,27 +1087,6 @@ pub fn parseResponseWithContext(
     options: ParseOptions,
     context: ResponseContext,
 ) Error!Response {
-    if (options.allow_http_0_9_responses) switch (classifyResponsePrefix(bytes)) {
-        .http_0_9 => {
-            // HTTP/0.9 defines only GET. The context-free parser cannot infer
-            // a method, but callers that provide one must not reinterpret a
-            // headerless response to any other request method.
-            if (context.request_method) |method| {
-                if (method != .GET) return error.InvalidResponse;
-            }
-            return .{
-                .version = .http_0_9,
-                .status = 200,
-                .reason = "",
-                .headers = @constCast(&[_]Header{}),
-                .body = bytes,
-                .body_framing = .close_delimited,
-                .trailers = @constCast(&[_]Header{}),
-                .consumed = bytes.len,
-            };
-        },
-        .incomplete, .http_1_x => {},
-    };
     const head_end = findHeadEnd(bytes) orelse return error.BufferTooShort;
     const head = bytes[0..head_end];
     var lines = LineIterator.init(head);
@@ -1221,7 +1107,7 @@ pub fn parseResponseWithContext(
         },
     );
     errdefer parsed_headers.deinit(allocator);
-    const metadata = try response_framing.inspect(version, status, context.request_method, parsed_headers.headers);
+    const metadata = try response_framing.inspect(status, context.request_method, parsed_headers.headers);
     early_data.validateForbiddenFields(parsed_headers.headers) catch
         return error.InvalidResponse;
     const consumed_head = head_end + 4;
@@ -1868,13 +1754,6 @@ pub fn statusCodeForbidsBody(status: u16) bool {
     return (status >= 100 and status < 200) or status == 204 or status == 304;
 }
 
-fn validateTransferEncodingForVersion(version: Version, headers: []const Header) Error!void {
-    if (version != .http_1_0) return;
-    for (headers) |header| {
-        if (header.eqlName("transfer-encoding")) return error.InvalidTransferEncoding;
-    }
-}
-
 const TeHeaderState = struct {
     present: bool = false,
     accepts_trailers: bool = false,
@@ -2286,11 +2165,9 @@ fn validateRequestForWrite(
     headers: []const Header,
     body: []const u8,
 ) Error!void {
-    if (version == .http_0_9) return error.InvalidVersion;
     try validateRequestTargetForMethod(method, target);
     early_data.validateOutboundRequestHeaders(headers) catch
         return error.MalformedHeader;
-    try validateTransferEncodingForVersion(version, headers);
     try validateConnectionHeadersForWrite(version, headers);
     try validateRequestTeForWrite(version, headers);
     try validateRequestHostParts(method, version, target, headers);
@@ -2390,10 +2267,8 @@ fn validateResponseForWrite(
     headers: []const Header,
     body: []const u8,
 ) Error!void {
-    if (version == .http_0_9) return error.InvalidVersion;
     try validateReasonPhrase(reason);
     try validateStatusCode(status);
-    try validateTransferEncodingForVersion(version, headers);
     try validateConnectionHeadersForWrite(version, headers);
     try validateResponseTeForWrite(headers);
     try validateResponseExpectForWrite(headers);
@@ -3231,15 +3106,6 @@ test "HTTP/1 low-level request writers validate framing before output" {
             .body = "",
         },
         .{
-            .expected = error.InvalidTransferEncoding,
-            .version = .http_1_0,
-            .headers = &.{.{
-                .name = "Transfer-Encoding",
-                .value = "chunked",
-            }},
-            .body = "0\r\n\r\n",
-        },
-        .{
             .expected = error.InvalidContentLength,
             .version = .http_1_1,
             .headers = &.{.{ .name = "Host", .value = "example.com" }},
@@ -3297,15 +3163,6 @@ test "HTTP/1 low-level request writers validate framing before output" {
             .version = .http_1_1,
             .headers = &.{
                 .{ .name = "Host", .value = "example.com" },
-                .{ .name = "Upgrade", .value = "websocket" },
-            },
-            .body = "",
-        },
-        .{
-            .expected = error.InvalidConnection,
-            .version = .http_1_0,
-            .headers = &.{
-                .{ .name = "Connection", .value = "Upgrade" },
                 .{ .name = "Upgrade", .value = "websocket" },
             },
             .body = "",
@@ -3472,15 +3329,6 @@ test "HTTP/1 low-level request writers validate framing before output" {
         },
         .{
             .expected = error.InvalidExpectation,
-            .version = .http_1_0,
-            .headers = &.{
-                .{ .name = "Content-Length", .value = "4" },
-                .{ .name = "Expect", .value = "100-continue" },
-            },
-            .body = "body",
-        },
-        .{
-            .expected = error.InvalidExpectation,
             .version = .http_1_1,
             .headers = &.{
                 .{ .name = "Host", .value = "example.com" },
@@ -3524,21 +3372,6 @@ test "HTTP/1 low-level request writers validate framing before output" {
         );
         try std.testing.expectEqualStrings(prefix, encoded.items);
     }
-
-    encoded.clearRetainingCapacity();
-    try writeRequestChecked(
-        &encoded,
-        allocator,
-        .GET,
-        "/legacy",
-        .http_1_0,
-        &.{},
-        "",
-    );
-    try std.testing.expectEqualStrings(
-        "GET /legacy HTTP/1.0\r\n\r\n",
-        encoded.items,
-    );
 
     encoded.clearRetainingCapacity();
     try writeRequestChecked(
@@ -3711,14 +3544,6 @@ test "HTTP/1 low-level response writers validate framing before output" {
         headers: []const Header,
         body: []const u8 = "",
     }{
-        .{
-            .expected = error.InvalidTransferEncoding,
-            .version = .http_1_0,
-            .headers = &.{.{
-                .name = "Transfer-Encoding",
-                .value = "chunked",
-            }},
-        },
         .{
             .expected = error.InvalidContentLength,
             .version = .http_1_1,
@@ -4121,7 +3946,6 @@ test "HTTP/1 request trailer capability combines repeated TE fields" {
         .{ .name = "Connection", .value = "keep-alive, TE" },
     };
     try std.testing.expect(requestAcceptsTrailers(.http_1_1, &headers));
-    try std.testing.expect(!requestAcceptsTrailers(.http_1_0, &headers));
     try std.testing.expect(!requestAcceptsTrailers(.http_1_1, &.{ .{
         .name = "TE",
         .value = "gzip, trailers;q=1",
@@ -5375,9 +5199,6 @@ test "HTTP/1 parser rejects ambiguous body lengths" {
 
     const split_non_final_chunked = "POST / HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: gzip\r\n\r\n0\r\n\r\n";
     try std.testing.expectError(error.InvalidTransferEncoding, parseRequest(allocator, split_non_final_chunked, .{}));
-
-    const http10_te = "POST / HTTP/1.0\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n";
-    try std.testing.expectError(error.InvalidTransferEncoding, parseRequest(allocator, http10_te, .{}));
 }
 
 test "HTTP/1 Transfer-Encoding grammar is quote aware and strict" {
@@ -5544,9 +5365,6 @@ test "HTTP/1 response body framing helpers" {
     try std.testing.expectEqualStrings("gzip", close_delimited_resp.header("transfer-encoding").?);
     try std.testing.expectEqualStrings("compressed-until-close", close_delimited_resp.body);
     try std.testing.expectEqual(non_chunked_te.len, close_delimited_resp.consumed);
-
-    const http10_te_response = "HTTP/1.0 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n";
-    try std.testing.expectError(error.InvalidTransferEncoding, parseResponse(allocator, http10_te_response, .{}));
 }
 
 test "HTTP/1 response parsing honors request method body rules" {

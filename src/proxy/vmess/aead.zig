@@ -119,7 +119,7 @@ pub const SealedHeader = struct {
     wire: []u8,
 };
 
-/// Seal one VMess AEAD request header. `data` is the legacy plaintext header
+/// Seal one VMess AEAD request header. `data` is the plaintext request header
 /// produced by the VMess request builder.
 pub fn sealHeader(
     allocator: std.mem.Allocator,

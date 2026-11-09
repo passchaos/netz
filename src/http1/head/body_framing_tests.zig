@@ -45,9 +45,9 @@ test "HTTP/1 bodyless response heads ignore unusable length metadata at the wire
     }
 }
 
-test "HTTP/1 bodyless HTTP10 responses prioritize head termination over transfer coding" {
+test "HTTP/1 bodyless responses prioritize head termination over transfer coding" {
     for (cases) |case| {
-        const wire = try std.fmt.allocPrint(allocator, "HTTP/1.0 {d} Status\r\nTransfer-Encoding: invalid;\r\n\r\nNEXT", .{case.status});
+        const wire = try std.fmt.allocPrint(allocator, "HTTP/1.1 {d} Status\r\nTransfer-Encoding: invalid;\r\n\r\nNEXT", .{case.status});
         defer allocator.free(wire);
         const end = std.mem.indexOf(u8, wire, "\r\n\r\n").? + 4;
         var storage: [8]http1.Header = undefined;
@@ -178,7 +178,7 @@ test "HTTP/1 bodyless CONNECT leaves exact tunnel bytes with invalid framing fie
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    for ([_][]const u8{ "HTTP/1.0", "HTTP/1.1" }) |version| {
+    for ([_][]const u8{"HTTP/1.1"}) |version| {
         for ([_][]const u8{
             "Content-Length: 184467440737095516160000\r\n",
             "Transfer-Encoding: invalid;\r\nContent-Length: +5\r\n",

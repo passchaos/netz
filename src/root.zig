@@ -10,6 +10,8 @@ pub const runtime = @import("runtime.zig");
 pub const stream = @import("stream.zig");
 pub const tls = @import("tls/mod.zig");
 pub const proxy = @import("proxy/mod.zig");
+pub const vpn = @import("vpn/mod.zig");
+pub const mesh = @import("mesh/mod.zig");
 pub const http = @import("http/mod.zig");
 pub const streaming = @import("http/streaming.zig");
 pub const http1 = @import("http1/mod.zig");
@@ -27,6 +29,8 @@ comptime {
     _ = stream;
     _ = tls;
     _ = proxy;
+    _ = vpn;
+    _ = mesh;
     _ = http;
     _ = streaming;
     _ = http1;

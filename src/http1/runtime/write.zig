@@ -584,7 +584,6 @@ fn prepareStreamingRequest(
     options: StreamingRequestOptions,
     scratch: *Scratch,
 ) Error!StreamingHead {
-    if (options.version == .http_0_9) return error.InvalidVersion;
     scratch.reset();
     var headers_stack: [header_staging_capacity]http1.Header = undefined;
     const headers_buffer = try stackFirstHeaderBuffer(
@@ -656,7 +655,6 @@ fn prepareStreamingRequest(
         );
     } else &.{};
     const explicit_chunked = try chunkedWriteFraming(
-        options.version,
         headers.items,
         trailer_headers,
     );
@@ -669,9 +667,6 @@ fn prepareStreamingRequest(
     const use_chunked = explicit_chunked or
         (declared_length == null and options.body_length == null and
             requestUnknownLengthUsesChunked(options.method));
-    if (use_chunked and options.version == .http_1_0) {
-        return error.InvalidVersion;
-    }
     const fixed_length: usize = if (use_chunked)
         0
     else if (options.body_length) |length|
@@ -752,7 +747,6 @@ fn prepareStreamingResponseWithDefaultDate(
     default_date: ?[]const u8,
     scratch: *Scratch,
 ) Error!StreamingHead {
-    if (options.version == .http_0_9) return error.InvalidVersion;
     scratch.reset();
     var headers_stack: [header_staging_capacity]http1.Header = undefined;
     const headers_buffer = try stackFirstHeaderBuffer(
@@ -800,7 +794,6 @@ fn prepareStreamingResponseWithDefaultDate(
         options.request_method,
     );
     const explicit_chunked = try chunkedWriteFraming(
-        options.version,
         options.headers,
         trailer_headers,
     );
@@ -839,9 +832,6 @@ fn prepareStreamingResponseWithDefaultDate(
     // explicitly supplied coding while still returning suppressed framing.
     const header_uses_chunked = use_chunked or
         metadata_only_transfer_encoding;
-    if (use_chunked and options.version == .http_1_0) {
-        return error.InvalidVersion;
-    }
     if (options.request_method != null and
         options.request_method.? == .CONNECT and
         options.status >= 200 and options.status < 300)
@@ -1207,17 +1197,6 @@ test "HTTP/1 runtime request writer normalizes TE connection semantics" {
             .{
                 .host = "localhost",
                 .headers = &.{.{ .name = "TE", .value = "chunked" }},
-            },
-            &scratch,
-        ),
-    );
-    try std.testing.expectError(
-        error.InvalidTransferEncoding,
-        prepareRequest(
-            allocator,
-            .{
-                .version = .http_1_0,
-                .headers = &.{.{ .name = "TE", .value = "trailers" }},
             },
             &scratch,
         ),
@@ -1741,7 +1720,6 @@ pub fn prepareRequest(
     options: RequestOptions,
     scratch: *Scratch,
 ) Error!MessageParts {
-    if (options.version == .http_0_9) return error.InvalidVersion;
     scratch.reset();
     var headers_stack: [header_staging_capacity]http1.Header = undefined;
     const headers_buffer = try stackFirstHeaderBuffer(
@@ -1803,7 +1781,6 @@ pub fn prepareRequest(
         options.trailers,
     );
     const use_chunked = try chunkedWriteFraming(
-        options.version,
         headers.items,
         options.trailers,
     );
@@ -1888,7 +1865,6 @@ fn prepareResponseWithDefaultDate(
     default_date: ?[]const u8,
     scratch: *Scratch,
 ) Error!MessageParts {
-    if (options.version == .http_0_9) return error.InvalidVersion;
     scratch.reset();
     const framing = try prepareResponseFramingAndHead(
         allocator,
@@ -2505,7 +2481,6 @@ fn prepareResponseFramingAndHead(
     default_date: ?[]const u8,
     scratch: *Scratch,
 ) Error!ResponseFraming {
-    if (options.version == .http_0_9) return error.InvalidVersion;
     try http1.validateStatusCode(options.status);
     try http1.validateReasonPhrase(options.reason);
     try http1.validateConnectionHeadersForWrite(
@@ -2535,7 +2510,6 @@ fn prepareResponseFramingAndHead(
         return error.InvalidTrailer;
     }
     const use_chunked = try chunkedWriteFraming(
-        options.version,
         options.headers,
         options.trailers,
     );
@@ -2949,7 +2923,6 @@ fn responseShouldDefaultContentLength(
 }
 
 fn chunkedWriteFraming(
-    version: http1.Version,
     headers: []const http1.Header,
     trailers: []const http1.Header,
 ) Error!bool {
@@ -2966,11 +2939,9 @@ fn chunkedWriteFraming(
         if ((try http1.bodyFraming(headers)) != .chunked) {
             return error.InvalidTransferEncoding;
         }
-        if (version == .http_1_0) return error.InvalidVersion;
         return true;
     }
     if (trailers.len == 0 and !hasHeader(headers, "trailer")) return false;
-    if (version == .http_1_0) return error.InvalidVersion;
     return true;
 }
 

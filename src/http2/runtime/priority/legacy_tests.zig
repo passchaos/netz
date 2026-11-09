@@ -1,4 +1,4 @@
-//! RFC 9218 negotiation disables legacy dependency semantics, not framing.
+//! Deprecated dependency semantics are ignored while framing remains validated.
 const std = @import("std");
 const http2 = @import("../../mod.zig");
 const runtime = @import("../../runtime.zig");
@@ -149,18 +149,22 @@ fn responseCase(comptime mode: Mode, fragmented: bool) !void {
     if (peer.err) |err| return err;
 }
 
-test "HTTP/2 RFC9218 ignored legacy fields retain structure and default validation" {
+test "HTTP/2 RFC9218 ignored legacy fields retain stream and framing validation" {
     var connection = runtime.Connection{ .allocator = allocator, .io = undefined, .stream = undefined, .role = .server };
     const priority = http2.Frame{ .header = .{ .length = 5, .frame_type = .priority, .flags = 0, .stream_id = 1 }, .payload = &.{ 0, 0, 0, 1, 16 } };
-    try std.testing.expectError(error.InvalidStreamId, runtime.testing.handleConnectionFrame(&connection, priority));
+    try std.testing.expect(try runtime.testing.handleConnectionFrame(&connection, priority));
     connection.peer_no_rfc7540_priorities = true;
     try std.testing.expect(try runtime.testing.handleConnectionFrame(&connection, priority));
     connection.role = .client;
-    try std.testing.expectError(error.InvalidStreamId, runtime.testing.handleConnectionFrame(&connection, priority));
+    connection.peer_no_rfc7540_priorities = false;
+    try std.testing.expect(try runtime.testing.handleConnectionFrame(&connection, priority));
     connection.limits.no_rfc7540_priorities = true;
     var zero_id = priority;
     zero_id.header.stream_id = 0;
     try std.testing.expectError(error.InvalidStreamId, runtime.testing.handleConnectionFrame(&connection, zero_id));
+    var short_priority = priority;
+    short_priority.payload = priority.payload[0..4];
+    try std.testing.expectError(error.InvalidFrameSize, runtime.testing.handleConnectionFrame(&connection, short_priority));
     const headers = http2.Frame{ .header = .{ .length = 9, .frame_type = .headers, .flags = 0x2d, .stream_id = 1 }, .payload = &.{ 2, 0, 0, 0, 1, 16, 0x88, 0, 0 } };
     try std.testing.expectError(error.InvalidStreamId, http2.HeadersPayload.parse(headers));
     const ignored = try http2.HeadersPayload.parseIgnoringPriority(headers);
