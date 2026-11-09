@@ -47,6 +47,11 @@ pub const Options = struct {
     /// scheduling contention for CPU-bound handlers; queued handlers wait in
     /// arrival order. Values are clamped to `1..max_streams`.
     max_worker_threads: ?usize = null,
+    /// Run handlers for requests that ended with their head on the QUIC
+    /// owner instead of a worker thread. The handler may return
+    /// `error.InlineDeclined` before producing side effects to fall back to
+    /// the worker path.
+    inline_bodyless: bool = false,
 };
 
 pub const Summary = struct {
@@ -113,6 +118,9 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
             from: net.IpAddress,
             stream_id: u62,
             head: http3.DecodedRequestHead,
+            /// The request stream ended with the head, so no body events are
+            /// needed before running the handler.
+            request_finished: bool = false,
             trailers: ?http3.DecodedTrailers = null,
             body_mutex: std.Io.Mutex = .init,
             /// Request DATA copied by the owner before `.finished` can retire
@@ -146,6 +154,13 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
         pub const Stream = struct {
             engine: *Self,
             slot: *Slot,
+
+            /// True when this handler runs on the QUIC owner. Handlers that
+            /// cannot finish without blocking must return
+            /// `error.InlineDeclined` before side effects.
+            pub fn isInline(self: Stream) bool {
+                return self.engine.inline_active;
+            }
 
             pub fn head(self: Stream) *const http3.DecodedRequestHead {
                 return &self.slot.head;
@@ -309,6 +324,11 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
         stopping: bool = false,
         max_buffered_body_bytes: usize = 1,
         active: usize = 0,
+        /// True while a handler runs on the owner. Stream command submissions
+        /// then execute in place instead of crossing to the owner.
+        inline_active: bool = false,
+        inline_pump: ?*const fn (*Self, *anyopaque) anyerror!void = null,
+        inline_pump_state: ?*anyopaque = null,
         summary: Summary = .{},
 
         pub fn init(
@@ -442,7 +462,13 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                     slot.deinit(self.allocator);
                     self.allocator.destroy(slot);
                 }
-                try self.enqueue(slot, limit, Context, context, handler);
+                if (self.options.inline_bodyless and !self.inline_active and
+                    slot.request_finished)
+                {
+                    try self.runInline(slot, limit, Context, context, handler);
+                } else {
+                    try self.enqueue(slot, limit, Context, context, handler);
+                }
             }
         }
 
@@ -577,6 +603,11 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                 .from = from,
                 .stream_id = stream_id,
                 .head = head,
+                .request_finished = head.request_finished,
+                // A head-complete request has no body events left; publishing
+                // this before the handler starts keeps an inline `nextBody`
+                // from waiting for a `.finished` event the owner cannot route.
+                .body_finished = head.request_finished,
             };
             errdefer slot.deinit(self.allocator);
             self.slots.append(self.allocator, slot) catch |err| return err;
@@ -790,6 +821,7 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
         }
 
         fn submit(self: *Self, command: *Command, deadline: ?std.Io.Clock.Timestamp) anyerror!void {
+            if (self.inline_active) return self.submitInline(command);
             self.mutex.lockUncancelable(self.io);
             self.commands.append(self.allocator, command) catch |err| {
                 self.mutex.unlock(self.io);
@@ -806,6 +838,79 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                 return err;
             };
             if (command.result) |failure| return failure;
+        }
+
+        /// Execute a command from the owner thread. Congestion, pacing, and
+        /// flow-control limits retry after processing one inbound event,
+        /// which is the progress the normal command loop gets between
+        /// re-queues.
+        fn submitInline(self: *Self, command: *Command) anyerror!void {
+            while (true) {
+                self.execute(command) catch |err| switch (err) {
+                    error.FlowControlBlocked,
+                    error.CongestionLimited,
+                    error.PacingLimited,
+                    => {
+                        const pump = self.inline_pump orelse return err;
+                        try pump(self, self.inline_pump_state orelse return err);
+                        continue;
+                    },
+                    else => return err,
+                };
+                return;
+            }
+        }
+
+        /// Run one head-complete request on the owner. The handler may return
+        /// `error.InlineDeclined` before side effects, in which case the slot
+        /// moves to the worker queue unchanged.
+        fn runInline(
+            self: *Self,
+            slot: *Slot,
+            limit: usize,
+            comptime Context: type,
+            context: *Context,
+            comptime handler: *const fn (*Context, *Stream) anyerror!void,
+        ) !void {
+            const Pump = struct {
+                fn pump(engine: *Self, raw: *anyopaque) anyerror!void {
+                    _ = raw;
+                    const event = try engine.readOrWake(null);
+                    if (event) |value| try engine.route(value);
+                }
+            };
+
+            self.active += 1;
+            self.summary.accepted += 1;
+            self.inline_active = true;
+            self.inline_pump = Pump.pump;
+            defer {
+                self.inline_active = false;
+                self.inline_pump = null;
+                self.inline_pump_state = null;
+            }
+
+            var declined = false;
+            handler(context, &slot.stream) catch |err| {
+                if (err == error.InlineDeclined) {
+                    declined = true;
+                } else {
+                    slot.handler_error = err;
+                }
+            };
+            if (declined) {
+                // Drop inline mode before the worker can pick the slot up.
+                self.inline_active = false;
+                self.inline_pump = null;
+                self.inline_pump_state = null;
+                try self.enqueue(slot, limit, Context, context, handler);
+                return;
+            }
+
+            slot.body_mutex.lockUncancelable(self.io);
+            slot.handler_done = true;
+            slot.body_mutex.unlock(self.io);
+            self.reap();
         }
 
         fn drainCommands(self: *Self) !void {

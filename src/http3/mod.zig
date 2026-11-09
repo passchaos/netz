@@ -3858,6 +3858,9 @@ pub const DecodedRequestHead = struct {
     headers: []Qpack.HeaderField,
     content_length: ?usize,
     body_allowed: bool,
+    /// True when the request stream ended with the head, so the handler can
+    /// run without waiting for body events.
+    request_finished: bool = false,
     consumed: usize,
     qpack_section_acknowledgments: usize,
 

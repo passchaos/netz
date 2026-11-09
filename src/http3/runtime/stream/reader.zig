@@ -248,7 +248,7 @@ pub const Reader = struct {
                     const payload = self.receive.available()[header.header_length..total_length];
                     if (self.phase == .initial_headers) {
                         var final_head = true;
-                        const event = switch (self.kind) {
+                        var event = switch (self.kind) {
                             .request => blk: {
                                 var head = try http3.decodeRequestHeadFieldSectionWithDynamicTable(
                                     self.allocator,
@@ -308,6 +308,10 @@ pub const Reader = struct {
                         self.current_frame = null;
                         self.current_header_consumed = false;
                         if (final_head) self.phase = .body;
+                        if (event == .head and event.head == .request) {
+                            event.head.request.request_finished =
+                                self.receive.complete();
+                        }
                         return event;
                     }
                     if (self.phase != .body) return error.UnexpectedFrame;
