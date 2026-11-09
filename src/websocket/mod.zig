@@ -2605,9 +2605,10 @@ test "WebSocket handshake validation" {
     );
 
     const http10 = "GET /chat HTTP/1.0\r\nHost: example.com\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n";
-    var http10_req = try http1.parseRequest(allocator, http10, .{});
-    defer http10_req.deinit(allocator);
-    try std.testing.expectError(error.InvalidHandshake, validateClientHandshake(http10_req));
+    try std.testing.expectError(
+        error.InvalidVersion,
+        http1.parseRequest(allocator, http10, .{}),
+    );
 
     const duplicate_key = "GET /chat HTTP/1.1\r\nHost: example.com\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n";
     var duplicate_key_req = try http1.parseRequest(allocator, duplicate_key, .{});

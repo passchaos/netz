@@ -15250,7 +15250,7 @@ test "WebSocket client rejects HTTP/1.0 upgrade responses" {
     var shared = Shared{ .server = &server };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
 
-    try std.testing.expectError(error.InvalidHandshake, Client.connect(allocator, io, server.address(), .{
+    try std.testing.expectError(error.InvalidVersion, Client.connect(allocator, io, server.address(), .{
         .host = "127.0.0.1",
         .target = "/http10-response",
         .limits = .{ .max_head_bytes = 4096, .max_frame_bytes = 4096 },

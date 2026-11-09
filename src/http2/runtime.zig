@@ -28719,7 +28719,7 @@ test "HTTP/2 runtime decodes padded priority HEADERS payloads" {
     try std.testing.expectEqualStrings("ok", response.body);
 }
 
-test "HTTP/2 runtime rejects HEADERS priority self dependency" {
+test "HTTP/2 runtime ignores HEADERS priority self dependency" {
     const allocator = std.testing.allocator;
 
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -28747,15 +28747,15 @@ test "HTTP/2 runtime rejects HEADERS priority self dependency" {
             defer connection.close();
 
             var request = connection.readRequest() catch |err| {
-                if (err == error.InvalidFrame or err == error.InvalidStreamId) {
-                    shared.saw_expected = true;
-                    return;
-                }
                 shared.err = err;
                 return;
             };
-            request.deinit(shared.server.allocator);
-            shared.err = error.UnexpectedFrame;
+            defer request.deinit(shared.server.allocator);
+            shared.saw_expected = std.mem.eql(
+                u8,
+                request.path,
+                "/self-priority",
+            );
         }
     };
 
@@ -28780,7 +28780,8 @@ test "HTTP/2 runtime rejects HEADERS priority self dependency" {
     defer payload.deinit(allocator);
     try payload.appendSlice(allocator, &.{ 0, 0, 0, 1, 16 }); // PRIORITY depends on stream 1 itself.
     try payload.appendSlice(allocator, block.items);
-    const flags = flag_end_headers | @as(u8, (@as(http2.Flags, .{ .priority = true })).byte());
+    const flags = flag_end_headers | flag_end_stream |
+        @as(u8, (@as(http2.Flags, .{ .priority = true })).byte());
     try writeFrame(allocator, io, client.stream, .headers, flags, 1, payload.items);
 
     thread.join();
