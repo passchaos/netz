@@ -6197,16 +6197,13 @@ pub const Connection = struct {
             .must_close = owned.must_close,
         };
         errdefer request.deinit(self.allocator);
-        var head_value = try RequestBodyReader.Head.copy(self.allocator, .{
-            .method = owned.method,
-            .target = owned.target,
-            .version = owned.version,
-            .headers = owned_headers,
-            .body_framing = owned.body_framing,
-            .content_length = owned.content_length,
-            .must_close = owned.must_close,
-        });
-        errdefer head_value.deinit();
+        // The head view borrows the request's owned bytes and header array;
+        // the reader keeps both alive until `takeRequest`/`deinit`.
+        const head_value = RequestBodyReader.Head.borrow(
+            self.allocator,
+            &request,
+            owned.content_length,
+        );
 
         succeeded = true;
         self.writer_state.finishRead();
