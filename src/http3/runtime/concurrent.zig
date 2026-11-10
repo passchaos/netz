@@ -11,6 +11,10 @@
 //! session directly.
 const std = @import("std");
 const http3 = @import("../mod.zig");
+
+/// Upper bound on the per-stream body reservation derived from a declared
+/// Content-Length. Larger bodies grow normally.
+const body_preallocate_cap: usize = 64 * 1024;
 const net = std.Io.net;
 const Error = @import("error.zig").Error;
 const stream_events = @import("stream/events.zig");
@@ -666,6 +670,16 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                 .body_finished = head.request_finished,
             };
             errdefer slot.deinit(self.allocator);
+            // Reserve the declared body once; the cap keeps a large
+            // declaration from front-loading per-stream memory.
+            if (slot.head.content_length) |length| {
+                if (length != 0) {
+                    slot.body.ensureTotalCapacity(
+                        self.allocator,
+                        @min(length, body_preallocate_cap),
+                    ) catch {};
+                }
+            }
             self.slots.append(self.allocator, slot) catch |err| return err;
             if (stream_id > self.summary.last_stream_id) self.summary.last_stream_id = stream_id;
             return slot;

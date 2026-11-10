@@ -8,6 +8,10 @@
 const std = @import("std");
 const http2 = @import("../mod.zig");
 
+/// Upper bound on the per-stream body reservation derived from a declared
+/// Content-Length. Larger bodies grow normally.
+const body_preallocate_cap: usize = 64 * 1024;
+
 pub const Options = struct {
     max_streams: usize = 32,
     deadline: ?std.Io.Clock.Timestamp = null,
@@ -577,6 +581,23 @@ pub fn Engine(
             };
             slot.public_stream = .{ .engine = self, .slot = slot };
             errdefer slot.deinit(self.allocator);
+            // A declared length lets the owner reserve the body once instead
+            // of growing through several ArrayList steps. Cap the reservation
+            // so a large declaration cannot front-load per-stream memory.
+            if (comptime @hasField(StreamType, "expected_request_length")) {
+                if (slot.stream.expected_request_length) |length| {
+                    const over_limit = if (comptime @hasField(StreamType, "request_body_over_limit"))
+                        slot.stream.request_body_over_limit
+                    else
+                        false;
+                    if (length != 0 and !over_limit) {
+                        slot.body.ensureTotalCapacity(
+                            self.allocator,
+                            @min(length, body_preallocate_cap),
+                        ) catch {};
+                    }
+                }
+            }
             try self.slots.append(self.allocator, slot);
             return slot;
         }
