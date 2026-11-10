@@ -6,7 +6,12 @@ pub fn Result(comptime Frame: type) type {
     return union(enum) { frame: Frame, wake };
 }
 
-pub fn read(connection: anytype, deadline: ?std.Io.Clock.Timestamp, wake: *std.Io.Event, comptime Frame: type, comptime ReadError: type, comptime read_frame: anytype, comptime retain_frame: anytype) anyerror!Result(Frame) {
+pub fn read(connection: anytype, deadline: ?std.Io.Clock.Timestamp, wake: ?*std.Io.Event, comptime Frame: type, comptime ReadError: type, comptime read_frame: anytype, comptime retain_frame: anytype) anyerror!Result(Frame) {
+    const event = wake orelse {
+        // No task can signal a command wake (no handler workers exist yet), so
+        // the caller's own task reads directly: no select, no extra spawns.
+        return .{ .frame = try read_frame(connection, deadline) };
+    };
     const Selection = union(enum) {
         frame: ReadError!Frame,
         wake: std.Io.Cancelable!void,
@@ -20,7 +25,7 @@ pub fn read(connection: anytype, deadline: ?std.Io.Clock.Timestamp, wake: *std.I
         .wake => |result| result catch {},
     };
     try select.concurrent(.frame, read_frame, .{ connection, deadline });
-    try select.concurrent(.wake, std.Io.Event.wait, .{ wake, connection.io });
+    try select.concurrent(.wake, std.Io.Event.wait, .{ event, connection.io });
     switch (try select.await()) {
         .frame => |result| return .{ .frame = try result },
         .wake => |result| try result,

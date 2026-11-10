@@ -12259,8 +12259,10 @@ pub const Connection = struct {
 
     /// Sole-owner server pump for new duplex requests and routed DATA on
     /// existing streams. A command wake cancels and joins the socket read;
-    /// a simultaneously completed frame wins and remains observable.
-    pub fn pumpServerUntilOrWake(self: *Connection, read_until: ?std.Io.Clock.Timestamp, output_timeout: std.Io.Duration, wake: *std.Io.Event) Error!ServerDuplexPumpEvent {
+    /// a simultaneously completed frame wins and remains observable. A null
+    /// wake event means no task can enqueue a command, so the read runs
+    /// directly on the caller's task instead of through a select.
+    pub fn pumpServerUntilOrWake(self: *Connection, read_until: ?std.Io.Clock.Timestamp, output_timeout: std.Io.Duration, wake: ?*std.Io.Event) Error!ServerDuplexPumpEvent {
         if (output_timeout.nanoseconds <= 0) return error.Timeout;
         if (read_until) |deadline| _ = try deadline_policy.usableAwake(self.io, deadline);
         if (self.aggregate_timeout_unusable) return error.ConnectionClosed;

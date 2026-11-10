@@ -375,10 +375,17 @@ pub fn Engine(
                     std.Io.Clock.Timestamp.now(self.io, .awake),
                     .{ .raw = self.options.poll_interval, .clock = .awake },
                 );
+                // Commands only come from handler workers. With none alive,
+                // the pump reads on the owner task instead of racing a wake
+                // arm it would cancel immediately.
+                const pump_wake: ?*std.Io.Event = if (self.workers.items.len == 0)
+                    null
+                else
+                    &self.wake;
                 const event = self.connection.pumpServerUntilOrWake(
                     read_until,
                     self.options.output_timeout,
-                    &self.wake,
+                    pump_wake,
                 ) catch |err| switch (err) {
                     error.Timeout => null,
                     error.ConnectionClosed => {
@@ -490,10 +497,16 @@ pub fn Engine(
                         std.Io.Clock.Timestamp.now(engine.io, .awake),
                         .{ .raw = engine.options.poll_interval, .clock = .awake },
                     );
+                    // Same rule as the outer pump: only live workers can
+                    // signal a command wake.
+                    const pump_wake: ?*std.Io.Event = if (engine.workers.items.len == 0)
+                        null
+                    else
+                        &engine.wake;
                     const event = engine.connection.pumpServerUntilOrWake(
                         read_until,
                         engine.options.output_timeout,
-                        &engine.wake,
+                        pump_wake,
                     ) catch |err| switch (err) {
                         error.Timeout => return,
                         else => return err,
