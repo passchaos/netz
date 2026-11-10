@@ -6381,10 +6381,17 @@ pub const HandshakeServer = struct {
                 self.handshake_options,
             );
         errdefer established.deinit();
-        return HandshakeServerSession.initEstablished(
+        var session = try HandshakeServerSession.initEstablished(
             established,
             self.session_options,
         );
+        errdefer session.deinit();
+        // Publish the server control stream before the request loop starts.
+        // Event-driven clients (extended CONNECT adapters in particular) wait
+        // for peer SETTINGS before opening their first request stream, so a
+        // lazy send here would deadlock both sides until their deadlines.
+        try session.ensureSettingsSent();
+        return session;
     }
 
     /// Accept from a client Initial already received/classified by the shared
