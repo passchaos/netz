@@ -1314,6 +1314,15 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
             self: *Self,
             deadline: std.Io.Clock.Timestamp,
         ) anyerror!?StreamingRequestEvent {
+            if (self.workers.items.len == 0) {
+                // Commands and body progress only come from handler workers.
+                // With none alive, receive on the owner task instead of
+                // spawning a wake arm that would be canceled immediately.
+                return Adapter.receive(self.session, deadline) catch |err| switch (err) {
+                    error.Timeout => null,
+                    else => |other| return other,
+                };
+            }
             const Selection = union(enum) {
                 event: Error!StreamingRequestEvent,
                 wake: std.Io.Cancelable!void,
