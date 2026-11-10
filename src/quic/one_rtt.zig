@@ -1646,7 +1646,7 @@ pub const Connection = struct {
         return observer.takeError();
     }
 
-    pub fn qlogFailed(self: Connection) bool {
+    pub fn qlogFailed(self: *const Connection) bool {
         const observer = self.config.qlog_observer orelse return false;
         return observer.failure != null;
     }
@@ -2937,10 +2937,10 @@ pub const Connection = struct {
                     // from this stable payload.
                     const tracked = try self.recovery
                         .trackSentUninitializedWithFrames(
-                            packet.packet_number,
-                            packet.recovery_payload_len,
-                            packet.frames,
-                        );
+                        packet.packet_number,
+                        packet.recovery_payload_len,
+                        packet.frames,
+                    );
                     tracked_recovery_packets[tracked_recovery_count] =
                         packet.packet_number;
                     tracked_recovery_count += 1;
@@ -3397,19 +3397,19 @@ pub const Connection = struct {
         return connection_increment;
     }
 
-    pub fn datagramSendEnabled(self: Connection) bool {
+    pub fn datagramSendEnabled(self: *const Connection) bool {
         return self.config.peer_max_datagram_frame_size != null;
     }
 
-    pub fn datagramReceiveEnabled(self: Connection) bool {
+    pub fn datagramReceiveEnabled(self: *const Connection) bool {
         return self.config.local_max_datagram_frame_size != null;
     }
 
-    pub fn datagramsEnabled(self: Connection) bool {
+    pub fn datagramsEnabled(self: *const Connection) bool {
         return self.datagramSendEnabled() and self.datagramReceiveEnabled();
     }
 
-    pub fn maxDatagramPayloadSize(self: Connection) ?usize {
+    pub fn maxDatagramPayloadSize(self: *const Connection) ?usize {
         const frame_limit = self.config.peer_max_datagram_frame_size orelse return null;
         const datagram_size = self.currentSendDatagramSize();
         var candidate = maxDatagramPayloadForFrameSize(
@@ -3873,7 +3873,7 @@ pub const Connection = struct {
         };
     }
 
-    fn validateDatagramSend(self: Connection, data: []const u8) Error!void {
+    fn validateDatagramSend(self: *const Connection, data: []const u8) Error!void {
         const max_payload = self.maxDatagramPayloadSize() orelse return error.DatagramsNotEnabled;
         if (data.len > max_payload) return error.DatagramTooLarge;
     }
@@ -4439,7 +4439,7 @@ pub const Connection = struct {
     /// This does not reserve bytes and can race a subsequent send in a
     /// concurrent owner; connection adapters serialize mutation and use it as
     /// a sizing hint before the transport performs authoritative preflight.
-    pub fn connectionSendAvailable(self: Connection) u64 {
+    pub fn connectionSendAvailable(self: *const Connection) u64 {
         return self.send_flow.available();
     }
 
@@ -4813,42 +4813,42 @@ pub const Connection = struct {
         return deadline;
     }
 
-    pub fn congestionAlgorithm(self: Connection) quic.congestion.Algorithm {
+    pub fn congestionAlgorithm(self: *const Connection) quic.congestion.Algorithm {
         return self.congestion.algorithm;
     }
 
-    pub fn congestionWindow(self: Connection) usize {
+    pub fn congestionWindow(self: *const Connection) usize {
         return self.congestion.congestion_window;
     }
 
-    pub fn congestionAvailable(self: Connection) usize {
+    pub fn congestionAvailable(self: *const Connection) usize {
         return self.congestion.available();
     }
 
-    pub fn bytesInFlight(self: Connection) usize {
+    pub fn bytesInFlight(self: *const Connection) usize {
         return self.congestion.bytes_in_flight;
     }
 
-    pub fn hystartEnabled(self: Connection) bool {
+    pub fn hystartEnabled(self: *const Connection) bool {
         return self.congestion.hystart.enabled;
     }
 
-    pub fn hystartPhase(self: Connection) quic.hystart.Phase {
+    pub fn hystartPhase(self: *const Connection) quic.hystart.Phase {
         return self.congestion.hystart.phase;
     }
 
-    pub fn pacingEnabled(self: Connection) bool {
+    pub fn pacingEnabled(self: *const Connection) bool {
         return self.pacer.enabled;
     }
 
     /// Returns the configured hard pacing ceiling in bytes per second.
     /// Null means pacing follows only the congestion-derived rate.
-    pub fn maxPacingRateBytesPerSecond(self: Connection) ?u64 {
+    pub fn maxPacingRateBytesPerSecond(self: *const Connection) ?u64 {
         return self.pacer.maxPacingRateBytesPerSecond();
     }
 
     /// Returns the effective finite pacing rate in bytes per second.
-    pub fn pacingRateBytesPerSecond(self: Connection) ?u64 {
+    pub fn pacingRateBytesPerSecond(self: *const Connection) ?u64 {
         return self.pacer.rateBytesPerSecond(
             self.congestion.congestion_window,
             self.rtt_stats.smoothedOrInitial(),
@@ -4890,11 +4890,11 @@ pub const Connection = struct {
         self.pacing_blocked_until_ns = null;
     }
 
-    pub fn pacingBudgetAt(self: Connection, now_ns: u64) usize {
+    pub fn pacingBudgetAt(self: *const Connection, now_ns: u64) usize {
         return self.pacer.budgetAt(now_ns, self.congestion.congestion_window, self.rtt_stats.smoothedOrInitial());
     }
 
-    pub fn pacingDeadlineAt(self: Connection, now_ns: u64, packet_size: usize) ?u64 {
+    pub fn pacingDeadlineAt(self: *const Connection, now_ns: u64, packet_size: usize) ?u64 {
         return self.pacer.deadlineAt(
             now_ns,
             packet_size,
@@ -4906,11 +4906,11 @@ pub const Connection = struct {
     /// Wake-up published by the most recent send attempt that pacing deferred.
     /// Shared endpoint owners use this to replace an already-due loss timer
     /// without sleeping or repeatedly servicing the same connection.
-    pub fn pendingPacingDeadline(self: Connection) ?u64 {
+    pub fn pendingPacingDeadline(self: *const Connection) ?u64 {
         return self.pacing_blocked_until_ns;
     }
 
-    pub fn nextPacketPacingDeadlineAt(self: Connection, now_ns: u64, payload_len: usize) Error!?u64 {
+    pub fn nextPacketPacingDeadlineAt(self: *const Connection, now_ns: u64, payload_len: usize) Error!?u64 {
         const packet_number_len = quic.protection.packetNumberLenForPayload(
             self.next_packet_number,
             self.sent.largestAcknowledged(),
@@ -4933,7 +4933,7 @@ pub const Connection = struct {
     /// offset avoids a fixed-overhead guess when a batch crosses a truncated
     /// packet-number length boundary.
     pub fn packetLenForFramesAtOffset(
-        self: Connection,
+        self: *const Connection,
         packet_offset: usize,
         frames: []const quic.Frame,
     ) Error!usize {
@@ -5442,10 +5442,10 @@ pub const Connection = struct {
         if (prepared.recovery_payload_len != 0) {
             const tracked = try self.recovery
                 .trackSentUninitializedWithFrames(
-                    packet_number,
-                    prepared.recovery_payload_len,
-                    prepared.frames,
-                );
+                packet_number,
+                prepared.recovery_payload_len,
+                prepared.frames,
+            );
             tracked_recovery = true;
             var payload_list = std.ArrayList(u8).initBuffer(
                 tracked.payload,
@@ -5516,7 +5516,7 @@ pub const Connection = struct {
     }
 
     fn validateOutboundFrames(
-        self: Connection,
+        self: *const Connection,
         frames: []const quic.Frame,
     ) Error!frame_traits.Traits {
         if (frames.len == 0) return error.MissingFrame;
@@ -5529,7 +5529,7 @@ pub const Connection = struct {
     }
 
     fn validateOutboundFrameAndTraits(
-        self: Connection,
+        self: *const Connection,
         frame: quic.Frame,
         traits: *OutboundFrameTraits,
     ) Error!bool {
@@ -5582,7 +5582,7 @@ pub const Connection = struct {
         return traits.observeRetransmittable(frame);
     }
 
-    fn validateResetPrefixQueued(self: Connection, reset: quic.ResetStreamAtFrame, packets: anytype) Error!void {
+    fn validateResetPrefixQueued(self: *const Connection, reset: quic.ResetStreamAtFrame, packets: anytype) Error!void {
         const entry = self.findSendStreamEntryConst(reset.stream_id) orelse return;
         if (entry.required_reset_prefix) |*prefix| {
             if (!prefix.queuedIn(reset.stream_id, packets)) return error.InvalidFrame;
@@ -5593,11 +5593,11 @@ pub const Connection = struct {
         return self.pmtud.currentSize();
     }
 
-    pub fn pmtudShouldProbe(self: Connection) bool {
+    pub fn pmtudShouldProbe(self: *const Connection) bool {
         return self.pmtud.shouldProbe();
     }
 
-    pub fn currentSendDatagramSize(self: Connection) usize {
+    pub fn currentSendDatagramSize(self: *const Connection) usize {
         const configured = @min(
             self.config.max_datagram_size,
             self.endpoint.limits.max_datagram_size,
@@ -7349,7 +7349,7 @@ pub const Connection = struct {
         var ack_eliciting_count: u64 = 0;
         var largest_packet_number = self.received.largestReceived();
         var reordered = false;
-        for (packets) |packet| {
+        for (packets) |*packet| {
             if (!frame_traits.ackEliciting(packet.frames)) continue;
             ack_eliciting_count +|= 1;
             if (largest_packet_number) |largest| {
@@ -14857,7 +14857,7 @@ pub const Connection = struct {
         );
     }
 
-    fn ackFrequencySendEnabled(self: Connection) bool {
+    fn ackFrequencySendEnabled(self: *const Connection) bool {
         if (!self.config.enable_ack_frequency) return false;
         if (self.config.local_min_ack_delay == null and
             self.config.peer_min_ack_delay == null) return true;
@@ -16205,7 +16205,7 @@ pub const Connection = struct {
         }
     }
 
-    fn findSendStreamEntryConst(self: Connection, stream_id: u64) ?*const StreamFlowEntry {
+    fn findSendStreamEntryConst(self: *const Connection, stream_id: u64) ?*const StreamFlowEntry {
         const index = self.stream_send_index.get(stream_id) orelse return null;
         if (index >= self.stream_send_flows.items.len) return null;
         const entry = &self.stream_send_flows.items[index];
