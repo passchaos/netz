@@ -5651,6 +5651,12 @@ pub const Connection = struct {
     /// A committed interim response survives retries of the current request.
     /// Cleared when that request is decoded or consumed by a batch reader.
     request_continue: message_continue.State = .{},
+    /// Reused bump arena for the synchronous bodyless request path. The copied
+    /// head bytes and header array are released together when the next
+    /// bodyless request starts, so the hot path skips two heap allocations.
+    /// Heap-owned because `Connection` may move between construction and
+    /// first use.
+    bodyless_arena: ?*std.heap.ArenaAllocator = null,
 
     fn transport(self: *Connection) RuntimeTransport {
         if (self.tls_server_conn) |connection| {
@@ -5731,14 +5737,30 @@ pub const Connection = struct {
     }
 
     pub fn close(self: *Connection) void {
-        self.inbuf.deinit(self.allocator);
-        self.write_scratch.deinit(self.allocator);
+        self.releaseBuffers();
         if (self.tls_server_conn) |connection| {
             connection.deinit();
         } else {
             self.stream.close(self.io);
         }
         self.* = undefined;
+    }
+
+    /// Release connection-owned buffers without touching the transport.
+    ///
+    /// Used when the socket moves to another owner, such as a WebSocket
+    /// upgrade. The connection must not be used afterwards; `close` remains
+    /// the normal retirement path.
+    pub fn releaseBuffers(self: *Connection) void {
+        self.inbuf.deinit(self.allocator);
+        self.inbuf = .empty;
+        self.write_scratch.deinit(self.allocator);
+        self.write_scratch = .{};
+        if (self.bodyless_arena) |arena| {
+            arena.deinit();
+            self.allocator.destroy(arena);
+            self.bodyless_arena = null;
+        }
     }
 
     /// Write one final response and retire the connection, even after the
@@ -6187,16 +6209,23 @@ pub const Connection = struct {
             return null;
         }
 
-        const head_bytes = try self.allocator.dupe(
+        // The bodyless path owns the copied head and header array only until
+        // the caller finishes the request. Bump-allocate both from a
+        // connection-owned arena and release them together on the next
+        // bodyless request, so steady-state requests skip two heap
+        // allocations. The reader itself stays heap-allocated because callers
+        // may deinit it after the connection has closed.
+        const arena = try self.bodylessAllocator();
+        const head_bytes = try arena.dupe(
             u8,
             self.inbuf.items[0..head.head_len],
         );
-        errdefer self.allocator.free(head_bytes);
-        const owned_headers = try self.allocator.dupe(
+        errdefer arena.free(head_bytes);
+        const owned_headers = try arena.dupe(
             http1.Header,
             head.headers,
         );
-        errdefer self.allocator.free(owned_headers);
+        errdefer arena.free(owned_headers);
 
         // Rebase the parsed slices into the copied head instead of parsing the
         // copy again. `inbuf` is not modified between the parse and the copy.
@@ -6230,8 +6259,9 @@ pub const Connection = struct {
             .body_framing = head.body_framing,
             .body_bytes = 0,
             .must_close = head.must_close,
+            .owned = false,
         };
-        errdefer request.deinit(self.allocator);
+        errdefer request.deinit(arena);
         // The head view borrows the request's owned bytes and header array;
         // the reader keeps both alive until `takeRequest`/`deinit`.
         const head_value = RequestBodyReader.Head.borrow(
@@ -6249,6 +6279,21 @@ pub const Connection = struct {
             head_value,
             request,
         );
+    }
+
+    /// Reset and return the connection-owned arena used by the synchronous
+    /// bodyless path. The previous reader must already be deinit'd; the
+    /// connection processes one request at a time and `beginRead` rejects a
+    /// second in-flight read.
+    fn bodylessAllocator(self: *Connection) !std.mem.Allocator {
+        const arena = self.bodyless_arena orelse blk: {
+            const created = try self.allocator.create(std.heap.ArenaAllocator);
+            created.* = .init(self.allocator);
+            self.bodyless_arena = created;
+            break :blk created;
+        };
+        _ = arena.reset(.retain_capacity);
+        return arena.allocator();
     }
 
     /// Read a request while delivering body bytes without aggregation.

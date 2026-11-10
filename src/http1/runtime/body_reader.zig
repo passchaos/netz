@@ -60,19 +60,24 @@ pub fn Reader(comptime RuntimeError: type) type {
             trailers: []http1.Header = &.{},
             trailer_bytes: ?[]u8 = null,
             trailer_value_storage: [][]u8 = &.{},
+            /// False when the slices borrow a connection-owned arena that is
+            /// released as a unit; `deinit` then frees nothing.
+            owned: bool = true,
 
             pub fn deinit(
                 self: *Request,
                 allocator: std.mem.Allocator,
             ) void {
-                allocator.free(self.headers);
-                for (self.header_value_storage) |value| allocator.free(value);
-                allocator.free(self.header_value_storage);
-                for (self.trailer_value_storage) |value| allocator.free(value);
-                allocator.free(self.trailer_value_storage);
-                allocator.free(self.trailers);
-                if (self.trailer_bytes) |bytes| allocator.free(bytes);
-                allocator.free(self.head_bytes);
+                if (self.owned) {
+                    allocator.free(self.headers);
+                    for (self.header_value_storage) |value| allocator.free(value);
+                    allocator.free(self.header_value_storage);
+                    for (self.trailer_value_storage) |value| allocator.free(value);
+                    allocator.free(self.trailer_value_storage);
+                    allocator.free(self.trailers);
+                    if (self.trailer_bytes) |bytes| allocator.free(bytes);
+                    allocator.free(self.head_bytes);
+                }
                 self.* = undefined;
             }
 
