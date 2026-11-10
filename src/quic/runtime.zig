@@ -828,7 +828,40 @@ pub const Endpoint = struct {
         ecn: quic.packet_space.EcnCodepoint,
     ) Error!void {
         try self.validateSocks5PayloadSize(to, bytes.len);
-        try self.applyOutgoingEcnMark(ecn);
+        if (self.socks5_udp != null) {
+            // SOCKS5 framing has no per-datagram ECN slot; the socket-wide
+            // fallback rejects anything but Not-ECT.
+            try self.applyOutgoingEcnMark(ecn);
+        } else if (comptime builtin.os.tag == .linux) {
+            if (ecn != .not_ect and
+                (self.test_force_ecn_unavailable or !socketEcnSupported()))
+            {
+                return error.EcnUnavailable;
+            }
+            // Carry ECN as an ancillary message instead of flipping the
+            // socket-wide mark, which costs a setsockopt on every ACK/data
+            // transition.
+            var control: [ecn_send_control_len]u8 align(@alignOf(EcnCmsgHdr)) = undefined;
+            const ctrl = encodeEcnControl(&control, to == .ip6, ecn);
+            var message: net.OutgoingMessage = .{
+                .address = &to,
+                .data_ptr = bytes.ptr,
+                .data_len = bytes.len,
+                .control = ctrl,
+            };
+            const send_error, const sent_count = self.io.vtable.netSend(
+                self.io.userdata,
+                self.socket.handle,
+                (&message)[0..1],
+                .{},
+            );
+            if (sent_count == 1) self.recordSocketSent(1, bytes.len);
+            if (send_error) |err| return err;
+            if (sent_count != 1) return error.Unexpected;
+            return;
+        } else {
+            try self.applyOutgoingEcnMark(ecn);
+        }
         if (self.socks5_udp) |*proxy| {
             const destination = self.socks5Destination(to);
             const framed = try socks5_udp.encodeDatagram(
@@ -974,11 +1007,23 @@ pub const Endpoint = struct {
             }
             return .{ .sent_count = sent_count };
         }
-        try self.applyOutgoingEcnMark(ecn);
+        var ecn_control: [ecn_send_control_len]u8 align(@alignOf(EcnCmsgHdr)) = undefined;
+        const cmsg_ecn = comptime builtin.os.tag == .linux;
+        const ecn_ctrl: []const u8 = if (cmsg_ecn)
+            encodeEcnControl(&ecn_control, to == .ip6, ecn)
+        else
+            &.{};
+        if (cmsg_ecn) {
+            if (ecn != .not_ect and
+                (self.test_force_ecn_unavailable or !socketEcnSupported()))
+            {
+                return error.EcnUnavailable;
+            }
+        } else try self.applyOutgoingEcnMark(ecn);
 
         if (self.gso_send_enabled) {
             if (gsoPlan(datagrams)) |plan| {
-                if (self.sendGso(to, plan)) |result| return result;
+                if (self.sendGso(to, plan, ecn_ctrl)) |result| return result;
             }
         }
 
@@ -997,6 +1042,7 @@ pub const Endpoint = struct {
                     .address = &to,
                     .data_ptr = bytes.ptr,
                     .data_len = bytes.len,
+                    .control = ecn_ctrl,
                 };
             }
             for (expected_lengths[0..count], chunk) |*expected, bytes| {
@@ -1126,7 +1172,24 @@ pub const Endpoint = struct {
             }
             return .{ .sent_count = sent_count };
         }
-        try self.applyOutgoingEcnMark(ecn);
+        var ecn_control_v4: [ecn_send_control_len]u8 align(@alignOf(EcnCmsgHdr)) = undefined;
+        var ecn_control_v6: [ecn_send_control_len]u8 align(@alignOf(EcnCmsgHdr)) = undefined;
+        const cmsg_ecn = comptime builtin.os.tag == .linux;
+        const ecn_ctrl_v4: []const u8 = if (cmsg_ecn)
+            encodeEcnControl(&ecn_control_v4, false, ecn)
+        else
+            &.{};
+        const ecn_ctrl_v6: []const u8 = if (cmsg_ecn)
+            encodeEcnControl(&ecn_control_v6, true, ecn)
+        else
+            &.{};
+        if (cmsg_ecn) {
+            if (ecn != .not_ect and
+                (self.test_force_ecn_unavailable or !socketEcnSupported()))
+            {
+                return error.EcnUnavailable;
+            }
+        } else try self.applyOutgoingEcnMark(ecn);
 
         var message_storage: [64]net.OutgoingMessage = undefined;
         var expected_lengths: [64]usize = undefined;
@@ -1143,6 +1206,7 @@ pub const Endpoint = struct {
                     .address = &datagram.to,
                     .data_ptr = datagram.bytes.ptr,
                     .data_len = datagram.bytes.len,
+                    .control = if (datagram.to == .ip6) ecn_ctrl_v6 else ecn_ctrl_v4,
                 };
             }
             for (expected_lengths[0..count], chunk) |*expected, datagram| {
@@ -1214,14 +1278,20 @@ pub const Endpoint = struct {
     /// Submit a Linux UDP GSO super-packet. Returning `null` means the kernel
     /// rejected GSO before accepting data and the caller should retry through
     /// the portable send-many path.
-    fn sendGso(self: *Endpoint, to: net.IpAddress, plan: GsoPlan) ?SendManyBytesResult {
-        var control: [udp_gso_control_len]u8 align(@alignOf(EcnCmsgHdr)) = undefined;
-        const control_slice = encodeUdpGsoControl(&control, plan.segment_size);
+    fn sendGso(self: *Endpoint, to: net.IpAddress, plan: GsoPlan, ecn_ctrl: []const u8) ?SendManyBytesResult {
+        var control: [udp_gso_control_len + ecn_send_control_len]u8 align(@alignOf(EcnCmsgHdr)) = undefined;
+        const gso_storage: *[udp_gso_control_len]u8 = control[0..udp_gso_control_len];
+        const gso_slice = encodeUdpGsoControl(gso_storage, plan.segment_size);
+        var control_len = gso_slice.len;
+        if (ecn_ctrl.len != 0) {
+            @memcpy(control[control_len..][0..ecn_ctrl.len], ecn_ctrl);
+            control_len += ecn_ctrl.len;
+        }
         var message: net.OutgoingMessage = .{
             .address = &to,
             .data_ptr = plan.data_ptr,
             .data_len = plan.total_len,
-            .control = control_slice,
+            .control = control[0..control_len],
         };
         const send_error, const sent_count = self.io.vtable.netSend(
             self.io.userdata,
@@ -2687,6 +2757,32 @@ pub fn socketEcnSupported() bool {
         .linux, .macos => true,
         else => false,
     };
+}
+
+/// Per-message ECN control. Carrying the codepoint as an ancillary message
+/// avoids a socket-wide `setsockopt` every time bidirectional QUIC traffic
+/// switches between data packets (ECT(0)) and ACK-only packets (Not-ECT).
+/// Linux-only: other targets keep the socket-wide fallback.
+const ecn_send_control_len = cmsgSpace(@sizeOf(u32));
+
+fn encodeEcnControl(
+    storage: *[ecn_send_control_len]u8,
+    ipv6: bool,
+    ecn: quic.packet_space.EcnCodepoint,
+) []const u8 {
+    @memset(storage, 0);
+    const header: *EcnCmsgHdr = @ptrCast(@alignCast(storage));
+    header.* = .{
+        .len = @sizeOf(EcnCmsgHdr) + @sizeOf(u32),
+        .level = if (ipv6) ipproto_ipv6 else ipproto_ip,
+        .type = if (ipv6) @intCast(ipv6_tclass) else ip_tos_cmsg_type,
+    };
+    const value: u32 = ecnCodepointBits(ecn);
+    @memcpy(
+        storage[@sizeOf(EcnCmsgHdr)..][0..@sizeOf(u32)],
+        std.mem.asBytes(&value),
+    );
+    return storage;
 }
 
 pub const testing = struct {
