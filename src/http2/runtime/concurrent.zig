@@ -7,6 +7,7 @@
 //! retired, so handlers pull body bytes without touching connection state.
 const std = @import("std");
 const http2 = @import("../mod.zig");
+const runtime_backend = @import("../../runtime.zig");
 
 /// Upper bound on the per-stream body reservation derived from a declared
 /// Content-Length. Larger bodies grow normally.
@@ -319,6 +320,14 @@ pub fn Engine(
             context: *Context,
             comptime handler: *const fn (*Context, *Stream) anyerror!void,
         ) anyerror!Summary {
+            // The pump, its select arms, and the shutdown watcher all work on
+            // this connection's state; keep them on one executor so each
+            // command wake stays local. Tasks remain stealable, so idle
+            // executors still help with other connections.
+            const previous_locality = runtime_backend.getSpawnLocality();
+            runtime_backend.setSpawnLocality(.local);
+            defer runtime_backend.setSpawnLocality(previous_locality);
+
             const limit = @min(self.options.max_streams, self.maxStreams());
             if (limit == 0) return error.InvalidServeOptions;
 

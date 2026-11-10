@@ -44,6 +44,31 @@ pub fn cachedAwakeTimestamp(io: std.Io) std.Io.Clock.Timestamp {
     };
 }
 
+/// Placement preference for tasks spawned through `.auto` by the calling
+/// task. Only the zio backend implements the hint; foreign `std.Io`
+/// implementations ignore it, so protocol code can set it unconditionally.
+pub const SpawnLocality = enum {
+    /// Spread new tasks round-robin across executors.
+    spread,
+    /// Keep new tasks on the calling executor (still stealable), so a
+    /// connection pump and its select arms share one executor's caches.
+    local,
+};
+
+pub fn setSpawnLocality(locality: SpawnLocality) void {
+    zio.setSpawnLocality(switch (locality) {
+        .spread => .spread,
+        .local => .local,
+    });
+}
+
+pub fn getSpawnLocality() SpawnLocality {
+    return switch (zio.getSpawnLocality()) {
+        .spread => .spread,
+        .local => .local,
+    };
+}
+
 pub const Backend = struct {
     allocator: std.mem.Allocator,
     backing_allocator: std.mem.Allocator,
