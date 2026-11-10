@@ -380,7 +380,7 @@ pub fn Engine(
                     null
                 else
                     &self.wake;
-                const event = self.connection.pumpServerUntilOrWake(
+                const event = self.connection.pumpServerUntilOrWakePrevalidated(
                     read_until,
                     self.options.output_timeout,
                     pump_wake,
@@ -499,7 +499,7 @@ pub fn Engine(
                         null
                     else
                         &engine.wake;
-                    const event = engine.connection.pumpServerUntilOrWake(
+                    const event = engine.connection.pumpServerUntilOrWakePrevalidated(
                         read_until,
                         engine.options.output_timeout,
                         pump_wake,

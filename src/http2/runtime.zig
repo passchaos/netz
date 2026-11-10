@@ -12264,8 +12264,22 @@ pub const Connection = struct {
     /// wake event means no task can enqueue a command, so the read runs
     /// directly on the caller's task instead of through a select.
     pub fn pumpServerUntilOrWake(self: *Connection, read_until: ?std.Io.Clock.Timestamp, output_timeout: std.Io.Duration, wake: ?*std.Io.Event) Error!ServerDuplexPumpEvent {
+        return self.pumpServerUntilOrWakeInner(read_until, output_timeout, wake, true);
+    }
+
+    /// Same as `pumpServerUntilOrWake` for a deadline the caller built from the
+    /// loop's cached clock and knows to be positive. Skips the redundant
+    /// clock read that `usableAwake` performs; an already-expired deadline
+    /// still times out in the read itself.
+    pub fn pumpServerUntilOrWakePrevalidated(self: *Connection, read_until: ?std.Io.Clock.Timestamp, output_timeout: std.Io.Duration, wake: ?*std.Io.Event) Error!ServerDuplexPumpEvent {
+        return self.pumpServerUntilOrWakeInner(read_until, output_timeout, wake, false);
+    }
+
+    fn pumpServerUntilOrWakeInner(self: *Connection, read_until: ?std.Io.Clock.Timestamp, output_timeout: std.Io.Duration, wake: ?*std.Io.Event, comptime validate_deadline: bool) Error!ServerDuplexPumpEvent {
         if (output_timeout.nanoseconds <= 0) return error.Timeout;
-        if (read_until) |deadline| _ = try deadline_policy.usableAwake(self.io, deadline);
+        if (validate_deadline) {
+            if (read_until) |deadline| _ = try deadline_policy.usableAwake(self.io, deadline);
+        }
         if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
         if (self.role != .server or self.callback_reader_active) return error.UnexpectedFrame;
         if (try self.acceptQueuedDuplexRequest()) |value| return .{ .request = value };
