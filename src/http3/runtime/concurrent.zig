@@ -1010,7 +1010,7 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
             slot.body_mutex.lockUncancelable(self.io);
             slot.handler_done = true;
             slot.body_mutex.unlock(self.io);
-            self.reap();
+            self.reapSlot(slot);
         }
 
         fn drainCommands(self: *Self) !void {
@@ -1168,25 +1168,42 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                 // the same lock makes `handler_error` visible to the owner.
                 slot.body_mutex.lockUncancelable(self.io);
                 const done = slot.handler_done;
-                const failure = slot.handler_error;
                 slot.body_mutex.unlock(self.io);
                 if (!done) {
                     index += 1;
                     continue;
                 }
-                if (!slot.response_finished and slot.reset_code == null) {
-                    Adapter.cancel(self.session, slot.from, slot.stream_id, 0) catch {};
+                self.reapSlot(slot);
+            }
+        }
+
+        /// Retire one completed slot. Inline handlers call this directly so a
+        /// batch of N owner-run requests does not rescan every live slot after
+        /// each handler.
+        fn reapSlot(self: *Self, slot: *Slot) void {
+            if (!slot.response_finished and slot.reset_code == null) {
+                Adapter.cancel(self.session, slot.from, slot.stream_id, 0) catch {};
+            }
+            if (slot.handler_error != null) {
+                self.summary.failed += 1;
+            } else {
+                self.summary.completed += 1;
+            }
+            if (slot.reset_code != null) self.summary.canceled += 1;
+            self.removeSlot(slot);
+            slot.deinit(self.allocator);
+            self.allocator.destroy(slot);
+            self.active -|= 1;
+        }
+
+        fn removeSlot(self: *Self, slot: *Slot) void {
+            var index = self.slots.items.len;
+            while (index > 0) {
+                index -= 1;
+                if (self.slots.items[index] == slot) {
+                    _ = self.slots.swapRemove(index);
+                    return;
                 }
-                if (failure != null) {
-                    self.summary.failed += 1;
-                } else {
-                    self.summary.completed += 1;
-                }
-                if (slot.reset_code != null) self.summary.canceled += 1;
-                _ = self.slots.orderedRemove(index);
-                slot.deinit(self.allocator);
-                self.allocator.destroy(slot);
-                self.active -|= 1;
             }
         }
 
