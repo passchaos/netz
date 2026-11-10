@@ -1,6 +1,5 @@
 const content_digest = @import("../http/digest.zig");
 const std = @import("std");
-const netz_runtime = @import("../runtime.zig");
 const test_socket = @import("../internal/test_socket.zig");
 const builtin = @import("builtin");
 const http2 = @import("mod.zig");
@@ -946,6 +945,23 @@ pub const Server = struct {
             try accept_deadline.withDeadline(&self.listener, self.io, absolute)
         else
             try self.listener.accept(self.io);
+        return self.acceptUpgradeStreamMaybeBefore(stream, deadline);
+    }
+
+    /// Adopt an already accepted stream for an HTTP/1.1 h2c Upgrade.
+    /// Ownership transfers at entry and every failure closes the stream.
+    pub fn acceptUpgradeStream(
+        self: *Server,
+        stream: net.Stream,
+    ) Error!H2cUpgradeRequest {
+        return self.acceptUpgradeStreamMaybeBefore(stream, null);
+    }
+
+    fn acceptUpgradeStreamMaybeBefore(
+        self: *Server,
+        stream: net.Stream,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!H2cUpgradeRequest {
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(self.io);
         if (self.limits.tcp_nodelay) {
@@ -1353,6 +1369,50 @@ fn acceptConnectionTransport(
         io,
         stream,
         transport,
+        limits,
+        null,
+    );
+}
+
+/// Adopt an already accepted cleartext stream for prior-knowledge HTTP/2.
+/// Ownership transfers at entry and every failure closes the stream.
+pub fn adoptPriorKnowledgeStream(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stream: net.Stream,
+    limits: Limits,
+) Error!Connection {
+    if (limits.tcp_nodelay) try socket_options.setTcpNoDelay(stream);
+    return acceptConnectionTransportMaybeBefore(
+        allocator,
+        io,
+        stream,
+        tcpTransport(io, stream),
+        limits,
+        null,
+    );
+}
+
+/// Adopt an already negotiated TLS server connection for HTTP/2. The caller
+/// must have selected ALPN `h2`; ownership transfers at entry on success.
+pub fn adoptNegotiatedTlsServer(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stream: net.Stream,
+    tls_connection: *tls_stream.ServerConnection,
+    limits: Limits,
+) Error!Connection {
+    if (tls_connection.selected_alpn == null or
+        !std.mem.eql(u8, tls_connection.selected_alpn.?, "h2"))
+    {
+        return error.InvalidAlpn;
+    }
+    if (limits.tcp_nodelay) try socket_options.setTcpNoDelay(stream);
+    return acceptConnectionTransportMaybeBefore(
+        allocator,
+        io,
+        stream,
+        .{ .tls_server = tls_connection },
         limits,
         null,
     );
@@ -12290,8 +12350,10 @@ pub const Connection = struct {
                 var frame = input;
                 var frame_owned = true;
                 defer if (frame_owned) frame.deinit(self.allocator);
-                const deadline = netz_runtime.cachedAwakeTimestamp(self.io)
-                    .addDuration(.{ .raw = output_timeout, .clock = .awake });
+                const deadline = std.Io.Clock.Timestamp.fromNow(
+                    self.io,
+                    .{ .raw = output_timeout, .clock = .awake },
+                );
                 if (try self.handleConnectionFrameUntil(frame.frame, deadline)) break :blk .progress;
                 if (frame.frame.header.frame_type == .goaway) break :blk .progress;
                 const stream_id = frame.frame.header.stream_id;

@@ -1,4 +1,5 @@
 const std = @import("std");
+const netz_runtime = @import("../runtime.zig");
 
 /// Length of an IMF-fixdate value such as
 /// `Sun, 06 Nov 1994 08:49:37 GMT`.
@@ -7,10 +8,17 @@ pub const value_len: usize = 29;
 const earliest_unix_second: i64 = 0;
 const latest_unix_second: i64 = 253_402_300_799;
 
+/// A wall-clock read is at most this stale. HTTP dates have one-second
+/// resolution, and the loop's cached awake clock lets a burst of responses
+/// share one `clock_gettime`.
+const real_clock_refresh_ns: i64 = 1_000_000;
+
 const Cache = struct {
     unix_second: u64 = 0,
     value: [value_len]u8 = "Thu, 01 Jan 1970 00:00:00 GMT".*,
     valid: bool = false,
+    sampled_at_awake_ns: i64 = 0,
+    sample_valid: bool = false,
 };
 
 threadlocal var cache: Cache = .{};
@@ -21,10 +29,26 @@ threadlocal var cache: Cache = .{};
 /// later call to `valueNow` on the same thread observes a different wall-clock
 /// second and overwrites the cached bytes. Callers should consume or copy it
 /// synchronously rather than retaining it. No allocation is performed.
+///
+/// The wall clock is sampled at most once per millisecond per thread, timed
+/// against the runtime's cached awake clock when available. A date can
+/// therefore trail the wall clock by under a millisecond, far inside its
+/// one-second resolution.
 pub fn valueNow(io: std.Io) *const [value_len]u8 {
-    return valueAtUnixSecond(
-        std.Io.Timestamp.now(io, .real).toSeconds(),
-    );
+    const awake_ns: i64 = std.math.cast(
+        i64,
+        netz_runtime.cachedAwakeNow(io).nanoseconds,
+    ) orelse 0;
+    if (cache.valid and cache.sample_valid and awake_ns > 0 and
+        awake_ns >= cache.sampled_at_awake_ns and
+        awake_ns - cache.sampled_at_awake_ns < real_clock_refresh_ns)
+    {
+        return &cache.value;
+    }
+    const seconds = std.Io.Timestamp.now(io, .real).toSeconds();
+    cache.sampled_at_awake_ns = awake_ns;
+    cache.sample_valid = awake_ns > 0;
+    return valueAtUnixSecond(seconds);
 }
 
 fn valueAtUnixSecond(raw_unix_second: i64) *const [value_len]u8 {

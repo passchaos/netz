@@ -11,7 +11,6 @@
 //! session directly.
 const std = @import("std");
 const http3 = @import("../mod.zig");
-const runtime_backend = @import("../../runtime.zig");
 
 /// Upper bound on the per-stream body reservation derived from a declared
 /// Content-Length. Larger bodies grow normally.
@@ -1295,8 +1294,16 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                 return null;
             }
 
-            const poll_deadline = runtime_backend.cachedAwakeTimestamp(self.io)
-                .addDuration(.{ .raw = poll, .clock = .awake });
+            // The zio loop's cached awake clock is a scan snapshot: it does
+            // not advance while a task runs without yielding. Composing a new
+            // deadline from it can produce a timestamp in the past, which
+            // `usableAwake` rejects as an immediate timeout and turns the
+            // accept pump into a busy loop. Deadlines need a fresh read; the
+            // cached snapshot is only safe for observation.
+            const poll_deadline = std.Io.Clock.Timestamp.fromNow(
+                self.io,
+                .{ .raw = poll, .clock = .awake },
+            );
             const use_deadline = if (deadline) |value|
                 if (value.raw.nanoseconds < poll_deadline.raw.nanoseconds) value else poll_deadline
             else

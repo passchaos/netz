@@ -3576,3 +3576,5 @@ test {
     _ = @import("compression/negotiation_tests.zig");
     _ = runtime;
 }
+
+pub const stream_connection = @import("stream_connection.zig");

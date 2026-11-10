@@ -4,7 +4,6 @@
 //! the negative sentinel means the broker deadline driver claimed expiry.
 
 const std = @import("std");
-const netz_runtime = @import("../../runtime.zig");
 
 const disabled: i64 = 0;
 const expired: i64 = -1;
@@ -73,8 +72,7 @@ fn deadlineNsFromNow(
     timeout: std.Io.Clock.Duration,
 ) i64 {
     std.debug.assert(timeout.clock == .awake);
-    const value = netz_runtime.cachedAwakeTimestamp(io)
-        .addDuration(timeout).raw.nanoseconds;
+    const value = std.Io.Clock.Timestamp.fromNow(io, timeout).raw.nanoseconds;
     return std.math.cast(i64, value) orelse std.math.maxInt(i64);
 }
 

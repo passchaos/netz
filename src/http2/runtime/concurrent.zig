@@ -371,8 +371,12 @@ pub fn Engine(
                     }
                 }
 
-                const read_until = runtime_backend.cachedAwakeTimestamp(self.io)
-                    .addDuration(.{ .raw = self.options.poll_interval, .clock = .awake });
+                // A cached loop timestamp does not advance while this task
+                // runs, so it cannot be used to compose a future deadline.
+                const read_until = std.Io.Clock.Timestamp.fromNow(
+                    self.io,
+                    .{ .raw = self.options.poll_interval, .clock = .awake },
+                );
                 // Commands only come from handler workers. With none alive,
                 // the pump reads on the owner task instead of racing a wake
                 // arm it would cancel immediately.
@@ -491,8 +495,12 @@ pub fn Engine(
 
                 fn pump(engine: *Self, raw: *anyopaque) anyerror!void {
                     const state: *@This() = @ptrCast(@alignCast(raw));
-                    const read_until = runtime_backend.cachedAwakeTimestamp(engine.io)
-                        .addDuration(.{ .raw = engine.options.poll_interval, .clock = .awake });
+                    // A cached loop timestamp does not advance while this task
+                    // runs, so it cannot be used to compose a future deadline.
+                    const read_until = std.Io.Clock.Timestamp.fromNow(
+                        engine.io,
+                        .{ .raw = engine.options.poll_interval, .clock = .awake },
+                    );
                     // Same rule as the outer pump: only live workers can
                     // signal a command wake.
                     const pump_wake: ?*std.Io.Event = if (engine.workers.items.len == 0)

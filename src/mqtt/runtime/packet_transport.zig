@@ -1,6 +1,5 @@
 const std = @import("std");
 const mqtt = @import("../mod.zig");
-const netz_runtime = @import("../../runtime.zig");
 const stream_io = @import("../../internal/stream_io.zig");
 const websocket_runtime = @import("../../websocket/mod.zig").runtime;
 const http1_runtime = @import("../../http1/mod.zig").runtime;
@@ -14,7 +13,7 @@ fn inactivityDeadline(
     timeout: std.Io.Clock.Duration,
 ) std.Io.Clock.Timestamp {
     std.debug.assert(timeout.clock == .awake);
-    return netz_runtime.cachedAwakeTimestamp(io).addDuration(timeout);
+    return std.Io.Clock.Timestamp.fromNow(io, timeout);
 }
 
 /// Broker-facing packet reads may reserve an aligned prefix for transferring

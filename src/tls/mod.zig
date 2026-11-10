@@ -1,6 +1,7 @@
 //! TLS stream transports shared by application protocols.
 
 pub const stream = @import("stream/mod.zig");
+pub const alpn_server = @import("alpn_server.zig");
 pub const server_identity_file = @import("server_identity_file.zig");
 pub const client_ca_file = @import("client_ca_file.zig");
 pub const client_ca_dir = @import("client_ca_dir.zig");

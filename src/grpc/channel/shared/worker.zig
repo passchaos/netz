@@ -104,11 +104,9 @@ pub fn Worker(comptime State: type) type {
         }
 
         fn outputDeadline(self: *Self) std.Io.Clock.Timestamp {
-            // Match grpc-core's Party/ExecCtx scoped time cache: one event-loop
-            // scan shares its awake-clock snapshot, while any intervening I/O
-            // poll refreshes the value before the next operation deadline.
-            return netz_runtime.cachedAwakeTimestamp(self.parent.io)
-                .addDuration(.{
+            // A cached loop timestamp can be older than the task's own runtime,
+            // so it is not a valid base for a future operation deadline.
+            return std.Io.Clock.Timestamp.fromNow(self.parent.io, .{
                 .raw = self.parent.options.operation_timeout,
                 .clock = .awake,
             });

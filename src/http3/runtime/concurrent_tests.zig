@@ -1,6 +1,7 @@
 const std = @import("std");
 const http3 = @import("../mod.zig");
 const runtime = @import("../runtime.zig");
+const netz_runtime = @import("../../runtime.zig");
 
 const net = std.Io.net;
 
@@ -942,4 +943,75 @@ test "HTTP/3 handshake concurrent serving bounds a large POST body" {
     thread.join();
     joined = true;
     if (server_task.err) |err| return err;
+}
+
+test "HTTP/3 handshake completes on the zio runtime" {
+    const allocator = std.testing.allocator;
+    var backend = try netz_runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
+
+    const original_dcid = [_]u8{ 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48 };
+    const client_cid = [_]u8{ 0x49, 0x4a, 0x4b, 0x4c };
+    const server_cid = [_]u8{ 0x4d, 0x4e, 0x4f, 0x50 };
+    var server = try runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .quic = .{ .max_datagram_size = 4096, .max_frames_per_datagram = 16 } },
+        .{ .handshake = .{
+            .local_connection_id = &server_cid,
+            .random = [_]u8{0x51} ** 32,
+            .x25519_secret_key = [_]u8{0x52} ** 32,
+        } },
+    );
+    defer server.deinit();
+
+    const ServerTask = struct {
+        server: *runtime.HandshakeServer,
+        io: std.Io,
+        release: *std.Io.Event,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) std.Io.Cancelable!void {
+            var session = self.server.acceptWithTimeout(.fromSeconds(3)) catch |err| {
+                self.err = err;
+                return;
+            };
+            defer session.deinit();
+            self.release.wait(self.io) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+            };
+        }
+    };
+
+    var release: std.Io.Event = .unset;
+    var task = ServerTask{
+        .server = &server,
+        .io = io,
+        .release = &release,
+    };
+    var group: std.Io.Group = .init;
+    defer group.cancel(io);
+    try group.concurrent(io, ServerTask.run, .{&task});
+
+    var client = try runtime.HandshakeClient.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{ .quic = .{ .max_datagram_size = 4096, .max_frames_per_datagram = 16 } },
+        .{ .handshake = .{
+            .original_destination_connection_id = &original_dcid,
+            .local_connection_id = &client_cid,
+            .server_name = "localhost",
+            .random = [_]u8{0x53} ** 32,
+            .x25519_secret_key = [_]u8{0x54} ** 32,
+        } },
+    );
+    defer client.deinit();
+
+    release.set(io);
+    try group.await(io);
+    if (task.err) |err| return err;
 }
