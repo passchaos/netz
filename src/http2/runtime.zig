@@ -1,5 +1,6 @@
 const content_digest = @import("../http/digest.zig");
 const std = @import("std");
+const netz_runtime = @import("../runtime.zig");
 const test_socket = @import("../internal/test_socket.zig");
 const builtin = @import("builtin");
 const http2 = @import("mod.zig");
@@ -12275,7 +12276,8 @@ pub const Connection = struct {
                 var frame = input;
                 var frame_owned = true;
                 defer if (frame_owned) frame.deinit(self.allocator);
-                const deadline = std.Io.Clock.Timestamp.fromNow(self.io, .{ .raw = output_timeout, .clock = .awake });
+                const deadline = netz_runtime.cachedAwakeTimestamp(self.io)
+                    .addDuration(.{ .raw = output_timeout, .clock = .awake });
                 if (try self.handleConnectionFrameUntil(frame.frame, deadline)) break :blk .progress;
                 if (frame.frame.header.frame_type == .goaway) break :blk .progress;
                 const stream_id = frame.frame.header.stream_id;

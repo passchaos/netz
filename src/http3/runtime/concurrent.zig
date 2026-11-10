@@ -11,6 +11,7 @@
 //! session directly.
 const std = @import("std");
 const http3 = @import("../mod.zig");
+const runtime_backend = @import("../../runtime.zig");
 
 /// Upper bound on the per-stream body reservation derived from a declared
 /// Content-Length. Larger bodies grow normally.
@@ -1294,10 +1295,8 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                 return null;
             }
 
-            const poll_deadline = std.Io.Clock.Timestamp.addDuration(
-                std.Io.Clock.Timestamp.now(self.io, .awake),
-                .{ .raw = poll, .clock = .awake },
-            );
+            const poll_deadline = runtime_backend.cachedAwakeTimestamp(self.io)
+                .addDuration(.{ .raw = poll, .clock = .awake });
             const use_deadline = if (deadline) |value|
                 if (value.raw.nanoseconds < poll_deadline.raw.nanoseconds) value else poll_deadline
             else
