@@ -220,31 +220,33 @@ pub fn validateHeaderBlock(headers: []const http2.Hpack.HeaderField, kind: Heade
         }
         saw_regular = true;
 
-        if (kind != .request and early_data.isHeaderName(header.name)) {
-            return error.InvalidHeader;
+        // Most field names match no special rule. One length switch replaces
+        // the chained case-insensitive comparisons on the hot path.
+        switch (header.name.len) {
+            2 => if (std.ascii.eqlIgnoreCase(header.name, "te")) {
+                switch (kind) {
+                    .request => if (!std.ascii.eqlIgnoreCase(std.mem.trim(u8, header.value, " \t"), "trailers")) return error.InvalidHeader,
+                    else => return error.InvalidHeader,
+                }
+            },
+            4 => if (std.ascii.eqlIgnoreCase(header.name, "host")) {
+                if (host_value != null) return error.InvalidHeader;
+                host_value = header.value;
+            },
+            7 => if (std.ascii.eqlIgnoreCase(header.name, "upgrade")) return error.InvalidHeader,
+            10 => switch (header.name[0] | 0x20) {
+                'c' => if (std.ascii.eqlIgnoreCase(header.name, "connection")) return error.InvalidHeader,
+                'e' => if (kind != .request and early_data.isHeaderName(header.name)) return error.InvalidHeader,
+                'k' => if (std.ascii.eqlIgnoreCase(header.name, "keep-alive")) return error.InvalidHeader,
+                else => {},
+            },
+            16 => if (std.ascii.eqlIgnoreCase(header.name, "proxy-connection")) return error.InvalidHeader,
+            17 => if (std.ascii.eqlIgnoreCase(header.name, "transfer-encoding")) return error.InvalidHeader,
+            else => {},
         }
 
         if (kind == .request_trailers or kind == .response_trailers) {
             if (forbiddenTrailerFieldName(header.name)) return error.InvalidHeader;
-        }
-        if (std.ascii.eqlIgnoreCase(header.name, "connection")) {
-            // RFC 9113 inherits the HTTP/1.1 Connection token rule: anything
-            // nominated by Connection is connection-specific and forbidden in
-            // HTTP/2.  Rejecting the field itself is stricter than stripping and
-            // prevents peers from smuggling hop-by-hop semantics through a block
-            // that another endpoint might forward.
-            return error.InvalidHeader;
-        }
-        if (connectionSpecificHeaderName(header.name)) return error.InvalidHeader;
-        if (std.ascii.eqlIgnoreCase(header.name, "te")) {
-            switch (kind) {
-                .request => if (!std.ascii.eqlIgnoreCase(std.mem.trim(u8, header.value, " \t"), "trailers")) return error.InvalidHeader,
-                else => return error.InvalidHeader,
-            }
-        }
-        if (std.ascii.eqlIgnoreCase(header.name, "host")) {
-            if (host_value != null) return error.InvalidHeader;
-            host_value = header.value;
         }
     }
 
@@ -362,25 +364,32 @@ fn markRequestPseudo(
     seen_authority: *bool,
     seen_protocol: *bool,
 ) Error!RequestPseudo {
-    if (std.mem.eql(u8, name, ":method")) {
-        try markOnce(seen_method);
-        return .method;
-    }
-    if (std.mem.eql(u8, name, ":scheme")) {
-        try markOnce(seen_scheme);
-        return .scheme;
-    }
-    if (std.mem.eql(u8, name, ":path")) {
-        try markOnce(seen_path);
-        return .path;
-    }
-    if (std.mem.eql(u8, name, ":authority")) {
-        try markOnce(seen_authority);
-        return .authority;
-    }
-    if (std.mem.eql(u8, name, ":protocol")) {
-        try markOnce(seen_protocol);
-        return .protocol;
+    // Pseudo-header names are fixed; one length switch replaces the chained
+    // comparisons for every request block.
+    switch (name.len) {
+        5 => if (std.mem.eql(u8, name, ":path")) {
+            try markOnce(seen_path);
+            return .path;
+        },
+        7 => {
+            if (std.mem.eql(u8, name, ":method")) {
+                try markOnce(seen_method);
+                return .method;
+            }
+            if (std.mem.eql(u8, name, ":scheme")) {
+                try markOnce(seen_scheme);
+                return .scheme;
+            }
+        },
+        9 => if (std.mem.eql(u8, name, ":protocol")) {
+            try markOnce(seen_protocol);
+            return .protocol;
+        },
+        10 => if (std.mem.eql(u8, name, ":authority")) {
+            try markOnce(seen_authority);
+            return .authority;
+        },
+        else => {},
     }
     return error.InvalidHeader;
 }
