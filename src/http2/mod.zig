@@ -1576,8 +1576,15 @@ pub const Hpack = struct {
 
             for (fields) |field| {
                 const never_index = field.never_index or sensitiveHeaderName(field.name);
+                // One static-table probe per field yields both the exact and
+                // the name-only index; hashing the same name twice was a hot
+                // spot on the response path.
+                const static_indexes = findStaticFieldIndexes(
+                    field.name,
+                    field.value,
+                );
                 if (!never_index) {
-                    if (findStaticIndex(field.name, field.value)) |index| {
+                    if (static_indexes.exact) |index| {
                         try encodeInteger(list, allocator, 7, 0x80, index);
                         continue;
                     }
@@ -1594,15 +1601,16 @@ pub const Hpack = struct {
                 const skip_value_index = skipValueIndex(field.name);
                 const can_incrementally_index = !never_index and !skip_value_index and shouldIndexField(field, self.dynamic_table.size_limit);
                 const literal_without_indexing_prefix: u8 = if (never_index) 0x10 else 0x00;
-                const dynamic_name_index = if (self.dynamic_table.entryCount() != 0)
-                    self.dynamic_table.findNameIndex(field.name)
-                else
-                    null;
-                if (findStaticNameIndex(field.name) orelse dynamic_name_index) |name_index| {
+                const name_index = static_indexes.name orelse
+                    (if (self.dynamic_table.entryCount() != 0)
+                        self.dynamic_table.findNameIndex(field.name)
+                    else
+                        null);
+                if (name_index) |index| {
                     if (can_incrementally_index) {
-                        try encodeInteger(list, allocator, 6, 0x40, name_index);
+                        try encodeInteger(list, allocator, 6, 0x40, index);
                     } else {
-                        try encodeInteger(list, allocator, 4, literal_without_indexing_prefix, name_index);
+                        try encodeInteger(list, allocator, 4, literal_without_indexing_prefix, index);
                     }
                 } else {
                     if (can_incrementally_index) {
@@ -1658,9 +1666,22 @@ pub const Hpack = struct {
         }
     };
 
-    pub fn findStaticIndex(name: []const u8, value: []const u8) ?u64 {
-        if (fastStaticPseudoIndex(name, value)) |index| return index;
-        const indexes = static_name_index.get(name) orelse return null;
+    /// Static-table indexes for one field: the exact (name and value) match
+    /// and the name-only match, resolved from one name probe.
+    pub const StaticFieldIndexes = struct {
+        exact: ?u64 = null,
+        name: ?u64 = null,
+    };
+
+    pub fn findStaticFieldIndexes(
+        name: []const u8,
+        value: []const u8,
+    ) StaticFieldIndexes {
+        if (name.len != 0 and name[0] == ':') {
+            return pseudoStaticFieldIndexes(name, value);
+        }
+        const indexes = static_name_index.get(name) orelse return .{};
+        var result = StaticFieldIndexes{ .name = indexes[0] };
         // HPACK field encoding queries the static table for every header.  The
         // Work reference implementations scan the whole 61-entry table; this
         // comptime name index narrows exact probes to only the candidate
@@ -1668,98 +1689,80 @@ pub const Hpack = struct {
         for (indexes) |index| {
             const entry = static_table[index - 1];
             if (std.mem.eql(u8, entry.value, value)) {
-                return index;
+                result.exact = index;
+                break;
             }
         }
-        return null;
+        return result;
+    }
+
+    pub fn findStaticIndex(name: []const u8, value: []const u8) ?u64 {
+        return findStaticFieldIndexes(name, value).exact;
     }
 
     pub fn findStaticNameIndex(name: []const u8) ?u64 {
-        if (fastStaticPseudoNameIndex(name)) |index| return index;
+        if (name.len != 0 and name[0] == ':') {
+            return pseudoStaticFieldIndexes(name, "").name;
+        }
         const indexes = static_name_index.get(name) orelse return null;
         return indexes[0];
     }
 
-    fn fastStaticPseudoIndex(name: []const u8, value: []const u8) ?u64 {
+    fn pseudoStaticFieldIndexes(
+        name: []const u8,
+        value: []const u8,
+    ) StaticFieldIndexes {
         if (std.mem.eql(u8, name, ":method")) {
-            if (std.mem.eql(u8, value, "GET")) return 2;
-            if (std.mem.eql(u8, value, "POST")) return 3;
-            return null;
+            const exact: ?u64 = if (std.mem.eql(u8, value, "GET"))
+                2
+            else if (std.mem.eql(u8, value, "POST"))
+                3
+            else
+                null;
+            return .{ .name = 2, .exact = exact };
         }
         if (std.mem.eql(u8, name, ":path")) {
-            if (std.mem.eql(u8, value, "/")) return 4;
-            if (std.mem.eql(u8, value, "/index.html")) return 5;
-            return null;
+            const exact: ?u64 = if (std.mem.eql(u8, value, "/"))
+                4
+            else if (std.mem.eql(u8, value, "/index.html"))
+                5
+            else
+                null;
+            return .{ .name = 4, .exact = exact };
         }
         if (std.mem.eql(u8, name, ":scheme")) {
-            if (std.mem.eql(u8, value, "http")) return 6;
-            if (std.mem.eql(u8, value, "https")) return 7;
-            return null;
+            const exact: ?u64 = if (std.mem.eql(u8, value, "http"))
+                6
+            else if (std.mem.eql(u8, value, "https"))
+                7
+            else
+                null;
+            return .{ .name = 6, .exact = exact };
         }
         if (std.mem.eql(u8, name, ":status")) {
-            if (std.mem.eql(u8, value, "200")) return 8;
-            if (std.mem.eql(u8, value, "204")) return 9;
-            if (std.mem.eql(u8, value, "206")) return 10;
-            if (std.mem.eql(u8, value, "304")) return 11;
-            if (std.mem.eql(u8, value, "400")) return 12;
-            if (std.mem.eql(u8, value, "404")) return 13;
-            if (std.mem.eql(u8, value, "500")) return 14;
-            return null;
+            const exact: ?u64 = if (std.mem.eql(u8, value, "200"))
+                8
+            else if (std.mem.eql(u8, value, "204"))
+                9
+            else if (std.mem.eql(u8, value, "206"))
+                10
+            else if (std.mem.eql(u8, value, "304"))
+                11
+            else if (std.mem.eql(u8, value, "400"))
+                12
+            else if (std.mem.eql(u8, value, "404"))
+                13
+            else if (std.mem.eql(u8, value, "500"))
+                14
+            else
+                null;
+            return .{ .name = 8, .exact = exact };
         }
         if (std.mem.eql(u8, name, ":authority")) {
-            if (value.len == 0) return 1;
-            return null;
+            return .{ .name = 1, .exact = if (value.len == 0) 1 else null };
         }
-        if (std.mem.eql(u8, name, "accept-encoding")) {
-            if (std.mem.eql(u8, value, "gzip, deflate")) return 16;
-            return null;
-        }
-        if (std.mem.eql(u8, name, "accept")) {
-            if (value.len == 0) return 19;
-            return null;
-        }
-        if (std.mem.eql(u8, name, "cache-control")) {
-            if (value.len == 0) return 24;
-            return null;
-        }
-        if (std.mem.eql(u8, name, "content-length")) {
-            if (value.len == 0) return 28;
-            return null;
-        }
-        if (std.mem.eql(u8, name, "content-type")) {
-            if (value.len == 0) return 31;
-            return null;
-        }
-        if (std.mem.eql(u8, name, "server")) {
-            if (value.len == 0) return 54;
-            return null;
-        }
-        if (std.mem.eql(u8, name, "user-agent")) {
-            if (value.len == 0) return 58;
-            return null;
-        }
-        if (std.mem.eql(u8, name, "vary")) {
-            if (value.len == 0) return 59;
-            return null;
-        }
-        return null;
-    }
-
-    fn fastStaticPseudoNameIndex(name: []const u8) ?u64 {
-        if (std.mem.eql(u8, name, ":authority")) return 1;
-        if (std.mem.eql(u8, name, ":method")) return 2;
-        if (std.mem.eql(u8, name, ":path")) return 4;
-        if (std.mem.eql(u8, name, ":scheme")) return 6;
-        if (std.mem.eql(u8, name, ":status")) return 8;
-        if (std.mem.eql(u8, name, "accept")) return 19;
-        if (std.mem.eql(u8, name, "accept-encoding")) return 16;
-        if (std.mem.eql(u8, name, "cache-control")) return 24;
-        if (std.mem.eql(u8, name, "content-length")) return 28;
-        if (std.mem.eql(u8, name, "content-type")) return 31;
-        if (std.mem.eql(u8, name, "server")) return 54;
-        if (std.mem.eql(u8, name, "user-agent")) return 58;
-        if (std.mem.eql(u8, name, "vary")) return 59;
-        return null;
+        // Unknown pseudo-header: no static entry.
+        return .{};
     }
 
     pub fn sensitiveHeaderName(name: []const u8) bool {
