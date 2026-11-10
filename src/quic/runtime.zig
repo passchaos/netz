@@ -840,9 +840,13 @@ pub const Endpoint = struct {
             }
             // Carry ECN as an ancillary message instead of flipping the
             // socket-wide mark, which costs a setsockopt on every ACK/data
-            // transition.
+            // transition. Not-ECT is the socket default, so ACK-only packets
+            // skip the control entirely.
             var control: [ecn_send_control_len]u8 align(@alignOf(EcnCmsgHdr)) = undefined;
-            const ctrl = encodeEcnControl(&control, to == .ip6, ecn);
+            const ctrl: []const u8 = if (ecn == .not_ect)
+                &.{}
+            else
+                encodeEcnControl(&control, to == .ip6, ecn);
             var message: net.OutgoingMessage = .{
                 .address = &to,
                 .data_ptr = bytes.ptr,
@@ -1009,7 +1013,7 @@ pub const Endpoint = struct {
         }
         var ecn_control: [ecn_send_control_len]u8 align(@alignOf(EcnCmsgHdr)) = undefined;
         const cmsg_ecn = comptime builtin.os.tag == .linux;
-        const ecn_ctrl: []const u8 = if (cmsg_ecn)
+        const ecn_ctrl: []const u8 = if (cmsg_ecn and ecn != .not_ect)
             encodeEcnControl(&ecn_control, to == .ip6, ecn)
         else
             &.{};
@@ -1175,11 +1179,11 @@ pub const Endpoint = struct {
         var ecn_control_v4: [ecn_send_control_len]u8 align(@alignOf(EcnCmsgHdr)) = undefined;
         var ecn_control_v6: [ecn_send_control_len]u8 align(@alignOf(EcnCmsgHdr)) = undefined;
         const cmsg_ecn = comptime builtin.os.tag == .linux;
-        const ecn_ctrl_v4: []const u8 = if (cmsg_ecn)
+        const ecn_ctrl_v4: []const u8 = if (cmsg_ecn and ecn != .not_ect)
             encodeEcnControl(&ecn_control_v4, false, ecn)
         else
             &.{};
-        const ecn_ctrl_v6: []const u8 = if (cmsg_ecn)
+        const ecn_ctrl_v6: []const u8 = if (cmsg_ecn and ecn != .not_ect)
             encodeEcnControl(&ecn_control_v6, true, ecn)
         else
             &.{};
