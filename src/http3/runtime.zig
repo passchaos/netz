@@ -2703,6 +2703,27 @@ const DevelopmentConcurrentAdapter = struct {
         try session.startResponse(from, stream_id, value, body_length);
         return session.sendResponseBody(from, stream_id, data, true);
     }
+    pub fn sendCompleteResponseWithInformational(
+        session: *Server,
+        from: net.IpAddress,
+        stream_id: u62,
+        informational: []const http3.InformationalResponse,
+        response: http3.Response,
+        body_length: ?usize,
+        data: []const u8,
+        request_method: ?[]const u8,
+    ) Error!void {
+        _ = body_length;
+        var value = response;
+        value.body = data;
+        value.request_method = request_method;
+        return session.sendResponseWithInformational(
+            from,
+            stream_id,
+            informational,
+            value,
+        );
+    }
     pub fn finishTrailers(
         session: *Server,
         from: net.IpAddress,
@@ -11958,6 +11979,44 @@ const HandshakeConcurrentAdapter = struct {
             }
         }
         return session.trySendResponseLiteral(stream_id, value);
+    }
+    pub fn sendCompleteResponseWithInformational(
+        session: *HandshakeServerSession,
+        from: net.IpAddress,
+        stream_id: u62,
+        informational: []const http3.InformationalResponse,
+        response: http3.Response,
+        body_length: ?usize,
+        data: []const u8,
+        request_method: ?[]const u8,
+    ) Error!void {
+        _ = from;
+        var value = response;
+        value.body = data;
+        value.request_method = request_method;
+        var headers_stack: [server_response.header_stack_capacity]http3.Qpack.HeaderField =
+            undefined;
+        var length_buffer: [20]u8 = undefined;
+        if (body_length) |length| {
+            if (server_response.headerValue(value.headers, "content-length") == null) {
+                if (value.headers.len == headers_stack.len) return error.InvalidHeader;
+                @memcpy(headers_stack[0..value.headers.len], value.headers);
+                headers_stack[value.headers.len] = .{
+                    .name = "content-length",
+                    .value = std.fmt.bufPrint(
+                        &length_buffer,
+                        "{d}",
+                        .{length},
+                    ) catch return error.InvalidHeader,
+                };
+                value.headers = headers_stack[0 .. value.headers.len + 1];
+            }
+        }
+        return session.sendResponseWithInformational(
+            stream_id,
+            informational,
+            value,
+        );
     }
     pub fn finishTrailers(
         session: *HandshakeServerSession,

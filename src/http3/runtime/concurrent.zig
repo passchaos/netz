@@ -110,6 +110,7 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                     body_length: ?usize,
                     data: []const u8,
                     fin: bool,
+                    informational: []const http3.InformationalResponse = &.{},
                 },
                 finish_trailers: []const http3.Qpack.HeaderField,
                 cancel: u64,
@@ -273,6 +274,26 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                     .fin = fin,
                 } } };
                 return self.engine.submit(&command, deadline);
+            }
+
+            /// Submit a complete buffered response with interim 1xx heads.
+            /// This path requires a final DATA frame and no trailers.
+            pub fn startResponseWithBodyAndInformational(
+                self: Stream,
+                response: http3.Response,
+                body_length: ?usize,
+                data: []const u8,
+                fin: bool,
+                informational: []const http3.InformationalResponse,
+            ) anyerror!void {
+                var command = Command{ .slot = self.slot, .kind = .{ .start_response_with_body = .{
+                    .response = response,
+                    .body_length = body_length,
+                    .data = data,
+                    .fin = fin,
+                    .informational = informational,
+                } } };
+                return self.engine.submit(&command, null);
             }
 
             /// Write one response DATA contribution. `data` must stay valid
@@ -1078,6 +1099,23 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                         );
                         if (value.data.len != 0) return error.InvalidContentLength;
                         if (value.fin) slot.response_finished = true;
+                        return;
+                    }
+                    if (value.informational.len != 0) {
+                        if (!value.fin or value.response.trailers.len != 0) {
+                            return error.InformationalStreamingUnsupported;
+                        }
+                        try Adapter.sendCompleteResponseWithInformational(
+                            self.session,
+                            slot.from,
+                            slot.stream_id,
+                            value.informational,
+                            value.response,
+                            value.body_length,
+                            value.data,
+                            slot.head.method,
+                        );
+                        slot.response_finished = true;
                         return;
                     }
                     // A complete buffered response fits in one QUIC packet, so
