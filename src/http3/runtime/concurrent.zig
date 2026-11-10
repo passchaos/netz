@@ -121,6 +121,10 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
             /// The request stream ended with the head, so no body events are
             /// needed before running the handler.
             request_finished: bool = false,
+            /// True while this slot's handler runs on the QUIC owner.
+            /// Per-slot, because a worker may run another handler while the
+            /// owner is inline.
+            handler_inline: bool = false,
             /// A small declared body is being buffered before the handler
             /// runs on the owner.
             deferred_inline: bool = false,
@@ -163,7 +167,7 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
             /// cannot finish without blocking must return
             /// `error.InlineDeclined` before side effects.
             pub fn isInline(self: Stream) bool {
-                return self.engine.inline_active;
+                return self.slot.handler_inline;
             }
 
             /// True when the whole request body is already buffered, so a
@@ -340,6 +344,10 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
         /// True while a handler runs on the owner. Stream command submissions
         /// then execute in place instead of crossing to the owner.
         inline_active: bool = false,
+        /// Slot whose handler currently runs inline on the owner. Commands
+        /// from any other slot (including workers) must go through the queue
+        /// even while an inline handler is active.
+        inline_slot: ?*Slot = null,
         inline_pump: ?*const fn (*Self, *anyopaque) anyerror!void = null,
         inline_pump_state: ?*anyopaque = null,
         summary: Summary = .{},
@@ -892,7 +900,9 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
         }
 
         fn submit(self: *Self, command: *Command, deadline: ?std.Io.Clock.Timestamp) anyerror!void {
-            if (self.inline_active) return self.submitInline(command);
+            if (self.inline_active and self.inline_slot == command.slot) {
+                return self.submitInline(command);
+            }
             self.mutex.lockUncancelable(self.io);
             self.commands.append(self.allocator, command) catch |err| {
                 self.mutex.unlock(self.io);
@@ -954,14 +964,17 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
             self.active += 1;
             self.summary.accepted += 1;
             self.inline_active = true;
+            self.inline_slot = slot;
             self.inline_pump = Pump.pump;
             defer {
                 self.inline_active = false;
+                self.inline_slot = null;
                 self.inline_pump = null;
                 self.inline_pump_state = null;
             }
 
             var declined = false;
+            slot.handler_inline = true;
             handler(context, &slot.stream) catch |err| {
                 if (err == error.InlineDeclined) {
                     declined = true;
@@ -969,9 +982,11 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                     slot.handler_error = err;
                 }
             };
+            slot.handler_inline = false;
             if (declined) {
                 // Drop inline mode before the worker can pick the slot up.
                 self.inline_active = false;
+                self.inline_slot = null;
                 self.inline_pump = null;
                 self.inline_pump_state = null;
                 try self.enqueue(slot, limit, Context, context, handler);
