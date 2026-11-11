@@ -2079,6 +2079,9 @@ pub const UnixServer = struct {
 
 pub const TlsListenOptions = struct {
     identity: vail.tls.auth.ServerIdentity,
+    /// Optional late-bound identity source consulted once per handshake.
+    /// Supports atomic certificate rotation without rebinding the listener.
+    identity_provider: ?tls_stream.ServerIdentityProvider = null,
     limits: Limits = .{},
     cipher_suites: []const vail.tls.cipher_suite.Suite =
         &vail.tls.cipher_suite.default_preference,
@@ -2116,7 +2119,13 @@ pub const TlsServer = struct {
         bind_address: net.IpAddress,
         options: TlsListenOptions,
     ) Error!TlsServer {
-        try options.identity.validate();
+        if (options.identity_provider) |provider| {
+            var lease = provider.acquire();
+            defer lease.deinit();
+            try lease.identity.validate();
+        } else {
+            try options.identity.validate();
+        }
         return .{
             .allocator = allocator,
             .io = io,
@@ -2127,6 +2136,7 @@ pub const TlsServer = struct {
             .limits = options.limits,
             .tls = .{
                 .identity = options.identity,
+                .identity_provider = options.identity_provider,
                 .cipher_suites = options.cipher_suites,
                 .tls12_cipher_suites = options.tls12_cipher_suites,
                 .protocol_policy = options.protocol_policy,
