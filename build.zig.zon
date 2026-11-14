@@ -13,6 +13,7 @@
             .hash = "zio-0.19.1-xHbVVE1kLABhvcTZ2InisM3hdkwDdj0fzzAUxvw2AmGk",
         },
         .pbz = .{ .path = "../pbz" },
+        .regexz = .{ .path = "../regexz" },
     },
     .paths = .{
         "build.zig",

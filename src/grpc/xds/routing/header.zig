@@ -2,7 +2,8 @@
 const std = @import("std");
 const Field = @import("../../../http2/mod.zig").Hpack.HeaderField;
 const String = @import("string.zig").Match;
-pub const Error = std.mem.Allocator.Error || @import("regex/budget.zig").Error || error{RouteMetadataLimitExceeded};
+const regex = @import("regexz");
+pub const Error = std.mem.Allocator.Error || regex.BudgetError || error{RouteMetadataLimitExceeded};
 pub const Value = struct {
     allocator: std.mem.Allocator,
     value: ?[]const u8,
@@ -18,7 +19,7 @@ pub const Request = struct {
     scheme: ?[]const u8 = null,
     metadata: []const Field = &.{},
     max_header_bytes: usize = 65536,
-    budget: ?@import("regex.zig").Budget = null,
+    budget: ?regex.Budget = null,
     pub fn header(self: Request, gpa: std.mem.Allocator, name: []const u8) Error!Value {
         if (self.budget) |budget| try budget.check();
         var result = Value{ .allocator = gpa, .value = null };
@@ -58,10 +59,10 @@ pub const Range = struct { start: i64, end: i64 };
 
 pub const DecodeLimits = struct {
     max_text_bytes: usize = 4096,
-    regex: @import("regex.zig").Limits = .{},
+    regex: regex.Limits = .{},
 };
 
-pub const DecodeError = std.mem.Allocator.Error || @import("../../protobuf.zig").Error || @import("regex.zig").Error || error{
+pub const DecodeError = std.mem.Allocator.Error || @import("../../protobuf.zig").Error || regex.Error || error{
     InvalidHeaderMatcher,
     HeaderMatcherLimitExceeded,
 };

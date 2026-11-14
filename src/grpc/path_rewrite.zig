@@ -1,6 +1,6 @@
 //! Capture-aware regex and URI-template path rewriting shared by xDS and gRPC.
 const std = @import("std");
-const regex = @import("xds/routing/regex.zig");
+const regex = @import("regexz");
 const template = @import("xds/routing/template.zig");
 
 pub const Error = std.mem.Allocator.Error || error{

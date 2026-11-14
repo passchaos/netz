@@ -2,7 +2,7 @@ const std = @import("std");
 const grpc = @import("../../mod.zig");
 const inputs = @import("request_inputs.zig");
 const path_rewrite = @import("../../path_rewrite.zig");
-const regex = @import("../../xds/routing/regex.zig");
+const regex = @import("regexz");
 
 test "shared request inputs apply regex path rewrites before copying metadata" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);

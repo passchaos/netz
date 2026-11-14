@@ -22,9 +22,10 @@ RE2-style `\0`..`\9` replacement are available to route path rewrites and
 header hash rewrites through a bounded backtracking workspace. Lookup data
 comes from pinned RE2 revision
 `2da0056814cf180480a19f5cf811e7e1c054bf6d`; its BSD license and source hashes
-are included beside endian-independent binary tables. The generation script
+are included beside endian-independent binary tables. The regex engine and its
+Unicode data now live in the sibling `regexz` library; the generation script
 can reproduce and verify them with
-`python3 tools/codegen/xds_unicode/generate.py --verify`.
+`python3 ../regexz/tools/codegen/generate.py --verify`.
 
 Syntax construction bounds pattern bytes, group depth, AST nodes, character
 ranges, repeat counts and emitted instructions. Concatenation/alternation trees

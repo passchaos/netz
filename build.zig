@@ -50,6 +50,10 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const regexz_dep = b.dependency("regexz", .{
+        .target = target,
+        .optimize = optimize,
+    });
 
     const netz_mod = b.addModule("netz", .{
         .root_source_file = b.path("src/root.zig"),
@@ -60,6 +64,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "vort", .module = vort_dep.module("vort") },
             .{ .name = "zio", .module = zio_dep.module("zio") },
             .{ .name = "kron", .module = kron_dep.module("kron") },
+            .{ .name = "regexz", .module = regexz_dep.module("regexz") },
         },
     });
     const benchmark_counting_allocator_mod = b.createModule(.{
@@ -2096,7 +2101,7 @@ pub fn build(b: *std.Build) void {
     const grpc_ads_step = b.step("interop-grpc-ads", "Verify v3 ADS ACK/NACK subscriptions and stream reconnect with official discovery protobufs and grpc-js");
     grpc_ads_step.dependOn(&grpc_ads.step);
 
-    const xds_regex_module = b.createModule(.{ .root_source_file = b.path("src/grpc/xds/routing/regex.zig"), .target = target, .optimize = optimize });
+    const xds_regex_module = regexz_dep.module("regexz");
     const xds_regex_client = b.addExecutable(.{
         .name = "netz-grpc-xds-regex-client",
         .root_module = b.createModule(.{

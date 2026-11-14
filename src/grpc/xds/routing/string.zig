@@ -1,6 +1,6 @@
 //! grpc-core string matching: ASCII-insensitive literals and RE2 full regex.
 const std = @import("std");
-const regex = @import("regex.zig");
+const regex = @import("regexz");
 const template = @import("template.zig");
 pub const Match = union(enum) {
     exact: Literal,
@@ -10,7 +10,7 @@ pub const Match = union(enum) {
     /// Envoy `path_separated_prefix`: exact or prefix followed by `/`,
     /// evaluated against the path without query or fragment.
     path_separated_prefix: Literal,
-    safe_regex: @import("regex/compile.zig").Program,
+    safe_regex: regex.Program,
     /// Envoy URI-template path matcher. The arena owns the pointed-to match.
     path_template: *const template.Match,
     pub const Literal = struct { text: []const u8, ignore_case: bool = false };
@@ -28,8 +28,7 @@ pub const Match = union(enum) {
     }
     /// The caller's arena owns the compiled program/sets until all users leave.
     pub fn compileRegex(arena: std.mem.Allocator, pattern: []const u8, limits: regex.Limits) regex.Error!Match {
-        const root = try @import("regex/parse.zig").parse(arena, pattern, limits);
-        return .{ .safe_regex = try @import("regex/compile.zig").compile(arena, root, limits) };
+        return .{ .safe_regex = try regex.compile(arena, pattern, limits) };
     }
     pub fn compileTemplate(arena: std.mem.Allocator, pattern: []const u8, limits: template.Limits) template.Error!Match {
         const matcher = try arena.create(template.Match);
@@ -79,7 +78,7 @@ pub const Match = union(enum) {
             else => null,
         };
     }
-    pub fn matchesWithBudget(self: Match, gpa: std.mem.Allocator, value: []const u8, budget: ?regex.Budget) (std.mem.Allocator.Error || @import("regex/budget.zig").Error)!bool {
+    pub fn matchesWithBudget(self: Match, gpa: std.mem.Allocator, value: []const u8, budget: ?regex.Budget) (std.mem.Allocator.Error || regex.BudgetError)!bool {
         if (budget) |active| {
             try active.check();
             if (self == .safe_regex) {

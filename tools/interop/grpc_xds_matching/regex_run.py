@@ -50,10 +50,14 @@ def main():
    mismatches.append({'pattern':case['pattern'],'native_error':actual['err'],'re2_error':expected['err'],'examples':wrong[:5]})
  if mismatches:raise AssertionError(json.dumps(mismatches[:20],ensure_ascii=False,indent=2))
  digest=lambda path:hashlib.sha256(path.read_bytes()).hexdigest()
- files=sorted((repo/'src/grpc/xds/routing/regex').rglob('*'))+[repo/'src/grpc/xds/routing/regex.zig']+sorted(directory.glob('regex_*'))+[repo/'tools/codegen/xds_unicode/generate.py']
+ regexz=repo.parent/'regexz'
+ files=sorted((regexz/'src/regex').rglob('*'))+[regexz/'src/root.zig']+sorted(directory.glob('regex_*'))+[regexz/'tools/codegen/generate.py']
+ def rel(path):
+  try:return str(path.relative_to(repo))
+  except ValueError:return str(path.relative_to(repo.parent))
  match_cases=[c for c in cases if c.get('substitution') is None]
  replacement_cases=[c for c in cases if c.get('substitution') is not None]
- report={'status':'passed','patterns':len(cases),'match_vectors':sum(len(c['inputs']) for c in match_cases),'replacement_vectors':sum(len(c['inputs']) for c in replacement_cases),'seed':'0x52534453','re2_wasm':'1.0.2','linear_work_bound':True,'source_sha256':{str(p.relative_to(repo)):digest(p) for p in files if p.is_file()},'client_sha256':digest(args.client),'corpus_sha256':hashlib.sha256(json.dumps(cases,sort_keys=True).encode()).hexdigest()}
+ report={'status':'passed','patterns':len(cases),'match_vectors':sum(len(c['inputs']) for c in match_cases),'replacement_vectors':sum(len(c['inputs']) for c in replacement_cases),'seed':'0x52534453','re2_wasm':'1.0.2','linear_work_bound':True,'source_sha256':{rel(p):digest(p) for p in files if p.is_file()},'client_sha256':digest(args.client),'corpus_sha256':hashlib.sha256(json.dumps(cases,sort_keys=True).encode()).hexdigest()}
  if args.output:args.output.parent.mkdir(parents=True,exist_ok=True);args.output.write_text(json.dumps(report,indent=2)+'\n')
  print(json.dumps(report,indent=2))
 if __name__=='__main__':main()
