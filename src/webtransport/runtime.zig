@@ -2278,6 +2278,9 @@ pub const EndpointAcceptedSession = struct {
     /// A peer CLOSE was already reported to the application; the endpoint
     /// still owes the CONNECT response FIN and retries it from later turns.
     close_response_pending: bool = false,
+    /// The owning QUIC connection closed; the HTTP/3 session may already be
+    /// gone, so teardown must not touch `h3` again.
+    transport_closed: bool = false,
     pending_close: ?PendingSessionClose = null,
     close_write: http3.runtime.BodyWriteState = .{},
 
@@ -2781,9 +2784,11 @@ pub const EndpointAcceptedSession = struct {
 
     fn deinit(self: *EndpointAcceptedSession, allocator: std.mem.Allocator) void {
         server_close.clear(self);
-        self.h3.closeConnectDatagramAssociation(
-            self.session_id.value,
-        ) catch {};
+        if (!self.transport_closed) {
+            self.h3.closeConnectDatagramAssociation(
+                self.session_id.value,
+            ) catch {};
+        }
         self.request.deinit(allocator);
         self.control.deinit();
         self.streams.deinit();
@@ -3411,6 +3416,9 @@ pub const EndpointServer = struct {
                 }
                 while (self.firstSessionKey(handle)) |key| {
                     const removed = self.sessions.fetchRemove(key).?.value;
+                    // The transport is already gone; the HTTP/3 session may
+                    // have been released with it.
+                    removed.transport_closed = true;
                     removed.deinit(self.allocator);
                     self.allocator.destroy(removed);
                 }

@@ -1580,7 +1580,9 @@ fn connectAttempt(
     defer if (system_store) |*store| store.deinit();
     const server_auth = options.server_auth orelse blk: {
         if (options.system_store) |store| {
-            break :blk store.verifier(auth_now.toSeconds()).clientVerifier();
+            break :blk quic.tls.auth.ClientVerifier.fromTrustVerifier(
+                store.verifier(auth_now.toSeconds()).clientVerifier(),
+            );
         }
         if (options.system_environ) |environ| {
             system_store = quic.tls.trust.SystemStore.initWithEnviron(
@@ -1592,9 +1594,11 @@ fn connectAttempt(
                 error.OutOfMemory => return error.OutOfMemory,
                 else => return error.NativeTrustStoreUnavailable,
             };
-            break :blk system_store.?.verifier(
-                auth_now.toSeconds(),
-            ).clientVerifier();
+            break :blk quic.tls.auth.ClientVerifier.fromTrustVerifier(
+                system_store.?.verifier(
+                    auth_now.toSeconds(),
+                ).clientVerifier(),
+            );
         }
         break :blk null;
     };

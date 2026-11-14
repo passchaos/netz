@@ -270,7 +270,13 @@ pub fn ensureNegotiated(local: http3.Settings, peer: http3.Settings) Error!void 
 /// Select the highest wire family both SETTINGS advertisements actually
 /// support. A legacy peer cannot satisfy a draft-16-only local policy.
 pub fn negotiatedVersion(local: http3.Settings, peer: http3.Settings) Error!Version {
-    return local.webTransportVersions().highestCommon(peer.webTransportVersions()) orelse
+    const local_versions = local.webTransportVersions();
+    const peer_versions = peer.webTransportVersions();
+    if (!peer_versions.any()) {
+        if (local_versions.legacy) return .legacy;
+        return error.WebTransportNotNegotiated;
+    }
+    return local_versions.highestCommon(peer_versions) orelse
         error.WebTransportNotNegotiated;
 }
 

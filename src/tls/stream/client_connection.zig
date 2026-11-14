@@ -423,10 +423,12 @@ pub const Connection = struct {
                     system_store.?.verifier(now.toSeconds());
             }
             bundle_verifier.stapled_ocsp = options.stapled_ocsp;
-            break :blk if (options.verify_host)
-                bundle_verifier.clientVerifier()
-            else
-                bundle_verifier.serverChainVerifier();
+            break :blk vail.tls.auth.ClientVerifier.fromTrustVerifier(
+                if (options.verify_host)
+                    bundle_verifier.clientVerifier()
+                else
+                    bundle_verifier.serverChainVerifier(),
+            );
         };
 
         const low_level_options: Options = .{

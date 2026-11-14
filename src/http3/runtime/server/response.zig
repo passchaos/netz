@@ -51,8 +51,10 @@ pub fn prepare(
         .name = "date",
         .value = date,
         // Date changes once per second. Keep the static-name reference but do
-        // not churn the QPACK dynamic table with short-lived values.
-        .never_indexed = true,
+        // not churn the QPACK dynamic table with short-lived values. The N=1
+        // (never-indexed) bit is legal QPACK but quic-go's static-table-only
+        // decoder rejects it, so use a regular literal for interop.
+        .never_indexed = false,
     };
     var value = response;
     value.headers = headers;
