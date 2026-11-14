@@ -554,6 +554,22 @@ pub const Server = struct {
         return self.connections.get(handle);
     }
 
+    /// Adopt an already-established connection into this event loop. The
+    /// server takes ownership of `established` and returns the handle used by
+    /// `pollStream`, `streamSendCredit`, and `sendBatch`. This is the entry
+    /// point for callers that complete `handshake.connect` or
+    /// `handshake.accept` before starting the loop.
+    pub fn adoptConnection(
+        self: *Server,
+        established: *quic.handshake.EstablishedConnection,
+    ) Error!quic.endpoint_dispatcher.ConnectionHandle {
+        const handle = self.reserveHandle();
+        try self.dispatcher.registerConnection(handle, &established.connection);
+        errdefer _ = self.dispatcher.unregisterConnection(handle) catch false;
+        try self.connections.put(self.allocator, handle, established);
+        return handle;
+    }
+
     pub fn refreshConnectionTimer(
         self: *Server,
         handle: quic.endpoint_dispatcher.ConnectionHandle,
@@ -611,6 +627,39 @@ pub const Server = struct {
             return err;
         };
         try self.dispatcher.refreshConnectionTimer(handle);
+    }
+
+    /// Submit one nonblocking multi-packet batch. Each inner slice becomes one
+    /// QUIC packet, and the endpoint backend may hand the whole batch to the
+    /// socket in one GSO/sendmmsg call. The endpoint timer schedule is
+    /// refreshed once per batch instead of once per packet, so high-rate
+    /// senders amortize dispatcher bookkeeping.
+    pub fn sendBatch(
+        self: *Server,
+        handle: quic.endpoint_dispatcher.ConnectionHandle,
+        packets: []const []const quic.Frame,
+    ) Error!quic.one_rtt.ConnectionBatchSendResult {
+        const established = self.connection(handle) orelse
+            return error.UnknownConnectionHandle;
+        const result = established.connection.sendManyProgress(
+            packets,
+        ) catch |err| {
+            self.dispatcher.refreshConnectionTimer(handle) catch {};
+            return err;
+        };
+        try self.dispatcher.refreshConnectionTimer(handle);
+        return result;
+    }
+
+    /// Monotonic nanosecond deadline published by the most recent
+    /// pacing-limited send. Null when the connection is not pacing-blocked.
+    pub fn pendingPacingDeadline(
+        self: *Server,
+        handle: quic.endpoint_dispatcher.ConnectionHandle,
+    ) Error!?u64 {
+        const established = self.connection(handle) orelse
+            return error.UnknownConnectionHandle;
+        return established.connection.pendingPacingDeadline();
     }
 
     /// Issue and route another local CID whose reset token is derived from the
