@@ -1,6 +1,8 @@
 //! Shared HTTP semantics independent of wire version.
 
 pub const digest = @import("digest.zig");
+pub const form = @import("form.zig");
+pub const multipart = @import("multipart.zig");
 pub const DigestHasher = digest.Hasher;
 pub const DigestHasherOptions = digest.HasherOptions;
 pub const DigestPolicy = digest.Policy;
@@ -74,6 +76,8 @@ pub const AddressConnectPolicy = client.AddressConnectPolicy;
 pub const HappyEyeballsOptions = client.HappyEyeballsOptions;
 pub const Header = client.Header;
 pub const HeaderIterator = client.HeaderIterator;
+pub const ReaderBody = client.ReaderBody;
+pub const BodySource = client.BodySource;
 pub const RequestOptions = client.RequestOptions;
 pub const RedirectOptions = client.RedirectOptions;
 pub const Socks5Proxy = client.Socks5Proxy;
@@ -90,6 +94,8 @@ pub const PoolOperationError = client_pool.OperationError;
 
 test {
     _ = digest;
+    _ = form;
+    _ = multipart;
     _ = authority;
     _ = content_coding;
     _ = early_data;

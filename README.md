@@ -249,6 +249,11 @@ Current protocol coverage includes:
   in every protocol. HTTP/3 aggregate and endpoint-handler requests expose
   `mightHaveBeenEarly()`, combining accepted current-hop 0-RTT provenance with
   a prior hop's header even when the current connection is ordinary 1-RTT,
+- Application-level form helpers: bounded `application/x-www-form-urlencoded`
+  encode/decode and a streaming `multipart/form-data` writer/reader.
+  `RequestOptions.body_source` streams reader-backed bodies over HTTP/1
+  chunked framing and HTTP/2 DATA frames; HTTP/3 pool requests fall back to
+  TCP or require a slice body. See `docs/http_forms.md`.
 - An explicit, single-owner RFC 6265/RFC6265bis-22 `http.CookieJar` that
   deep-owns state from every repeated H1/H2/H3 `Set-Cookie` field; validates
   the lenient user-agent syntax with CTL and 4,096-byte bounds; applies

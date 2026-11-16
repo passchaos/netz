@@ -208,6 +208,10 @@ fn requestHttp3(
         &trailer_stack,
     );
     defer trailers.deinit(pool.allocator);
+    const body_slice = if (request.body_source) |source| switch (source) {
+        .slice => |body| body,
+        .reader => return error.StreamingBodyUnsupported,
+    } else request.body;
     const response = try state.request(
         origin,
         uri_text,
@@ -215,7 +219,7 @@ fn requestHttp3(
         .{
             .method = request.method,
             .headers = headers.items,
-            .body = request.body,
+            .body = body_slice,
             .trailers = trailers.items,
         },
         request.allow_early_data,
@@ -264,6 +268,9 @@ fn h3FallbackAllowed(
     method: []const u8,
     err: anyerror,
 ) bool {
+    // The request was rejected before any HTTP/3 stream was opened, so falling
+    // back to TCP cannot replay a partially sent body.
+    if (err == error.StreamingBodyUnsupported) return true;
     switch (err) {
         error.Timeout,
         error.Canceled,
@@ -288,6 +295,7 @@ fn h3FailureAffectsAlternative(err: anyerror) bool {
         error.OutOfMemory,
         error.InvalidHeader,
         error.InvalidUri,
+        error.StreamingBodyUnsupported,
         => false,
         else => true,
     };

@@ -777,6 +777,289 @@ test "unified HTTP client selects explicit cleartext protocol" {
     if (h2_worker.err) |err| return err;
 }
 
+test "unified HTTP client streams reader request bodies" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var h1_server = try http1_runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer h1_server.deinit();
+    var h2_server = try http2_runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer h2_server.deinit();
+
+    const H1Worker = struct {
+        server: *http1_runtime.Server,
+        release: *std.Io.Event,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            var request = try connection.readRequest(.{});
+            defer request.deinit(self.server.allocator);
+            try std.testing.expectEqualStrings(
+                "streamed-h1",
+                request.request.body,
+            );
+            try std.testing.expect(request.request.body_framing == .chunked);
+            try connection.writeResponse(.{
+                .body = "ok-h1",
+                .request_method = request.request.method,
+            });
+            try self.release.wait(self.server.io);
+        }
+    };
+    const H2Worker = struct {
+        server: *http2_runtime.Server,
+        release: *std.Io.Event,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            var request = try connection.readRequest();
+            defer request.deinit(self.server.allocator);
+            try std.testing.expectEqualStrings("streamed-h2", request.body);
+            try connection.writeResponse(request.stream_id, .{
+                .body = "ok-h2",
+                .request_method = request.method,
+            });
+            try self.release.wait(self.server.io);
+        }
+    };
+
+    var release: std.Io.Event = .unset;
+    var h1_worker = H1Worker{ .server = &h1_server, .release = &release };
+    var h2_worker = H2Worker{ .server = &h2_server, .release = &release };
+    const h1_thread = try std.Thread.spawn(.{}, H1Worker.run, .{&h1_worker});
+    var h1_joined = false;
+    defer if (!h1_joined) {
+        release.set(io);
+        h1_thread.join();
+    };
+    const h2_thread = try std.Thread.spawn(.{}, H2Worker.run, .{&h2_worker});
+    var h2_joined = false;
+    defer if (!h2_joined) {
+        release.set(io);
+        h2_thread.join();
+    };
+
+    const h1_uri = try std.fmt.allocPrint(
+        allocator,
+        "http://127.0.0.1:{d}/upload",
+        .{h1_server.address().getPort()},
+    );
+    defer allocator.free(h1_uri);
+    const h2_uri = try std.fmt.allocPrint(
+        allocator,
+        "http://127.0.0.1:{d}/upload",
+        .{h2_server.address().getPort()},
+    );
+    defer allocator.free(h2_uri);
+
+    var h1_client = try http.Client.init(allocator, io, .{});
+    defer h1_client.deinit();
+    var h1_reader = std.Io.Reader.fixed("streamed-h1");
+    var h1_response = try h1_client.requestUriWithTimeout(
+        h1_uri,
+        .{
+            .method = "POST",
+            .body_source = .{ .reader = .{ .reader = &h1_reader } },
+        },
+        .fromSeconds(3),
+    );
+    defer h1_response.deinit();
+    try std.testing.expectEqualStrings("ok-h1", h1_response.body());
+
+    var h2_client = try http.Client.init(allocator, io, .{
+        .cleartext_protocol = .http2_prior_knowledge,
+    });
+    defer h2_client.deinit();
+    var h2_reader = std.Io.Reader.fixed("streamed-h2");
+    var h2_response = try h2_client.requestUriWithTimeout(
+        h2_uri,
+        .{
+            .method = "POST",
+            .body_source = .{ .reader = .{ .reader = &h2_reader } },
+        },
+        .fromSeconds(3),
+    );
+    defer h2_response.deinit();
+    try std.testing.expectEqualStrings("ok-h2", h2_response.body());
+
+    release.set(io);
+    h1_thread.join();
+    h1_joined = true;
+    h2_thread.join();
+    h2_joined = true;
+    if (h1_worker.err) |err| return err;
+    if (h2_worker.err) |err| return err;
+}
+
+test "redirect following rejects reader-backed bodies" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    var client = try http.Client.init(allocator, threaded.io(), .{});
+    defer client.deinit();
+    var reader = std.Io.Reader.fixed("body");
+    try std.testing.expectError(
+        error.StreamingBodyUnsupported,
+        client.requestUriFollowingRedirects(
+            "http://127.0.0.1:1/",
+            .{
+                .method = "POST",
+                .body_source = .{ .reader = .{ .reader = &reader } },
+            },
+            .{},
+        ),
+    );
+}
+
+test "unified HTTP client sends a streaming multipart form" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try http1_runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Worker = struct {
+        server: *http1_runtime.Server,
+        release: *std.Io.Event,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            var request = try connection.readRequest(.{});
+            defer request.deinit(self.server.allocator);
+            try std.testing.expect(request.request.body_framing == .chunked);
+            try std.testing.expect(std.mem.indexOf(
+                u8,
+                request.request.body,
+                "Content-Disposition: form-data; name=\"field\"",
+            ) != null);
+            try std.testing.expect(std.mem.indexOf(
+                u8,
+                request.request.body,
+                "value",
+            ) != null);
+            try std.testing.expect(std.mem.indexOf(
+                u8,
+                request.request.body,
+                "filename=\"a.txt\"",
+            ) != null);
+            try std.testing.expect(std.mem.indexOf(
+                u8,
+                request.request.body,
+                "hello",
+            ) != null);
+            try connection.writeResponse(.{
+                .body = "ok-multipart",
+                .request_method = request.request.method,
+            });
+            try self.release.wait(self.server.io);
+        }
+    };
+
+    var release: std.Io.Event = .unset;
+    var worker = Worker{ .server = &server, .release = &release };
+    const thread = try std.Thread.spawn(.{}, Worker.run, .{&worker});
+    var joined = false;
+    defer if (!joined) {
+        release.set(io);
+        thread.join();
+    };
+
+    const uri = try std.fmt.allocPrint(
+        allocator,
+        "http://127.0.0.1:{d}/upload",
+        .{server.address().getPort()},
+    );
+    defer allocator.free(uri);
+
+    const boundary = "----netz-e2e";
+    const parts = [_]http.multipart.Part{
+        .{ .name = "field", .body = .{ .slice = "value" } },
+        .{
+            .name = "upload",
+            .filename = "a.txt",
+            .content_type = "text/plain",
+            .body = .{ .slice = "hello" },
+        },
+    };
+    var form_reader = try http.multipart.Reader.init(&parts, boundary);
+    var content_type_buf: [128]u8 = undefined;
+    const content_type = try http.multipart.contentType(
+        &content_type_buf,
+        boundary,
+    );
+
+    var client = try http.Client.init(allocator, io, .{});
+    defer client.deinit();
+    var response = try client.requestUriWithTimeout(
+        uri,
+        .{
+            .method = "POST",
+            .headers = &.{.{
+                .name = "content-type",
+                .value = content_type,
+            }},
+            .body_source = .{ .reader = .{
+                .reader = &form_reader.reader,
+            } },
+        },
+        .fromSeconds(3),
+    );
+    defer response.deinit();
+    try std.testing.expectEqualStrings("ok-multipart", response.body());
+
+    release.set(io);
+    thread.join();
+    joined = true;
+    if (worker.err) |err| return err;
+}
+
 test "unified HTTP client uses one resolver contract for h1 and h2" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

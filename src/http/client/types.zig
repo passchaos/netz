@@ -70,10 +70,26 @@ pub const Header = struct {
     never_indexed: bool = false,
 };
 
+pub const ReaderBody = struct {
+    reader: *std.Io.Reader,
+    /// Exact body size when known. HTTP/1 uses fixed framing when present and
+    /// chunked framing otherwise; HTTP/2 adds Content-Length when present.
+    length: ?usize = null,
+};
+
+pub const BodySource = union(enum) {
+    slice: []const u8,
+    reader: ReaderBody,
+};
+
 pub const RequestOptions = struct {
     method: []const u8 = "GET",
     headers: []const Header = &.{},
     body: []const u8 = &.{},
+    /// Streaming body source. When set, it takes precedence over `body`.
+    /// HTTP/1 and HTTP/2 connections stream reader-backed bodies; HTTP/3 pool
+    /// requests reject them before opening a stream and may fall back to TCP.
+    body_source: ?BodySource = null,
     trailers: []const Header = &.{},
     /// Permit an explicitly configured HTTP/3 pool to use 0-RTT for this
     /// request. HTTP/1, HTTP/2, and reused HTTP/3 connections ignore it.

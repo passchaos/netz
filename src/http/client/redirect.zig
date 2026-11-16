@@ -13,6 +13,12 @@ pub fn followDetailed(
     deadline: ?std.Io.Clock.Timestamp,
     comptime Adapter: type,
 ) OperationError!types.RedirectedResponse {
+    if (request.body_source) |source| {
+        switch (source) {
+            .reader => return error.StreamingBodyUnsupported,
+            .slice => {},
+        }
+    }
     const allocator = client.allocator;
     const policy = redirect_options.policy;
     var chain = uri_redirect.Chain.init(allocator, policy);
@@ -90,6 +96,7 @@ pub fn followDetailed(
         if (action == .rewrite_get) {
             hop_request.method = "GET";
             hop_request.body = &.{};
+            hop_request.body_source = null;
             hop_request.trailers = &.{};
         } else if (remove_credentials) {
             hop_request.trailers = &.{};

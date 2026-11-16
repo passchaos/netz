@@ -11,6 +11,7 @@ performance record.
 | --- | --- |
 | [architecture.md](architecture.md) | Layered design, performance invariants P1-P10, memory/concurrency doctrine, change acceptance checklist, known structural gaps. |
 | [trust_roots.md](trust_roots.md) | System versus compiled-in Mozilla trust roots, precedence, protocol surfaces, and store reuse. |
+| [http_forms.md](http_forms.md) | URL-encoded and streaming multipart forms, `body_source`, limits, and HTTP/3 caveats. |
 | [performance-playbook.md](performance-playbook.md) | How to profile, author benchmarks, run fixed-binary A/B, record evidence, and decide retain versus reject. |
 | [benchmark-baseline.md](benchmark-baseline.md) | Current and historical benchmark results with commands, hashes, and caveats. |
 

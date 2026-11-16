@@ -25,6 +25,7 @@ pub const Error = http1_runtime.Error || http2_runtime.Error ||
     proxy_socks5.Error || uri_redirect.Error || error{
     InvalidAddressConnectPolicy,
     InvalidClientOptions,
+    StreamingBodyUnsupported,
 };
 pub const ResponseTimeoutError = Error || std.Io.Timeout.Error ||
     std.Io.ConcurrentError;
@@ -40,6 +41,8 @@ pub const HttpProxy = types.HttpProxy;
 pub const HttpProxyOptions = types.HttpProxyOptions;
 pub const Header = types.Header;
 pub const HeaderIterator = types.HeaderIterator;
+pub const ReaderBody = types.ReaderBody;
+pub const BodySource = types.BodySource;
 pub const RequestOptions = types.RequestOptions;
 pub const RedirectOptions = types.RedirectOptions;
 pub const Options = types.Options;
@@ -192,6 +195,10 @@ pub const Connection = struct {
         options: RequestOptions,
         deadline: ?std.Io.Clock.Timestamp,
     ) ResponseTimeoutError!OwnedResponse {
+        const body_slice = if (options.body_source) |source| switch (source) {
+            .slice => |body| body,
+            .reader => options.body,
+        } else options.body;
         switch (self.value) {
             .http1 => |*client| {
                 var header_stack: [max_stack_headers]http1.Header = undefined;
@@ -208,11 +215,32 @@ pub const Connection = struct {
                     &trailer_stack,
                 );
                 defer trailers.deinit(self.allocator);
+                const method = try http1.Method.parse(options.method);
+                if (options.body_source) |source| {
+                    switch (source) {
+                        .reader => |reader_body| {
+                            if (self.forward_proxy != null) {
+                                return error.StreamingBodyUnsupported;
+                            }
+                            return streamHttp1Body(
+                                self.allocator,
+                                client,
+                                target,
+                                method,
+                                headers.items,
+                                trailers.items,
+                                reader_body,
+                                deadline,
+                            );
+                        },
+                        .slice => {},
+                    }
+                }
                 const request_options: http1_runtime.RequestOptions = .{
-                    .method = try http1.Method.parse(options.method),
+                    .method = method,
                     .target = target,
                     .headers = headers.items,
-                    .body = options.body,
+                    .body = body_slice,
                     .trailers = trailers.items,
                 };
                 if (self.forward_proxy) |proxy| {
@@ -272,11 +300,26 @@ pub const Connection = struct {
                     &trailer_stack,
                 );
                 defer trailers.deinit(self.allocator);
+                if (options.body_source) |source| {
+                    switch (source) {
+                        .reader => |reader_body| return streamHttp2Body(
+                            self.allocator,
+                            connection,
+                            target,
+                            options.method,
+                            headers.items,
+                            trailers.items,
+                            reader_body,
+                            deadline,
+                        ),
+                        .slice => {},
+                    }
+                }
                 const request_options: http2_runtime.RequestOptions = .{
                     .method = options.method,
                     .path = target,
                     .headers = headers.items,
-                    .body = options.body,
+                    .body = body_slice,
                     .trailers = trailers.items,
                 };
                 var response = if (deadline) |absolute|
@@ -302,6 +345,146 @@ pub const Connection = struct {
         };
     }
 };
+
+const streaming_chunk_size = 16 * 1024;
+
+fn streamHttp1Body(
+    allocator: std.mem.Allocator,
+    client: *http1_runtime.Client,
+    target: []const u8,
+    method: http1.Method,
+    headers: []const http1.Header,
+    trailers: []const http1.Header,
+    body: types.ReaderBody,
+    deadline: ?std.Io.Clock.Timestamp,
+) ResponseTimeoutError!OwnedResponse {
+    var trailer_names: [max_stack_trailers][]const u8 = undefined;
+    for (trailers, 0..) |trailer, index| {
+        trailer_names[index] = trailer.name;
+    }
+    var writer = try client.startRequest(.{
+        .method = method,
+        .target = target,
+        .headers = headers,
+        .body_length = body.length,
+        .trailer_names = trailer_names[0..trailers.len],
+    });
+    defer writer.deinit();
+
+    if (writer.expects_continue) {
+        switch (try writer.waitForContinue()) {
+            .proceed => {},
+            .final_response => |response| {
+                return .{
+                    .allocator = allocator,
+                    .value = .{ .http1 = response },
+                };
+            },
+        }
+    }
+
+    var buffer: [streaming_chunk_size]u8 = undefined;
+    while (true) {
+        if (deadline) |absolute| {
+            _ = try deadline_policy.usableAwake(client.io, absolute);
+        }
+        const read = try body.reader.readSliceShort(&buffer);
+        if (read == 0) break;
+        try writer.write(buffer[0..read]);
+    }
+
+    if (trailers.len != 0) {
+        try writer.finishTrailers(trailers);
+    } else {
+        try writer.finish();
+    }
+
+    const response = if (deadline) |absolute|
+        try writer.readResponseWithDeadline(absolute)
+    else
+        try writer.readResponse();
+    return .{
+        .allocator = allocator,
+        .value = .{ .http1 = response },
+    };
+}
+
+fn streamHttp2Body(
+    allocator: std.mem.Allocator,
+    connection: *http2_runtime.Connection,
+    target: []const u8,
+    method: []const u8,
+    headers: []const http2.Hpack.HeaderField,
+    trailers: []const http2.Hpack.HeaderField,
+    body: types.ReaderBody,
+    deadline: ?std.Io.Clock.Timestamp,
+) ResponseTimeoutError!OwnedResponse {
+    const request_options: http2_runtime.StreamingRequestOptions = .{
+        .method = method,
+        .path = target,
+        .headers = headers,
+        .body_length = body.length,
+    };
+    var writer = if (deadline) |absolute|
+        try connection.startRequestWithDeadline(request_options, absolute)
+    else
+        try connection.startRequest(request_options);
+    defer writer.deinit();
+
+    var buffer: [streaming_chunk_size]u8 = undefined;
+    while (true) {
+        const read = try body.reader.readSliceShort(&buffer);
+        if (read == 0) break;
+        if (deadline) |absolute| {
+            writer.writeWithDeadline(buffer[0..read], absolute) catch |err| switch (err) {
+                error.ResponseAvailable => break,
+                else => return err,
+            };
+        } else {
+            writer.write(buffer[0..read]) catch |err| switch (err) {
+                error.ResponseAvailable => break,
+                else => return err,
+            };
+        }
+    }
+
+    if (!writer.body_finished) {
+        if (trailers.len != 0) {
+            if (deadline) |absolute| {
+                writer.finishTrailersWithDeadline(trailers, absolute) catch |err| switch (err) {
+                    error.ResponseAvailable => {},
+                    else => return err,
+                };
+            } else {
+                writer.finishTrailers(trailers) catch |err| switch (err) {
+                    error.ResponseAvailable => {},
+                    else => return err,
+                };
+            }
+        } else {
+            if (deadline) |absolute| {
+                writer.finishWithDeadline(absolute) catch |err| switch (err) {
+                    error.ResponseAvailable => {},
+                    else => return err,
+                };
+            } else {
+                writer.finish() catch |err| switch (err) {
+                    error.ResponseAvailable => {},
+                    else => return err,
+                };
+            }
+        }
+    }
+
+    const response = if (deadline) |absolute|
+        try writer.readResponseWithDeadline(absolute)
+    else
+        try writer.readResponse();
+    return .{
+        .allocator = allocator,
+        .value = .{ .http2 = response },
+    };
+}
 
 fn connectAuthority(
     allocator: std.mem.Allocator,
