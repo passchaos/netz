@@ -5,8 +5,20 @@
 //! and flow directly to the HTTP body writer.
 
 const std = @import("std");
+const boundary_rules = @import("multipart/boundary.zig");
 
-pub const max_boundary_len = 70;
+pub const max_boundary_len = boundary_rules.max_len;
+pub const validateBoundary = boundary_rules.validate;
+
+pub const content_type = @import("multipart/content_type.zig");
+pub const parser = @import("multipart/parser.zig");
+pub const parse = parser.parseAlloc;
+pub const parseWithBoundary = parser.parseWithBoundary;
+pub const ParseOptions = parser.ParseOptions;
+pub const Parsed = parser.Parsed;
+pub const ParsedPart = parser.Part;
+pub const ParsedHeader = parser.Header;
+pub const contentTypeBoundary = content_type.boundaryInto;
 pub const max_part_header_bytes = 8 * 1024;
 
 pub const Error = std.Io.Writer.Error ||
@@ -49,17 +61,6 @@ pub const Part = struct {
     headers: []const Header = &.{},
     body: Body,
 };
-
-pub fn validateBoundary(boundary: []const u8) Error!void {
-    if (boundary.len == 0 or boundary.len > max_boundary_len) {
-        return error.InvalidBoundary;
-    }
-    for (boundary) |byte| {
-        if (byte < 0x21 or byte > 0x7e or byte == '"' or byte == '\\') {
-            return error.InvalidBoundary;
-        }
-    }
-}
 
 fn isTokenChar(byte: u8) bool {
     return std.ascii.isAlphanumeric(byte) or
@@ -120,8 +121,8 @@ fn validatePart(
     if (options.filename) |filename| {
         try validateDispositionValue(filename, error.InvalidFilename);
     }
-    if (options.content_type) |content_type| {
-        try validateHeaderValue(content_type);
+    if (options.content_type) |content_type_value| {
+        try validateHeaderValue(content_type_value);
     }
     for (options.headers) |header| {
         try validateHeaderName(header.name);
@@ -147,9 +148,9 @@ fn writePartPrefix(
         try writeQuoted(writer, filename);
     }
     try writer.writeAll("\"\r\n");
-    if (options.content_type) |content_type| {
+    if (options.content_type) |content_type_value| {
         try writer.writeAll("Content-Type: ");
-        try writer.writeAll(content_type);
+        try writer.writeAll(content_type_value);
         try writer.writeAll("\r\n");
     }
     for (options.headers) |header| {
@@ -175,9 +176,9 @@ fn partPrefixLen(
         total = try std.math.add(usize, total, quotedLen(filename));
     }
     total = try std.math.add(usize, total, "\"\r\n".len);
-    if (options.content_type) |content_type| {
+    if (options.content_type) |content_type_value| {
         total = try std.math.add(usize, total, "Content-Type: ".len);
-        total = try std.math.add(usize, total, content_type.len);
+        total = try std.math.add(usize, total, content_type_value.len);
         total = try std.math.add(usize, total, 2);
     }
     for (options.headers) |header| {
@@ -723,4 +724,9 @@ test "multipart content type and boundary helpers are bounded" {
         error.BufferTooSmall,
         contentType(&tiny, boundary),
     );
+}
+
+test {
+    _ = parser;
+    _ = content_type;
 }

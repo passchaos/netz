@@ -56,6 +56,13 @@ const qpack_decoder_seed = smithSliceSeed(&.{ 0x81, 0x41, 0x01 });
 const cookie_seed = smithSliceSeed(
     "sid=abc; Path=/docs; Secure; HttpOnly; SameSite=Lax; Max-Age=60",
 );
+const multipart_seed = smithSliceSeed(
+    "------netz-fuzz\r\n" ++
+        "Content-Disposition: form-data; name=\"a\"\r\n" ++
+        "\r\n" ++
+        "value\r\n" ++
+        "------netz-fuzz--\r\n",
+);
 const cookie_snapshot_seed = smithSliceSeed("netz-http-cookie-jar\x00");
 const cookie_netscape_seed = smithSliceSeed(
     "# Netscape HTTP Cookie File\n" ++
@@ -80,6 +87,7 @@ test "fuzz bounded cross-protocol parsers" {
         &cookie_seed,
         &cookie_snapshot_seed,
         &cookie_netscape_seed,
+        &multipart_seed,
         &websocket_text_seed,
         &websocket_close_seed,
         &websocket_extended_seed,
@@ -116,6 +124,7 @@ test "bounded deterministic parser mutation smoke" {
         http_get_seed[4..],
         http_chunked_seed[4..],
         http_ambiguous_seed[4..],
+        multipart_seed[4..],
         http2_settings_seed[4..],
         http2_headers_seed[4..],
         hpack_seed[4..],
@@ -204,6 +213,34 @@ fn exerciseHttp(bytes: []const u8) !void {
     try exerciseHttp2(bytes);
     try exerciseHttp3(bytes);
     try exerciseCookies(bytes);
+    try exerciseMultipart(bytes);
+}
+
+fn exerciseMultipart(bytes: []const u8) !void {
+    var boundary_buffer: [netz.http.multipart.max_boundary_len]u8 = undefined;
+    _ = netz.http.multipart.contentTypeBoundary(
+        &boundary_buffer,
+        bytes,
+    ) catch {};
+    if (netz.http.multipart.parseWithBoundary(
+        std.testing.allocator,
+        bytes,
+        "----netz-fuzz",
+        .{
+            .max_parts = 8,
+            .max_headers_per_part = 8,
+            .max_header_bytes = 1024,
+            .max_part_bytes = 1024,
+            .max_total_bytes = 4096,
+            .max_preamble_bytes = 128,
+            .max_epilogue_bytes = 128,
+        },
+    )) |parsed| {
+        defer parsed.deinit();
+        for (parsed.parts) |part| {
+            try std.testing.expect(part.name.len <= 255);
+        }
+    } else |_| {}
 }
 
 fn exerciseCookies(bytes: []const u8) !void {

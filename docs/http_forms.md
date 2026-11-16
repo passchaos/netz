@@ -93,6 +93,35 @@ The reader and its backing storage must outlive the request call. A
 `multipart.Reader` reports encoding failures as `error.ReadFailed`; call
 `takeError()` on the reader to inspect the specific encoder error.
 
+
+## Parsing multipart forms
+
+```zig
+var parsed = try netz.http.multipart.parseAlloc(
+    allocator,
+    request.body,
+    request.header("content-type").?,
+    .{ .max_part_bytes = 8 * 1024 * 1024 },
+);
+defer parsed.deinit();
+
+for (parsed.parts) |part| {
+    // part.name, part.filename, part.content_type, part.body
+}
+```
+
+The parser borrows part bodies from the input slice and owns only the
+`Part`/`Header` arrays plus unescaped disposition values. It enforces limits on
+part count, headers per part, header bytes, part size, total body size, preamble,
+epilogue, and name/filename length. `filename*` is rejected as an unsupported
+parameter, and nested `multipart/*` parts are rejected unless
+`allow_nested = true`.
+
+`multipart.parseWithBoundary` skips Content-Type parsing when the caller already
+has the boundary. `multipart.contentTypeBoundary` parses only the boundary
+parameter. The parser is exercised by the `fuzz-parsers` target with a
+dedicated multipart seed.
+
 ## Limits and validation
 
 Multipart encoding rejects:

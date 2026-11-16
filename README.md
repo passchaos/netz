@@ -250,7 +250,7 @@ Current protocol coverage includes:
   `mightHaveBeenEarly()`, combining accepted current-hop 0-RTT provenance with
   a prior hop's header even when the current connection is ordinary 1-RTT,
 - Application-level form helpers: bounded `application/x-www-form-urlencoded`
-  encode/decode and a streaming `multipart/form-data` writer/reader.
+  encode/decode and a streaming `multipart/form-data` writer/reader/parser.
   `RequestOptions.body_source` streams reader-backed bodies over HTTP/1
   chunked framing and HTTP/2 DATA frames; HTTP/3 pool requests fall back to
   TCP or require a slice body. See `docs/http_forms.md`.
