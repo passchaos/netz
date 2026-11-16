@@ -359,7 +359,8 @@ pub const Handle = struct {
         self: *Handle,
         response: http1_runtime.OwnedResponse,
         sink: ResponseSink,
-    ) !ResponseHead {        const headers = try copyHeaders1(
+    ) !ResponseHead {
+        const headers = try copyHeaders1(
             self.allocator,
             &self.response_headers,
             &self.response_header_storage,
