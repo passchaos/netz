@@ -228,6 +228,70 @@ pub fn Reader(comptime ConnectionType: type, comptime RuntimeError: type) type {
             }
         }
 
+        /// Adapter that exposes this pull reader as a `std.Io.Reader`.
+        ///
+        /// The adapter borrows the `Reader` and must not outlive it. A read
+        /// error is reported as `error.ReadFailed`; inspect `takeError` for
+        /// the original error.
+        pub const StdReader = struct {
+            body: *Self,
+            reader: std.Io.Reader,
+            pending: []const u8 = &.{},
+            offset: usize = 0,
+            err: ?anyerror = null,
+
+            const vtable: std.Io.Reader.VTable = .{ .stream = stream };
+
+            pub fn init(body: *Self) StdReader {
+                return .{
+                    .body = body,
+                    .reader = .{
+                        .vtable = &vtable,
+                        .buffer = &.{},
+                        .seek = 0,
+                        .end = 0,
+                    },
+                };
+            }
+
+            pub fn takeError(self: *StdReader) ?anyerror {
+                return self.err;
+            }
+
+            fn stream(
+                r: *std.Io.Reader,
+                w: *std.Io.Writer,
+                limit: std.Io.Limit,
+            ) std.Io.Reader.StreamError!usize {
+                const self: *StdReader = @alignCast(
+                    @fieldParentPtr("reader", r),
+                );
+                const max = @intFromEnum(limit);
+                var written: usize = 0;
+                while (written < max) {
+                    if (self.offset == self.pending.len) {
+                        self.pending = self.body.next() catch |err| {
+                            self.err = err;
+                            return error.ReadFailed;
+                        } orelse return if (written == 0)
+                            error.EndOfStream
+                        else
+                            written;
+                        self.offset = 0;
+                        if (self.pending.len == 0) continue;
+                    }
+                    const count = @min(
+                        max - written,
+                        self.pending.len - self.offset,
+                    );
+                    try w.writeAll(self.pending[self.offset..][0..count]);
+                    self.offset += count;
+                    written += count;
+                }
+                return written;
+            }
+        };
+
         /// Take the completed request metadata. `next` must have returned null
         /// (or `requestReady` must be true); calling early returns
         /// `error.RequestNotComplete` instead of blocking behind a full queue.

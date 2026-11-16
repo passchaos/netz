@@ -958,6 +958,8 @@ test "unified HTTP client sends a streaming multipart form" {
     defer server.deinit();
 
     const Worker = struct {
+        const Self = @This();
+
         server: *http1_runtime.Server,
         release: *std.Io.Event,
         err: ?anyerror = null,
@@ -1239,6 +1241,8 @@ test "unified HTTP client applies Happy Eyeballs to system resolution" {
     defer server.deinit();
 
     const Worker = struct {
+        const Self = @This();
+
         server: *http1_runtime.Server,
         err: ?anyerror = null,
 
@@ -1369,4 +1373,167 @@ test "unified HTTP resolver inherits the caller deadline" {
         started.durationTo(std.Io.Clock.awake.now(io)).nanoseconds <
             500 * std.time.ns_per_ms,
     );
+}
+
+test "HTTP server streams a multipart request body through the parser" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try http1_runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Worker = struct {
+        const Self = @This();
+
+        server: *http1_runtime.Server,
+        release: *std.Io.Event,
+        err: ?anyerror = null,
+        parts: usize = 0,
+        seen: std.ArrayList(u8) = .empty,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            var body_reader = try connection.readRequestBody(.{});
+            defer body_reader.deinit();
+            const head = try body_reader.head();
+            const content_type = head.header("content-type") orelse
+                return error.MissingContentType;
+            var std_reader = http1_runtime.RequestBodyReader.StdReader.init(
+                body_reader,
+            );
+            try http.multipart.parseStream(
+                self.server.allocator,
+                &std_reader.reader,
+                content_type,
+                .{ .buffer_bytes = 16 },
+                .{
+                    .context = self,
+                    .begin = Self.begin,
+                    .data = Self.data,
+                    .end = Self.end,
+                },
+            );
+            while (try body_reader.next()) |_| {}
+            var request = try body_reader.takeRequest();
+            defer request.deinit(self.server.allocator);
+            try connection.writeResponse(.{
+                .body = "ok-stream-parser",
+                .request_method = request.method,
+            });
+            try self.release.wait(self.server.io);
+        }
+
+        fn begin(context: *anyopaque, head: http.multipart.StreamPartHead) !void {
+            const self: *Self = @ptrCast(@alignCast(context));
+            self.parts += 1;
+            try self.seen.appendSlice(self.server.allocator, head.name);
+            try self.seen.append(self.server.allocator, 0);
+            if (head.filename) |filename| {
+                try self.seen.appendSlice(self.server.allocator, filename);
+            }
+            try self.seen.append(self.server.allocator, 0);
+            if (head.content_type) |value| {
+                try self.seen.appendSlice(self.server.allocator, value);
+            }
+            try self.seen.append(self.server.allocator, 1);
+        }
+
+        fn data(context: *anyopaque, bytes: []const u8) !void {
+            const self: *Self = @ptrCast(@alignCast(context));
+            try self.seen.appendSlice(self.server.allocator, bytes);
+        }
+
+        fn end(context: *anyopaque) !void {
+            const self: *Self = @ptrCast(@alignCast(context));
+            try self.seen.append(self.server.allocator, 2);
+        }
+
+        fn deinit(self: *Self) void {
+            self.seen.deinit(self.server.allocator);
+        }
+    };
+
+    var release: std.Io.Event = .unset;
+    var worker = Worker{ .server = &server, .release = &release };
+    defer worker.deinit();
+    const thread = try std.Thread.spawn(.{}, Worker.run, .{&worker});
+    var joined = false;
+    defer if (!joined) {
+        release.set(io);
+        thread.join();
+    };
+
+    const uri = try std.fmt.allocPrint(
+        allocator,
+        "http://127.0.0.1:{d}/upload",
+        .{server.address().getPort()},
+    );
+    defer allocator.free(uri);
+
+    const boundary = "----netz-server-stream";
+    const parts = [_]http.multipart.Part{
+        .{ .name = "field", .body = .{ .slice = "value" } },
+        .{
+            .name = "upload",
+            .filename = "a.txt",
+            .content_type = "text/plain",
+            .body = .{ .slice = "hello" },
+        },
+    };
+    var form_reader = try http.multipart.Reader.init(&parts, boundary);
+    var content_type_buffer: [128]u8 = undefined;
+    const content_type = try http.multipart.contentType(
+        &content_type_buffer,
+        boundary,
+    );
+
+    var client = try http.Client.init(allocator, io, .{});
+    defer client.deinit();
+    var response = try client.requestUriWithTimeout(
+        uri,
+        .{
+            .method = "POST",
+            .headers = &.{.{
+                .name = "content-type",
+                .value = content_type,
+            }},
+            .body_source = .{ .reader = .{
+                .reader = &form_reader.reader,
+            } },
+        },
+        .fromSeconds(3),
+    );
+    defer response.deinit();
+    try std.testing.expectEqualStrings("ok-stream-parser", response.body());
+
+    release.set(io);
+    thread.join();
+    joined = true;
+    if (worker.err) |err| return err;
+    try std.testing.expectEqual(@as(usize, 2), worker.parts);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        worker.seen.items,
+        "field\x00\x00\x01value\x02",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        worker.seen.items,
+        "upload\x00a.txt\x00text/plain\x01hello\x02",
+    ) != null);
 }
