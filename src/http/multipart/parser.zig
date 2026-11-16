@@ -61,6 +61,8 @@ pub const Error = std.mem.Allocator.Error || error{
     FilenameTooLong,
     UnsupportedNestedMultipart,
     UnsupportedParameter,
+    UnsupportedCharset,
+    InvalidExtendedValue,
     InvalidHeaderName,
 };
 
@@ -431,6 +433,7 @@ const Parser = struct {
 
         var name: ?[]const u8 = null;
         var filename: ?[]const u8 = null;
+        var filename_extended: ?[]const u8 = null;
         while (index < value.len) {
             skipOws(value, &index);
             if (index == value.len) break;
@@ -461,6 +464,22 @@ const Parser = struct {
                 param_name,
                 "filename",
             );
+            const is_filename_extended = std.ascii.eqlIgnoreCase(
+                param_name,
+                "filename*",
+            );
+            if (is_filename_extended) {
+                if (filename_extended != null) {
+                    return error.DuplicateFilename;
+                }
+                const raw = try parseExtendedRaw(value, &index);
+                const decoded = try self.decodeExtendedValue(raw);
+                if (decoded.len > self.options.max_filename_bytes) {
+                    return error.FilenameTooLong;
+                }
+                filename_extended = decoded;
+                continue;
+            }
             if (!is_name and !is_filename) {
                 if (std.mem.endsWith(u8, param_name, "*")) {
                     return error.UnsupportedParameter;
@@ -487,8 +506,58 @@ const Parser = struct {
 
         return .{
             .name = name orelse return error.MissingName,
-            .filename = filename,
+            .filename = filename_extended orelse filename,
         };
+    }
+
+    fn decodeExtendedValue(
+        self: *Parser,
+        raw: []const u8,
+    ) Error![]const u8 {
+        const first_quote = std.mem.indexOfScalar(u8, raw, '\'') orelse
+            return error.InvalidExtendedValue;
+        const rest = raw[first_quote + 1 ..];
+        const second_relative = std.mem.indexOfScalar(u8, rest, '\'') orelse
+            return error.InvalidExtendedValue;
+        const second_quote = first_quote + 1 + second_relative;
+        const charset = raw[0..first_quote];
+        const latin1 = std.ascii.eqlIgnoreCase(charset, "ISO-8859-1");
+        if (!latin1 and !std.ascii.eqlIgnoreCase(charset, "UTF-8")) {
+            return error.UnsupportedCharset;
+        }
+        const encoded = raw[second_quote + 1 ..];
+        const start = self.disposition_count;
+        var cursor: usize = 0;
+        while (cursor < encoded.len) {
+            if (encoded[cursor] == '%') {
+                if (cursor + 2 >= encoded.len) {
+                    return error.InvalidExtendedValue;
+                }
+                const high = hexValue(encoded[cursor + 1]) orelse
+                    return error.InvalidExtendedValue;
+                const low = hexValue(encoded[cursor + 2]) orelse
+                    return error.InvalidExtendedValue;
+                if (self.disposition_count == self.disposition.len) {
+                    return error.FilenameTooLong;
+                }
+                self.disposition[self.disposition_count] =
+                    (high << 4) | low;
+                self.disposition_count += 1;
+                cursor += 3;
+                continue;
+            }
+            if (self.disposition_count == self.disposition.len) {
+                return error.FilenameTooLong;
+            }
+            self.disposition[self.disposition_count] = encoded[cursor];
+            self.disposition_count += 1;
+            cursor += 1;
+        }
+        const result = self.disposition[start..self.disposition_count];
+        if (!latin1 and !std.unicode.utf8ValidateSlice(result)) {
+            return error.InvalidExtendedValue;
+        }
+        return result;
     }
 
     fn parseDispositionValue(
@@ -538,6 +607,34 @@ fn skipOws(input: []const u8, index: *usize) void {
     {
         index.* += 1;
     }
+}
+
+fn parseExtendedRaw(
+    value: []const u8,
+    index: *usize,
+) Error![]const u8 {
+    if (index.* == value.len or value[index.*] == '"') {
+        return error.InvalidExtendedValue;
+    }
+    const start = index.*;
+    while (index.* < value.len and
+        value[index.*] != ';' and
+        value[index.*] != ' ' and
+        value[index.*] != '\t')
+    {
+        index.* += 1;
+    }
+    if (start == index.*) return error.InvalidExtendedValue;
+    return value[start..index.*];
+}
+
+fn hexValue(byte: u8) ?u8 {
+    return switch (byte) {
+        '0'...'9' => byte - '0',
+        'a'...'f' => byte - 'a' + 10,
+        'A'...'F' => byte - 'A' + 10,
+        else => null,
+    };
 }
 
 fn skipValue(input: []const u8, index: *usize) Error!void {
@@ -690,4 +787,124 @@ test "multipart parser rejects malformed and oversized input" {
             .max_part_bytes = 1,
         }),
     );
+}
+
+test "multipart parser decodes RFC 5987 filename*" {
+    const allocator = std.testing.allocator;
+    const body =
+        "--b\r\n" ++
+        "Content-Disposition: form-data; name=\"upload\"; " ++
+        "filename*=UTF-8''%E4%B8%AD%E6%96%87.txt\r\n" ++
+        "\r\n" ++
+        "x\r\n" ++
+        "--b--\r\n";
+
+    var parsed = try parseWithBoundary(allocator, body, "b", .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("upload", parsed.parts[0].name);
+    try std.testing.expectEqualStrings("中文.txt", parsed.parts[0].filename.?);
+}
+
+test "multipart parser prefers filename* and validates extended values" {
+    const allocator = std.testing.allocator;
+    const boundary = "b";
+
+    const preferred = try std.fmt.allocPrint(
+        allocator,
+        "--b\r\nContent-Disposition: {s}\r\n\r\nx\r\n--b--\r\n",
+        .{
+            "form-data; name=\"upload\"; filename=\"fallback.txt\"; " ++
+                "filename*=UTF-8''real.txt",
+        },
+    );
+    defer allocator.free(preferred);
+    var parsed = try parseWithBoundary(
+        allocator,
+        preferred,
+        boundary,
+        .{},
+    );
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings(
+        "real.txt",
+        parsed.parts[0].filename.?,
+    );
+
+    const latin1 = try std.fmt.allocPrint(
+        allocator,
+        "--b\r\nContent-Disposition: {s}\r\n\r\nx\r\n--b--\r\n",
+        .{
+            "form-data; name=\"upload\"; " ++
+                "filename*=ISO-8859-1''caf%E9.txt",
+        },
+    );
+    defer allocator.free(latin1);
+    var parsed_latin1 = try parseWithBoundary(
+        allocator,
+        latin1,
+        boundary,
+        .{},
+    );
+    defer parsed_latin1.deinit();
+    try std.testing.expectEqualSlices(
+        u8,
+        "caf\xe9.txt",
+        parsed_latin1.parts[0].filename.?,
+    );
+
+    const invalid = try std.fmt.allocPrint(
+        allocator,
+        "--b\r\nContent-Disposition: {s}\r\n\r\nx\r\n--b--\r\n",
+        .{
+            "form-data; name=\"upload\"; filename*=UTF-8''%ZZ",
+        },
+    );
+    defer allocator.free(invalid);
+    try std.testing.expectError(
+        error.InvalidExtendedValue,
+        parseWithBoundary(allocator, invalid, boundary, .{}),
+    );
+
+    const unsupported = try std.fmt.allocPrint(
+        allocator,
+        "--b\r\nContent-Disposition: {s}\r\n\r\nx\r\n--b--\r\n",
+        .{
+            "form-data; name=\"upload\"; filename*=KOI8-R''x",
+        },
+    );
+    defer allocator.free(unsupported);
+    try std.testing.expectError(
+        error.UnsupportedCharset,
+        parseWithBoundary(allocator, unsupported, boundary, .{}),
+    );
+}
+
+test "multipart parser accepts a curl-shaped form" {
+    const allocator = std.testing.allocator;
+    const boundary = "------------------------7u3Vb6xOMj4YLWeQhjKRTV";
+    const body =
+        "--------------------------7u3Vb6xOMj4YLWeQhjKRTV\r\n" ++
+        "Content-Disposition: form-data; name=\"field\"\r\n" ++
+        "\r\n" ++
+        "value\r\n" ++
+        "--------------------------7u3Vb6xOMj4YLWeQhjKRTV\r\n" ++
+        "Content-Disposition: form-data; name=\"upload\"; filename=\"a.txt\"\r\n" ++
+        "Content-Type: text/plain\r\n" ++
+        "\r\n" ++
+        "hello\r\n" ++
+        "--------------------------7u3Vb6xOMj4YLWeQhjKRTV--\r\n";
+
+    var parsed = try parseAlloc(
+        allocator,
+        body,
+        "multipart/form-data; boundary=" ++ boundary,
+        .{},
+    );
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(usize, 2), parsed.parts.len);
+    try std.testing.expectEqualStrings("field", parsed.parts[0].name);
+    try std.testing.expectEqualStrings("value", parsed.parts[0].body);
+    try std.testing.expectEqualStrings("upload", parsed.parts[1].name);
+    try std.testing.expectEqualStrings("a.txt", parsed.parts[1].filename.?);
+    try std.testing.expectEqualStrings("hello", parsed.parts[1].body);
 }

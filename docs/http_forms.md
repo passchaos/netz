@@ -113,14 +113,15 @@ for (parsed.parts) |part| {
 The parser borrows part bodies from the input slice and owns only the
 `Part`/`Header` arrays plus unescaped disposition values. It enforces limits on
 part count, headers per part, header bytes, part size, total body size, preamble,
-epilogue, and name/filename length. `filename*` is rejected as an unsupported
-parameter, and nested `multipart/*` parts are rejected unless
-`allow_nested = true`.
+epilogue, and name/filename length. `filename*` supports UTF-8 and ISO-8859-1
+(RFC 5987) and takes precedence over `filename`; quoted `filename*` is
+rejected. Nested `multipart/*` parts are rejected unless `allow_nested = true`.
 
 `multipart.parseWithBoundary` skips Content-Type parsing when the caller already
 has the boundary. `multipart.contentTypeBoundary` parses only the boundary
 parameter. The parser is exercised by the `fuzz-parsers` target with a
-dedicated multipart seed.
+dedicated multipart seed, and a curl-shaped fixture covers the common
+`Content-Disposition`/`Content-Type` layout.
 
 ## Limits and validation
 
