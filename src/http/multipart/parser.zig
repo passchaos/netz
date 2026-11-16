@@ -962,3 +962,79 @@ test "multipart parser accepts a curl-shaped form" {
     try std.testing.expectEqualStrings("a.txt", parsed.parts[1].filename.?);
     try std.testing.expectEqualStrings("hello", parsed.parts[1].body);
 }
+
+test "multipart parser keeps slices valid across storage growth" {
+    const allocator = std.testing.allocator;
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(allocator);
+
+    for (0..8) |index| {
+        const part = try std.fmt.allocPrint(
+            allocator,
+            "--b\r\n" ++
+                "Content-Disposition: form-data; name=\"p{d}\"; " ++
+                "filename=\"f{d}.txt\"\r\n" ++
+                "Content-Type: text/plain\r\n" ++
+                "X-Index: {d}\r\n" ++
+                "X-Part: value\r\n" ++
+                "\r\n" ++
+                "body-{d}\r\n",
+            .{ index, index, index, index },
+        );
+        defer allocator.free(part);
+        try body.appendSlice(allocator, part);
+    }
+    try body.appendSlice(allocator, "--b--\r\n");
+
+    var parsed = try parseWithBoundary(
+        allocator,
+        body.items,
+        "b",
+        .{},
+    );
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(usize, 8), parsed.parts.len);
+
+    for (parsed.parts, 0..) |part, index| {
+        const expected_name = try std.fmt.allocPrint(
+            allocator,
+            "p{d}",
+            .{index},
+        );
+        defer allocator.free(expected_name);
+        const expected_filename = try std.fmt.allocPrint(
+            allocator,
+            "f{d}.txt",
+            .{index},
+        );
+        defer allocator.free(expected_filename);
+        const expected_body = try std.fmt.allocPrint(
+            allocator,
+            "body-{d}",
+            .{index},
+        );
+        defer allocator.free(expected_body);
+        const expected_index = try std.fmt.allocPrint(
+            allocator,
+            "{d}",
+            .{index},
+        );
+        defer allocator.free(expected_index);
+
+        try std.testing.expectEqualStrings(expected_name, part.name);
+        try std.testing.expectEqualStrings(
+            expected_filename,
+            part.filename.?,
+        );
+        try std.testing.expectEqualStrings(expected_body, part.body);
+        try std.testing.expectEqual(@as(usize, 4), part.headers.len);
+        try std.testing.expectEqualStrings(
+            "X-Index",
+            part.headers[2].name,
+        );
+        try std.testing.expectEqualStrings(
+            expected_index,
+            part.headers[2].value,
+        );
+    }
+}
