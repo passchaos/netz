@@ -1693,7 +1693,8 @@ test "HTTP/1 duplex handle streams request and response" {
     defer handle.deinit();
 
     try handle.writeBody("hello ");
-    try handle.writeBody("world");
+    var body_reader = std.Io.Reader.fixed("world");
+    try handle.writeBodyFromReader(&body_reader);
     try handle.finishBody();
 
     var sink = DuplexSink{ .allocator = allocator };

@@ -966,6 +966,13 @@ pub const StreamHandle = struct {
         try self.handle.writeBody(bytes);
     }
 
+    pub fn writeBodyFromReader(
+        self: *StreamHandle,
+        reader: *std.Io.Reader,
+    ) !void {
+        try self.handle.writeBodyFromReader(reader);
+    }
+
     pub fn finishBody(self: *StreamHandle) !void {
         try self.handle.finishBody();
     }

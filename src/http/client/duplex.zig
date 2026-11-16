@@ -175,6 +175,19 @@ pub const Handle = struct {
         }
     }
 
+    /// Pump `reader` into the request body until EOF.
+    pub fn writeBodyFromReader(
+        self: *Handle,
+        reader: *std.Io.Reader,
+    ) !void {
+        var buffer: [16 * 1024]u8 = undefined;
+        while (true) {
+            const count = try reader.readSliceShort(&buffer);
+            if (count == 0) break;
+            try self.writeBody(buffer[0..count]);
+        }
+    }
+
     pub fn finishBody(self: *Handle) !void {
         switch (self.state) {
             .http1 => |*writer| {
