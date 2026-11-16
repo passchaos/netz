@@ -32,6 +32,14 @@ CHECKSUM_SPEC.loader.exec_module(CHECKSUM)
 REPOSITORY_ROOT = Path(__file__).parents[2]
 
 
+def extract_all(archive: tarfile.TarFile, path: Path) -> None:
+    try:
+        archive.extractall(path, filter="data")
+    except TypeError:
+        # Python < 3.12 lacks the extraction filter argument.
+        archive.extractall(path)
+
+
 def initialize_repository(root: Path, files: dict[str, bytes]) -> str:
     for relative, data in files.items():
         path = root / relative
@@ -64,6 +72,8 @@ class SourceArchiveTest(unittest.TestCase):
         self.vail = base / "vail"
         self.vort = base / "vort"
         self.pbz = base / "pbz"
+        self.webpkiz = base / "webpkiz"
+        self.regexz = base / "regexz"
         self.zio = base / "zio"
         self.harnessz = base / "harnessz"
         for path in (
@@ -71,6 +81,8 @@ class SourceArchiveTest(unittest.TestCase):
             self.vail,
             self.vort,
             self.pbz,
+            self.webpkiz,
+            self.regexz,
             self.zio,
             self.harnessz,
         ):
@@ -81,10 +93,12 @@ class SourceArchiveTest(unittest.TestCase):
         .vail = .{ .path = \"../vail\" },
         .vort = .{ .path = \"../vort\" },
         .zio = .{
-            .url = \"git+https://github.com/passchaos/zio#3c2365b88c9b6fef5ba709c36c6b2f8ceb77a789\",
-            .hash = \"zio-0.19.1-xHbVVHZNLABUkjHyJHQiljEahUaadEy3x1_4vyCvFxjw\",
+            .url = \"git+https://github.com/passchaos/zio#8f4ce3a97cc69eddb03409b01d1137c2f99ef42b\",
+            .hash = \"zio-0.19.1-xHbVVE1kLABhvcTZ2InisM3hdkwDdj0fzzAUxvw2AmGk\",
         },
         .pbz = .{ .path = \"../pbz\" },
+        .webpkiz = .{ .path = \"../webpkiz\" },
+        .regexz = .{ .path = \"../regexz\" },
     },
     .paths = .{
         \"build.zig\",
@@ -126,6 +140,22 @@ class SourceArchiveTest(unittest.TestCase):
                 "src/root.zig": b"pub const value = 3;\n",
             },
         )
+        self.webpkiz_revision = initialize_repository(
+            self.webpkiz,
+            {
+                "build.zig": b"pub fn build() void {}\n",
+                "build.zig.zon": b".{}\n",
+                "src/root.zig": b"pub const value = 7;\n",
+            },
+        )
+        self.regexz_revision = initialize_repository(
+            self.regexz,
+            {
+                "build.zig": b"pub fn build() void {}\n",
+                "build.zig.zon": b".{}\n",
+                "src/root.zig": b"pub const value = 8;\n",
+            },
+        )
         self.harnessz_revision = initialize_repository(
             self.harnessz,
             {
@@ -163,12 +193,16 @@ class SourceArchiveTest(unittest.TestCase):
             self.vail,
             self.vort,
             self.pbz,
+            self.webpkiz,
+            self.regexz,
             self.zio,
             self.harnessz,
             output,
             expected_vail_revision=self.vail_revision,
             expected_vort_revision=self.vort_revision,
             expected_pbz_revision=self.pbz_revision,
+            expected_webpkiz_revision=self.webpkiz_revision,
+            expected_regexz_revision=self.regexz_revision,
             expected_harnessz_revision=self.harnessz_revision,
             expected_zio_package_hash=self.zio_hash,
         )
@@ -186,6 +220,8 @@ class SourceArchiveTest(unittest.TestCase):
             self.assertIn("netz-0.1.0/deps/vail/src/root.zig", names)
             self.assertIn("netz-0.1.0/deps/vort/src/root.zig", names)
             self.assertIn("netz-0.1.0/deps/pbz/src/root.zig", names)
+            self.assertIn("netz-0.1.0/deps/webpkiz/src/root.zig", names)
+            self.assertIn("netz-0.1.0/deps/regexz/src/root.zig", names)
             self.assertIn("netz-0.1.0/deps/harnessz/src/root.zig", names)
             self.assertIn("netz-0.1.0/deps/zio/src/root.zig", names)
             package = archive.extractfile(
@@ -204,12 +240,16 @@ class SourceArchiveTest(unittest.TestCase):
         self.assertIn('.path = "deps/vail"', package)
         self.assertIn('.path = "deps/vort"', package)
         self.assertIn('.path = "deps/pbz"', package)
+        self.assertIn('.path = "deps/webpkiz"', package)
+        self.assertIn('.path = "deps/regexz"', package)
         self.assertIn('.path = "deps/zio"', package)
         self.assertIn('"deps"', package)
         self.assertNotIn("../harnessz", package)
         self.assertNotIn("../vail", package)
         self.assertNotIn("../vort", package)
         self.assertNotIn("../pbz", package)
+        self.assertNotIn("../webpkiz", package)
+        self.assertNotIn("../regexz", package)
         self.assertNotIn("git+https://github.com/passchaos/zio", package)
         self.assertEqual(self.netz_revision, metadata["source_revision"])
         self.assertEqual(
@@ -228,10 +268,18 @@ class SourceArchiveTest(unittest.TestCase):
             self.pbz_revision,
             metadata["vendored_dependencies"]["pbz"]["revision"],
         )
+        self.assertEqual(
+            self.webpkiz_revision,
+            metadata["vendored_dependencies"]["webpkiz"]["revision"],
+        )
+        self.assertEqual(
+            self.regexz_revision,
+            metadata["vendored_dependencies"]["regexz"]["revision"],
+        )
         with tempfile.TemporaryDirectory() as extracted_name:
             extracted = Path(extracted_name)
             with tarfile.open(first, mode="r:gz") as archive:
-                archive.extractall(extracted, filter="data")
+                extract_all(archive, extracted)
             VERIFY_ARCHIVE.verify_layout(extracted / "netz-0.1.0")
 
     def test_rejects_dirty_source_repository(self) -> None:
@@ -241,6 +289,12 @@ class SourceArchiveTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "not clean"):
             self.create(Path(self.temporary.name) / "dirty.tar.gz")
 
+    def test_ignores_untracked_files(self) -> None:
+        (self.root / "untracked.txt").write_text(
+            "local only\n", encoding="utf-8"
+        )
+        self.create(Path(self.temporary.name) / "untracked.tar.gz")
+
     def test_rejects_dependency_revision_mismatch(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "vail revision mismatch"):
             SOURCE_ARCHIVE.create_archive(
@@ -248,12 +302,16 @@ class SourceArchiveTest(unittest.TestCase):
                 self.vail,
                 self.vort,
                 self.pbz,
+                self.webpkiz,
+                self.regexz,
                 self.zio,
                 self.harnessz,
                 Path(self.temporary.name) / "mismatch.tar.gz",
                 expected_vail_revision="0" * 40,
                 expected_vort_revision=self.vort_revision,
                 expected_pbz_revision=self.pbz_revision,
+                expected_webpkiz_revision=self.webpkiz_revision,
+                expected_regexz_revision=self.regexz_revision,
                 expected_harnessz_revision=self.harnessz_revision,
                 expected_zio_package_hash=self.zio_hash,
             )
@@ -271,7 +329,7 @@ class SourceArchiveTest(unittest.TestCase):
         self.create(archive_path)
         extracted = Path(self.temporary.name) / "extracted"
         with tarfile.open(archive_path, mode="r:gz") as archive:
-            archive.extractall(extracted, filter="data")
+            extract_all(archive, extracted)
         root = extracted / "netz-0.1.0"
         (root / "src/root.zig").write_text(
             "pub const value = 99;\n", encoding="utf-8"
@@ -327,13 +385,21 @@ class RepositoryDependencyPinTest(unittest.TestCase):
             "vail": SOURCE_ARCHIVE.VAIL_REVISION,
             "vort": SOURCE_ARCHIVE.VORT_REVISION,
             "pbz": SOURCE_ARCHIVE.PBZ_REVISION,
+            "webpkiz": SOURCE_ARCHIVE.WEBPKIZ_REVISION,
+            "regexz": SOURCE_ARCHIVE.REGEXZ_REVISION,
         }
         for name, revision in sibling_pins.items():
             checkout_lines = [
                 f"repository: passchaos/{name}",
                 f"          ref: {revision}",
             ]
-            if name in ("harnessz", "vail", "vort"):
+            if name in (
+                "harnessz",
+                "vail",
+                "vort",
+                "webpkiz",
+                "regexz",
+            ):
                 checkout_lines.append(
                     "          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}"
                 )

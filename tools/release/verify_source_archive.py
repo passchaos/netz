@@ -92,7 +92,7 @@ def verify_layout(root: Path) -> None:
             f"archive root {root.name!r} does not match manifest {expected_root!r}"
         )
     dependencies = manifest.get("vendored_dependencies", {})
-    for name in ("harnessz", "vail", "vort", "pbz", "zio"):
+    for name in ("harnessz", "vail", "vort", "pbz", "webpkiz", "regexz", "zio"):
         dependency = dependencies.get(name, {})
         expected = f"deps/{name}"
         if dependency.get("path") != expected:
@@ -121,6 +121,8 @@ def verify_layout(root: Path) -> None:
         '.vail = .{ .path = "deps/vail" },',
         '.vort = .{ .path = "deps/vort" },',
         '.pbz = .{ .path = "deps/pbz" },',
+        '.webpkiz = .{ .path = "deps/webpkiz" },',
+        '.regexz = .{ .path = "deps/regexz" },',
         '.zio = .{ .path = "deps/zio" },',
         '"RELEASE-MANIFEST.json"',
         '"deps"',
@@ -132,6 +134,8 @@ def verify_layout(root: Path) -> None:
         or '../vail' in package_manifest
         or '../vort' in package_manifest
         or '../pbz' in package_manifest
+        or '../webpkiz' in package_manifest
+        or '../regexz' in package_manifest
         or 'git+https://github.com/passchaos/zio' in package_manifest
     ):
         raise RuntimeError("release package retains a sibling dependency path")

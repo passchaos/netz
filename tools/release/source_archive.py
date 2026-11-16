@@ -22,12 +22,13 @@ VAIL_REVISION = "3b772b0cccb64d84fbc760df6428bc51e0fe0761"
 VORT_REVISION = "b661c887e21fb1965db358bc6d12ea379d20178d"
 PBZ_REVISION = "6513ef1f8b130b308bd86ba0bd02f6acc2be64e8"
 WEBPKIZ_REVISION = "35c9f4bfecb51a7794670d474c01b3c6fe541e9e"
+REGEXZ_REVISION = "f150767088ef11fb4435f3b42c99165333b6e51c"
 HARNESSZ_REVISION = "e626f26b0a7ead0377254ed3a04b43b25fb2d270"
 ZIO_SOURCE = (
     "git+https://github.com/passchaos/zio"
-    "#3c2365b88c9b6fef5ba709c36c6b2f8ceb77a789"
+    "#8f4ce3a97cc69eddb03409b01d1137c2f99ef42b"
 )
-ZIO_PACKAGE_HASH = "zio-0.19.1-xHbVVHZNLABUkjHyJHQiljEahUaadEy3x1_4vyCvFxjw"
+ZIO_PACKAGE_HASH = "zio-0.19.1-xHbVVE1kLABhvcTZ2InisM3hdkwDdj0fzzAUxvw2AmGk"
 ROOT_FILES = {
     ".gitignore",
     "LICENSE",
@@ -69,7 +70,9 @@ def package_hash(repo: Path, zig: str) -> str:
 
 
 def require_clean(repo: Path) -> None:
-    status = git(repo, "status", "--porcelain", "--untracked-files=all")
+    # Only tracked content is archived, so untracked editor/OS files cannot
+    # change the archive. Reject tracked modifications and staged changes.
+    status = git(repo, "status", "--porcelain", "--untracked-files=no")
     if status:
         raise RuntimeError(f"source repository is not clean: {repo}")
 
@@ -119,6 +122,7 @@ def release_manifest(
     vort_revision: str,
     pbz_revision: str,
     webpkiz_revision: str,
+    regexz_revision: str,
     harnessz_revision: str,
     file_hashes: dict[str, str],
 ) -> bytes:
@@ -151,6 +155,10 @@ def release_manifest(
                         "path": "deps/webpkiz",
                         "revision": webpkiz_revision,
                     },
+                    "regexz": {
+                        "path": "deps/regexz",
+                        "revision": regexz_revision,
+                    },
                     "zio": {
                         "path": "deps/zio",
                         "package_hash": ZIO_PACKAGE_HASH,
@@ -178,6 +186,8 @@ def rewrite_package_manifest(data: bytes) -> bytes:
             '.pbz = .{ .path = "deps/pbz" },',
         '.webpkiz = .{ .path = "../webpkiz" },':
             '.webpkiz = .{ .path = "deps/webpkiz" },',
+        '.regexz = .{ .path = "../regexz" },':
+            '.regexz = .{ .path = "deps/regexz" },',
         '        .zio = .{\n'
         '            .url = "' + ZIO_SOURCE + '",\n'
         '            .hash = "' + ZIO_PACKAGE_HASH + '",\n'
@@ -232,6 +242,7 @@ def create_archive(
     vort: Path,
     pbz: Path,
     webpkiz: Path,
+    regexz: Path,
     zio: Path,
     harnessz: Path,
     output: Path,
@@ -240,6 +251,7 @@ def create_archive(
     expected_vort_revision: str = VORT_REVISION,
     expected_pbz_revision: str = PBZ_REVISION,
     expected_webpkiz_revision: str = WEBPKIZ_REVISION,
+    expected_regexz_revision: str = REGEXZ_REVISION,
     expected_harnessz_revision: str = HARNESSZ_REVISION,
     expected_zio_package_hash: str = ZIO_PACKAGE_HASH,
     zig: str = "zig",
@@ -250,6 +262,7 @@ def create_archive(
         "deps/vort": vort.resolve(),
         "deps/pbz": pbz.resolve(),
         "deps/webpkiz": webpkiz.resolve(),
+        "deps/regexz": regexz.resolve(),
         "deps/harnessz": harnessz.resolve(),
     }
     for repo in repositories.values():
@@ -276,6 +289,12 @@ def create_archive(
             "webpkiz revision mismatch: expected "
             f"{expected_webpkiz_revision}, "
             f"found {revisions['deps/webpkiz']}"
+        )
+    if revisions["deps/regexz"] != expected_regexz_revision:
+        raise RuntimeError(
+            "regexz revision mismatch: expected "
+            f"{expected_regexz_revision}, "
+            f"found {revisions['deps/regexz']}"
         )
     if revisions["deps/harnessz"] != expected_harnessz_revision:
         raise RuntimeError(
@@ -319,6 +338,7 @@ def create_archive(
             revisions["deps/vort"],
             revisions["deps/pbz"],
             revisions["deps/webpkiz"],
+            revisions["deps/regexz"],
             revisions["deps/harnessz"],
             file_hashes,
         ),
@@ -359,6 +379,7 @@ def main() -> None:
     parser.add_argument("--vort", type=Path, required=True)
     parser.add_argument("--pbz", type=Path, required=True)
     parser.add_argument("--webpkiz", type=Path, required=True)
+    parser.add_argument("--regexz", type=Path, required=True)
     parser.add_argument("--zio", type=Path, required=True)
     parser.add_argument("--harnessz", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -371,6 +392,7 @@ def main() -> None:
         args.vort,
         args.pbz,
         args.webpkiz,
+        args.regexz,
         args.zio,
         args.harnessz,
         args.output,

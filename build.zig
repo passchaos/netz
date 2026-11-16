@@ -2720,6 +2720,8 @@ pub fn build(b: *std.Build) void {
         source_archive.addDirectoryArg(pbz_dep.path("."));
         source_archive.addArg("--webpkiz");
         source_archive.addDirectoryArg(webpkiz_dep.path("."));
+        source_archive.addArg("--regexz");
+        source_archive.addDirectoryArg(regexz_dep.path("."));
         source_archive.addArg("--harnessz");
         source_archive.addDirectoryArg(harnessz_dep.path("."));
         source_archive.addArg("--zio");

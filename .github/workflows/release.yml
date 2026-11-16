@@ -32,7 +32,7 @@ jobs:
           DEPENDENCIES_TOKEN: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
         run: |
           if [ -z "$DEPENDENCIES_TOKEN" ]; then
-            echo "::error::Configure NETZ_DEPENDENCIES_TOKEN with read access to passchaos/vail, passchaos/vort and passchaos/harnessz"
+            echo "::error::Configure NETZ_DEPENDENCIES_TOKEN with read access to passchaos/vail, passchaos/vort, passchaos/webpkiz, passchaos/regexz and passchaos/harnessz"
             exit 1
           fi
 
@@ -40,7 +40,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: passchaos/vail
-          ref: 0199eb833833fa51819c747ba01e4b5850bb0d2b
+          ref: 3b772b0cccb64d84fbc760df6428bc51e0fe0761
           token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
           path: vail
           persist-credentials: false
@@ -60,6 +60,24 @@ jobs:
           repository: passchaos/pbz
           ref: 6513ef1f8b130b308bd86ba0bd02f6acc2be64e8
           path: pbz
+          persist-credentials: false
+
+      - name: Checkout pinned webpkiz
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: passchaos/webpkiz
+          ref: 35c9f4bfecb51a7794670d474c01b3c6fe541e9e
+          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
+          path: webpkiz
+          persist-credentials: false
+
+      - name: Checkout pinned regexz
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: passchaos/regexz
+          ref: f150767088ef11fb4435f3b42c99165333b6e51c
+          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
+          path: regexz
           persist-credentials: false
 
       - name: Checkout pinned harnessz
