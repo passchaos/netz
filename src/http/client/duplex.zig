@@ -40,6 +40,7 @@ pub const Handle = struct {
     h3_pending_event: ?http3_runtime.StreamingEvent = null,
     response_available: bool = false,
     body_finished: bool = false,
+    response_complete: bool = false,
     response_head: ?ResponseHead = null,
     response_headers: []Header = &.{},
     response_header_storage: []u8 = &.{},
@@ -98,7 +99,16 @@ pub const Handle = struct {
         switch (self.state) {
             .http1 => |*writer| writer.deinit(),
             .http2 => |*writer| writer.deinit(),
-            .http3 => {},
+            .http3 => |*h3| {
+                // Abandoning a live H3 request must release its stream
+                // lifecycle; the connection itself stays reusable.
+                if (!self.response_complete) {
+                    h3.client.tryCancelRequest(
+                        h3.stream_id,
+                        http3.ApplicationErrorCode.request_cancelled,
+                    ) catch {};
+                }
+            },
         }
         if (self.h1_buffered_response) |*response| {
             response.deinit(self.allocator);
@@ -388,6 +398,7 @@ pub const Handle = struct {
                     );
                     defer self.allocator.free(mapped);
                     try sink.end(sink.context, mapped);
+                    self.response_complete = true;
                     return self.response_head orelse
                         error.MissingResponseHead;
                 },
