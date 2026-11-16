@@ -43,7 +43,7 @@ performance record.
 
 | Document | Topic |
 | --- | --- |
-| [http_streaming.md](http_streaming.md) | Streaming body and queue ownership. |
+| [http_streaming.md](http_streaming.md) | Server streaming ownership plus the client duplex `RequestHandle` for HTTP/1, HTTP/2, and HTTP/3. |
 | [http3_complete_requests.md](http3_complete_requests.md) | Complete-request HTTP/3 path. |
 | [http3_complete_responses.md](http3_complete_responses.md) | Complete-response HTTP/3 path. |
 | [http_digest.md](http_digest.md) | HTTP Digest authentication. |

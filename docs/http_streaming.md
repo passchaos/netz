@@ -134,6 +134,62 @@ owns the received requests and one error slot per input; handlers must not
 deinitialize the borrowed request or retain its slices after the result is
 deinitialized. The same single-reader/one-writer rules as HTTP/2 apply.
 
+## Client duplex requests (HTTP/1, HTTP/2, HTTP/3)
+
+`netz.http.RequestHandle` is the connection-level streaming client shape shared
+by all three protocols. The caller writes the request body incrementally and
+receives the response through callbacks; neither direction is buffered whole.
+
+```zig
+var handle = try connection.startRequest("/upload", .{ // HTTP/1 or HTTP/2
+    .method = "POST",
+    .headers = &.{.{ .name = "te", .value = "trailers" }},
+});
+defer handle.deinit();
+
+try handle.writeBody("chunk-1");
+try handle.writeBody("chunk-2");
+try handle.finishTrailers(&.{.{ .name = "x-checksum", .value = "1" }});
+
+var sink = MySink{};
+const head = try handle.readResponse(sink.responseSink());
+// or: try handle.readResponseWithDeadline(sink.responseSink(), deadline);
+```
+
+`ResponseSink` has four callbacks:
+
+- `begin(head)` once with the final `status` and owned header copies;
+- `data(bytes)` for each body chunk, borrowed for the callback only;
+- `end(trailers)` once, after the last chunk;
+- optional `informational(head)` for every 1xx head, including `100 Continue`
+  and `103 Early Hints`, before `begin`.
+
+`readResponseWithDeadline` bounds head and body waits with one absolute awake
+clock deadline on every protocol. `Handle.writeBody` surfaces
+`error.ResponseAvailable` when a peer rejects the request early; call
+`readResponse` to drain the already-received final response. HTTP/1
+`Expect: 100-continue` is handled on the first body write.
+
+Surfaces:
+
+- `http.Connection.startRequest` for an owned HTTP/1 or HTTP/2 connection.
+- `http.Pool.startRequest` for a pooled HTTP/1 or HTTP/2 lease. The returned
+  `Pool.StreamHandle` returns a completed exchange to the idle pool and closes
+  an abandoned one.
+- `http.startHttp3Request(allocator, &handshake_client, request, body_length)`
+  for an exclusive HTTP/3 `HandshakeClient`. Abandoning an unfinished H3 handle
+  cancels its stream so the QUIC connection stays reusable.
+
+Limits:
+
+- The pooled HTTP/3 dispatcher only exposes buffered requests. When an Alt-Svc
+  route is live for the origin, `Pool.startRequest` returns
+  `error.H3StreamingUnsupported` instead of silently bypassing HTTP/3; use
+  `HandshakeClient` directly for H3 streaming.
+- HTTP/1 forward-proxy connections reject streaming requests with
+  `error.StreamingBodyUnsupported`.
+- The handle borrows its connection; the connection or pool must outlive it.
+
 ## Continuous concurrent serving
 
 Long-lived HTTP server connections use a per-connection owner loop instead of a
