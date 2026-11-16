@@ -271,63 +271,22 @@ const Parser = struct {
         if (header_end > header_limit) return error.HeaderTooLarge;
 
         const header_start = self.headers.items.len;
-        var disposition_value: ?[]const u8 = null;
-        var content_type_value: ?[]const u8 = null;
-        var line_start = self.pos;
-        while (line_start < header_end) {
-            const line_end = std.mem.indexOfPos(
-                u8,
-                self.body,
-                line_start,
-                "\r\n",
-            ) orelse return error.MalformedHeader;
-            if (line_end > header_end) return error.MalformedHeader;
-            if (line_end == line_start) break;
-            if (self.body[line_start] == ' ' or
-                self.body[line_start] == '\t')
-            {
-                return error.MalformedHeader;
-            }
-            const colon = std.mem.indexOfScalarPos(
-                u8,
-                self.body,
-                line_start,
-                ':',
-            ) orelse return error.MalformedHeader;
-            if (colon >= line_end) return error.MalformedHeader;
-            const name = self.body[line_start..colon];
-            if (!validHeaderName(name)) return error.InvalidHeaderName;
-            const value = std.mem.trim(
-                u8,
-                self.body[colon + 1 .. line_end],
-                " \t",
-            );
-            if (self.headers.items.len - header_start >=
-                self.options.max_headers_per_part)
-            {
-                return error.TooManyHeaders;
-            }
-            try self.headers.append(self.allocator, .{
-                .name = name,
-                .value = value,
-            });
-            if (std.ascii.eqlIgnoreCase(name, "content-disposition")) {
-                if (disposition_value != null) {
-                    return error.MalformedHeader;
-                }
-                disposition_value = value;
-            } else if (std.ascii.eqlIgnoreCase(name, "content-type")) {
-                if (content_type_value != null) {
-                    return error.MalformedHeader;
-                }
-                content_type_value = value;
-            }
-            line_start = line_end + 2;
-        }
-
-        const disposition = disposition_value orelse
+        const parsed_headers = try parseHeaderLines(
+            self.allocator,
+            &self.headers,
+            self.body[self.pos..header_end],
+            self.options.max_headers_per_part,
+        );
+        const disposition = parsed_headers.disposition orelse
             return error.MissingContentDisposition;
-        const names = try self.parseDisposition(disposition);
+        const names = try parseDispositionInto(
+            self.allocator,
+            &self.disposition,
+            disposition,
+            self.options.max_name_bytes,
+            self.options.max_filename_bytes,
+        );
+        const content_type_value = parsed_headers.content_type;
 
         if (content_type_value) |value| {
             if (!self.options.allow_nested and
@@ -416,8 +375,15 @@ const Parser = struct {
         }
         return error.TruncatedBody;
     }
+};
 
-    const DispositionNames = struct {
+const DispositionParser = struct {
+    allocator: std.mem.Allocator,
+    disposition: *std.ArrayList(u8),
+    max_name_bytes: usize,
+    max_filename_bytes: usize,
+
+    const Names = struct {
         name_start: usize,
         name_len: usize,
         filename_start: usize = 0,
@@ -430,10 +396,10 @@ const Parser = struct {
         len: usize,
     };
 
-    fn parseDisposition(
-        self: *Parser,
+    fn parse(
+        self: *DispositionParser,
         value: []const u8,
-    ) Error!DispositionNames {
+    ) Error!Names {
         var index: usize = 0;
         skipOws(value, &index);
         const type_start = index;
@@ -494,7 +460,7 @@ const Parser = struct {
                 }
                 const raw = try parseExtendedRaw(value, &index);
                 const decoded = try self.decodeExtendedValue(raw);
-                if (decoded.len > self.options.max_filename_bytes) {
+                if (decoded.len > self.max_filename_bytes) {
                     return error.FilenameTooLong;
                 }
                 filename_extended = decoded;
@@ -511,13 +477,13 @@ const Parser = struct {
             const decoded = try self.parseDispositionValue(value, &index);
             if (is_name) {
                 if (name != null) return error.DuplicateName;
-                if (decoded.len > self.options.max_name_bytes) {
+                if (decoded.len > self.max_name_bytes) {
                     return error.NameTooLong;
                 }
                 name = decoded;
             } else {
                 if (filename != null) return error.DuplicateFilename;
-                if (decoded.len > self.options.max_filename_bytes) {
+                if (decoded.len > self.max_filename_bytes) {
                     return error.FilenameTooLong;
                 }
                 filename = decoded;
@@ -536,7 +502,7 @@ const Parser = struct {
     }
 
     fn decodeExtendedValue(
-        self: *Parser,
+        self: *DispositionParser,
         raw: []const u8,
     ) Error!ValueRange {
         const first_quote = std.mem.indexOfScalar(u8, raw, '\'') orelse
@@ -594,7 +560,7 @@ const Parser = struct {
     }
 
     fn parseDispositionValue(
-        self: *Parser,
+        self: *DispositionParser,
         value: []const u8,
         index: *usize,
     ) Error!ValueRange {
@@ -654,6 +620,24 @@ const Parser = struct {
         };
     }
 };
+
+pub const DispositionNames = DispositionParser.Names;
+
+pub fn parseDispositionInto(
+    allocator: std.mem.Allocator,
+    disposition: *std.ArrayList(u8),
+    value: []const u8,
+    max_name_bytes: usize,
+    max_filename_bytes: usize,
+) Error!DispositionNames {
+    var parser = DispositionParser{
+        .allocator = allocator,
+        .disposition = disposition,
+        .max_name_bytes = max_name_bytes,
+        .max_filename_bytes = max_filename_bytes,
+    };
+    return parser.parse(value);
+}
 
 fn skipOws(input: []const u8, index: *usize) void {
     while (index.* < input.len and
@@ -731,6 +715,61 @@ fn validHeaderName(name: []const u8) bool {
         if (!isTokenChar(byte)) return false;
     }
     return true;
+}
+
+pub const HeaderParseResult = struct {
+    disposition: ?[]const u8 = null,
+    content_type: ?[]const u8 = null,
+};
+
+pub fn parseHeaderLines(
+    allocator: std.mem.Allocator,
+    headers: *std.ArrayList(Header),
+    block: []const u8,
+    max_headers: usize,
+) Error!HeaderParseResult {
+    const start_count = headers.items.len;
+    var result: HeaderParseResult = .{};
+    var line_start: usize = 0;
+    while (line_start < block.len) {
+        const line_end = std.mem.indexOfPos(
+            u8,
+            block,
+            line_start,
+            "\r\n",
+        ) orelse block.len;
+        if (line_end == line_start) return error.MalformedHeader;
+        if (block[line_start] == ' ' or block[line_start] == '\t') {
+            return error.MalformedHeader;
+        }
+        const colon = std.mem.indexOfScalarPos(
+            u8,
+            block,
+            line_start,
+            ':',
+        ) orelse return error.MalformedHeader;
+        if (colon >= line_end) return error.MalformedHeader;
+        const name = block[line_start..colon];
+        if (!validHeaderName(name)) return error.InvalidHeaderName;
+        const value = std.mem.trim(
+            u8,
+            block[colon + 1 .. line_end],
+            " \t",
+        );
+        if (headers.items.len - start_count >= max_headers) {
+            return error.TooManyHeaders;
+        }
+        try headers.append(allocator, .{ .name = name, .value = value });
+        if (std.ascii.eqlIgnoreCase(name, "content-disposition")) {
+            if (result.disposition != null) return error.MalformedHeader;
+            result.disposition = value;
+        } else if (std.ascii.eqlIgnoreCase(name, "content-type")) {
+            if (result.content_type != null) return error.MalformedHeader;
+            result.content_type = value;
+        }
+        line_start = line_end + 2;
+    }
+    return result;
 }
 
 test "multipart parser extracts fields and files" {

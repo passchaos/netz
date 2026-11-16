@@ -125,6 +125,35 @@ parameter. The parser is exercised by the `fuzz-parsers` target with a
 dedicated multipart seed, and a curl-shaped fixture covers the common
 `Content-Disposition`/`Content-Type` layout.
 
+
+## Streaming multipart parsing
+
+For large uploads, use the streaming parser instead of buffering the whole body:
+
+```zig
+const Handler = netz.http.multipart.StreamHandler;
+var sink: MySink = .{};
+
+try netz.http.multipart.parseStream(
+    allocator,
+    &request_reader,
+    request.header("content-type").?,
+    .{ .buffer_bytes = 64 * 1024 },
+    .{
+        .context = &sink,
+        .begin = MySink.begin,
+        .data = MySink.data,
+        .end = MySink.end,
+    },
+);
+```
+
+The parser keeps only a bounded rolling window for boundary detection. Part
+bodies are delivered through `data` callbacks and are never buffered whole.
+`begin` receives a `StreamPartHead` with owned headers/name/filename; it stays
+valid until `end`. Parsing stops at the final boundary; any epilogue bytes
+already read into the window are ignored.
+
 ## Limits and validation
 
 Multipart encoding rejects:

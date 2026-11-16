@@ -216,11 +216,39 @@ fn exerciseHttp(bytes: []const u8) !void {
     try exerciseMultipart(bytes);
 }
 
+const StreamSink = struct {
+    fn begin(_: *anyopaque, _: netz.http.multipart.StreamPartHead) anyerror!void {}
+    fn data(_: *anyopaque, _: []const u8) anyerror!void {}
+    fn end(_: *anyopaque) anyerror!void {}
+};
+
 fn exerciseMultipart(bytes: []const u8) !void {
     var boundary_buffer: [netz.http.multipart.max_boundary_len]u8 = undefined;
     _ = netz.http.multipart.contentTypeBoundary(
         &boundary_buffer,
         bytes,
+    ) catch {};
+    var stream_context: u8 = 0;
+    var stream_reader = std.Io.Reader.fixed(bytes);
+    _ = netz.http.multipart.parseStream(
+        std.testing.allocator,
+        &stream_reader,
+        "multipart/form-data; boundary=----netz-fuzz",
+        .{
+            .max_parts = 8,
+            .max_headers_per_part = 8,
+            .max_header_bytes = 1024,
+            .max_part_bytes = 1024,
+            .max_total_bytes = 4096,
+            .max_preamble_bytes = 128,
+            .buffer_bytes = 64,
+        },
+        .{
+            .context = &stream_context,
+            .begin = StreamSink.begin,
+            .data = StreamSink.data,
+            .end = StreamSink.end,
+        },
     ) catch {};
     if (netz.http.multipart.parseWithBoundary(
         std.testing.allocator,

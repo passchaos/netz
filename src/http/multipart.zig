@@ -12,6 +12,7 @@ pub const validateBoundary = boundary_rules.validate;
 
 pub const content_type = @import("multipart/content_type.zig");
 pub const parser = @import("multipart/parser.zig");
+pub const stream_parser = @import("multipart/stream.zig");
 pub const parse = parser.parseAlloc;
 pub const parseWithBoundary = parser.parseWithBoundary;
 pub const ParseOptions = parser.ParseOptions;
@@ -19,6 +20,11 @@ pub const Parsed = parser.Parsed;
 pub const ParsedPart = parser.Part;
 pub const ParsedHeader = parser.Header;
 pub const contentTypeBoundary = content_type.boundaryInto;
+pub const StreamOptions = stream_parser.StreamOptions;
+pub const StreamHandler = stream_parser.Handler;
+pub const StreamPartHead = stream_parser.PartHead;
+pub const parseStream = stream_parser.parseStream;
+pub const parseStreamWithBoundary = stream_parser.parseStreamWithBoundary;
 pub const max_part_header_bytes = 8 * 1024;
 
 pub const Error = std.Io.Writer.Error ||
@@ -729,4 +735,5 @@ test "multipart content type and boundary helpers are bounded" {
 test {
     _ = parser;
     _ = content_type;
+    _ = stream_parser;
 }
