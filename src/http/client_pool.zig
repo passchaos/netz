@@ -40,6 +40,7 @@ pub const Error = client.Error || http3_runtime.Error ||
     PoolClosed,
     ConnectionLimitReached,
     InvalidPoolOptions,
+    H3StreamingUnsupported,
 } || shared_tcp.Error;
 pub const OperationError = Error || std.Io.Timeout.Error ||
     std.Io.ConcurrentError;
@@ -331,6 +332,50 @@ pub const Pool = struct {
         request_ops.requestUriFollowingRedirectsDetailedWithTimeout;
     pub const requestUriFollowingRedirectsDetailedWithDeadline =
         request_ops.requestUriFollowingRedirectsDetailedWithDeadline;
+
+    /// Open a streaming request on a leased HTTP/1 or HTTP/2 connection.
+    ///
+    /// HTTP/3 origins with a live Alt-Svc route return
+    /// `error.H3StreamingUnsupported`: the shared H3 dispatcher only exposes
+    /// buffered requests. Use `http3.runtime.HandshakeClient` directly when
+    /// H3 streaming is required.
+    pub fn startRequest(
+        self: *Pool,
+        uri_text: []const u8,
+        request: client.RequestOptions,
+    ) Error!StreamHandle {
+        const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
+        if (self.http3) |state| {
+            if (std.ascii.eqlIgnoreCase(uri.scheme, "https")) {
+                var key = try originKeyForUri(self.allocator, uri_text);
+                defer key.deinit();
+                if (state.cache.lookup(key.origin()) catch null) |alternative| {
+                    var owned = alternative;
+                    owned.deinit();
+                    return error.H3StreamingUnsupported;
+                }
+            }
+        }
+        const target = try request_ops.uriTargetAlloc(self.allocator, uri);
+        defer self.allocator.free(target);
+        // The protocol writer keeps a pointer into the leased connection, so
+        // the lease must not move after `startRequest`.
+        const lease = try self.allocator.create(Lease);
+        errdefer self.allocator.destroy(lease);
+        lease.* = try self.acquireUri(uri_text);
+        errdefer if (lease.active) lease.discard();
+        const connection = lease.connection();
+        const request_target = if (connection.isForwardProxy())
+            uri_text
+        else
+            target;
+        const handle = try connection.startRequest(request_target, request);
+        return .{
+            .allocator = self.allocator,
+            .lease = lease,
+            .handle = handle,
+        };
+    }
 
     pub fn idleCount(self: *Pool) usize {
         self.mutex.lockUncancelable(self.io);
@@ -863,6 +908,63 @@ pub const Lease = struct {
         self.pool.releaseConnectionSlot();
         self.connection_value = undefined;
         self.origin_key = undefined;
+    }
+};
+
+/// Streaming request handle that owns its pooled connection lease. Dropping it
+/// returns a completed exchange to the idle pool and closes an abandoned one.
+pub const StreamHandle = struct {
+    allocator: std.mem.Allocator,
+    lease: *Lease,
+    handle: client.RequestHandle,
+
+    pub fn writeBody(self: *StreamHandle, bytes: []const u8) !void {
+        try self.handle.writeBody(bytes);
+    }
+
+    pub fn finishBody(self: *StreamHandle) !void {
+        try self.handle.finishBody();
+    }
+
+    pub fn finishTrailers(
+        self: *StreamHandle,
+        trailers: []const client.DuplexHeader,
+    ) !void {
+        try self.handle.finishTrailers(trailers);
+    }
+
+    pub fn readResponse(
+        self: *StreamHandle,
+        sink: client.ResponseSink,
+    ) !client.ResponseHead {
+        return self.handle.readResponse(sink);
+    }
+
+    pub fn readResponseWithDeadline(
+        self: *StreamHandle,
+        sink: client.ResponseSink,
+        deadline: std.Io.Clock.Timestamp,
+    ) !client.ResponseHead {
+        return self.handle.readResponseWithDeadline(sink, deadline);
+    }
+
+    pub fn protocol(self: *const StreamHandle) client.Protocol {
+        return self.lease.protocol();
+    }
+
+    /// Close the connection instead of returning it to the idle pool.
+    pub fn discard(self: *StreamHandle) void {
+        self.handle.deinit();
+        self.lease.discard();
+        self.allocator.destroy(self.lease);
+        self.* = undefined;
+    }
+
+    pub fn deinit(self: *StreamHandle) void {
+        self.handle.deinit();
+        self.lease.release();
+        self.allocator.destroy(self.lease);
+        self.* = undefined;
     }
 };
 

@@ -562,3 +562,131 @@ fn waitForFlag(io: std.Io, flag: *std.atomic.Value(bool)) !void {
     }
     return error.Timeout;
 }
+
+test "unified HTTP pool streams a request over a leased connection" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try http1_runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Worker = struct {
+        const Self = @This();
+        server: *http1_runtime.Server,
+        release: *std.Io.Event,
+        err: ?anyerror = null,
+
+        fn run(self: *Self) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *Self) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            var request = try connection.readRequest(.{});
+            defer request.deinit(self.server.allocator);
+            try std.testing.expectEqualStrings(
+                "hello world",
+                request.request.body,
+            );
+            var response = try connection.startResponse(.{
+                .headers = &.{.{
+                    .name = "content-type",
+                    .value = "text/plain",
+                }},
+                .body_length = null,
+                .request_method = .POST,
+            });
+            try response.write("streamed");
+            try response.finish();
+            try self.release.wait(self.server.io);
+        }
+    };
+
+    var release: std.Io.Event = .unset;
+    var worker = Worker{ .server = &server, .release = &release };
+    const thread = try std.Thread.spawn(.{}, Worker.run, .{&worker});
+    var joined = false;
+    defer if (!joined) {
+        release.set(io);
+        thread.join();
+    };
+
+    const uri = try std.fmt.allocPrint(
+        allocator,
+        "http://127.0.0.1:{d}/upload",
+        .{server.address().getPort()},
+    );
+    defer allocator.free(uri);
+
+    var pool = try http.Pool.init(allocator, io, .{});
+    defer pool.deinit();
+
+    const Sink = struct {
+        allocator: std.mem.Allocator,
+        status: u16 = 0,
+        body: std.ArrayList(u8) = .empty,
+
+        fn sink(self: *@This()) http.ResponseSink {
+            return .{
+                .context = self,
+                .begin = begin,
+                .data = data,
+                .end = end,
+            };
+        }
+
+        fn begin(context: *anyopaque, head: http.ResponseHead) !void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.status = head.status;
+        }
+
+        fn data(context: *anyopaque, bytes: []const u8) !void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            try self.body.appendSlice(self.allocator, bytes);
+        }
+
+        fn end(context: *anyopaque, trailers: []const http.DuplexHeader) !void {
+            _ = context;
+            _ = trailers;
+        }
+    };
+
+    var handle = try pool.startRequest(uri, .{
+        .method = "POST",
+        .body = "hello world",
+    });
+    var handle_closed = false;
+    defer if (!handle_closed) handle.deinit();
+    try std.testing.expectEqual(http.Protocol.http1, handle.protocol());
+
+    try handle.writeBody("hello ");
+    try handle.writeBody("world");
+    try handle.finishBody();
+
+    var sink = Sink{ .allocator = allocator };
+    defer sink.body.deinit(allocator);
+    const head = try handle.readResponse(sink.sink());
+    try std.testing.expectEqual(@as(u16, 200), head.status);
+    try std.testing.expectEqualStrings("streamed", sink.body.items);
+
+    handle.deinit();
+    handle_closed = true;
+    try std.testing.expectEqual(@as(usize, 1), pool.idleCount());
+
+    release.set(io);
+    thread.join();
+    joined = true;
+    if (worker.err) |err| return err;
+}

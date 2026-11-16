@@ -448,7 +448,7 @@ fn RedirectAdapter(comptime PoolType: type) type {
     };
 }
 
-fn uriTargetAlloc(
+pub fn uriTargetAlloc(
     allocator: std.mem.Allocator,
     uri: std.Uri,
 ) ![]u8 {
