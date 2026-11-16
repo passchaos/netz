@@ -15,6 +15,14 @@ import tempfile
 from archive_checksum import verify as verify_checksum
 
 
+def extract_all(archive: tarfile.TarFile, path: Path) -> None:
+    try:
+        archive.extractall(path, filter="data")
+    except TypeError:
+        # Python < 3.12 lacks the extraction filter argument.
+        archive.extractall(path)
+
+
 FORBIDDEN_PARTS = {
     ".git",
     ".zig-cache",
@@ -215,7 +223,7 @@ def verify_archive(archive_path: Path, checksum_path: Path, zig: str) -> None:
         with tarfile.open(archive_path, mode="r:gz") as archive:
             members = archive.getmembers()
             root_name = validate_members(members)
-            archive.extractall(temp, filter="data")
+            extract_all(archive, temp)
         root = temp / root_name
         verify_layout(root)
         run_zig_test(root, zig, temp / "package-cache", "test-package")
