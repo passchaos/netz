@@ -3691,6 +3691,12 @@ pub fn build(b: *std.Build) void {
             .description = "Run the HTTP/2 h2c local client/server example",
         },
         .{
+            .exe_name = "netz-http-duplex",
+            .path = "examples/http_duplex.zig",
+            .run_step = "run-http-duplex",
+            .description = "Stream a request body and response through the unified HTTP duplex handle",
+        },
+        .{
             .exe_name = "netz-grpc-h2c",
             .path = "examples/grpc_h2c.zig",
             .run_step = "run-grpc-h2c",

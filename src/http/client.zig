@@ -44,6 +44,7 @@ pub const Header = types.Header;
 pub const HeaderIterator = types.HeaderIterator;
 pub const ReaderBody = types.ReaderBody;
 pub const BodySource = types.BodySource;
+pub const BodyLength = types.BodyLength;
 pub const RequestHandle = duplex.Handle;
 pub const ResponseSink = duplex.ResponseSink;
 pub const ResponseHead = duplex.ResponseHead;
@@ -558,6 +559,12 @@ fn streamHttp2Body(
 }
 
 fn requestBodyLength(options: RequestOptions) ?usize {
+    if (options.body_length) |declared| {
+        return switch (declared) {
+            .unknown => null,
+            .exact => |length| length,
+        };
+    }
     if (options.body_source) |source| {
         return switch (source) {
             .slice => |body| body.len,

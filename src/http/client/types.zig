@@ -82,6 +82,14 @@ pub const BodySource = union(enum) {
     reader: ReaderBody,
 };
 
+/// Manual duplex-streaming body declaration for `Connection.startRequest`.
+pub const BodyLength = union(enum) {
+    /// No length is known; HTTP/1 uses chunked framing and HTTP/2 omits
+    /// Content-Length.
+    unknown,
+    exact: usize,
+};
+
 pub const RequestOptions = struct {
     method: []const u8 = "GET",
     headers: []const Header = &.{},
@@ -90,6 +98,10 @@ pub const RequestOptions = struct {
     /// HTTP/1 and HTTP/2 connections stream reader-backed bodies; HTTP/3 pool
     /// requests reject them before opening a stream and may fall back to TCP.
     body_source: ?BodySource = null,
+    /// Declared length for a manually written duplex body. When set, it
+    /// overrides the length implied by `body` or `body_source`; the caller
+    /// writes the bytes through `RequestHandle`.
+    body_length: ?BodyLength = null,
     trailers: []const Header = &.{},
     /// Permit an explicitly configured HTTP/3 pool to use 0-RTT for this
     /// request. HTTP/1, HTTP/2, and reused HTTP/3 connections ignore it.

@@ -94,6 +94,7 @@ reader feeds `writeBodyFromReader` directly:
 var handle = try connection.startRequest("/upload", .{
     .method = "POST",
     .headers = &.{.{ .name = "content-type", .value = content_type }},
+    .body_length = .unknown, // multipart reader length is not known up front
 });
 defer handle.deinit();
 

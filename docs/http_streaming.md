@@ -144,6 +144,7 @@ receives the response through callbacks; neither direction is buffered whole.
 var handle = try connection.startRequest("/upload", .{ // HTTP/1 or HTTP/2
     .method = "POST",
     .headers = &.{.{ .name = "te", .value = "trailers" }},
+    .body_length = .unknown, // or .{ .exact = n }; derived when omitted
 });
 defer handle.deinit();
 
@@ -165,7 +166,10 @@ const head = try handle.readResponse(sink.responseSink());
   and `103 Early Hints`, before `begin`.
 
 `readResponseWithDeadline` bounds head and body waits with one absolute awake
-clock deadline on every protocol. `Handle.writeBody` surfaces
+clock deadline on every protocol. `body_length` declares the manual write
+length: `.unknown` selects HTTP/1 chunked framing (HTTP/2 omits Content-Length)
+and `.exact = n` selects fixed framing; when omitted, the length is derived
+from `body` or `body_source`. `Handle.writeBody` surfaces
 `error.ResponseAvailable` when a peer rejects the request early; call
 `readResponse` to drain the already-received final response. HTTP/1
 `Expect: 100-continue` is handled on the first body write.

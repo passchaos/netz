@@ -78,6 +78,7 @@ pub const Header = client.Header;
 pub const HeaderIterator = client.HeaderIterator;
 pub const ReaderBody = client.ReaderBody;
 pub const BodySource = client.BodySource;
+pub const BodyLength = client.BodyLength;
 pub const RequestHandle = client.RequestHandle;
 pub const ResponseSink = client.ResponseSink;
 pub const ResponseHead = client.ResponseHead;
