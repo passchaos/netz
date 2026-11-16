@@ -17,6 +17,8 @@ const DuplexSink = struct {
     trailer_count: usize = 0,
     trailer_name: std.ArrayList(u8) = .empty,
     trailer_value: std.ArrayList(u8) = .empty,
+    informational_count: usize = 0,
+    informational_status: u16 = 0,
 
     fn sink(self: *DuplexSink) http.ResponseSink {
         return .{
@@ -24,7 +26,17 @@ const DuplexSink = struct {
             .begin = begin,
             .data = data,
             .end = end,
+            .informational = observeInformational,
         };
+    }
+
+    fn observeInformational(
+        context: *anyopaque,
+        head: http.ResponseHead,
+    ) void {
+        const self: *DuplexSink = @ptrCast(@alignCast(context));
+        self.informational_count += 1;
+        self.informational_status = head.status;
     }
 
     fn begin(context: *anyopaque, head: http.ResponseHead) !void {
@@ -1625,6 +1637,14 @@ test "HTTP/1 duplex handle streams request and response" {
                 "hello world",
                 request.request.body,
             );
+            try connection.writeResponse(.{
+                .status = 103,
+                .reason = "Early Hints",
+                .headers = &.{.{
+                    .name = "link",
+                    .value = "</style.css>; rel=preload",
+                }},
+            });
             var response = try connection.startResponse(.{
                 .headers = &.{.{
                     .name = "content-type",
@@ -1678,13 +1698,18 @@ test "HTTP/1 duplex handle streams request and response" {
 
     var sink = DuplexSink{ .allocator = allocator };
     defer sink.deinit();
-    const head = try handle.readResponse(sink.sink());
+    const head = try handle.readResponseWithDeadline(
+        sink.sink(),
+        .fromNow(io, .{ .raw = .fromSeconds(10), .clock = .awake }),
+    );
     try std.testing.expectEqual(http.Protocol.http1, head.protocol);
     try std.testing.expectEqual(@as(u16, 200), head.status);
     try std.testing.expectEqualStrings("resp-1resp-2", sink.body.items);
     try std.testing.expectEqual(@as(usize, 1), sink.trailer_count);
     try std.testing.expectEqualStrings("x-checksum", sink.trailer_name.items);
     try std.testing.expectEqualStrings("1", sink.trailer_value.items);
+    try std.testing.expectEqual(@as(usize, 1), sink.informational_count);
+    try std.testing.expectEqual(@as(u16, 103), sink.informational_status);
 
     release.set(io);
     thread.join();
@@ -1725,6 +1750,14 @@ test "HTTP/2 duplex handle streams request and response" {
             var request = try connection.readRequest();
             defer request.deinit(self.server.allocator);
             try std.testing.expectEqualStrings("hello world", request.body);
+            try connection.writeInformationalResponse(
+                request.stream_id,
+                103,
+                &.{.{
+                    .name = "link",
+                    .value = "</style.css>; rel=preload",
+                }},
+            );
             var response = try connection.startResponse(
                 request.stream_id,
                 .{
@@ -1786,6 +1819,8 @@ test "HTTP/2 duplex handle streams request and response" {
     try std.testing.expectEqual(@as(usize, 1), sink.trailer_count);
     try std.testing.expectEqualStrings("x-checksum", sink.trailer_name.items);
     try std.testing.expectEqualStrings("1", sink.trailer_value.items);
+    try std.testing.expectEqual(@as(usize, 1), sink.informational_count);
+    try std.testing.expectEqual(@as(u16, 103), sink.informational_status);
 
     release.set(io);
     thread.join();
@@ -1904,7 +1939,10 @@ test "HTTP/3 duplex handle streams request and response" {
 
     var sink = DuplexSink{ .allocator = allocator };
     defer sink.deinit();
-    const head = try handle.readResponse(sink.sink());
+    const head = try handle.readResponseWithDeadline(
+        sink.sink(),
+        .fromNow(io, .{ .raw = .fromSeconds(10), .clock = .awake }),
+    );
     try std.testing.expectEqual(http.Protocol.http3, head.protocol);
     try std.testing.expectEqual(@as(u16, 200), head.status);
     try std.testing.expectEqualStrings("resp-1resp-2", sink.body.items);

@@ -7875,6 +7875,49 @@ pub const RequestWriter = struct {
         );
     }
 
+    /// Finish the request and stream the final response under one absolute
+    /// deadline while observing every interim head and the final head.
+    pub fn readResponseStreamingWithInformationalAndHeadAndDeadline(
+        self: *RequestWriter,
+        informational: ?InformationalObserver,
+        deadline: std.Io.Clock.Timestamp,
+        context: anytype,
+        comptime begin: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
+        _ = try deadline_policy.usableAwake(self.client.io, deadline);
+        std.debug.assert(self.client.response_deadline == null);
+        self.client.response_deadline = deadline;
+        defer self.client.response_deadline = null;
+        return self.readResponseStreamingWithInformationalAndHead(
+            informational,
+            context,
+            begin,
+            consume,
+        );
+    }
+
+    pub fn readResponseStreamingWithInformationalAndHeadAndTimeout(
+        self: *RequestWriter,
+        informational: ?InformationalObserver,
+        timeout: std.Io.Duration,
+        context: anytype,
+        comptime begin: anytype,
+        comptime consume: anytype,
+    ) !StreamingResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.readResponseStreamingWithInformationalAndHeadAndDeadline(
+            informational,
+            .fromNow(self.client.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+            context,
+            begin,
+            consume,
+        );
+    }
+
     pub fn readResponseStreamingWithOptionsAndHead(
         self: *RequestWriter,
         parse_options: http1.ParseOptions,

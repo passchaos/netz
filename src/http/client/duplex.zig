@@ -29,6 +29,11 @@ pub const ResponseSink = struct {
     begin: *const fn (context: *anyopaque, head: ResponseHead) anyerror!void,
     data: *const fn (context: *anyopaque, bytes: []const u8) anyerror!void,
     end: *const fn (context: *anyopaque, trailers: []const Header) anyerror!void,
+    /// Optional 1xx observer. Head slices are valid only during the callback.
+    informational: ?*const fn (
+        context: *anyopaque,
+        head: ResponseHead,
+    ) void = null,
 };
 
 pub const Handle = struct {
@@ -250,17 +255,49 @@ pub const Handle = struct {
     /// Stream the final response into `sink`. `head.headers` and trailer
     /// slices are valid only for the duration of the corresponding callback.
     pub fn readResponse(self: *Handle, sink: ResponseSink) !ResponseHead {
+        return self.readResponseBefore(sink, null);
+    }
+
+    /// Stream the final response under one absolute awake-clock deadline.
+    pub fn readResponseWithDeadline(
+        self: *Handle,
+        sink: ResponseSink,
+        deadline: std.Io.Clock.Timestamp,
+    ) !ResponseHead {
+        return self.readResponseBefore(sink, deadline);
+    }
+
+    fn readResponseBefore(
+        self: *Handle,
+        sink: ResponseSink,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) !ResponseHead {
         if (self.h1_buffered_response) |response| {
             return self.emitBufferedResponse(response, sink);
         }
         var context = ResponseContext{ .handle = self, .sink = sink };
         switch (self.state) {
             .http1 => |*writer| {
-                var response = try writer.readResponseStreamingWithHead(
-                    &context,
-                    beginHttp1,
-                    consumeResponse,
-                );
+                const observer: ?http1_runtime.InformationalObserver =
+                    if (sink.informational != null) .{
+                        .context = &context,
+                        .on_response = observeInformationalHttp1,
+                    } else null;
+                var response = if (deadline) |absolute|
+                    try writer.readResponseStreamingWithInformationalAndHeadAndDeadline(
+                        observer,
+                        absolute,
+                        &context,
+                        beginHttp1,
+                        consumeResponse,
+                    )
+                else
+                    try writer.readResponseStreamingWithInformationalAndHead(
+                        observer,
+                        &context,
+                        beginHttp1,
+                        consumeResponse,
+                    );
                 defer response.deinit(self.allocator);
                 const trailers = try mapHeaders1(
                     self.allocator,
@@ -270,11 +307,26 @@ pub const Handle = struct {
                 try sink.end(sink.context, trailers);
             },
             .http2 => |*writer| {
-                var response = try writer.readResponseStreamingWithHead(
-                    &context,
-                    beginHttp2,
-                    consumeResponse,
-                );
+                const observer: ?http2_runtime.InformationalObserver =
+                    if (sink.informational != null) .{
+                        .context = &context,
+                        .on_response = observeInformationalHttp2,
+                    } else null;
+                var response = if (deadline) |absolute|
+                    try writer.readResponseStreamingWithInformationalAndHeadAndDeadline(
+                        observer,
+                        absolute,
+                        &context,
+                        beginHttp2,
+                        consumeResponse,
+                    )
+                else
+                    try writer.readResponseStreamingWithInformationalAndHead(
+                        observer,
+                        &context,
+                        beginHttp2,
+                        consumeResponse,
+                    );
                 defer response.deinit(self.allocator);
                 const trailers = try mapHeaders2(
                     self.allocator,
@@ -284,7 +336,7 @@ pub const Handle = struct {
                 try sink.end(sink.context, trailers);
             },
             .http3 => |*h3| {
-                return self.readResponseHttp3(h3, sink);
+                return self.readResponseHttp3(h3, sink, deadline);
             },
         }
         return self.response_head orelse error.MissingResponseHead;
@@ -350,6 +402,7 @@ pub const Handle = struct {
         self: *Handle,
         h3: *const Http3,
         sink: ResponseSink,
+        deadline: ?std.Io.Clock.Timestamp,
     ) !ResponseHead {
         var trailers: ?http3.DecodedTrailers = null;
         defer if (trailers) |*value| value.deinit(self.allocator);
@@ -365,14 +418,36 @@ pub const Handle = struct {
                 const value = pending.?;
                 pending = null;
                 break :blk value;
-            } else (try h3.client.receiveResponseEvent(h3.stream_id)) orelse
-                continue;
+            } else blk: {
+                const received = if (deadline) |absolute|
+                    try h3.client.receiveResponseEventWithDeadline(
+                        h3.stream_id,
+                        absolute,
+                    )
+                else
+                    try h3.client.receiveResponseEvent(h3.stream_id);
+                break :blk received orelse continue;
+            };
             defer event.deinit(self.allocator);
             switch (event) {
                 .head => |head| switch (head) {
                     .request => return error.InvalidResponse,
                     .response => |response| {
-                        if (response.status < 200) continue;
+                        if (response.status < 200) {
+                            if (sink.informational) |callback| {
+                                const mapped = try mapHeaders3(
+                                    self.allocator,
+                                    response.headers,
+                                );
+                                defer self.allocator.free(mapped);
+                                callback(sink.context, .{
+                                    .protocol = .http3,
+                                    .status = response.status,
+                                    .headers = mapped,
+                                });
+                            }
+                            continue;
+                        }
                         try self.beginHttp3Response(response, sink);
                     },
                 },
@@ -474,6 +549,42 @@ pub const Handle = struct {
             context.sink.context,
             context.handle.response_head.?,
         );
+    }
+
+    fn observeInformationalHttp1(
+        context: *anyopaque,
+        head: http1_runtime.InformationalResponseHead,
+    ) void {
+        const self: *ResponseContext = @ptrCast(@alignCast(context));
+        const callback = self.sink.informational orelse return;
+        const mapped = mapHeaders1(
+            self.handle.allocator,
+            head.headers,
+        ) catch return;
+        defer self.handle.allocator.free(mapped);
+        callback(self.sink.context, .{
+            .protocol = .http1,
+            .status = head.status,
+            .headers = mapped,
+        });
+    }
+
+    fn observeInformationalHttp2(
+        context: *anyopaque,
+        head: http2_runtime.StreamingResponseHead,
+    ) void {
+        const self: *ResponseContext = @ptrCast(@alignCast(context));
+        const callback = self.sink.informational orelse return;
+        const mapped = mapHeaders2(
+            self.handle.allocator,
+            head.headers,
+        ) catch return;
+        defer self.handle.allocator.free(mapped);
+        callback(self.sink.context, .{
+            .protocol = .http2,
+            .status = head.status,
+            .headers = mapped,
+        });
     }
 
     fn consumeResponse(
