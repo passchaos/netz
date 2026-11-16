@@ -115,9 +115,10 @@ The parser borrows part bodies from the input slice and owns only the
 part count, headers per part, header bytes, part size, total body size, preamble,
 epilogue, name/filename length, and total disposition metadata (4 MiB). Header
 and disposition arrays grow with actual input instead of preallocating the
-maximum part count. `filename*` supports UTF-8 and ISO-8859-1
-(RFC 5987) and takes precedence over `filename`; quoted `filename*` is
-rejected. Nested `multipart/*` parts are rejected unless `allow_nested = true`.
+maximum part count. `filename*` supports UTF-8 and ISO-8859-1 (RFC 5987),
+accepts both quoted and unquoted ext-values, and takes precedence over
+`filename`. Nested `multipart/*` parts are rejected unless
+`allow_nested = true`.
 
 `multipart.parseWithBoundary` skips Content-Type parsing when the caller already
 has the boundary. `multipart.contentTypeBoundary` parses only the boundary

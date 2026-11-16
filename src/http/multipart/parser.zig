@@ -458,7 +458,14 @@ const DispositionParser = struct {
                 if (filename_extended != null) {
                     return error.DuplicateFilename;
                 }
-                const raw = try parseExtendedRaw(value, &index);
+                var scratch: std.ArrayList(u8) = .empty;
+                defer scratch.deinit(self.allocator);
+                const raw = try parseExtendedRaw(
+                    self.allocator,
+                    &scratch,
+                    value,
+                    &index,
+                );
                 const decoded = try self.decodeExtendedValue(raw);
                 if (decoded.len > self.max_filename_bytes) {
                     return error.FilenameTooLong;
@@ -648,11 +655,29 @@ fn skipOws(input: []const u8, index: *usize) void {
 }
 
 fn parseExtendedRaw(
+    allocator: std.mem.Allocator,
+    scratch: *std.ArrayList(u8),
     value: []const u8,
     index: *usize,
 ) Error![]const u8 {
-    if (index.* == value.len or value[index.*] == '"') {
-        return error.InvalidExtendedValue;
+    if (index.* == value.len) return error.InvalidExtendedValue;
+    if (value[index.*] == '"') {
+        index.* += 1;
+        while (index.* < value.len and value[index.*] != '"') {
+            if (value[index.*] == '\\') {
+                index.* += 1;
+                if (index.* == value.len) {
+                    return error.InvalidExtendedValue;
+                }
+            }
+            try scratch.append(allocator, value[index.*]);
+            index.* += 1;
+        }
+        if (index.* == value.len or value[index.*] != '"') {
+            return error.InvalidExtendedValue;
+        }
+        index.* += 1;
+        return scratch.items;
     }
     const start = index.*;
     while (index.* < value.len and
@@ -943,6 +968,27 @@ test "multipart parser prefers filename* and validates extended values" {
         u8,
         "caf\xe9.txt",
         parsed_latin1.parts[0].filename.?,
+    );
+
+    const quoted = try std.fmt.allocPrint(
+        allocator,
+        "--b\r\nContent-Disposition: {s}\r\n\r\nx\r\n--b--\r\n",
+        .{
+            "form-data; name=\"upload\"; " ++
+                "filename*=\"UTF-8''%E4%B8%AD%E6%96%87.txt\"",
+        },
+    );
+    defer allocator.free(quoted);
+    var parsed_quoted = try parseWithBoundary(
+        allocator,
+        quoted,
+        boundary,
+        .{},
+    );
+    defer parsed_quoted.deinit();
+    try std.testing.expectEqualStrings(
+        "中文.txt",
+        parsed_quoted.parts[0].filename.?,
     );
 
     const invalid = try std.fmt.allocPrint(
