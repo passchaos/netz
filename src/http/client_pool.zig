@@ -344,6 +344,47 @@ pub const Pool = struct {
         uri_text: []const u8,
         request: client.RequestOptions,
     ) Error!StreamHandle {
+        return self.startRequestBefore(uri_text, request, null) catch |err|
+            switch (err) {
+                error.Timeout,
+                error.Canceled,
+                error.ConcurrencyUnavailable,
+                => unreachable,
+                else => |other| return @errorCast(other),
+            };
+    }
+
+    /// Bound connection acquisition by one absolute awake-clock deadline. The
+    /// response read has its own deadline on the returned handle.
+    pub fn startRequestWithDeadline(
+        self: *Pool,
+        uri_text: []const u8,
+        request: client.RequestOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) OperationError!StreamHandle {
+        return self.startRequestBefore(uri_text, request, deadline);
+    }
+
+    pub fn startRequestWithTimeout(
+        self: *Pool,
+        uri_text: []const u8,
+        request: client.RequestOptions,
+        timeout: std.Io.Duration,
+    ) OperationError!StreamHandle {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.startRequestWithDeadline(
+            uri_text,
+            request,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    fn startRequestBefore(
+        self: *Pool,
+        uri_text: []const u8,
+        request: client.RequestOptions,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) OperationError!StreamHandle {
         const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
         if (self.http3) |state| {
             if (std.ascii.eqlIgnoreCase(uri.scheme, "https")) {
@@ -362,7 +403,10 @@ pub const Pool = struct {
         // the lease must not move after `startRequest`.
         const lease = try self.allocator.create(Lease);
         errdefer self.allocator.destroy(lease);
-        lease.* = try self.acquireUri(uri_text);
+        lease.* = if (deadline) |absolute|
+            try self.acquireUriWithDeadline(uri_text, absolute)
+        else
+            try self.acquireUri(uri_text);
         errdefer if (lease.active) lease.discard();
         const connection = lease.connection();
         const request_target = if (connection.isForwardProxy())

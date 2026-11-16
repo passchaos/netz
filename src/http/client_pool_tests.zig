@@ -663,10 +663,10 @@ test "unified HTTP pool streams a request over a leased connection" {
         }
     };
 
-    var handle = try pool.startRequest(uri, .{
+    var handle = try pool.startRequestWithTimeout(uri, .{
         .method = "POST",
         .body = "hello world",
-    });
+    }, .fromSeconds(10));
     var handle_closed = false;
     defer if (!handle_closed) handle.deinit();
     try std.testing.expectEqual(http.Protocol.http1, handle.protocol());
