@@ -86,6 +86,30 @@ not stream reader bodies directly: it returns
 when the pool's fallback policy allows it. With fallback disabled, use a slice
 body.
 
+When the response must stream too, or the request body is produced
+incrementally, use the connection-level duplex handle instead. The multipart
+reader feeds `writeBodyFromReader` directly:
+
+```zig
+var handle = try connection.startRequest("/upload", .{
+    .method = "POST",
+    .headers = &.{.{ .name = "content-type", .value = content_type }},
+});
+defer handle.deinit();
+
+try handle.writeBodyFromReader(&form_reader.reader);
+try handle.finishBody();
+
+var sink = MySink{};
+const head = try handle.readResponse(sink.responseSink());
+```
+
+`http.Connection.startRequest` covers HTTP/1 and HTTP/2;
+`http.Pool.startRequest` leases a pooled HTTP/1 or HTTP/2 connection; and
+`http.startHttp3Request` opens the same handle on an exclusive HTTP/3
+`HandshakeClient`. See [http_streaming.md](http_streaming.md) for the full
+`ResponseSink`, informational-response, trailer, and deadline contract.
+
 Reader-backed bodies are also rejected by redirect following and by the
 HTTP/1 forward-proxy path, because those paths may need to replay or rewrite
 the request body. Use a slice body, or drive the redirect/proxy manually.

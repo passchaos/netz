@@ -269,9 +269,16 @@ A performance or architecture change is accepted only when all answers are yes:
 
 These are current limits, not permission to ignore them:
 
-- **macOS cross-compilation** stops inside the pinned Vort dependency's Mach-O
-  `linksection` before netz tests compile. This is an external dependency issue
-  recorded in `docs/evidence/portable_compile/2026-11-08.json`.
+- **HTTP/3 pool streaming** is limited to buffered requests on the shared
+  dispatcher. Connection-level H3 streaming is available through
+  `http.startHttp3Request` on an exclusive `HandshakeClient`, and
+  `http.Pool.startRequest` returns `error.H3StreamingUnsupported` when a live
+  Alt-Svc route would select H3 (`docs/http_streaming.md`).
+- **macOS cross-compilation** with the CI-pinned Vort revision stops inside its
+  Mach-O `linksection` before netz tests compile. The local sibling Vort already
+  contains the fix (`82475fa1`), so this is a pin bump rather than a netz
+  change; the blocked state is recorded in
+  `docs/evidence/portable_compile/2026-11-08.json`.
 - **Firefox STOP_SENDING** remains a separately documented browser gap in the
   WebTransport browser gate.
 - **WebTransport over HTTP/2** is implemented for non-browser deployments
@@ -295,6 +302,7 @@ These are current limits, not permission to ignore them:
 | `docs/architecture.md` (this file) | architecture, performance doctrine, acceptance rules |
 | `docs/performance-playbook.md` | how to profile, benchmark, and record evidence |
 | `docs/benchmark-baseline.md` | historical and current benchmark results |
+| `docs/coverage.md` | feature-level coverage inventory and verification targets |
 | `docs/grpc_parity.md` | gRPC feature/interop completeness |
 | `docs/hyper_parity.md` | HTTP/1.1 and HTTP/2 behavior versus Hyper |
 | `docs/quicz_parity.md` | QUIC behavior versus quicz |

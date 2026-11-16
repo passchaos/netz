@@ -19,6 +19,7 @@ performance record.
 
 | Document | Protocol / reference |
 | --- | --- |
+| [coverage.md](coverage.md) | Feature-level coverage inventory and bounded fuzz/live-network verification targets. |
 | [grpc_parity.md](grpc_parity.md) | gRPC behavior, xDS, official C++ interop scenarios, channel features. |
 | [hyper_parity.md](hyper_parity.md) | HTTP/1.1 and HTTP/2 behavior versus Hyper. |
 | [quicz_parity.md](quicz_parity.md) | QUIC behavior versus quicz. |
