@@ -136,6 +136,42 @@ fn validatePart(
     }
 }
 
+fn isUnreservedFilenameByte(byte: u8) bool {
+    return std.ascii.isAlphanumeric(byte) or
+        byte == '-' or byte == '.' or byte == '_' or byte == '~';
+}
+
+fn needsExtendedFilename(filename: []const u8) bool {
+    for (filename) |byte| {
+        if (byte >= 0x80) return true;
+    }
+    return false;
+}
+
+fn extendedFilenameLen(filename: []const u8) usize {
+    var total: usize = 0;
+    for (filename) |byte| {
+        total += if (isUnreservedFilenameByte(byte)) 1 else 3;
+    }
+    return total;
+}
+
+fn writeExtendedFilename(
+    writer: *std.Io.Writer,
+    filename: []const u8,
+) Error!void {
+    const hex = "0123456789ABCDEF";
+    for (filename) |byte| {
+        if (isUnreservedFilenameByte(byte)) {
+            try writer.writeByte(byte);
+        } else {
+            try writer.writeByte('%');
+            try writer.writeByte(hex[byte >> 4]);
+            try writer.writeByte(hex[byte & 0x0f]);
+        }
+    }
+}
+
 fn writePartPrefix(
     writer: *std.Io.Writer,
     boundary: []const u8,
@@ -149,11 +185,17 @@ fn writePartPrefix(
     try writer.writeAll("\r\n");
     try writer.writeAll("Content-Disposition: form-data; name=\"");
     try writeQuoted(writer, name);
+    try writer.writeByte('"');
     if (options.filename) |filename| {
-        try writer.writeAll("\"; filename=\"");
+        try writer.writeAll("; filename=\"");
         try writeQuoted(writer, filename);
+        try writer.writeByte('"');
+        if (needsExtendedFilename(filename)) {
+            try writer.writeAll("; filename*=UTF-8''");
+            try writeExtendedFilename(writer, filename);
+        }
     }
-    try writer.writeAll("\"\r\n");
+    try writer.writeAll("\r\n");
     if (options.content_type) |content_type_value| {
         try writer.writeAll("Content-Type: ");
         try writer.writeAll(content_type_value);
@@ -177,11 +219,25 @@ fn partPrefixLen(
     total = try std.math.add(usize, total, 2 + boundary.len + 2);
     total = try std.math.add(usize, total, "Content-Disposition: form-data; name=\"".len);
     total = try std.math.add(usize, total, quotedLen(name));
+    total = try std.math.add(usize, total, 1);
     if (options.filename) |filename| {
-        total = try std.math.add(usize, total, "\"; filename=\"".len);
+        total = try std.math.add(usize, total, "; filename=\"".len);
         total = try std.math.add(usize, total, quotedLen(filename));
+        total = try std.math.add(usize, total, 1);
+        if (needsExtendedFilename(filename)) {
+            total = try std.math.add(
+                usize,
+                total,
+                "; filename*=UTF-8''".len,
+            );
+            total = try std.math.add(
+                usize,
+                total,
+                extendedFilenameLen(filename),
+            );
+        }
     }
-    total = try std.math.add(usize, total, "\"\r\n".len);
+    total = try std.math.add(usize, total, 2);
     if (options.content_type) |content_type_value| {
         total = try std.math.add(usize, total, "Content-Type: ".len);
         total = try std.math.add(usize, total, content_type_value.len);
@@ -736,4 +792,39 @@ test {
     _ = parser;
     _ = content_type;
     _ = stream_parser;
+}
+
+test "multipart writer emits filename* for non-ASCII filenames" {
+    var storage: [512]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&storage);
+    const boundary = "----netz-extended";
+    const parts = [_]Part{.{
+        .name = "upload",
+        .filename = "中文.txt",
+        .content_type = "text/plain",
+        .body = .{ .slice = "x" },
+    }};
+
+    try write(&writer, boundary, &parts);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        writer.buffered(),
+        "filename=\"中文.txt\"; filename*=UTF-8''%E4%B8%AD%E6%96%87.txt",
+    ) != null);
+    try std.testing.expectEqual(
+        writer.buffered().len,
+        (try contentLength(boundary, &parts)).?,
+    );
+
+    var parsed = try parseWithBoundary(
+        std.testing.allocator,
+        writer.buffered(),
+        boundary,
+        .{},
+    );
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings(
+        "中文.txt",
+        parsed.parts[0].filename.?,
+    );
 }

@@ -58,8 +58,9 @@ const parts = [_]netz.http.multipart.Part{.{
 ```
 
 `multipart.contentLength` returns the exact length when every part is a slice,
-and `null` when any part is reader-backed. `multipart.Reader` is a pull-based
-`std.Io.Reader` that produces the same bytes as `multipart.write`.
+and `null` when any part is reader-backed. Non-ASCII filenames are emitted as
+both `filename` and RFC 5987 `filename*` automatically. `multipart.Reader` is a
+pull-based `std.Io.Reader` that produces the same bytes as `multipart.write`.
 
 ## Sending a multipart form
 
