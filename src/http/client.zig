@@ -20,6 +20,7 @@ const uri_redirect = @import("../http1/runtime/redirect.zig");
 const types = @import("client/types.zig");
 const header_mapping = @import("client/header_mapping.zig");
 const redirect = @import("client/redirect.zig");
+const duplex = @import("client/duplex.zig");
 
 pub const Error = http1_runtime.Error || http2_runtime.Error ||
     proxy_socks5.Error || uri_redirect.Error || error{
@@ -43,6 +44,10 @@ pub const Header = types.Header;
 pub const HeaderIterator = types.HeaderIterator;
 pub const ReaderBody = types.ReaderBody;
 pub const BodySource = types.BodySource;
+pub const RequestHandle = duplex.Handle;
+pub const ResponseSink = duplex.ResponseSink;
+pub const ResponseHead = duplex.ResponseHead;
+pub const DuplexHeader = duplex.Header;
 pub const RequestOptions = types.RequestOptions;
 pub const RedirectOptions = types.RedirectOptions;
 pub const Options = types.Options;
@@ -187,6 +192,71 @@ pub const Connection = struct {
                 .clock = .awake,
             }),
         );
+    }
+
+    /// Open a streaming request. The caller writes the request body and then
+    /// consumes the response through a callback sink.
+    pub fn startRequest(
+        self: *Connection,
+        target: []const u8,
+        options: RequestOptions,
+    ) Error!RequestHandle {
+        if (self.forward_proxy != null) return error.StreamingBodyUnsupported;
+        switch (self.value) {
+            .http1 => |*client| {
+                var header_stack: [max_stack_headers]http1.Header = undefined;
+                var trailer_stack: [max_stack_trailers]http1.Header = undefined;
+                var headers = try header_mapping.mapHttp1(
+                    self.allocator,
+                    options.headers,
+                    &header_stack,
+                );
+                defer headers.deinit(self.allocator);
+                var trailers = try header_mapping.mapHttp1(
+                    self.allocator,
+                    options.trailers,
+                    &trailer_stack,
+                );
+                defer trailers.deinit(self.allocator);
+                var trailer_names: [max_stack_trailers][]const u8 = undefined;
+                for (trailers.items, 0..) |trailer, index| {
+                    trailer_names[index] = trailer.name;
+                }
+                const writer = try client.startRequest(.{
+                    .method = try http1.Method.parse(options.method),
+                    .target = target,
+                    .headers = headers.items,
+                    .body_length = requestBodyLength(options),
+                    .trailer_names = trailer_names[0..trailers.items.len],
+                });
+                return RequestHandle.initHttp1(self.allocator, writer);
+            },
+            .http2 => |*connection| {
+                var header_stack: [max_stack_headers]http2.Hpack.HeaderField =
+                    undefined;
+                var trailer_stack: [max_stack_trailers]http2.Hpack.HeaderField =
+                    undefined;
+                var headers = try header_mapping.mapHttp2(
+                    self.allocator,
+                    options.headers,
+                    &header_stack,
+                );
+                defer headers.deinit(self.allocator);
+                var trailers = try header_mapping.mapHttp2(
+                    self.allocator,
+                    options.trailers,
+                    &trailer_stack,
+                );
+                defer trailers.deinit(self.allocator);
+                const writer = try connection.startRequest(.{
+                    .method = options.method,
+                    .path = target,
+                    .headers = headers.items,
+                    .body_length = requestBodyLength(options),
+                });
+                return RequestHandle.initHttp2(self.allocator, writer);
+            },
+        }
     }
 
     fn requestBefore(
@@ -484,6 +554,16 @@ fn streamHttp2Body(
         .allocator = allocator,
         .value = .{ .http2 = response },
     };
+}
+
+fn requestBodyLength(options: RequestOptions) ?usize {
+    if (options.body_source) |source| {
+        return switch (source) {
+            .slice => |body| body.len,
+            .reader => |reader| reader.length,
+        };
+    }
+    return options.body.len;
 }
 
 fn connectAuthority(
