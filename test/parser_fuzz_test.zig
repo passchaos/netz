@@ -263,7 +263,8 @@ fn exerciseMultipart(bytes: []const u8) !void {
             .max_preamble_bytes = 128,
             .max_epilogue_bytes = 128,
         },
-    )) |parsed| {
+    )) |parsed_value| {
+        var parsed = parsed_value;
         defer parsed.deinit();
         for (parsed.parts) |part| {
             try std.testing.expect(part.name.len <= 255);
