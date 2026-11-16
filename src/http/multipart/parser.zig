@@ -37,6 +37,7 @@ pub const ParseOptions = struct {
 const hard_max_parts = 1024;
 const hard_max_headers_per_part = 128;
 const hard_max_disposition_bytes = 64 * 1024;
+const hard_max_total_disposition_bytes = 4 * 1024 * 1024;
 
 pub const Error = std.mem.Allocator.Error || error{
     InvalidContentType,
@@ -63,6 +64,7 @@ pub const Error = std.mem.Allocator.Error || error{
     UnsupportedParameter,
     UnsupportedCharset,
     InvalidExtendedValue,
+    DispositionTooLarge,
     InvalidHeaderName,
 };
 
@@ -70,14 +72,12 @@ pub const Parsed = struct {
     allocator: std.mem.Allocator,
     parts: []Part,
     headers: []Header,
-    parts_allocation: []Part,
-    headers_allocation: []Header,
-    disposition_allocation: []u8,
+    disposition: []u8,
 
     pub fn deinit(self: *Parsed) void {
-        self.allocator.free(self.parts_allocation);
-        self.allocator.free(self.headers_allocation);
-        self.allocator.free(self.disposition_allocation);
+        self.allocator.free(self.parts);
+        self.allocator.free(self.headers);
+        self.allocator.free(self.disposition);
         self.* = undefined;
     }
 };
@@ -127,57 +127,70 @@ pub fn parseWithBoundary(
         return error.NameTooLong;
     }
 
-    const parts_allocation = try allocator.alloc(Part, options.max_parts);
-    errdefer allocator.free(parts_allocation);
-    const header_capacity = std.math.mul(
-        usize,
-        options.max_parts,
-        options.max_headers_per_part,
-    ) catch return error.TooManyHeaders;
-    const headers_allocation = try allocator.alloc(Header, header_capacity);
-    errdefer allocator.free(headers_allocation);
-    const disposition_capacity = std.math.mul(
-        usize,
-        options.max_parts,
-        options.max_name_bytes + options.max_filename_bytes + 2,
-    ) catch return error.NameTooLong;
-    const disposition_allocation = try allocator.alloc(
-        u8,
-        disposition_capacity,
-    );
-    errdefer allocator.free(disposition_allocation);
-
     var parser = Parser{
+        .allocator = allocator,
         .body = body,
         .boundary = boundary,
         .options = options,
-        .parts = parts_allocation,
-        .headers = headers_allocation,
-        .disposition = disposition_allocation,
     };
+    defer parser.deinit();
     try parser.run();
+
+    const parts = try allocator.alloc(Part, parser.parts.items.len);
+    errdefer allocator.free(parts);
+    const headers = try parser.headers.toOwnedSlice(allocator);
+    errdefer allocator.free(headers);
+    const disposition = try parser.disposition.toOwnedSlice(allocator);
+    errdefer allocator.free(disposition);
+
+    for (parser.parts.items, parts) |draft, *part| {
+        part.* = .{
+            .headers = headers[draft.header_start..][0..draft.header_count],
+            .name = disposition[draft.name_start..][0..draft.name_len],
+            .filename = if (draft.has_filename)
+                disposition[draft.filename_start..][0..draft.filename_len]
+            else
+                null,
+            .content_type = draft.content_type,
+            .body = draft.body,
+        };
+    }
 
     return .{
         .allocator = allocator,
-        .parts = parts_allocation[0..parser.part_count],
-        .headers = headers_allocation[0..parser.header_count],
-        .parts_allocation = parts_allocation,
-        .headers_allocation = headers_allocation,
-        .disposition_allocation = disposition_allocation,
+        .parts = parts,
+        .headers = headers,
+        .disposition = disposition,
     };
 }
 
+const PartDraft = struct {
+    header_start: usize,
+    header_count: usize,
+    name_start: usize,
+    name_len: usize,
+    filename_start: usize = 0,
+    filename_len: usize = 0,
+    has_filename: bool = false,
+    content_type: ?[]const u8,
+    body: []const u8,
+};
+
 const Parser = struct {
+    allocator: std.mem.Allocator,
     body: []const u8,
     boundary: []const u8,
     options: ParseOptions,
     pos: usize = 0,
-    parts: []Part,
-    part_count: usize = 0,
-    headers: []Header,
-    header_count: usize = 0,
-    disposition: []u8,
-    disposition_count: usize = 0,
+    parts: std.ArrayList(PartDraft) = .empty,
+    headers: std.ArrayList(Header) = .empty,
+    disposition: std.ArrayList(u8) = .empty,
+
+    fn deinit(self: *Parser) void {
+        self.parts.deinit(self.allocator);
+        self.headers.deinit(self.allocator);
+        self.disposition.deinit(self.allocator);
+    }
 
     fn run(self: *Parser) Error!void {
         try self.findInitialBoundary();
@@ -241,7 +254,7 @@ const Parser = struct {
     }
 
     fn parsePart(self: *Parser) Error!void {
-        if (self.part_count == self.options.max_parts) {
+        if (self.parts.items.len == self.options.max_parts) {
             return error.TooManyParts;
         }
         const header_limit = std.math.add(
@@ -257,7 +270,7 @@ const Parser = struct {
         ) orelse return error.HeaderTooLarge;
         if (header_end > header_limit) return error.HeaderTooLarge;
 
-        const header_start = self.header_count;
+        const header_start = self.headers.items.len;
         var disposition_value: ?[]const u8 = null;
         var content_type_value: ?[]const u8 = null;
         var line_start = self.pos;
@@ -289,19 +302,15 @@ const Parser = struct {
                 self.body[colon + 1 .. line_end],
                 " \t",
             );
-            if (self.header_count - header_start >=
+            if (self.headers.items.len - header_start >=
                 self.options.max_headers_per_part)
             {
                 return error.TooManyHeaders;
             }
-            if (self.header_count == self.headers.len) {
-                return error.TooManyHeaders;
-            }
-            self.headers[self.header_count] = .{
+            try self.headers.append(self.allocator, .{
                 .name = name,
                 .value = value,
-            };
-            self.header_count += 1;
+            });
             if (std.ascii.eqlIgnoreCase(name, "content-disposition")) {
                 if (disposition_value != null) {
                     return error.MalformedHeader;
@@ -330,14 +339,17 @@ const Parser = struct {
 
         const body_start = header_end + 4;
         const part = try self.findPartBody(body_start);
-        self.parts[self.part_count] = .{
-            .headers = self.headers[header_start..self.header_count],
-            .name = names.name,
-            .filename = names.filename,
+        try self.parts.append(self.allocator, .{
+            .header_start = header_start,
+            .header_count = self.headers.items.len - header_start,
+            .name_start = names.name_start,
+            .name_len = names.name_len,
+            .filename_start = names.filename_start,
+            .filename_len = names.filename_len,
+            .has_filename = names.has_filename,
             .content_type = content_type_value,
             .body = part.body,
-        };
-        self.part_count += 1;
+        });
 
         if (part.final) {
             const epilogue_len = self.body.len - part.next;
@@ -406,8 +418,16 @@ const Parser = struct {
     }
 
     const DispositionNames = struct {
-        name: []const u8,
-        filename: ?[]const u8,
+        name_start: usize,
+        name_len: usize,
+        filename_start: usize = 0,
+        filename_len: usize = 0,
+        has_filename: bool = false,
+    };
+
+    const ValueRange = struct {
+        start: usize,
+        len: usize,
     };
 
     fn parseDisposition(
@@ -431,9 +451,9 @@ const Parser = struct {
             return error.InvalidContentDisposition;
         }
 
-        var name: ?[]const u8 = null;
-        var filename: ?[]const u8 = null;
-        var filename_extended: ?[]const u8 = null;
+        var name: ?ValueRange = null;
+        var filename: ?ValueRange = null;
+        var filename_extended: ?ValueRange = null;
         while (index < value.len) {
             skipOws(value, &index);
             if (index == value.len) break;
@@ -504,16 +524,21 @@ const Parser = struct {
             }
         }
 
+        const chosen_name = name orelse return error.MissingName;
+        const chosen_filename = filename_extended orelse filename;
         return .{
-            .name = name orelse return error.MissingName,
-            .filename = filename_extended orelse filename,
+            .name_start = chosen_name.start,
+            .name_len = chosen_name.len,
+            .filename_start = if (chosen_filename) |item| item.start else 0,
+            .filename_len = if (chosen_filename) |item| item.len else 0,
+            .has_filename = chosen_filename != null,
         };
     }
 
     fn decodeExtendedValue(
         self: *Parser,
         raw: []const u8,
-    ) Error![]const u8 {
+    ) Error!ValueRange {
         const first_quote = std.mem.indexOfScalar(u8, raw, '\'') orelse
             return error.InvalidExtendedValue;
         const rest = raw[first_quote + 1 ..];
@@ -526,7 +551,7 @@ const Parser = struct {
             return error.UnsupportedCharset;
         }
         const encoded = raw[second_quote + 1 ..];
-        const start = self.disposition_count;
+        const start = self.disposition.items.len;
         var cursor: usize = 0;
         while (cursor < encoded.len) {
             if (encoded[cursor] == '%') {
@@ -537,37 +562,45 @@ const Parser = struct {
                     return error.InvalidExtendedValue;
                 const low = hexValue(encoded[cursor + 2]) orelse
                     return error.InvalidExtendedValue;
-                if (self.disposition_count == self.disposition.len) {
-                    return error.FilenameTooLong;
+                if (self.disposition.items.len ==
+                    hard_max_total_disposition_bytes)
+                {
+                    return error.DispositionTooLarge;
                 }
-                self.disposition[self.disposition_count] =
-                    (high << 4) | low;
-                self.disposition_count += 1;
+                try self.disposition.append(
+                    self.allocator,
+                    (high << 4) | low,
+                );
                 cursor += 3;
                 continue;
             }
-            if (self.disposition_count == self.disposition.len) {
-                return error.FilenameTooLong;
+            if (self.disposition.items.len ==
+                hard_max_total_disposition_bytes)
+            {
+                return error.DispositionTooLarge;
             }
-            self.disposition[self.disposition_count] = encoded[cursor];
-            self.disposition_count += 1;
+            try self.disposition.append(
+                self.allocator,
+                encoded[cursor],
+            );
             cursor += 1;
         }
-        const result = self.disposition[start..self.disposition_count];
+        const len = self.disposition.items.len - start;
+        const result = self.disposition.items[start..];
         if (!latin1 and !std.unicode.utf8ValidateSlice(result)) {
             return error.InvalidExtendedValue;
         }
-        return result;
+        return .{ .start = start, .len = len };
     }
 
     fn parseDispositionValue(
         self: *Parser,
         value: []const u8,
         index: *usize,
-    ) Error![]const u8 {
+    ) Error!ValueRange {
         if (value[index.*] == '"') {
             index.* += 1;
-            const start = self.disposition_count;
+            const start = self.disposition.items.len;
             while (index.* < value.len and value[index.*] != '"') {
                 if (value[index.*] == '\\') {
                     index.* += 1;
@@ -575,20 +608,27 @@ const Parser = struct {
                         return error.InvalidContentDisposition;
                     }
                 }
-                if (self.disposition_count == self.disposition.len) {
-                    return error.NameTooLong;
+                if (self.disposition.items.len ==
+                    hard_max_total_disposition_bytes)
+                {
+                    return error.DispositionTooLarge;
                 }
-                self.disposition[self.disposition_count] = value[index.*];
-                self.disposition_count += 1;
+                try self.disposition.append(
+                    self.allocator,
+                    value[index.*],
+                );
                 index.* += 1;
             }
             if (index.* == value.len or value[index.*] != '"') {
                 return error.InvalidContentDisposition;
             }
             index.* += 1;
-            return self.disposition[start..self.disposition_count];
+            return .{
+                .start = start,
+                .len = self.disposition.items.len - start,
+            };
         }
-        const start = index.*;
+        const input_start = index.*;
         while (index.* < value.len and
             value[index.*] != ';' and
             value[index.*] != ' ' and
@@ -596,8 +636,22 @@ const Parser = struct {
         {
             index.* += 1;
         }
-        if (start == index.*) return error.InvalidContentDisposition;
-        return value[start..index.*];
+        if (input_start == index.*) return error.InvalidContentDisposition;
+        const slice = value[input_start..index.*];
+        if (self.disposition.items.len + slice.len >
+            hard_max_total_disposition_bytes)
+        {
+            return error.DispositionTooLarge;
+        }
+        const start = self.disposition.items.len;
+        try self.disposition.appendSlice(
+            self.allocator,
+            slice,
+        );
+        return .{
+            .start = start,
+            .len = index.* - input_start,
+        };
     }
 };
 

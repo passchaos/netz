@@ -113,7 +113,9 @@ for (parsed.parts) |part| {
 The parser borrows part bodies from the input slice and owns only the
 `Part`/`Header` arrays plus unescaped disposition values. It enforces limits on
 part count, headers per part, header bytes, part size, total body size, preamble,
-epilogue, and name/filename length. `filename*` supports UTF-8 and ISO-8859-1
+epilogue, name/filename length, and total disposition metadata (4 MiB). Header
+and disposition arrays grow with actual input instead of preallocating the
+maximum part count. `filename*` supports UTF-8 and ISO-8859-1
 (RFC 5987) and takes precedence over `filename`; quoted `filename*` is
 rejected. Nested `multipart/*` parts are rejected unless `allow_nested = true`.
 
