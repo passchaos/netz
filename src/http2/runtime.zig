@@ -4037,6 +4037,9 @@ pub const TlsConnectOptions = struct {
     environ: ?std.process.Environ = null,
     /// Optional caller-owned native trust store reused across handshakes.
     system_store: ?*const vail.x509.trust.SystemStore = null,
+    /// Selects the default root set when no explicit verifier, CA bundle, or
+    /// store is supplied. `.bundled` uses the compiled-in Mozilla roots.
+    root_source: tls_stream.RootSource = .system,
     server_verifier: ?vail.tls.auth.ClientVerifier = null,
     /// Built-in verifier policy for RFC 6066 stapled OCSP responses.
     stapled_ocsp: StapledOcspPolicy = .ignore,
@@ -4068,6 +4071,7 @@ fn verifiedTlsClientOptions(
         .ca_bundle = options.ca_bundle,
         .system_environ = options.environ,
         .system_store = options.system_store,
+        .root_source = options.root_source,
         .server_verifier = options.server_verifier,
         .stapled_ocsp = options.stapled_ocsp,
         .request_ocsp = options.request_ocsp,
@@ -4109,6 +4113,13 @@ test "HTTP/2 TLS options forward reusable native trust store" {
         .system_store = &store,
     });
     try std.testing.expect(mapped.system_store != null);
+}
+
+test "HTTP/2 TLS options forward bundled root selection" {
+    const mapped = verifiedTlsClientOptions("example.com", .{
+        .root_source = .bundled,
+    });
+    try std.testing.expectEqual(tls_stream.RootSource.bundled, mapped.root_source);
 }
 
 pub const Role = enum {

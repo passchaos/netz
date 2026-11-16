@@ -21,8 +21,9 @@ pub const Options = struct {
     /// CertificateRequest. Storage only needs to outlive the synchronous
     /// WebSocket connect call.
     identity: ?ClientIdentity = null,
-    /// Custom server trust policy. When omitted, `tls.ca_bundle` or operating
-    /// system roots plus hostname verification are used.
+    /// Custom server trust policy. When omitted, `tls.ca_bundle`,
+    /// `tls.system_store`, the selected `tls.root_source`, or operating system
+    /// roots plus hostname verification are used.
     server_verifier: ?CertificateVerifier = null,
     /// Built-in verifier policy for RFC 6066 stapled OCSP responses.
     stapled_ocsp: StapledOcspPolicy = .ignore,
@@ -129,6 +130,7 @@ fn verifiedOptions(
             null,
         .system_environ = tls_options.environ,
         .system_store = tls_options.system_store,
+        .root_source = tls_options.root_source,
         .server_verifier = identity_options.server_verifier,
         .stapled_ocsp = identity_options.stapled_ocsp,
         .request_ocsp = identity_options.request_ocsp,

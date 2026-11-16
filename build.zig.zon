@@ -8,6 +8,7 @@
         .kron = .{ .path = "../kron" },
         .vail = .{ .path = "../vail" },
         .vort = .{ .path = "../vort" },
+        .webpkiz = .{ .path = "../webpkiz" },
         .zio = .{
             .url = "git+https://github.com/passchaos/zio#8f4ce3a97cc69eddb03409b01d1137c2f99ef42b",
             .hash = "zio-0.19.1-xHbVVE1kLABhvcTZ2InisM3hdkwDdj0fzzAUxvw2AmGk",

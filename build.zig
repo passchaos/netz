@@ -54,6 +54,10 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const webpkiz_dep = b.dependency("webpkiz", .{
+        .target = target,
+        .optimize = optimize,
+    });
 
     const netz_mod = b.addModule("netz", .{
         .root_source_file = b.path("src/root.zig"),
@@ -65,6 +69,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "zio", .module = zio_dep.module("zio") },
             .{ .name = "kron", .module = kron_dep.module("kron") },
             .{ .name = "regexz", .module = regexz_dep.module("regexz") },
+            .{ .name = "webpkiz", .module = webpkiz_dep.module("webpkiz") },
         },
     });
     const benchmark_counting_allocator_mod = b.createModule(.{
@@ -2713,6 +2718,8 @@ pub fn build(b: *std.Build) void {
         source_archive.addDirectoryArg(vort_dep.path("."));
         source_archive.addArg("--pbz");
         source_archive.addDirectoryArg(pbz_dep.path("."));
+        source_archive.addArg("--webpkiz");
+        source_archive.addDirectoryArg(webpkiz_dep.path("."));
         source_archive.addArg("--harnessz");
         source_archive.addDirectoryArg(harnessz_dep.path("."));
         source_archive.addArg("--zio");

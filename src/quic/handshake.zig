@@ -9,6 +9,7 @@ const datagram_reader = @import("handshake/datagram_reader.zig");
 const handshake_transcript = @import("handshake/transcript.zig");
 const established_promotion = @import("handshake/established_promotion.zig");
 const fixed_bit = @import("one_rtt/fixed_bit.zig");
+const root_trust = @import("../trust.zig");
 
 const net = std.Io.net;
 
@@ -99,6 +100,9 @@ pub const ClientOptions = struct {
     /// takes precedence over `system_environ`; the caller must keep it alive
     /// for the synchronous handshake.
     system_store: ?*const quic.tls.trust.SystemStore = null,
+    /// Selects the default root set when `server_auth` and `system_store` are
+    /// both null. `.bundled` uses the compiled-in Mozilla roots.
+    root_source: root_trust.RootSource = .system,
     client_identity: ?quic.tls.client_auth.ClientIdentity = null,
     /// TLS 1.3 cipher suites offered in preference order.
     cipher_suites: []const quic.tls_client_hello.CipherSuite =
@@ -1582,6 +1586,20 @@ fn connectAttempt(
         if (options.system_store) |store| {
             break :blk quic.tls.auth.ClientVerifier.fromTrustVerifier(
                 store.verifier(auth_now.toSeconds()).clientVerifier(),
+            );
+        }
+        if (options.root_source == .bundled) {
+            system_store = root_trust.initBundledStore(
+                endpoint.allocator,
+                auth_now,
+            ) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.NativeTrustStoreUnavailable,
+            };
+            break :blk quic.tls.auth.ClientVerifier.fromTrustVerifier(
+                system_store.?.verifier(
+                    auth_now.toSeconds(),
+                ).clientVerifier(),
             );
         }
         if (options.system_environ) |environ| {

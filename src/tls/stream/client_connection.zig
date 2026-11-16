@@ -10,6 +10,7 @@ const handshake_deadline = @import("handshake_deadline.zig");
 const record_io = @import("record_io.zig");
 const record_stream = @import("record_stream.zig");
 const stream_io = @import("../../internal/stream_io.zig");
+const root_trust = @import("../../trust.zig");
 
 const net = std.Io.net;
 const tls_record = vail.tls.record;
@@ -87,6 +88,9 @@ pub const VerifiedOptions = struct {
     /// precedence over `system_environ`; the caller must keep it alive for the
     /// synchronous handshake.
     system_store: ?*const vail.x509.trust.SystemStore = null,
+    /// Selects the default root set when no explicit verifier, CA bundle, or
+    /// store is supplied. `.bundled` uses the compiled-in Mozilla roots.
+    root_source: root_trust.RootSource = .system,
     server_verifier: ?vail.tls.auth.ClientVerifier = null,
     /// Stapled OCSP policy applied by the built-in system/caller-bundle
     /// verifier. A custom `server_verifier` must own its OCSP policy and
@@ -414,6 +418,18 @@ pub const Connection = struct {
                     .bundle = ca_bundle.bundle,
                     .now_seconds = now.toSeconds(),
                 };
+            } else if (options.system_store) |store| {
+                bundle_verifier = store.verifier(now.toSeconds());
+            } else if (options.root_source == .bundled) {
+                system_store = root_trust.initBundledStore(
+                    allocator,
+                    now,
+                ) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return error.CertificateUntrusted,
+                };
+                bundle_verifier =
+                    system_store.?.verifier(now.toSeconds());
             } else {
                 system_store = if (options.system_environ) |environ|
                     try .initWithEnviron(allocator, io, now, environ)

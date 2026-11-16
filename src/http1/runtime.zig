@@ -27,6 +27,7 @@ const tcp_connect = @import("../internal/tcp_connect.zig");
 const address_resolver = @import("../internal/address_resolver.zig");
 const socket_options = @import("../internal/socket_options.zig");
 const tls_stream = @import("../tls/mod.zig").stream;
+const root_trust = @import("../trust.zig");
 const vail = @import("vail");
 
 const net = std.Io.net;
@@ -416,9 +417,9 @@ pub const TlsClientOptions = struct {
     /// Verify the certificate chain and hostname.  Leave this enabled for
     /// production HTTPS/WSS clients; tests or private tunnels can opt out.
     verify_host: bool = true,
-    /// Optional caller-managed CA bundle.  When omitted and host verification is
-    /// enabled, the runtime loads the operating-system root store for the
-    /// handshake and frees it after TLS session establishment.
+    /// Optional caller-managed CA bundle. When omitted and host verification
+    /// is enabled, the runtime uses `root_source` (system roots by default) and
+    /// frees a temporary store after TLS session establishment.
     ca_bundle: ?TlsCaBundle = null,
     /// Optional process environment for vail's native trust store. When set,
     /// `SSL_CERT_FILE` and `SSL_CERT_DIR` take precedence over the platform
@@ -426,6 +427,9 @@ pub const TlsClientOptions = struct {
     environ: ?std.process.Environ = null,
     /// Optional caller-owned native trust store reused across handshakes.
     system_store: ?*const vail.x509.trust.SystemStore = null,
+    /// Selects the default root set when no explicit verifier, CA bundle, or
+    /// store is supplied. `.bundled` uses the compiled-in Mozilla roots.
+    root_source: tls_stream.RootSource = .system,
     /// Forward EOF without close_notify.  This is useful only when the HTTP
     /// layer independently verifies body length (for example Content-Length).
     allow_truncation_attacks: bool = false,
@@ -449,6 +453,9 @@ pub const VailTlsClientOptions = struct {
     environ: ?std.process.Environ = null,
     /// Optional caller-owned native trust store reused across handshakes.
     system_store: ?*const vail.x509.trust.SystemStore = null,
+    /// Selects the default root set when no explicit verifier, CA bundle, or
+    /// store is supplied. `.bundled` uses the compiled-in Mozilla roots.
+    root_source: tls_stream.RootSource = .system,
     server_verifier: ?vail.tls.auth.ClientVerifier = null,
     /// Built-in verifier policy for RFC 6066 stapled OCSP responses.
     stapled_ocsp: StapledOcspPolicy = .ignore,
@@ -1245,7 +1252,17 @@ pub const TlsClientConnection = struct {
         if (options.verify_host) {
             client_options.ca = if (options.ca_bundle) |ca_bundle|
                 .{ .bundle = .{ .gpa = allocator, .io = io, .lock = ca_bundle.lock, .bundle = ca_bundle.bundle } }
-            else blk: {
+            else if (options.root_source == .bundled) blk: {
+                local_bundle = root_trust.initBundledBundle(
+                    allocator,
+                    now,
+                ) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return error.CertificateUntrusted,
+                };
+                loaded_local_bundle = true;
+                break :blk .{ .bundle = .{ .gpa = allocator, .io = io, .lock = &local_lock, .bundle = &local_bundle } };
+            } else blk: {
                 try local_bundle.rescan(allocator, io, now);
                 loaded_local_bundle = true;
                 break :blk .{ .bundle = .{ .gpa = allocator, .io = io, .lock = &local_lock, .bundle = &local_bundle } };
@@ -5612,6 +5629,7 @@ fn verifiedTlsClientOptions(
         .ca_bundle = options.ca_bundle,
         .system_environ = options.environ,
         .system_store = options.system_store,
+        .root_source = options.root_source,
         .server_verifier = options.server_verifier,
         .stapled_ocsp = options.stapled_ocsp,
         .request_ocsp = options.request_ocsp,
@@ -5633,9 +5651,11 @@ test "HTTP/1 vail TLS options preserve stapled OCSP policy" {
     const mapped = verifiedTlsClientOptions("example.com", .{
         .stapled_ocsp = .require,
         .request_ocsp = true,
+        .root_source = .bundled,
     });
     try std.testing.expectEqual(StapledOcspPolicy.require, mapped.stapled_ocsp);
     try std.testing.expect(mapped.request_ocsp);
+    try std.testing.expectEqual(tls_stream.RootSource.bundled, mapped.root_source);
 }
 
 /// Upper bound on request bytes discarded by `Connection.drainAndClose`.

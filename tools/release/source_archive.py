@@ -21,6 +21,7 @@ DEFAULT_PACKAGE_VERSION = "0.1.0"
 VAIL_REVISION = "0199eb833833fa51819c747ba01e4b5850bb0d2b"
 VORT_REVISION = "b661c887e21fb1965db358bc6d12ea379d20178d"
 PBZ_REVISION = "6513ef1f8b130b308bd86ba0bd02f6acc2be64e8"
+WEBPKIZ_REVISION = "9fc4532b9ab06155d92836f1c5ad428b1ad30a6c"
 HARNESSZ_REVISION = "e626f26b0a7ead0377254ed3a04b43b25fb2d270"
 ZIO_SOURCE = (
     "git+https://github.com/passchaos/zio"
@@ -117,6 +118,7 @@ def release_manifest(
     vail_revision: str,
     vort_revision: str,
     pbz_revision: str,
+    webpkiz_revision: str,
     harnessz_revision: str,
     file_hashes: dict[str, str],
 ) -> bytes:
@@ -145,6 +147,10 @@ def release_manifest(
                         "path": "deps/vort",
                         "revision": vort_revision,
                     },
+                    "webpkiz": {
+                        "path": "deps/webpkiz",
+                        "revision": webpkiz_revision,
+                    },
                     "zio": {
                         "path": "deps/zio",
                         "package_hash": ZIO_PACKAGE_HASH,
@@ -170,6 +176,8 @@ def rewrite_package_manifest(data: bytes) -> bytes:
             '.vort = .{ .path = "deps/vort" },',
         '.pbz = .{ .path = "../pbz" },':
             '.pbz = .{ .path = "deps/pbz" },',
+        '.webpkiz = .{ .path = "../webpkiz" },':
+            '.webpkiz = .{ .path = "deps/webpkiz" },',
         '        .zio = .{\n'
         '            .url = "' + ZIO_SOURCE + '",\n'
         '            .hash = "' + ZIO_PACKAGE_HASH + '",\n'
@@ -223,6 +231,7 @@ def create_archive(
     vail: Path,
     vort: Path,
     pbz: Path,
+    webpkiz: Path,
     zio: Path,
     harnessz: Path,
     output: Path,
@@ -230,6 +239,7 @@ def create_archive(
     expected_vail_revision: str = VAIL_REVISION,
     expected_vort_revision: str = VORT_REVISION,
     expected_pbz_revision: str = PBZ_REVISION,
+    expected_webpkiz_revision: str = WEBPKIZ_REVISION,
     expected_harnessz_revision: str = HARNESSZ_REVISION,
     expected_zio_package_hash: str = ZIO_PACKAGE_HASH,
     zig: str = "zig",
@@ -239,6 +249,7 @@ def create_archive(
         "deps/vail": vail.resolve(),
         "deps/vort": vort.resolve(),
         "deps/pbz": pbz.resolve(),
+        "deps/webpkiz": webpkiz.resolve(),
         "deps/harnessz": harnessz.resolve(),
     }
     for repo in repositories.values():
@@ -259,6 +270,12 @@ def create_archive(
         raise RuntimeError(
             "pbz revision mismatch: expected "
             f"{expected_pbz_revision}, found {revisions['deps/pbz']}"
+        )
+    if revisions["deps/webpkiz"] != expected_webpkiz_revision:
+        raise RuntimeError(
+            "webpkiz revision mismatch: expected "
+            f"{expected_webpkiz_revision}, "
+            f"found {revisions['deps/webpkiz']}"
         )
     if revisions["deps/harnessz"] != expected_harnessz_revision:
         raise RuntimeError(
@@ -301,6 +318,7 @@ def create_archive(
             revisions["deps/vail"],
             revisions["deps/vort"],
             revisions["deps/pbz"],
+            revisions["deps/webpkiz"],
             revisions["deps/harnessz"],
             file_hashes,
         ),
@@ -340,6 +358,7 @@ def main() -> None:
     parser.add_argument("--vail", type=Path, required=True)
     parser.add_argument("--vort", type=Path, required=True)
     parser.add_argument("--pbz", type=Path, required=True)
+    parser.add_argument("--webpkiz", type=Path, required=True)
     parser.add_argument("--zio", type=Path, required=True)
     parser.add_argument("--harnessz", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -351,6 +370,7 @@ def main() -> None:
         args.vail,
         args.vort,
         args.pbz,
+        args.webpkiz,
         args.zio,
         args.harnessz,
         args.output,

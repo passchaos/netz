@@ -208,8 +208,8 @@ two-session runs, the QUIC path target to 256 runs, the QUIC handshake target
 and QUIC endpoint target to 32 runs, and the in-memory targets to 10,000
 iterations. A manual `fuzz_runs` value overrides all targets. Because
 the source
-checkout currently uses sibling `../vail`, `../vort`, `../pbz`, and
-`../harnessz` paths, repository
+checkout currently uses sibling `../vail`, `../vort`, `../pbz`,
+`../webpkiz`, and `../harnessz` paths, repository
 administrators must configure the read-only `NETZ_DEPENDENCIES_TOKEN` secret
 for the private dependency checkouts.
 Pull requests also compile the complete library and public-package test surfaces
@@ -423,7 +423,7 @@ Current protocol coverage includes:
   configurable POST rewrite semantics, 307/308 body replay, cross-origin
   credential stripping, proxy retention and one deadline across the chain,
   with userinfo rejection, host-name DNS and IPv4/bracketed-IPv6 literal connect support, TLS client transport via Zig `std.crypto.tls`
-  with host verification plus OS/custom CA bundles, an opt-in vail HTTPS client
+  with host verification plus OS/custom/compiled-in Mozilla CA bundles, an opt-in vail HTTPS client
   for mTLS/ALPN/peer-chain/exporter/KeyUpdate access, and a `std.Io.async`
   concurrent server helper; aggregate client calls hold the generation-tagged
   HTTP/1 exchange slot from pre-write validation through the complete final
@@ -1202,7 +1202,7 @@ Current protocol coverage includes:
   rejection, and optional mutual TLS with CertificateRequest plus client
   possession proof,
   together with Vail's zero-allocation X.509 chain/hostname/time verifier over
-  caller or platform CA bundles, its system-CA loader for production clients,
+  caller, platform, or compiled-in Mozilla CA bundles, its system-CA loader for production clients,
   and CertificateRequest-driven mutual TLS with client possession proof,
   with TLS 1.3 early/handshake/application/resumption HKDF, Finished, PSK
   binder, early-traffic, and traffic-update secrets centralized in Vail while
@@ -2762,14 +2762,14 @@ userspace accounting as kernel/interface capture; `--traffic` and `--stats`
 are deliberately mutually exclusive.
 
 The build script pins the package to Zig `0.16.0`.
-The development package manifest uses sibling `../vail`, `../vort`, and
-`../pbz` checkouts and pins `zio` by immutable URL and content hash. CI checks
-out exact vail, vort, and pbz commits into that layout. The published path set
+The development package manifest uses sibling `../vail`, `../vort`,
+`../pbz`, and `../webpkiz` checkouts and pins `zio` by immutable URL and content hash. CI checks
+out exact vail, vort, pbz, and webpkiz commits into that layout. The published path set
 includes all example, benchmark, documentation, test, and interop sources
 referenced by the build graph. The
 `release-source` target emits `zig-out/artifacts/netz-<version>-source.tar.gz`
 and its `.sha256` sidecar
-with those exact vail, vort, and pbz commits plus the hash-verified zio package
+with those exact vail, vort, pbz, and webpkiz commits plus the hash-verified zio package
 under `deps/`, rewrites the release manifest to local paths, and records
 SHA-256 for every packaged file in `RELEASE-MANIFEST.json`. It rejects dirty
 source repositories or dependency revision drift. `verify-release-source` checks the

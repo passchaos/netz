@@ -8,6 +8,7 @@
 pub const alloc = @import("alloc.zig");
 pub const runtime = @import("runtime.zig");
 pub const stream = @import("stream.zig");
+pub const trust = @import("trust.zig");
 pub const tls = @import("tls/mod.zig");
 pub const proxy = @import("proxy/mod.zig");
 pub const vpn = @import("vpn/mod.zig");
@@ -27,6 +28,7 @@ comptime {
     _ = alloc;
     _ = runtime;
     _ = stream;
+    _ = trust;
     _ = tls;
     _ = proxy;
     _ = vpn;

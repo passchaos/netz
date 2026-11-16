@@ -9,6 +9,7 @@ pub const ClientConnection =
 pub const ClientOptions = @import("versioned_client_connection.zig").Options;
 pub const ClientVerifiedOptions =
     @import("versioned_client_connection.zig").VerifiedOptions;
+pub const RootSource = @import("../../trust.zig").RootSource;
 pub const ClientCaBundle = @import("versioned_client_connection.zig").CaBundle;
 pub const StapledOcspPolicy = @import("vail").x509.trust.StapledOcspPolicy;
 pub const Tls13ServerConnection = @import("server_connection.zig").Connection;

@@ -1152,8 +1152,8 @@ pub const ConnectOptions = struct {
     /// The identity storage only needs to outlive the synchronous connect call.
     client_identity: ?ClientIdentity = null,
     /// Server trust policy for the vail path. When omitted, the runtime maps
-    /// `tls.ca_bundle`/system roots and hostname verification to vail's X.509
-    /// verifier, preserving the ordinary client defaults.
+    /// `tls.ca_bundle`/`tls.root_source` roots and hostname verification to
+    /// vail's X.509 verifier, preserving the ordinary client defaults.
     server_verifier: ?ClientCertificateVerifier = null,
     /// Stapled OCSP verification for the built-in system/caller-bundle trust
     /// path. Reconnects reuse this policy and revalidate each new staple.
@@ -1719,6 +1719,7 @@ fn connectVailStreamAttempt(
             null,
         .system_environ = options.tls.environ,
         .system_store = options.tls.system_store,
+        .root_source = options.tls.root_source,
         .server_verifier = options.server_verifier,
         .stapled_ocsp = options.stapled_ocsp,
         .request_ocsp = options.request_ocsp,

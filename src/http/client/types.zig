@@ -434,6 +434,7 @@ pub fn verifiedTlsOptions(
         .ca_bundle = tls.ca_bundle,
         .system_environ = tls.environ,
         .system_store = tls.system_store,
+        .root_source = tls.root_source,
         .server_verifier = tls.server_verifier,
         .stapled_ocsp = tls.stapled_ocsp,
         .request_ocsp = tls.request_ocsp,

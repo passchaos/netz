@@ -10,6 +10,8 @@ pub const cipher_suites = @import("cipher_suites.zig");
 pub const encrypted_private_key = @import("encrypted_private_key.zig");
 pub const testing = @import("testing.zig");
 pub const trust = @import("vail").x509.trust;
+pub const RootSource = @import("../trust.zig").RootSource;
+pub const bundled = @import("../trust.zig");
 pub const ClientCertificateTrustContext = @import("vail").tls.auth.TrustContext;
 pub const trust_cache = @import("trust_cache.zig");
 
@@ -23,5 +25,7 @@ test {
     _ = encrypted_private_key;
     _ = testing;
     _ = trust;
+    _ = RootSource;
+    _ = bundled;
     _ = trust_cache;
 }
