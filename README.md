@@ -423,7 +423,7 @@ Current protocol coverage includes:
   configurable POST rewrite semantics, 307/308 body replay, cross-origin
   credential stripping, proxy retention and one deadline across the chain,
   with userinfo rejection, host-name DNS and IPv4/bracketed-IPv6 literal connect support, TLS client transport via Zig `std.crypto.tls`
-  with host verification plus OS/custom/compiled-in Mozilla CA bundles, an opt-in vail HTTPS client
+  with host verification plus OS root bundles, platform-native macOS/Windows verification, custom CA bundles, and compiled-in Mozilla roots, an opt-in vail HTTPS client
   for mTLS/ALPN/peer-chain/exporter/KeyUpdate access, and a `std.Io.async`
   concurrent server helper; aggregate client calls hold the generation-tagged
   HTTP/1 exchange slot from pre-write validation through the complete final
@@ -1202,7 +1202,7 @@ Current protocol coverage includes:
   rejection, and optional mutual TLS with CertificateRequest plus client
   possession proof,
   together with Vail's zero-allocation X.509 chain/hostname/time verifier over
-  caller, platform, or compiled-in Mozilla CA bundles, its system-CA loader for production clients,
+  caller, system-root, platform-native, or compiled-in Mozilla trust, its system-CA loader for production clients,
   and CertificateRequest-driven mutual TLS with client possession proof,
   with TLS 1.3 early/handshake/application/resumption HKDF, Finished, PSK
   binder, early-traffic, and traffic-update secrets centralized in Vail while

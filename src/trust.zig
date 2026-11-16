@@ -1,7 +1,9 @@
 //! Trust-root source selection shared by netz TLS clients.
 //!
-//! `root_source = .system` keeps the existing operating-system trust behavior.
-//! `root_source = .bundled` uses the Mozilla CCADB TLS roots compiled into the
+//! `root_source = .system` keeps the existing operating-system root-file
+//! behavior. `.platform` delegates chain and hostname verification to the
+//! operating system's certificate verifier (macOS Security.framework, Windows
+//! CryptoAPI). `.bundled` uses the Mozilla CCADB TLS roots compiled into the
 //! sibling `webpkiz` package, so HTTPS/WSS/MQTT/QUIC clients can run in
 //! minimal containers without a system CA bundle.
 //!
@@ -10,6 +12,7 @@
 //! `system_environ` refines `.system` only.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const vail = @import("vail");
 const webpkiz = @import("webpkiz");
 
@@ -17,6 +20,9 @@ pub const RootSource = enum {
     /// Load roots from the operating system, or from `SSL_CERT_FILE` /
     /// `SSL_CERT_DIR` when the caller supplies `system_environ`.
     system,
+    /// Use the operating system certificate verifier. Unsupported targets
+    /// report `error.PlatformVerifierUnavailable`.
+    platform,
     /// Use the compiled-in Mozilla CCADB TLS root set.
     bundled,
 };
@@ -100,4 +106,21 @@ test "bundled roots load into both trust representations" {
     var bundle = try initBundledBundle(std.testing.allocator, now);
     defer bundle.deinit(std.testing.allocator);
     try std.testing.expect(bundle.map.count() > 0);
+}
+
+test "platform verifier availability matches the target" {
+    var verifier = vail.x509.platform.Verifier.init(
+        std.testing.allocator,
+        .{},
+    ) catch |err| {
+        if (builtin.os.tag == .macos or builtin.os.tag == .windows) {
+            return err;
+        }
+        try std.testing.expectEqual(
+            error.PlatformVerifierUnavailable,
+            err,
+        );
+        return;
+    };
+    defer verifier.deinit();
 }

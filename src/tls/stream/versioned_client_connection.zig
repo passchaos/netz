@@ -45,6 +45,7 @@ pub const Error = std.mem.Allocator.Error ||
         CertificateUntrusted,
         ConflictingOcspVerifier,
         OcspPolicyRequiresRequest,
+        PlatformVerifierUnavailable,
         TlsKeyUpdateUnavailable,
         ReadFailed,
         StreamTooLong,
@@ -111,7 +112,8 @@ pub const VerifiedOptions = struct {
     /// synchronous handshake.
     system_store: ?*const vail.x509.trust.SystemStore = null,
     /// Selects the default root set when no explicit verifier, CA bundle, or
-    /// store is supplied. `.bundled` uses the compiled-in Mozilla roots.
+    /// store is supplied. `.platform` uses the OS verifier; `.bundled` uses
+    /// the compiled-in Mozilla roots.
     root_source: root_trust.RootSource = .system,
     server_verifier: ?vail.tls.auth.ClientVerifier = null,
     stapled_ocsp: vail.x509.trust.StapledOcspPolicy = .ignore,
@@ -506,6 +508,8 @@ pub const Connection = struct {
         try validateVerifiedOptions(options);
         var system_store: ?vail.x509.trust.SystemStore = null;
         defer if (system_store) |*store| store.deinit();
+        var platform_verifier: ?vail.x509.platform.Verifier = null;
+        defer if (platform_verifier) |*verifier| verifier.deinit();
         var caller_bundle_locked = false;
         defer if (caller_bundle_locked) options.ca_bundle.?.lock.unlockShared(io);
         var bundle_verifier: vail.x509.trust.BundleVerifier = undefined;
@@ -529,6 +533,23 @@ pub const Connection = struct {
                     else => return error.CertificateUntrusted,
                 };
                 bundle_verifier = system_store.?.verifier(now.toSeconds());
+            } else if (options.root_source == .platform) {
+                if (options.stapled_ocsp != .ignore) {
+                    return error.ConflictingOcspVerifier;
+                }
+                platform_verifier = vail.x509.platform.Verifier.init(
+                    allocator,
+                    .{ .verify_host = options.verify_host },
+                ) catch |err| {
+                    if (err == error.OutOfMemory) return error.OutOfMemory;
+                    if (err == error.PlatformVerifierUnavailable) {
+                        return error.PlatformVerifierUnavailable;
+                    }
+                    return error.CertificateUntrusted;
+                };
+                break :blk vail.tls.auth.ClientVerifier.fromTrustVerifier(
+                    platform_verifier.?.clientVerifier(),
+                );
             } else {
                 system_store = if (options.system_environ) |environ|
                     try .initWithEnviron(allocator, io, now, environ)

@@ -1,5 +1,6 @@
 //! Inline xDS cluster TLS material shared by EDS, STATIC and DNS projections.
 const std = @import("std");
+const builtin = @import("builtin");
 const vail = @import("vail");
 const http2 = @import("../../http2/mod.zig");
 const tls_stream = @import("../../tls/mod.zig").stream;
@@ -41,6 +42,9 @@ pub const Config = struct {
     /// Use the compiled-in Mozilla CCADB roots instead of the platform store.
     /// Ignored when `trusted_ca` is supplied.
     bundled_root_certs: bool = false,
+    /// Use the operating system certificate verifier. Ignored when
+    /// `trusted_ca` is supplied.
+    platform_root_certs: bool = false,
 };
 
 pub const Error = std.mem.Allocator.Error || server_identity_file.Error || error{
@@ -55,6 +59,7 @@ pub const Material = struct {
     bundle: std.crypto.Certificate.Bundle = .empty,
     bundle_loaded: bool = false,
     bundled_store: ?vail.x509.trust.SystemStore = null,
+    platform_verifier: ?vail.x509.platform.Verifier = null,
     lock: std.Io.RwLock = .init,
     identity: ?server_identity_file.Identity = null,
     server_name: []const u8 = "",
@@ -77,12 +82,15 @@ pub const Material = struct {
         if (config.tls12_cipher_suites) |suites| {
             if (suites.len != 0) self.tls12_cipher_suites = try gpa.dupe(tls_stream.Tls12CipherSuite, suites);
         }
-        const wants_identity_verification =
-            config.system_root_certs or
-            config.bundled_root_certs or
+        const needs_san_checks =
             (config.san_matchers != null and config.san_matchers.?.len != 0) or
             (config.verify_certificate_hashes != null and config.verify_certificate_hashes.?.len != 0) or
             (config.verify_certificate_spkis != null and config.verify_certificate_spkis.?.len != 0);
+        const wants_identity_verification =
+            config.system_root_certs or
+            config.bundled_root_certs or
+            config.platform_root_certs or
+            needs_san_checks;
         if (config.trusted_ca.len != 0) {
             addCerts(gpa, io, &self.bundle, config.trusted_ca) catch return error.InvalidTlsMaterial;
             if (self.bundle.map.count() == 0) return error.InvalidTlsMaterial;
@@ -91,6 +99,11 @@ pub const Material = struct {
             self.bundled_store = root_trust.initBundledStore(
                 gpa,
                 std.Io.Timestamp.now(io, .real),
+            ) catch return error.InvalidTlsMaterial;
+        } else if (config.platform_root_certs) {
+            self.platform_verifier = vail.x509.platform.Verifier.init(
+                gpa,
+                .{ .verify_host = !needs_san_checks },
             ) catch return error.InvalidTlsMaterial;
         } else if (wants_identity_verification) {
             // No inline CA: use the platform trust store, matching Envoy/gRPC.
@@ -150,11 +163,14 @@ pub const Material = struct {
         if (self.verify_certificate_spkis.len != 0) self.allocator.free(self.verify_certificate_spkis);
         if (self.identity) |*identity| identity.deinit();
         if (self.bundled_store) |*store| store.deinit();
+        if (self.platform_verifier) |*verifier| verifier.deinit();
         self.bundle.deinit(self.allocator);
         self.allocator.destroy(self);
     }
     fn hasTrust(self: *const Material) bool {
-        return self.bundled_store != null or self.bundle_loaded;
+        return self.bundled_store != null or
+            self.platform_verifier != null or
+            self.bundle_loaded;
     }
     pub fn serverName(self: *const Material, fallback: []const u8) []const u8 {
         return if (self.server_name.len != 0) self.server_name else fallback;
@@ -167,7 +183,7 @@ pub const Material = struct {
             self.san_matchers.len != 0 or
             self.verify_certificate_hashes.len != 0 or
             self.verify_certificate_spkis.len != 0;
-        if (self.bundled_store != null) {
+        if (self.bundled_store != null or self.platform_verifier != null) {
             result.server_verifier = .{
                 .verify_trust = if (needs_san_checks) verifySanTrust else verifyBundledTrust,
                 .context = self,
@@ -199,11 +215,20 @@ pub const Material = struct {
 
     pub fn verifySanTrust(context: ?*anyopaque, trust: vail.tls.auth.TrustContext) anyerror!void {
         const self: *Material = @ptrCast(@alignCast(context orelse return error.CertificateUntrusted));
-        const now = std.Io.Clock.Timestamp.now(self.io, .real).raw.nanoseconds;
-        var verifier = self.trustVerifier(@intCast(@divTrunc(now, std.time.ns_per_s)));
-        try vail.tls.auth.ClientVerifier.fromTrustVerifier(
-            verifier.serverChainVerifier(),
-        ).verifyTrust(trust.server_name, trust.chain);
+        if (self.platform_verifier) |*platform| {
+            var chain_only = trust;
+            chain_only.server_name = null;
+            const trust_verifier = platform.clientVerifier();
+            const callback = trust_verifier.verify_trust orelse
+                return error.CertificateUntrusted;
+            try callback(trust_verifier.context, chain_only);
+        } else {
+            const now = std.Io.Clock.Timestamp.now(self.io, .real).raw.nanoseconds;
+            var verifier = self.trustVerifier(@intCast(@divTrunc(now, std.time.ns_per_s)));
+            try vail.tls.auth.ClientVerifier.fromTrustVerifier(
+                verifier.serverChainVerifier(),
+            ).verifyTrust(trust.server_name, trust.chain);
+        }
         if (trust.chain.len == 0) return error.CertificateUntrusted;
         if (self.verify_certificate_hashes.len != 0) {
             var pinned = false;
@@ -242,10 +267,17 @@ pub const Material = struct {
         }
     }
 
-    /// Hostname-verifying callback used when bundled roots are selected without
-    /// xDS SAN matchers or certificate pins.
+    /// Hostname-verifying callback used when bundled roots or the platform
+    /// verifier are selected without xDS SAN matchers or certificate pins.
     pub fn verifyBundledTrust(context: ?*anyopaque, trust: vail.tls.auth.TrustContext) anyerror!void {
         const self: *Material = @ptrCast(@alignCast(context orelse return error.CertificateUntrusted));
+        if (self.platform_verifier) |*platform| {
+            const trust_verifier = platform.clientVerifier();
+            const callback = trust_verifier.verify_trust orelse
+                return error.CertificateUntrusted;
+            try callback(trust_verifier.context, trust);
+            return;
+        }
         const now = std.Io.Clock.Timestamp.now(self.io, .real).raw.nanoseconds;
         var verifier = self.trustVerifier(@intCast(@divTrunc(now, std.time.ns_per_s)));
         try vail.tls.auth.ClientVerifier.fromTrustVerifier(
@@ -505,6 +537,19 @@ test "xDS TLS SPKI pins accept and reject the peer chain" {
     var rejecting = try Material.create(allocator, std.testing.io, .{ .trusted_ca = pem, .verify_certificate_spkis = &.{wrong} });
     defer rejecting.deinit();
     try std.testing.expectError(error.CertificateUntrusted, Material.verifySanTrust(rejecting, trust));
+}
+
+test "xDS TLS platform root certs install a verifier" {
+    if (builtin.os.tag != .macos and builtin.os.tag != .windows) {
+        return error.SkipZigTest;
+    }
+    var material = try Material.create(std.testing.allocator, std.testing.io, .{
+        .server_name = "example.com",
+        .platform_root_certs = true,
+    });
+    defer material.deinit();
+    const options = material.options();
+    try std.testing.expect(options.server_verifier != null);
 }
 
 test "xDS TLS hash-only verification uses the platform trust store" {

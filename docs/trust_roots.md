@@ -1,20 +1,29 @@
-# Trust roots: system or compiled-in Mozilla CA set
+# Trust roots: system, platform, or compiled-in Mozilla CA set
 
-Netz clients default to the operating system trust store. Callers can select a
-compiled-in Mozilla CCADB root set instead:
+Netz clients default to the operating system root files. Three sources are
+available:
 
 ```zig
 const netz = @import("netz");
 
-var client = try netz.http.Client.init(allocator, io, .{
-    .tls = .{ .root_source = .bundled },
-});
+// Load the OS root bundle in Zig (the default).
+.tls = .{ .root_source = .system }
+
+// Delegate chain and hostname verification to the OS verifier.
+// macOS: Security.framework; Windows: CryptoAPI/WinTrust.
+.tls = .{ .root_source = .platform }
+
+// Use the compiled-in Mozilla CCADB root snapshot.
+.tls = .{ .root_source = .bundled }
 ```
 
 `root_source = .bundled` uses the sibling `webpkiz` package. The data is a
 snapshot of the Mozilla Included CA Certificate Report, including the
 Mozilla-applied name constraints that are not encoded in the root certificates
 themselves.
+
+`root_source = .platform` is only available on macOS and Windows. Other targets
+return `error.PlatformVerifierUnavailable`; use `.system` or `.bundled` there.
 
 ## Precedence
 
@@ -37,7 +46,12 @@ This keeps explicit application trust material authoritative while letting
 - MQTT: `ConnectOptions.tls.root_source`
 - WebSocket/WSS: the embedded `http1.runtime.TlsClientOptions.root_source`
 - QUIC and HTTP/3: `quic.handshake.ClientOptions.root_source`
-- gRPC xDS TLS material: `grpc.xds.tls_material.Config.bundled_root_certs`
+- gRPC xDS TLS material: `grpc.xds.tls_material.Config.bundled_root_certs` or
+  `Config.platform_root_certs`
+
+The HTTP/1 standard-library TLS path cannot use `.platform` because Zig's
+`std.crypto.tls.Client` accepts only a certificate bundle, not a verification
+callback. Use the Vail-backed transport for platform verification.
 
 ## Reusing a bundled store
 
@@ -66,8 +80,11 @@ the Vail TLS transport when complete Mozilla coverage is required.
 
 ## Limitations
 
-- The root set only updates when the application is rebuilt and redeployed.
-- Enterprise CAs installed on the device are not included.
-- OS trust-policy changes and platform revocation behavior are not inherited.
+- `.system` loads OS root files but does not inherit OS verification policy.
+- `.platform` is macOS/Windows only and does not currently combine with
+  stapled OCSP policy in the Vail TLS path.
+- The bundled root set only updates when the application is rebuilt and
+  redeployed.
+- Bundled roots do not include enterprise CAs installed on the device.
 - `webpkiz` currently stores full DER roots, not the compact webpki trust-anchor
   representation. This keeps it compatible with both Zig std and Vail.

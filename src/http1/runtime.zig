@@ -74,6 +74,7 @@ pub const Error = http1.Error || tls_stream.Error || uri_redirect.Error || error
     PayloadTooLarge,
     UnexpectedContextId,
     ExcessiveLoad,
+    PlatformVerifierUnavailable,
 } || net.IpAddress.ListenError || net.IpAddress.ConnectError ||
     net.UnixAddress.ListenError || net.UnixAddress.ConnectError ||
     net.HostName.ValidateError || net.HostName.ConnectError ||
@@ -428,7 +429,8 @@ pub const TlsClientOptions = struct {
     /// Optional caller-owned native trust store reused across handshakes.
     system_store: ?*const vail.x509.trust.SystemStore = null,
     /// Selects the default root set when no explicit verifier, CA bundle, or
-    /// store is supplied. `.bundled` uses the compiled-in Mozilla roots.
+    /// store is supplied. `.platform` uses the OS verifier; `.bundled` uses
+    /// the compiled-in Mozilla roots.
     root_source: tls_stream.RootSource = .system,
     /// Forward EOF without close_notify.  This is useful only when the HTTP
     /// layer independently verifies body length (for example Content-Length).
@@ -454,7 +456,8 @@ pub const VailTlsClientOptions = struct {
     /// Optional caller-owned native trust store reused across handshakes.
     system_store: ?*const vail.x509.trust.SystemStore = null,
     /// Selects the default root set when no explicit verifier, CA bundle, or
-    /// store is supplied. `.bundled` uses the compiled-in Mozilla roots.
+    /// store is supplied. `.platform` uses the OS verifier; `.bundled` uses
+    /// the compiled-in Mozilla roots.
     root_source: tls_stream.RootSource = .system,
     server_verifier: ?vail.tls.auth.ClientVerifier = null,
     /// Built-in verifier policy for RFC 6066 stapled OCSP responses.
@@ -1234,6 +1237,13 @@ pub const TlsClientConnection = struct {
         var entropy: [tls.Client.Options.entropy_len]u8 = undefined;
         try std.Io.randomSecure(io, &entropy);
         const now = std.Io.Timestamp.now(io, .real);
+
+        // Zig's standard TLS client accepts only a certificate bundle, not a
+        // platform verification callback. Callers that need OS policy should
+        // use the Vail-backed transport.
+        if (options.root_source == .platform) {
+            return error.PlatformVerifierUnavailable;
+        }
 
         var local_bundle: CertificateBundle = .empty;
         var local_lock: std.Io.RwLock = .init;

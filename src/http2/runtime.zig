@@ -4038,7 +4038,8 @@ pub const TlsConnectOptions = struct {
     /// Optional caller-owned native trust store reused across handshakes.
     system_store: ?*const vail.x509.trust.SystemStore = null,
     /// Selects the default root set when no explicit verifier, CA bundle, or
-    /// store is supplied. `.bundled` uses the compiled-in Mozilla roots.
+    /// store is supplied. `.platform` uses the OS verifier; `.bundled` uses
+    /// the compiled-in Mozilla roots.
     root_source: tls_stream.RootSource = .system,
     server_verifier: ?vail.tls.auth.ClientVerifier = null,
     /// Built-in verifier policy for RFC 6066 stapled OCSP responses.

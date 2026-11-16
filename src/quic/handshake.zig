@@ -101,7 +101,8 @@ pub const ClientOptions = struct {
     /// for the synchronous handshake.
     system_store: ?*const quic.tls.trust.SystemStore = null,
     /// Selects the default root set when `server_auth` and `system_store` are
-    /// both null. `.bundled` uses the compiled-in Mozilla roots.
+    /// both null. `.platform` uses the OS verifier; `.bundled` uses the
+    /// compiled-in Mozilla roots.
     root_source: root_trust.RootSource = .system,
     client_identity: ?quic.tls.client_auth.ClientIdentity = null,
     /// TLS 1.3 cipher suites offered in preference order.
@@ -1582,10 +1583,24 @@ fn connectAttempt(
     const auth_now = std.Io.Timestamp.now(endpoint.io, .real);
     var system_store: ?quic.tls.trust.SystemStore = null;
     defer if (system_store) |*store| store.deinit();
+    var platform_verifier: ?quic.tls.platform.Verifier = null;
+    defer if (platform_verifier) |*verifier| verifier.deinit();
     const server_auth = options.server_auth orelse blk: {
         if (options.system_store) |store| {
             break :blk quic.tls.auth.ClientVerifier.fromTrustVerifier(
                 store.verifier(auth_now.toSeconds()).clientVerifier(),
+            );
+        }
+        if (options.root_source == .platform) {
+            platform_verifier = quic.tls.platform.Verifier.init(
+                endpoint.allocator,
+                .{},
+            ) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.NativeTrustStoreUnavailable,
+            };
+            break :blk quic.tls.auth.ClientVerifier.fromTrustVerifier(
+                platform_verifier.?.clientVerifier(),
             );
         }
         if (options.root_source == .bundled) {
