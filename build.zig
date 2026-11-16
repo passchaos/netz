@@ -2718,6 +2718,8 @@ pub fn build(b: *std.Build) void {
         source_archive.addDirectoryArg(vort_dep.path("."));
         source_archive.addArg("--pbz");
         source_archive.addDirectoryArg(pbz_dep.path("."));
+        source_archive.addArg("--kron");
+        source_archive.addDirectoryArg(kron_dep.path("."));
         source_archive.addArg("--webpkiz");
         source_archive.addDirectoryArg(webpkiz_dep.path("."));
         source_archive.addArg("--regexz");

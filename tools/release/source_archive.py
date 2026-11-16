@@ -21,6 +21,7 @@ DEFAULT_PACKAGE_VERSION = "0.1.0"
 VAIL_REVISION = "3b772b0cccb64d84fbc760df6428bc51e0fe0761"
 VORT_REVISION = "b661c887e21fb1965db358bc6d12ea379d20178d"
 PBZ_REVISION = "6513ef1f8b130b308bd86ba0bd02f6acc2be64e8"
+KRON_REVISION = "77b9572a0256da0ece836c6b49024b3282bd1d5b"
 WEBPKIZ_REVISION = "35c9f4bfecb51a7794670d474c01b3c6fe541e9e"
 REGEXZ_REVISION = "f150767088ef11fb4435f3b42c99165333b6e51c"
 HARNESSZ_REVISION = "e626f26b0a7ead0377254ed3a04b43b25fb2d270"
@@ -121,6 +122,7 @@ def release_manifest(
     vail_revision: str,
     vort_revision: str,
     pbz_revision: str,
+    kron_revision: str,
     webpkiz_revision: str,
     regexz_revision: str,
     harnessz_revision: str,
@@ -142,6 +144,10 @@ def release_manifest(
                     "pbz": {
                         "path": "deps/pbz",
                         "revision": pbz_revision,
+                    },
+                    "kron": {
+                        "path": "deps/kron",
+                        "revision": kron_revision,
                     },
                     "vail": {
                         "path": "deps/vail",
@@ -184,6 +190,8 @@ def rewrite_package_manifest(data: bytes) -> bytes:
             '.vort = .{ .path = "deps/vort" },',
         '.pbz = .{ .path = "../pbz" },':
             '.pbz = .{ .path = "deps/pbz" },',
+        '.kron = .{ .path = "../kron" },':
+            '.kron = .{ .path = "deps/kron" },',
         '.webpkiz = .{ .path = "../webpkiz" },':
             '.webpkiz = .{ .path = "deps/webpkiz" },',
         '.regexz = .{ .path = "../regexz" },':
@@ -241,6 +249,7 @@ def create_archive(
     vail: Path,
     vort: Path,
     pbz: Path,
+    kron: Path,
     webpkiz: Path,
     regexz: Path,
     zio: Path,
@@ -250,6 +259,7 @@ def create_archive(
     expected_vail_revision: str = VAIL_REVISION,
     expected_vort_revision: str = VORT_REVISION,
     expected_pbz_revision: str = PBZ_REVISION,
+    expected_kron_revision: str = KRON_REVISION,
     expected_webpkiz_revision: str = WEBPKIZ_REVISION,
     expected_regexz_revision: str = REGEXZ_REVISION,
     expected_harnessz_revision: str = HARNESSZ_REVISION,
@@ -261,6 +271,7 @@ def create_archive(
         "deps/vail": vail.resolve(),
         "deps/vort": vort.resolve(),
         "deps/pbz": pbz.resolve(),
+        "deps/kron": kron.resolve(),
         "deps/webpkiz": webpkiz.resolve(),
         "deps/regexz": regexz.resolve(),
         "deps/harnessz": harnessz.resolve(),
@@ -283,6 +294,12 @@ def create_archive(
         raise RuntimeError(
             "pbz revision mismatch: expected "
             f"{expected_pbz_revision}, found {revisions['deps/pbz']}"
+        )
+    if revisions["deps/kron"] != expected_kron_revision:
+        raise RuntimeError(
+            "kron revision mismatch: expected "
+            f"{expected_kron_revision}, "
+            f"found {revisions['deps/kron']}"
         )
     if revisions["deps/webpkiz"] != expected_webpkiz_revision:
         raise RuntimeError(
@@ -337,6 +354,7 @@ def create_archive(
             revisions["deps/vail"],
             revisions["deps/vort"],
             revisions["deps/pbz"],
+            revisions["deps/kron"],
             revisions["deps/webpkiz"],
             revisions["deps/regexz"],
             revisions["deps/harnessz"],
@@ -378,6 +396,7 @@ def main() -> None:
     parser.add_argument("--vail", type=Path, required=True)
     parser.add_argument("--vort", type=Path, required=True)
     parser.add_argument("--pbz", type=Path, required=True)
+    parser.add_argument("--kron", type=Path, required=True)
     parser.add_argument("--webpkiz", type=Path, required=True)
     parser.add_argument("--regexz", type=Path, required=True)
     parser.add_argument("--zio", type=Path, required=True)
@@ -391,6 +410,7 @@ def main() -> None:
         args.vail,
         args.vort,
         args.pbz,
+        args.kron,
         args.webpkiz,
         args.regexz,
         args.zio,

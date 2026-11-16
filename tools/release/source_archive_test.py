@@ -72,6 +72,7 @@ class SourceArchiveTest(unittest.TestCase):
         self.vail = base / "vail"
         self.vort = base / "vort"
         self.pbz = base / "pbz"
+        self.kron = base / "kron"
         self.webpkiz = base / "webpkiz"
         self.regexz = base / "regexz"
         self.zio = base / "zio"
@@ -81,6 +82,7 @@ class SourceArchiveTest(unittest.TestCase):
             self.vail,
             self.vort,
             self.pbz,
+            self.kron,
             self.webpkiz,
             self.regexz,
             self.zio,
@@ -97,6 +99,7 @@ class SourceArchiveTest(unittest.TestCase):
             .hash = \"zio-0.19.1-xHbVVE1kLABhvcTZ2InisM3hdkwDdj0fzzAUxvw2AmGk\",
         },
         .pbz = .{ .path = \"../pbz\" },
+        .kron = .{ .path = \"../kron\" },
         .webpkiz = .{ .path = \"../webpkiz\" },
         .regexz = .{ .path = \"../regexz\" },
     },
@@ -138,6 +141,14 @@ class SourceArchiveTest(unittest.TestCase):
                 "build.zig": b"pub fn build() void {}\n",
                 "build.zig.zon": b".{}\n",
                 "src/root.zig": b"pub const value = 3;\n",
+            },
+        )
+        self.kron_revision = initialize_repository(
+            self.kron,
+            {
+                "build.zig": b"pub fn build() void {}\n",
+                "build.zig.zon": b".{}\n",
+                "src/root.zig": b"pub const value = 9;\n",
             },
         )
         self.webpkiz_revision = initialize_repository(
@@ -193,6 +204,7 @@ class SourceArchiveTest(unittest.TestCase):
             self.vail,
             self.vort,
             self.pbz,
+            self.kron,
             self.webpkiz,
             self.regexz,
             self.zio,
@@ -201,6 +213,7 @@ class SourceArchiveTest(unittest.TestCase):
             expected_vail_revision=self.vail_revision,
             expected_vort_revision=self.vort_revision,
             expected_pbz_revision=self.pbz_revision,
+            expected_kron_revision=self.kron_revision,
             expected_webpkiz_revision=self.webpkiz_revision,
             expected_regexz_revision=self.regexz_revision,
             expected_harnessz_revision=self.harnessz_revision,
@@ -220,6 +233,7 @@ class SourceArchiveTest(unittest.TestCase):
             self.assertIn("netz-0.1.0/deps/vail/src/root.zig", names)
             self.assertIn("netz-0.1.0/deps/vort/src/root.zig", names)
             self.assertIn("netz-0.1.0/deps/pbz/src/root.zig", names)
+            self.assertIn("netz-0.1.0/deps/kron/src/root.zig", names)
             self.assertIn("netz-0.1.0/deps/webpkiz/src/root.zig", names)
             self.assertIn("netz-0.1.0/deps/regexz/src/root.zig", names)
             self.assertIn("netz-0.1.0/deps/harnessz/src/root.zig", names)
@@ -240,6 +254,7 @@ class SourceArchiveTest(unittest.TestCase):
         self.assertIn('.path = "deps/vail"', package)
         self.assertIn('.path = "deps/vort"', package)
         self.assertIn('.path = "deps/pbz"', package)
+        self.assertIn('.path = "deps/kron"', package)
         self.assertIn('.path = "deps/webpkiz"', package)
         self.assertIn('.path = "deps/regexz"', package)
         self.assertIn('.path = "deps/zio"', package)
@@ -248,6 +263,7 @@ class SourceArchiveTest(unittest.TestCase):
         self.assertNotIn("../vail", package)
         self.assertNotIn("../vort", package)
         self.assertNotIn("../pbz", package)
+        self.assertNotIn("../kron", package)
         self.assertNotIn("../webpkiz", package)
         self.assertNotIn("../regexz", package)
         self.assertNotIn("git+https://github.com/passchaos/zio", package)
@@ -267,6 +283,10 @@ class SourceArchiveTest(unittest.TestCase):
         self.assertEqual(
             self.pbz_revision,
             metadata["vendored_dependencies"]["pbz"]["revision"],
+        )
+        self.assertEqual(
+            self.kron_revision,
+            metadata["vendored_dependencies"]["kron"]["revision"],
         )
         self.assertEqual(
             self.webpkiz_revision,
@@ -302,6 +322,7 @@ class SourceArchiveTest(unittest.TestCase):
                 self.vail,
                 self.vort,
                 self.pbz,
+                self.kron,
                 self.webpkiz,
                 self.regexz,
                 self.zio,
@@ -310,6 +331,7 @@ class SourceArchiveTest(unittest.TestCase):
                 expected_vail_revision="0" * 40,
                 expected_vort_revision=self.vort_revision,
                 expected_pbz_revision=self.pbz_revision,
+                expected_kron_revision=self.kron_revision,
                 expected_webpkiz_revision=self.webpkiz_revision,
                 expected_regexz_revision=self.regexz_revision,
                 expected_harnessz_revision=self.harnessz_revision,
@@ -385,6 +407,7 @@ class RepositoryDependencyPinTest(unittest.TestCase):
             "vail": SOURCE_ARCHIVE.VAIL_REVISION,
             "vort": SOURCE_ARCHIVE.VORT_REVISION,
             "pbz": SOURCE_ARCHIVE.PBZ_REVISION,
+            "kron": SOURCE_ARCHIVE.KRON_REVISION,
             "webpkiz": SOURCE_ARCHIVE.WEBPKIZ_REVISION,
             "regexz": SOURCE_ARCHIVE.REGEXZ_REVISION,
         }
@@ -397,6 +420,7 @@ class RepositoryDependencyPinTest(unittest.TestCase):
                 "harnessz",
                 "vail",
                 "vort",
+                "kron",
                 "webpkiz",
                 "regexz",
             ):

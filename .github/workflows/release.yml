@@ -32,7 +32,7 @@ jobs:
           DEPENDENCIES_TOKEN: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
         run: |
           if [ -z "$DEPENDENCIES_TOKEN" ]; then
-            echo "::error::Configure NETZ_DEPENDENCIES_TOKEN with read access to passchaos/vail, passchaos/vort, passchaos/webpkiz, passchaos/regexz and passchaos/harnessz"
+            echo "::error::Configure NETZ_DEPENDENCIES_TOKEN with read access to passchaos/vail, passchaos/vort, passchaos/webpkiz, passchaos/regexz, passchaos/kron and passchaos/harnessz"
             exit 1
           fi
 
@@ -60,6 +60,15 @@ jobs:
           repository: passchaos/pbz
           ref: 6513ef1f8b130b308bd86ba0bd02f6acc2be64e8
           path: pbz
+          persist-credentials: false
+
+      - name: Checkout pinned kron
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: passchaos/kron
+          ref: 77b9572a0256da0ece836c6b49024b3282bd1d5b
+          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
+          path: kron
           persist-credentials: false
 
       - name: Checkout pinned webpkiz
