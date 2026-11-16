@@ -82,6 +82,7 @@ pub const RequestHandle = client.RequestHandle;
 pub const ResponseSink = client.ResponseSink;
 pub const ResponseHead = client.ResponseHead;
 pub const DuplexHeader = client.DuplexHeader;
+pub const startHttp3Request = client.startHttp3Request;
 pub const RequestOptions = client.RequestOptions;
 pub const RedirectOptions = client.RedirectOptions;
 pub const Socks5Proxy = client.Socks5Proxy;

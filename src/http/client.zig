@@ -48,6 +48,7 @@ pub const RequestHandle = duplex.Handle;
 pub const ResponseSink = duplex.ResponseSink;
 pub const ResponseHead = duplex.ResponseHead;
 pub const DuplexHeader = duplex.Header;
+pub const startHttp3Request = duplex.startHttp3;
 pub const RequestOptions = types.RequestOptions;
 pub const RedirectOptions = types.RedirectOptions;
 pub const Options = types.Options;

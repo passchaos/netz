@@ -1792,3 +1792,127 @@ test "HTTP/2 duplex handle streams request and response" {
     joined = true;
     if (worker.err) |err| return err;
 }
+
+test "HTTP/3 duplex handle streams request and response" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const original_dcid = [_]u8{ 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xc8 };
+    const client_cid = [_]u8{ 0xc9, 0xca, 0xcb, 0xcc };
+    const server_cid = [_]u8{ 0xcd, 0xce, 0xcf, 0xd0 };
+    var server = try http3_runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 16,
+        } },
+        .{ .handshake = .{
+            .local_connection_id = &server_cid,
+            .random = [_]u8{0xd1} ** 32,
+            .x25519_secret_key = [_]u8{0xd2} ** 32,
+        } },
+    );
+    defer server.deinit();
+
+    const Worker = struct {
+        const Self = @This();
+        server: *http3_runtime.HandshakeServer,
+        err: ?anyerror = null,
+
+        fn run(self: *Self) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *Self) !void {
+            var session = try self.server.accept();
+            defer session.deinit();
+            var request = try session.receiveRequest();
+            defer request.deinit(self.server.allocator);
+            try std.testing.expectEqualStrings(
+                "hello world",
+                request.request.body,
+            );
+            try session.startResponse(request.stream_id, .{
+                .status = 200,
+                .headers = &.{.{
+                    .name = "content-type",
+                    .value = "text/plain",
+                }},
+            }, null);
+            try session.sendResponseBodyPaced(
+                request.stream_id,
+                "resp-1",
+                false,
+            );
+            try session.sendResponseBodyPaced(
+                request.stream_id,
+                "resp-2",
+                false,
+            );
+            try session.finishResponseTrailersPaced(
+                request.stream_id,
+                &.{.{ .name = "x-checksum", .value = "1" }},
+            );
+        }
+    };
+
+    var worker = Worker{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Worker.run, .{&worker});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try http3_runtime.HandshakeClient.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 16,
+        } },
+        .{ .handshake = .{
+            .original_destination_connection_id = &original_dcid,
+            .local_connection_id = &client_cid,
+            .server_name = "localhost",
+            .random = [_]u8{0xd3} ** 32,
+            .x25519_secret_key = [_]u8{0xd4} ** 32,
+        } },
+    );
+    defer client.deinit();
+
+    var handle = try http.startHttp3Request(
+        allocator,
+        &client,
+        .{
+            .method = "POST",
+            .path = "/upload",
+            .authority = "localhost",
+        },
+        "hello world".len,
+    );
+    defer handle.deinit();
+
+    try handle.writeBody("hello ");
+    try handle.writeBody("world");
+    try handle.finishBody();
+
+    var sink = DuplexSink{ .allocator = allocator };
+    defer sink.deinit();
+    const head = try handle.readResponse(sink.sink());
+    try std.testing.expectEqual(http.Protocol.http3, head.protocol);
+    try std.testing.expectEqual(@as(u16, 200), head.status);
+    try std.testing.expectEqualStrings("resp-1resp-2", sink.body.items);
+    try std.testing.expectEqual(@as(usize, 1), sink.trailer_count);
+    try std.testing.expectEqualStrings("x-checksum", sink.trailer_name.items);
+    try std.testing.expectEqualStrings("1", sink.trailer_value.items);
+
+    thread.join();
+    joined = true;
+    if (worker.err) |err| return err;
+}
