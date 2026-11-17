@@ -257,9 +257,11 @@ Current protocol coverage includes:
   incremental request-body writes (`writeBody`, `writeBodyFromReader`,
   `finishBody`, `finishTrailers`), callback-scoped response chunks and trailers,
   optional 1xx observation, deadline-bounded response reads, early-response
-  handoff, abandoned-H3 stream cancellation, and pooled HTTP/1/H2 leasing
-  through `http.Pool.startRequest`; H3 opens the same handle through
-  `http.startHttp3Request` on an exclusive `HandshakeClient`.
+  handoff, abandoned-H3 stream cancellation, pooled HTTP/1/H2 leasing through
+  `http.Pool.startRequest`, and pooled HTTP/3 streaming through the shared and
+  exclusive pool dispatchers when an Alt-Svc route is active; H3 also opens the
+  same handle through `http.startHttp3Request` on an exclusive
+  `HandshakeClient`.
 - A unified `http.Client`/`http.Connection` surface for HTTP/1.1 and HTTP/2,
   plus an optional HTTP/3-capable `http.Pool`:
   HTTPS performs one certificate-verified vail TLS 1.2/1.3 handshake offering

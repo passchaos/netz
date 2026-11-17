@@ -256,6 +256,8 @@ test {
 }
 
 pub const StreamingResponseEvent = stream_events.Response;
+pub const StreamCallbackSink =
+    @import("runtime/shared_handshake_client_pool/stream_command.zig").CallbackSink;
 pub const PeerResponseCancellation = stream_events.PeerResponseCancellation;
 pub const SessionTicketStats = ticket_receiver.Stats;
 const StreamingMessageSet = streaming_set.Set;

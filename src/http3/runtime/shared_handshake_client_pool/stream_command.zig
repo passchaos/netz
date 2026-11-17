@@ -13,6 +13,22 @@ pub const max_pending_write_bytes: usize = 64 * 1024;
 /// Maximum response bytes resident before the worker stops reading DATA.
 pub const max_pending_read_bytes: usize = 256 * 1024;
 
+pub const CallbackSink = struct {
+    context: *anyopaque,
+    begin: *const fn (
+        context: *anyopaque,
+        head: http3.DecodedResponseHead,
+    ) anyerror!void,
+    data: *const fn (
+        context: *anyopaque,
+        bytes: []const u8,
+    ) anyerror!void,
+    end: *const fn (
+        context: *anyopaque,
+        trailers: []const http3.Qpack.HeaderField,
+    ) anyerror!void,
+};
+
 pub fn Stream(comptime Pool: type) type {
     return struct {
         pool: *Pool,
@@ -60,21 +76,7 @@ pub fn Stream(comptime Pool: type) type {
             }
         };
 
-        pub const Sink = struct {
-            context: *anyopaque,
-            begin: *const fn (
-                context: *anyopaque,
-                head: http3.DecodedResponseHead,
-            ) anyerror!void,
-            data: *const fn (
-                context: *anyopaque,
-                bytes: []const u8,
-            ) anyerror!void,
-            end: *const fn (
-                context: *anyopaque,
-                trailers: []const http3.Qpack.HeaderField,
-            ) anyerror!void,
-        };
+        pub const Sink = CallbackSink;
 
         pub fn init(
             pool: *Pool,

@@ -227,12 +227,12 @@ pub const Handle = struct {
     pub fn finishTrailers(self: *Handle, trailers: []const Header) !void {
         switch (self.state) {
             .http1 => |*writer| {
-                const mapped = try mapHeaders1(self.allocator, trailers);
+                const mapped = try mapToHttp1(self.allocator, trailers);
                 defer self.allocator.free(mapped);
                 try writer.finishTrailers(mapped);
             },
             .http2 => |*writer| {
-                const mapped = try mapHeaders2(self.allocator, trailers);
+                const mapped = try mapToHttp2(self.allocator, trailers);
                 defer self.allocator.free(mapped);
                 writer.finishTrailers(mapped) catch |err| switch (err) {
                     error.ResponseAvailable => {
@@ -244,7 +244,7 @@ pub const Handle = struct {
                 };
             },
             .http3 => |*h3| {
-                const mapped = try mapHeaders3(self.allocator, trailers);
+                const mapped = try mapToHttp3(self.allocator, trailers);
                 defer self.allocator.free(mapped);
                 h3.client.finishRequestTrailersPaced(
                     h3.stream_id,
@@ -621,6 +621,39 @@ pub fn startHttp3(
 ) !Handle {
     const stream_id = try client.startRequest(request, body_length);
     return Handle.initHttp3(allocator, client, stream_id);
+}
+
+fn mapToHttp1(
+    allocator: std.mem.Allocator,
+    headers: []const Header,
+) ![]http1.Header {
+    const result = try allocator.alloc(http1.Header, headers.len);
+    for (headers, result) |source, *target| {
+        target.* = .{ .name = source.name, .value = source.value };
+    }
+    return result;
+}
+
+fn mapToHttp2(
+    allocator: std.mem.Allocator,
+    headers: []const Header,
+) ![]http2.Hpack.HeaderField {
+    const result = try allocator.alloc(http2.Hpack.HeaderField, headers.len);
+    for (headers, result) |source, *target| {
+        target.* = .{ .name = source.name, .value = source.value };
+    }
+    return result;
+}
+
+fn mapToHttp3(
+    allocator: std.mem.Allocator,
+    headers: []const Header,
+) ![]http3.Qpack.HeaderField {
+    const result = try allocator.alloc(http3.Qpack.HeaderField, headers.len);
+    for (headers, result) |source, *target| {
+        target.* = .{ .name = source.name, .value = source.value };
+    }
+    return result;
 }
 
 fn mapHeaders1(

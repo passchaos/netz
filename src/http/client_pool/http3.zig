@@ -75,6 +75,56 @@ pub const Options = struct {
     fallback: FallbackPolicy = .idempotent_methods,
 };
 
+pub const StreamHandle = union(enum) {
+    shared: *runtime.SharedHandshakeClientPoolRequestDispatcher.StreamHandle,
+    exclusive: *runtime.HandshakeClientPoolSharedDispatcher.StreamHandle,
+
+    pub fn writeBody(self: *StreamHandle, data: []const u8, fin: bool) !void {
+        switch (self.*) {
+            .shared => |handle| try handle.writeBody(data, fin),
+            .exclusive => |handle| try handle.writeBody(data, fin),
+        }
+    }
+
+    pub fn writeTrailers(
+        self: *StreamHandle,
+        trailers: []const http3.Qpack.HeaderField,
+    ) !void {
+        switch (self.*) {
+            .shared => |handle| try handle.writeTrailers(trailers),
+            .exclusive => |handle| try handle.writeTrailers(trailers),
+        }
+    }
+
+    pub fn readResponse(
+        self: *StreamHandle,
+        sink: runtime.StreamCallbackSink,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) !*const http3.DecodedResponseHead {
+        return switch (self.*) {
+            .shared => |handle| handle.readResponse(sink, deadline),
+            .exclusive => |handle| handle.readResponse(sink, deadline),
+        };
+    }
+
+    pub fn pollResponse(
+        self: *StreamHandle,
+        sink: runtime.StreamCallbackSink,
+    ) !bool {
+        return switch (self.*) {
+            .shared => |handle| handle.pollResponse(sink),
+            .exclusive => |handle| handle.pollResponse(sink),
+        };
+    }
+
+    pub fn deinit(self: *StreamHandle) void {
+        switch (self.*) {
+            .shared => |handle| handle.deinit(),
+            .exclusive => |handle| handle.deinit(),
+        }
+    }
+};
+
 pub const State = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -443,6 +493,34 @@ pub const State = struct {
         defer self.settings_mutex.unlock(self.io);
         if (self.closed.load(.acquire)) return;
         self.settings.remember(origin, settings) catch {};
+    }
+
+    /// Open a streaming request on the shared or exclusive HTTP/3 dispatcher.
+    pub fn startStream(
+        self: *State,
+        uri_text: []const u8,
+        target: http3.AltSvcTarget,
+        request_value: http3.Request,
+        body_length: ?usize,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) !StreamHandle {
+        if (self.closed.load(.acquire)) return error.PoolClosed;
+        if (self.shared_pool != null) {
+            return .{ .shared = try self.shared_dispatcher.?.sender().startStream(
+                uri_text,
+                target,
+                request_value,
+                body_length,
+                deadline,
+            ) };
+        }
+        return .{ .exclusive = try self.dispatcher.sender().startStream(
+            uri_text,
+            target,
+            request_value,
+            body_length,
+            deadline,
+        ) };
     }
 
     pub fn request(

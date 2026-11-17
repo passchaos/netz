@@ -1197,3 +1197,290 @@ test "unified HTTP pool backs off failed HTTP3 and preserves TCP reuse" {
     if (worker.err) |err| return err;
     try std.testing.expectEqual(@as(usize, 3), worker.requests);
 }
+
+test "unified HTTP pool streams a request through HTTP3" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+    const key_pair = try tls_testing.serverKeyPair();
+    const public_key = key_pair.public_key.toUncompressedSec1();
+    const identity: @FieldType(http1_runtime.TlsListenOptions, "identity") = .{
+        .certificate_chain = &.{&certificate_der},
+        .signer = .{ .ecdsa_p256_sha256 = .{ .key_pair = key_pair } },
+    };
+    var tcp_server = try http2_runtime.TlsServer.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .identity = identity },
+    );
+    defer tcp_server.deinit();
+    const h3_limits: http3_runtime.Limits = .{ .quic = .{
+        .max_datagram_size = 4096,
+        .max_frames_per_datagram = 8,
+    } };
+    const server_cid = [_]u8{ 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48 };
+    var h3_server = try http3_runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        h3_limits,
+        .{ .handshake = .{
+            .local_connection_id = &server_cid,
+            .identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{ .ecdsa_p256_sha256 = .{ .key_pair = key_pair } },
+            },
+        } },
+    );
+    defer h3_server.deinit();
+    const alt_svc = try std.fmt.allocPrint(
+        allocator,
+        "h3=\":{d}\"; ma=60",
+        .{h3_server.address().ip4.port},
+    );
+    defer allocator.free(alt_svc);
+
+    var request_body: [600]u8 = undefined;
+    for (&request_body, 0..) |*byte, index| byte.* = @truncate(index);
+    var response_body: [3000]u8 = undefined;
+    for (&response_body, 0..) |*byte, index| byte.* = @truncate(index *% 11);
+
+    const TcpWorker = struct {
+        server: *http2_runtime.TlsServer,
+        alt_svc: []const u8,
+        release: *std.Io.Event,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            var request = try connection.readRequest();
+            defer request.deinit(self.server.allocator);
+            try connection.writeResponse(request.stream_id, .{
+                .headers = &.{.{ .name = "alt-svc", .value = self.alt_svc }},
+                .body = "tcp-discovery",
+                .request_method = request.method,
+            });
+            try self.release.wait(self.server.io);
+        }
+    };
+    const H3Worker = struct {
+        server: *http3_runtime.HandshakeServer,
+        request_body: []const u8,
+        response_body: []const u8,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var session = try self.server.accept();
+            defer session.deinit();
+            var request = try session.receiveRequest();
+            defer request.deinit(self.server.allocator);
+            try std.testing.expectEqualStrings(
+                "/stream",
+                request.request.path,
+            );
+            try std.testing.expectEqualStrings(
+                self.request_body,
+                request.request.body,
+            );
+            try std.testing.expectEqual(
+                @as(usize, 1),
+                request.request.trailers.len,
+            );
+            try session.startResponse(
+                request.stream_id,
+                .{ .status = 200, .request_method = "POST" },
+                self.response_body.len,
+            );
+            var offset: usize = 0;
+            while (offset < self.response_body.len) {
+                const end = @min(offset + 500, self.response_body.len);
+                try session.sendResponseBodyPaced(
+                    request.stream_id,
+                    self.response_body[offset..end],
+                    false,
+                );
+                offset = end;
+            }
+            try session.finishResponseTrailersPaced(
+                request.stream_id,
+                &.{.{ .name = "x-response", .value = "complete" }},
+            );
+        }
+    };
+
+    var release: std.Io.Event = .unset;
+    var tcp_worker = TcpWorker{
+        .server = &tcp_server,
+        .alt_svc = alt_svc,
+        .release = &release,
+    };
+    var h3_worker = H3Worker{
+        .server = &h3_server,
+        .request_body = &request_body,
+        .response_body = &response_body,
+    };
+    const tcp_thread = try std.Thread.spawn(.{}, TcpWorker.run, .{&tcp_worker});
+    var tcp_joined = false;
+    defer if (!tcp_joined) {
+        release.set(io);
+        tcp_thread.join();
+    };
+    const h3_thread = try std.Thread.spawn(.{}, H3Worker.run, .{&h3_worker});
+    var h3_joined = false;
+    defer if (!h3_joined) h3_thread.join();
+
+    var pool = try http.Pool.init(allocator, io, .{
+        .max_total_connections = 2,
+        .client = .{ .tls = .{ .server_verifier = .{
+            .pinned_ecdsa_p256_public_key = public_key,
+        } } },
+        .http3 = .{
+            .limits = h3_limits,
+            .handshake = .{ .handshake = .{
+                .original_destination_connection_id = &.{},
+                .local_connection_id = &.{},
+                .server_auth = .{
+                    .pinned_ecdsa_p256_public_key = public_key,
+                },
+            } },
+            .idle = .{ .max_idle_per_origin = 1, .max_idle_total = 1 },
+            .max_connections = 1,
+        },
+    });
+    defer pool.deinit();
+    const base = try std.fmt.allocPrint(
+        allocator,
+        "https://localhost:{d}",
+        .{tcp_server.address().ip4.port},
+    );
+    defer allocator.free(base);
+    const discover_uri = try std.fmt.allocPrint(
+        allocator,
+        "{s}/discover",
+        .{base},
+    );
+    defer allocator.free(discover_uri);
+    var discovery = try pool.requestUriWithTimeout(
+        discover_uri,
+        .{},
+        .fromSeconds(5),
+    );
+    defer discovery.deinit();
+    try std.testing.expectEqual(http.Protocol.http2, discovery.protocol());
+
+    const stream_uri = try std.fmt.allocPrint(
+        allocator,
+        "{s}/stream",
+        .{base},
+    );
+    defer allocator.free(stream_uri);
+    var handle = try pool.startRequest(stream_uri, .{
+        .method = "POST",
+        .headers = &.{.{ .name = "te", .value = "trailers" }},
+        .body_length = .unknown,
+    });
+    var handle_active = true;
+    defer if (handle_active) handle.deinit();
+    try std.testing.expectEqual(http.Protocol.http3, handle.protocol());
+
+    var sink = StreamSink{ .allocator = allocator };
+    defer sink.deinit();
+    var written: usize = 0;
+    while (written < request_body.len) {
+        const end = @min(written + 100, request_body.len);
+        try handle.writeBody(request_body[written..end]);
+        written = end;
+    }
+    try handle.finishTrailers(&.{
+        .{ .name = "x-upload", .value = "complete" },
+    });
+    const head = try handle.readResponseWithDeadline(
+        sink.sink(),
+        .fromNow(io, .{ .raw = .fromSeconds(5), .clock = .awake }),
+    );
+    try std.testing.expectEqual(@as(u16, 200), head.status);
+    try std.testing.expectEqualSlices(
+        u8,
+        &response_body,
+        sink.body.items,
+    );
+    try std.testing.expectEqualStrings("x-response", sink.trailer_name.items);
+    try std.testing.expectEqualStrings("complete", sink.trailer_value.items);
+
+    handle_active = false;
+    handle.deinit();
+    release.set(io);
+    tcp_thread.join();
+    tcp_joined = true;
+    h3_thread.join();
+    h3_joined = true;
+    if (tcp_worker.err) |err| return err;
+    if (h3_worker.err) |err| return err;
+}
+
+const StreamSink = struct {
+    allocator: std.mem.Allocator,
+    body: std.ArrayList(u8) = .empty,
+    trailer_name: std.ArrayList(u8) = .empty,
+    trailer_value: std.ArrayList(u8) = .empty,
+
+    fn sink(self: *StreamSink) http.ResponseSink {
+        return .{
+            .context = self,
+            .begin = begin,
+            .data = data,
+            .end = end,
+        };
+    }
+
+    fn begin(_: *anyopaque, _: http.ResponseHead) !void {}
+
+    fn data(context: *anyopaque, bytes: []const u8) !void {
+        const self: *StreamSink = @ptrCast(@alignCast(context));
+        try self.body.appendSlice(self.allocator, bytes);
+    }
+
+    fn end(
+        context: *anyopaque,
+        trailers: []const http.DuplexHeader,
+    ) !void {
+        const self: *StreamSink = @ptrCast(@alignCast(context));
+        if (trailers.len == 0) return;
+        try self.trailer_name.appendSlice(
+            self.allocator,
+            trailers[0].name,
+        );
+        try self.trailer_value.appendSlice(
+            self.allocator,
+            trailers[0].value,
+        );
+    }
+
+    fn deinit(self: *StreamSink) void {
+        self.body.deinit(self.allocator);
+        self.trailer_name.deinit(self.allocator);
+        self.trailer_value.deinit(self.allocator);
+    }
+};

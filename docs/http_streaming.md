@@ -177,9 +177,10 @@ from `body` or `body_source`. `Handle.writeBody` surfaces
 Surfaces:
 
 - `http.Connection.startRequest` for an owned HTTP/1 or HTTP/2 connection.
-- `http.Pool.startRequest` for a pooled HTTP/1 or HTTP/2 lease. The returned
-  `Pool.StreamHandle` returns a completed exchange to the idle pool and closes
-  an abandoned one.
+- `http.Pool.startRequest` for a pooled HTTP/1 or HTTP/2 lease, or for the
+  HTTP/3 dispatcher when a live Alt-Svc route selects H3. The returned
+  `Pool.StreamHandle` returns a completed TCP exchange to the idle pool and
+  cancels an abandoned H3 stream.
 - `http.startHttp3Request(allocator, &handshake_client, request, body_length)`
   for an exclusive HTTP/3 `HandshakeClient`. Abandoning an unfinished H3 handle
   cancels its stream so the QUIC connection stays reusable.
@@ -194,11 +195,6 @@ Surfaces:
 
 Limits:
 
-- The `http.Pool.startRequest` facade is not yet wired to the HTTP/3 dispatcher
-  stream handles. When an Alt-Svc route is live for the origin it returns
-  `error.H3StreamingUnsupported` instead of silently bypassing HTTP/3; use the
-  HTTP/3 sender handle, `HandshakeClient`, or a raw
-  `SharedHandshakeClientPool.StreamTransaction` for H3 streaming.
 - HTTP/1 forward-proxy connections reject streaming requests with
   `error.StreamingBodyUnsupported`.
 - The handle borrows its connection; the connection or pool must outlive it.

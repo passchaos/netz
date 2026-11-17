@@ -22,6 +22,7 @@ const http1_runtime = @import("../http1/runtime.zig");
 const http3 = @import("../http3/mod.zig");
 const origin_pool = @import("../http3/origin_pool.zig");
 const request_ops = @import("client_pool/requests.zig");
+const header_mapping = @import("client/header_mapping.zig");
 const shared_tcp = @import("client_pool/shared_tcp.zig");
 const TcpRequests = shared_tcp.State(Pool, Lease);
 const pool_tickets = @import("client_pool/tickets.zig");
@@ -333,12 +334,8 @@ pub const Pool = struct {
     pub const requestUriFollowingRedirectsDetailedWithDeadline =
         request_ops.requestUriFollowingRedirectsDetailedWithDeadline;
 
-    /// Open a streaming request on a leased HTTP/1 or HTTP/2 connection.
-    ///
-    /// HTTP/3 origins with a live Alt-Svc route return
-    /// `error.H3StreamingUnsupported`: the shared H3 dispatcher only exposes
-    /// buffered requests. Use `http3.runtime.HandshakeClient` directly when
-    /// H3 streaming is required.
+    /// Open a streaming request on a leased HTTP/1 or HTTP/2 connection, or
+    /// on the HTTP/3 dispatcher when a live Alt-Svc route selects H3.
     pub fn startRequest(
         self: *Pool,
         uri_text: []const u8,
@@ -391,9 +388,44 @@ pub const Pool = struct {
                 var key = try originKeyForUri(self.allocator, uri_text);
                 defer key.deinit();
                 if (state.cache.lookup(key.origin()) catch null) |alternative| {
-                    var owned = alternative;
-                    owned.deinit();
-                    return error.H3StreamingUnsupported;
+                    var alt = alternative;
+                    defer alt.deinit();
+                    var endpoint = try http1_runtime.uriEndpoint(
+                        self.allocator,
+                        uri,
+                        443,
+                    );
+                    defer endpoint.deinit();
+                    const path = try request_ops.uriTargetAlloc(
+                        self.allocator,
+                        uri,
+                    );
+                    defer self.allocator.free(path);
+                    var header_stack: [header_mapping.max_stack_headers]http3.Qpack.HeaderField =
+                        undefined;
+                    var headers = try header_mapping.mapHttp3(
+                        self.allocator,
+                        request.headers,
+                        &header_stack,
+                    );
+                    defer headers.deinit(self.allocator);
+                    const handle = try state.startStream(
+                        uri_text,
+                        alt.target(),
+                        .{
+                            .method = request.method,
+                            .path = path,
+                            .scheme = "https",
+                            .authority = endpoint.authority,
+                            .headers = headers.items,
+                        },
+                        streamBodyLength(request),
+                        deadline,
+                    );
+                    return .{ .kind = .{ .http3 = .{
+                        .allocator = self.allocator,
+                        .handle = handle,
+                    } } };
                 }
             }
         }
@@ -414,11 +446,11 @@ pub const Pool = struct {
         else
             target;
         const handle = try connection.startRequest(request_target, request);
-        return .{
+        return .{ .kind = .{ .tcp = .{
             .allocator = self.allocator,
             .lease = lease,
             .handle = handle,
-        };
+        } } };
     }
 
     pub fn idleCount(self: *Pool) usize {
@@ -958,37 +990,95 @@ pub const Lease = struct {
 /// Streaming request handle that owns its pooled connection lease. Dropping it
 /// returns a completed exchange to the idle pool and closes an abandoned one.
 pub const StreamHandle = struct {
-    allocator: std.mem.Allocator,
-    lease: *Lease,
-    handle: client.RequestHandle,
+    kind: Kind,
+
+    const Kind = union(enum) {
+        tcp: Tcp,
+        http3: Http3,
+    };
+
+    const Tcp = struct {
+        allocator: std.mem.Allocator,
+        lease: *Lease,
+        handle: client.RequestHandle,
+    };
+
+    const Http3 = struct {
+        allocator: std.mem.Allocator,
+        handle: h3_support.StreamHandle,
+        head: ?OwnedHead = null,
+    };
+
+    const OwnedHead = struct {
+        headers: []client.DuplexHeader,
+        storage: []u8,
+
+        fn deinit(self: *OwnedHead, allocator: std.mem.Allocator) void {
+            allocator.free(self.headers);
+            allocator.free(self.storage);
+            self.* = undefined;
+        }
+    };
 
     pub fn writeBody(self: *StreamHandle, bytes: []const u8) !void {
-        try self.handle.writeBody(bytes);
+        switch (self.kind) {
+            .tcp => |*tcp| try tcp.handle.writeBody(bytes),
+            .http3 => |*h3| try h3.handle.writeBody(bytes, false),
+        }
     }
 
     pub fn writeBodyFromReader(
         self: *StreamHandle,
         reader: *std.Io.Reader,
     ) !void {
-        try self.handle.writeBodyFromReader(reader);
+        switch (self.kind) {
+            .tcp => |*tcp| try tcp.handle.writeBodyFromReader(reader),
+            .http3 => |*h3| {
+                var buffer: [16 * 1024]u8 = undefined;
+                while (true) {
+                    const count = try reader.readSliceShort(&buffer);
+                    if (count == 0) break;
+                    try h3.handle.writeBody(buffer[0..count], false);
+                }
+            },
+        }
     }
 
     pub fn finishBody(self: *StreamHandle) !void {
-        try self.handle.finishBody();
+        switch (self.kind) {
+            .tcp => |*tcp| try tcp.handle.finishBody(),
+            .http3 => |*h3| try h3.handle.writeBody(&.{}, true),
+        }
     }
 
     pub fn finishTrailers(
         self: *StreamHandle,
         trailers: []const client.DuplexHeader,
     ) !void {
-        try self.handle.finishTrailers(trailers);
+        switch (self.kind) {
+            .tcp => |*tcp| try tcp.handle.finishTrailers(trailers),
+            .http3 => |*h3| {
+                var stack: [32]http3.Qpack.HeaderField = undefined;
+                if (trailers.len > stack.len) return error.TooManyTrailers;
+                for (trailers, stack[0..trailers.len]) |source, *target| {
+                    target.* = .{
+                        .name = source.name,
+                        .value = source.value,
+                    };
+                }
+                try h3.handle.writeTrailers(stack[0..trailers.len]);
+            },
+        }
     }
 
     pub fn readResponse(
         self: *StreamHandle,
         sink: client.ResponseSink,
     ) !client.ResponseHead {
-        return self.handle.readResponse(sink);
+        switch (self.kind) {
+            .tcp => |*tcp| return tcp.handle.readResponse(sink),
+            .http3 => |*h3| return readHttp3Response(h3, sink, null),
+        }
     }
 
     pub fn readResponseWithDeadline(
@@ -996,27 +1086,136 @@ pub const StreamHandle = struct {
         sink: client.ResponseSink,
         deadline: std.Io.Clock.Timestamp,
     ) !client.ResponseHead {
-        return self.handle.readResponseWithDeadline(sink, deadline);
+        switch (self.kind) {
+            .tcp => |*tcp| return tcp.handle.readResponseWithDeadline(
+                sink,
+                deadline,
+            ),
+            .http3 => |*h3| return readHttp3Response(h3, sink, deadline),
+        }
     }
 
     pub fn protocol(self: *const StreamHandle) client.Protocol {
-        return self.lease.protocol();
+        return switch (self.kind) {
+            .tcp => |tcp| tcp.lease.protocol(),
+            .http3 => .http3,
+        };
     }
 
     /// Close the connection instead of returning it to the idle pool.
     pub fn discard(self: *StreamHandle) void {
-        self.handle.deinit();
-        self.lease.discard();
-        self.allocator.destroy(self.lease);
-        self.* = undefined;
+        self.deinit();
     }
 
     pub fn deinit(self: *StreamHandle) void {
-        self.handle.deinit();
-        self.lease.release();
-        self.allocator.destroy(self.lease);
+        switch (self.kind) {
+            .tcp => |*tcp| {
+                tcp.handle.deinit();
+                tcp.lease.release();
+                tcp.allocator.destroy(tcp.lease);
+            },
+            .http3 => |*h3| {
+                h3.handle.deinit();
+                if (h3.head) |*head| head.deinit(h3.allocator);
+            },
+        }
         self.* = undefined;
     }
+
+    fn readHttp3Response(
+        h3: *Http3,
+        sink: client.ResponseSink,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) !client.ResponseHead {
+        var adapter = H3Adapter{ .http3 = h3, .response_sink = sink };
+        const head = try h3.handle.readResponse(
+            adapter.callbackSink(),
+            deadline,
+        );
+        return .{
+            .protocol = .http3,
+            .status = head.status,
+            .headers = if (h3.head) |owned| owned.headers else &.{},
+        };
+    }
+
+    const H3Adapter = struct {
+        http3: *Http3,
+        response_sink: client.ResponseSink,
+
+        fn callbackSink(self: *H3Adapter) http3_runtime.StreamCallbackSink {
+            return .{
+                .context = self,
+                .begin = begin,
+                .data = data,
+                .end = end,
+            };
+        }
+
+        fn begin(
+            context: *anyopaque,
+            head: http3.DecodedResponseHead,
+        ) !void {
+            const self: *H3Adapter = @ptrCast(@alignCast(context));
+            if (self.http3.head) |*old| old.deinit(self.http3.allocator);
+            self.http3.head = null;
+            var total: usize = 0;
+            for (head.headers) |field| {
+                total = try std.math.add(usize, total, field.name.len);
+                total = try std.math.add(usize, total, field.value.len);
+            }
+            const storage = try self.http3.allocator.alloc(u8, total);
+            errdefer self.http3.allocator.free(storage);
+            const headers = try self.http3.allocator.alloc(
+                client.DuplexHeader,
+                head.headers.len,
+            );
+            errdefer self.http3.allocator.free(headers);
+            var offset: usize = 0;
+            for (head.headers, headers) |source, *target| {
+                const name = storage[offset..][0..source.name.len];
+                @memcpy(name, source.name);
+                offset += source.name.len;
+                const value = storage[offset..][0..source.value.len];
+                @memcpy(value, source.value);
+                offset += source.value.len;
+                target.* = .{ .name = name, .value = value };
+            }
+            self.http3.head = .{
+                .headers = headers,
+                .storage = storage,
+            };
+            try self.response_sink.begin(self.response_sink.context, .{
+                .protocol = .http3,
+                .status = head.status,
+                .headers = headers,
+            });
+        }
+
+        fn data(context: *anyopaque, bytes: []const u8) !void {
+            const self: *H3Adapter = @ptrCast(@alignCast(context));
+            try self.response_sink.data(self.response_sink.context, bytes);
+        }
+
+        fn end(
+            context: *anyopaque,
+            trailers: []const http3.Qpack.HeaderField,
+        ) !void {
+            const self: *H3Adapter = @ptrCast(@alignCast(context));
+            var stack: [32]client.DuplexHeader = undefined;
+            if (trailers.len > stack.len) return error.TooManyTrailers;
+            for (trailers, stack[0..trailers.len]) |source, *target| {
+                target.* = .{
+                    .name = source.name,
+                    .value = source.value,
+                };
+            }
+            try self.response_sink.end(
+                self.response_sink.context,
+                stack[0..trailers.len],
+            );
+        }
+    };
 };
 
 fn dropConnection(_: std.mem.Allocator, connection_value: IdleConnection) void {
@@ -1028,6 +1227,22 @@ fn dropConnectionWithoutCloseNotify(_: std.mem.Allocator, connection_value: Idle
     var connection = connection_value;
     connection.connection_value.closeWithoutCloseNotify();
     connection.return_node.destroy();
+}
+
+fn streamBodyLength(options: client.RequestOptions) ?usize {
+    if (options.body_length) |declared| {
+        return switch (declared) {
+            .unknown => null,
+            .exact => |length| length,
+        };
+    }
+    if (options.body_source) |source| {
+        return switch (source) {
+            .slice => |body| body.len,
+            .reader => |reader| reader.length,
+        };
+    }
+    return options.body.len;
 }
 
 fn originKeyForUri(
