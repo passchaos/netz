@@ -297,6 +297,7 @@ These are current limits, not permission to ignore them:
 | Document | Authority |
 | --- | --- |
 | `docs/architecture.md` (this file) | architecture, performance doctrine, acceptance rules |
+| `docs/build.md` | build, test, fuzz, interop, release-archive, and evidence gates |
 | `docs/performance-playbook.md` | how to profile, benchmark, and record evidence |
 | `docs/benchmark-baseline.md` | historical and current benchmark results |
 | `docs/coverage.md` | feature-level coverage inventory and verification targets |
