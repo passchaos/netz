@@ -183,13 +183,19 @@ Surfaces:
 - `http.startHttp3Request(allocator, &handshake_client, request, body_length)`
   for an exclusive HTTP/3 `HandshakeClient`. Abandoning an unfinished H3 handle
   cancels its stream so the QUIC connection stays reusable.
+- `SharedHandshakeClientPool.StreamTransaction` for a raw HTTP/3 pool lease.
+  The caller pumps `receive*`, routes events through `processEvent`, and writes
+  body chunks with `writeBody`/`writeTrailers`; backpressure errors mean "pump
+  events, then retry". This is the pool-level primitive that the shared
+  dispatcher does not yet expose.
 
 Limits:
 
 - The pooled HTTP/3 dispatcher only exposes buffered requests. When an Alt-Svc
   route is live for the origin, `Pool.startRequest` returns
   `error.H3StreamingUnsupported` instead of silently bypassing HTTP/3; use
-  `HandshakeClient` directly for H3 streaming.
+  `HandshakeClient` or a raw `SharedHandshakeClientPool.StreamTransaction` for
+  H3 streaming.
 - HTTP/1 forward-proxy connections reject streaming requests with
   `error.StreamingBodyUnsupported`.
 - The handle borrows its connection; the connection or pool must outlive it.

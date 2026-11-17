@@ -16,6 +16,7 @@ const shared_dispatcher = @import("shared_handshake_client_pool/dispatcher.zig")
 const launch_timer = @import("shared_handshake_client_pool/launch_timer.zig");
 const shared_redirect = @import("shared_handshake_client_pool/redirect.zig");
 const shared_request = @import("shared_handshake_client_pool/request.zig");
+const shared_stream = @import("shared_handshake_client_pool/stream.zig");
 const address_resolver = @import("../../internal/address_resolver.zig");
 const happy_eyeballs = @import("../../internal/happy_eyeballs.zig");
 
@@ -106,7 +107,7 @@ pub fn Pool(comptime Runtime: type) type {
 
         const Self = @This();
         const Client = Runtime.HandshakeClient;
-        const Handle = quic.endpoint_dispatcher.ConnectionHandle;
+        pub const Handle = quic.endpoint_dispatcher.ConnectionHandle;
         const ConnectRoute = union(enum) {
             origin,
             alt_svc: http3.AltSvcTarget,
@@ -1114,6 +1115,14 @@ pub fn Pool(comptime Runtime: type) type {
             std.Io.Timeout.Error || std.Io.ConcurrentError;
         pub const OwnedResponse = shared_request.OwnedResponse;
         pub const RequestTransaction = shared_request.Transaction(
+            Runtime,
+            Self,
+            RequestOperationError,
+        );
+        /// Caller-driven incremental request/response transaction. The caller
+        /// pumps `receive*` and routes events through `processEvent`; see
+        /// `shared_handshake_client_pool/stream.zig`.
+        pub const StreamTransaction = shared_stream.Transaction(
             Runtime,
             Self,
             RequestOperationError,

@@ -272,10 +272,13 @@ A performance or architecture change is accepted only when all answers are yes:
 These are current limits, not permission to ignore them:
 
 - **HTTP/3 pool streaming** is limited to buffered requests on the shared
-  dispatcher. Connection-level H3 streaming is available through
-  `http.startHttp3Request` on an exclusive `HandshakeClient`, and
-  `http.Pool.startRequest` returns `error.H3StreamingUnsupported` when a live
-  Alt-Svc route would select H3 (`docs/http_streaming.md`).
+  dispatcher. `SharedHandshakeClientPool.StreamTransaction` provides
+  caller-driven incremental request/response I/O over a raw pool lease, and
+  connection-level H3 streaming is available through `http.startHttp3Request`
+  on an exclusive `HandshakeClient`; wiring the transaction into the
+  dispatcher's queued command path remains open. `http.Pool.startRequest`
+  returns `error.H3StreamingUnsupported` when a live Alt-Svc route would select
+  H3 (`docs/http_streaming.md`).
 - **Firefox STOP_SENDING** remains a separately documented browser gap in the
   WebTransport browser gate.
 - **WebTransport over HTTP/2** is implemented for non-browser deployments

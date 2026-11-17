@@ -416,7 +416,7 @@ pub fn Transaction(
     };
 }
 
-fn responseStreamId(response: anytype) u62 {
+pub fn responseStreamId(response: anytype) u62 {
     return switch (response) {
         .message => |message| message.stream_id,
         .reset => |reset| reset.stream_id,
