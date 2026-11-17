@@ -36053,7 +36053,7 @@ test {
     _ = @import("runtime/shared_handshake_client_pool_happy_eyeballs_tests.zig");
     _ = @import("runtime/shared_handshake_client_pool_request_tests.zig");
     _ = @import("runtime/shared_handshake_client_pool_stream_tests.zig");
-    _ = @import("runtime/handshake_client_pool_stream_dispatcher_tests.zig");
+    _ = @import("runtime/shared_handshake_client_pool_stream_dispatcher_tests.zig");
     _ = @import("runtime/shared_handshake_client_pool_dispatcher_tests.zig");
     _ = @import("runtime/shared_handshake_client_pool_handshake_progress_tests.zig");
     _ = @import("runtime/shared_handshake_client_pool_concurrent_handshake_tests.zig");

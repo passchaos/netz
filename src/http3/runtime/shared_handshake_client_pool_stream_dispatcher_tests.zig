@@ -104,16 +104,7 @@ test "HTTP/3 shared dispatcher streams a request and response" {
     var server_joined = false;
     defer if (!server_joined) server_thread.join();
 
-    var connector = runtime.HandshakeClientPoolDefaultConnector{ .options = .{
-        .handshake = .{
-            .original_destination_connection_id = &.{},
-            .local_connection_id = &.{},
-            .server_auth = .{
-                .pinned_ecdsa_p256_public_key = public_key,
-            },
-        },
-    } };
-    var pool = try runtime.HandshakeClientPool.init(allocator, io, .{
+    var pool = try runtime.SharedHandshakeClientPool.init(allocator, io, .{
         .local_address = .{ .ip4 = .unspecified(0) },
         .limits = limits,
         .idle = .{
@@ -121,21 +112,31 @@ test "HTTP/3 shared dispatcher streams a request and response" {
             .max_idle_total = 1,
         },
         .max_connections = 1,
-        .connector = connector.connector(),
+        .client = .{ .handshake = .{
+            .original_destination_connection_id = &.{},
+            .local_connection_id = &.{},
+            .server_auth = .{
+                .pinned_ecdsa_p256_public_key = public_key,
+            },
+            .initial_one_rtt_config = .{
+                .max_datagram_size = 4096,
+                .enable_pacing = false,
+            },
+        }, .connect_timeout = .fromSeconds(3) },
     });
     defer pool.deinit();
-    var dispatcher = try runtime.HandshakeClientPoolSharedDispatcher.init(
+    var dispatcher = try runtime.SharedHandshakeClientPoolRequestDispatcher.init(
         allocator,
         io,
         &pool,
-        .{ .max_connection_drivers = 1 },
+        .{ .max_active_connections = 1 },
     );
     var dispatcher_active = true;
     defer if (dispatcher_active) dispatcher.deinit();
     const sender = dispatcher.sender();
     var driver = try std.Io.concurrent(
         io,
-        runtime.HandshakeClientPoolSharedDispatcher.run,
+        runtime.SharedHandshakeClientPoolRequestDispatcher.run,
         .{&dispatcher},
     );
     var driver_active = true;
@@ -219,7 +220,7 @@ const CollectSink = struct {
 
     fn sink(
         self: *CollectSink,
-    ) runtime.HandshakeClientPoolSharedDispatcher.StreamHandle.Sink {
+    ) runtime.SharedHandshakeClientPoolRequestDispatcher.StreamHandle.Sink {
         return .{
             .context = self,
             .begin = begin,

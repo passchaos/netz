@@ -32,6 +32,9 @@ pub fn Stream(comptime Pool: type) type {
         writes: std.ArrayListUnmanaged(Write) = .empty,
         pending_write_bytes: usize = 0,
         queued_trailers: ?OwnedTrailers = null,
+        /// Worker-only in-flight request data retained across backpressure.
+        worker_write: ?Write = null,
+        worker_trailers: ?OwnedTrailers = null,
         cancelled: bool = false,
         finished: bool = false,
         err: ?anyerror = null,
@@ -93,6 +96,8 @@ pub fn Stream(comptime Pool: type) type {
             if (self.head) |*head| head.deinit(self.allocator);
             if (self.trailers) |*trailers| trailers.deinit(self.allocator);
             if (self.queued_trailers) |*trailers| trailers.deinit(self.allocator);
+            if (self.worker_write) |write| self.allocator.free(write.data);
+            if (self.worker_trailers) |*trailers| trailers.deinit(self.allocator);
             self.* = undefined;
         }
 

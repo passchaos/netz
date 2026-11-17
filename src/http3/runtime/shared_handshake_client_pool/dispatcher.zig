@@ -16,6 +16,7 @@ const connection_budget = @import("../../../internal/connection_budget.zig");
 const early_data = @import("../../../http/early_data.zig");
 const authority = @import("../handshake_client_pool/shared/authority.zig");
 const route_key = @import("../handshake_client_pool/shared/route.zig");
+const stream_command = @import("stream_command.zig");
 const receive_race = @import("dispatcher/receive.zig");
 
 pub const Error = error{
@@ -45,6 +46,7 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
 
         const Self = @This();
         pub const RequestError = Pool.ReceiveOperationError || Error;
+        const StreamType = stream_command.Stream(Pool);
         pub const EarlyRequestMetadata = struct {
             disposition: Runtime.EarlyRequestDisposition,
             retry_reason: Runtime.EarlyDataRetryReason,
@@ -82,6 +84,67 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
             response: ?Pool.OwnedResponse = null,
             err: ?RequestError = null,
             done: std.Io.Event = .unset,
+            stream: ?*StreamType = null,
+            stream_request: ?http3.Request = null,
+            stream_body_length: ?usize = null,
+            stream_id: ?u62 = null,
+        };
+
+        /// Streaming request handle. The caller owns it until `deinit`.
+        pub const StreamHandle = struct {
+            pub const Sink = StreamType.Sink;
+            state: *State,
+            command: Command,
+            stream: *StreamType,
+            allocator: std.mem.Allocator,
+            active: bool = true,
+
+            pub fn writeBody(
+                self: *StreamHandle,
+                data: []const u8,
+                fin: bool,
+            ) !void {
+                try self.stream.writeBody(data, fin);
+            }
+
+            pub fn writeTrailers(
+                self: *StreamHandle,
+                trailers: []const http3.Qpack.HeaderField,
+            ) !void {
+                try self.stream.writeTrailers(trailers);
+            }
+
+            pub fn readResponse(
+                self: *StreamHandle,
+                sink: StreamType.Sink,
+                deadline: ?std.Io.Clock.Timestamp,
+            ) !*const http3.DecodedResponseHead {
+                return self.stream.readResponse(sink, deadline);
+            }
+
+            pub fn pollResponse(
+                self: *StreamHandle,
+                sink: StreamType.Sink,
+            ) !bool {
+                return self.stream.pollResponse(sink);
+            }
+
+            pub fn requestStreamId(self: *StreamHandle) ?u62 {
+                return self.stream.requestStreamId();
+            }
+
+            pub fn deinit(self: *StreamHandle) void {
+                if (!self.active) return;
+                self.active = false;
+                self.stream.cancel();
+                if (!cancelQueued(self.state, &self.command)) {
+                    abandonInFlight(self.state, &self.command);
+                    self.command.done.waitUncancelable(self.state.io);
+                }
+                self.stream.deinit();
+                self.allocator.destroy(self.stream);
+                self.allocator.destroy(self);
+            }
         };
 
         const Connection = struct {
@@ -301,6 +364,93 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
                     &metadata,
                 );
                 return .{ .response = response, .early_data = metadata };
+            }
+
+            /// Open a streaming request on a dedicated route. The worker
+            /// sends the head, then multiplexes caller body writes with
+            /// response events until the stream finishes.
+            pub fn startStream(
+                self: Sender,
+                uri: []const u8,
+                target: ?http3.AltSvcTarget,
+                request_value: http3.Request,
+                body_length: ?usize,
+                deadline: ?std.Io.Clock.Timestamp,
+            ) RequestError!*StreamHandle {
+                const state = self.state;
+                if (deadline) |absolute| {
+                    if (absolute.clock != .awake or
+                        absolute.durationFromNow(state.io).raw.nanoseconds <= 0)
+                    {
+                        return error.Timeout;
+                    }
+                }
+                const identity = try route_key.Key.init(
+                    uri,
+                    target,
+                    null,
+                );
+                const allocator = state.pool.allocator;
+                const stream = try allocator.create(StreamType);
+                errdefer allocator.destroy(stream);
+                stream.* = StreamType.init(state.pool, allocator, state.io);
+                errdefer stream.deinit();
+                const handle = try allocator.create(StreamHandle);
+                errdefer allocator.destroy(handle);
+                handle.* = .{
+                    .state = state,
+                    .command = .{
+                        .uri = uri,
+                        .request = .{},
+                        .alt_svc = target,
+                        .deadline = deadline,
+                        .route = identity,
+                        .stream = stream,
+                        .stream_request = request_value,
+                        .stream_body_length = body_length,
+                    },
+                    .stream = stream,
+                    .allocator = allocator,
+                };
+                try enqueue(state, &handle.command);
+                stream.mutex.lockUncancelable(state.io);
+                while (stream.stream_id == null and
+                    stream.err == null and !stream.finished)
+                {
+                    stream.mutex.unlock(state.io);
+                    if (deadline) |absolute| {
+                        stream.user_ready.waitTimeout(
+                            state.io,
+                            .{ .deadline = absolute },
+                        ) catch |err| switch (err) {
+                            error.Timeout => {
+                                handle.deinit();
+                                return error.Timeout;
+                            },
+                            error.Canceled => {
+                                handle.deinit();
+                                return error.Canceled;
+                            },
+                        };
+                    } else {
+                        stream.user_ready.wait(
+                            state.io,
+                        ) catch |err| {
+                            handle.deinit();
+                            return err;
+                        };
+                    }
+                    stream.user_ready.reset();
+                    stream.mutex.lockUncancelable(state.io);
+                }
+                const started = stream.stream_id != null;
+                const start_err = stream.err;
+                stream.mutex.unlock(state.io);
+                if (!started) {
+                    handle.deinit();
+                    return if (start_err) |err| @errorCast(err) else error.RequestCancelled;
+                }
+                return handle;
             }
 
             fn requestBefore(
@@ -635,6 +785,20 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
                         command.pending_acquire = null;
                     }
                     clearPreparedEarly(command);
+                    if (command.stream) |stream| {
+                        if (command.stream_id) |stream_id| {
+                            connection.lease.client().tryCancelRequest(
+                                stream_id,
+                                http3.ApplicationErrorCode.request_cancelled,
+                            ) catch {};
+                        }
+                        stream.fail(if (closed)
+                            error.SharedEndpointDriverClosed
+                        else if (expired)
+                            error.Timeout
+                        else
+                            error.Canceled);
+                    }
                     if (command.transaction) |*transaction| {
                         transaction.deinit();
                     }
@@ -760,11 +924,7 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
                     addConnectionCommand(state, connection, command);
                     continue;
                 }
-                command.transaction = initCommandTransaction(
-                    state,
-                    connection,
-                    command,
-                ) catch |err| {
+                startCommand(state, connection, command) catch |err| {
                     command.connection_index = null;
                     complete(state, command, null, err);
                     if (connection.command_count == 0) {
@@ -883,6 +1043,29 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
                         .early_data_rejected,
                 };
             }
+        }
+
+        fn startCommand(
+            state: *State,
+            connection: *Connection,
+            command: *Command,
+        ) RequestError!void {
+            if (command.stream) |stream| {
+                const request = command.stream_request orelse
+                    return error.InvalidHeader;
+                const stream_id = connection.lease.client().tryStartRequest(
+                    request,
+                    command.stream_body_length,
+                ) catch |err| return @errorCast(err);
+                command.stream_id = stream_id;
+                stream.markStarted(stream_id);
+                return;
+            }
+            command.transaction = try initCommandTransaction(
+                state,
+                connection,
+                command,
+            );
         }
 
         fn initCommandTransaction(
@@ -1034,11 +1217,7 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
                     );
                     continue;
                 }
-                command.transaction = initCommandTransaction(
-                    state,
-                    connection,
-                    command,
-                ) catch |err| {
+                startCommand(state, connection, command) catch |err| {
                     removeConnectionCommand(state, connection, 0);
                     command.connection_index = null;
                     complete(state, command, null, err);
@@ -1048,12 +1227,91 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
             }
         }
 
+        fn progressStream(
+            state: *State,
+            connection: *Connection,
+            command: *Command,
+            stream: *StreamType,
+        ) RequestError!void {
+            const stream_id = command.stream_id orelse return;
+            const client = connection.lease.client();
+            while (true) {
+                if (stream.worker_write == null) {
+                    stream.worker_write = stream.takeWrite();
+                }
+                if (stream.worker_write) |write| {
+                    client.trySendRequestBody(
+                        stream_id,
+                        write.data,
+                        write.fin,
+                    ) catch |err| switch (err) {
+                        error.PacingLimited,
+                        error.CongestionLimited,
+                        error.FlowControlBlocked,
+                        error.StreamLimitExceeded,
+                        error.AntiAmplificationLimited,
+                        => return,
+                        else => {
+                            state.pool.allocator.free(write.data);
+                            stream.worker_write = null;
+                            stream.fail(err);
+                            return @errorCast(err);
+                        },
+                    };
+                    state.pool.allocator.free(write.data);
+                    stream.worker_write = null;
+                    continue;
+                }
+                if (stream.worker_trailers == null) {
+                    stream.worker_trailers = stream.takeTrailers();
+                }
+                if (stream.worker_trailers) |*trailers| {
+                    client.tryFinishRequestTrailers(
+                        stream_id,
+                        trailers.fields,
+                    ) catch |err| switch (err) {
+                        error.PacingLimited,
+                        error.CongestionLimited,
+                        error.FlowControlBlocked,
+                        error.StreamLimitExceeded,
+                        error.AntiAmplificationLimited,
+                        => return,
+                        else => {
+                            trailers.deinit(state.pool.allocator);
+                            stream.worker_trailers = null;
+                            stream.fail(err);
+                            return @errorCast(err);
+                        },
+                    };
+                    trailers.deinit(state.pool.allocator);
+                    stream.worker_trailers = null;
+                    continue;
+                }
+                return;
+            }
+        }
+
         fn progressTransactions(state: *State) RequestError!void {
             for (state.connections, 0..) |*connection, connection_index| {
                 if (!connection.active or connection.pending) continue;
                 var index: usize = 0;
                 while (index < connection.command_count) {
                     const command = connection.commands[index].?;
+                    if (command.stream) |stream| {
+                        progressStream(
+                            state,
+                            connection,
+                            command,
+                            stream,
+                        ) catch |err| {
+                            removeConnectionCommand(state, connection, index);
+                            command.connection_index = null;
+                            complete(state, command, null, err);
+                            continue;
+                        };
+                        index += 1;
+                        continue;
+                    }
                     command.transaction.?.progress() catch |err| {
                         command.transaction.?.deinit();
                         command.transaction = null;
@@ -1071,6 +1329,71 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
             }
         }
 
+        fn processStreamEvent(
+            state: *State,
+            connection: *Connection,
+            command: *Command,
+            stream: *StreamType,
+            event: *Pool.Event,
+        ) RequestError!bool {
+            const response = switch (event.*) {
+                .response => |*value| value,
+                else => return false,
+            };
+            switch (response.response) {
+                .reset => {
+                    stream.fail(error.RequestCancelled);
+                    return true;
+                },
+                .message => |*message| switch (message.value) {
+                    .head => |head_value| {
+                        event.* = .consumed;
+                        var head = head_value;
+                        if (head != .response) {
+                            head.deinit(state.pool.allocator);
+                            return false;
+                        }
+                        var decoded = head.response;
+                        if (decoded.status < 200) {
+                            decoded.deinit(state.pool.allocator);
+                            return false;
+                        }
+                        stream.deliverHead(decoded);
+                        return false;
+                    },
+                    .data_available => {
+                        var buffer: [16 * 1024]u8 = undefined;
+                        const maybe_count = state.pool.readResponseDataOnce(
+                            connection.lease.connectionHandle(),
+                            command.stream_id.?,
+                            &buffer,
+                        ) catch |err| {
+                            stream.fail(err);
+                            return @errorCast(err);
+                        };
+                        const count = maybe_count orelse 0;
+                        if (count != 0) {
+                            stream.deliverData(buffer[0..count]) catch |err| {
+                                stream.fail(err);
+                                return @errorCast(err);
+                            };
+                        }
+                        return false;
+                    },
+                    .trailers => |trailers_value| {
+                        event.* = .consumed;
+                        stream.deliverTrailers(trailers_value);
+                        return false;
+                    },
+                    .finished => {
+                        stream.finish();
+                        return true;
+                    },
+                    .push_promise => return false,
+                },
+            }
+        }
+
         fn processEvent(
             state: *State,
             event: *Pool.Event,
@@ -1082,6 +1405,67 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
                         response_event.connection_handle,
                     ) orelse return error.UnknownConnectionHandle;
                     const connection = &state.connections[connection_index];
+                    const event_stream_id = responseStreamId(
+                        response_event.response,
+                    );
+                    var stream_index: usize = 0;
+                    while (stream_index < connection.command_count) : (stream_index += 1) {
+                        const stream_command_value =
+                            connection.commands[stream_index].?;
+                        const stream = stream_command_value.stream orelse
+                            continue;
+                        if (stream_command_value.stream_id != event_stream_id) {
+                            continue;
+                        }
+                        const finished = processStreamEvent(
+                            state,
+                            connection,
+                            stream_command_value,
+                            stream,
+                            event,
+                        ) catch |err| {
+                            stream.fail(err);
+                            removeConnectionCommand(
+                                state,
+                                connection,
+                                stream_index,
+                            );
+                            stream_command_value.connection_index = null;
+                            complete(state, stream_command_value, null, err);
+                            refreshAuthority(state, connection);
+                            if (connection.command_count == 0) {
+                                releaseConnection(
+                                    state,
+                                    connection_index,
+                                    true,
+                                );
+                            }
+                            return;
+                        };
+                        if (finished) {
+                            removeConnectionCommand(
+                                state,
+                                connection,
+                                stream_index,
+                            );
+                            stream_command_value.connection_index = null;
+                            complete(
+                                state,
+                                stream_command_value,
+                                null,
+                                null,
+                            );
+                            refreshAuthority(state, connection);
+                            if (connection.command_count == 0) {
+                                releaseConnection(
+                                    state,
+                                    connection_index,
+                                    false,
+                                );
+                            }
+                        }
+                        return;
+                    }
                     var index: usize = 0;
                     while (index < connection.command_count) : (index += 1) {
                         const command = connection.commands[index].?;
@@ -1221,6 +1605,10 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
             var index: usize = 0;
             while (index < connection.command_count) {
                 const command = connection.commands[index].?;
+                if (command.stream != null) {
+                    index += 1;
+                    continue;
+                }
                 const result = command.transaction.?.processEvent(event) catch |err| {
                     command.transaction.?.deinit();
                     command.transaction = null;
@@ -1317,6 +1705,7 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
                     command.pending_acquire = null;
                 }
                 clearPreparedEarly(command);
+                if (command.stream) |stream| stream.fail(err);
                 if (command.transaction) |*transaction| transaction.deinit();
                 command.transaction = null;
                 removeConnectionCommand(state, connection, command_index);
