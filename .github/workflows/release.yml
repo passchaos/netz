@@ -110,7 +110,7 @@ jobs:
           --manifest build.zig.zon
 
       - name: Check formatting
-        run: zig fmt --check build.zig build.zig.zon src test examples benchmarks tools
+        run: zig fmt --check build.zig build.zig.zon build src test examples benchmarks tools
 
       - name: Run complete test gate
         run: zig build test -j1 --summary all

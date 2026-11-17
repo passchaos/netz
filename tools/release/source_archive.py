@@ -37,7 +37,15 @@ ROOT_FILES = {
     "build.zig",
     "build.zig.zon",
 }
-ROOT_DIRECTORIES = {"benchmarks", "docs", "examples", "src", "test", "tools"}
+ROOT_DIRECTORIES = {
+    "benchmarks",
+    "build",
+    "docs",
+    "examples",
+    "src",
+    "test",
+    "tools",
+}
 IGNORED_PACKAGE_PARTS = {
     ".git",
     ".zig-cache",
