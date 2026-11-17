@@ -13,6 +13,7 @@ const http3 = @import("../../mod.zig");
 const connection_budget = @import("../../../internal/connection_budget.zig");
 const authority = @import("shared/authority.zig");
 const route_key = @import("shared/route.zig");
+const stream_command = @import("../shared_handshake_client_pool/stream_command.zig");
 
 pub const Error = error{
     SharedDriverClosed,
@@ -48,6 +49,7 @@ pub fn Dispatcher(comptime PoolType: type, comptime Runtime: type) type {
         const Self = @This();
         pub const RequestError = Runtime.ReceiveTimeoutError ||
             Runtime.HandshakeClientPoolError || Error;
+        const StreamType = stream_command.Stream(PoolType);
         const CommandState = enum { idle, queued, in_flight, completed };
 
         const RouteTurn = struct {
@@ -75,6 +77,66 @@ pub fn Dispatcher(comptime PoolType: type, comptime Runtime: type) type {
             response: ?Runtime.OwnedHandshakeResponse = null,
             err: ?RequestError = null,
             done: std.Io.Event = .unset,
+            stream: ?*StreamType = null,
+            stream_request: ?http3.Request = null,
+            stream_body_length: ?usize = null,
+        };
+
+        /// Streaming request handle. The caller owns it until `deinit`.
+        pub const StreamHandle = struct {
+            pub const Sink = StreamType.Sink;
+            state: *State,
+            command: Command,
+            stream: *StreamType,
+            allocator: std.mem.Allocator,
+            active: bool = true,
+
+            pub fn writeBody(
+                self: *StreamHandle,
+                data: []const u8,
+                fin: bool,
+            ) !void {
+                try self.stream.writeBody(data, fin);
+            }
+
+            pub fn writeTrailers(
+                self: *StreamHandle,
+                trailers: []const http3.Qpack.HeaderField,
+            ) !void {
+                try self.stream.writeTrailers(trailers);
+            }
+
+            pub fn readResponse(
+                self: *StreamHandle,
+                sink: StreamType.Sink,
+                deadline: ?std.Io.Clock.Timestamp,
+            ) !*const http3.DecodedResponseHead {
+                return self.stream.readResponse(sink, deadline);
+            }
+
+            pub fn pollResponse(
+                self: *StreamHandle,
+                sink: StreamType.Sink,
+            ) !bool {
+                return self.stream.pollResponse(sink);
+            }
+
+            pub fn requestStreamId(self: *StreamHandle) ?u62 {
+                return self.stream.requestStreamId();
+            }
+
+            pub fn deinit(self: *StreamHandle) void {
+                if (!self.active) return;
+                self.active = false;
+                self.stream.cancel();
+                if (!cancelQueued(self.state, &self.command)) {
+                    abandonInFlight(self.state, &self.command);
+                    self.command.done.waitUncancelable(self.state.io);
+                }
+                self.stream.deinit();
+                self.allocator.destroy(self.stream);
+                self.allocator.destroy(self);
+            }
         };
 
         const State = struct {
@@ -234,6 +296,93 @@ pub fn Dispatcher(comptime PoolType: type, comptime Runtime: type) type {
                     deadline,
                     reclaimer,
                 );
+            }
+
+            /// Open a streaming request on a dedicated route. The worker
+            /// sends the head, then multiplexes caller body writes with
+            /// response events until the stream finishes.
+            pub fn startStream(
+                self: Sender,
+                uri: []const u8,
+                target: ?http3.AltSvcTarget,
+                request_value: http3.Request,
+                body_length: ?usize,
+                deadline: ?std.Io.Clock.Timestamp,
+            ) RequestError!*StreamHandle {
+                const state = self.state;
+                if (deadline) |absolute| {
+                    if (absolute.clock != .awake or
+                        absolute.durationFromNow(state.io).raw.nanoseconds <= 0)
+                    {
+                        return error.Timeout;
+                    }
+                }
+                const identity = try route_key.Key.init(
+                    uri,
+                    target,
+                    null,
+                );
+                const allocator = state.pool.allocator;
+                const stream = try allocator.create(StreamType);
+                errdefer allocator.destroy(stream);
+                stream.* = StreamType.init(state.pool, allocator, state.io);
+                errdefer stream.deinit();
+                const handle = try allocator.create(StreamHandle);
+                errdefer allocator.destroy(handle);
+                handle.* = .{
+                    .state = state,
+                    .command = .{
+                        .uri = uri,
+                        .request = .{},
+                        .alt_svc = target,
+                        .deadline = deadline,
+                        .route_key = identity,
+                        .stream = stream,
+                        .stream_request = request_value,
+                        .stream_body_length = body_length,
+                    },
+                    .stream = stream,
+                    .allocator = allocator,
+                };
+                try enqueue(state, &handle.command);
+                stream.mutex.lockUncancelable(state.io);
+                while (stream.stream_id == null and
+                    stream.err == null and !stream.finished)
+                {
+                    stream.mutex.unlock(state.io);
+                    if (deadline) |absolute| {
+                        stream.user_ready.waitTimeout(
+                            state.io,
+                            .{ .deadline = absolute },
+                        ) catch |err| switch (err) {
+                            error.Timeout => {
+                                handle.deinit();
+                                return error.Timeout;
+                            },
+                            error.Canceled => {
+                                handle.deinit();
+                                return error.Canceled;
+                            },
+                        };
+                    } else {
+                        stream.user_ready.wait(
+                            state.io,
+                        ) catch |err| {
+                            handle.deinit();
+                            return err;
+                        };
+                    }
+                    stream.user_ready.reset();
+                    stream.mutex.lockUncancelable(state.io);
+                }
+                const started = stream.stream_id != null;
+                const start_err = stream.err;
+                stream.mutex.unlock(state.io);
+                if (!started) {
+                    handle.deinit();
+                    return if (start_err) |err| @errorCast(err) else error.RequestCancelled;
+                }
+                return handle;
             }
 
             fn requestBefore(
@@ -490,6 +639,7 @@ pub fn Dispatcher(comptime PoolType: type, comptime Runtime: type) type {
                 first.state = .in_flight;
                 first.active_route = route;
                 out[0] = first;
+                if (first.stream != null) return .{ .batch = 1 };
                 var count: usize = 1;
                 var current = state.head;
                 while (current) |candidate| {
@@ -742,6 +892,15 @@ pub fn Dispatcher(comptime PoolType: type, comptime Runtime: type) type {
                 };
                 errdefer reusable = false;
                 refreshAuthority(state, route, &lease);
+                if (active[0].command.stream) |stream| {
+                    return driveStream(
+                        state,
+                        route,
+                        active[0].command,
+                        stream,
+                        &lease,
+                    );
+                }
 
                 while (active_count.* != 0) {
                     try processControl(
@@ -967,6 +1126,168 @@ pub fn Dispatcher(comptime PoolType: type, comptime Runtime: type) type {
                 }
                 complete(state, command, null, error.Timeout);
                 removeActive(active, active_count, index);
+            }
+        }
+
+        fn driveStream(
+            state: *State,
+            route: *RouteTurn,
+            command: *Command,
+            stream: *StreamType,
+            lease: *PoolType.Lease,
+        ) RequestError!void {
+            _ = route;
+            const request = command.stream_request orelse
+                return error.InvalidHeader;
+            const stream_id = lease.client().tryStartRequest(
+                request,
+                command.stream_body_length,
+            ) catch |err| {
+                stream.fail(err);
+                return @errorCast(err);
+            };
+            stream.markStarted(stream_id);
+
+            var pending_write: ?StreamType.Write = null;
+            var pending_trailers: ?StreamType.OwnedTrailers = null;
+            defer {
+                if (pending_write) |write| {
+                    state.pool.allocator.free(write.data);
+                }
+                if (pending_trailers) |*trailers| {
+                    trailers.deinit(state.pool.allocator);
+                }
+            }
+
+            while (true) {
+                if (stream.isCancelled()) {
+                    lease.client().tryCancelRequest(
+                        stream_id,
+                        http3.ApplicationErrorCode.request_cancelled,
+                    ) catch {};
+                    stream.finish();
+                    complete(state, command, null, null);
+                    return;
+                }
+                while (true) {
+                    if (pending_write == null) {
+                        pending_write = stream.takeWrite();
+                    }
+                    if (pending_write) |write| {
+                        lease.client().trySendRequestBody(
+                            stream_id,
+                            write.data,
+                            write.fin,
+                        ) catch |err| switch (err) {
+                            error.PacingLimited,
+                            error.CongestionLimited,
+                            error.FlowControlBlocked,
+                            error.StreamLimitExceeded,
+                            error.AntiAmplificationLimited,
+                            => break,
+                            else => {
+                                state.pool.allocator.free(write.data);
+                                pending_write = null;
+                                stream.fail(err);
+                                return @errorCast(err);
+                            },
+                        };
+                        state.pool.allocator.free(write.data);
+                        pending_write = null;
+                        continue;
+                    }
+                    if (pending_trailers == null) {
+                        pending_trailers = stream.takeTrailers();
+                    }
+                    if (pending_trailers) |*trailers| {
+                        lease.client().tryFinishRequestTrailers(
+                            stream_id,
+                            trailers.fields,
+                        ) catch |err| switch (err) {
+                            error.PacingLimited,
+                            error.CongestionLimited,
+                            error.FlowControlBlocked,
+                            error.StreamLimitExceeded,
+                            error.AntiAmplificationLimited,
+                            => break,
+                            else => {
+                                trailers.deinit(state.pool.allocator);
+                                pending_trailers = null;
+                                stream.fail(err);
+                                return @errorCast(err);
+                            },
+                        };
+                        trailers.deinit(state.pool.allocator);
+                        pending_trailers = null;
+                        continue;
+                    }
+                    break;
+                }
+
+                stream.resetActivityIfIdle();
+                const maybe_event = lease.client()
+                    .receiveResponseEventBeforeOrWake(
+                    stream_id,
+                    command.deadline,
+                    &stream.activity,
+                ) catch |err| {
+                    stream.fail(err);
+                    return @errorCast(err);
+                };
+                if (maybe_event) |event_value| {
+                    var event = event_value;
+                    defer event.deinit(state.pool.allocator);
+                    switch (event) {
+                        .head => |head_value| {
+                            event = .finished;
+                            var head = head_value;
+                            if (head != .response) {
+                                head.deinit(state.pool.allocator);
+                                continue;
+                            }
+                            var decoded = head.response;
+                            if (decoded.status < 200) {
+                                decoded.deinit(state.pool.allocator);
+                                continue;
+                            }
+                            stream.deliverHead(decoded);
+                        },
+                        .data_available => {
+                            var buffer: [16 * 1024]u8 = undefined;
+                            const maybe_count = lease.client()
+                                .readResponseDataOnce(
+                                stream_id,
+                                &buffer,
+                            ) catch |err| {
+                                stream.fail(err);
+                                return @errorCast(err);
+                            };
+                            const count = maybe_count orelse 0;
+                            if (count != 0) {
+                                stream.deliverData(
+                                    buffer[0..count],
+                                ) catch |err| {
+                                    stream.fail(err);
+                                    return @errorCast(err);
+                                };
+                            }
+                        },
+                        .trailers => |trailers_value| {
+                            event = .finished;
+                            stream.deliverTrailers(trailers_value);
+                        },
+                        .finished => {
+                            stream.finish();
+                            complete(state, command, null, null);
+                            return;
+                        },
+                        .push_promise => |promise_value| {
+                            event = .finished;
+                            var promise = promise_value;
+                            promise.deinit(state.pool.allocator);
+                        },
+                    }
+                }
             }
         }
 

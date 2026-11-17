@@ -15124,6 +15124,100 @@ pub const HandshakeClient = struct {
         return null;
     }
 
+    /// Streaming counterpart to `receiveNextResponseBeforeOrWake`: return one
+    /// buffered response event, or null when `wake` fires first. The caller
+    /// must keep consuming the stream through the streaming APIs.
+    pub fn receiveResponseEventBeforeOrWake(
+        self: *HandshakeClient,
+        stream_id: u62,
+        deadline: ?std.Io.Clock.Timestamp,
+        wake: *std.Io.Event,
+    ) ReceiveTimeoutError!?StreamingEvent {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        if (deadline) |absolute| {
+            _ = try deadline_policy.usableAwake(
+                self.connectionIo(),
+                absolute,
+            );
+        }
+
+        const Wake = union(enum) {
+            event: ReceiveTimeoutError!?StreamingEvent,
+            control: std.Io.Cancelable!void,
+        };
+        const Task = struct {
+            fn receive(
+                client: *HandshakeClient,
+                id: u62,
+                absolute: ?std.Io.Clock.Timestamp,
+            ) ReceiveTimeoutError!?StreamingEvent {
+                return client.receiveResponseEventInternal(id, absolute);
+            }
+
+            fn wait(
+                event: *std.Io.Event,
+                io: std.Io,
+            ) std.Io.Cancelable!void {
+                return event.wait(io);
+            }
+        };
+        var storage: [2]Wake = undefined;
+        var select: std.Io.Select(Wake) = .init(self.connectionIo(), &storage);
+        defer while (select.cancel()) |late| switch (late) {
+            .event => |result| if (result) |maybe| {
+                if (maybe) |event| {
+                    var dropped = event;
+                    dropped.deinit(self.allocator);
+                }
+            } else |_| {},
+            .control => {},
+        };
+        try select.concurrent(
+            .event,
+            Task.receive,
+            .{ self, stream_id, deadline },
+        );
+        try select.concurrent(
+            .control,
+            Task.wait,
+            .{ wake, self.connectionIo() },
+        );
+
+        var response: ?StreamingEvent = null;
+        var response_err: ?anyerror = null;
+        const first = select.await() catch |err| return err;
+        switch (first) {
+            .event => |result| if (result) |value| {
+                response = value;
+            } else |err| {
+                response_err = err;
+            },
+            .control => |result| {
+                try result;
+            },
+        }
+        while (select.cancel()) |late| switch (late) {
+            .event => |result| if (result) |maybe| {
+                if (maybe) |value| {
+                    if (response == null) {
+                        response = value;
+                    } else {
+                        var dropped = value;
+                        dropped.deinit(self.allocator);
+                    }
+                }
+            } else |err| {
+                if (err != error.Canceled) response_err = err;
+            },
+            .control => |result| result catch |err| {
+                if (err != error.Canceled) return err;
+            },
+        };
+        if (response) |value| return value;
+        if (response_err) |err| return @errorCast(err);
+        return null;
+    }
+
     /// Send a request and observe ordered 1xx heads before the final response.
     pub fn requestWithInformational(
         self: *HandshakeClient,
@@ -35959,6 +36053,7 @@ test {
     _ = @import("runtime/shared_handshake_client_pool_happy_eyeballs_tests.zig");
     _ = @import("runtime/shared_handshake_client_pool_request_tests.zig");
     _ = @import("runtime/shared_handshake_client_pool_stream_tests.zig");
+    _ = @import("runtime/handshake_client_pool_stream_dispatcher_tests.zig");
     _ = @import("runtime/shared_handshake_client_pool_dispatcher_tests.zig");
     _ = @import("runtime/shared_handshake_client_pool_handshake_progress_tests.zig");
     _ = @import("runtime/shared_handshake_client_pool_concurrent_handshake_tests.zig");
