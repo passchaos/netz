@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "date": "2026-11-17",
+  "head": "working-tree",
+  "subject": "unblock macOS portable cross-compilation",
+  "change": "Bumped the pinned Vort revision to a48e1151, which emits Brotli counted-context code through the platform code_sections table instead of an ELF-style dotted section name. Added explicit macOS SDK framework, library, and include paths to the vail module when an explicit -Dtarget selects macOS, because explicit targets disable Zig's automatic SDK discovery. CI now compiles aarch64-macos-none and x86_64-macos-none on macos-latest instead of ubuntu-latest, where the Security/CoreFoundation frameworks are unavailable.",
+  "matrix": {
+    "aarch64-macos-none": {
+      "command": "zig build test-compile -Dtarget=aarch64-macos-none --summary all",
+      "host": "macOS 26.6.2 aarch64",
+      "steps_passed": 9,
+      "steps_total": 9,
+      "sdk": "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk"
+    },
+    "x86_64-macos-none": {
+      "command": "zig build test-compile -Dtarget=x86_64-macos-none --summary all",
+      "host": "macOS 26.6.2 aarch64",
+      "steps_passed": 8,
+      "steps_total": 8,
+      "sdk": "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk"
+    }
+  },
+  "tests": {
+    "release_tooling": {
+      "command": "python3 tools/release/source_archive_test.py",
+      "passed": 9,
+      "total": 9
+    },
+    "duplex_and_pool": {
+      "command": "zig build test-lib -Dtest-filter=duplex handle; zig build test-lib -Dtest-filter=streams a request over a leased connection",
+      "passed": 188,
+      "total": 188
+    }
+  },
+  "source_sha256": {
+    "build.zig": "81ef740d36bcc6e55d182ec8bfda304e93baa6fba8c5889acec7b3a4219d39d9",
+    "build.zig.zon": "7746492dbcccab1b9d8fa0548506ef03b3edb26882037e7e1384b24df59ff3eb",
+    ".github/workflows/ci.yml": "500604b17a389384ed5335d000b5f56f59adb8bd3b57b0eb076a268623b8d036",
+    ".github/workflows/release.yml": "f1e747781b23b3df5250127cbafdf6e5fa1b37423a3b8fa7488f3d8d66f5b8ae",
+    "tools/release/source_archive.py": "160427ba04cd42479b3731eb24a7ed55ad44e10b505b8a332ec0d8013a74241f",
+    "tools/release/verify_source_archive.py": "c93bf3c4e552e3d560dd90e853d0eded3ec58b2a3e714786110ad361b3bba172",
+    "tools/release/source_archive_test.py": "b14fc29ab74113675a5891549136f77b9a3e45f7f477710bbaeefbc6be4ac2f5"
+  },
+  "notes": "The pinned Vort revision is a48e1151872a30a574363e994ec312969b3c7818 in source_archive.py, ci.yml, and release.yml. The 2026-11-08 evidence remains as the historical blocked-state record. A non-macOS host can cross-compile these targets by passing -Dmacos-sdk=<sdk root>; CI validates them on macos-latest where std.zig.system.darwin.getSdk discovers the runner SDK."
+}

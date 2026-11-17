@@ -22,6 +22,34 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    // An explicit -Dtarget disables Zig's automatic macOS SDK discovery, so
+    // framework links (`Security`, `CoreFoundation`) need explicit search
+    // paths. CI passes -Dmacos-sdk; local macOS hosts discover the SDK here.
+    if (target.result.os.tag == .macos) {
+        if (b.option(
+            []const u8,
+            "macos-sdk",
+            "macOS SDK root for cross-compiled framework links",
+        ) orelse std.zig.system.darwin.getSdk(
+            b.allocator,
+            b.graph.io,
+            &target.result,
+        )) |sdk| {
+            const vail_module = vail_dep.module("vail");
+            vail_module.addFrameworkPath(.{
+                .cwd_relative = b.fmt(
+                    "{s}/System/Library/Frameworks",
+                    .{sdk},
+                ),
+            });
+            vail_module.addLibraryPath(.{
+                .cwd_relative = b.fmt("{s}/usr/lib", .{sdk}),
+            });
+            vail_module.addSystemIncludePath(.{
+                .cwd_relative = b.fmt("{s}/usr/include", .{sdk}),
+            });
+        }
+    }
     const vort_dep = b.dependency("vort", .{
         .target = target,
         .optimize = optimize,

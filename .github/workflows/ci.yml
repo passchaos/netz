@@ -58,7 +58,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: passchaos/vort
-          ref: b661c887e21fb1965db358bc6d12ea379d20178d
+          ref: a48e1151872a30a574363e994ec312969b3c7818
           token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
           path: vort
           persist-credentials: false
@@ -116,7 +116,7 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: ~/.cache/zig
-          key: ${{ runner.os }}-zig-0.16-${{ hashFiles('netz/build.zig.zon', 'vail/build.zig.zon', 'vort/build.zig.zon', 'pbz/build.zig.zon', 'webpkiz/build.zig.zon', 'harnessz/build.zig.zon') }}
+          key: ${{ runner.os }}-zig-0.16-${{ hashFiles('netz/build.zig.zon', 'vail/build.zig.zon', 'vort/build.zig.zon', 'pbz/build.zig.zon', 'kron/build.zig.zon', 'webpkiz/build.zig.zon', 'regexz/build.zig.zon', 'harnessz/build.zig.zon') }}
           restore-keys: |
             ${{ runner.os }}-zig-0.16-
 
@@ -147,6 +147,113 @@ jobs:
           - aarch64-linux-gnu
           - x86_64-linux-gnu
           - x86_64-windows-gnu
+    defaults:
+      run:
+        working-directory: netz
+    steps:
+      - name: Checkout netz
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: netz
+          persist-credentials: false
+
+      - name: Require sibling dependency credentials
+        env:
+          DEPENDENCIES_TOKEN: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
+        run: |
+          if [ -z "$DEPENDENCIES_TOKEN" ]; then
+            echo "::error::Configure NETZ_DEPENDENCIES_TOKEN with read access to passchaos/vail, passchaos/vort, passchaos/webpkiz, passchaos/regexz, passchaos/kron and passchaos/harnessz"
+            exit 1
+          fi
+
+      - name: Checkout pinned vail
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: passchaos/vail
+          ref: 3b772b0cccb64d84fbc760df6428bc51e0fe0761
+          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
+          path: vail
+          persist-credentials: false
+
+      - name: Checkout pinned vort
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: passchaos/vort
+          ref: a48e1151872a30a574363e994ec312969b3c7818
+          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
+          path: vort
+          persist-credentials: false
+
+      - name: Checkout pinned pbz
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: passchaos/pbz
+          ref: 6513ef1f8b130b308bd86ba0bd02f6acc2be64e8
+          path: pbz
+          persist-credentials: false
+
+      - name: Checkout pinned kron
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: passchaos/kron
+          ref: 77b9572a0256da0ece836c6b49024b3282bd1d5b
+          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
+          path: kron
+          persist-credentials: false
+
+      - name: Checkout pinned webpkiz
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: passchaos/webpkiz
+          ref: 35c9f4bfecb51a7794670d474c01b3c6fe541e9e
+          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
+          path: webpkiz
+          persist-credentials: false
+
+      - name: Checkout pinned regexz
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: passchaos/regexz
+          ref: f150767088ef11fb4435f3b42c99165333b6e51c
+          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
+          path: regexz
+          persist-credentials: false
+
+      - name: Checkout pinned harnessz
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: passchaos/harnessz
+          ref: e626f26b0a7ead0377254ed3a04b43b25fb2d270
+          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
+          path: harnessz
+          persist-credentials: false
+
+      - name: Install Zig 0.16.0
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
+        with:
+          version: 0.16.0
+
+      - name: Cache Zig downloads
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ~/.cache/zig
+          key: ${{ runner.os }}-zig-0.16-${{ matrix.target }}-${{ hashFiles('netz/build.zig.zon', 'vail/build.zig.zon', 'vort/build.zig.zon', 'pbz/build.zig.zon', 'kron/build.zig.zon', 'webpkiz/build.zig.zon', 'regexz/build.zig.zon', 'harnessz/build.zig.zon') }}
+          restore-keys: |
+            ${{ runner.os }}-zig-0.16-${{ matrix.target }}-
+            ${{ runner.os }}-zig-0.16-
+
+      - name: Compile library and public-package tests
+        run: zig build test-compile -j1 -Dtarget=${{ matrix.target }} --summary all
+
+  portable-macos:
+    if: github.event_name != 'schedule'
+    name: Cross-compile ${{ matrix.target }} (macOS SDK)
+    runs-on: macos-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
           - aarch64-macos-none
           - x86_64-macos-none
     defaults:
@@ -181,7 +288,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: passchaos/vort
-          ref: b661c887e21fb1965db358bc6d12ea379d20178d
+          ref: a48e1151872a30a574363e994ec312969b3c7818
           token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
           path: vort
           persist-credentials: false
@@ -239,7 +346,7 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: ~/.cache/zig
-          key: ${{ runner.os }}-zig-0.16-${{ matrix.target }}-${{ hashFiles('netz/build.zig.zon', 'vail/build.zig.zon', 'vort/build.zig.zon', 'pbz/build.zig.zon', 'webpkiz/build.zig.zon', 'harnessz/build.zig.zon') }}
+          key: ${{ runner.os }}-zig-0.16-${{ matrix.target }}-${{ hashFiles('netz/build.zig.zon', 'vail/build.zig.zon', 'vort/build.zig.zon', 'pbz/build.zig.zon', 'kron/build.zig.zon', 'webpkiz/build.zig.zon', 'regexz/build.zig.zon', 'harnessz/build.zig.zon') }}
           restore-keys: |
             ${{ runner.os }}-zig-0.16-${{ matrix.target }}-
             ${{ runner.os }}-zig-0.16-
@@ -355,7 +462,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: passchaos/vort
-          ref: b661c887e21fb1965db358bc6d12ea379d20178d
+          ref: a48e1151872a30a574363e994ec312969b3c7818
           token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
           path: vort
           persist-credentials: false

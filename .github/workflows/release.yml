@@ -49,7 +49,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: passchaos/vort
-          ref: b661c887e21fb1965db358bc6d12ea379d20178d
+          ref: a48e1151872a30a574363e994ec312969b3c7818
           token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
           path: vort
           persist-credentials: false

@@ -67,10 +67,9 @@ proxy, VPN, and mesh behavior. Build and test gates are summarized under
 ```sh
 zig build test
 zig build test-compile -Dtarget=x86_64-windows-gnu
-# Linux and Windows portable targets pass. macOS cross-compilation with the
-# CI-pinned Vort revision stops inside its Mach-O linksection before netz tests
-# compile; the local sibling Vort already contains the fix, pending a pin bump.
-# See docs/evidence/portable_compile/2026-11-08.json.
+# Linux and Windows portable targets pass on ubuntu-latest; macOS targets
+# compile on the portable-macos job with the host SDK. Non-macOS hosts must pass
+# -Dmacos-sdk=<root> for the vail Security/CoreFoundation framework links.
 # Build a deterministic source archive containing pinned harnessz, vail,
 # vort, pbz, and zio.
 zig build release-source

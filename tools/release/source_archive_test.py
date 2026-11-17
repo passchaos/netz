@@ -429,7 +429,7 @@ class RepositoryDependencyPinTest(unittest.TestCase):
                 )
             checkout_lines.append(f"          path: {name}")
             checkout = "\n".join(checkout_lines)
-            self.assertEqual(3, ci.count(checkout), name)
+            self.assertEqual(4, ci.count(checkout), name)
             self.assertEqual(1, release.count(checkout), name)
 
         self.assertIn("'vort/build.zig.zon'", ci)

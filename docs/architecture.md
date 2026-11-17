@@ -274,11 +274,6 @@ These are current limits, not permission to ignore them:
   `http.startHttp3Request` on an exclusive `HandshakeClient`, and
   `http.Pool.startRequest` returns `error.H3StreamingUnsupported` when a live
   Alt-Svc route would select H3 (`docs/http_streaming.md`).
-- **macOS cross-compilation** with the CI-pinned Vort revision stops inside its
-  Mach-O `linksection` before netz tests compile. The local sibling Vort already
-  contains the fix (`82475fa1`), so this is a pin bump rather than a netz
-  change; the blocked state is recorded in
-  `docs/evidence/portable_compile/2026-11-08.json`.
 - **Firefox STOP_SENDING** remains a separately documented browser gap in the
   WebTransport browser gate.
 - **WebTransport over HTTP/2** is implemented for non-browser deployments
