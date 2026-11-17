@@ -214,8 +214,9 @@ Accepted performance claims use the following protocol:
    repeated samples; report min/p50/p90/p99/mean/stddev.
 5. Record the binary SHA-256 values, command, pair count, order, host-load
    caveat, and source SHA-256 values in `docs/evidence/<area>/<date>.json`.
-6. Run `zig build verify-evidence`; invalid JSON or unresolved audit failures
-   block the change.
+6. Run `zig build verify-evidence`; invalid JSON blocks the change. Unresolved
+   entries are expected only for fixture-relative names; a new unresolved
+   repository path must be fixed or mapped to its moved location.
 
 `zig build bench-record` and `zig build bench-gate` maintain harnessz baselines
 for the sampler-backed microbenchmarks under `benchmarks/baselines/`. The record
@@ -244,7 +245,7 @@ a reference-gate regression.
 | Interop | `zig build interop-*` | independent peers and official implementations |
 | Browser | `zig build interop-browser*` | real Chromium/Firefox protocol stacks |
 | Benchmark gate | `zig build bench-gate` | sampler-backed baselines |
-| Evidence audit | `zig build verify-evidence` | evidence JSON validity and source hashes |
+| Evidence audit | `zig build verify-evidence` | evidence JSON validity, source hashes, and the unresolved-path ceiling (`--max-unresolved`) |
 | Release archive | `zig build release-source-archive` | deterministic pinned-dependency archive |
 
 ## 9. Change acceptance checklist
@@ -260,7 +261,8 @@ A performance or architecture change is accepted only when all answers are yes:
    and pinned CPU?
 5. Do the focused tests, full library suite, and relevant interop gate pass?
 6. Is the evidence file complete (command, pairs, hashes, results, notes) and
-   does `verify-evidence` report `invalid=0`?
+   does `verify-evidence` report `invalid=0` with unresolved entries limited to
+   fixture-relative names?
 7. Are rejected alternatives recorded with their numbers?
 8. Are README, this document, and the per-protocol parity/benchmark docs
    updated where behavior or guidance changed?

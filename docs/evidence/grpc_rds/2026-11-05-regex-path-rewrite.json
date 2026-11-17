@@ -6,7 +6,7 @@
   "change": "RouteAction.regex_rewrite (field 32), HashPolicy.Header.regex_rewrite and RouteAction.host_rewrite_path_regex (field 35) now decode RegexMatchAndSubstitute, compile the pattern with the bounded xDS safe-regex parser, validate RE2-style \\0..\\9 substitution references, and apply leftmost-first global replacement. Path rewrites run while copying owned request inputs; header hash rewrites transform the joined header value before XXH64; host path rewrites evaluate the path with query and fragment removed and use the result as :authority. Greedy and lazy quantifiers keep their priority semantics. Replacement runs on an explicit backtracking stack with hard step, choice and capture-trail budgets; the selector precomputes exact output lengths so the existing single-allocation request-input copy and max_header_bytes checks remain unchanged.",
   "tests": {
     "unit": [
-      "src/grpc/xds/routing/regex/replace_tests.zig covers numbered groups, global replacement, lazy quantifiers, inline case folding, \\0 and \\\\, unmatched groups, Unicode captures, unknown group references and the backtracking budget.",
+      "regexz/src/regex/replace_tests.zig covers numbered groups, global replacement, lazy quantifiers, inline case folding, \\0 and \\\\, unmatched groups, Unicode captures, unknown group references and the backtracking budget.",
       "src/grpc/xds/rds/tests.zig 'gRPC RDS applies regex rewrites and rejects format rewrites' decodes a route with ^/service/([^/]+)(/.*)$ -> \\2/instance/\\1, asserts the selected output length and rewritten path, and rejects empty rewrites, unknown capture references, malformed patterns and format path_rewrite.",
       "src/grpc/channel/shared/request_inputs_tests.zig applies the selected regex rewrite through the production owned-input copy and verifies the rewritten path, authority and header mutation layout.",
       "src/grpc/xds/rds/tests.zig 'gRPC RDS applies header hash regex rewrites' decodes a terminal HashPolicy.Header with ^tenant-(\\d+)$ -> \\1 and asserts the selected hash is XXH64 of the rewritten value.",
@@ -58,13 +58,13 @@
     }
   },
   "source_sha256": {
-    "src/grpc/xds/routing/regex/model.zig": "de9997c7c2e9fe293fa1e5229e7dccaf41b1a5974c82c1c70084d59b90e0fcd6",
-    "src/grpc/xds/routing/regex/parse.zig": "7395136c35f75a26155679adb16e05041d285121c3ee9e2ff5a9f68c58c561c2",
-    "src/grpc/xds/routing/regex/compile.zig": "5d77fd643a75b9c91d832fba7b31789b236df4650b01bf244277029ac1f9b1bb",
-    "src/grpc/xds/routing/regex/execute.zig": "170cd4a0ea974b260d51e9ca1be0929852e7c82dda1dc86eb67e9f6861f6c10c",
-    "src/grpc/xds/routing/regex/replace.zig": "62c25016a93993218acb0789edacd6db4211745effbfec8ee87d0c22acb876b7",
-    "src/grpc/xds/routing/regex/replace_tests.zig": "bd46676f0d88c685502064e0178c0d785d06a707a07c99e952b2edbe2c3ef408",
-    "src/grpc/xds/routing/regex.zig": "7afd9a93b6d46cdeaa203811f805a333b10c9e48be883b4e6fdc14a948ca6e2a",
+    "regexz/src/regex/model.zig": "de9997c7c2e9fe293fa1e5229e7dccaf41b1a5974c82c1c70084d59b90e0fcd6",
+    "regexz/src/regex/parse.zig": "7395136c35f75a26155679adb16e05041d285121c3ee9e2ff5a9f68c58c561c2",
+    "regexz/src/regex/compile.zig": "5d77fd643a75b9c91d832fba7b31789b236df4650b01bf244277029ac1f9b1bb",
+    "regexz/src/regex/execute.zig": "170cd4a0ea974b260d51e9ca1be0929852e7c82dda1dc86eb67e9f6861f6c10c",
+    "regexz/src/regex/replace.zig": "62c25016a93993218acb0789edacd6db4211745effbfec8ee87d0c22acb876b7",
+    "regexz/src/regex/replace_tests.zig": "bd46676f0d88c685502064e0178c0d785d06a707a07c99e952b2edbe2c3ef408",
+    "regexz/src/root.zig": "7afd9a93b6d46cdeaa203811f805a333b10c9e48be883b4e6fdc14a948ca6e2a",
     "src/grpc/path_rewrite.zig": "5738417ae9e9660b808097480016b5234a82d3b6d53bd57e3dcf5340f7bee17a",
     "src/grpc/call.zig": "93dcf3ae928050fcbb72dc502eeb1b0f4b9af93409d3c17a5880da0ab53c31c7",
     "src/grpc/stream/runtime.zig": "b4a9037a374b7e81a43f4cba00428f4e45e485dcc4aa45a9009b31a4873abaa4",

@@ -80,7 +80,7 @@
   ],
   "source_sha256": {
     "src/webtransport/h2/endpoint_client.zig": "fb5c0ca4e37efe1550b032933968ccfedb4fe1f9b60c583a6d35771dc15383b1",
-    "src/webtransport/h2/endpoint_client/queue.zig": "8903253a4080ec4c43b18794b6dc1f7d7db87b756d4bec2b0965aefab62b7243",
+    "src/webtransport/h2/endpoint/queue.zig": "8903253a4080ec4c43b18794b6dc1f7d7db87b756d4bec2b0965aefab62b7243",
     "src/webtransport/h2/endpoint_client/job.zig": "140ea213ef4159ef573a2dbac9a33a5742dd1970d7ac55425e63e1f979de2674",
     "src/webtransport/h2/endpoint_client/worker.zig": "fa5113c8b2c76cd752f884f52ce4dc6ccb0f7ba7b0d51bbcb988e0e217be767a",
     "src/webtransport/h2/endpoint_client/admission_tests.zig": "33d533c8922f01c555185bf30b52841a5f923ccc94f7d0acff406706a4353aee",

@@ -123,6 +123,9 @@ jobs:
       - name: Check formatting
         run: zig fmt --check build.zig build.zig.zon src test examples benchmarks tools
 
+      - name: Audit evidence hashes
+        run: zig build verify-evidence -- --max-unresolved=24
+
       - name: Verify standalone source release
         run: zig build verify-release-source
 

@@ -76,7 +76,8 @@ zig build release-source
 # Extract the archive in isolation and compile its public-package test.
 zig build verify-release-source
 # Report stale or unresolved source hashes recorded under docs/evidence.
-# Add --strict to fail on any stale hash or unresolved path.
+# Add --strict to fail on any stale hash or unresolved path. CI uses
+# --max-unresolved=24 so only known fixture-relative names stay unresolved.
 zig build verify-evidence
 ```
 

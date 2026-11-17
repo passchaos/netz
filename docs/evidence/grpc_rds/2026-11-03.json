@@ -125,8 +125,8 @@
     "src/grpc/xds/rds/testing.zig": "eed3739d1083e3d2358fdca4813990b040662ff2c09bfec2b0c8ad25fc65079e",
     "src/grpc/xds/rds/tests.zig": "702be827ad4ba1c73619f66f95a32faf59e98452431c4e04482981ba36371448",
     "src/grpc/xds/rds/transport_tests.zig": "b5894cdfaa296aeca043bf7da4d40358c57a799c52e665f1d0fc1ef28838d999",
-    "src/grpc/xds/routing/regex/budget.zig": "69dcffa2490dbcf9de098713e6d24ed2d965db9cfce3388fa7fcad6c287fed0c",
-    "src/grpc/xds/routing/regex/budget_tests.zig": "e9a73e9ecf29751e5db7a024f5c69ecace24a7a24dbcd9cc415ee34a902f2fe1",
+    "regexz/src/regex/budget.zig": "69dcffa2490dbcf9de098713e6d24ed2d965db9cfce3388fa7fcad6c287fed0c",
+    "regexz/src/regex/budget_tests.zig": "e9a73e9ecf29751e5db7a024f5c69ecace24a7a24dbcd9cc415ee34a902f2fe1",
     "tools/interop/grpc_rds/client.zig": "ad01bc97af27703331b2948b554827adb5858d82f96e0e7bf88ef2db18b3d534",
     "tools/interop/grpc_rds/peer.js": "b63b9d6b00b614cfd1a73aae3c8240cdc690eda305320924d62bac2ec5596b0b",
     "tools/interop/grpc_rds/run.py": "86cd6e00a4fe91f55cb558476480b8faf9dade8e9a39c1b7cbcca2d3f4fe6be5",
@@ -145,8 +145,8 @@
     "src/grpc/mod.zig": "301c43c81b28150932ce839ea1e0272b259d84f89fce5a5af90fe897e6bafd37",
     "src/grpc/xds/mod.zig": "7376bbf711bddc83e0aeffdd9978304ef40800a013e3512b07d9eec69ae0c55c",
     "src/grpc/xds/routing/header.zig": "14cc77b2de4923a6eb1f064b32530d55587717d487f4a57431036e9007b5996f",
-    "src/grpc/xds/routing/regex.zig": "9996f19db03ff5f9969f32d0cef6aad6599ce0d3c05580623e943ef581f6784a",
-    "src/grpc/xds/routing/regex/execute.zig": "c6c167215887b8382671be0b246ef1b7e7813a2395184607e47d759adefe95bd",
+    "regexz/src/root.zig": "9996f19db03ff5f9969f32d0cef6aad6599ce0d3c05580623e943ef581f6784a",
+    "regexz/src/regex/execute.zig": "c6c167215887b8382671be0b246ef1b7e7813a2395184607e47d759adefe95bd",
     "src/grpc/xds/routing/string.zig": "2e9b0d1a0d576963388ff88b7ee4b77e7b1f5c3fcb8694583fca2dba4c799e72"
   },
   "reference_grpc_sha256": {

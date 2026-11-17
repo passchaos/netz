@@ -64,7 +64,7 @@
     "src/webtransport/h2/endpoint_client/tests.zig": "9178bde779aa68d7b81b0ea66a05acebf3038ff81b2a3899085db7500368f734",
     "src/webtransport/h2/endpoint_client/worker.zig": "a0f3257953694ca2c101bca464c3c45e3d66ff26b4dc10b880bd8dae303e74cc",
     "src/webtransport/h2/endpoint_client/job.zig": "140ea213ef4159ef573a2dbac9a33a5742dd1970d7ac55425e63e1f979de2674",
-    "src/webtransport/h2/endpoint_client/queue.zig": "8903253a4080ec4c43b18794b6dc1f7d7db87b756d4bec2b0965aefab62b7243",
+    "src/webtransport/h2/endpoint/queue.zig": "8903253a4080ec4c43b18794b6dc1f7d7db87b756d4bec2b0965aefab62b7243",
     "src/webtransport/h2/session.zig": "49ecd75cb98de627659472ea64ff10d1b781532daca6385bf746847e87b5d9ad",
     "tools/interop/webtransport_h2/driver.zig": "4dfdcb50d9a68e665a4c1a05ab49a4b6015982a67ae68658dc30b1a684743748",
     "tools/interop/webtransport_h2/peer.py": "0c97af63ddfbf34c56a883ebd59fef5a78de08cc80888361eacdd5d74ab7bb37",

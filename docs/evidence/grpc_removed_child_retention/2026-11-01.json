@@ -70,7 +70,7 @@
     "src/grpc/channel/shared/weighted_target.zig": "d87ae254f760e70c8f7c4bf1300dd7351e87eed5f44bb6033e5268df6c9e25a9",
     "src/grpc/channel/shared/weighted_target/outlier.zig": "16df11556fc86cd97ef12a8b93856400fd7844adefbdcaa1b5369d2e7b9e9794",
     "src/grpc/channel/shared/weighted_target/state_transfer.zig": "ea75f042bef3dbc8f938c3dd80026c12465cd7e7d1bc461f6ecea5291dc40fa5",
-    "src/grpc/channel/shared/weighted_target/tree_query.zig": "b9470970fefd941805ff60bcb6b4c1d83d4b336980670ad1e101995972b0d46f",
+    "src/grpc/channel/tree_query.zig": "b9470970fefd941805ff60bcb6b4c1d83d4b336980670ad1e101995972b0d46f",
     "src/grpc/channel/shared/weighted_target/weighted_round_robin.zig": "35f23cad7a5bd67ef8a5d14a3dd41e1e7e832f1811b272cb64119b17e561f759",
     "tools/interop/grpc_connection_race/client.zig": "ffdca9bac2c6a22edb724c5011744c51ade374daa06623ee251ecdaa59e1f364",
     "tools/interop/grpc_connection_race/peer.js": "cb1dbf25880ebce021309bb91f0d796bcf037c502abe66e50e54c02729a7e5fa",
@@ -397,7 +397,7 @@
       "src/grpc/channel/shared/retention/cache.zig": "9c44f48f8d53892ffca775d47d860c0449ae55a885f8b0aa8a45b5c3442df89e",
       "src/grpc/channel/shared/retention/plan.zig": "0250b37a184bff1366c2fbca60477fafc756dfce8b24e187cdad1f78b0312209",
       "src/grpc/channel/shared/retention/manager.zig": "99d287a9a1cc4355f97409a77336ab7c31bf18339b8f9911f36bfeb63aa4ed1b",
-      "src/grpc/channel/shared/weighted_target/tree_query.zig": "b9470970fefd941805ff60bcb6b4c1d83d4b336980670ad1e101995972b0d46f",
+      "src/grpc/channel/tree_query.zig": "b9470970fefd941805ff60bcb6b4c1d83d4b336980670ad1e101995972b0d46f",
       "tools/interop/grpc_connection_race/shared_retention.zig": "28b64e290c4255e679d4db8115983f84934c409fcdc10c5c9155bad94a8a736f"
     },
     "reference_source_sha256": "7bec812850bb38317e8ffa477d809d21744577102f03c21f15d34a1c95867f18"

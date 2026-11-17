@@ -148,7 +148,7 @@
     "netz/tools/interop/grpc_ip_literals/client.zig": "0e9254f2f06aee57ef1bf5acbf5e31566680cd9d386548964be1ccc87d2c6529",
     "netz/tools/interop/grpc_ip_literals/peer.js": "c449c36ab9983f89fb9c7fb544ca328142d118c77a863707edc6b9b8b5fb7f4a",
     "netz/tools/interop/grpc_ip_literals/run.py": "eeb58db45332c5c26d5c5681254754ef438c6b38e21dc7ff452972f36a6af54e",
-    "vail/src/tls/client_hello.zig": "953adac174ee5249dec75a0cb5e1c2c714b524963deb8b7ff41ff413570fcde3",
-    "vail/src/tls/client_hello/sni.zig": "d9ffadaac2ea7140186733378c9579037517cd687daebd674e7e70923564710e"
+    "vail/src/tls/handshake/client_hello.zig": "953adac174ee5249dec75a0cb5e1c2c714b524963deb8b7ff41ff413570fcde3",
+    "vail/src/tls/handshake/client_hello/sni.zig": "d9ffadaac2ea7140186733378c9579037517cd687daebd674e7e70923564710e"
   }
 }

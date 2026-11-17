@@ -3,7 +3,9 @@
 //! This is a reporting tool, not a release gate: hashes legitimately drift as
 //! the source evolves, so stale entries are counted and reported but only fail
 //! with `--strict`. Unresolved paths (for example fixture-relative names that
-//! cannot be mapped back to the repository) are reported separately.
+//! cannot be mapped back to the repository) are reported separately. Recorded
+//! paths may use a `vail/` or `regexz/` prefix for code that moved to a sibling
+//! package.
 
 const std = @import("std");
 const harnessz = @import("harnessz");
@@ -14,6 +16,7 @@ const Options = struct {
     root: []const u8 = ".",
     strict: bool = false,
     fail_unresolved: bool = false,
+    max_unresolved: ?usize = null,
     example_limit: usize = 10,
 };
 
@@ -75,6 +78,12 @@ pub fn main(init: std.process.Init) !u8 {
             options.strict = true;
         } else if (std.mem.eql(u8, arg, "--fail-unresolved")) {
             options.fail_unresolved = true;
+        } else if (std.mem.startsWith(u8, arg, "--max-unresolved=")) {
+            options.max_unresolved = try std.fmt.parseInt(
+                usize,
+                arg["--max-unresolved=".len..],
+                10,
+            );
         } else if (std.mem.startsWith(u8, arg, "--limit=")) {
             options.example_limit = try std.fmt.parseInt(
                 usize,
@@ -114,6 +123,17 @@ pub fn main(init: std.process.Init) !u8 {
         .{},
     ) catch null;
     defer if (vail_dir) |*dir| dir.close(io);
+
+    const regexz_path = try std.fs.path.join(
+        arena,
+        &.{ options.root, "..", "regexz" },
+    );
+    var regexz_dir: ?std.Io.Dir = std.Io.Dir.cwd().openDir(
+        io,
+        regexz_path,
+        .{},
+    ) catch null;
+    defer if (regexz_dir) |*dir| dir.close(io);
 
     var report: Report = .{ .example_limit = options.example_limit };
     var cache: Cache = .{ .allocator = allocator };
@@ -183,6 +203,7 @@ pub fn main(init: std.process.Init) !u8 {
                 io,
                 std.Io.Dir.cwd(),
                 vail_dir,
+                regexz_dir,
                 &cache,
                 source_path,
             );
@@ -230,6 +251,15 @@ pub fn main(init: std.process.Init) !u8 {
         return 1;
     }
     if (options.fail_unresolved and report.unresolved != 0) return 1;
+    if (options.max_unresolved) |limit| {
+        if (report.unresolved > limit) {
+            std.debug.print(
+                "evidence audit: unresolved {d} exceeds limit {d}\n",
+                .{ report.unresolved, limit },
+            );
+            return 1;
+        }
+    }
     return 0;
 }
 
@@ -238,6 +268,7 @@ fn hashRecordedPath(
     io: std.Io,
     cwd: std.Io.Dir,
     vail: ?std.Io.Dir,
+    regexz: ?std.Io.Dir,
     cache: *Cache,
     recorded_path: []const u8,
 ) !?[]const u8 {
@@ -265,6 +296,19 @@ fn hashRecordedPath(
                 io,
                 dir,
                 recorded_path["vail/".len..],
+            )) |hex| {
+                try cache.put(recorded_path, hex);
+                return hex;
+            }
+        }
+    }
+    if (std.mem.startsWith(u8, recorded_path, "regexz/")) {
+        if (regexz) |dir| {
+            if (try hashCandidate(
+                allocator,
+                io,
+                dir,
+                recorded_path["regexz/".len..],
             )) |hex| {
                 try cache.put(recorded_path, hex);
                 return hex;
