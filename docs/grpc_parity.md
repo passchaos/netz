@@ -3497,9 +3497,10 @@ previous version, latest nonce, replay without old-stream nonce/error, local
 read timeout recovery and delivery after a 50-ms opening budget. Two ADS streams
 must use one HTTP/2 connection and the server must see exactly nine requests.
 See [ADS usage and boundaries](grpc_ads.md) and
-`docs/evidence/grpc_ads/2026-11-03.json`. Typed resource validation/application,
-route selection, bootstrap/failover and resource expiry remain open rather than
-being inferred from this transport evidence.
+`docs/evidence/grpc_ads/2026-11-03.json`. Typed resource
+validation/application, route selection, bootstrap/failover and resource
+expiry are covered by the typed controller and bootstrap documents rather than
+inferred from this transport evidence.
 
 `grpc.xds.ads.delta` adds the v3 `DeltaAggregatedResources` transport. It
 retains per-resource accepted versions, emits only subscribe/unsubscribe diffs,
@@ -3569,8 +3570,11 @@ invalid-resource NACK with unchanged topology/version, omitted-resource
 retention and explicit empty-assignment publication,
 requiring one backend HTTP/2 session per endpoint across updates.
 See [EDS usage and boundaries](grpc_eds.md) and
-`docs/evidence/grpc_eds/2026-11-03.json`. LDS/RDS/CDS route integration, EDS drop
-execution and remaining bootstrap/failover/expiry behavior remain open.
+`docs/evidence/grpc_eds/2026-11-03.json`. LDS/RDS/CDS route integration, EDS
+drop execution, bootstrap/failover and resource expiry are implemented and
+documented in `grpc_lds.md`, `grpc_rds.md`, `grpc_cds.md`, `grpc_eds_drop.md`,
+`grpc_bootstrap.md` and `grpc_delta_xds.md`; broader control-plane
+orchestration and route-filter breadth remain open.
 
 The same EDS runner exposed owner competition in nested priority/locality picks.
 A pending priority job now keeps a stable selected worker until claim and wakes

@@ -54,5 +54,7 @@ This change covers SotW omission, including existing LDS/CDS deletion behavior.
 The separate [delta xDS transport](grpc_delta_xds.md) now covers explicit
 removals and Resource envelopes at the transport/state layer. Typed delta
 application, TTL expiry, bootstrap parsing and control-plane failover
-are implemented; certificate providers and automatic refresh scheduling, authority-specific control planes
-and broader security/filter deployment remain open work.
+are implemented; authority-specific control planes are implemented through the
+automatic runtime; certificate providers other than `file_watcher`, automatic
+bootstrap refresh scheduling and broader security/filter deployment remain open
+work.

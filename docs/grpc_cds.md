@@ -139,8 +139,9 @@ parser before publication. Aggregate/custom cluster discovery is unsupported.
 This slice handles EDS-backed, STATIC, STRICT_DNS and LOGICAL_DNS clusters.
 Typed delta CDS/EDS publication is available through the automatic runtime;
 delta CDS/EDS TTL expiry is covered. Bootstrap parsing and control-plane
-failover are available. LDS/RDS routing, certificate providers and automatic
-refresh scheduling, authority-specific control planes and full security
+failover are available. LDS/RDS routing and authority-specific control planes
+are implemented through the automatic runtime; certificate providers other
+than `file_watcher`, automatic bootstrap refresh scheduling and full security
 integration remain open.
 
 `zig build interop-grpc-cds --summary all` compares valid fixture policies and
