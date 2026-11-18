@@ -3686,6 +3686,7 @@ pub const HandshakeClient = struct {
                     &self.qpack_encoder_send,
                     &self.qpack_encoder_prefix_sent,
                     &self.outbound_bodies,
+                    0,
                     &committed,
                     deadline,
                 ) catch |err| switch (err) {
@@ -3713,6 +3714,7 @@ pub const HandshakeClient = struct {
                     &self.qpack_encoder_send,
                     &self.qpack_encoder_prefix_sent,
                     &self.outbound_bodies,
+                    0,
                     absolute,
                 ) catch |err| switch (err) {
                     error.FlowControlBlocked, error.CongestionLimited => {
@@ -3741,6 +3743,7 @@ pub const HandshakeClient = struct {
                 &self.qpack_encoder_send,
                 &self.qpack_encoder_prefix_sent,
                 &self.outbound_bodies,
+                0,
             );
         }
         head_sent = true;

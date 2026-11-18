@@ -33,6 +33,7 @@ pub fn sendConnectionStreamingHead(
     qpack_encoder_send: *quic.stream_state.SendState,
     qpack_encoder_prefix_sent: *bool,
     bodies: *OutboundBodySet,
+    initial_offset: u64,
 ) Error!void {
     return sendConnectionStreamingHeadUntil(
         connection,
@@ -47,6 +48,7 @@ pub fn sendConnectionStreamingHead(
         qpack_encoder_send,
         qpack_encoder_prefix_sent,
         bodies,
+        initial_offset,
         null,
         null,
     ) catch |err| switch (err) {
@@ -68,6 +70,7 @@ pub fn sendConnectionStreamingHeadWithDeadline(
     qpack_encoder_send: *quic.stream_state.SendState,
     qpack_encoder_prefix_sent: *bool,
     bodies: *OutboundBodySet,
+    initial_offset: u64,
     deadline: std.Io.Clock.Timestamp,
 ) runtime_error.ReceiveTimeoutError!void {
     return sendConnectionStreamingHeadUntil(
@@ -83,6 +86,7 @@ pub fn sendConnectionStreamingHeadWithDeadline(
         qpack_encoder_send,
         qpack_encoder_prefix_sent,
         bodies,
+        initial_offset,
         deadline,
         null,
     );
@@ -101,6 +105,7 @@ fn sendConnectionStreamingHeadUntil(
     qpack_encoder_send: *quic.stream_state.SendState,
     qpack_encoder_prefix_sent: *bool,
     bodies: *OutboundBodySet,
+    initial_offset: u64,
     deadline: ?std.Io.Clock.Timestamp,
     progress: ?*usize,
 ) runtime_error.ReceiveTimeoutError!void {
@@ -130,10 +135,11 @@ fn sendConnectionStreamingHeadUntil(
         );
     }
     var send = quic.stream_state.SendState.init(stream_id);
+    send.next_offset = initial_offset;
     const fin = !body_allowed or (!trailers_pending and expected_length != null and expected_length.? == 0);
     if (progress) |committed| {
-        try field_section.sendProgress(connection, stream_id, scratch.encoded.items, 0, fin, committed, options.max_stream_frame_data, options.max_frames_per_packet, deadline);
-        send.next_offset = committed.*;
+        try field_section.sendProgress(connection, stream_id, scratch.encoded.items, initial_offset, fin, committed, options.max_stream_frame_data, options.max_frames_per_packet, deadline);
+        send.next_offset = initial_offset + committed.*;
     } else {
         try send.appendFrames(
             &scratch.frames,
@@ -185,6 +191,7 @@ pub fn sendProgress(
     qpack_encoder_send: *quic.stream_state.SendState,
     qpack_encoder_prefix_sent: *bool,
     bodies: *OutboundBodySet,
+    initial_offset: u64,
     committed: *usize,
     deadline: ?std.Io.Clock.Timestamp,
 ) runtime_error.ReceiveTimeoutError!void {
@@ -201,7 +208,118 @@ pub fn sendProgress(
         qpack_encoder_send,
         qpack_encoder_prefix_sent,
         bodies,
+        initial_offset,
         deadline,
         committed,
     );
+}
+
+/// Submit one encoded informational HEADERS section at `initial_offset`
+/// without FIN and without opening outbound body state.
+pub fn sendConnectionInformationalHead(
+    connection: *quic.one_rtt.Connection,
+    scratch: *StreamMessageSendScratch,
+    critical_scratch: *CriticalStreamSendScratch,
+    stream_id: u62,
+    options: anytype,
+    qpack: *QpackEncodeState,
+    qpack_encoder_send: *quic.stream_state.SendState,
+    qpack_encoder_prefix_sent: *bool,
+    initial_offset: u64,
+) runtime_error.ReceiveTimeoutError!void {
+    return sendConnectionInformationalHeadUntil(
+        connection,
+        scratch,
+        critical_scratch,
+        stream_id,
+        options,
+        qpack,
+        qpack_encoder_send,
+        qpack_encoder_prefix_sent,
+        initial_offset,
+        null,
+    );
+}
+
+pub fn sendConnectionInformationalHeadWithDeadline(
+    connection: *quic.one_rtt.Connection,
+    scratch: *StreamMessageSendScratch,
+    critical_scratch: *CriticalStreamSendScratch,
+    stream_id: u62,
+    options: anytype,
+    qpack: *QpackEncodeState,
+    qpack_encoder_send: *quic.stream_state.SendState,
+    qpack_encoder_prefix_sent: *bool,
+    initial_offset: u64,
+    deadline: std.Io.Clock.Timestamp,
+) runtime_error.ReceiveTimeoutError!void {
+    return sendConnectionInformationalHeadUntil(
+        connection,
+        scratch,
+        critical_scratch,
+        stream_id,
+        options,
+        qpack,
+        qpack_encoder_send,
+        qpack_encoder_prefix_sent,
+        initial_offset,
+        deadline,
+    );
+}
+
+fn sendConnectionInformationalHeadUntil(
+    connection: *quic.one_rtt.Connection,
+    scratch: *StreamMessageSendScratch,
+    critical_scratch: *CriticalStreamSendScratch,
+    stream_id: u62,
+    options: anytype,
+    qpack: *QpackEncodeState,
+    qpack_encoder_send: *quic.stream_state.SendState,
+    qpack_encoder_prefix_sent: *bool,
+    initial_offset: u64,
+    deadline: ?std.Io.Clock.Timestamp,
+) runtime_error.ReceiveTimeoutError!void {
+    if (deadline) |absolute| {
+        try sendConnectionQpackEncoderInstructionsWithDeadline(
+            connection,
+            critical_scratch,
+            qpack,
+            qpack_encoder_send,
+            qpack_encoder_prefix_sent,
+            options,
+            absolute,
+        );
+    } else {
+        try sendConnectionQpackEncoderInstructions(
+            connection,
+            critical_scratch,
+            qpack,
+            qpack_encoder_send,
+            qpack_encoder_prefix_sent,
+            options,
+        );
+    }
+    var send = quic.stream_state.SendState.init(stream_id);
+    send.next_offset = initial_offset;
+    try send.appendFrames(
+        &scratch.frames,
+        connection.endpoint.allocator,
+        scratch.encoded.items,
+        options.max_stream_frame_data,
+        false,
+    );
+    if (deadline) |absolute| {
+        try sendConnectionFramesWithDeadline(
+            connection,
+            scratch.frames.items,
+            options.max_frames_per_packet,
+            absolute,
+        );
+    } else {
+        try sendConnectionFrames(
+            connection,
+            scratch.frames.items,
+            options.max_frames_per_packet,
+        );
+    }
 }

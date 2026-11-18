@@ -964,3 +964,117 @@ test "HTTP/3 protected push 1xx overflow stops only the push stream" {
     try std.testing.expect(!saw_close);
     try std.testing.expectEqual(@as(usize, 0), client.push_streams.entryCount());
 }
+
+test "HTTP/3 streaming server sends 100 Continue before request body reads" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xe5} ** quic.protection.secret_len,
+    );
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xe6} ** quic.protection.secret_len,
+    );
+    const client_cid = "expect-client";
+    const server_cid = "expect-server";
+    var client = try runtime.HandshakeClient.initPreconfigured(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server_endpoint.address(),
+        .{ .quic = .{ .max_datagram_size = 4096 } },
+        .{},
+        .{
+            .receive_keys = server_keys,
+            .send_keys = client_keys,
+            .local_connection_id = client_cid,
+            .peer_connection_id = server_cid,
+            .one_rtt = .{ .enable_pacing = false },
+        },
+    );
+    defer client.deinit();
+    var session = try runtime.HandshakeServerSession.initPreconfigured(
+        &server_endpoint,
+        client.address(),
+        .{},
+        .{
+            .receive_keys = client_keys,
+            .send_keys = server_keys,
+            .local_connection_id = server_cid,
+            .peer_connection_id = client_cid,
+            .one_rtt = .{ .enable_pacing = false },
+        },
+    );
+    defer session.deinit();
+
+    const stream_id = try client.startRequest(.{
+        .method = "POST",
+        .path = "/expect",
+        .authority = "localhost",
+        .headers = &.{.{ .name = "expect", .value = "100-continue" }},
+    }, 4);
+    try client.sendRequestBody(stream_id, "ping", true);
+
+    var event = try session.receiveRequestEvent();
+    defer event.deinit(allocator);
+    try std.testing.expect(event == .message);
+    try std.testing.expect(event.message.value == .head);
+    try std.testing.expectEqual(stream_id, event.message.stream_id);
+    try std.testing.expect(
+        !event.message.value.head.request.request_finished,
+    );
+    try std.testing.expectEqualStrings(
+        "100-continue",
+        findHeader(
+            event.message.value.head.request.headers,
+            "expect",
+        ).?,
+    );
+
+    var data_event = try session.receiveRequestEvent();
+    defer data_event.deinit(allocator);
+    try std.testing.expect(data_event == .message);
+    try std.testing.expect(data_event.message.value == .data_available);
+
+    var body: [8]u8 = undefined;
+    const body_len = try session.readRequestData(stream_id, &body);
+    try std.testing.expectEqualStrings("ping", body[0..body_len]);
+    try session.sendResponse(stream_id, .{
+        .status = 200,
+        .body = "pong",
+    });
+
+    const Observer = struct {
+        saw_continue: bool = false,
+
+        fn onResponse(
+            context: *anyopaque,
+            response: http3.InformationalResponseHead,
+        ) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (response.status == 100) self.saw_continue = true;
+        }
+    };
+    var observer = Observer{};
+    var response = try client.receiveResponseWithInformational(
+        stream_id,
+        .{
+            .context = &observer,
+            .on_response = Observer.onResponse,
+        },
+    );
+    defer response.deinit(allocator);
+
+    try std.testing.expect(observer.saw_continue);
+    try std.testing.expectEqual(@as(u16, 200), response.response.status);
+    try std.testing.expectEqualStrings("pong", response.response.body);
+}

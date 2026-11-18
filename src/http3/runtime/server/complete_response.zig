@@ -12,7 +12,7 @@ pub const Cancellation = struct {
     needs_cancel: bool = true,
 };
 
-pub fn send(server: anytype, id: u62, informational: []const http3.InformationalResponse, response: http3.Response, deadline: ?std.Io.Clock.Timestamp, hooks: anytype) ReceiveTimeoutError!void {
+pub fn send(server: anytype, id: u62, informational: []const http3.InformationalResponse, response: http3.Response, initial_offset: u64, deadline: ?std.Io.Clock.Timestamp, hooks: anytype) ReceiveTimeoutError!void {
     if (server.dispatcher_bound) return error.InvalidDispatcherState;
     hooks.flush(server);
     if (!server.request_lifecycle.contains(id)) return error.UnexpectedStream;
@@ -47,7 +47,7 @@ pub fn send(server: anytype, id: u62, informational: []const http3.Informational
     const trailers_pending = body_allowed and response.trailers.len != 0;
     while (true) {
         _ = try hooks.before(server, id, deadline);
-        streaming_head.sendProgress(&server.established.connection, &server.stream_send_scratch, &server.critical_stream_send_scratch, id, if (body_allowed) response.body.len else 0, body_allowed, trailers_pending, server.options, &server.qpack_encode, &server.qpack_encoder_send, &server.qpack_encoder_prefix_sent, &server.outbound_bodies, &committed, deadline) catch |err| switch (err) {
+        streaming_head.sendProgress(&server.established.connection, &server.stream_send_scratch, &server.critical_stream_send_scratch, id, if (body_allowed) response.body.len else 0, body_allowed, trailers_pending, server.options, &server.qpack_encode, &server.qpack_encoder_send, &server.qpack_encoder_prefix_sent, &server.outbound_bodies, initial_offset, &committed, deadline) catch |err| switch (err) {
             error.FlowControlBlocked, error.CongestionLimited => {
                 if (server.established.connection.closed()) return err;
                 try hooks.receive(server, id, deadline);

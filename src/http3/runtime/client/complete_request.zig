@@ -77,6 +77,7 @@ pub fn send(client: anytype, request: http3.Request, deadline: ?std.Io.Clock.Tim
             &client.qpack_encoder_send,
             &client.qpack_encoder_prefix_sent,
             &client.outbound_bodies,
+            0,
             &head_committed,
             deadline,
         ) catch |err| switch (err) {

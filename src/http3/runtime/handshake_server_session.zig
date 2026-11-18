@@ -44,6 +44,7 @@ const cancelConnectionRequest = runtime.cancelConnectionRequest;
 const cancelHandshakeRequestWithDeadline = runtime.cancelHandshakeRequestWithDeadline;
 const closeConnectionForHttp3Error = runtime.closeConnectionForHttp3Error;
 const complete_response = runtime.complete_response;
+const streaming_head = @import("send/streaming_head.zig");
 const concurrent = runtime.concurrent;
 const connectDatagramTerminalError = runtime.connectDatagramTerminalError;
 const connect_datagram = runtime.connect_datagram;
@@ -169,6 +170,9 @@ pub const HandshakeServerSession = struct {
     /// before this HTTP/3 session exists. Route that snapshot exactly once
     /// before the first application request poll.
     preexisting_streams_routed: bool = false,
+    /// Response-stream byte offsets after informational heads. The final
+    /// response head and body must continue after every 1xx section.
+    informational_offsets: std.AutoHashMapUnmanaged(u62, u64) = .empty,
 
     pub fn initEstablished(
         established: quic.handshake.EstablishedConnection,
@@ -407,6 +411,9 @@ pub const HandshakeServerSession = struct {
         self.request_streams.deinit();
         self.qpack_encode.deinit();
         self.qpack_decode.deinit();
+        self.informational_offsets.deinit(
+            self.established.connection.endpoint.allocator,
+        );
         self.established.deinit();
         self.* = undefined;
     }
@@ -787,7 +794,10 @@ pub const HandshakeServerSession = struct {
         deadline: ?std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!StreamingRequestEvent {
         while (true) {
-            if (try self.pollRequestEvent()) |event| return event;
+            if (try self.pollRequestEvent()) |event| {
+                try self.maybeSendContinueForEvent(event, deadline);
+                return event;
+            }
             try self.receiveRequestPacketUntil(deadline);
         }
     }
@@ -841,9 +851,58 @@ pub const HandshakeServerSession = struct {
         deadline: ?std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!StreamingRequestEvent {
         while (true) {
-            if (try self.pollRequestEventFor(stream_id)) |event| return event;
+            if (try self.pollRequestEventFor(stream_id)) |event| {
+                try self.maybeSendContinueForEvent(event, deadline);
+                return event;
+            }
             try self.receiveRequestPacketUntil(deadline);
         }
+    }
+
+    /// Release a peer that sent `Expect: 100-continue` before its body is
+    /// consumed. The event is returned unchanged to the application.
+    fn maybeSendContinueForEvent(
+        self: *HandshakeServerSession,
+        event: StreamingRequestEvent,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        const message = switch (event) {
+            .message => |value| value,
+            .reset => return,
+        };
+        const head = switch (message.value) {
+            .head => |value| value,
+            .push_promise, .data_available, .trailers, .finished => return,
+        };
+        const request = switch (head) {
+            .request => |value| value,
+            .response => return,
+        };
+        if (request.request_finished) return;
+        if (!requestHeadExpectsContinue(request.headers)) return;
+        try self.sendInformationalResponseUntil(
+            message.stream_id,
+            .{ .status = 100 },
+            deadline,
+        );
+    }
+
+    fn requestHeadExpectsContinue(
+        headers: []const http3.Qpack.HeaderField,
+    ) bool {
+        for (headers) |header| {
+            if (!std.ascii.eqlIgnoreCase(header.name, "expect")) continue;
+            var rest = header.value;
+            while (rest.len != 0) {
+                const comma = std.mem.indexOfScalar(u8, rest, ',') orelse rest.len;
+                const token = std.mem.trim(u8, rest[0..comma], " \t");
+                if (std.ascii.eqlIgnoreCase(token, "100-continue")) {
+                    return true;
+                }
+                rest = if (comma == rest.len) "" else rest[comma + 1 ..];
+            }
+        }
+        return false;
     }
 
     /// Return the next request event already present in QUIC stream state.
@@ -2442,6 +2501,7 @@ pub const HandshakeServerSession = struct {
             trailers_pending,
             self.options,
             self.control.settings.peer,
+            self.takeInformationalOffset(stream_id),
         );
         if (!retained) {
             finishServerRequest(
@@ -2511,7 +2571,7 @@ pub const HandshakeServerSession = struct {
 
     fn sendCompleteResponseUntil(self: *HandshakeServerSession, id: u62, informational: []const http3.InformationalResponse, response: http3.Response, deadline: ?std.Io.Clock.Timestamp) ReceiveTimeoutError!void {
         if (deadline) |absolute| _ = try deadline_policy.usableAwake(self.connectionIo(), absolute);
-        return complete_response.send(self, id, informational, response, deadline, .{
+        return complete_response.send(self, id, informational, response, self.takeInformationalOffset(id), deadline, .{
             .before = beforePacedResponseBody,
             .receive = receivePacedResponseBody,
             .body = sendResponseBodyPacedUntil,
@@ -2523,6 +2583,121 @@ pub const HandshakeServerSession = struct {
 
     fn finishCompleteResponse(self: *HandshakeServerSession, id: u62) void {
         finishServerRequest(&self.control, &self.request_lifecycle, id);
+    }
+
+    fn takeInformationalOffset(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+    ) u64 {
+        if (self.informational_offsets.fetchRemove(stream_id)) |entry| {
+            return entry.value;
+        }
+        return 0;
+    }
+
+    /// Send one informational response head, such as `100 Continue`, without
+    /// finishing the request stream. The final response head and body continue
+    /// at the recorded response-stream offset.
+    pub fn sendInformationalResponse(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        response: http3.InformationalResponse,
+    ) Error!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        return self.sendInformationalResponseUntil(
+            stream_id,
+            response,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn sendInformationalResponseWithTimeout(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        response: http3.InformationalResponse,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendInformationalResponseWithDeadline(
+            stream_id,
+            response,
+            .fromNow(self.connectionIo(), .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn sendInformationalResponseWithDeadline(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        response: http3.InformationalResponse,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
+        return self.sendInformationalResponseUntil(
+            stream_id,
+            response,
+            deadline,
+        );
+    }
+
+    fn sendInformationalResponseUntil(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        response: http3.InformationalResponse,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        if (!self.request_lifecycle.contains(stream_id)) {
+            return error.UnexpectedStream;
+        }
+        const allocator = self.established.connection.endpoint.allocator;
+        try self.informational_offsets.ensureUnusedCapacity(allocator, 1);
+        self.flushResponseCancellations();
+        self.stream_send_scratch.reset();
+        try response.writeDynamic(
+            &self.stream_send_scratch.encoded,
+            allocator,
+            self.control.settings.peer,
+            stream_id,
+            &self.qpack_encode,
+        );
+        const initial_offset = self.informational_offsets.get(stream_id) orelse 0;
+        if (deadline) |absolute| {
+            try streaming_head.sendConnectionInformationalHeadWithDeadline(
+                &self.established.connection,
+                &self.stream_send_scratch,
+                &self.critical_stream_send_scratch,
+                stream_id,
+                self.options,
+                &self.qpack_encode,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                initial_offset,
+                absolute,
+            );
+        } else {
+            try streaming_head.sendConnectionInformationalHead(
+                &self.established.connection,
+                &self.stream_send_scratch,
+                &self.critical_stream_send_scratch,
+                stream_id,
+                self.options,
+                &self.qpack_encode,
+                &self.qpack_encoder_send,
+                &self.qpack_encoder_prefix_sent,
+                initial_offset,
+            );
+        }
+        self.informational_offsets.putAssumeCapacity(
+            stream_id,
+            initial_offset + self.stream_send_scratch.encoded.items.len,
+        );
     }
 
     /// Send a parent response and one promised response while advancing both
@@ -3331,6 +3506,7 @@ pub const HandshakeServerSession = struct {
             &self.qpack_encode,
         );
         errdefer self.qpack_encode.rollbackAfter(qpack_checkpoint);
+        const initial_offset = self.takeInformationalOffset(stream_id);
         if (deadline) |absolute| {
             try sendConnectionStreamingHeadWithDeadline(
                 &self.established.connection,
@@ -3345,6 +3521,7 @@ pub const HandshakeServerSession = struct {
                 &self.qpack_encoder_send,
                 &self.qpack_encoder_prefix_sent,
                 &self.outbound_bodies,
+                initial_offset,
                 absolute,
             );
         } else {
@@ -3361,6 +3538,7 @@ pub const HandshakeServerSession = struct {
                 &self.qpack_encoder_send,
                 &self.qpack_encoder_prefix_sent,
                 &self.outbound_bodies,
+                initial_offset,
             );
         }
         if (!streaming.body_allowed or

@@ -311,6 +311,23 @@ Concurrency contract:
   budget; both are fallbacks now that commands interrupt the receive directly.
   The HTTP/2 owner uses the same wake-race shape for its frame read.
 
+## Expect: 100-continue
+
+- HTTP/1 exposes `RequestWriter.waitForContinue*` on the client and sends the
+  interim head before an expected body is read on the server.
+- HTTP/2 servers send `100 Continue` before consuming request DATA in both
+  `readRequest` (aggregate) and `readRequestStreaming` paths. Clients that send
+  an `expect` field observe the interim head through the existing
+  `InformationalObserver`.
+- HTTP/3 servers send `100 Continue` before body reads in the streaming
+  `receiveRequestEvent*` paths. The response send layer tracks the byte offset
+  consumed by informational heads, so the final response head and body start
+  after every 1xx section instead of conflicting at stream offset zero.
+- HTTP/3 aggregate `receiveRequest` still waits for the complete request before
+  decoding headers. A peer that blocks on `100 Continue` before sending its
+  body must use the streaming event API; aggregate callers should not rely on
+  automatic 100-continue.
+
 ## Build status
 
 The earlier `tls_material` relative-import, missing `grpc/http2/mod.zig` and

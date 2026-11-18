@@ -548,6 +548,7 @@ pub fn trySendConnectionStreamingResponseHeadLiteral(
     trailers_pending: bool,
     options: anytype,
     peer_settings: http3.Settings,
+    initial_offset: u64,
 ) Error!bool {
     scratch.reset();
     const streaming = try response.writeStreamingHead(
@@ -561,6 +562,7 @@ pub fn trySendConnectionStreamingResponseHeadLiteral(
             streaming.expected_length.? != 0);
     if (retain_body_state) try bodies.reserveOpen(stream_id);
     var send = quic.stream_state.SendState.init(stream_id);
+    send.next_offset = initial_offset;
     try send.appendFrames(
         &scratch.frames,
         connection.endpoint.allocator,
