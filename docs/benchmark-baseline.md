@@ -1205,6 +1205,11 @@ QUIC 1-RTT send benchmark
   total packets/path: 32000
 ```
 
+A CPU-0-pinned 2026-11-19 zio-era smoke of the current build recorded
+118,884 ns/batch sequential and 111,105 ns/batch batched (3,715/3,472 ns/packet,
+1.07x) for 32 x 1-KiB packets. The host also ran unrelated builds, so this is a
+backend/shape refresh rather than a regression or speedup claim.
+
 The 1-RTT send path now centralizes frame classification in
 `one_rtt/frame_traits.zig`. Single-packet validation hands its collected traits
 to packet preparation instead of rescanning for ACK-eliciting, in-flight,
