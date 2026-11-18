@@ -258,6 +258,12 @@ The fixture lockfile hash was
 These are focused same-application-shape loopback results, not a whole-library
 superiority claim.
 
+A CPU-0-pinned 2026-11-19 zio-era smoke of the current netz-self pipeline
+recorded 1,250 ns/request and 799,641 requests/s for depth 16, 13-byte
+responses, and 32,000 requests (200 warmup, 2,000 measured). This refreshes the
+backend identity only; the Hyper comparison above remains the historical
+fixed-binary result.
+
 The older results in the following historical subsection predate the zio
 migration and remain `std.Io.Threaded` evidence only.
 
@@ -578,6 +584,10 @@ the persistent connection buffer. Read-ahead can span several chunk boundaries
 or a pipelined suffix, but callbacks still receive one wire chunk at a time and
 the suffix remains buffered for the next message. These are focused workload
 results, not a whole-library superiority claim.
+
+A CPU-0-pinned 2026-11-19 zio-era smoke of the netz-self fixed 1-MiB
+bidirectional body recorded 269,693 ns/round-trip and 7,415 aggregate MiB/s
+(20 warmups, 200 measured). This refreshes the backend identity only.
 
 ### HTTP/2 persistent consecutive and parallel round trips
 
