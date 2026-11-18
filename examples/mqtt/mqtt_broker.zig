@@ -1,11 +1,9 @@
 const std = @import("std");
 const netz = @import("netz");
 const broker_config_runner = @import("mqtt_broker_config.zig");
-const CountingAllocator = @import("support/counting_allocator.zig")
+const CountingAllocator = @import("support").counting_allocator
     .CountingAllocator;
-const InteropAuthentication = @import(
-    "support/mqtt_interop_authentication.zig",
-).Policy;
+const InteropAuthentication = @import("support").mqtt_interop_authentication.Policy;
 
 const Config = struct {
     bind: std.Io.net.IpAddress = .{ .ip4 = .loopback(1883) },

@@ -1,5 +1,5 @@
 const std = @import("std");
-const sampling = @import("support/bench_sampling.zig");
+const sampling = @import("support").bench_sampling;
 const netz = @import("netz");
 
 const rule_count: usize = 512;

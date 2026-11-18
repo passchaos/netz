@@ -3,7 +3,7 @@ const netz = @import("netz");
 const config = @import("grpc_shared_bench/options.zig");
 const Session = @import("grpc_shared_bench/session.zig").Session;
 const Peer = @import("grpc_shared_bench/peer.zig").Peer;
-const telemetry = @import("support/counting_allocator.zig");
+const telemetry = @import("support").counting_allocator;
 
 pub fn main(init: std.process.Init) !void {
     const options = try config.parse(init);

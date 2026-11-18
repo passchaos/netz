@@ -1,7 +1,7 @@
 //! Compare immutable shared metadata with independent Session ownership.
 const std = @import("std");
 const netz = @import("netz");
-const CountingAllocator = @import("support/counting_allocator.zig").CountingAllocator;
+const CountingAllocator = @import("support").counting_allocator.CountingAllocator;
 const sessions = 64;
 const messages = 256;
 const samples = 7;

@@ -108,6 +108,15 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const examples_support_mod = b.createModule(.{
+        .root_source_file = b.path("examples/support/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "netz", .module = netz_mod },
+            .{ .name = "harnessz", .module = harnessz_dep.module("harnessz") },
+        },
+    });
 
     const lib = b.addLibrary(.{
         .name = "netz",
@@ -2474,7 +2483,7 @@ pub fn build(b: *std.Build) void {
         .name = "netz-webtransport-stream-churn",
         .root_module = b.createModule(.{
             .root_source_file = b.path(
-                "examples/bench_webtransport_stream.zig",
+                "examples/benchmarks/bench_webtransport_stream.zig",
             ),
             .target = target,
             .optimize = optimize,
@@ -2579,6 +2588,24 @@ pub fn build(b: *std.Build) void {
     b.step("interop-webtransport-protocol", "Verify WebTransport application-protocol negotiation and scoped rejection with independent peers").dependOn(&webtransport_protocol.step);
     const example_specs = examples.specs;
     const examples_step = b.step("examples", "Build all examples");
+    const h3_multipath_probe = b.addExecutable(.{
+        .name = "netz-h3-multipath-probe",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/interop/h3_multipath_probe.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const h3_multipath_probe_install = b.addInstallArtifact(
+        h3_multipath_probe,
+        .{},
+    );
+    const h3_multipath_probe_step = b.step(
+        "h3-multipath-probe",
+        "Build the cross-host HTTP/3 multipath serve/probe tool",
+    );
+    h3_multipath_probe_step.dependOn(&h3_multipath_probe_install.step);
     const bench_step = b.step("bench", "Run all native protocol benchmarks");
     var http1_pipeline_bench_exe: ?*std.Build.Step.Compile = null;
     var http1_body_bench_exe: ?*std.Build.Step.Compile = null;
@@ -2602,6 +2629,7 @@ pub fn build(b: *std.Build) void {
                     .{ .name = "netz", .module = netz_mod },
                     .{ .name = "harnessz", .module = harnessz_dep.module("harnessz") },
                     .{ .name = "kron", .module = kron_dep.module("kron") },
+                    .{ .name = "support", .module = examples_support_mod },
                 },
             }),
         });
@@ -2785,7 +2813,7 @@ pub fn build(b: *std.Build) void {
     const http3_public_fetch = b.addExecutable(.{
         .name = "netz-http3-public-fetch",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/http3_fetch.zig"),
+            .root_source_file = b.path("examples/http/http3_fetch.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "netz", .module = netz_mod }},
@@ -2805,28 +2833,37 @@ pub fn build(b: *std.Build) void {
     const websocket_slices_h1 = b.addExecutable(.{
         .name = "netz-websocket-slices-h1",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/bench_websocket_echo.zig"),
+            .root_source_file = b.path("examples/benchmarks/bench_websocket_echo.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+            .imports = &.{
+                .{ .name = "netz", .module = netz_mod },
+                .{ .name = "support", .module = examples_support_mod },
+            },
         }),
     });
     const websocket_slices_h2 = b.addExecutable(.{
         .name = "netz-websocket-slices-h2",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/bench_websocket_h2_echo.zig"),
+            .root_source_file = b.path("examples/benchmarks/bench_websocket_h2_echo.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+            .imports = &.{
+                .{ .name = "netz", .module = netz_mod },
+                .{ .name = "support", .module = examples_support_mod },
+            },
         }),
     });
     const websocket_slices_h3 = b.addExecutable(.{
         .name = "netz-websocket-slices-h3",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/bench_websocket_h3_echo.zig"),
+            .root_source_file = b.path("examples/benchmarks/bench_websocket_h3_echo.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+            .imports = &.{
+                .{ .name = "netz", .module = netz_mod },
+                .{ .name = "support", .module = examples_support_mod },
+            },
         }),
     });
     const websocket_slices_ab = b.addSystemCommand(&.{

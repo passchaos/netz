@@ -1,8 +1,8 @@
 const std = @import("std");
 const netz = @import("netz");
-const counting_allocator = @import("support/counting_allocator.zig");
+const counting_allocator = @import("support").counting_allocator;
 const CountingAllocator = counting_allocator.CountingAllocator;
-const send_shape = @import("support/websocket_send_shape.zig");
+const send_shape = @import("support").websocket_send_shape;
 
 const payload_bytes: usize = 4096;
 const default_warmup_iterations: usize = 20;

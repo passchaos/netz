@@ -1,6 +1,6 @@
 const std = @import("std");
 const netz = @import("netz");
-const CountingAllocator = @import("support/counting_allocator.zig")
+const CountingAllocator = @import("support").counting_allocator
     .CountingAllocator;
 
 const default_iterations: usize = 1;

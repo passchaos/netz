@@ -1,10 +1,10 @@
 //! Full-state serialization and unchanged durable MQTT journal append costs.
 const std = @import("std");
 const netz = @import("netz");
-const CountingAllocator = @import("support/counting_allocator.zig").CountingAllocator;
-const options = @import("support/mqtt_commit_log_bench/options.zig");
-const fixture_mod = @import("support/mqtt_commit_log_bench/fixture.zig");
-const metrics = @import("support/mqtt_commit_log_bench/metrics.zig");
+const CountingAllocator = @import("support").counting_allocator.CountingAllocator;
+const options = @import("support").mqtt_commit_log_bench.options;
+const fixture_mod = @import("support").mqtt_commit_log_bench.fixture;
+const metrics = @import("support").mqtt_commit_log_bench.metrics;
 const Log = netz.mqtt.persistence.commit_log.Log;
 
 pub fn main(init: std.process.Init) !void {

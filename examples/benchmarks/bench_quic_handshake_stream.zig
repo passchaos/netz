@@ -1,7 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const netz = @import("netz");
-const CountingAllocator = @import("support/counting_allocator.zig")
+const CountingAllocator = @import("support").counting_allocator
     .CountingAllocator;
 
 // Match ~/Work/quicz/examples/quic_bench_hs.zig by default: each sample uses

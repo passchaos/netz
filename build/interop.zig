@@ -14,6 +14,19 @@ pub fn addAll(
     netz_mod: *std.Build.Module,
     test_step: *std.Build.Step,
 ) Artifacts {
+    const harnessz_dep = b.dependency("harnessz", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const examples_support_mod = b.createModule(.{
+        .root_source_file = b.path("examples/support/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "netz", .module = netz_mod },
+            .{ .name = "harnessz", .module = harnessz_dep.module("harnessz") },
+        },
+    });
     const mqtt_mtls_server = b.addExecutable(.{
         .name = "netz-mqtt-mtls-server",
         .root_module = b.createModule(.{
@@ -38,10 +51,13 @@ pub fn addAll(
     const mqtt_vectors_broker = b.addExecutable(.{
         .name = "netz-mqtt-vector-broker",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/mqtt_broker.zig"),
+            .root_source_file = b.path("examples/mqtt/mqtt_broker.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+            .imports = &.{
+                .{ .name = "netz", .module = netz_mod },
+                .{ .name = "support", .module = examples_support_mod },
+            },
         }),
     });
     b.step("build-mqtt-vector-broker", "Build the standalone MQTT wire-vector broker").dependOn(&b.addInstallArtifact(mqtt_vectors_broker, .{}).step);
@@ -83,10 +99,13 @@ pub fn addAll(
     const mqtt_broker_bench = b.addExecutable(.{
         .name = "netz-bench-mqtt-broker-compare",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/bench_mqtt_broker.zig"),
+            .root_source_file = b.path("examples/benchmarks/bench_mqtt_broker.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+            .imports = &.{
+                .{ .name = "netz", .module = netz_mod },
+                .{ .name = "support", .module = examples_support_mod },
+            },
         }),
     });
     const mqtt_broker_compare = b.addSystemCommand(&.{

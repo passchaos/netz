@@ -1,6 +1,6 @@
 const std = @import("std");
 const netz = @import("netz");
-const CountingAllocator = @import("support/counting_allocator.zig")
+const CountingAllocator = @import("support").counting_allocator
     .CountingAllocator;
 
 const warmup_iterations: usize = 1_000;
@@ -594,8 +594,8 @@ fn parseOptions(
 }
 
 fn printAllocationDelta(
-    before: @import("support/counting_allocator.zig").Snapshot,
-    after: @import("support/counting_allocator.zig").Snapshot,
+    before: @import("support").counting_allocator.Snapshot,
+    after: @import("support").counting_allocator.Snapshot,
 ) void {
     std.debug.print(
         \\  measured allocator calls: {d}
@@ -614,7 +614,7 @@ fn printAllocationDelta(
         after.current_bytes,
         after.peak_bytes,
     });
-    for (@import("support/counting_allocator.zig").bucket_labels, 0..) |label, index| {
+    for (@import("support").counting_allocator.bucket_labels, 0..) |label, index| {
         std.debug.print(
             "    {s}: count={d}, bytes={d}\n",
             .{

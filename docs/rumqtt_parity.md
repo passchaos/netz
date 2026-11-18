@@ -1483,7 +1483,7 @@ recovery, failed Clean Start cleanup, and post-mutation Will failure handling.
 
 ## Same-client live broker comparison
 
-`examples/bench_mqtt_broker.zig` is one external MQTT 5 TCP client workload,
+`examples/benchmarks/bench_mqtt_broker.zig` is one external MQTT 5 TCP client workload,
 not a broker-specific adapter. It connects subscribers first, verifies every
 SUBACK, then connects publishers. Each measured input is a QoS 1 PUBLISH and
 each subscriber receives and PUBACKs one QoS 1 delivery. The timer starts only

@@ -6,21 +6,13 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const netz = @import("netz");
-const reloadable_security = @import(
-    "support/mqtt_reloadable_security.zig",
-);
-const reloadable_identity = @import(
-    "support/mqtt_reloadable_identity.zig",
-);
-const configured_bridges = @import(
-    "support/mqtt_configured_bridges.zig",
-);
-const reload_compatibility = @import(
-    "support/mqtt_reload_compatibility.zig",
-);
-const MemoryLimiter = @import("support/memory_limiter.zig").MemoryLimiter;
-const mqtt_pid_file = @import("support/mqtt_pid_file.zig");
-const tls_ticket_keys = @import("support/mqtt_tls_ticket_keys.zig");
+const reloadable_security = @import("support").mqtt_reloadable_security;
+const reloadable_identity = @import("support").mqtt_reloadable_identity;
+const configured_bridges = @import("support").mqtt_configured_bridges;
+const reload_compatibility = @import("support").mqtt_reload_compatibility;
+const MemoryLimiter = @import("support").memory_limiter.MemoryLimiter;
+const mqtt_pid_file = @import("support").mqtt_pid_file;
+const tls_ticket_keys = @import("support").mqtt_tls_ticket_keys;
 
 const mqtt = netz.mqtt;
 
@@ -1165,7 +1157,7 @@ fn serveWithManagement(
     defer bridges.requestStop();
     try select.concurrent(.serve, serveResult, .{ broker, service });
     try select.concurrent(.bridges, bridgeSetResult, .{bridges});
-    if (comptime builtin.os.tag == .linux or
+    if (builtin.os.tag == .linux or
         autosave.persistence_path != null)
     {
         try select.concurrent(

@@ -5,6 +5,21 @@ These examples mirror the shape of the `~/Work/hyper` and
 print the exchange, then exit. They are self-contained and do not require
 external network access.
 
+## Layout
+
+```text
+examples/
+  http/          HTTP/1.1, HTTP/2 h2c, HTTP/3, streaming, chunked bodies
+  quic/          preconfigured-key and real-handshake QUIC smoke tests
+  websocket/     WebSocket echo over HTTP/1
+  mqtt/          finite MQTT broker and Mosquitto-style configuration runner
+  grpc/          gRPC unary over HTTP/2 h2c
+  webtransport/  WebTransport over HTTP/3 handshake and streams
+  benchmarks/    native protocol and transport benchmarks
+  support/       shared benchmark allocators, samplers, and fixtures
+  logging.zig    process-wide kron logging setup
+```
+
 Run all example compile checks:
 
 ```sh
@@ -16,13 +31,20 @@ Run individual examples:
 ```sh
 zig build run-http1-hello
 zig build run-http2-h2c
+zig build run-http-duplex
+zig build run-http-streaming
+zig build run-http-chunked
 zig build run-http3-handshake
+zig build run-http3-multipath
 zig build run-http3-fetch
 zig build run-quic-echo
 zig build run-quic-handshake-echo
 zig build run-quic-datagram-echo
 zig build run-quic-close
 zig build run-websocket-echo
+zig build run-mqtt-broker
+zig build run-grpc-h2c
+zig build run-webtransport-handshake-stream
 taskset -c 0 zig build bench-http1-pipeline -Doptimize=ReleaseFast
 taskset -c 0 zig build bench-http1-pipeline -Doptimize=ReleaseFast -- \
   --write-strategy=auto

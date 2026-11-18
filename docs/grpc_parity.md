@@ -3038,7 +3038,7 @@ write dominated.
 Both implementations and their focused tests were reverted. A later
 response-only prefix variant, with the request path unchanged, also failed:
 424,415 ns to 428,024 ns (0.85% slower, 2/5 ABBA rounds). The reusable
-ordinary-unary benchmark remains at `examples/bench_grpc_unary.zig`. Rows,
+ordinary-unary benchmark remains at `examples/benchmarks/bench_grpc_unary.zig`. Rows,
 binary identities and commands are recorded in
 `docs/evidence/grpc_unary_prefix_rejected/2026-11-02.json`,
 `docs/evidence/grpc_unary_response_prefix_rejected/2026-11-02.json`, and
@@ -3052,7 +3052,7 @@ performs an acquire load of `abandoned_pending` and returns before the
 before waking the owner and re-entering `unlock`, so a concurrent abandonment
 is still observed by the next prune.
 
-The new ordinary-unary benchmark (`examples/bench_grpc_unary.zig`) separates
+The new ordinary-unary benchmark (`examples/benchmarks/bench_grpc_unary.zig`) separates
 the two client APIs: with 256-KiB cached payloads and length-only validation,
 ordinary unary measured about 273 us per roundtrip while SharedChannel unary
 measured about 462 us. The fast path moved a 500-iteration SharedChannel A/B
