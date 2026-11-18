@@ -2396,3 +2396,41 @@ fn classifyUnrouted(datagram: runtime.OwnedBytes) Event {
         .first_packet_len = info.len,
     } };
 }
+
+test "QUIC dispatcher buffered datagram FIFO advances a head index" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer endpoint.deinit();
+    var dispatcher = Dispatcher.init(allocator, &endpoint);
+    defer dispatcher.deinit();
+
+    const payloads = [_][]const u8{ "one", "two", "three" };
+    for (payloads) |payload| {
+        try dispatcher.buffered_datagrams.append(allocator, .{
+            .from = .{ .ip4 = .loopback(0) },
+            .bytes = try allocator.dupe(u8, payload),
+        });
+    }
+    try std.testing.expectEqual(
+        @as(usize, payloads.len),
+        dispatcher.bufferedDatagramCount(),
+    );
+    for (payloads) |payload| {
+        var datagram = dispatcher.popBufferedDatagram().?;
+        try std.testing.expectEqualStrings(payload, datagram.bytes);
+        datagram.deinit(allocator);
+    }
+    try std.testing.expect(dispatcher.popBufferedDatagram() == null);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        dispatcher.buffered_datagrams.items.len,
+    );
+}
