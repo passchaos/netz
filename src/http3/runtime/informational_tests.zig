@@ -1470,3 +1470,168 @@ test "HTTP/3 aggregate server omits 100 Continue without an Expect field" {
     try std.testing.expectEqual(@as(u16, 200), response.response.status);
     try std.testing.expectEqualStrings("pong", response.response.body);
 }
+
+test "HTTP/3 aggregate 100 Continue is not repeated after a timeout" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xef} ** quic.protection.secret_len,
+    );
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xf0} ** quic.protection.secret_len,
+    );
+    const client_cid = "retry-expect-client";
+    const server_cid = "retry-expect-server";
+    var client = try runtime.HandshakeClient.initPreconfigured(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server_endpoint.address(),
+        .{ .quic = .{ .max_datagram_size = 4096 } },
+        .{},
+        .{
+            .receive_keys = server_keys,
+            .send_keys = client_keys,
+            .local_connection_id = client_cid,
+            .peer_connection_id = server_cid,
+            .one_rtt = .{ .enable_pacing = false },
+        },
+    );
+    defer client.deinit();
+
+    const Shared = struct {
+        endpoint: *quic.runtime.Endpoint,
+        peer: std.Io.net.IpAddress,
+        receive_keys: quic.protection.PacketProtectionKeys,
+        send_keys: quic.protection.PacketProtectionKeys,
+        err: ?anyerror = null,
+        timed_out: bool = false,
+        body_ok: bool = false,
+
+        fn run(shared: *@This()) void {
+            var session = runtime.HandshakeServerSession.initPreconfigured(
+                shared.endpoint,
+                shared.peer,
+                .{},
+                .{
+                    .receive_keys = shared.receive_keys,
+                    .send_keys = shared.send_keys,
+                    .local_connection_id = "retry-expect-server",
+                    .peer_connection_id = "retry-expect-client",
+                    .one_rtt = .{ .enable_pacing = false },
+                },
+            ) catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer session.deinit();
+            const first = session.receiveRequestWithTimeout(
+                .fromMilliseconds(100),
+            );
+            if (first) |_| {
+                shared.err = error.UnexpectedRequest;
+                return;
+            } else |err| switch (err) {
+                error.Timeout => shared.timed_out = true,
+                else => {
+                    shared.err = err;
+                    return;
+                },
+            }
+            var request = session.receiveRequestWithTimeout(
+                .fromSeconds(5),
+            ) catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer request.deinit(std.testing.allocator);
+            shared.body_ok = std.mem.eql(u8, request.request.body, "ping");
+            session.sendResponse(request.stream_id, .{
+                .status = 200,
+                .body = "pong",
+            }) catch |err| {
+                shared.err = err;
+            };
+        }
+    };
+    var shared = Shared{
+        .endpoint = &server_endpoint,
+        .peer = client.address(),
+        .receive_keys = client_keys,
+        .send_keys = server_keys,
+    };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    defer thread.join();
+
+    const stream_id = try client.startRequest(.{
+        .method = "POST",
+        .path = "/aggregate-retry-expect",
+        .authority = "localhost",
+        .headers = &.{.{ .name = "expect", .value = "100-continue" }},
+    }, 4);
+
+    const response_deadline = std.Io.Clock.Timestamp.fromNow(
+        io,
+        .{ .raw = .fromSeconds(5), .clock = .awake },
+    );
+    var saw_continue = false;
+    var final_status: u16 = 0;
+    var body_buf: [16]u8 = undefined;
+    var body_len: usize = 0;
+    var finished = false;
+    while (!finished) {
+        var event = while (true) {
+            if (try client.receiveResponseEventWithDeadline(
+                stream_id,
+                response_deadline,
+            )) |event| break event;
+        };
+        defer event.deinit(allocator);
+        switch (event) {
+            .head => |head| switch (head) {
+                .response => |response| {
+                    if (response.status == 100) {
+                        if (saw_continue) return error.DuplicateContinue;
+                        saw_continue = true;
+                        // Let the first aggregate call time out before the
+                        // body is released; the retry must not resend 100.
+                        try std.Io.sleep(
+                            io,
+                            .fromMilliseconds(200),
+                            .awake,
+                        );
+                        try client.sendRequestBody(stream_id, "ping", true);
+                    } else {
+                        final_status = response.status;
+                    }
+                },
+                .request => return error.TestUnexpectedResult,
+            },
+            .data_available => {
+                body_len += try client.readResponseData(
+                    stream_id,
+                    body_buf[body_len..],
+                );
+            },
+            .finished => finished = true,
+            .trailers, .push_promise => {},
+        }
+    }
+
+    if (shared.err) |err| return err;
+    try std.testing.expect(shared.timed_out);
+    try std.testing.expect(shared.body_ok);
+    try std.testing.expect(saw_continue);
+    try std.testing.expectEqual(@as(u16, 200), final_status);
+    try std.testing.expectEqualStrings("pong", body_buf[0..body_len]);
+}
