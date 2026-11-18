@@ -69,7 +69,7 @@ bug, not a style issue. `std.posix` appears only in runtime layers for
 socket-option and ancillary-data syscalls (for example `SO_LINGER` or
 `recvmsg`), never in codecs.
 
-Scale at the time of writing: 1,900 Zig files and roughly 851,000 lines, split
+Scale at the time of writing: 1,932 Zig files and roughly 852,000 lines, split
 into self-contained protocol directories. The size is deliberate: protocol
 runtimes are allowed to be large, but each hot path must be locally auditable.
 Runtimes that hold several cohesive owner types are split into `runtime/`
