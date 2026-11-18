@@ -143,7 +143,7 @@ const SelectedServerPsk = struct {
     identity_index: u16,
     age_within_tolerance: bool,
 
-    fn permitsEarlyData(self: SelectedServerPsk) bool {
+    pub fn permitsEarlyData(self: SelectedServerPsk) bool {
         return self.identity_index == 0 and self.age_within_tolerance;
     }
 };
@@ -306,7 +306,7 @@ pub const OneRttConfig = struct {
     /// ID transport-parameter token to this key during the handshake.
     local_stateless_reset_key: ?[quic.stateless_reset.static_key_len]u8 = null,
 
-    fn apply(
+    pub fn apply(
         self: OneRttConfig,
         version: quic.Version,
         peer: net.IpAddress,
@@ -661,196 +661,6 @@ pub fn establishPreconfigured(
     );
 }
 
-test "preconfigured QUIC validates externally negotiated metadata" {
-    const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    var endpoint = try quic.runtime.Endpoint.bind(
-        allocator,
-        threaded.io(),
-        .{ .ip4 = .loopback(0) },
-        .{},
-    );
-    defer endpoint.deinit();
-    const keys = quic.protection.deriveAes128Keys(
-        [_]u8{0x4a} ** quic.protection.secret_len,
-    );
-    const peer: net.IpAddress = .{ .ip4 = .loopback(443) };
-
-    try std.testing.expectError(
-        error.InvalidTransportParameter,
-        establishPreconfigured(&endpoint, peer, .client, .{
-            .version = .negotiation,
-            .receive_keys = keys,
-            .send_keys = keys,
-            .local_connection_id = "local",
-            .peer_connection_id = "peer",
-        }),
-    );
-    try std.testing.expectError(
-        error.TransportParameterForbidden,
-        establishPreconfigured(&endpoint, peer, .server, .{
-            .receive_keys = keys,
-            .send_keys = keys,
-            .local_connection_id = "local",
-            .peer_connection_id = "peer",
-            .peer_transport_parameters = .{
-                .preferred_address = .{},
-            },
-        }),
-    );
-
-    var established = try establishPreconfigured(
-        &endpoint,
-        peer,
-        .client,
-        .{
-            .receive_keys = keys,
-            .send_keys = keys,
-            .local_connection_id = "local",
-            // RFC 9000 permits a peer to select a zero-length CID. The local
-            // CID cannot be empty because short-header receive routing needs
-            // a deterministic length on this endpoint.
-            .peer_connection_id = &.{},
-            .peer_certificates = &.{"externally-authenticated-peer"},
-        },
-    );
-    defer established.deinit();
-    const peer_certificates = established.peerCertificates() orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(usize, 1), peer_certificates.len);
-    try std.testing.expectEqualStrings(
-        "externally-authenticated-peer",
-        peer_certificates[0],
-    );
-    try std.testing.expect(
-        @intFromPtr(peer_certificates[0].ptr) !=
-            @intFromPtr("externally-authenticated-peer".ptr),
-    );
-    try std.testing.expectEqual(
-        quic.tls.cipher_suite.Suite.aes_128_gcm_sha256,
-        established.negotiatedCipherSuite(),
-    );
-    try std.testing.expectEqual(
-        quic.tls.secret.Hash.sha256,
-        established.negotiatedTranscriptHash(),
-    );
-    try established.initiateKeyUpdate();
-    try std.testing.expectEqual(@as(u64, 1), established.localKeyUpdateCount());
-    try std.testing.expectEqual(@as(u64, 0), established.peerKeyUpdateCount());
-    try std.testing.expect(established.keyUpdateAwaitingAck());
-    try std.testing.expectError(
-        error.PostHandshakeTlsUnavailable,
-        established.issueSessionTicket(threaded.io(), .{
-            .now_ms = 0,
-        }),
-    );
-    var exported: [32]u8 = undefined;
-    try std.testing.expectError(
-        error.PostHandshakeTlsUnavailable,
-        established.exportKeyingMaterial(
-            "EXPORTER-netz-test",
-            "context",
-            &exported,
-        ),
-    );
-}
-
-test "preconfigured QUIC propagates established PTO jitter" {
-    const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    var endpoint = try quic.runtime.Endpoint.bind(
-        allocator,
-        threaded.io(),
-        .{ .ip4 = .loopback(0) },
-        .{},
-    );
-    defer endpoint.deinit();
-    const keys = quic.protection.deriveAes128Keys(
-        [_]u8{0x6a} ** quic.protection.secret_len,
-    );
-    var established = try establishPreconfigured(
-        &endpoint,
-        .{ .ip4 = .loopback(443) },
-        .client,
-        .{
-            .receive_keys = keys,
-            .send_keys = keys,
-            .local_connection_id = "local-jitter",
-            .peer_connection_id = "peer-jitter",
-            .one_rtt = .{ .pto_jitter_percentage = 25 },
-        },
-    );
-    defer established.deinit();
-    try std.testing.expect(established.connection.ptoJitterEnabled());
-}
-
-test "preconfigured QUIC propagates automatic ECN policy" {
-    const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    var endpoint = try quic.runtime.Endpoint.bind(
-        allocator,
-        threaded.io(),
-        .{ .ip4 = .loopback(0) },
-        .{},
-    );
-    defer endpoint.deinit();
-    const keys = quic.protection.deriveAes128Keys(
-        [_]u8{0x6b} ** quic.protection.secret_len,
-    );
-    var established = try establishPreconfigured(
-        &endpoint,
-        .{ .ip4 = .loopback(443) },
-        .client,
-        .{
-            .receive_keys = keys,
-            .send_keys = keys,
-            .local_connection_id = "local-ecn-policy",
-            .peer_connection_id = "peer-ecn-policy",
-            .one_rtt = .{ .automatic_ecn_policy = .disabled },
-        },
-    );
-    defer established.deinit();
-    try std.testing.expectEqual(
-        quic.ecn.ValidationState.disabled,
-        quic.one_rtt.testing.ecnPathState(&established.connection),
-    );
-}
-
-test "preconfigured QUIC propagates reset partial delivery policy" {
-    const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    var endpoint = try quic.runtime.Endpoint.bind(
-        allocator,
-        threaded.io(),
-        .{ .ip4 = .loopback(0) },
-        .{},
-    );
-    defer endpoint.deinit();
-    const keys = quic.protection.deriveAes128Keys(
-        [_]u8{0x6c} ** quic.protection.secret_len,
-    );
-    var established = try establishPreconfigured(
-        &endpoint,
-        .{ .ip4 = .loopback(443) },
-        .client,
-        .{
-            .receive_keys = keys,
-            .send_keys = keys,
-            .local_connection_id = "local-reset-partial",
-            .peer_connection_id = "peer-reset-partial",
-            .one_rtt = .{ .enable_reset_partial_delivery = true },
-        },
-    );
-    defer established.deinit();
-    try std.testing.expect(
-        established.connection.resetPartialDeliveryEnabled(),
-    );
-}
-
 fn validateConfiguredVersions(version: quic.Version, available_versions: []const quic.Version) Error!void {
     if (version == .negotiation or quic.isReservedVersionWire(version.wireValue())) return error.InvalidVersionNegotiation;
     if (available_versions.len == 0) return error.InvalidVersionNegotiation;
@@ -872,7 +682,7 @@ fn cipherSuiteEnabled(
     return false;
 }
 
-fn selectServerPsk(
+pub fn selectServerPsk(
     client_hello_bytes: []const u8,
     cipher_suite: quic.tls_client_hello.CipherSuite,
     configured: ServerPsk,
@@ -907,7 +717,7 @@ fn selectServerPsk(
     };
 }
 
-fn lookupAutomaticServerPsk(
+pub fn lookupAutomaticServerPsk(
     client_hello_bytes: []const u8,
     cipher_suite: quic.tls_client_hello.CipherSuite,
     automatic: quic.resumption.ticket.handshake.ServerAutoResume,
@@ -926,102 +736,7 @@ fn lookupAutomaticServerPsk(
     return null;
 }
 
-test "QUIC server selects a later PSK identity without accepting its 0-RTT" {
-    const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    var hello: std.ArrayList(u8) = .empty;
-    defer hello.deinit(allocator);
-    try quic.tls_client_hello.writeClientHello(&hello, allocator, .{
-        .random = [_]u8{0x61} ** 32,
-        .x25519_public_key = [_]u8{0x62} ** 32,
-        .transport_parameters = &.{ 1, 2, 3 },
-        .cipher_suites = &.{.aes_128_gcm_sha256},
-    });
-    var first_secret = quic.tls.secret.Secret.fromSha256([_]u8{0x63} ** 32);
-    defer first_secret.deinit();
-    var later_secret = quic.tls.secret.Secret.fromSha256([_]u8{0x64} ** 32);
-    defer later_secret.deinit();
-    try quic.resumption.tls_psk.appendClientOffersForSecrets(
-        &hello,
-        allocator,
-        &.{
-            .{
-                .identity = "first-ticket",
-                .obfuscated_ticket_age = 11,
-                .psk_secret = first_secret,
-            },
-            .{
-                .identity = "later-ticket",
-                .obfuscated_ticket_age = 17,
-                .psk_secret = later_secret,
-            },
-        },
-        true,
-        null,
-    );
-
-    var later = (try selectServerPsk(
-        hello.items,
-        .aes_128_gcm_sha256,
-        .{
-            .identity = "later-ticket",
-            .secret = [_]u8{0x64} ** 32,
-            .age_add = 7,
-            .issued_at_ms = 1000,
-            .lifetime_seconds = 60,
-            .now_ms = 1010,
-        },
-    )).?;
-    defer later.secret.deinit();
-    try std.testing.expectEqual(@as(u16, 1), later.identity_index);
-    try std.testing.expect(!later.permitsEarlyData());
-
-    var first = (try selectServerPsk(
-        hello.items,
-        .aes_128_gcm_sha256,
-        .{
-            .identity = "first-ticket",
-            .secret = [_]u8{0x63} ** 32,
-            .age_add = 1,
-            .issued_at_ms = 1000,
-            .lifetime_seconds = 60,
-            .now_ms = 1010,
-        },
-    )).?;
-    defer first.secret.deinit();
-    try std.testing.expectEqual(@as(u16, 0), first.identity_index);
-    try std.testing.expect(first.permitsEarlyData());
-
-    var ticket_store = try quic.resumption.ticket.store.Store.init(
-        allocator,
-        threaded.io(),
-        2,
-    );
-    defer ticket_store.deinit();
-    try ticket_store.issue(.{
-        .identity = "later-ticket",
-        .secret = [_]u8{0x64} ** 32,
-        .secret_value = later_secret,
-        .age_add = 7,
-        .cipher_suite = .aes_128_gcm_sha256,
-        .issued_at_ms = 1000,
-        .lifetime_seconds = 60,
-    });
-    var lease = (try lookupAutomaticServerPsk(
-        hello.items,
-        .aes_128_gcm_sha256,
-        .{
-            .allocator = allocator,
-            .store = &ticket_store,
-            .now_ms = 1010,
-        },
-    )).?;
-    defer lease.deinit();
-    try std.testing.expectEqualStrings("later-ticket", lease.identity);
-}
-
-fn configuredGreaseQuicBit(
+pub fn configuredGreaseQuicBit(
     allocator: std.mem.Allocator,
     encoded: []const u8,
     typed: quic.TransportParameters,
@@ -1033,30 +748,6 @@ fn configuredGreaseQuicBit(
         encoded,
         source,
     )).grease_quic_bit;
-}
-
-test "raw transport parameters configure QUIC Bit greasing" {
-    const allocator = std.testing.allocator;
-    var encoded: std.ArrayList(u8) = .empty;
-    defer encoded.deinit(allocator);
-    try quic.encodeTransportParametersForSource(
-        &encoded,
-        allocator,
-        .{ .grease_quic_bit = true },
-        .client,
-    );
-    try std.testing.expect(try configuredGreaseQuicBit(
-        allocator,
-        encoded.items,
-        .{},
-        .client,
-    ));
-    try std.testing.expect(!try configuredGreaseQuicBit(
-        allocator,
-        &.{},
-        .{},
-        .client,
-    ));
 }
 
 fn clientInitialDestinationConnectionId(options: ClientOptions) []const u8 {
@@ -1121,9 +812,9 @@ fn isDiscardableLongHeaderParseError(err: anyerror) bool {
     };
 }
 
-const HandshakeClosePacketType = failure.PacketType;
+pub const HandshakeClosePacketType = failure.PacketType;
 
-fn sendHandshakeProtocolViolation(
+pub fn sendHandshakeProtocolViolation(
     endpoint: *quic.runtime.Endpoint,
     peer: net.IpAddress,
     packet_type: HandshakeClosePacketType,
@@ -1150,96 +841,6 @@ fn sendHandshakeProtocolViolation(
     try state.send(@intFromEnum(quic.TransportErrorCode.protocol_violation), reason_phrase);
 }
 
-test "QUIC handshake protocol violations use the available encryption level" {
-    const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-    var sender = try quic.runtime.Endpoint.bind(
-        allocator,
-        io,
-        .{ .ip4 = .loopback(0) },
-        .{ .max_datagram_size = 4096 },
-    );
-    defer sender.deinit();
-    var receiver = try quic.runtime.Endpoint.bind(
-        allocator,
-        io,
-        .{ .ip4 = .loopback(0) },
-        .{ .max_datagram_size = 4096 },
-    );
-    defer receiver.deinit();
-
-    const dcid = "close-dst";
-    const scid = "close-src";
-    const initial_keys = quic.protection.deriveInitialSecrets(dcid).server;
-    const handshake_keys = quic.protection.deriveAes128Keys(
-        [_]u8{0xf1} ** quic.protection.secret_len,
-    );
-    for ([_]struct {
-        packet_type: HandshakeClosePacketType,
-        keys: quic.protection.PacketProtectionKeys,
-        packet_number: u64,
-    }{
-        .{ .packet_type = .initial, .keys = initial_keys, .packet_number = 7 },
-        .{ .packet_type = .handshake, .keys = handshake_keys, .packet_number = 8 },
-    }) |case| {
-        try sendHandshakeProtocolViolation(
-            &sender,
-            receiver.address(),
-            case.packet_type,
-            case.keys,
-            quic.Version.version_1.wireValue(),
-            dcid,
-            scid,
-            case.packet_number,
-            "reserved bits",
-            null,
-        );
-        var datagram = try receiver.receiveBytes();
-        defer datagram.deinit(allocator);
-        const payload = switch (case.packet_type) {
-            .initial => blk: {
-                var opened = try quic.protection.openInitialPacket(
-                    allocator,
-                    case.keys,
-                    datagram.bytes,
-                    case.packet_number,
-                );
-                defer opened.deinit(allocator);
-                break :blk try allocator.dupe(u8, opened.payload);
-            },
-            .handshake => blk: {
-                var opened = try quic.protection.openHandshakePacket(
-                    allocator,
-                    case.keys,
-                    datagram.bytes,
-                    case.packet_number,
-                );
-                defer opened.deinit(allocator);
-                break :blk try allocator.dupe(u8, opened.payload);
-            },
-        };
-        defer allocator.free(payload);
-        const parsed = try quic.parseFrame(payload);
-        try std.testing.expect(std.mem.allEqual(u8, payload[parsed.consumed..], 0));
-        if (case.packet_type == .initial) try std.testing.expect(datagram.bytes.len >= 1200);
-        try std.testing.expect(parsed.frame == .connection_close);
-        try std.testing.expectEqual(
-            @as(u64, @intFromEnum(quic.TransportErrorCode.protocol_violation)),
-            parsed.frame.connection_close.error_code,
-        );
-        try std.testing.expectEqual(
-            @as(u64, 0),
-            parsed.frame.connection_close.frame_type,
-        );
-        try std.testing.expectEqualStrings(
-            "reserved bits",
-            parsed.frame.connection_close.reason_phrase,
-        );
-    }
-}
-
 fn passiveHandshakeTimeout(
     io: std.Io,
     recovery: retransmit.Config,
@@ -1256,7 +857,7 @@ fn passiveHandshakeTimeout(
     };
 }
 
-fn peekExpectedServerInitial(
+pub fn peekExpectedServerInitial(
     bytes: []const u8,
     version: quic.Version,
     expected_destination_connection_id: []const u8,
@@ -1279,59 +880,7 @@ fn peekExpectedServerInitial(
     return info;
 }
 
-test "QUIC client filters non-target datagrams while waiting for server Initial" {
-    const allocator = std.testing.allocator;
-    const dcid = [_]u8{ 0xa0, 0xa1, 0xa2, 0xa3 };
-    const scid = [_]u8{ 0xa4, 0xa5, 0xa6, 0xa7 };
-    const keys = quic.protection.deriveInitialSecrets(&dcid).server;
-    const initial = try quic.protection.sealInitialPacket(
-        allocator,
-        keys,
-        .{
-            .destination_connection_id = &dcid,
-            .source_connection_id = &scid,
-            .packet_number = 0,
-            .payload = &.{@intFromEnum(quic.FrameType.ping)},
-        },
-    );
-    defer allocator.free(initial);
-    const handshake = try quic.protection.sealHandshakePacket(
-        allocator,
-        quic.protection.deriveAes128Keys(
-            [_]u8{0x61} ** quic.protection.secret_len,
-        ),
-        .{
-            .destination_connection_id = &dcid,
-            .source_connection_id = &scid,
-            .packet_number = 0,
-            .payload = &.{@intFromEnum(quic.FrameType.ping)},
-        },
-    );
-    defer allocator.free(handshake);
-    try std.testing.expect(try peekExpectedServerInitial(
-        handshake,
-        .version_1,
-        &dcid,
-        false,
-    ) == null);
-    try std.testing.expect(try peekExpectedServerInitial(
-        initial,
-        .version_1,
-        "other",
-        false,
-    ) == null);
-
-    const info = (try peekExpectedServerInitial(
-        initial,
-        .version_1,
-        &dcid,
-        false,
-    )) orelse return error.InvalidHandshakeFlight;
-    try std.testing.expectEqual(quic.protection.ProtectedLongPacketType.initial, info.packet_type);
-    try std.testing.expectEqualSlices(u8, &dcid, info.destination_connection_id);
-}
-
-const EarlyDataFlight = struct {
+pub const EarlyDataFlight = struct {
     endpoint: *quic.runtime.Endpoint,
     peer: net.IpAddress,
     initial_keys: quic.protection.PacketProtectionKeys,
@@ -1344,7 +893,7 @@ const EarlyDataFlight = struct {
     sent_packet_count: usize = 0,
     sent_packet_len: usize = 0,
 
-    fn send(context: *anyopaque, retransmission: u8) anyerror!void {
+    pub fn send(context: *anyopaque, retransmission: u8) anyerror!void {
         const self: *EarlyDataFlight = @ptrCast(@alignCast(context));
         var initial_options = self.initial_options;
         initial_options.initial.packet_number = std.math.add(
@@ -3407,7 +2956,7 @@ fn acceptInternal(
     );
 }
 
-fn containsHandshakePacket(datagram: []const u8) bool {
+pub fn containsHandshakePacket(datagram: []const u8) bool {
     var tail = datagram;
     return (nextHandshakePacketFromCoalescedTail(
         &tail,
@@ -3415,7 +2964,7 @@ fn containsHandshakePacket(datagram: []const u8) bool {
     ) catch return false) != null;
 }
 
-fn openClientHandshakeCryptoFromDatagram(
+pub fn openClientHandshakeCryptoFromDatagram(
     endpoint: *quic.runtime.Endpoint,
     from: net.IpAddress,
     datagram: []const u8,
@@ -3523,7 +3072,7 @@ fn openClientHandshakeCryptoFromDatagram(
     return error.MissingCryptoFrame;
 }
 
-fn receiveClientHandshakeCryptoFromDatagram(
+pub fn receiveClientHandshakeCryptoFromDatagram(
     endpoint: *quic.runtime.Endpoint,
     source: quic.runtime.DatagramSource,
     expected_from: net.IpAddress,
@@ -3601,192 +3150,6 @@ fn coalescedOneRttTail(
         tail = tail[info.len..];
     }
     return tail;
-}
-
-test "QUIC server finds Client Finished behind coalesced Initial" {
-    const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    var endpoint = try quic.runtime.Endpoint.bind(
-        allocator,
-        threaded.io(),
-        .{ .ip4 = .loopback(0) },
-        .{ .max_datagram_size = 4096 },
-    );
-    defer endpoint.deinit();
-
-    const dcid = "server01";
-    const scid = "client01";
-    const initial_keys = quic.protection
-        .deriveInitialSecrets(dcid).client;
-    var initial_payload: std.ArrayList(u8) = .empty;
-    defer initial_payload.deinit(allocator);
-    try quic.appendPadding(&initial_payload, allocator, 1);
-    const initial = try quic.protection.sealInitialPacket(
-        allocator,
-        initial_keys,
-        .{
-            .destination_connection_id = dcid,
-            .source_connection_id = scid,
-            .packet_number = 1,
-            .payload = initial_payload.items,
-        },
-    );
-    defer allocator.free(initial);
-
-    const handshake_keys = quic.protection.deriveAes128Keys(
-        [_]u8{0x5a} ** quic.protection.secret_len,
-    );
-    const finished = [_]u8{
-        0x14, // TLS Finished handshake message.
-        0,
-        0,
-        32,
-    } ++ ([_]u8{0xa5} ** 32);
-    var handshake_payload: std.ArrayList(u8) = .empty;
-    defer handshake_payload.deinit(allocator);
-    try quic.crypto_stream.writeCryptoFrames(
-        &handshake_payload,
-        allocator,
-        0,
-        &finished,
-        finished.len,
-    );
-    const handshake = try quic.protection.sealHandshakePacket(
-        allocator,
-        handshake_keys,
-        .{
-            .destination_connection_id = dcid,
-            .source_connection_id = scid,
-            .packet_number = 0,
-            .payload = handshake_payload.items,
-        },
-    );
-    defer allocator.free(handshake);
-    const unauthenticated_handshake = try allocator.dupe(u8, handshake);
-    defer allocator.free(unauthenticated_handshake);
-    unauthenticated_handshake[unauthenticated_handshake.len - 1] ^= 0x80;
-    const application_keys = quic.protection.deriveAes128Keys(
-        [_]u8{0x6b} ** quic.protection.secret_len,
-    );
-    var application_payload: std.ArrayList(u8) = .empty;
-    defer application_payload.deinit(allocator);
-    try (quic.Frame{ .stream = .{
-        .stream_id = 2,
-        .data = "client control",
-        .fin = false,
-    } }).write(&application_payload, allocator);
-    const application = try quic.protection.sealShortPacket(
-        allocator,
-        application_keys,
-        .{
-            .destination_connection_id = dcid,
-            .packet_number = 3,
-            .payload = application_payload.items,
-        },
-    );
-    defer allocator.free(application);
-
-    const coalesced = try std.mem.concat(
-        allocator,
-        u8,
-        &.{ initial, unauthenticated_handshake, handshake, application },
-    );
-    defer allocator.free(coalesced);
-    try std.testing.expect(containsHandshakePacket(coalesced));
-    var opened = try openClientHandshakeCryptoFromDatagram(
-        &endpoint,
-        .{ .ip4 = .loopback(4433) },
-        coalesced,
-        .not_ect,
-        handshake_keys,
-        0,
-        1024,
-        false,
-        false,
-        null,
-    );
-    defer opened.deinit(allocator);
-    try std.testing.expectEqualSlices(
-        u8,
-        &finished,
-        opened.crypto_data,
-    );
-    try std.testing.expectEqualSlices(
-        u8,
-        application,
-        opened.coalesced_one_rtt.?,
-    );
-}
-
-test "QUIC server waits past unauthenticated client Handshake datagram" {
-    const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-    var receiver = try quic.runtime.Endpoint.bind(
-        allocator,
-        io,
-        .{ .ip4 = .loopback(0) },
-        .{ .max_datagram_size = 4096 },
-    );
-    defer receiver.deinit();
-    var sender = try quic.runtime.Endpoint.bind(
-        allocator,
-        io,
-        .{ .ip4 = .loopback(0) },
-        .{ .max_datagram_size = 4096 },
-    );
-    defer sender.deinit();
-
-    const keys = quic.protection.deriveAes128Keys(
-        [_]u8{0x6c} ** quic.protection.secret_len,
-    );
-    const dcid = "server02";
-    const scid = "client02";
-    const finished = [_]u8{ 0x14, 0, 0, 32 } ++ ([_]u8{0xa6} ** 32);
-    var payload: std.ArrayList(u8) = .empty;
-    defer payload.deinit(allocator);
-    try quic.crypto_stream.writeCryptoFrames(
-        &payload,
-        allocator,
-        0,
-        &finished,
-        finished.len,
-    );
-    const valid = try quic.protection.sealHandshakePacket(allocator, keys, .{
-        .destination_connection_id = dcid,
-        .source_connection_id = scid,
-        .packet_number = 1,
-        .payload = payload.items,
-    });
-    defer allocator.free(valid);
-    const corrupted = try allocator.dupe(u8, valid);
-    defer allocator.free(corrupted);
-    corrupted[corrupted.len - 1] ^= 0x80;
-    try sender.sendBytes(receiver.address(), valid);
-    var anti_amplification = retransmit.AntiAmplificationBudget{
-        .validated = true,
-    };
-
-    var opened = try receiveClientHandshakeCryptoFromDatagram(
-        &receiver,
-        quic.runtime.DatagramSource.fromEndpoint(&receiver),
-        sender.address(),
-        sender.address(),
-        corrupted,
-        .not_ect,
-        keys,
-        0,
-        1024,
-        false,
-        false,
-        .{ .initial_pto_ms = 10, .max_pto_ms = 10 },
-        &anti_amplification,
-    );
-    defer opened.deinit(allocator);
-    try std.testing.expectEqualSlices(u8, &finished, opened.crypto_data);
-    try std.testing.expectEqual(@as(u64, 1), opened.packet.packet_number);
 }
 
 fn serverOriginalDestinationConnectionId(received_destination_connection_id: []const u8, options: ServerOptions) []const u8 {
@@ -4086,7 +3449,7 @@ fn receiveRetriedClientInitial(
     }
 }
 
-fn receiveServerHandshakeCrypto(
+pub fn receiveServerHandshakeCrypto(
     endpoint: *quic.runtime.Endpoint,
     source: quic.runtime.DatagramSource,
     from: net.IpAddress,
@@ -4250,7 +3613,7 @@ fn receiveServerHandshakeCrypto(
     }
 }
 
-fn nextHandshakePacketFromCoalescedTail(
+pub fn nextHandshakePacketFromCoalescedTail(
     tail: *[]const u8,
     allow_zero_fixed_bit: bool,
 ) Error!?[]const u8 {
@@ -4270,180 +3633,7 @@ fn nextHandshakePacketFromCoalescedTail(
     return null;
 }
 
-test "QUIC handshake receive skips non-handshake coalesced tail packets" {
-    const allocator = std.testing.allocator;
-    const dcid = [_]u8{ 0x80, 0x81, 0x82, 0x83 };
-    const scid = [_]u8{ 0x84, 0x85, 0x86, 0x87 };
-    const initial_keys =
-        quic.protection.deriveInitialSecrets(&dcid).server;
-    var initial_payload: std.ArrayList(u8) = .empty;
-    defer initial_payload.deinit(allocator);
-    try quic.appendPadding(&initial_payload, allocator, 1);
-    const initial = try quic.protection.sealInitialPacket(
-        allocator,
-        initial_keys,
-        .{
-            .destination_connection_id = &dcid,
-            .source_connection_id = &scid,
-            .packet_number = 0,
-            .payload = initial_payload.items,
-        },
-    );
-    defer allocator.free(initial);
-
-    const handshake_keys =
-        quic.protection.deriveAes128Keys([_]u8{0x52} ** quic.protection.secret_len);
-    var handshake_payload: std.ArrayList(u8) = .empty;
-    defer handshake_payload.deinit(allocator);
-    try quic.appendPadding(&handshake_payload, allocator, 1);
-    const handshake_packet = try quic.protection.sealHandshakePacket(
-        allocator,
-        handshake_keys,
-        .{
-            .destination_connection_id = &dcid,
-            .source_connection_id = &scid,
-            .packet_number = 0,
-            .payload = handshake_payload.items,
-        },
-    );
-    defer allocator.free(handshake_packet);
-
-    var coalesced: std.ArrayList(u8) = .empty;
-    defer coalesced.deinit(allocator);
-    try coalesced.appendSlice(allocator, initial);
-    try coalesced.appendSlice(allocator, handshake_packet);
-    try coalesced.append(allocator, 0x40);
-
-    var tail: []const u8 = coalesced.items;
-    const found = (try nextHandshakePacketFromCoalescedTail(
-        &tail,
-        false,
-    )) orelse return error.InvalidHandshakeFlight;
-    try std.testing.expectEqualSlices(u8, handshake_packet, found);
-    try std.testing.expectEqual(@as(usize, 1), tail.len);
-    try std.testing.expectEqual(@as(?[]const u8, null), try nextHandshakePacketFromCoalescedTail(
-        &tail,
-        false,
-    ));
-    try std.testing.expectEqual(@as(usize, 0), tail.len);
-}
-
-test "QUIC handshake receive skips many CRYPTO-less Handshake packets" {
-    const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    var endpoint = try quic.runtime.Endpoint.bind(
-        allocator,
-        threaded.io(),
-        .{ .ip4 = .loopback(0) },
-        .{ .max_datagram_size = 1200 },
-    );
-    defer endpoint.deinit();
-
-    const keys =
-        quic.protection.deriveAes128Keys([_]u8{0x53} ** quic.protection.secret_len);
-    const dcid = [_]u8{ 0x90, 0x91, 0x92, 0x93 };
-    const scid = [_]u8{ 0x94, 0x95, 0x96, 0x97 };
-
-    var coalesced: std.ArrayList(u8) = .empty;
-    defer coalesced.deinit(allocator);
-    var ack_packet_number: u64 = 0;
-    while (ack_packet_number < 9) : (ack_packet_number += 1) {
-        var ack_only_payload: std.ArrayList(u8) = .empty;
-        defer ack_only_payload.deinit(allocator);
-        try quic.appendPadding(&ack_only_payload, allocator, 1);
-        const ack_only = try quic.protection.sealHandshakePacket(
-            allocator,
-            keys,
-            .{
-                .destination_connection_id = &dcid,
-                .source_connection_id = &scid,
-                .packet_number = ack_packet_number,
-                .payload = ack_only_payload.items,
-            },
-        );
-        defer allocator.free(ack_only);
-        try coalesced.appendSlice(allocator, ack_only);
-    }
-
-    const tls_flight = [_]u8{
-        0x08, 0x00, 0x00, 0x00, // EncryptedExtensions with an empty body.
-        0x14, 0x00, 0x00, 0x00, // Finished with an empty body.
-    };
-    var crypto_payload: std.ArrayList(u8) = .empty;
-    defer crypto_payload.deinit(allocator);
-    try quic.crypto_stream.writeCryptoFrames(
-        &crypto_payload,
-        allocator,
-        0,
-        &tls_flight,
-        tls_flight.len,
-    );
-    const crypto_packet = try quic.protection.sealHandshakePacket(
-        allocator,
-        keys,
-        .{
-            .destination_connection_id = &dcid,
-            .source_connection_id = &scid,
-            .packet_number = ack_packet_number,
-            .payload = crypto_payload.items,
-        },
-    );
-    defer allocator.free(crypto_packet);
-    const unauthenticated_packet = try allocator.dupe(u8, crypto_packet);
-    defer allocator.free(unauthenticated_packet);
-    unauthenticated_packet[unauthenticated_packet.len - 1] ^= 0x80;
-    try coalesced.appendSlice(allocator, unauthenticated_packet);
-    try coalesced.appendSlice(allocator, crypto_packet);
-    const application_keys = quic.protection.deriveAes128Keys(
-        [_]u8{0x54} ** quic.protection.secret_len,
-    );
-    const application_packet = try quic.protection.sealShortPacket(
-        allocator,
-        application_keys,
-        .{
-            .destination_connection_id = &dcid,
-            .packet_number = 3,
-            .payload = &.{@intFromEnum(quic.FrameType.ping)},
-        },
-    );
-    defer allocator.free(application_packet);
-    try coalesced.appendSlice(allocator, application_packet);
-
-    const client_keys = quic.protection.deriveAes128Keys(
-        [_]u8{0x55} ** quic.protection.secret_len,
-    );
-    var next_client_packet_number: u64 = 0;
-    var received = try receiveServerHandshakeCrypto(
-        &endpoint,
-        quic.runtime.DatagramSource.fromEndpoint(&endpoint),
-        endpoint.address(),
-        coalesced.items,
-        .ce,
-        keys,
-        client_keys,
-        &next_client_packet_number,
-        0,
-        1024,
-        false,
-        false,
-        .{},
-    );
-    defer received.deinit(allocator);
-    try std.testing.expectEqual(@as(u64, 1), next_client_packet_number);
-    try std.testing.expectEqualStrings(&tls_flight, received.crypto_data);
-    try std.testing.expectEqualSlices(
-        u8,
-        application_packet,
-        received.coalesced_one_rtt.?,
-    );
-    try std.testing.expectEqual(
-        quic.packet_space.EcnCodepoint.ce,
-        received.coalesced_one_rtt_ecn,
-    );
-}
-
-fn openClientEarlyData(
+pub fn openClientEarlyData(
     endpoint: *quic.runtime.Endpoint,
     from: net.IpAddress,
     coalesced_tail: []const u8,
@@ -4497,84 +3687,6 @@ fn openClientEarlyData(
         return error.InvalidInitialPacket;
     }
     return packet;
-}
-
-test "QUIC handshake discards unauthenticated 0-RTT before frame parsing" {
-    const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    var endpoint = try quic.runtime.Endpoint.bind(
-        allocator,
-        threaded.io(),
-        .{ .ip4 = .loopback(0) },
-        .{ .max_datagram_size = 4096 },
-    );
-    defer endpoint.deinit();
-
-    const dcid = "earlydst";
-    const scid = "earlysrc";
-    const keys = quic.protection.deriveAes128Keys(
-        [_]u8{0xe8} ** quic.protection.secret_len,
-    );
-    const payload = try quic.zero_rtt.encodeFrames(
-        allocator,
-        &.{.{ .stream = .{ .stream_id = 0, .data = "early" } }},
-    );
-    defer allocator.free(payload);
-    const corrupted = try quic.protection.sealZeroRttPacket(
-        allocator,
-        keys,
-        .{
-            .destination_connection_id = dcid,
-            .source_connection_id = scid,
-            .packet_number = 0,
-            .payload = payload,
-        },
-    );
-    defer allocator.free(corrupted);
-    corrupted[corrupted.len - 1] ^= 0x80;
-    try std.testing.expect((try openClientEarlyData(
-        &endpoint,
-        endpoint.address(),
-        corrupted,
-        keys,
-        0,
-        8,
-        dcid,
-        scid,
-        false,
-    )) == null);
-
-    const forbidden_payload = try quic.zero_rtt.encodeFrames(
-        allocator,
-        &.{.{ .crypto = .{ .offset = 0, .data = "forbidden" } }},
-    );
-    defer allocator.free(forbidden_payload);
-    const authenticated = try quic.protection.sealZeroRttPacket(
-        allocator,
-        keys,
-        .{
-            .destination_connection_id = dcid,
-            .source_connection_id = scid,
-            .packet_number = 1,
-            .payload = forbidden_payload,
-        },
-    );
-    defer allocator.free(authenticated);
-    try std.testing.expectError(
-        error.InvalidFrame,
-        openClientEarlyData(
-            &endpoint,
-            endpoint.address(),
-            authenticated,
-            keys,
-            0,
-            8,
-            dcid,
-            scid,
-            false,
-        ),
-    );
 }
 
 fn receiveStandaloneClientEarlyData(
@@ -4690,7 +3802,7 @@ fn receiveFromSourceBefore(
         };
 }
 
-fn validateClientInitialTail(
+pub fn validateClientInitialTail(
     bytes: []const u8,
     version: quic.Version,
     allow_zero_fixed_bit: bool,
@@ -4710,66 +3822,6 @@ fn validateClientInitialTail(
         }
         tail = tail[info.len..];
     }
-}
-
-test "QUIC server accepts Initial packets and datagram padding after ClientHello" {
-    const allocator = std.testing.allocator;
-    const dcid = "server01";
-    const scid = "client01";
-    const keys = quic.protection.deriveInitialSecrets(dcid).client;
-    const padding = [_]u8{@intFromEnum(quic.FrameType.padding)};
-    const initial = try quic.protection.sealInitialPacket(
-        allocator,
-        keys,
-        .{
-            .destination_connection_id = dcid,
-            .source_connection_id = scid,
-            .packet_number = 1,
-            .payload = &padding,
-        },
-    );
-    defer allocator.free(initial);
-    try validateClientInitialTail(
-        initial,
-        .version_1,
-        false,
-    );
-    try validateClientInitialTail(
-        &([_]u8{0} ** 906),
-        .version_1,
-        false,
-    );
-    var initial_and_padding: std.ArrayList(u8) = .empty;
-    defer initial_and_padding.deinit(allocator);
-    try initial_and_padding.appendSlice(allocator, initial);
-    try initial_and_padding.appendNTimes(allocator, 0, 64);
-    try validateClientInitialTail(
-        initial_and_padding.items,
-        .version_1,
-        false,
-    );
-
-    const zero_rtt = try quic.protection.sealZeroRttPacket(
-        allocator,
-        quic.protection.deriveAes128Keys(
-            [_]u8{0x42} ** quic.protection.secret_len,
-        ),
-        .{
-            .destination_connection_id = dcid,
-            .source_connection_id = scid,
-            .packet_number = 0,
-            .payload = &padding,
-        },
-    );
-    defer allocator.free(zero_rtt);
-    try std.testing.expectError(
-        error.InvalidHandshakeFlight,
-        validateClientInitialTail(
-            zero_rtt,
-            .version_1,
-            false,
-        ),
-    );
 }
 
 fn establishedConnection(
@@ -4895,7 +3947,7 @@ fn clientTransportParameters(
     return encoded.items;
 }
 
-fn serverTransportParameters(
+pub fn serverTransportParameters(
     allocator: std.mem.Allocator,
     options: ServerOptions,
     receive_capacity: usize,
@@ -5003,7 +4055,7 @@ fn validateClientTransportParameters(
     try validatePeerVersionInformation(params.version_information, expected_version, available_versions, false);
 }
 
-fn validateServerTransportParameters(
+pub fn validateServerTransportParameters(
     params: quic.TransportParameters,
     initial_source_connection_id: []const u8,
     original_destination_connection_id: []const u8,
@@ -5063,66 +4115,6 @@ fn validatePeerVersionInformation(
     }
 }
 
-test "QUIC server Version Information may omit its chosen version" {
-    const only_v2 = [_]u8{ 0x6b, 0x33, 0x43, 0xcf };
-    const base = quic.TransportParameters{
-        .original_destination_connection_id = "original",
-        .initial_source_connection_id = "server",
-        .version_information = .{
-            .chosen_version = .version_1,
-            .available_versions_wire = &only_v2,
-        },
-    };
-    try validateServerTransportParameters(
-        base,
-        "server",
-        "original",
-        &.{},
-        .version_1,
-        &.{ .version_1, .version_2 },
-        false,
-    );
-
-    var empty_available = base;
-    empty_available.version_information.?.available_versions_wire = &.{};
-    try validateServerTransportParameters(
-        empty_available,
-        "server",
-        "original",
-        &.{},
-        .version_1,
-        &.{.version_1},
-        false,
-    );
-    try std.testing.expectError(
-        error.InvalidTransportParameter,
-        validateServerTransportParameters(
-            empty_available,
-            "server",
-            "original",
-            &.{},
-            .version_1,
-            &.{.version_1},
-            true,
-        ),
-    );
-}
-
-test "QUIC server with a zero-length CID cannot provide a preferred address" {
-    try std.testing.expectError(
-        error.InvalidTransportParameter,
-        validateServerTransportParameters(.{
-            .original_destination_connection_id = "original",
-            .initial_source_connection_id = &.{},
-            .preferred_address = .{
-                .ipv4_address = .{ 127, 0, 0, 1 },
-                .ipv4_port = 4433,
-                .connection_id = "preferred",
-            },
-        }, &.{}, "original", &.{}, .version_1, &.{.version_1}, false),
-    );
-}
-
 const ServerFlight = struct {
     encrypted_extensions: []const u8,
     certificate_request: ?[]const u8 = null,
@@ -5133,7 +4125,7 @@ const ServerFlight = struct {
     finished: []const u8,
 };
 
-fn splitServerFlight(
+pub fn splitServerFlight(
     bytes: []const u8,
     authenticated_server: bool,
 ) Error!ServerFlight {
@@ -5250,7 +4242,7 @@ fn random32(io: std.Io, provided: ?[32]u8) std.Io.RandomSecureError![32]u8 {
     return out;
 }
 
-fn sampledSpinBitConfig(
+pub fn sampledSpinBitConfig(
     config: OneRttConfig,
     connection_random: [32]u8,
 ) OneRttConfig {
@@ -5258,138 +4250,6 @@ fn sampledSpinBitConfig(
     effective.enable_spin_bit = config.enable_spin_bit and
         (connection_random[0] & 0x0f) != 0;
     return effective;
-}
-
-test "QUIC early-data flight skips protected PN after zero socket progress" {
-    const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-    var receiver = try quic.runtime.Endpoint.bind(
-        allocator,
-        io,
-        .{ .ip4 = .loopback(0) },
-        .{ .max_datagram_size = 1200 },
-    );
-    defer receiver.deinit();
-    var sender = try quic.runtime.Endpoint.bind(
-        allocator,
-        io,
-        .{ .ip4 = .loopback(0) },
-        .{ .max_datagram_size = 1200, .enable_gso_send = false },
-    );
-    defer sender.deinit();
-
-    const RejectFirstZeroRtt = struct {
-        delegate: std.Io,
-        rejected: bool = false,
-
-        fn netSend(
-            userdata: ?*anyopaque,
-            socket_handle: net.Socket.Handle,
-            messages: []net.OutgoingMessage,
-            flags: net.SendFlags,
-        ) struct { ?net.Socket.SendError, usize } {
-            const self: *@This() = @ptrCast(@alignCast(userdata));
-            if (!self.rejected and messages.len == 1) {
-                const bytes = messages[0].data_ptr[0..messages[0].data_len];
-                if ((bytes[0] & 0x30) == 0x10) {
-                    self.rejected = true;
-                    return .{ error.NetworkDown, 0 };
-                }
-            }
-            return self.delegate.vtable.netSend(
-                self.delegate.userdata,
-                socket_handle,
-                messages,
-                flags,
-            );
-        }
-    };
-    var reject = RejectFirstZeroRtt{ .delegate = sender.io };
-    var rejecting_vtable = sender.io.vtable.*;
-    rejecting_vtable.netSend = RejectFirstZeroRtt.netSend;
-    sender.io = .{ .userdata = &reject, .vtable = &rejecting_vtable };
-    defer sender.io = reject.delegate;
-
-    const initial_keys = quic.protection
-        .deriveInitialSecrets("earlypn1").client;
-    const zero_rtt_keys = quic.protection.deriveAes128Keys(
-        [_]u8{0xd8} ** quic.protection.secret_len,
-    );
-    var context = EarlyDataFlight{
-        .endpoint = &sender,
-        .peer = receiver.address(),
-        .initial_keys = initial_keys,
-        .initial_options = .{
-            .initial = .{
-                .destination_connection_id = "earlypn1",
-                .source_connection_id = "client",
-                .packet_number = 10,
-                .crypto_data = "initial",
-            },
-            .max_datagram_size = 1200,
-            .max_datagrams = 4,
-        },
-        .zero_rtt_keys = zero_rtt_keys,
-        .zero_rtt_options = .{
-            .destination_connection_id = "earlypn1",
-            .source_connection_id = "client",
-            .packet_number = 0,
-            .frames = &.{.{ .stream = .{
-                .stream_id = 0,
-                .data = "early",
-            } }},
-        },
-    };
-    try EarlyDataFlight.send(&context, 0);
-    try std.testing.expectEqual(@as(u64, 1), context.protected_packet_count);
-    try std.testing.expectEqual(@as(usize, 0), context.sent_packet_count);
-    try EarlyDataFlight.send(&context, 1);
-    try std.testing.expectEqual(@as(u64, 2), context.protected_packet_count);
-    try std.testing.expectEqual(@as(usize, 1), context.sent_packet_count);
-    try std.testing.expectEqual(@as(u64, 1), context.sent_packet_numbers[0]);
-
-    var first_initial = try receiver.receiveBytes();
-    defer first_initial.deinit(allocator);
-    var opened_first_initial = try quic.protection.openInitialPacket(
-        allocator,
-        initial_keys,
-        first_initial.bytes,
-        10,
-    );
-    defer opened_first_initial.deinit(allocator);
-    try std.testing.expectEqual(
-        @as(u64, 10),
-        opened_first_initial.packet_number,
-    );
-
-    var retry_initial = try receiver.receiveBytes();
-    defer retry_initial.deinit(allocator);
-    var opened_retry_initial = try quic.protection.openInitialPacket(
-        allocator,
-        initial_keys,
-        retry_initial.bytes,
-        14,
-    );
-    defer opened_retry_initial.deinit(allocator);
-    try std.testing.expectEqual(
-        @as(u64, 14),
-        opened_retry_initial.packet_number,
-    );
-
-    var early = try receiver.receiveBytes();
-    defer early.deinit(allocator);
-    var opened_early = try quic.zero_rtt.openBytes(
-        &receiver,
-        early.from,
-        early.bytes,
-        zero_rtt_keys,
-        1,
-        8,
-    );
-    defer opened_early.deinit(allocator);
-    try std.testing.expectEqual(@as(u64, 1), opened_early.packet.packet_number);
 }
 
 fn chooseAlpn(server_protocol: []const u8, client_protocols: []const []const u8) Error![]const u8 {
@@ -5406,443 +4266,7 @@ fn ensureOfferedAlpn(offered: []const []const u8, selected: []const u8) Error!vo
     return error.MissingAlpn;
 }
 
-test "QUIC handshake one-RTT config propagates local ACK policy" {
-    const keys = quic.protection.deriveAes128Keys(
-        [_]u8{0xa1} ** quic.protection.secret_len,
-    );
-    const defaults = (OneRttConfig{}).apply(
-        .version_1,
-        .{ .ip4 = .loopback(443) },
-        keys,
-        keys,
-        "local",
-        "peer",
-        .client,
-        .{},
-        .{},
-    );
-    try std.testing.expectEqual(
-        @as(u64, 2),
-        defaults.local_ack_eliciting_threshold,
-    );
-    try std.testing.expectEqual(
-        @as(u64, 25_000),
-        defaults.local_max_ack_delay_us,
-    );
-    const applied = (OneRttConfig{
-        .local_ack_eliciting_threshold = 2,
-        .local_max_ack_delay_us = 25_000,
-        .local_ack_reordering_threshold = 3,
-    }).apply(
-        .version_1,
-        .{ .ip4 = .loopback(443) },
-        keys,
-        keys,
-        "local",
-        "peer",
-        .client,
-        .{},
-        .{},
-    );
-    try std.testing.expectEqual(@as(u64, 2), applied.local_ack_eliciting_threshold);
-    try std.testing.expectEqual(@as(u64, 25_000), applied.local_max_ack_delay_us);
-    try std.testing.expectEqual(@as(u64, 3), applied.local_ack_reordering_threshold);
-    const clamped = (OneRttConfig{
-        .local_ack_eliciting_threshold = 2,
-        .local_max_ack_delay_us = 25_000,
-    }).apply(
-        .version_1,
-        .{ .ip4 = .loopback(443) },
-        keys,
-        keys,
-        "local",
-        "peer",
-        .client,
-        .{ .max_ack_delay = 10 },
-        .{},
-    );
-    try std.testing.expectEqual(@as(u64, 10_000), clamped.local_max_ack_delay_us);
-    try std.testing.expect(defaults.automatic_ack_frequency_request == null);
-    const negotiated = (OneRttConfig{
-        .ack_frequency_request = .{
-            .request_max_ack_delay_us = 50_000,
-        },
-    }).apply(
-        .version_1,
-        .{ .ip4 = .loopback(443) },
-        keys,
-        keys,
-        "local",
-        "peer",
-        .client,
-        .{ .min_ack_delay = 1_000 },
-        .{ .min_ack_delay = 2_000 },
-    );
-    try std.testing.expectEqual(
-        @as(u64, 3),
-        negotiated.automatic_ack_frequency_request.?
-            .ack_eliciting_threshold,
-    );
-    try std.testing.expectEqual(
-        @as(?u64, 50_000),
-        negotiated.automatic_ack_frequency_request.?
-            .request_max_ack_delay_us,
-    );
-    const disabled_request = (OneRttConfig{
-        .ack_frequency_request = null,
-    }).apply(
-        .version_1,
-        .{ .ip4 = .loopback(443) },
-        keys,
-        keys,
-        "local",
-        "peer",
-        .client,
-        .{ .min_ack_delay = 1_000 },
-        .{ .min_ack_delay = 2_000 },
-    );
-    try std.testing.expect(
-        disabled_request.automatic_ack_frequency_request == null,
-    );
-}
-
-test "QUIC handshake one-RTT config propagates DATAGRAM queue limits" {
-    const keys = quic.protection.deriveAes128Keys(
-        [_]u8{0xa2} ** quic.protection.secret_len,
-    );
-    const defaults = (OneRttConfig{}).apply(
-        .version_1,
-        .{ .ip4 = .loopback(443) },
-        keys,
-        keys,
-        "local",
-        "peer",
-        .client,
-        .{},
-        .{},
-    );
-    try std.testing.expectEqual(@as(usize, 16), defaults.max_datagram_queue_items);
-    try std.testing.expectEqual(
-        quic.one_rtt.default_max_datagram_queue_bytes,
-        defaults.max_datagram_queue_bytes,
-    );
-    const direct_only = (OneRttConfig{
-        .max_datagram_queue_items = 0,
-        .max_datagram_queue_bytes = 0,
-    }).apply(
-        .version_1,
-        .{ .ip4 = .loopback(443) },
-        keys,
-        keys,
-        "local",
-        "peer",
-        .server,
-        .{},
-        .{},
-    );
-    try std.testing.expectEqual(@as(usize, 0), direct_only.max_datagram_queue_items);
-    try std.testing.expectEqual(@as(usize, 0), direct_only.max_datagram_queue_bytes);
-    const burst = (OneRttConfig{
-        .max_datagram_queue_items = 64,
-        .max_datagram_queue_bytes = 256 * 1024,
-    }).apply(
-        .version_1,
-        .{ .ip4 = .loopback(443) },
-        keys,
-        keys,
-        "local",
-        "peer",
-        .client,
-        .{},
-        .{},
-    );
-    try std.testing.expectEqual(@as(usize, 64), burst.max_datagram_queue_items);
-    try std.testing.expectEqual(
-        @as(usize, 256 * 1024),
-        burst.max_datagram_queue_bytes,
-    );
-}
-
-test "QUIC handshake one-RTT config propagates pacing policy" {
-    const keys = quic.protection.deriveAes128Keys(
-        [_]u8{0xa3} ** quic.protection.secret_len,
-    );
-    const defaults = (OneRttConfig{}).apply(
-        .version_1,
-        .{ .ip4 = .loopback(443) },
-        keys,
-        keys,
-        "local",
-        "peer",
-        .client,
-        .{},
-        .{},
-    );
-    try std.testing.expect(defaults.enable_pacing);
-    try std.testing.expectEqual(
-        quic.pacing.Pacer.default_max_burst_packets,
-        defaults.pacing_max_burst_packets,
-    );
-    try std.testing.expectEqual(
-        @as(?u64, null),
-        defaults.max_pacing_rate_bytes_per_second,
-    );
-
-    const configured = (OneRttConfig{
-        .enable_pacing = false,
-        .pacing_max_burst_packets = 3,
-        .max_pacing_rate_bytes_per_second = 750_000,
-    }).apply(
-        .version_1,
-        .{ .ip4 = .loopback(443) },
-        keys,
-        keys,
-        "local",
-        "peer",
-        .server,
-        .{},
-        .{},
-    );
-    try std.testing.expect(!configured.enable_pacing);
-    try std.testing.expectEqual(@as(usize, 3), configured.pacing_max_burst_packets);
-    try std.testing.expectEqual(
-        @as(?u64, 750_000),
-        configured.max_pacing_rate_bytes_per_second,
-    );
-}
-
-test "QUIC server transport parameters bind reset token to local CID" {
-    const allocator = std.testing.allocator;
-    const key = [_]u8{0x81} ** quic.stateless_reset.static_key_len;
-    const cid = "server-reset-cid";
-    const expected = quic.stateless_reset.tokenForConnectionId(key, cid);
-    var local = quic.practical_transport_parameters;
-    var encoded: std.ArrayList(u8) = .empty;
-    defer encoded.deinit(allocator);
-    const bytes = try serverTransportParameters(allocator, .{
-        .local_connection_id = cid,
-        .initial_one_rtt_config = .{
-            .local_stateless_reset_key = key,
-        },
-    }, 4096, "original", &.{}, &local, &encoded);
-    try std.testing.expectEqual(@as(u64, 4096), local.max_udp_payload_size);
-    try std.testing.expectEqualSlices(
-        u8,
-        &expected,
-        &local.stateless_reset_token.?,
-    );
-    const parsed = try quic.parseTransportParametersTyped(
-        allocator,
-        bytes,
-        .server,
-    );
-    try std.testing.expectEqual(@as(u64, 4096), parsed.max_udp_payload_size);
-    try std.testing.expectEqualSlices(
-        u8,
-        &expected,
-        &parsed.stateless_reset_token.?,
-    );
-
-    var preferred_local = quic.practical_transport_parameters;
-    preferred_local.preferred_address = .{
-        .ipv4_address = .{ 127, 0, 0, 1 },
-        .ipv4_port = 4433,
-        .connection_id = "preferred-reset-cid",
-    };
-    var preferred_encoded: std.ArrayList(u8) = .empty;
-    defer preferred_encoded.deinit(allocator);
-    _ = try serverTransportParameters(allocator, .{
-        .local_connection_id = cid,
-        .local_transport_parameters = preferred_local,
-        .initial_one_rtt_config = .{
-            .local_stateless_reset_key = key,
-        },
-    }, quic.default_max_udp_payload_size, "original", &.{}, &preferred_local, &preferred_encoded);
-    try std.testing.expectEqualSlices(
-        u8,
-        &quic.stateless_reset.tokenForConnectionId(
-            key,
-            "preferred-reset-cid",
-        ),
-        &preferred_local.preferred_address.?.stateless_reset_token,
-    );
-
-    const keys = quic.protection.deriveAes128Keys(
-        [_]u8{0x82} ** quic.protection.secret_len,
-    );
-    const applied = (OneRttConfig{
-        .local_stateless_reset_key = key,
-    }).apply(
-        .version_1,
-        .{ .ip4 = .loopback(443) },
-        keys,
-        keys,
-        cid,
-        "peer",
-        .server,
-        local,
-        .{},
-    );
-    try std.testing.expectEqual(
-        @as(?[quic.stateless_reset.static_key_len]u8, key),
-        applied.local_stateless_reset_key,
-    );
-
-    var raw_params = quic.practical_transport_parameters;
-    raw_params.original_destination_connection_id = "original";
-    raw_params.initial_source_connection_id = cid;
-    raw_params.stateless_reset_token = expected;
-    var raw: std.ArrayList(u8) = .empty;
-    defer raw.deinit(allocator);
-    try quic.encodeTransportParametersForSource(
-        &raw,
-        allocator,
-        raw_params,
-        .server,
-    );
-    var parsed_raw: quic.TransportParameters = undefined;
-    var unused_encoded: std.ArrayList(u8) = .empty;
-    defer unused_encoded.deinit(allocator);
-    const returned_raw = try serverTransportParameters(allocator, .{
-        .local_connection_id = cid,
-        .transport_parameters = raw.items,
-        .initial_one_rtt_config = .{
-            .local_stateless_reset_key = key,
-        },
-    }, quic.default_max_udp_payload_size, "original", &.{}, &parsed_raw, &unused_encoded);
-    try std.testing.expectEqualSlices(u8, raw.items, returned_raw);
-    try std.testing.expectEqualSlices(
-        u8,
-        &expected,
-        &parsed_raw.stateless_reset_token.?,
-    );
-
-    raw_params.stateless_reset_token = [_]u8{0xff} **
-        quic.stateless_reset.token_len;
-    raw.clearRetainingCapacity();
-    try quic.encodeTransportParametersForSource(
-        &raw,
-        allocator,
-        raw_params,
-        .server,
-    );
-    try std.testing.expectError(
-        error.InvalidTransportParameter,
-        serverTransportParameters(allocator, .{
-            .local_connection_id = cid,
-            .transport_parameters = raw.items,
-            .initial_one_rtt_config = .{
-                .local_stateless_reset_key = key,
-            },
-        }, quic.default_max_udp_payload_size, "original", &.{}, &parsed_raw, &unused_encoded),
-    );
-}
-
-test "QUIC handshake one-RTT config propagates spin-bit policy" {
-    const keys = quic.protection.deriveAes128Keys(
-        [_]u8{0xa2} ** quic.protection.secret_len,
-    );
-    const enabled = (OneRttConfig{
-        .enable_spin_bit = true,
-    }).apply(
-        .version_1,
-        .{ .ip4 = .loopback(443) },
-        keys,
-        keys,
-        "local",
-        "peer",
-        .client,
-        .{},
-        .{},
-    );
-    try std.testing.expect(enabled.enable_spin_bit);
-    const disabled = (OneRttConfig{}).apply(
-        .version_1,
-        .{ .ip4 = .loopback(443) },
-        keys,
-        keys,
-        "local",
-        "peer",
-        .server,
-        .{},
-        .{},
-    );
-    try std.testing.expect(!disabled.enable_spin_bit);
-    try std.testing.expect(sampledSpinBitConfig(.{
-        .enable_spin_bit = true,
-    }, [_]u8{0x11} ** 32).enable_spin_bit);
-    try std.testing.expect(!sampledSpinBitConfig(.{
-        .enable_spin_bit = true,
-    }, [_]u8{0x10} ** 32).enable_spin_bit);
-    try std.testing.expect(!sampledSpinBitConfig(.{}, [_]u8{0x11} ** 32)
-        .enable_spin_bit);
-}
-
-test "QUIC client accepts an RFC 8879 compressed server Certificate" {
-    const allocator = std.testing.allocator;
-    const large_certificate = [_]u8{0x7c} ** 4096;
-    var ordinary: std.ArrayList(u8) = .empty;
-    defer ordinary.deinit(allocator);
-    try quic.tls.auth.writeCertificate(
-        &ordinary,
-        allocator,
-        &.{&large_certificate},
-    );
-
-    var prepared = try quic.tls.certificate_compression.Prepared.initZlib(
-        allocator,
-        ordinary.items,
-        .amortized,
-    );
-    defer prepared.deinit();
-    var compressed_message: std.ArrayList(u8) = .empty;
-    defer compressed_message.deinit(allocator);
-    try prepared.view().write(&compressed_message, allocator);
-
-    // Fabricate EE + compressed Certificate + CertificateVerify + Finished
-    // messages. The splitter only consumes lengths and the first byte.
-    const ee_body = [_]u8{0x11} ** 32;
-    const verify_body = [_]u8{0x22} ** 80;
-    const finished_body = [_]u8{0x33} ** 48;
-    var flight: std.ArrayList(u8) = .empty;
-    defer flight.deinit(allocator);
-    try appendTestHandshakeMessage(&flight, allocator, 0x08, &ee_body);
-    try flight.appendSlice(allocator, compressed_message.items);
-    try appendTestHandshakeMessage(&flight, allocator, 0x0f, &verify_body);
-    try appendTestHandshakeMessage(&flight, allocator, 0x14, &finished_body);
-
-    const split = try splitServerFlight(flight.items, true);
-    try std.testing.expectEqual(
-        quic.tls.certificate_compression.handshake_type_compressed_certificate,
-        split.certificate.?[0],
-    );
-    // Transcript coverage retains the compressed message.
-    try std.testing.expect(split.through_certificate.?.len ==
-        4 + ee_body.len + compressed_message.items.len);
-
-    // Decompression restores the exact Certificate message.
-    const restored = try quic.tls.certificate_compression.decompressCertificate(
-        allocator,
-        split.certificate.?,
-        &.{.zlib},
-        ordinary.items.len,
-    );
-    defer allocator.free(restored);
-    try std.testing.expectEqualSlices(u8, ordinary.items, restored);
-
-    // An unoffered algorithm is rejected rather than inflated.
-    try std.testing.expectError(
-        error.SelectedUnofferedCompressionAlgorithm,
-        quic.tls.certificate_compression.decompressCertificate(
-            allocator,
-            split.certificate.?,
-            &.{.zstd},
-            ordinary.items.len,
-        ),
-    );
-}
-
-fn appendTestHandshakeMessage(
+pub fn appendTestHandshakeMessage(
     list: *std.ArrayList(u8),
     allocator: std.mem.Allocator,
     typ: u8,
