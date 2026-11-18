@@ -617,7 +617,7 @@ test "retained wildcard matching keeps entry order across slot reuse" {
     try std.testing.expectEqualStrings("a/a", reordered[2].topic);
 }
 
-test "retained wildcard matching falls back for very deep filters" {
+test "retained wildcard matching handles very deep filters" {
     const allocator = std.testing.allocator;
     var store = Store.init(allocator, .{});
     defer store.deinit();
@@ -625,6 +625,7 @@ test "retained wildcard matching falls back for very deep filters" {
 
     var topic_buffer: [512]u8 = undefined;
     var filter_buffer: [512]u8 = undefined;
+    var wrong_buffer: [512]u8 = undefined;
     const topic = try writeDeepTopic(&topic_buffer, 70, "leaf");
     const plus_filter = try writeDeepPlusFilter(&filter_buffer, 70);
     _ = try store.applyPublish(topic, "deep", .{
@@ -640,11 +641,27 @@ test "retained wildcard matching falls back for very deep filters" {
     const exact = try store.matchInto(topic, now, &matches);
     try std.testing.expectEqual(@as(usize, 1), exact.len);
 
-    const wrong = try writeDeepTopic(&filter_buffer, 70, "other");
+    const wrong = try writeDeepTopic(&wrong_buffer, 70, "other");
     try std.testing.expectEqual(
         @as(usize, 0),
         (try store.matchInto(wrong, now, &matches)).len,
     );
+
+    // Deep filters allocate their traversal state on the heap. Both the level
+    // array and the frame stack fall back to the linear scan when allocation
+    // fails, so the match result must be identical in every case.
+    for ([_]usize{ 0, 1 }) |fail_index| {
+        var failing = std.testing.FailingAllocator.init(
+            allocator,
+            .{ .fail_index = fail_index },
+        );
+        const saved = store.allocator;
+        store.allocator = failing.allocator();
+        defer store.allocator = saved;
+        const fallback = try store.matchInto(plus_filter, now, &matches);
+        try std.testing.expectEqual(@as(usize, 1), fallback.len);
+        try std.testing.expectEqualStrings(topic, fallback[0].topic);
+    }
 }
 
 test "retained index budget bounds deep topic amplification" {

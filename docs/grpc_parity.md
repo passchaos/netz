@@ -688,9 +688,10 @@ deterministic ownership, and recursively retains any implemented leaf,
 outlier wrapper or nested weighted target. Empty target maps remain valid so
 the runtime can report grpc-core's no-children transient-failure state. Missing
 fields, zero/overflow weights, unknown-only children, extra fields, empty names
-and nesting beyond 32 policy levels fail transactionally. Until runtime nodes
-land, ordinary and SharedChannel initialization both reject a parsed weighted
-target synchronously instead of silently flattening it. That rejection test
+and nesting beyond 32 policy levels fail transactionally. The runtime sections
+below execute this parser output in both owners; selecting `.weighted_target`
+without a service config remains invalid instead of silently falling back to a
+flat picker. That rejection test
 also exposed and fixed a pre-existing SharedChannel leak when a State initializer
 returned before cleanup ownership was installed. Parser evidence is recorded in
 `docs/evidence/grpc_weighted_target_parser/2026-10-31.json`.

@@ -252,6 +252,22 @@ fn computeFilterLevels(filter: []const u8) FilterLevels {
     return levels;
 }
 
+/// Fill every level end for a filter whose depth exceeds the inline bound.
+fn fillFilterLevelEnds(filter: []const u8, ends: []usize) void {
+    var start: usize = 0;
+    var index: usize = 0;
+    while (true) {
+        const end = std.mem.indexOfScalarPos(u8, filter, start, '/') orelse
+            filter.len;
+        std.debug.assert(index < ends.len);
+        ends[index] = end;
+        index += 1;
+        if (end == filter.len) break;
+        start = end + 1;
+    }
+    std.debug.assert(index == ends.len);
+}
+
 const MatchFrame = struct {
     node: usize,
     level_index: usize,
@@ -894,34 +910,58 @@ pub const Store = struct {
     fn collectMatches(self: *Store, filter: []const u8) void {
         if (self.message_count == 0) return;
         const levels = computeFilterLevels(filter);
-        if (!levels.complete or self.trie_nodes.items.len == 0) {
-            // Filters deeper than the inline bound are vanishingly rare. A
-            // linear scan keeps the lookup allocation-free instead of growing
-            // a heap traversal stack.
-            for (self.entries.items, 0..) |maybe_entry, entry_index| {
-                const entry = maybe_entry orelse continue;
-                if (mqtt.topicMatchesFilter(entry.topic, filter)) {
-                    self.setMatchBit(entry_index);
-                }
-            }
+        if (levels.complete and self.trie_nodes.items.len != 0) {
+            var stack: [max_filter_levels + 1]MatchFrame = undefined;
+            self.traverseFilter(
+                filter,
+                levels.ends[0..levels.count],
+                &stack,
+            );
             return;
         }
-        self.traverseFilter(filter, &levels);
+        if (!levels.complete and self.trie_nodes.items.len != 0) {
+            // Filters deeper than the inline bound are vanishingly rare. Grow
+            // the traversal state on the heap for that path only; the common
+            // path above stays allocation-free.
+            const level_count = std.mem.count(u8, filter, "/") + 1;
+            const ends = self.allocator.alloc(usize, level_count) catch {
+                self.collectMatchesLinearly(filter);
+                return;
+            };
+            defer self.allocator.free(ends);
+            fillFilterLevelEnds(filter, ends);
+            const stack = self.allocator.alloc(MatchFrame, level_count + 1) catch {
+                self.collectMatchesLinearly(filter);
+                return;
+            };
+            defer self.allocator.free(stack);
+            self.traverseFilter(filter, ends, stack);
+            return;
+        }
+        self.collectMatchesLinearly(filter);
+    }
+
+    fn collectMatchesLinearly(self: *Store, filter: []const u8) void {
+        for (self.entries.items, 0..) |maybe_entry, entry_index| {
+            const entry = maybe_entry orelse continue;
+            if (mqtt.topicMatchesFilter(entry.topic, filter)) {
+                self.setMatchBit(entry_index);
+            }
+        }
     }
 
     fn traverseFilter(
         self: *Store,
         filter: []const u8,
-        levels: *const FilterLevels,
+        ends: []const usize,
+        stack: []MatchFrame,
     ) void {
-        // One frame per filter level plus the terminal frame. The depth is
-        // bounded by `max_filter_levels`, so this needs no allocation.
-        var stack: [max_filter_levels + 1]MatchFrame = undefined;
+        std.debug.assert(stack.len >= ends.len + 1);
         var depth: usize = 0;
         stack[0] = .{ .node = 0, .level_index = 0, .next_child = null };
         while (true) {
             const frame = &stack[depth];
-            if (frame.level_index == levels.count) {
+            if (frame.level_index == ends.len) {
                 if (trieIndex(self.trie_nodes.items[frame.node].entry_index)) |index| {
                     self.setMatchBit(index);
                 }
@@ -932,8 +972,8 @@ pub const Store = struct {
             const level_start = if (frame.level_index == 0)
                 0
             else
-                levels.ends[frame.level_index - 1] + 1;
-            const level = filter[level_start..levels.ends[frame.level_index]];
+                ends[frame.level_index - 1] + 1;
+            const level = filter[level_start..ends[frame.level_index]];
             if (level.len == 1 and level[0] == '#') {
                 // `#` is validated to be the final level.
                 self.collectSubtree(frame.node, frame.level_index == 0);

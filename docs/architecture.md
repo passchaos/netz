@@ -297,9 +297,10 @@ These are current limits, not permission to ignore them:
   (`docs/webtransport_parity.md`).
 - **Retained trie index cost** is an approximation (`node + edge-map slot`);
   the budget is conservative but not an exact allocator accounting.
-- **Deep-filter fallback** in the retained store uses a linear
-  `topicMatchesFilter` scan for filters deeper than 64 levels. It is bounded
-  and correct but not trie-accelerated.
+- **Deep-filter fallback** in the retained store allocates its level array and
+  traversal stack for filters deeper than 64 levels, then walks the trie like
+  the inline path. The linear `topicMatchesFilter` scan remains only as the
+  allocation-failure fallback; ordinary lookups stay allocation-free.
 - **Sampler-backed baseline gates are host-load sensitive.** `bench-gate`
   failures on a loaded host need a quiet-host confirmation before they are
   treated as regressions; the evidence notes must say which condition applied.
