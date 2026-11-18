@@ -1668,6 +1668,15 @@ cost more than the saved locks for QoS 2, so the change was reverted. A future
 attempt must leave the QoS 2 flush path structurally unchanged. See
 `docs/evidence/mqtt_queue_batch_rejected/2026-11-01.json`.
 
+A 2026-11-18 transient-only retry kept every Session packet (including QoS 2)
+on the original one-at-a-time path and batched only live-queue deliveries. The
+shared macOS host was too noisy for a decision: baseline/candidate balanced
+QoS 1 p50 was roughly 3.5–3.9 ms in both arms, p99 ranged from 5.1 ms to
+11.9 ms within each arm, and later pairs were dominated by unrelated host load.
+The code change was reverted; the experiment remains open until it can run on a
+quiet host with the audited Mosquitto matrix. `zig build build-mqtt-bench`
+builds the standalone driver used for that comparison.
+
 The remaining gap has moved to tail latency and memory. Balanced-32x32 p99 is
 10.64 ms versus 4.22 ms, and serial p999 is 287.9 us versus 69.4 us. Broker RSS
 is 1.16–1.65× Mosquitto in four shapes and 0.66× in balanced-32x32. The host

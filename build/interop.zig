@@ -111,6 +111,10 @@ pub fn addAll(
     const mqtt_broker_compare = b.addSystemCommand(&.{
         "tools/compare_mqtt_mosquitto.sh",
     });
+    b.step(
+        "build-mqtt-bench",
+        "Build the standalone MQTT broker benchmark driver",
+    ).dependOn(&b.addInstallArtifact(mqtt_broker_bench, .{}).step);
     mqtt_broker_compare.addArtifactArg(mqtt_vectors_broker);
     mqtt_broker_compare.addArtifactArg(mqtt_broker_bench);
     const mqtt_broker_compare_step = b.step(
