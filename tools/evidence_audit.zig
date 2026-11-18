@@ -315,6 +315,19 @@ fn hashRecordedPath(
             }
         }
     }
+    // Interop evidence records fixture scripts relative to the runner's
+    // working directory (`tools/interop`) rather than the repository root.
+    // Resolve those names against that fixture root instead of treating them
+    // as stale repository paths.
+    const fixture_path = try std.fs.path.join(
+        allocator,
+        &.{ "tools/interop", recorded_path },
+    );
+    defer allocator.free(fixture_path);
+    if (try hashCandidate(allocator, io, cwd, fixture_path)) |hex| {
+        try cache.put(recorded_path, hex);
+        return hex;
+    }
     return null;
 }
 

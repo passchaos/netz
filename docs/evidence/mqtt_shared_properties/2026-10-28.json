@@ -8,7 +8,7 @@
       "src/mqtt/session/mod.zig": "932da50353f6d18ac80bff2ce11bbcd4213776e0d82a679babf2e2d01f915b0f",
       "src/mqtt/broker/publication.zig": "c7b8824dfb090505014f2a1d1781c7c7524fa3bcb9f4f00f5699e11224cad97d",
       "src/mqtt/owned_properties.zig": "93a92d1b6c79e72a4cb498d9791d11a9489501f95186f95d49d6351c4ba62ab9",
-      "examples/bench_mqtt_shared_properties.zig": "f19cecea85b5687409e3f7306dec6e76a559464373c8c40bf5a8e10cc9afb311"
+      "examples/benchmarks/bench_mqtt_shared_properties.zig": "f19cecea85b5687409e3f7306dec6e76a559464373c8c40bf5a8e10cc9afb311"
     }
   },
   "candidate_binary": {
@@ -16,7 +16,7 @@
     "sources": {
       "src/mqtt/session/mod.zig": "7d8b62f0da76bcb70913b9815a832bb6b87c28b7eee7772ce282570ca4e0c7dc",
       "src/mqtt/session/shared_properties.zig": "d81f00d081504a009d4971fc010971b30f860c1471cca4e9e4f663acf95b4c12",
-      "examples/bench_mqtt_shared_properties.zig": "f19cecea85b5687409e3f7306dec6e76a559464373c8c40bf5a8e10cc9afb311"
+      "examples/benchmarks/bench_mqtt_shared_properties.zig": "f19cecea85b5687409e3f7306dec6e76a559464373c8c40bf5a8e10cc9afb311"
     }
   },
   "correctness_regression": {
@@ -4557,7 +4557,7 @@
     "src/mqtt/broker/source_view.zig": "145dccab81041f77e1d8c57da43794b2841160605f4246c63a61f31b58930bc8",
     "src/mqtt/broker/source_view_tests.zig": "c2baffefbf4010fc617ae2bdc19064c0fbca1ea688cb4732ef952ffed6d379d4",
     "src/mqtt/broker/listener_tests.zig": "7d1a2bfbb38c45f90eff65f2eddcaf842f7fce1b8b80e5678543d62c1e9d7763",
-    "examples/bench_mqtt_shared_properties.zig": "f19cecea85b5687409e3f7306dec6e76a559464373c8c40bf5a8e10cc9afb311",
+    "examples/benchmarks/bench_mqtt_shared_properties.zig": "f19cecea85b5687409e3f7306dec6e76a559464373c8c40bf5a8e10cc9afb311",
     "tools/interop/mqtt_shared_properties_ab.py": "00a014a9348d45222b79dd82229097b21d3474a152759e03053b0f9746bb93a3",
     "tools/interop/mqtt_shared_properties_ab_test.py": "dc7db91a1fa71b54ba09f8b077cdf00203f49b7666b2a60457218072ea8c6d11",
     "tools/interop/mqtt_scenarios/shared_properties.py": "74c80a9c93869e340043f2fb960ba7bb3d1fe021bcb94b353b0972fb21b1fcb8",

@@ -7,7 +7,7 @@
     "src/mqtt/session/mod.zig": "136d3f91c39db9ebe840b8ff11375cb0d3ac3477a29aa9f6f2be237dc44959dd",
     "src/mqtt/retained/mod.zig": "4334161366b697ebfbefdb209432b43ab94aee25c1844c59dd255020f540fd07",
     "src/mqtt/will/snapshot.zig": "6d3bc940cf804f3bf1fa5c4dbf322b54ebcb3deb9f2853b4573935ffda47d87b",
-    "examples/bench_mqtt_commit_log.zig": "a559be2d0485b71c1b22ef79ee691b82d1f55e041993f64dd8920ace8dea09a7",
+    "examples/benchmarks/bench_mqtt_commit_log.zig": "a559be2d0485b71c1b22ef79ee691b82d1f55e041993f64dd8920ace8dea09a7",
     "examples/support/mqtt_commit_log_bench/fixture.zig": "b5b670aa04825dbf5dd78ef2ccd00d69017cea9ebb377f6510e89d77c7697b55",
     "examples/support/mqtt_commit_log_bench/metrics.zig": "456b684ba2f38fc861933f92a97aa671314e715fe5b06b22f50c15e7fb6ba9f2",
     "examples/support/mqtt_commit_log_bench/options.zig": "b4d42ecce980f0742246fa11e435ad58c9e95d96ce23b42634e9ef69039e6244"

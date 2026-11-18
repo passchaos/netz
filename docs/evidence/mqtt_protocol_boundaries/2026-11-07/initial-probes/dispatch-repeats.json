@@ -81,9 +81,9 @@
       "normative_clause": "MQTT-3.3.4-4",
       "scenarios": 5,
       "source_sha256": {
-        "mqtt_commit_log_support.py": "824fca282705aa002cc5afbb38f6bff90f16c52c34fbe607833dbea9d5c9fb18",
-        "mqtt_vectors/broker.py": "d988de57586e95e308ec7ed3383883f53c59f998b2e8efb30419f6684134d19b",
-        "mqtt_vectors/equal_subscription_identifiers.py": "97fbf376aaa7bd9db755335fd8e9c1a27abd6cf2e7733b21b755b46f4aa45603"
+        "tools/interop/mqtt_commit_log_support.py": "824fca282705aa002cc5afbb38f6bff90f16c52c34fbe607833dbea9d5c9fb18",
+        "tools/interop/mqtt_vectors/broker.py": "d988de57586e95e308ec7ed3383883f53c59f998b2e8efb30419f6684134d19b",
+        "tools/interop/mqtt_vectors/equal_subscription_identifiers.py": "97fbf376aaa7bd9db755335fd8e9c1a27abd6cf2e7733b21b755b46f4aa45603"
       },
       "status": "passed",
       "subscribe_hex": "82170001020b070003612f23010003612f2b010003612f7801"
@@ -172,9 +172,9 @@
       "normative_clause": "MQTT-3.3.4-4",
       "scenarios": 5,
       "source_sha256": {
-        "mqtt_commit_log_support.py": "824fca282705aa002cc5afbb38f6bff90f16c52c34fbe607833dbea9d5c9fb18",
-        "mqtt_vectors/broker.py": "d988de57586e95e308ec7ed3383883f53c59f998b2e8efb30419f6684134d19b",
-        "mqtt_vectors/equal_subscription_identifiers.py": "97fbf376aaa7bd9db755335fd8e9c1a27abd6cf2e7733b21b755b46f4aa45603"
+        "tools/interop/mqtt_commit_log_support.py": "824fca282705aa002cc5afbb38f6bff90f16c52c34fbe607833dbea9d5c9fb18",
+        "tools/interop/mqtt_vectors/broker.py": "d988de57586e95e308ec7ed3383883f53c59f998b2e8efb30419f6684134d19b",
+        "tools/interop/mqtt_vectors/equal_subscription_identifiers.py": "97fbf376aaa7bd9db755335fd8e9c1a27abd6cf2e7733b21b755b46f4aa45603"
       },
       "status": "passed",
       "subscribe_hex": "82170001020b070003612f23010003612f2b010003612f7801"
@@ -263,9 +263,9 @@
       "normative_clause": "MQTT-3.3.4-4",
       "scenarios": 5,
       "source_sha256": {
-        "mqtt_commit_log_support.py": "824fca282705aa002cc5afbb38f6bff90f16c52c34fbe607833dbea9d5c9fb18",
-        "mqtt_vectors/broker.py": "d988de57586e95e308ec7ed3383883f53c59f998b2e8efb30419f6684134d19b",
-        "mqtt_vectors/equal_subscription_identifiers.py": "97fbf376aaa7bd9db755335fd8e9c1a27abd6cf2e7733b21b755b46f4aa45603"
+        "tools/interop/mqtt_commit_log_support.py": "824fca282705aa002cc5afbb38f6bff90f16c52c34fbe607833dbea9d5c9fb18",
+        "tools/interop/mqtt_vectors/broker.py": "d988de57586e95e308ec7ed3383883f53c59f998b2e8efb30419f6684134d19b",
+        "tools/interop/mqtt_vectors/equal_subscription_identifiers.py": "97fbf376aaa7bd9db755335fd8e9c1a27abd6cf2e7733b21b755b46f4aa45603"
       },
       "status": "passed",
       "subscribe_hex": "82170001020b070003612f23010003612f2b010003612f7801"

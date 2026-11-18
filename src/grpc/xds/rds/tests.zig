@@ -124,7 +124,10 @@ test "gRPC RDS skips non-gRPC route matches and enforces regex resource bounds" 
     var owned = try rds.decode(gpa, bytes, .{});
     defer owned.deinit();
     try std.testing.expectEqual(@as(usize, 1), owned.value.virtual_hosts[0].routes.len);
-    const invalid = try fixture.encode(gpa, "routes", &.{"backend.test"}, &.{.{ .regex = "(?=a)" }}, null);
+    // Use a malformed expression that no supported regex dialect accepts.
+    // A feature such as a lookahead can become valid as the regex engine
+    // grows, which would turn this resource-bound test into a false failure.
+    const invalid = try fixture.encode(gpa, "routes", &.{"backend.test"}, &.{.{ .regex = "[" }}, null);
     defer gpa.free(invalid);
     try std.testing.expectError(error.InvalidRdsResource, rds.decode(gpa, invalid, .{}));
     try std.testing.expectError(error.RdsLimitExceeded, rds.decode(gpa, bytes, .{ .max_routes = 2 }));

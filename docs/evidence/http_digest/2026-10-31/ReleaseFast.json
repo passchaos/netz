@@ -7,9 +7,9 @@
     "hyperframe": "6.1.0"
   },
   "source_sha256": {
-    "driver.zig": "d7017c9482396e09804069b4c2f10bd53c97d9022a1d4dc1933e6b57abe42342",
-    "peer.py": "36083965fb5bb4a43eb9d0b4acaca320c969b3bdeb330d4d1a679affb1d92f72",
-    "run.py": "d70a3eda14f90ce97a2c651f37816448bea66a7a563f76bfaa67e5c441f1f539"
+    "tools/interop/http_digest/driver.zig": "d7017c9482396e09804069b4c2f10bd53c97d9022a1d4dc1933e6b57abe42342",
+    "tools/interop/http_digest/peer.py": "36083965fb5bb4a43eb9d0b4acaca320c969b3bdeb330d4d1a679affb1d92f72",
+    "tools/interop/http_digest/run.py": "d70a3eda14f90ce97a2c651f37816448bea66a7a563f76bfaa67e5c441f1f539"
   },
   "standard": "RFC9530",
   "status": "passed",

@@ -54,7 +54,7 @@
     "src/grpc/channel/shared.zig": "815c682a930fc90b469e0822a6d84d3141bf63dd64f638e67ff4c887d10222cc",
     "src/grpc/channel/shared/state.zig": "82249cbacdb903443f12d687dbeb95927bdab23766dffa56f26ac11bb09be93c",
     "src/grpc/channel/shared/tests.zig": "61ac26a1231c331a6c49860a2a8981f967fa19095422b639917b6044d3c30304",
-    "examples/bench_grpc_unary.zig": "b940d9aff23306f30990858641048cf06ec7c6d9d5c13f468ce07262cc234a25",
+    "examples/benchmarks/bench_grpc_unary.zig": "b940d9aff23306f30990858641048cf06ec7c6d9d5c13f468ce07262cc234a25",
     "docs/grpc_shared_performance.md": "b0092648e03ad35fded84a644d626206a45a696c7c261dfdf84db6abe41c791a"
   },
   "notes": "The benchmark compares request storage with the same binary and server: only the client request ownership changes. The staged path compresses/copies the payload and frames it per request; the owned path reuses one prefix-reserved buffer and performs no per-request payload copy or allocation. A request with both message and owned_message is rejected as InvalidMessageCount, and compressed requests still take the framed fallback. SharedChannel's queued-job copy is intentional because a job can outlive the caller after abandonment; the shared arm therefore measures parity rather than the ordinary zero-copy win."

@@ -24,6 +24,8 @@ performance record.
 | [grpc_parity.md](grpc_parity.md) | gRPC behavior, xDS, official C++ interop scenarios, channel features. |
 | [hyper_parity.md](hyper_parity.md) | HTTP/1.1 and HTTP/2 behavior versus Hyper. |
 | [quicz_parity.md](quicz_parity.md) | QUIC behavior versus quicz. |
+| [proxy_parity.md](proxy_parity.md) | SOCKS5, HTTP CONNECT, Shadowsocks, Trojan, VLESS/VMess, TUIC, and Hysteria coverage and verification status. |
+| [vpn_mesh_parity.md](vpn_mesh_parity.md) | WireGuard, mesh disco, and DERP frame/relay coverage and verification status. |
 | [rumqtt_parity.md](rumqtt_parity.md) | MQTT client, broker, bridge, reconnect, and fuzz behavior versus rumqtt. |
 | [websocket_zig_parity.md](websocket_zig_parity.md) | WebSocket behavior versus websocket.zig, including Autobahn results. |
 | [webtransport_parity.md](webtransport_parity.md) | WebTransport behavior versus wtransport, including HTTP/2 capsules and browser gates. |

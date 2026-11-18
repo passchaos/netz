@@ -43,7 +43,7 @@
   "notes": "The deny pass still precedes the grant pass and scopeMatches is unchanged, so precedence and Mosquitto-compatible deny behavior are preserved. The boundary walk preserves splitScalar semantics for empty levels and trailing slashes, the '$' leading-wildcard reservation, and '#' termination. Filters deeper than eight levels use the original matcher without changing results. The new benchmark is wired as `zig build bench-mqtt-acl -Doptimize=ReleaseFast` and listed in README. The complete broker-config interop matrix passes with the precomputed boundaries, including ACL reload and retained-source reauthorization paths. Splitting the topic once per authorization removes the repeated per-rule split while preserving deny-before-grant precedence and scope checks.",
   "source_sha256": {
     "src/mqtt/acl_file.zig": "d1f93dc5141a65fc75d9a9872dc6aca4adfc2c5e333f11b37c0d7084661821c9",
-    "examples/bench_mqtt_acl.zig": "277beb6d58683d8e4bce573fb05b40f1dea9c2bc21f5025aa1e6ddab060f9eb7"
+    "examples/benchmarks/bench_mqtt_acl.zig": "277beb6d58683d8e4bce573fb05b40f1dea9c2bc21f5025aa1e6ddab060f9eb7"
   },
   "topic_level_benchmark": {
     "command": "taskset -c 0 <bench-mqtt-acl>",

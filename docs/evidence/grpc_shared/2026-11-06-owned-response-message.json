@@ -41,7 +41,7 @@
     "src/grpc/call.zig": "b2008b2bf8f48fe6a8dc22ede1bee77611ef52e04fe4accf6b5eba7d050cc6d0",
     "src/grpc/mod.zig": "76b169d8190152692b4fa0724f2cf8807d64b1de7c72d5b2c233c646973c029f",
     "src/grpc/runtime_tests.zig": "a8e86adce2ce2e43db3f07d40477ad6eeebbf9517e3c63c40528620ebffd159f",
-    "examples/bench_grpc_unary.zig": "976bcdfd73bce02e16f312d57e6647c1968dfa3db7541fd0630a150c5d00fd7b",
+    "examples/benchmarks/bench_grpc_unary.zig": "976bcdfd73bce02e16f312d57e6647c1968dfa3db7541fd0630a150c5d00fd7b",
     "docs/grpc_shared_performance.md": "e1b582476f6f4de5078d9503553df408251c15d0dc0a480d90cbf82baa4b5bb2"
   },
   "notes": "The benchmark is an internal API-shape comparison with the same binary: only the server response ownership changes. The borrowed path stages prefix plus payload and allocates a framed buffer per response; the owned path reuses one prefix-reserved buffer and performs no per-response copy or allocation. A response with both message and owned_message is rejected as InvalidMessageCount, and compressed responses still take the framed fallback."

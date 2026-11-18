@@ -767,4 +767,51 @@ pub fn addAll(
     test_step.dependOn(&run_quic_path_fuzz_tests.step);
     test_step.dependOn(&run_quic_handshake_fuzz_tests.step);
     test_step.dependOn(&run_quic_endpoint_fuzz_tests.step);
+
+    const run_proxy_fuzz_tests = addSimpleFuzzTarget(
+        b,
+        target,
+        optimize,
+        netz_mod,
+        "fuzz-proxy",
+        "Fuzz bounded application-proxy wire codecs",
+        "test/proxy_fuzz_test.zig",
+    );
+    const run_wireguard_mesh_fuzz_tests = addSimpleFuzzTarget(
+        b,
+        target,
+        optimize,
+        netz_mod,
+        "fuzz-wireguard-mesh",
+        "Fuzz bounded WireGuard and mesh wire codecs",
+        "test/wireguard_mesh_fuzz_test.zig",
+    );
+    test_step.dependOn(&run_proxy_fuzz_tests.step);
+    test_step.dependOn(&run_wireguard_mesh_fuzz_tests.step);
+}
+
+fn addSimpleFuzzTarget(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    netz_mod: *std.Build.Module,
+    name: []const u8,
+    description: []const u8,
+    root_file: []const u8,
+) *std.Build.Step.Run {
+    const tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(root_file),
+            .target = target,
+            .optimize = optimize,
+            // See the parser fuzz target above: this is a Zig 0.16 fuzz-runner
+            // workaround and does not disable allocator leak detection.
+            .error_tracing = false,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const run = b.addRunArtifact(tests);
+    const step = b.step(name, description);
+    step.dependOn(&run.step);
+    return run;
 }

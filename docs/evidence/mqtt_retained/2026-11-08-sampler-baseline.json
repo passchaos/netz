@@ -40,7 +40,7 @@
     }
   },
   "source_sha256": {
-    "examples/bench_mqtt_retained.zig": "f4046355ebe888115829b43993c6c710c2f38ae8c711f59b3498010f8e14c3a3",
+    "examples/benchmarks/bench_mqtt_retained.zig": "f4046355ebe888115829b43993c6c710c2f38ae8c711f59b3498010f8e14c3a3",
     "build.zig": "ee4a64ad6f2667f54d94141781631fb4053e4014ecf7ea529448b1ca5b847327"
   },
   "notes": "The sampler medians match the previous fixed-loop benchmark within host noise: devices/+/state 69.5 us/op, devices/# 30.1 us/op, selective devices/+/state 105.7 us/op, devices/1234/# 273 ns/op. Exact lookup reports about 20 ns/op because the old loop formatted devices/<n>/state with std.fmt.bufPrint on every iteration; the new loop reuses one constant filter. The baseline files under benchmarks/baselines/ are local generated artifacts, not tracked sources. Pinning with taskset changes the environment fingerprint because the fingerprint includes the process CPU count, so a pinned gate must be compared against a pinned record. The bench-record and bench-gate steps now depend on each other in build.zig, so the benchmarks run one at a time even when the build runner is parallel; a quiet host is still required for a gate verdict."

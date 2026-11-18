@@ -44,7 +44,7 @@
   "source_sha256": {
     "src/mqtt/mod.zig": "02f87e27afbb9d6d2276b94c6d34312afc2ea01c75a5e9389c8a075f63ee30fe",
     "src/mqtt/retained/mod.zig": "1437273d8e1b3d2070ea0ab2c25828e829212ca54fa68a69223728e8ad4e8e1b",
-    "examples/bench_mqtt_retained.zig": "4ca521e8a27c019681ef2911394b0cda7716240b5a68d0702b6f1469421cec0f"
+    "examples/benchmarks/bench_mqtt_retained.zig": "4ca521e8a27c019681ef2911394b0cda7716240b5a68d0702b6f1469421cec0f"
   },
   "utf8_vector_benchmark": {
     "command": "taskset -c 0 <bench-mqtt-retained>",

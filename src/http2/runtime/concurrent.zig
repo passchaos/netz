@@ -160,6 +160,15 @@ pub fn Engine(
                 return self.engine.nextBody(self.slot, out, deadline);
             }
 
+            /// True once the request body has ended, including a request whose
+            /// HEADERS frame carried END_STREAM and therefore never produced a
+            /// body event.
+            pub fn bodyFinished(self: Stream) bool {
+                self.slot.body_mutex.lockUncancelable(self.engine.io);
+                defer self.slot.body_mutex.unlock(self.engine.io);
+                return self.slot.body_finished;
+            }
+
             /// Trailers received after the request body. The returned slice is
             /// borrowed until the handler returns. The owner publishes it
             /// under `body_mutex`; taking the same lock makes the read
@@ -598,12 +607,18 @@ pub fn Engine(
         }
 
         fn createSlot(self: *Self, stream: StreamType) !*Slot {
+            // A request that ended with its HEADERS has no DATA event to
+            // publish later. Seed the body state from the stream itself so a
+            // handler's first `nextBody` observes EOF instead of waiting for
+            // an event that will never arrive.
+            const request_finished = streamRequestComplete(stream);
             const slot = try self.allocator.create(Slot);
             errdefer self.allocator.destroy(slot);
             slot.* = .{
                 .engine = self,
                 .stream = stream,
                 .public_stream = undefined,
+                .body_finished = request_finished,
             };
             slot.public_stream = .{ .engine = self, .slot = slot };
             errdefer slot.deinit(self.allocator);

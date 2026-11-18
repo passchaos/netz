@@ -7593,18 +7593,18 @@
       "src/mqtt/runtime/transport/write_parts_deadline.zig": "0c6a555ad703fc5953d0abf0ffc059a474d8080840e7a7e45c16e9bb86671fcd",
       "src/internal/stream_io/timed_write.zig": "d54dc73d3ecaaa57ba8aaab1273f07ba3f3ef0b2d1c3cb049815c44d79135b38",
       "src/runtime/timed_socket.zig": "36dc7859b594063643f9b3ad5e9081d450868d7e9526bb8b627b0eadafd4cb90",
-      "examples/bench_mqtt_deadline.zig": "02e3d29a20d589b05d714f242cb8368d01cf1b9a8c4cf5a508ddeaef04f2f8cb",
-      "examples/mqtt_deadline_bench/peer.zig": "5dcf3b49047407c2e847841ed7368005ed406db2817be18d9de6538d00a773ea",
-      "examples/mqtt_deadline_bench/options.zig": "d447054f7052ee80bc1a144639e33cda2663a5ff9c8861a955e616468c527660"
+      "examples/benchmarks/bench_mqtt_deadline.zig": "02e3d29a20d589b05d714f242cb8368d01cf1b9a8c4cf5a508ddeaef04f2f8cb",
+      "examples/benchmarks/mqtt_deadline_bench/peer.zig": "5dcf3b49047407c2e847841ed7368005ed406db2817be18d9de6538d00a773ea",
+      "examples/benchmarks/mqtt_deadline_bench/options.zig": "d447054f7052ee80bc1a144639e33cda2663a5ff9c8861a955e616468c527660"
     },
     "after": {
       "src/mqtt/runtime/packet_transport.zig": "a1a2e3ff80aeeb663bd78092865a6149cfaec8260c873918a6871e6a84dd6721",
       "src/mqtt/runtime/transport/write_parts_deadline.zig": "b74ba5787100cc0e9efad22eaf87576da783732bff784c2dfe3af1bc6c687bb8",
       "src/internal/stream_io/timed_write.zig": "d54dc73d3ecaaa57ba8aaab1273f07ba3f3ef0b2d1c3cb049815c44d79135b38",
       "src/runtime/timed_socket.zig": "36dc7859b594063643f9b3ad5e9081d450868d7e9526bb8b627b0eadafd4cb90",
-      "examples/bench_mqtt_deadline.zig": "02e3d29a20d589b05d714f242cb8368d01cf1b9a8c4cf5a508ddeaef04f2f8cb",
-      "examples/mqtt_deadline_bench/peer.zig": "5dcf3b49047407c2e847841ed7368005ed406db2817be18d9de6538d00a773ea",
-      "examples/mqtt_deadline_bench/options.zig": "d447054f7052ee80bc1a144639e33cda2663a5ff9c8861a955e616468c527660"
+      "examples/benchmarks/bench_mqtt_deadline.zig": "02e3d29a20d589b05d714f242cb8368d01cf1b9a8c4cf5a508ddeaef04f2f8cb",
+      "examples/benchmarks/mqtt_deadline_bench/peer.zig": "5dcf3b49047407c2e847841ed7368005ed406db2817be18d9de6538d00a773ea",
+      "examples/benchmarks/mqtt_deadline_bench/options.zig": "d447054f7052ee80bc1a144639e33cda2663a5ff9c8861a955e616468c527660"
     }
   }
 }

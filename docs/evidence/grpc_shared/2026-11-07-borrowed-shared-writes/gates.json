@@ -88,9 +88,9 @@
     "src/grpc/channel/shared/stream/owner.zig": "f38646c2c5d9c7c918bd051deea0f0401df74cd9b7671fb82392c0ec43ccf8d2",
     "src/grpc/channel/shared/stream.zig": "c8fe982382d1ddc446c12bfe1fcb6a351545729ef209146b78d395eef54a99e9",
     "src/grpc/channel/shared/tests.zig": "b17af748207439dde0bcae497687cc5e91563018c71f26e51de0b6e97d6c6ea7",
-    "examples/grpc_shared_bench/options.zig": "4a21f15b50cde914c7069e927d6db11247e909f4ec38661259d47f1ad8117f5c",
-    "examples/grpc_shared_bench/session.zig": "732b2b55a67b7e9c822d78e3ca024bc9d193cdf366f9ab260e1c2745170c1420",
-    "examples/bench_grpc_shared.zig": "96c068f6242efd716ec53643d7194198c46d8f97e6065bf21f88dbe0d83b69dd",
+    "examples/benchmarks/grpc_shared_bench/options.zig": "4a21f15b50cde914c7069e927d6db11247e909f4ec38661259d47f1ad8117f5c",
+    "examples/benchmarks/grpc_shared_bench/session.zig": "732b2b55a67b7e9c822d78e3ca024bc9d193cdf366f9ab260e1c2745170c1420",
+    "examples/benchmarks/bench_grpc_shared.zig": "96c068f6242efd716ec53643d7194198c46d8f97e6065bf21f88dbe0d83b69dd",
     "docs/grpc_shared_performance.md": "0b7b862291040a7cdb570e5a2773b8f07f9d9dce8933db24c8cbb56931c697c0"
   },
   "notes": "The full suite passed 6765/6765 after the new shared borrowed-write regression. Two host-load LRS flakes during focused runs passed in isolation and as the complete LRS group before the clean 1062/1062 focused gate. The borrowed path preserves SharedChannel's bounded per-turn write scheduling; only the payload copy is removed."

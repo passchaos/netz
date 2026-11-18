@@ -7,7 +7,7 @@
     "cpu": "shared host; alternating pairs",
     "netz_revision": "433bb0e3",
     "build_mode": "ReleaseFast",
-    "benchmark": "examples/bench_grpc_shared.zig",
+    "benchmark": "examples/benchmarks/bench_grpc_shared.zig",
     "mode": "persistent",
     "warmup": 20,
     "iterations": 200,
@@ -19,10 +19,10 @@
     },
     "grpc_cpp_reference_ns_262144": 392766.5394405986,
     "source_sha256": {
-      "examples/bench_grpc_shared.zig": "acee42cc972c18705f7500e08ef3203cc241adb4410134b1ff4013644f0a9be5",
-      "examples/grpc_shared_bench/options.zig": "5809562d2d6eb8a373d16401c649361570664cc1ef92932e1f12289ddd33a904",
-      "examples/grpc_shared_bench/session.zig": "46593a6040485d8ad6edcfaa84e4707723e535f282c4dad87f585fd3d08d3817",
-      "examples/grpc_shared_bench/peer.zig": "9a011822e217745f5c4d3b573e366476938fc7075b1ee10be2e4e68b73ce99e0",
+      "examples/benchmarks/bench_grpc_shared.zig": "acee42cc972c18705f7500e08ef3203cc241adb4410134b1ff4013644f0a9be5",
+      "examples/benchmarks/grpc_shared_bench/options.zig": "5809562d2d6eb8a373d16401c649361570664cc1ef92932e1f12289ddd33a904",
+      "examples/benchmarks/grpc_shared_bench/session.zig": "46593a6040485d8ad6edcfaa84e4707723e535f282c4dad87f585fd3d08d3817",
+      "examples/benchmarks/grpc_shared_bench/peer.zig": "9a011822e217745f5c4d3b573e366476938fc7075b1ee10be2e4e68b73ce99e0",
       "src/alloc.zig": "a6cac8cb88facbb291519bca48997b01f220b813ddc39e748ecc3749ea4a3e54"
     }
   },

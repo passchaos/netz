@@ -144,9 +144,9 @@ After all four protocol combinations warm retained capacity, every generation
 must return connection, pending-handshake, CID-route, and allocator live-byte
 state to the same baseline; final endpoint teardown must return live bytes to
 zero. Multi-hour, high-concurrency stability remains outside these bounded
-models. The pinned GitHub Actions workflow replays all thirty-five
+models. The pinned GitHub Actions workflow replays all thirty-seven
 corpora and the complete test gate on pushes and pull requests, then runs the
-thirty-five coverage-guided targets
+thirty-seven coverage-guided targets
 daily and on demand. The live HTTP/1 and HTTP/2 targets default to 256 daily
 connections, the TLS HTTP/1, TLS HTTP/2, and HTTP/3 connection targets to 64
 authenticated sessions, the WebSocket H1/H2 TLS targets to 64 authenticated
@@ -1873,4 +1873,24 @@ negotiated transport parameters,
 ALPN, packet keys, and optional resumption master secret must all come from the
 same authenticated external negotiation; the API does not replace TLS or
 authenticate those inputs.
+
+## Proxy, VPN, and mesh protocol families
+
+The application-proxy modules under `src/proxy/` cover SOCKS5 (CONNECT, BIND,
+UDP ASSOCIATE, RFC 1929 authentication), HTTP/1 CONNECT, Shadowsocks AEAD,
+Trojan, VLESS/VMess with TLS/WebSocket/HTTP/2/QUIC/gRPC transports, TUIC v5, and
+Hysteria v3, together with shared ACL, destination, connection-limit,
+rate-limit, reload, statistics, and bounded TCP/UDP/TLS/QUIC relay primitives.
+`zig build fuzz-proxy` replays bounded hostile inputs through the SOCKS5, HTTP
+CONNECT, Trojan, VLESS, VMess, TUIC, and Hysteria codecs. The feature matrix
+and current verification limits are in [proxy_parity.md](proxy_parity.md).
+
+`src/vpn/wireguard/` owns the Noise IKpsk2 handshake, message codecs, cookie
+replies, replay protection, transport sessions, timers, and metrics.
+`src/mesh/` owns mesh identity/endpoint types, bounded wire helpers, the disco
+message codec, and DERP frame/relay/client state machines with their WebSocket
+adapter. Product policy for both families remains in `vpnz` and `meshz`.
+`zig build fuzz-wireguard-mesh` covers the WireGuard message parsers, disco
+messages, and DERP frames. The feature matrix and current verification limits
+are in [vpn_mesh_parity.md](vpn_mesh_parity.md).
 

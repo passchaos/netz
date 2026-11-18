@@ -545,6 +545,107 @@ test "HTTP/2 concurrent oversize declared body stays stream-scoped" {
     try std.testing.expectEqual(@as(usize, 2), context.normal.load(.monotonic));
 }
 
+test "HTTP/2 concurrent bodyless request observes body EOF without waiting" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Context = struct {
+        io: std.Io,
+        saw_finished: bool = false,
+        body_calls: usize = 0,
+    };
+    var context = Context{ .io = io };
+
+    const Handler = struct {
+        fn run(ctx: *Context, stream: *runtime.Connection.ConcurrentStream) anyerror!void {
+            const head = stream.head();
+            try std.testing.expectEqualStrings("GET", head.method);
+            try std.testing.expect(stream.bodyFinished());
+            var scratch: [16]u8 = undefined;
+            const body = try stream.nextBody(&scratch, futureDeadline(ctx.io));
+            try std.testing.expectEqual(@as(?usize, null), body);
+            ctx.body_calls += 1;
+            ctx.saw_finished = true;
+            try stream.startResponse(.{ .status = 200 });
+            try stream.writeData("bodyless", true);
+        }
+    };
+
+    const ServerTask = struct {
+        server: *runtime.Server,
+        context: *Context,
+        shutdown: *std.Io.Event,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            const summary = try connection.serveConcurrentStreams(
+                Context,
+                self.context,
+                Handler.run,
+                .{ .max_streams = 1, .shutdown = self.shutdown },
+            );
+            try std.testing.expectEqual(@as(usize, 1), summary.accepted);
+            try std.testing.expectEqual(@as(usize, 1), summary.completed);
+        }
+    };
+
+    var shutdown: std.Io.Event = .unset;
+    var server_task = ServerTask{ .server = &server, .context = &context, .shutdown = &shutdown };
+    const thread = try std.Thread.spawn(.{}, ServerTask.run, .{&server_task});
+    var joined = false;
+    defer if (!joined) {
+        shutdown.set(io);
+        thread.join();
+    };
+
+    var client = try runtime.Client.connectWithTimeout(
+        allocator,
+        io,
+        server.address(),
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+        .fromSeconds(3),
+    );
+    defer client.close();
+    const pending = try runtime.testing.sendCompleteRequest(&client, .{
+        .method = "GET",
+        .path = "/bodyless",
+        .authority = "localhost",
+    });
+    var response = try client.readResponseWithTimeout(
+        pending.stream_id,
+        pending.request_method,
+        pending.extended_connect,
+        .fromSeconds(3),
+    );
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    try std.testing.expectEqualStrings("bodyless", response.body);
+
+    shutdown.set(io);
+    thread.join();
+    joined = true;
+    if (server_task.err) |err| return err;
+    try std.testing.expect(context.saw_finished);
+    try std.testing.expectEqual(@as(usize, 1), context.body_calls);
+}
+
 fn futureDeadline(io: std.Io) std.Io.Clock.Timestamp {
     return .fromNow(io, .{
         .raw = .fromSeconds(3),

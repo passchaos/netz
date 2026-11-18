@@ -40,10 +40,10 @@
     "hyperframe": "6.1.0"
   },
   "source_sha256": {
-    "driver.zig": "05cc273728458b59f36f59daccd74b7393d2371d3fe6df82116b0be3c5b477d6",
-    "peer.py": "a1017443068ddb5948a26ffa53b399cbc8a53fecc2e3002b0ef4baee82ab8afa",
-    "run.py": "7a14de0f9d4db7ad0d3a00d9d4f501c57873b0665b95a9f2a0828ff58f7d3834",
-    "wire.py": "a05b6e736b3fff89fdd497656f66b7727b30318b50f9f14578c7727f62ac9698"
+    "tools/interop/webtransport_h2/driver.zig": "05cc273728458b59f36f59daccd74b7393d2371d3fe6df82116b0be3c5b477d6",
+    "tools/interop/webtransport_h2/peer.py": "a1017443068ddb5948a26ffa53b399cbc8a53fecc2e3002b0ef4baee82ab8afa",
+    "tools/interop/webtransport_h2/run.py": "7a14de0f9d4db7ad0d3a00d9d4f501c57873b0665b95a9f2a0828ff58f7d3834",
+    "tools/interop/webtransport_h2/wire.py": "a05b6e736b3fff89fdd497656f66b7727b30318b50f9f14578c7727f62ac9698"
   },
   "status": "passed",
   "tls": "TLSv1.3",

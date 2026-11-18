@@ -73,7 +73,7 @@
   "source_sha256": {
     "src/mqtt/retained/mod.zig": "0c38b4e1a40a8989e73eb74726272a84ced4bb4271e61599450f36a015b2744f",
     "src/mqtt/retained/tests.zig": "611a150b0d24ea777c51894cda3cd3349bd90932108cc06ced7a58a70a3a8456",
-    "examples/bench_mqtt_retained.zig": "bc0f04b9ad5921d9888bdb4bd4d81031f185b845e63f9c1a590227cdad7e3fbd"
+    "examples/benchmarks/bench_mqtt_retained.zig": "bc0f04b9ad5921d9888bdb4bd4d81031f185b845e63f9c1a590227cdad7e3fbd"
   },
   "notes": "An intermediate build that only shrank the nodes to u32 sentinels regressed the broad devices/+/state scan to 0.901x (0/8 wins) while improving devices/# to 1.205x. Adding the Entry-pointer hot path recovered the broad scan to neutral (0.991x, 2/8) and kept the hash win, so the combined change has no maintained-scenario regression. The index cost is an approximation (node plus one edge-map key/value slot with metadata headroom); the budget is conservative and independent of payload bytes. The cost walk runs before the insert commit, so a rejected insert allocates no trie nodes; removal returns the exact per-level charge. The host was loaded during the batches (load average roughly 5 to 12), so only interleaved ratios are claimed."
 }

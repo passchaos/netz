@@ -45,12 +45,12 @@
     "build.zig": "fa9595d15671b1f6b238e4a8d2f0be8d45abb87cd938b18e4586a0409af7184d",
     "build.zig.zon": "0e689c20c3efa5db0c66574b23ba81b734f4af60451093a864a1fc6a6ddf8833",
     "examples/support/bench_sampling.zig": "8d33bea907f1585277dd2ba76771953aefe69c9d1d582922a6a33c8587c74891",
-    "examples/bench_http1_parse.zig": "e58ed4cbe5287f324c403ef3f95dfd99864d5b2ddf1532f753c154b60354554a",
-    "examples/bench_http2_hpack.zig": "2098567c3a95e9a94a2c14426185bc63c40e077578968d685ce31c28ef85ed4a",
-    "examples/bench_http3_capsule.zig": "b611d5b076c2bede672b07f682117e34dd324feb1a67010cc17773d2d34bd8b3",
-    "examples/bench_http3_qpack.zig": "291f7f5d4a4a5d7f25cfc6c200c7880a9e97abe7d9c363768901f61325e8cfa3",
-    "examples/bench_http_content_coding.zig": "932d6686eedd64a629168e3a1cc865567c826043f2be2f740a1d28fd93699189",
-    "examples/bench_quic_padding_parse.zig": "00eabab091abddb517fd63399cfb3b63479b46f547b8b84cfbc7f6426064d035",
+    "examples/benchmarks/bench_http1_parse.zig": "e58ed4cbe5287f324c403ef3f95dfd99864d5b2ddf1532f753c154b60354554a",
+    "examples/benchmarks/bench_http2_hpack.zig": "2098567c3a95e9a94a2c14426185bc63c40e077578968d685ce31c28ef85ed4a",
+    "examples/benchmarks/bench_http3_capsule.zig": "b611d5b076c2bede672b07f682117e34dd324feb1a67010cc17773d2d34bd8b3",
+    "examples/benchmarks/bench_http3_qpack.zig": "291f7f5d4a4a5d7f25cfc6c200c7880a9e97abe7d9c363768901f61325e8cfa3",
+    "examples/benchmarks/bench_http_content_coding.zig": "932d6686eedd64a629168e3a1cc865567c826043f2be2f740a1d28fd93699189",
+    "examples/benchmarks/bench_quic_padding_parse.zig": "00eabab091abddb517fd63399cfb3b63479b46f547b8b84cfbc7f6426064d035",
     "test/mqtt_bridge_qos2_fuzz/model.zig": "0678523b69608b8ae11d5c9eb3eaa5424bd71192d50c4d0df9d2565c88178077",
     "tools/evidence_audit.zig": "7cb24158c9a21043dba7596b148b48aa64a7f0002d14c1c02722de72d4498281"
   }

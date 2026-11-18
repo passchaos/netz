@@ -888,6 +888,7 @@ pub const Server = server_runtime.Server;
 pub const Client = client_runtime.Client;
 pub const ProtectedConfig = client_runtime.ProtectedConfig;
 pub const HandshakeSessionOptions = client_runtime.HandshakeSessionOptions;
+pub const EarlyRequestReplayPolicy = client_runtime.EarlyRequestReplayPolicy;
 pub const PreparedEarlyRequestOptions = client_runtime.PreparedEarlyRequestOptions;
 pub const PreparedEarlyRequest = client_runtime.PreparedEarlyRequest;
 pub const BodyChunk = client_runtime.BodyChunk;

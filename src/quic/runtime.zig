@@ -859,10 +859,16 @@ pub const Endpoint = struct {
                 (&message)[0..1],
                 .{},
             );
-            if (sent_count == 1) self.recordSocketSent(1, bytes.len);
+            // A single datagram is all-or-nothing at this boundary: if the
+            // backend reports it complete, a trailing error cannot make the
+            // bytes unsent. Reporting the error here would make stateful
+            // callers roll back credit for data the peer already received.
+            if (sent_count == 1) {
+                self.recordSocketSent(1, bytes.len);
+                return;
+            }
             if (send_error) |err| return err;
-            if (sent_count != 1) return error.Unexpected;
-            return;
+            return error.Unexpected;
         } else {
             try self.applyOutgoingEcnMark(ecn);
         }

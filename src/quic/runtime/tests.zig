@@ -11,6 +11,7 @@ const EcnCmsgHdr = quic_runtime_root.EcnCmsgHdr;
 const Endpoint = quic_runtime_root.Endpoint;
 const OwnedBytes = quic_runtime_root.OwnedBytes;
 const OwnedDatagramBatch = quic_runtime_root.OwnedDatagramBatch;
+const ObservedBatchSend = @import("../one_rtt/tests/observed_batch_send.zig").ObservedBatchSend;
 const ReceivedBytesView = quic_runtime_root.ReceivedBytesView;
 const RejectFirstGsoSend = quic_runtime_root.RejectFirstGsoSend;
 const RejectMessageOversizeReceives = quic_runtime_root.RejectMessageOversizeReceives;
@@ -1009,6 +1010,60 @@ test "QUIC UDP socket traffic counts successful single and batch I/O" {
         .sent_datagrams = 3,
         .sent_bytes = 11,
     }, sender_traffic.stats().since(.{}));
+}
+
+test "QUIC UDP single send treats a complete datagram as success despite a trailing error" {
+    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var sender_traffic: SocketTrafficCounters = .{};
+    var receiver = try Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 128 },
+    );
+    defer receiver.deinit();
+    var sender = try Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .max_datagram_size = 128,
+            .enable_gso_send = false,
+            .socket_traffic_counters = &sender_traffic,
+        },
+    );
+    defer sender.deinit();
+
+    // The wrapped backend reports the datagram as fully sent and then an
+    // error. A single-datagram send must keep the success because the peer
+    // already received those bytes.
+    var observed = ObservedBatchSend{
+        .delegate = sender.io,
+        .fail_after_prefix = 1,
+    };
+    var vtable = sender.io.vtable.*;
+    vtable.netSend = ObservedBatchSend.netSend;
+    sender.io = .{
+        .userdata = &observed,
+        .vtable = &vtable,
+    };
+    defer sender.io = observed.delegate;
+
+    try sender.sendBytes(receiver.address(), "complete");
+    var storage: [128]u8 = undefined;
+    const received = try receiver.receiveBytesInto(&storage);
+    try std.testing.expectEqualStrings("complete", received.bytes);
+    try std.testing.expectEqual(@as(usize, 1), observed.calls);
+    try std.testing.expectEqual(@as(usize, 1), observed.last_message_count);
+    try std.testing.expectEqual(SocketTrafficStats{
+        .sent_datagrams = 1,
+        .sent_bytes = "complete".len,
+    }, sender_traffic.stats());
 }
 
 test "QUIC UDP endpoint receives into caller storage" {

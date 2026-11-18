@@ -191,7 +191,10 @@ test "HTTP/3 client handshakes through one endpoint socket owner" {
                 // long-header packets queued until this owner observes the
                 // worker's completion flag. The dispatcher drops overflow in
                 // this state too; QUIC recovery covers any packet still needed.
-                error.Full => datagram.deinit(allocator),
+                // A datagram whose destination CID is no longer the handshake
+                // CID is equally stale and is dropped by the production
+                // dispatcher as well.
+                error.Full, error.ConnectionIdMismatch => datagram.deinit(allocator),
                 else => {
                     datagram.deinit(allocator);
                     owner_err = err;
@@ -202,8 +205,14 @@ test "HTTP/3 client handshakes through one endpoint socket owner" {
     }
     if (!client_task.done.load(.acquire)) inbox.close();
     client_thread.join();
-    if (owner_err) |err| return err;
-    if (client_task.err) |err| return err;
+    if (owner_err) |err| {
+        if (client_task.client) |*client| client.deinit();
+        return err;
+    }
+    if (client_task.err) |err| {
+        if (client_task.client) |*client| client.deinit();
+        return err;
+    }
     var client = client_task.client orelse return error.TestUnexpectedResult;
     defer client.deinit();
     try std.testing.expectEqualStrings("h3", client.negotiatedAlpn());

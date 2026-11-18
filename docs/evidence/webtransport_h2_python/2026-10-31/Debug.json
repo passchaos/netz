@@ -8,10 +8,10 @@
     "hyperframe": "6.1.0"
   },
   "source_sha256": {
-    "driver.zig": "f2d38a705a4e74e224cafa06f846fa582349e4d3432aef3da06ffd359567ae66",
-    "peer.py": "0871230ce5e0f281f92739908d9065f9bb947239d4f61e83b0f537bd081139ac",
-    "run.py": "cbce2d7b1d7cdd901e3900d3dc2d238e47d303a080d0f6dc9ca579593be4f0d2",
-    "wire.py": "a05b6e736b3fff89fdd497656f66b7727b30318b50f9f14578c7727f62ac9698"
+    "tools/interop/webtransport_h2/driver.zig": "f2d38a705a4e74e224cafa06f846fa582349e4d3432aef3da06ffd359567ae66",
+    "tools/interop/webtransport_h2/peer.py": "0871230ce5e0f281f92739908d9065f9bb947239d4f61e83b0f537bd081139ac",
+    "tools/interop/webtransport_h2/run.py": "cbce2d7b1d7cdd901e3900d3dc2d238e47d303a080d0f6dc9ca579593be4f0d2",
+    "tools/interop/webtransport_h2/wire.py": "a05b6e736b3fff89fdd497656f66b7727b30318b50f9f14578c7727f62ac9698"
   },
   "status": "passed",
   "tls": "TLSv1.3",

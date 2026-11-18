@@ -39,7 +39,7 @@
     }
   },
   "source_sha256": {
-    "examples/bench_mqtt_router_match.zig": "74e23accbdad26f17d29b82a79559d52c93d8866ef38dc52005115cc244a9d20",
+    "examples/benchmarks/bench_mqtt_router_match.zig": "74e23accbdad26f17d29b82a79559d52c93d8866ef38dc52005115cc244a9d20",
     "build.zig": "2f561d956c587e959a7f9b7b13787b2cee73ddaab727e789b5636ad9ac61a055"
   },
   "notes": "The linear scenario uses 100 iterations per callback because one 4,098-filter scan is about 103 us; ten samples still give a stable median. The shared routers are recreated per strategy so the cursor and random state start from the same point as the fixed-loop benchmark. The benchmark records ns per callback; dividing by the iteration count gives 74 ns for router-match, 103.3 us for the linear scan, 130-138 ns for round-robin/sticky/random, and 1.04 us for rendezvous. Baseline files under benchmarks/baselines/ are local generated artifacts. The gate remains host-load sensitive and should be judged on a quiet host; this run used --warn-only while other sessions were active."

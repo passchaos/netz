@@ -23,7 +23,7 @@
     "validation": "full request and response payload equality plus terminal OK"
   },
   "benchmark_method": {
-    "harness": "examples/bench_grpc_unary.zig",
+    "harness": "examples/benchmarks/bench_grpc_unary.zig",
     "schedule": "five ABBA rounds; baseline, candidate, candidate, baseline",
     "runs_per_arm": 10,
     "host": "shared host with unrelated load; no CPU pinning",

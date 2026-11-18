@@ -183,7 +183,7 @@
   },
   "source_sha256": {
     "src/mqtt/broker.zig": "865a12754582a81b40483e6262e753df405fabf5990d2656e918bebb5f591316",
-    "examples/mqtt_broker.zig": "1fb1bcdf9a989f222d7ba6d72a9778f9d479c8cca46b0220115713b4fe21af01",
+    "examples/mqtt/mqtt_broker.zig": "1fb1bcdf9a989f222d7ba6d72a9778f9d479c8cca46b0220115713b4fe21af01",
     "tools/interop/mqtt_broker_allocator_matrix.sh": "e1dcb431146d4375817c6ce714fafe155a2cad205a4438d12d99e082622998f2",
     "tools/interop/mqtt_broker_allocator_matrix_check.py": "69adfa1c66613cf2e0c07a813042e1e2ec79bb3257689422b72878df9031ce49"
   }

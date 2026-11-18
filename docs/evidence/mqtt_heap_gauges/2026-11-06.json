@@ -35,7 +35,7 @@
     "src/mqtt/broker.zig": "59974c347c1e3506c5a283e8385857381ee89272f0eb5ca595b998e3553fb469",
     "src/mqtt/broker/prometheus.zig": "0ca2a580e37ce36d1fda787624955c90fdb3990955ec588986b11bdc2c7bdc0b",
     "src/mqtt/broker_tests.zig": "65148f3cb588239d8c35c35b3b39bd2d379df4241b1fc0b856ccc59d91332bf8",
-    "examples/mqtt_broker_config.zig": "99cb353e0f1ea1f0e503eb766e67a4952b69a502b701b48a1fb48d719510c087",
+    "examples/mqtt/mqtt_broker_config.zig": "99cb353e0f1ea1f0e503eb766e67a4952b69a502b701b48a1fb48d719510c087",
     "docs/rumqtt_parity.md": "cb164543ae2df4a57f34a97cae271f72da2ebf839315d844558236b0ea52dd58",
     "README.md": "5245f3a8ec8f6687eb2c989e8182410b9a0f8431489e00b95f982f3d84b100ee"
   },

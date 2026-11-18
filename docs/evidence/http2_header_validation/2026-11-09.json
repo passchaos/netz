@@ -70,7 +70,7 @@
   "source_sha256": {
     "src/http2/runtime/headers/message.zig": "b0d88bdb779bf62512651e346e5886fd3dc668d978c53b2b721f75ec67f810e0",
     "src/http2/runtime.zig": "302ee5c3f9df07cf24098de34e0867a24eb04f4a5c23a151f01270e39adf348a",
-    "examples/bench_http2_hpack.zig": "28dd7db056428cdbbaee8d29e02ff4a2d2d896894b35f5da6c7d3d8f22b7d9ab"
+    "examples/benchmarks/bench_http2_hpack.zig": "28dd7db056428cdbbaee8d29e02ff4a2d2d896894b35f5da6c7d3d8f22b7d9ab"
   },
   "notes": "The validation scenario uses the benchmark's seven-field request block (four pseudo headers plus three regular headers). The tag-based classifier is the same shape already used by HTTP/3, so the two runtimes now agree on pseudo-header classification. The encode-only 1.020x is code layout; HPACK decode and roundtrip scenarios are neutral within noise. benchmarks/baselines/http2-hpack.json was re-recorded with the new header-validation entry (nine entries, unpinned cpu32 fingerprint) so bench-gate keeps covering the existing HPACK scenarios. The host was loaded during the batch (load average roughly 5 to 15), so only interleaved ratios are claimed."
 }

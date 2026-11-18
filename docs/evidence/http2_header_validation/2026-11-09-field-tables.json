@@ -131,7 +131,7 @@
     "src/http/field_value.zig": "674bbb6e0027ff7bdb6952feb0db9f54e58f4ee0d17c4c120d3be96e4322da6e",
     "src/http2/runtime/headers/message.zig": "a2dd2f17d65a02367d19b9b0b970534c9860854014d41382940963b00618ca51",
     "src/http3/mod.zig": "9d3ed0fcc3707e010b8f3b70c0eaca37ade6f7484646b6236213d992a52904d5",
-    "examples/bench_http2_hpack.zig": "28dd7db056428cdbbaee8d29e02ff4a2d2d896894b35f5da6c7d3d8f22b7d9ab"
+    "examples/benchmarks/bench_http2_hpack.zig": "28dd7db056428cdbbaee8d29e02ff4a2d2d896894b35f5da6c7d3d8f22b7d9ab"
   },
   "notes": "The two stages are sequential: the name-table stage compares the tag-based validator with the old per-byte switch, and the value-table stage compares the name-table binary with the added value table. Combined with the earlier pseudo-header tag change, request header validation moved from 167.0 ns/block in the pre-tag binary to 131.5 ns/block after both tables. The non-target HPACK rows in each batch are layout noise; the two roundtrip rows moved by about 1% in opposite directions across the stages. HTTP/2 and HTTP/3 now share one name validator, so the grammar cannot drift between the two runtimes. The http2-hpack baseline was re-recorded with nine entries, including header-validation, under the unpinned cpu32 fingerprint. The host was loaded during the batches (load average roughly 5 to 20), so only interleaved ratios are claimed."
 }

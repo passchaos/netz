@@ -1907,14 +1907,14 @@
       "src/runtime/timed_socket.zig": "36dc7859b594063643f9b3ad5e9081d450868d7e9526bb8b627b0eadafd4cb90",
       "src/mqtt/runtime/packet_transport.zig": "a1a2e3ff80aeeb663bd78092865a6149cfaec8260c873918a6871e6a84dd6721",
       "src/mqtt/broker.zig": "bd3f7146084c596327328d72b1b7cedfc94e73628b7df579aa837d72161ccabd",
-      "examples/bench_mqtt_broker.zig": "eda188eb224cd26aa3975fa931d63c9b9c02c191baf9badfa11500f9cf6dc6cc"
+      "examples/benchmarks/bench_mqtt_broker.zig": "eda188eb224cd26aa3975fa931d63c9b9c02c191baf9badfa11500f9cf6dc6cc"
     },
     "after": {
       "src/internal/stream_io.zig": "bf8bf8f1f825aeb8d9a6d73a4def34b2271222a69f22d3b449bd57ef90365e6b",
       "src/runtime/timed_socket.zig": "8fb0c84bff217b2a002475d7dd7fbe78da6839b4c2e996364f0ffd8dce3fd1ed",
       "src/mqtt/runtime/packet_transport.zig": "a1a2e3ff80aeeb663bd78092865a6149cfaec8260c873918a6871e6a84dd6721",
       "src/mqtt/broker.zig": "bd3f7146084c596327328d72b1b7cedfc94e73628b7df579aa837d72161ccabd",
-      "examples/bench_mqtt_broker.zig": "eda188eb224cd26aa3975fa931d63c9b9c02c191baf9badfa11500f9cf6dc6cc"
+      "examples/benchmarks/bench_mqtt_broker.zig": "eda188eb224cd26aa3975fa931d63c9b9c02c191baf9badfa11500f9cf6dc6cc"
     }
   },
   "decision": {

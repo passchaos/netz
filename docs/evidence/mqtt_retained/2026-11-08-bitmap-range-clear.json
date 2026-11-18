@@ -69,7 +69,7 @@
   "source_sha256": {
     "src/mqtt/retained/mod.zig": "11cae5502faa000e815c1da6707cf287ccd1c303f741e27039f818a517a1f227",
     "src/mqtt/retained/tests.zig": "611a150b0d24ea777c51894cda3cd3349bd90932108cc06ced7a58a70a3a8456",
-    "examples/bench_mqtt_retained.zig": "bc0f04b9ad5921d9888bdb4bd4d81031f185b845e63f9c1a590227cdad7e3fbd"
+    "examples/benchmarks/bench_mqtt_retained.zig": "bc0f04b9ad5921d9888bdb4bd4d81031f185b845e63f9c1a590227cdad7e3fbd"
   },
   "notes": "The selective subtree scenario emits four entries from device 1234 on the mixed store; the previous implementation zeroed 256 words per lookup, while the range clear touches one word. The exact, broad wildcard, prefix-hash, and selective-wildcard scenarios are neutral: their matches span most or all of the bitmap, so the range clear is equivalent to the old full clear. The exact-lookup delta is attributed to code layout because that path never touches the bitmap. The bitmap stays zero at every match boundary: clearMatchBits runs through a defer on both matchInto and deliveriesInto, and insert zeroes newly grown words. Existing tests that issue several different wildcard filters against one store would observe stale matches if this invariant broke. The host was loaded during the batch (load average roughly 5 to 13), so only interleaved ratios are claimed."
 }
