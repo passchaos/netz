@@ -388,6 +388,8 @@ zig build bench-mqtt-router -Doptimize=ReleaseFast
 zig build bench-mqtt-acl -Doptimize=ReleaseFast
 zig build bench-mqtt-websocket -Doptimize=ReleaseFast
 taskset -c 0 zig build bench-mqtt-tls -Doptimize=ReleaseFast
+# Install the standalone broker and benchmark driver without Mosquitto.
+zig build build-mqtt-vector-broker build-mqtt-bench -Doptimize=ReleaseFast
 zig build compare-mqtt-mosquitto -Doptimize=ReleaseFast
 # Add verifier-checked 2-ms broker RSS sampling on Linux.
 MQTT_STATS=true zig build compare-mqtt-mosquitto -Doptimize=ReleaseFast
