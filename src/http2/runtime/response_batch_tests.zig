@@ -142,13 +142,14 @@ test "HTTP/2 batch streaming request heads feed response body batch" {
     const response_body = "x" ** (1024 * 1024);
     const parallel = 10;
     const chunk_size = 16 * 1024;
-    // An exact-boundary window (total response bytes) currently deadlocks in
-    // the response batch scheduler. Keep headroom so this test covers the
-    // large-body path while that bug is tracked separately.
+    // An exact-boundary window forces the client to send WINDOW_UPDATEs while
+    // the server is finishing the batch. The server must drain those control
+    // frames before closing; otherwise its close turns the final FIN into a
+    // RST and truncates the response.
     const limits: Limits = .{
         .max_body_bytes = response_body.len,
-        .initial_window_size = @max(2 * response_body.len * parallel, 65_535),
-        .initial_connection_window_size = @max(2 * response_body.len * parallel, 65_535),
+        .initial_window_size = @max(response_body.len * parallel, 65_535),
+        .initial_connection_window_size = @max(response_body.len * parallel, 65_535),
     };
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -207,6 +208,26 @@ test "HTTP/2 batch streaming request heads feed response body batch" {
                 &responses,
                 chunk_size,
             );
+            // Drain client control frames (WINDOW_UPDATE/GOAWAY) until the
+            // peer closes. Closing with unread bytes in the receive queue
+            // turns the final FIN into a RST and truncates the response.
+            const drain_deadline = std.Io.Clock.Timestamp.fromNow(
+                connection.io,
+                .{ .raw = .fromSeconds(2), .clock = .awake },
+            );
+            while (true) {
+                var frame = connection.readOwnedFrameWithDeadline(
+                    drain_deadline,
+                ) catch |err| switch (err) {
+                    error.ConnectionClosed,
+                    error.SocketUnconnected,
+                    error.Timeout,
+                    => break,
+                    else => return err,
+                };
+                defer frame.deinit(server_ptr.allocator);
+                _ = try connection.handleConnectionFrame(frame.frame);
+            }
         }
     };
     var shared = Shared{ .server = &server };
