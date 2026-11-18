@@ -5933,6 +5933,186 @@ test "HTTP/2 h2c runtime client and server exchange over TCP" {
     try std.testing.expectEqualStrings("done", goaway.goaway.debug_data);
 }
 
+test "HTTP/2 server sends 100 Continue before reading an expected body" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+
+            var request = try connection.readRequest();
+            defer request.deinit(server_ptr.allocator);
+            try std.testing.expectEqualStrings("/expect", request.path);
+            try std.testing.expectEqualStrings("ping", request.body);
+            try std.testing.expectEqualStrings(
+                "100-continue",
+                findHeader(request.headers, "expect").?,
+            );
+            try connection.writeResponse(request.stream_id, .{
+                .status = 200,
+                .body = "pong",
+            });
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+
+    const Observer = struct {
+        seen_continue: bool = false,
+
+        fn onResponse(context: *anyopaque, response: StreamingResponseHead) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (response.status == 100) self.seen_continue = true;
+        }
+    };
+    var observer = Observer{};
+    var response = try client.requestWithInformational(.{
+        .method = "POST",
+        .path = "/expect",
+        .authority = "127.0.0.1",
+        .headers = &.{.{ .name = "expect", .value = "100-continue" }},
+        .body = "ping",
+    }, .{
+        .context = &observer,
+        .on_response = Observer.onResponse,
+    });
+    defer response.deinit(allocator);
+
+    thread.join();
+    if (shared.err) |err| return err;
+
+    try std.testing.expect(observer.seen_continue);
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    try std.testing.expectEqualStrings("pong", response.body);
+}
+
+test "HTTP/2 streaming server sends 100 Continue before body callbacks" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+
+            const Sink = struct {
+                bytes: usize = 0,
+
+                fn consume(self: *@This(), data: []const u8) !void {
+                    self.bytes += data.len;
+                }
+            };
+            var sink = Sink{};
+            var request = try connection.readRequestStreaming(
+                &sink,
+                Sink.consume,
+            );
+            defer request.deinit(server_ptr.allocator);
+            try std.testing.expectEqualStrings("/expect-streaming", request.path);
+            try std.testing.expectEqual(@as(usize, 4), sink.bytes);
+            try std.testing.expectEqualStrings(
+                "100-continue",
+                findHeader(request.headers, "expect").?,
+            );
+            try connection.writeResponse(request.stream_id, .{
+                .status = 200,
+                .body = "pong",
+            });
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+
+    var writer = try client.startRequest(.{
+        .method = "POST",
+        .path = "/expect-streaming",
+        .authority = "127.0.0.1",
+        .headers = &.{.{ .name = "expect", .value = "100-continue" }},
+        .body_length = 4,
+    });
+    defer writer.deinit();
+    try writer.write("ping");
+    try writer.finish();
+
+    const Observer = struct {
+        seen_continue: bool = false,
+
+        fn onResponse(context: *anyopaque, response: StreamingResponseHead) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (response.status == 100) self.seen_continue = true;
+        }
+    };
+    var observer = Observer{};
+    var response = try writer.readResponseWithInformational(.{
+        .context = &observer,
+        .on_response = Observer.onResponse,
+    });
+    defer response.deinit(allocator);
+
+    thread.join();
+    if (shared.err) |err| return err;
+
+    try std.testing.expect(observer.seen_continue);
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    try std.testing.expectEqualStrings("pong", response.body);
+}
+
 test "HTTP/2 aggregate empty exchange borrows wire frames after warmup" {
     const allocator = std.testing.allocator;
 

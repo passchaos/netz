@@ -6648,6 +6648,29 @@ pub const Connection = struct {
                         );
                     }
 
+                    // RFC 9110 10.1.1: release an expecting peer before the
+                    // first request DATA frame is consumed. END_STREAM means
+                    // there is no body to wait for, so no interim head is sent.
+                    if (lookup.expects_continue and
+                        (!is_connect or is_extended_connect) and
+                        (frame.header.flags & flag_end_stream) == 0)
+                    {
+                        if (deadline) |absolute| {
+                            try self.writeInformationalResponseWithDeadline(
+                                stream_id,
+                                100,
+                                &.{},
+                                absolute,
+                            );
+                        } else {
+                            try self.writeInformationalResponse(
+                                stream_id,
+                                100,
+                                &.{},
+                            );
+                        }
+                    }
+
                     if ((!is_connect or is_extended_connect) and (frame.header.flags & flag_end_stream) == 0) {
                         while (true) {
                             var incoming = try self.readRequestBodyFrameUntil(
@@ -7337,6 +7360,26 @@ pub const Connection = struct {
             if (lookup.content_length) |body_len| {
                 if (body_len > self.limits.max_body_bytes) {
                     return error.MessageTooLarge;
+                }
+            }
+            // Release an expecting peer before the first request DATA callback.
+            if (lookup.expects_continue and
+                (!is_connect or is_extended_connect) and
+                (first.header.flags & flag_end_stream) == 0)
+            {
+                if (deadline) |absolute| {
+                    try self.writeInformationalResponseWithDeadline(
+                        stream_id,
+                        100,
+                        &.{},
+                        absolute,
+                    );
+                } else {
+                    try self.writeInformationalResponse(
+                        stream_id,
+                        100,
+                        &.{},
+                    );
                 }
             }
             {

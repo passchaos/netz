@@ -627,6 +627,9 @@ pub const RequestHeaderLookup = struct {
     protocol: ?[]const u8 = null,
     priority: http2.ExtensiblePriority = .{},
     content_length: ?usize = null,
+    /// True when an `expect` field requests `100-continue`. The server sends
+    /// the interim head before reading request DATA.
+    expects_continue: bool = false,
 
     pub fn requestAuthority(self: RequestHeaderLookup) ?[]const u8 {
         return self.authority orelse self.host;
@@ -650,10 +653,28 @@ pub fn requestHeaderLookup(headers: []const http2.Hpack.HeaderField) Error!Reque
             if (lookup.protocol == null) lookup.protocol = header.value;
         } else if (std.ascii.eqlIgnoreCase(header.name, "content-length")) {
             try parseContentLengthHeaderValue(header.value, &lookup.content_length);
+        } else if (std.ascii.eqlIgnoreCase(header.name, "expect")) {
+            if (expectHeaderRequestsContinue(header.value)) {
+                lookup.expects_continue = true;
+            }
         }
     }
     lookup.priority = http2.ExtensiblePriority.parseFields(headers);
     return lookup;
+}
+
+/// Parse the RFC 9110 `Expect` field as a comma-separated case-insensitive
+/// list. Unknown expectations are ignored; only `100-continue` changes server
+/// behavior.
+pub fn expectHeaderRequestsContinue(value: []const u8) bool {
+    var rest = value;
+    while (rest.len != 0) {
+        const comma = std.mem.indexOfScalar(u8, rest, ',') orelse rest.len;
+        const token = std.mem.trim(u8, rest[0..comma], " \t");
+        if (std.ascii.eqlIgnoreCase(token, "100-continue")) return true;
+        rest = if (comma == rest.len) "" else rest[comma + 1 ..];
+    }
+    return false;
 }
 
 pub fn findHeader(headers: []const http2.Hpack.HeaderField, name: []const u8) ?[]const u8 {
