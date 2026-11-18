@@ -212,5 +212,6 @@ new revision for a heartbeat-only refresh. See
 
 This slice supplies the transport, envelope codec, subscription/version state,
 stream client, typed automatic LDS/RDS/CDS/EDS publication and TTL expiry.
-Bootstrap parsing and automatic control-plane failover remain follow-up work.
-Typed SotW publication is unchanged.
+Bootstrap-managed SotW and delta controllers share the same source provenance,
+failover and expiry machinery (`managed.zig`, `bootstrap.zig`); typed SotW
+publication is unchanged.

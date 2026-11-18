@@ -3609,8 +3609,9 @@ resumes delivery on the same HTTP/2 session. Adjacent tests additionally cover
 queued-policy replacement, active RPC completion, invalid/canceled input,
 allocator rollback and retry-throttle preservation. See
 [request drop semantics](grpc_eds_drop.md) and
-`docs/evidence/grpc_eds_drop/2026-11-03.json`. Circuit breaking and LRS reporting
-remain open with the broader xDS/control-plane objective.
+`docs/evidence/grpc_eds_drop/2026-11-03.json`. Circuit breaking
+(`grpc_circuit.md`) and automatic LRS reporting (`grpc_lrs_automatic.md`) are
+implemented; broader control-plane orchestration remains open.
 
 
 ## Shared cluster circuit admission
