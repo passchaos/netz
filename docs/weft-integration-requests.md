@@ -68,8 +68,10 @@ after the final DATA contribution; the package test covers
   ~9% batch-32 drop is much smaller than the historical capture.
   A matching `max_handler_threads = 8` experiment measured 39.5k batch-32 GET
   req/s, within run noise of the uncapped 39.1k result, so the current drop is
-  not thread oversubscription on that host. The owner command/receive path is
-  the next profiling target.
+  not thread oversubscription on that host. A `perf` sample of the in-process
+  run was dominated by receive/wait/event-loop frames rather than handler
+  execution, so the next step is a split client/server profile of the owner
+  command and receive path.
 - `serveConcurrentStreams` now exposes `max_worker_threads` and reports
   `Summary.workers_spawned` (`74acea01`, `11f971e1`). The default remains one
   worker per possible concurrent handler; weft can cap the pool to test whether
