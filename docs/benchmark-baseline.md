@@ -585,6 +585,10 @@ The current executable obtains `std.Io` from the zio backend and schedules its
 local server through `std.Io.async`; it prints `io backend: zio-std-io`. The
 numeric results in this section were captured before that migration and remain
 historical `std.Io.Threaded` evidence until a fixed-binary zio run is recorded.
+The in-process 1-MiB response and duplex self-benchmark scenarios are currently
+selectable with `--scenario` but skipped by the default run because they
+deadlock in the single-executor harness; this is a known open item, not a
+performance result.
 
 Captured on 2026-08-17 against Hyper's
 `http2_consecutive_x1_empty`, `http2_consecutive_x1_req_10b`,

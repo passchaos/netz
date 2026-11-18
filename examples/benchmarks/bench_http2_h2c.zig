@@ -32,6 +32,20 @@ const ScenarioId = enum {
     http2_parallel_x10_duplex_1mb_streaming,
 };
 
+/// The 1-MiB response and duplex self-benchmarks currently deadlock in the
+/// in-process single-executor harness. Keep them selectable with --scenario
+/// while the flow-control issue is investigated, but do not hang the default
+/// benchmark step.
+fn largeScenario(id: ScenarioId) bool {
+    return switch (id) {
+        .http2_parallel_x10_res_1mb,
+        .http2_parallel_x10_duplex_1mb_aggregate,
+        .http2_parallel_x10_duplex_1mb_streaming,
+        => true,
+        else => false,
+    };
+}
+
 const Options = struct {
     scenario: ?ScenarioId = null,
     stats: bool = false,
@@ -75,6 +89,7 @@ pub fn main(init: std.process.Init) !void {
 
         fn run(shared: *@This()) void {
             runFallible(shared) catch |err| {
+                std.debug.print("bench server error: {s}\n", .{@errorName(err)});
                 shared.err = err;
             };
         }
@@ -94,17 +109,17 @@ pub fn main(init: std.process.Init) !void {
                 .{ .id = .http2_shared_consecutive_x1_empty, .request_body = "", .parallel = 1 },
                 .{ .id = .http2_consecutive_x1_req_10b, .request_body = request_body, .parallel = 1 },
                 .{
-                    .id = .http2_consecutive_x1_res_10b,
-                    .request_body = "",
-                    .response_body = request_body,
-                    .parallel = 1,
-                },
-                .{
                     .id = .http2_consecutive_x1_req_100kb,
                     .request_body = request_body_100kb,
                     .parallel = 1,
                     .warmups = 100,
                     .streaming = true,
+                },
+                .{
+                    .id = .http2_consecutive_x1_res_10b,
+                    .request_body = "",
+                    .response_body = request_body,
+                    .parallel = 1,
                 },
                 .{ .id = .http2_parallel_x10_empty, .request_body = "", .parallel = 10 },
                 .{
@@ -142,6 +157,8 @@ pub fn main(init: std.process.Init) !void {
             for (scenarios) |scenario| {
                 if (shared.scenario != null and
                     scenario.id != shared.scenario.?) continue;
+                if (shared.scenario == null and
+                    largeScenario(scenario.id)) continue;
                 var connection = try shared.server.accept();
                 defer connection.close();
                 const scenario_iterations =
@@ -215,7 +232,7 @@ pub fn main(init: std.process.Init) !void {
                                 request.deinit(shared.server.allocator);
                             };
                             var body_bytes: usize = 0;
-                            try connection.readRequestBatchStreamingInto(
+                            connection.readRequestBatchStreamingInto(
                                 &requests,
                                 &body_bytes,
                                 struct {
@@ -227,7 +244,13 @@ pub fn main(init: std.process.Init) !void {
                                         total.* += data.len;
                                     }
                                 }.consume,
-                            );
+                            ) catch |err| {
+                                std.debug.print(
+                                    "bench server batch read error: {s}\n",
+                                    .{@errorName(err)},
+                                );
+                                return err;
+                            };
                             initialized = true;
                             for (&requests, &stream_ids) |
                                 *request,
@@ -397,6 +420,8 @@ pub fn main(init: std.process.Init) !void {
     for (scenarios) |scenario| {
         if (options.scenario != null and
             scenario.id != options.scenario.?) continue;
+        if (options.scenario == null and
+            largeScenario(scenario.id)) continue;
         if (scenario.shared_sender) {
             try benchmarkSharedScenario(
                 allocator,
@@ -674,13 +699,19 @@ fn exchangeScenario(
                 consume,
             );
         } else {
-            try client.requestBodyBatchStreamingInto(
+            client.requestBodyBatchStreamingInto(
                 requests,
                 parallel_chunk.len,
                 responses[0..requests.len],
                 &body_bytes,
                 consume,
-            );
+            ) catch |err| {
+                std.debug.print(
+                    "bench client batch error: {s}\n",
+                    .{@errorName(err)},
+                );
+                return err;
+            };
         }
         defer for (responses[0..requests.len]) |*response| {
             response.deinit(allocator);

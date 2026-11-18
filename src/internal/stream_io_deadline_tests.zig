@@ -126,3 +126,94 @@ test "stream timed socket writer reports an abortive TCP peer reset" {
     }
     try std.testing.expectEqual(@as(usize, 0), committed);
 }
+
+test "wide stream write waits for writability after EAGAIN" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var listener = try (std.Io.net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+    const sender = try listener.socket.address.connect(
+        io,
+        .{ .mode = .stream },
+    );
+    defer sender.close(io);
+    const peer = try listener.accept(io);
+    defer peer.close(io);
+
+    const buffer_size: c_int = 4096;
+    try std.posix.setsockopt(
+        sender.socket.handle,
+        std.posix.SOL.SOCKET,
+        std.posix.SO.SNDBUF,
+        std.mem.asBytes(&buffer_size),
+    );
+    try std.posix.setsockopt(
+        peer.socket.handle,
+        std.posix.SOL.SOCKET,
+        std.posix.SO.RCVBUF,
+        std.mem.asBytes(&buffer_size),
+    );
+
+    // Fill both kernel queues so the next raw sendmsg observes EAGAIN.
+    const filler = "z" ** 4096;
+    for (0..3) |round| {
+        while (true) {
+            const rc = std.posix.system.sendto(
+                sender.socket.handle,
+                filler.ptr,
+                filler.len,
+                std.posix.MSG.DONTWAIT | std.posix.MSG.NOSIGNAL,
+                null,
+                0,
+            );
+            switch (std.posix.errno(rc)) {
+                .SUCCESS, .INTR => continue,
+                .AGAIN => break,
+                else => |err| return std.posix.unexpectedErrno(err),
+            }
+        }
+        if (round != 2) {
+            try std.Io.sleep(io, .fromMilliseconds(20), .awake);
+        }
+    }
+
+    const payload = "x" ** (64 * 1024);
+    const parts = [_][]const u8{payload};
+    const Reader = struct {
+        stream: std.Io.net.Stream,
+        io: std.Io,
+        payload_bytes: usize = 0,
+
+        fn run(self: *@This()) void {
+            var buffer: [4096]u8 = undefined;
+            var reader = self.stream.reader(self.io, &buffer);
+            var one: [1]u8 = undefined;
+            while (true) {
+                const count = reader.interface.readSliceShort(&one) catch return;
+                if (count == 0) return;
+                if (one[0] == 'x') self.payload_bytes += 1;
+                if (self.payload_bytes == payload.len) return;
+            }
+        }
+    };
+    var reader = Reader{ .stream = peer, .io = io };
+    const thread = try std.Thread.spawn(.{}, Reader.run, .{&reader});
+    var joined = false;
+    defer if (!joined) {
+        peer.shutdown(io, .both) catch {};
+        thread.join();
+    };
+
+    try stream_io.writeAllSlicesWide(io, sender, &parts);
+    thread.join();
+    joined = true;
+    try std.testing.expectEqual(payload.len, reader.payload_bytes);
+}

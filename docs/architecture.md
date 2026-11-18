@@ -254,7 +254,7 @@ a reference-gate regression.
 
 | Gate | Command | Scope |
 | --- | --- | --- |
-| Full library | `zig build test-lib --summary all` | all unit and runtime tests (6,973 at the time of writing) |
+| Full library | `zig build test-lib --summary all` | all unit and runtime tests (6,974 at the time of writing) |
 | Focused | `zig build test-lib -Dtest-filter=<area>` | fast iteration on one protocol or subsystem |
 | Package surface | `zig build test-package --summary all` | public API smoke tests |
 | Cross-compile | `zig build test-compile -Dtarget=<triple> --summary all` | portable test compilation |

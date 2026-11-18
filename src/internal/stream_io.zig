@@ -167,7 +167,21 @@ pub fn writeAllSlicesWide(
             .PIPE, .NOTCONN => return error.SocketUnconnected,
             .CONNRESET => return error.ConnectionResetByPeer,
             .NOBUFS, .NOMEM => return error.SystemResources,
-            .AGAIN => return error.Unexpected,
+            .AGAIN => blk: {
+                // The raw sendmsg path bypasses the backend's readiness
+                // wait. Fall back to the backend's single-slice write for
+                // the current part; the common advancement below resumes
+                // at the exact offset after the socket becomes writable.
+                const written_count = try io.vtable.netWrite(
+                    io.userdata,
+                    stream.socket.handle,
+                    parts[part_index][part_offset..],
+                    &.{""},
+                    0,
+                );
+                if (written_count == 0) return error.SocketUnconnected;
+                break :blk written_count;
+            },
             else => return error.Unexpected,
         };
         if (written == 0) return error.SocketUnconnected;
