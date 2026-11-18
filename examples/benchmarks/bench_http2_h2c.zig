@@ -500,7 +500,8 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    server_task.await(io);
+    server_thread.join();
+    server_joined = true;
     if (shared.err) |err| return err;
 }
 

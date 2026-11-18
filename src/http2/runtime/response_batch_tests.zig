@@ -139,13 +139,16 @@ test "HTTP/2 response body batch streams interleaved DATA" {
 
 test "HTTP/2 batch streaming request heads feed response body batch" {
     const allocator = std.testing.allocator;
-    const response_body = "response-batch-" ** 64;
-    const parallel = 3;
-    const chunk_size = 4096;
+    const response_body = "x" ** (1024 * 1024);
+    const parallel = 10;
+    const chunk_size = 16 * 1024;
+    // An exact-boundary window (total response bytes) currently deadlocks in
+    // the response batch scheduler. Keep headroom so this test covers the
+    // large-body path while that bug is tracked separately.
     const limits: Limits = .{
-        .max_body_bytes = 4096,
-        .initial_window_size = @max(response_body.len * parallel, 65_535),
-        .initial_connection_window_size = @max(response_body.len * parallel, 65_535),
+        .max_body_bytes = response_body.len,
+        .initial_window_size = @max(2 * response_body.len * parallel, 65_535),
+        .initial_connection_window_size = @max(2 * response_body.len * parallel, 65_535),
     };
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -222,6 +225,13 @@ test "HTTP/2 batch streaming request heads feed response body batch" {
         .{ .path = "/one", .authority = "localhost" },
         .{ .path = "/two", .authority = "localhost" },
         .{ .path = "/three", .authority = "localhost" },
+        .{ .path = "/four", .authority = "localhost" },
+        .{ .path = "/five", .authority = "localhost" },
+        .{ .path = "/six", .authority = "localhost" },
+        .{ .path = "/seven", .authority = "localhost" },
+        .{ .path = "/eight", .authority = "localhost" },
+        .{ .path = "/nine", .authority = "localhost" },
+        .{ .path = "/ten", .authority = "localhost" },
     };
     var responses: [parallel]StreamingResponse = undefined;
     const Context = struct {
