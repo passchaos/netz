@@ -69,18 +69,19 @@ bug, not a style issue. `std.posix` appears only in runtime layers for
 socket-option and ancillary-data syscalls (for example `SO_LINGER` or
 `recvmsg`), never in codecs.
 
-Scale at the time of writing: 1,894 Zig files and roughly 851,000 lines, split
+Scale at the time of writing: 1,900 Zig files and roughly 851,000 lines, split
 into self-contained protocol directories. The size is deliberate: protocol
 runtimes are allowed to be large, but each hot path must be locally auditable.
 Runtimes that hold several cohesive owner types are split into `runtime/`
 submodules; the protocol root keeps the public entry points and re-exports the
 moved types so import paths stay stable. `src/webtransport/runtime.zig` follows
 this rule, delegating server-side handshake, session, and endpoint types to
-`src/webtransport/runtime/server.zig`. A single owner type that cannot be split
-without breaking encapsulation stays in one file and is kept locally auditable;
-current examples are `src/http2/runtime/connection.zig`,
-`src/http3/runtime/handshake_client.zig`, and
-`src/quic/one_rtt/connection.zig`.
+`src/webtransport/runtime/server.zig`, and `src/http3/runtime/protected.zig`
+re-exports `ProtectedServer` and `ProtectedClient` from separate files. A single
+owner type that cannot be split without breaking encapsulation stays in one file
+and is kept locally auditable; current examples are
+`src/http2/runtime/connection.zig`, `src/http3/runtime/handshake_client.zig`,
+and `src/quic/one_rtt/connection.zig`.
 
 Tests follow the same ownership boundary. Named test bodies for a runtime root
 or protocol module live in a sibling `tests.zig` (or a topic-specific
