@@ -278,6 +278,9 @@ pub const Dispatcher = struct {
     /// Owning FIFO for datagrams already read in a batch but deferred across
     /// a route-publishing event such as server Initial admission/promotion.
     buffered_datagrams: std.ArrayList(runtime.OwnedBytes) = .empty,
+    /// First live entry in `buffered_datagrams`. Consuming a datagram advances
+    /// this index instead of shifting the remaining FIFO on every receive.
+    buffered_datagram_head: usize = 0,
     /// Registered connections can retain at most one preloaded application
     /// datagram. Track ready handles directly so an idle endpoint does not
     /// scan every connection. The indirection keeps observer pointers stable
@@ -324,6 +327,50 @@ pub const Dispatcher = struct {
                 endpoint == self.secondary_endpoint.?);
     }
 
+    fn bufferedDatagramCount(self: *const Dispatcher) usize {
+        return self.buffered_datagrams.items.len -
+            self.buffered_datagram_head;
+    }
+
+    fn compactBufferedDatagrams(self: *Dispatcher) void {
+        if (self.buffered_datagram_head == 0) return;
+        const remaining = self.buffered_datagrams.items[self.buffered_datagram_head..];
+        if (remaining.len != 0) {
+            std.mem.copyForwards(
+                runtime.OwnedBytes,
+                self.buffered_datagrams.items[0..remaining.len],
+                remaining,
+            );
+        }
+        self.buffered_datagrams.items.len = remaining.len;
+        self.buffered_datagram_head = 0;
+    }
+
+    fn popBufferedDatagram(self: *Dispatcher) ?runtime.OwnedBytes {
+        if (self.buffered_datagram_head ==
+            self.buffered_datagrams.items.len)
+        {
+            self.compactBufferedDatagrams();
+            return null;
+        }
+        const datagram = self.buffered_datagrams.items[
+            self.buffered_datagram_head
+        ];
+        self.buffered_datagram_head += 1;
+        if (self.buffered_datagram_head ==
+            self.buffered_datagrams.items.len)
+        {
+            self.buffered_datagrams.clearRetainingCapacity();
+            self.buffered_datagram_head = 0;
+        } else if (self.buffered_datagram_head >= 64 and
+            self.buffered_datagram_head * 2 >=
+                self.buffered_datagrams.items.len)
+        {
+            self.compactBufferedDatagrams();
+        }
+        return datagram;
+    }
+
     /// Release dispatcher metadata without deinitializing caller-owned QUIC
     /// connections or the shared UDP endpoint. Connections must be unregistered
     /// before their storage moves or is destroyed.
@@ -346,7 +393,7 @@ pub const Dispatcher = struct {
             entry.deinit(self.allocator);
         }
         self.pending_handshakes.deinit(self.allocator);
-        for (self.buffered_datagrams.items) |*datagram| {
+        for (self.buffered_datagrams.items[self.buffered_datagram_head..]) |*datagram| {
             datagram.deinit(self.allocator);
         }
         self.buffered_datagrams.deinit(self.allocator);
@@ -1118,9 +1165,9 @@ pub const Dispatcher = struct {
     /// the bound socket. Multi-endpoint owners use this before racing their
     /// sockets so the dispatcher remains the sole state mutation point.
     pub fn poll(self: *Dispatcher) Error!?Event {
-        while (self.buffered_datagrams.items.len != 0) {
+        while (self.bufferedDatagramCount() != 0) {
             const event = try self.dispatch(
-                self.buffered_datagrams.orderedRemove(0),
+                self.popBufferedDatagram().?,
             );
             if (event == .discarded_long_header) continue;
             return event;
@@ -1501,9 +1548,9 @@ pub const Dispatcher = struct {
         comptime visitor: anytype,
     ) (ReceiveError || callbackErrorSet(visitor))!usize {
         while (true) {
-            if (self.buffered_datagrams.items.len != 0) {
+            if (self.bufferedDatagramCount() != 0) {
                 output[0] = try self.visitOwnedEvent(
-                    try self.dispatch(self.buffered_datagrams.orderedRemove(0)),
+                    try self.dispatch(self.popBufferedDatagram().?),
                     context,
                     visitor,
                 );
@@ -1603,6 +1650,7 @@ pub const Dispatcher = struct {
         datagrams: []const runtime.ReceivedBytesView,
     ) Error!void {
         if (datagrams.len == 0) return;
+        self.compactBufferedDatagrams();
         try self.buffered_datagrams.ensureUnusedCapacity(
             self.allocator,
             datagrams.len,
@@ -1630,11 +1678,11 @@ pub const Dispatcher = struct {
         comptime visitor: anytype,
     ) (ReceiveError || callbackErrorSet(visitor))!VisitEvent {
         while (true) {
-            if (self.buffered_datagrams.items.len != 0) {
+            if (self.bufferedDatagramCount() != 0) {
                 // Route-changing and error suffixes are rare and already
                 // owned; preserve their FIFO lifetime guarantees.
                 return self.visitOwnedEvent(
-                    try self.dispatch(self.buffered_datagrams.orderedRemove(0)),
+                    try self.dispatch(self.popBufferedDatagram().?),
                     context,
                     visitor,
                 );
@@ -1892,8 +1940,8 @@ pub const Dispatcher = struct {
         caller_deadline: ?std.Io.Clock.Timestamp,
     ) ReceiveError!Event {
         while (true) {
-            if (self.buffered_datagrams.items.len != 0) {
-                const datagram = self.buffered_datagrams.orderedRemove(0);
+            if (self.bufferedDatagramCount() != 0) {
+                const datagram = self.popBufferedDatagram().?;
                 return self.dispatch(datagram);
             }
             if (try self.pollPendingPacket()) |packet| {

@@ -61,9 +61,15 @@ after the final DATA contribution; the package test covers
   - batch=8 upload (2 KiB): ~85 µs/req, 11.8k req/s
   - batch=32 GET: ~134 µs/req, 7.4k req/s
   - batch=32 upload (2 KiB): ~161 µs/req, 6.2k req/s
-  The previous fixed ~2 ms sequential stall is gone. Per-request throughput
-  falls sharply at 32 concurrent streams, indicating owner command-queue or
-  worker scheduling contention above roughly eight streams.
+  The previous fixed ~2 ms sequential stall is gone. The historical 7.4k
+  batch-32 number predates the current runtime. A 2026-11-19 run on a
+  32-logical-CPU host measured 43.1k req/s at batch 8 and 39.1k req/s at
+  batch 32 for GET, and 25.2k/22.8k req/s for the 2-KiB upload. The remaining
+  ~9% batch-32 drop is much smaller than the historical capture.
+  A matching `max_handler_threads = 8` experiment measured 39.5k batch-32 GET
+  req/s, within run noise of the uncapped 39.1k result, so the current drop is
+  not thread oversubscription on that host. The owner command/receive path is
+  the next profiling target.
 - `serveConcurrentStreams` now exposes `max_worker_threads` and reports
   `Summary.workers_spawned` (`74acea01`, `11f971e1`). The default remains one
   worker per possible concurrent handler; weft can cap the pool to test whether
