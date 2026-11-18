@@ -590,6 +590,23 @@ selectable with `--scenario` but skipped by the default run because they
 deadlock in the single-executor harness; this is a known open item, not a
 performance result.
 
+A single unpinned 2026-11-19 ReleaseFast run of the current in-process harness
+(`zig build bench-http2-h2c -Doptimize=ReleaseFast`) recorded:
+
+```text
+consecutive x1 empty:              9,941 ns/request   100,589 req/s
+shared consecutive x1 empty:      10,655 ns/request    93,852 req/s
+consecutive x1 10-byte request:    8,899 ns/request   112,361 req/s
+consecutive x1 100-KiB request:   21,367 ns/request    46,799 req/s
+consecutive x1 10-byte response:   8,808 ns/request   113,531 req/s
+parallel x10 empty:                2,104 ns/request   475,230 req/s
+parallel x10 1-MiB request batch: 176,342 ns/request     5,670 req/s
+```
+
+The host also ran unrelated builds, so this is a backend-identity and
+scenario-coverage refresh, not a fixed-binary comparison or a cross-library
+claim.
+
 Captured on 2026-08-17 against Hyper's
 `http2_consecutive_x1_empty`, `http2_consecutive_x1_req_10b`,
 `http2_consecutive_x1_req_100kb`, and `http2_parallel_x10_empty` benchmarks.
