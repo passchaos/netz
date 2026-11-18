@@ -107,6 +107,15 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
                 try self.stream.writeBody(data, fin);
             }
 
+            pub fn writeBodyBlocking(
+                self: *StreamHandle,
+                data: []const u8,
+                fin: bool,
+                deadline: ?std.Io.Clock.Timestamp,
+            ) !void {
+                try self.stream.writeBodyBlocking(data, fin, deadline);
+            }
+
             pub fn writeTrailers(
                 self: *StreamHandle,
                 trailers: []const http3.Qpack.HeaderField,

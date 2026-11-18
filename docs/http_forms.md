@@ -80,11 +80,9 @@ var response = try client.requestUri(uri, .{
 ```
 
 `body_source` takes precedence over `body`. HTTP/1 uses chunked framing when
-the reader length is unknown; HTTP/2 streams DATA frames. The HTTP/3 pool does
-not stream reader bodies directly: it returns
-`error.StreamingBodyUnsupported` before opening a stream and falls back to TCP
-when the pool's fallback policy allows it. With fallback disabled, use a slice
-body.
+the reader length is unknown; HTTP/2 streams DATA frames. The HTTP/3 pool also
+streams reader bodies through the bounded H3 request handle, using the declared
+length as `Content-Length` and omitting it when the length is unknown.
 
 When the response must stream too, or the request body is produced
 incrementally, use the connection-level duplex handle instead. The multipart

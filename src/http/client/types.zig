@@ -95,8 +95,8 @@ pub const RequestOptions = struct {
     headers: []const Header = &.{},
     body: []const u8 = &.{},
     /// Streaming body source. When set, it takes precedence over `body`.
-    /// HTTP/1 and HTTP/2 connections stream reader-backed bodies; HTTP/3 pool
-    /// requests reject them before opening a stream and may fall back to TCP.
+    /// HTTP/1, HTTP/2, and HTTP/3 pool requests stream reader-backed bodies;
+    /// the declared length controls fixed framing or Content-Length.
     body_source: ?BodySource = null,
     /// Declared length for a manually written duplex body. When set, it
     /// overrides the length implied by `body` or `body_source`; the caller

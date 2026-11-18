@@ -206,8 +206,8 @@ Current protocol coverage includes:
 - Application-level form helpers: bounded `application/x-www-form-urlencoded`
   encode/decode and a streaming `multipart/form-data` writer/reader/parser.
   `RequestOptions.body_source` streams reader-backed bodies over HTTP/1
-  chunked framing and HTTP/2 DATA frames; HTTP/3 pool requests fall back to
-  TCP or require a slice body. See `docs/http_forms.md`.
+  chunked framing, HTTP/2 DATA frames, and bounded HTTP/3 request DATA.
+  See `docs/http_forms.md`.
 - An explicit, single-owner RFC 6265/RFC6265bis-22 `http.CookieJar` that
   deep-owns state from every repeated H1/H2/H3 `Set-Cookie` field; validates
   the lenient user-agent syntax with CTL and 4,096-byte bounds; applies

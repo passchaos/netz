@@ -38,6 +38,9 @@ pub fn Stream(comptime Pool: type) type {
         mutex: std.Io.Mutex = .init,
         user_ready: std.Io.Event = .unset,
         worker_ready: std.Io.Event = .unset,
+        /// Wakes a caller blocked in `writeBodyBlocking` after the worker
+        /// drains queued request DATA.
+        write_ready: std.Io.Event = .unset,
         /// Set by the caller to interrupt the worker's receive wait.
         activity: std.Io.Event = .unset,
         stream_id: ?u62 = null,
@@ -127,31 +130,74 @@ pub fn Stream(comptime Pool: type) type {
             fin: bool,
         ) !void {
             self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
             if (self.finished or self.cancelled) {
-                self.mutex.unlock(self.io);
                 return error.RequestCancelled;
             }
-            if (self.pending_write_bytes + data.len >
+            if (self.pending_write_bytes +| data.len >
                 max_pending_write_bytes)
             {
-                self.mutex.unlock(self.io);
                 return error.Backpressure;
             }
-            const copy = self.allocator.dupe(u8, data) catch |err| {
+            return self.appendBodyLocked(data, fin);
+        }
+
+        /// Queue one request DATA contribution, waiting for the worker to
+        /// drain the bounded write queue instead of reporting backpressure.
+        /// The caller must keep `data` valid until this call returns; it is
+        /// copied into the queue before the wait completes.
+        pub fn writeBodyBlocking(
+            self: *Self,
+            data: []const u8,
+            fin: bool,
+            deadline: ?std.Io.Clock.Timestamp,
+        ) !void {
+            self.mutex.lockUncancelable(self.io);
+            while (true) {
+                if (self.finished or self.cancelled) {
+                    self.mutex.unlock(self.io);
+                    return error.RequestCancelled;
+                }
+                if (self.pending_write_bytes +| data.len <=
+                    max_pending_write_bytes)
+                {
+                    const result = self.appendBodyLocked(data, fin);
+                    self.mutex.unlock(self.io);
+                    return result;
+                }
+                // Reset under the queue mutex so a concurrent `takeWrite`
+                // cannot publish a wake between the capacity check and the
+                // wait.
+                self.write_ready.reset();
                 self.mutex.unlock(self.io);
-                return err;
-            };
+                if (deadline) |absolute| {
+                    self.write_ready.waitTimeout(
+                        self.io,
+                        .{ .deadline = absolute },
+                    ) catch |err| switch (err) {
+                        error.Timeout => return error.Timeout,
+                        error.Canceled => return error.Canceled,
+                    };
+                } else {
+                    self.write_ready.wait(self.io) catch |err| return err;
+                }
+                self.mutex.lockUncancelable(self.io);
+            }
+        }
+
+        fn appendBodyLocked(
+            self: *Self,
+            data: []const u8,
+            fin: bool,
+        ) !void {
+            const copy = self.allocator.dupe(u8, data) catch |err| return err;
+            errdefer self.allocator.free(copy);
             self.writes.append(self.allocator, .{
                 .data = copy,
                 .fin = fin,
-            }) catch |err| {
-                self.allocator.free(copy);
-                self.mutex.unlock(self.io);
-                return err;
-            };
+            }) catch |err| return err;
             self.pending_write_bytes += copy.len;
             self.activity.set(self.io);
-            self.mutex.unlock(self.io);
         }
 
         /// Queue request trailers. The stream is closed when the worker sends
@@ -310,6 +356,7 @@ pub fn Stream(comptime Pool: type) type {
             self.cancelled = true;
             self.worker_ready.set(self.io);
             self.user_ready.set(self.io);
+            self.write_ready.set(self.io);
             self.mutex.unlock(self.io);
             self.activity.set(self.io);
         }
@@ -336,6 +383,7 @@ pub fn Stream(comptime Pool: type) type {
             }
             const write = self.writes.popFront().?;
             self.pending_write_bytes -= write.data.len;
+            self.write_ready.set(self.io);
             self.mutex.unlock(self.io);
             return write;
         }
@@ -423,6 +471,7 @@ pub fn Stream(comptime Pool: type) type {
             self.mutex.lockUncancelable(self.io);
             self.finished = true;
             self.user_ready.set(self.io);
+            self.write_ready.set(self.io);
             self.mutex.unlock(self.io);
         }
 
@@ -432,8 +481,48 @@ pub fn Stream(comptime Pool: type) type {
                 self.err = err;
                 self.finished = true;
                 self.user_ready.set(self.io);
+                self.write_ready.set(self.io);
             }
             self.mutex.unlock(self.io);
         }
     };
+}
+
+test "stream blocking body write waits for queue capacity" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const TestPool = struct {};
+    var pool: TestPool = .{};
+    var stream = Stream(TestPool).init(&pool, allocator, io);
+    defer stream.deinit();
+
+    var chunk: [max_pending_write_bytes]u8 = @splat(0);
+    try stream.writeBody(&chunk, false);
+    try std.testing.expectError(
+        error.Backpressure,
+        stream.writeBody("x", false),
+    );
+
+    const expired = std.Io.Clock.Timestamp.fromNow(io, .{
+        .raw = .fromNanoseconds(-1),
+        .clock = .awake,
+    });
+    try std.testing.expectError(
+        error.Timeout,
+        stream.writeBodyBlocking("x", false, expired),
+    );
+
+    const drained = stream.takeWrite().?;
+    allocator.free(drained.data);
+    try stream.writeBodyBlocking("x", true, .fromNow(io, .{
+        .raw = .fromSeconds(1),
+        .clock = .awake,
+    }));
+    const final = stream.takeWrite().?;
+    defer allocator.free(final.data);
+    try std.testing.expectEqualStrings("x", final.data);
+    try std.testing.expect(final.fin);
 }

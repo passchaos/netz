@@ -1253,6 +1253,9 @@ test "unified HTTP pool streams a request through HTTP3" {
     for (&request_body, 0..) |*byte, index| byte.* = @truncate(index);
     var response_body: [3000]u8 = undefined;
     for (&response_body, 0..) |*byte, index| byte.* = @truncate(index *% 11);
+    var reader_request_body: [700]u8 = undefined;
+    for (&reader_request_body, 0..) |*byte, index| byte.* = @truncate(index *% 7 + 1);
+    const reader_response_body = "reader-body-response";
 
     const TcpWorker = struct {
         server: *http2_runtime.TlsServer,
@@ -1283,6 +1286,8 @@ test "unified HTTP pool streams a request through HTTP3" {
         server: *http3_runtime.HandshakeServer,
         request_body: []const u8,
         response_body: []const u8,
+        reader_request_body: []const u8,
+        reader_response_body: []const u8,
         err: ?anyerror = null,
 
         fn run(self: *@This()) void {
@@ -1327,6 +1332,27 @@ test "unified HTTP pool streams a request through HTTP3" {
                 request.stream_id,
                 &.{.{ .name = "x-response", .value = "complete" }},
             );
+
+            var reader_request = try session.receiveRequest();
+            defer reader_request.deinit(self.server.allocator);
+            try std.testing.expectEqualStrings(
+                "/reader",
+                reader_request.request.path,
+            );
+            try std.testing.expectEqualStrings(
+                self.reader_request_body,
+                reader_request.request.body,
+            );
+            try session.startResponse(
+                reader_request.stream_id,
+                .{ .status = 200, .request_method = "POST" },
+                self.reader_response_body.len,
+            );
+            try session.sendResponseBodyPaced(
+                reader_request.stream_id,
+                self.reader_response_body,
+                true,
+            );
         }
     };
 
@@ -1340,6 +1366,8 @@ test "unified HTTP pool streams a request through HTTP3" {
         .server = &h3_server,
         .request_body = &request_body,
         .response_body = &response_body,
+        .reader_request_body = &reader_request_body,
+        .reader_response_body = reader_response_body,
     };
     const tcp_thread = try std.Thread.spawn(.{}, TcpWorker.run, .{&tcp_worker});
     var tcp_joined = false;
@@ -1431,6 +1459,33 @@ test "unified HTTP pool streams a request through HTTP3" {
 
     handle_active = false;
     handle.deinit();
+
+    const reader_uri = try std.fmt.allocPrint(
+        allocator,
+        "{s}/reader",
+        .{base},
+    );
+    defer allocator.free(reader_uri);
+    var reader_source = std.Io.Reader.fixed(&reader_request_body);
+    var reader_response = try pool.requestUriWithTimeout(
+        reader_uri,
+        .{
+            .method = "POST",
+            .body_source = .{ .reader = .{
+                .reader = &reader_source,
+                .length = reader_request_body.len,
+            } },
+        },
+        .fromSeconds(5),
+    );
+    defer reader_response.deinit();
+    try std.testing.expectEqual(http.Protocol.http3, reader_response.protocol());
+    try std.testing.expectEqual(@as(u16, 200), reader_response.status());
+    try std.testing.expectEqualStrings(
+        reader_response_body,
+        reader_response.body(),
+    );
+
     release.set(io);
     tcp_thread.join();
     tcp_joined = true;

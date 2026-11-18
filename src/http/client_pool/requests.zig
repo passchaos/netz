@@ -10,6 +10,7 @@ const http_method = @import("../../internal/http_method.zig");
 const http1_runtime = @import("../../http1/runtime.zig");
 const uri_redirect = @import("../../http1/runtime/redirect.zig");
 const http3 = @import("../../http3/mod.zig");
+const http3_runtime = @import("../../http3/runtime.zig");
 const alt_svc_cache = @import("../alt_svc_cache.zig");
 
 pub fn requestUri(
@@ -111,7 +112,7 @@ pub fn requestUriBefore(
                     _ = h3_state.cache.recordFailure(origin);
                 }
                 if (!h3FallbackAllowed(h3_state, request.method, err)) {
-                    return err;
+                    return @errorCast(err);
                 }
             }
         }
@@ -208,9 +209,23 @@ fn requestHttp3(
         &trailer_stack,
     );
     defer trailers.deinit(pool.allocator);
+    if (request.body_source) |source| switch (source) {
+        .reader => |reader_body| return requestHttp3ReaderBody(
+            pool,
+            state,
+            uri_text,
+            alternative,
+            request,
+            headers.items,
+            trailers.items,
+            reader_body,
+            deadline,
+        ),
+        .slice => {},
+    };
     const body_slice = if (request.body_source) |source| switch (source) {
         .slice => |body| body,
-        .reader => return error.StreamingBodyUnsupported,
+        .reader => unreachable,
     } else request.body;
     const response = try state.request(
         origin,
@@ -237,6 +252,193 @@ fn requestHttp3(
         } else null,
     };
 }
+
+/// Stream a reader-backed request body over HTTP/3 instead of falling back
+/// to TCP. The body is written through the same bounded streaming handle used
+/// by `Pool.startRequest`; the response is collected into the aggregate
+/// `OwnedResponse` shape expected by `requestUri`.
+fn requestHttp3ReaderBody(
+    pool: anytype,
+    state: anytype,
+    uri_text: []const u8,
+    alternative: *const alt_svc_cache.Alternative,
+    request: client.RequestOptions,
+    headers: []const http3.Qpack.HeaderField,
+    trailers: []const http3.Qpack.HeaderField,
+    reader_body: client.ReaderBody,
+    deadline: ?std.Io.Clock.Timestamp,
+) !client.OwnedResponse {
+    const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
+    var endpoint = try http1_runtime.uriEndpoint(pool.allocator, uri, 443);
+    defer endpoint.deinit();
+    const path = try uriTargetAlloc(pool.allocator, uri);
+    defer pool.allocator.free(path);
+
+    var handle = try state.startStream(
+        uri_text,
+        alternative.target(),
+        .{
+            .method = request.method,
+            .path = path,
+            .scheme = "https",
+            .authority = endpoint.authority,
+            .headers = headers,
+        },
+        reader_body.length,
+        deadline,
+    );
+    defer handle.deinit();
+
+    var collector = H3ResponseCollector{ .allocator = pool.allocator };
+    defer collector.deinit();
+
+    var buffer: [16 * 1024]u8 = undefined;
+    while (true) {
+        const count = try reader_body.reader.readSliceShort(&buffer);
+        if (count == 0) break;
+        handle.writeBodyBlocking(buffer[0..count], false, deadline) catch |err|
+            switch (err) {
+                // A final response may arrive before the upload finishes.
+                // Keep reading it instead of treating the upload as fatal.
+                error.RequestCancelled => break,
+                else => return @errorCast(err),
+            };
+    }
+    if (!collector.finished) {
+        if (trailers.len != 0) {
+            try handle.writeTrailers(trailers);
+        } else {
+            handle.writeBodyBlocking(&.{}, true, deadline) catch |err|
+                switch (err) {
+                    error.RequestCancelled => {},
+                    else => return @errorCast(err),
+                };
+        }
+    }
+    _ = try handle.readResponse(collector.sink(), deadline);
+    return collector.intoResponse(pool.allocator);
+}
+
+/// Clone decoded QPACK fields so they outlive the stream handle. Each field
+/// owns its name and value allocation, matching `Qpack.freeDecodedFields`.
+fn cloneH3Fields(
+    allocator: std.mem.Allocator,
+    fields: []const http3.Qpack.HeaderField,
+) std.mem.Allocator.Error![]http3.Qpack.HeaderField {
+    const owned = try allocator.alloc(http3.Qpack.HeaderField, fields.len);
+    var initialized: usize = 0;
+    errdefer {
+        for (owned[0..initialized]) |field| {
+            if (field.name_storage) |storage| allocator.free(storage);
+            if (field.value_storage) |storage| allocator.free(storage);
+        }
+        allocator.free(owned);
+    }
+    for (fields, owned) |source, *target| {
+        const name = try allocator.dupe(u8, source.name);
+        errdefer allocator.free(name);
+        const value = try allocator.dupe(u8, source.value);
+        target.* = .{
+            .name = name,
+            .value = value,
+            .never_indexed = source.never_indexed,
+            .name_storage = name,
+            .value_storage = value,
+        };
+        initialized += 1;
+    }
+    return owned;
+}
+
+const H3ResponseCollector = struct {
+    allocator: std.mem.Allocator,
+    status: u16 = 0,
+    headers: []http3.Qpack.HeaderField = &.{},
+    trailers: []http3.Qpack.HeaderField = &.{},
+    body: std.ArrayList(u8) = .empty,
+    body_allowed: bool = true,
+    consumed: usize = 0,
+    qpack_section_acknowledgments: usize = 0,
+    finished: bool = false,
+
+    fn sink(self: *H3ResponseCollector) http3_runtime.StreamCallbackSink {
+        return .{
+            .context = self,
+            .begin = begin,
+            .data = data,
+            .end = end,
+        };
+    }
+
+    fn begin(
+        context: *anyopaque,
+        head: http3.DecodedResponseHead,
+    ) !void {
+        const self: *H3ResponseCollector = @ptrCast(@alignCast(context));
+        if (self.status != 0) return error.UnexpectedFrame;
+        self.status = head.status;
+        self.body_allowed = head.body_allowed;
+        self.consumed = head.consumed;
+        self.qpack_section_acknowledgments =
+            head.qpack_section_acknowledgments;
+        self.headers = try cloneH3Fields(self.allocator, head.headers);
+    }
+
+    fn data(context: *anyopaque, bytes: []const u8) !void {
+        const self: *H3ResponseCollector = @ptrCast(@alignCast(context));
+        try self.body.appendSlice(self.allocator, bytes);
+    }
+
+    fn end(
+        context: *anyopaque,
+        trailers: []const http3.Qpack.HeaderField,
+    ) !void {
+        const self: *H3ResponseCollector = @ptrCast(@alignCast(context));
+        if (self.finished) return error.UnexpectedFrame;
+        self.trailers = try cloneH3Fields(self.allocator, trailers);
+        self.finished = true;
+    }
+
+    fn deinit(self: *H3ResponseCollector) void {
+        http3.Qpack.freeDecodedFields(self.allocator, self.headers);
+        http3.Qpack.freeDecodedFields(self.allocator, self.trailers);
+        self.body.deinit(self.allocator);
+        self.* = undefined;
+    }
+
+    fn intoResponse(
+        self: *H3ResponseCollector,
+        allocator: std.mem.Allocator,
+    ) !client.OwnedResponse {
+        if (!self.finished or self.status == 0) {
+            return error.UnexpectedFrame;
+        }
+        const body = try self.body.toOwnedSlice(allocator);
+        errdefer allocator.free(body);
+        const stream_bytes = try allocator.alloc(u8, 0);
+        errdefer allocator.free(stream_bytes);
+        const headers = self.headers;
+        self.headers = &.{};
+        const trailers = self.trailers;
+        self.trailers = &.{};
+        return .{
+            .allocator = allocator,
+            .value = .{ .http3 = .{
+                .stream_bytes = stream_bytes,
+                .response = .{
+                    .status = self.status,
+                    .headers = headers,
+                    .trailers = trailers,
+                    .body = body,
+                    .body_storage = body,
+                    .body_allowed = self.body_allowed,
+                    .consumed = self.consumed,
+                    .qpack_section_acknowledgments = self.qpack_section_acknowledgments,
+                },
+            } },
+        };
+    }
+};
 
 fn observeAltSvc(
     state: anytype,

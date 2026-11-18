@@ -86,6 +86,18 @@ pub const StreamHandle = union(enum) {
         }
     }
 
+    pub fn writeBodyBlocking(
+        self: *StreamHandle,
+        data: []const u8,
+        fin: bool,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) !void {
+        switch (self.*) {
+            .shared => |handle| try handle.writeBodyBlocking(data, fin, deadline),
+            .exclusive => |handle| try handle.writeBodyBlocking(data, fin, deadline),
+        }
+    }
+
     pub fn writeTrailers(
         self: *StreamHandle,
         trailers: []const http3.Qpack.HeaderField,
