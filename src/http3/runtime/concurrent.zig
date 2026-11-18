@@ -17,6 +17,7 @@ const http3 = @import("../mod.zig");
 const body_preallocate_cap: usize = 64 * 1024;
 const net = std.Io.net;
 const Error = @import("error.zig").Error;
+const Fifo = @import("../../internal/fifo.zig").Fifo;
 const stream_events = @import("stream/events.zig");
 const StreamingRequestEvent = stream_events.Request;
 
@@ -343,21 +344,21 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
         io: std.Io,
         options: Options,
         mutex: std.Io.Mutex = .init,
-        commands: std.ArrayList(*Command) = .empty,
+        commands: Fifo(*Command) = .{},
         commands_blocked: bool = false,
         wake: std.Io.Event = .unset,
         slots: std.ArrayList(*Slot) = .empty,
-        pending_heads: std.ArrayList(StreamingRequestEvent) = .empty,
+        pending_heads: Fifo(StreamingRequestEvent) = .{},
         /// Events completed by a receive that raced a command wake. The wake
         /// path retains them so a completed packet is never dropped.
-        pending_events: std.ArrayList(StreamingRequestEvent) = .empty,
+        pending_events: Fifo(StreamingRequestEvent) = .{},
         pending_event_error: ?anyerror = null,
         /// Ready handlers consumed by a lazily grown per-connection worker
         /// pool. A sequential connection keeps one reusable thread instead of
         /// spawning a thread for every request.
         task_mutex: std.Io.Mutex = .init,
         task_cond: std.Io.Condition = .init,
-        task_queue: std.ArrayList(*Slot) = .empty,
+        task_queue: Fifo(*Slot) = .{},
         workers: std.ArrayList(std.Thread) = .empty,
         idle_workers: usize = 0,
         stopping: bool = false,
@@ -400,9 +401,9 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
             self.cancelActive();
             self.slots.deinit(self.allocator);
             self.deferred_slots.deinit(self.allocator);
-            for (self.pending_heads.items) |*event| event.deinit(self.allocator);
+            for (self.pending_heads.slice()) |*event| event.deinit(self.allocator);
             self.pending_heads.deinit(self.allocator);
-            for (self.pending_events.items) |*event| event.deinit(self.allocator);
+            for (self.pending_events.slice()) |*event| event.deinit(self.allocator);
             self.pending_events.deinit(self.allocator);
             self.commands.deinit(self.allocator);
             self.task_queue.deinit(self.allocator);
@@ -438,12 +439,12 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
 
                 if (self.shutdownRequested()) {
                     try self.stopAccepting();
-                    if (self.active == 0 and self.pending_heads.items.len == 0) {
+                    if (self.active == 0 and self.pending_heads.isEmpty()) {
                         break;
                     }
                 }
 
-                if (self.active == 0 and self.pending_heads.items.len == 0) {
+                if (self.active == 0 and self.pending_heads.isEmpty()) {
                     if (idle_deadline == null) {
                         if (self.options.idle_timeout) |timeout| {
                             idle_deadline = std.Io.Clock.Timestamp.fromNow(self.io, .{
@@ -490,7 +491,7 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
         }
 
         fn stopAccepting(self: *Self) !void {
-            for (self.pending_heads.items) |*event| event.deinit(self.allocator);
+            for (self.pending_heads.slice()) |*event| event.deinit(self.allocator);
             self.pending_heads.clearRetainingCapacity();
         }
 
@@ -535,8 +536,8 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                 try self.enqueue(slot, limit, Context, context, handler);
             }
 
-            while (self.active < limit and self.pending_heads.items.len != 0) {
-                const event = self.pending_heads.orderedRemove(0);
+            while (self.active < limit and !self.pending_heads.isEmpty()) {
+                const event = self.pending_heads.popFront().?;
                 const slot = try self.createSlot(event);
                 errdefer {
                     _ = self.slots.pop();
@@ -597,7 +598,7 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                     while (true) {
                         engine.task_mutex.lockUncancelable(engine.io);
                         engine.idle_workers += 1;
-                        while (engine.task_queue.items.len == 0 and !engine.stopping) {
+                        while (engine.task_queue.isEmpty() and !engine.stopping) {
                             engine.task_cond.wait(engine.io, &engine.task_mutex) catch |err| switch (err) {
                                 error.Canceled => {
                                     engine.idle_workers -= 1;
@@ -611,7 +612,7 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                             engine.task_mutex.unlock(engine.io);
                             return;
                         }
-                        const slot = engine.task_queue.orderedRemove(0);
+                        const slot = engine.task_queue.popFront().?;
                         engine.task_mutex.unlock(engine.io);
 
                         worker.handler(worker.context, &slot.stream) catch |err| {
@@ -1038,11 +1039,11 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
             self.commands_blocked = false;
             while (true) {
                 self.mutex.lockUncancelable(self.io);
-                if (self.commands.items.len == 0) {
+                if (self.commands.isEmpty()) {
                     self.mutex.unlock(self.io);
                     return;
                 }
-                const command = self.commands.orderedRemove(0);
+                const command = self.commands.popFront().?;
                 self.mutex.unlock(self.io);
                 if (command.abandoned.load(.acquire)) {
                     command.done.set(self.io);
@@ -1283,7 +1284,7 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
             self.commands = .empty;
             self.commands_blocked = false;
             self.mutex.unlock(self.io);
-            for (pending.items) |command| {
+            for (pending.slice()) |command| {
                 command.abandoned.store(true, .release);
                 command.result = error.Canceled;
                 command.done.set(self.io);
@@ -1306,14 +1307,14 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                 self.pending_event_error = null;
                 return err;
             }
-            if (self.pending_events.items.len != 0) {
-                return self.pending_events.orderedRemove(0);
+            if (!self.pending_events.isEmpty()) {
+                return self.pending_events.popFront().?;
             }
 
             // Do not clear a wake that belongs to an already queued command.
             self.wake.reset();
             self.mutex.lockUncancelable(self.io);
-            const has_commands = self.commands.items.len != 0;
+            const has_commands = !self.commands.isEmpty();
             self.mutex.unlock(self.io);
             if (has_commands and !self.commands_blocked) return null;
 

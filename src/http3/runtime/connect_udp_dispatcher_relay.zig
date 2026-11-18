@@ -3,6 +3,7 @@
 const std = @import("std");
 
 const net = std.Io.net;
+const Fifo = @import("../../internal/fifo.zig").Fifo;
 
 pub fn Server(comptime Runtime: type) type {
     return struct {
@@ -72,7 +73,7 @@ pub fn Server(comptime Runtime: type) type {
             session: Runtime.ConnectUdpServerSession,
             session_buffer: []u8,
             udp_buffer: []u8,
-            pending: std.ArrayList([]u8) = .empty,
+            pending: Fifo([]u8) = .{},
             pending_bytes: usize = 0,
             stats: Stats = .{},
 
@@ -81,7 +82,7 @@ pub fn Server(comptime Runtime: type) type {
                 allocator: std.mem.Allocator,
                 io: std.Io,
             ) void {
-                for (self.pending.items) |payload| allocator.free(payload);
+                for (self.pending.slice()) |payload| allocator.free(payload);
                 self.pending.deinit(allocator);
                 allocator.free(self.session_buffer);
                 allocator.free(self.udp_buffer);
@@ -106,7 +107,7 @@ pub fn Server(comptime Runtime: type) type {
         io: std.Io,
         options: Options,
         states: std.ArrayList(*State) = .empty,
-        relay_events: std.ArrayList(RelayClosed) = .empty,
+        relay_events: Fifo(RelayClosed) = .{},
         pending_endpoint: ?Runtime.EndpointServerEvent = null,
         wake_storage: []Wake,
         completed_storage: []Wake,
@@ -189,9 +190,9 @@ pub fn Server(comptime Runtime: type) type {
             socket: net.Socket,
             target: net.IpAddress,
         ) !void {
-            if (self.relay_events.items.len >= self.options.max_relays or
+            if (self.relay_events.len() >= self.options.max_relays or
                 self.states.items.len >=
-                    self.options.max_relays - self.relay_events.items.len)
+                    self.options.max_relays - self.relay_events.len())
             {
                 return error.RelayLimitReached;
             }
@@ -252,7 +253,7 @@ pub fn Server(comptime Runtime: type) type {
             const state = self.states.orderedRemove(index);
             const socket = state.socket;
             const stats = state.stats;
-            for (state.pending.items) |payload| self.allocator.free(payload);
+            for (state.pending.slice()) |payload| self.allocator.free(payload);
             state.pending.deinit(self.allocator);
             self.allocator.free(state.session_buffer);
             self.allocator.free(state.udp_buffer);
@@ -271,12 +272,12 @@ pub fn Server(comptime Runtime: type) type {
                 self.pending_endpoint = null;
                 return .{ .endpoint = event };
             }
-            if (self.relay_events.items.len != 0) {
-                return .{ .relay_closed = self.relay_events.orderedRemove(0) };
+            if (!self.relay_events.isEmpty()) {
+                return .{ .relay_closed = self.relay_events.popFront().? };
             }
             const revisit_relays = try self.serviceRelays();
-            if (self.relay_events.items.len != 0) {
-                return .{ .relay_closed = self.relay_events.orderedRemove(0) };
+            if (!self.relay_events.isEmpty()) {
+                return .{ .relay_closed = self.relay_events.popFront().? };
             }
             // A full per-relay budget cannot prove the already-routed queue is
             // empty. Yield one nonblocking turn so the caller can reschedule
@@ -380,8 +381,8 @@ pub fn Server(comptime Runtime: type) type {
                 self.pending_endpoint = null;
                 return .{ .endpoint = event };
             }
-            if (self.relay_events.items.len != 0) {
-                return .{ .relay_closed = self.relay_events.orderedRemove(0) };
+            if (!self.relay_events.isEmpty()) {
+                return .{ .relay_closed = self.relay_events.popFront().? };
             }
             return null;
         }
@@ -412,8 +413,8 @@ pub fn Server(comptime Runtime: type) type {
             revisit: *bool,
         ) !?EndReason {
             var budget = self.options.per_relay_turn_budget;
-            while (budget != 0 and state.pending.items.len != 0) : (budget -= 1) {
-                const payload = state.pending.items[0];
+            while (budget != 0 and !state.pending.isEmpty()) : (budget -= 1) {
+                const payload = state.pending.front();
                 state.session.trySend(payload) catch |err| switch (err) {
                     error.CongestionLimited, error.PacingLimited => {
                         try self.endpoint.dispatcher.refreshConnectionTimer(
@@ -425,7 +426,7 @@ pub fn Server(comptime Runtime: type) type {
                     error.ConnectionClosed => return .connection_closed,
                     else => return err,
                 };
-                _ = state.pending.orderedRemove(0);
+                _ = state.pending.popFront().?;
                 state.pending_bytes -= payload.len;
                 state.stats.udp_to_session_datagrams +|= 1;
                 state.stats.udp_to_session_bytes +|= @intCast(payload.len);
@@ -434,7 +435,7 @@ pub fn Server(comptime Runtime: type) type {
                     state.key.connection_handle,
                 );
             }
-            if (budget == 0 and state.pending.items.len != 0) {
+            if (budget == 0 and !state.pending.isEmpty()) {
                 revisit.* = true;
             }
 
@@ -487,7 +488,7 @@ pub fn Server(comptime Runtime: type) type {
                 state.stats.dropped_unexpected_source +|= 1;
                 return;
             }
-            if (state.pending.items.len == 0) {
+            if (state.pending.isEmpty()) {
                 state.session.trySend(message.data) catch |err| switch (err) {
                     error.CongestionLimited, error.PacingLimited => {
                         try self.endpoint.dispatcher.refreshConnectionTimer(
@@ -524,7 +525,7 @@ pub fn Server(comptime Runtime: type) type {
                 state.stats.dropped_backpressure +|= 1;
                 return;
             };
-            if (state.pending.items.len >=
+            if (state.pending.len() >=
                 self.options.max_queued_target_datagrams or
                 new_bytes > self.options.max_queued_target_bytes)
             {
@@ -542,7 +543,7 @@ pub fn Server(comptime Runtime: type) type {
             index: usize,
             reason: EndReason,
         ) !void {
-            if (self.relay_events.items.len >= self.options.max_relays) {
+            if (self.relay_events.len() >= self.options.max_relays) {
                 return error.RelayEventQueueFull;
             }
             const state = self.states.orderedRemove(index);

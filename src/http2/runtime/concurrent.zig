@@ -8,6 +8,7 @@
 const std = @import("std");
 const http2 = @import("../mod.zig");
 const runtime_backend = @import("../../runtime.zig");
+const Fifo = @import("../../internal/fifo.zig").Fifo;
 
 /// Upper bound on the per-stream body reservation derived from a declared
 /// Content-Length. Larger bodies grow normally.
@@ -267,18 +268,18 @@ pub fn Engine(
         io: std.Io,
         options: Options,
         mutex: std.Io.Mutex = .init,
-        commands: std.ArrayList(*Command) = .empty,
+        commands: Fifo(*Command) = .{},
         commands_blocked: bool = false,
         wake: std.Io.Event = .unset,
         slots: std.ArrayList(*Slot) = .empty,
-        pending: std.ArrayList(StreamType) = .empty,
+        pending: Fifo(StreamType) = .{},
         /// Ready handlers. The owner enqueues accepted streams here; a
         /// per-connection worker pool consumes them. Workers are created lazily
         /// so a sequential connection keeps a single reusable thread instead of
         /// spawning one thread per request.
         task_mutex: std.Io.Mutex = .init,
         task_cond: std.Io.Condition = .init,
-        task_queue: std.ArrayList(*Slot) = .empty,
+        task_queue: Fifo(*Slot) = .{},
         workers: std.ArrayList(std.Thread) = .empty,
         idle_workers: usize = 0,
         stopping: bool = false,
@@ -314,7 +315,7 @@ pub fn Engine(
         pub fn deinit(self: *Self) void {
             self.cancelCommands();
             self.cancelActive();
-            for (self.pending.items) |*stream| stream.deinit();
+            for (self.pending.slice()) |*stream| stream.deinit();
             self.pending.deinit(self.allocator);
             self.slots.deinit(self.allocator);
             self.commands.deinit(self.allocator);
@@ -358,7 +359,7 @@ pub fn Engine(
                     if (self.active == 0) break;
                 }
 
-                if (self.active == 0 and self.pending.items.len == 0) {
+                if (self.active == 0 and self.pending.isEmpty()) {
                     if (idle_deadline == null) {
                         if (self.options.idle_timeout) |timeout| {
                             idle_deadline = std.Io.Clock.Timestamp.fromNow(self.io, .{
@@ -444,7 +445,7 @@ pub fn Engine(
         }
 
         fn discardPending(self: *Self) void {
-            for (self.pending.items) |*stream| stream.deinit();
+            for (self.pending.slice()) |*stream| stream.deinit();
             self.pending.clearRetainingCapacity();
         }
 
@@ -595,8 +596,8 @@ pub fn Engine(
             context: *Context,
             comptime handler: *const fn (*Context, *Stream) anyerror!void,
         ) !void {
-            while (self.active < limit and self.pending.items.len != 0) {
-                const stream = self.pending.orderedRemove(0);
+            while (self.active < limit and !self.pending.isEmpty()) {
+                const stream = self.pending.popFront().?;
                 try self.enqueue(stream, limit, Context, context, handler);
             }
         }
@@ -700,7 +701,7 @@ pub fn Engine(
                     while (true) {
                         engine.task_mutex.lockUncancelable(engine.io);
                         engine.idle_workers += 1;
-                        while (engine.task_queue.items.len == 0 and !engine.stopping) {
+                        while (engine.task_queue.isEmpty() and !engine.stopping) {
                             engine.task_cond.wait(engine.io, &engine.task_mutex) catch |err| switch (err) {
                                 error.Canceled => {
                                     engine.idle_workers -= 1;
@@ -714,7 +715,7 @@ pub fn Engine(
                             engine.task_mutex.unlock(engine.io);
                             return;
                         }
-                        const slot = engine.task_queue.orderedRemove(0);
+                        const slot = engine.task_queue.popFront().?;
                         engine.task_mutex.unlock(engine.io);
 
                         worker.handler(worker.context, &slot.public_stream) catch |err| {
@@ -943,11 +944,11 @@ pub fn Engine(
             self.commands_blocked = false;
             while (true) {
                 self.mutex.lockUncancelable(self.io);
-                if (self.commands.items.len == 0) {
+                if (self.commands.isEmpty()) {
                     self.mutex.unlock(self.io);
                     return;
                 }
-                const command = self.commands.orderedRemove(0);
+                const command = self.commands.popFront().?;
                 self.mutex.unlock(self.io);
                 if (command.abandoned.load(.acquire)) {
                     command.done.set(self.io);
@@ -1110,7 +1111,7 @@ pub fn Engine(
             self.commands = .empty;
             self.commands_blocked = false;
             self.mutex.unlock(self.io);
-            for (pending.items) |command| {
+            for (pending.slice()) |command| {
                 command.abandoned.store(true, .release);
                 command.result = error.Canceled;
                 command.done.set(self.io);

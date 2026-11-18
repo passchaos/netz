@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const http3 = @import("../../mod.zig");
+const Fifo = @import("../../../internal/fifo.zig").Fifo;
 
 /// Maximum request bytes queued before `writeBody` reports backpressure.
 pub const max_pending_write_bytes: usize = 64 * 1024;
@@ -43,9 +44,9 @@ pub fn Stream(comptime Pool: type) type {
         head: ?http3.DecodedResponseHead = null,
         head_delivered: bool = false,
         trailers: ?http3.DecodedTrailers = null,
-        data: std.ArrayListUnmanaged([]u8) = .empty,
+        data: Fifo([]u8) = .{},
         pending_read_bytes: usize = 0,
-        writes: std.ArrayListUnmanaged(Write) = .empty,
+        writes: Fifo(Write) = .{},
         pending_write_bytes: usize = 0,
         queued_trailers: ?OwnedTrailers = null,
         /// Worker-only in-flight request data retained across backpressure.
@@ -91,9 +92,9 @@ pub fn Stream(comptime Pool: type) type {
         }
 
         pub fn deinit(self: *Self) void {
-            for (self.writes.items) |write| self.allocator.free(write.data);
+            for (self.writes.slice()) |write| self.allocator.free(write.data);
             self.writes.deinit(self.allocator);
-            for (self.data.items) |bytes| self.allocator.free(bytes);
+            for (self.data.slice()) |bytes| self.allocator.free(bytes);
             self.data.deinit(self.allocator);
             if (self.head) |*head| head.deinit(self.allocator);
             if (self.trailers) |*trailers| trailers.deinit(self.allocator);
@@ -222,8 +223,8 @@ pub fn Stream(comptime Pool: type) type {
                         continue;
                     }
                 }
-                if (self.data.items.len != 0) {
-                    const bytes = self.data.orderedRemove(0);
+                if (!self.data.isEmpty()) {
+                    const bytes = self.data.popFront().?;
                     self.pending_read_bytes -= bytes.len;
                     self.worker_ready.set(self.io);
                     self.mutex.unlock(self.io);
@@ -281,8 +282,8 @@ pub fn Stream(comptime Pool: type) type {
                         continue;
                     }
                 }
-                if (self.data.items.len != 0) {
-                    const bytes = self.data.orderedRemove(0);
+                if (!self.data.isEmpty()) {
+                    const bytes = self.data.popFront().?;
                     self.pending_read_bytes -= bytes.len;
                     self.worker_ready.set(self.io);
                     self.mutex.unlock(self.io);
@@ -329,11 +330,11 @@ pub fn Stream(comptime Pool: type) type {
 
         pub fn takeWrite(self: *Self) ?Write {
             self.mutex.lockUncancelable(self.io);
-            if (self.writes.items.len == 0) {
+            if (self.writes.isEmpty()) {
                 self.mutex.unlock(self.io);
                 return null;
             }
-            const write = self.writes.orderedRemove(0);
+            const write = self.writes.popFront().?;
             self.pending_write_bytes -= write.data.len;
             self.mutex.unlock(self.io);
             return write;
@@ -354,7 +355,7 @@ pub fn Stream(comptime Pool: type) type {
         /// under the same mutex as enqueue so a new write cannot be lost.
         pub fn resetActivityIfIdle(self: *Self) void {
             self.mutex.lockUncancelable(self.io);
-            if (self.writes.items.len == 0 and
+            if (self.writes.isEmpty() and
                 self.queued_trailers == null and !self.cancelled)
             {
                 self.activity.reset();

@@ -4,6 +4,7 @@ const http2 = @import("../../http2/mod.zig");
 const model = @import("state.zig");
 const capsules = @import("capsule.zig");
 const reader_mod = @import("reader.zig");
+const Fifo = @import("../../internal/fifo.zig").Fifo;
 pub const Error = model.Error || reader_mod.Error || http2.runtime.Error || error{ PendingWrite, PendingEvent };
 pub const Event = model.Event;
 pub const Options = struct { max_payload: usize = 1024 * 1024, max_live_streams: usize = 256, max_pending_events: usize = 64, max_pending_bytes: usize = 64 * 1024 };
@@ -25,7 +26,7 @@ pub const Session = struct {
     terminal: bool = false,
     selected_protocol: ?[]u8 = null,
     pending_terminal: ?Event = null,
-    queued: std.ArrayList(Retained) = .empty,
+    queued: Fifo(Retained) = .{},
     queued_bytes: usize = 0,
     deferred_event: ?Event = null,
     delivered_storage: std.ArrayList(u8) = .empty,
@@ -53,7 +54,7 @@ pub const Session = struct {
         if (self.pending) |pending| self.allocator.free(pending.bytes);
         self.reader.deinit();
         self.delivered_storage.deinit(self.allocator);
-        for (self.queued.items) |*retained| retained.storage.deinit(self.allocator);
+        for (self.queued.slice()) |*retained| retained.storage.deinit(self.allocator);
         self.queued.deinit(self.allocator);
         self.state.deinit();
         if (self.selected_protocol) |value| self.allocator.free(value);
@@ -271,8 +272,8 @@ pub const Session = struct {
     pub fn receiveWithDeadline(self: *Session, deadline: std.Io.Clock.Timestamp) Error!Event {
         self.delivered_storage.deinit(self.allocator);
         self.delivered_storage = .empty;
-        if (self.queued.items.len != 0) {
-            const retained = self.queued.orderedRemove(0);
+        if (!self.queued.isEmpty()) {
+            const retained = self.queued.popFront().?;
             self.queued_bytes -= retained.storage.items.len;
             self.delivered_storage = retained.storage;
             return retained.event;
@@ -295,7 +296,7 @@ pub const Session = struct {
     fn queueDeferred(self: *Session) Error!void {
         const event = self.deferred_event.?;
         const bytes = if (event == .stream or event == .datagram or event == .closed) self.reader.buffer.items.len else 0;
-        if (self.queued.items.len >= self.options.max_pending_events or bytes > self.options.max_pending_bytes -| self.queued_bytes) return error.PendingEvent;
+        if (self.queued.len() >= self.options.max_pending_events or bytes > self.options.max_pending_bytes -| self.queued_bytes) return error.PendingEvent;
         try self.queued.ensureUnusedCapacity(self.allocator, 1);
         self.queued.appendAssumeCapacity(.{ .event = event, .storage = self.takeEventStorage(event) });
         self.queued_bytes += bytes;
