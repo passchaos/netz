@@ -82,12 +82,13 @@ Two stable shapes are available:
   loop can keep independent parsers/checksums while DATA frames arrive
   round-robin.
 
-`Connection.writeResponseBodyBatch` currently needs headroom beyond the total
-response DATA bytes in the peer's advertised initial window. When the stream and
-connection windows exactly equal the batch's total body bytes, the in-process
-benchmark and a single-executor test can stall instead of completing; the
-regression test keeps a doubled window until the boundary accounting is fixed.
-Production callers should not size the peer window to the exact batch total.
+A server that closes immediately after `writeResponseBodyBatch` must first
+drain pending client control frames (WINDOW_UPDATE/GOAWAY). Closing with unread
+bytes in the receive queue turns the final FIN into a RST; an exact-boundary
+window makes that path observable because the client must send WINDOW_UPDATEs
+while the batch is finishing. The batch regression test drains with a bounded
+deadline and uses the exact window. Normal connection-owning serve loops keep
+reading frames and do not need a special drain.
 
 For step-driven ownership use `Connection.acceptDuplexRequest*`; it returns a
 `netz.streaming.http2.Stream`. The handle exposes `readRequestEvent*` (`data`,
