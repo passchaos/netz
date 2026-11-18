@@ -1837,6 +1837,13 @@ QUIC 1-RTT receive benchmark
   total packets/path: 54000
 ```
 
+A CPU-0-pinned 2026-11-19 zio-era smoke of the same 54 x 1,152-byte PADDING
+shape recorded GRO batch 60,678 ns/batch (1,123 ns/packet), plain 92,481
+ns/batch (1,712 ns/packet), in-place service 65,628 ns/batch (1,215 ns/packet),
+borrowed visitor 65,909 ns/batch (1,220 ns/packet), and state-only GRO 20,242
+ns/batch (374 ns/packet). The host also ran unrelated builds, so this is a
+backend/shape refresh rather than a regression or speedup claim.
+
 Ordinary non-GRO event loops can now call `Connection.servicePacket` to apply
 one datagram without returning owned decrypt/frame diagnostics. It uses the
 same current-key in-place path and retained frame array as GRO service, with an
