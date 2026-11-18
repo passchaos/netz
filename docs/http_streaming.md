@@ -82,6 +82,13 @@ Two stable shapes are available:
   loop can keep independent parsers/checksums while DATA frames arrive
   round-robin.
 
+`Connection.writeResponseBodyBatch` currently needs headroom beyond the total
+response DATA bytes in the peer's advertised initial window. When the stream and
+connection windows exactly equal the batch's total body bytes, the in-process
+benchmark and a single-executor test can stall instead of completing; the
+regression test keeps a doubled window until the boundary accounting is fixed.
+Production callers should not size the peer window to the exact batch total.
+
 For step-driven ownership use `Connection.acceptDuplexRequest*`; it returns a
 `netz.streaming.http2.Stream`. The handle exposes `readRequestEvent*` (`data`,
 `trailers`, `finished`, `reset`), `pollRequestEvent*`, response writes,
