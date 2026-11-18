@@ -137,6 +137,124 @@ test "HTTP/2 response body batch streams interleaved DATA" {
     if (shared.err) |err| return err;
 }
 
+test "HTTP/2 batch streaming request heads feed response body batch" {
+    const allocator = std.testing.allocator;
+    const response_body = "response-batch-" ** 64;
+    const parallel = 3;
+    const chunk_size = 4096;
+    const limits: Limits = .{
+        .max_body_bytes = 4096,
+        .initial_window_size = @max(response_body.len * parallel, 65_535),
+        .initial_connection_window_size = @max(response_body.len * parallel, 65_535),
+    };
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        limits,
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+            var requests: [parallel]runtime.StreamingRequest = undefined;
+            var initialized = false;
+            defer if (initialized) for (&requests) |*request| {
+                request.deinit(server_ptr.allocator);
+            };
+            var body_bytes: usize = 0;
+            try connection.readRequestBatchStreamingInto(
+                &requests,
+                &body_bytes,
+                struct {
+                    fn consume(
+                        total: *usize,
+                        _: u31,
+                        data: []const u8,
+                    ) !void {
+                        total.* += data.len;
+                    }
+                }.consume,
+            );
+            initialized = true;
+            try std.testing.expectEqual(@as(usize, 0), body_bytes);
+            var stream_ids: [parallel]u31 = undefined;
+            for (&requests, &stream_ids) |request, *stream_id| {
+                stream_id.* = request.stream_id;
+            }
+            const responses = [_]ResponseOptions{
+                .{ .body = response_body },
+            } ** parallel;
+            try connection.writeResponseBodyBatch(
+                &stream_ids,
+                &responses,
+                chunk_size,
+            );
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try Client.connect(
+        allocator,
+        io,
+        server.address(),
+        limits,
+    );
+    defer client.close();
+    const requests = [_]RequestOptions{
+        .{ .path = "/one", .authority = "localhost" },
+        .{ .path = "/two", .authority = "localhost" },
+        .{ .path = "/three", .authority = "localhost" },
+    };
+    var responses: [parallel]StreamingResponse = undefined;
+    const Context = struct {
+        bytes: [parallel]usize = @splat(0),
+
+        fn consume(
+            self: *@This(),
+            index: usize,
+            data: []const u8,
+        ) !void {
+            self.bytes[index] += data.len;
+        }
+    };
+    var context: Context = .{};
+    try client.requestBatchStreamingIntoWithTimeout(
+        &requests,
+        &responses,
+        .fromSeconds(2),
+        &context,
+        Context.consume,
+    );
+    defer for (&responses) |*response| response.deinit(allocator);
+    for (responses, context.bytes) |response, bytes| {
+        try std.testing.expectEqual(@as(u16, 200), response.status);
+        try std.testing.expectEqual(response_body.len, response.body_bytes);
+        try std.testing.expectEqual(response_body.len, bytes);
+    }
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "HTTP/2 body request streaming response batch deadline is not renewed" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
