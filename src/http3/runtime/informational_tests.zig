@@ -1221,3 +1221,252 @@ test "HTTP/3 aggregate server sends 100 Continue before waiting for body" {
     try std.testing.expectEqual(@as(u16, 200), final_status);
     try std.testing.expectEqualStrings("pong", body_buf[0..body_len]);
 }
+
+test "HTTP/3 aggregate server skips 100 Continue when the head ends the stream" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xeb} ** quic.protection.secret_len,
+    );
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xec} ** quic.protection.secret_len,
+    );
+    const client_cid = "head-only-client";
+    const server_cid = "head-only-server";
+    var client = try runtime.HandshakeClient.initPreconfigured(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server_endpoint.address(),
+        .{ .quic = .{ .max_datagram_size = 4096 } },
+        .{},
+        .{
+            .receive_keys = server_keys,
+            .send_keys = client_keys,
+            .local_connection_id = client_cid,
+            .peer_connection_id = server_cid,
+            .one_rtt = .{ .enable_pacing = false },
+        },
+    );
+    defer client.deinit();
+
+    const Shared = struct {
+        endpoint: *quic.runtime.Endpoint,
+        peer: std.Io.net.IpAddress,
+        receive_keys: quic.protection.PacketProtectionKeys,
+        send_keys: quic.protection.PacketProtectionKeys,
+        err: ?anyerror = null,
+        body_empty: bool = false,
+
+        fn run(shared: *@This()) void {
+            var session = runtime.HandshakeServerSession.initPreconfigured(
+                shared.endpoint,
+                shared.peer,
+                .{},
+                .{
+                    .receive_keys = shared.receive_keys,
+                    .send_keys = shared.send_keys,
+                    .local_connection_id = "head-only-server",
+                    .peer_connection_id = "head-only-client",
+                    .one_rtt = .{ .enable_pacing = false },
+                },
+            ) catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer session.deinit();
+            var request = session.receiveRequestWithTimeout(
+                .fromSeconds(5),
+            ) catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer request.deinit(std.testing.allocator);
+            shared.body_empty = request.request.body.len == 0;
+            session.sendResponse(request.stream_id, .{
+                .status = 200,
+                .body = "empty",
+            }) catch |err| {
+                shared.err = err;
+            };
+        }
+    };
+    var shared = Shared{
+        .endpoint = &server_endpoint,
+        .peer = client.address(),
+        .receive_keys = client_keys,
+        .send_keys = server_keys,
+    };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    defer thread.join();
+
+    const stream_id = try client.startRequest(.{
+        .method = "POST",
+        .path = "/aggregate-head-only",
+        .authority = "localhost",
+        .headers = &.{.{ .name = "expect", .value = "100-continue" }},
+    }, 0);
+
+    const Observer = struct {
+        saw_informational: bool = false,
+
+        fn onResponse(
+            context: *anyopaque,
+            response: http3.InformationalResponseHead,
+        ) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (response.status < 200) self.saw_informational = true;
+        }
+    };
+    var observer = Observer{};
+    var response = try client.receiveResponseWithInformationalAndTimeout(
+        stream_id,
+        .{
+            .context = &observer,
+            .on_response = Observer.onResponse,
+        },
+        .fromSeconds(5),
+    );
+    defer response.deinit(allocator);
+
+    if (shared.err) |err| return err;
+    try std.testing.expect(shared.body_empty);
+    try std.testing.expect(!observer.saw_informational);
+    try std.testing.expectEqual(@as(u16, 200), response.response.status);
+    try std.testing.expectEqualStrings("empty", response.response.body);
+}
+
+test "HTTP/3 aggregate server omits 100 Continue without an Expect field" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xed} ** quic.protection.secret_len,
+    );
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xee} ** quic.protection.secret_len,
+    );
+    const client_cid = "no-expect-client";
+    const server_cid = "no-expect-server";
+    var client = try runtime.HandshakeClient.initPreconfigured(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server_endpoint.address(),
+        .{ .quic = .{ .max_datagram_size = 4096 } },
+        .{},
+        .{
+            .receive_keys = server_keys,
+            .send_keys = client_keys,
+            .local_connection_id = client_cid,
+            .peer_connection_id = server_cid,
+            .one_rtt = .{ .enable_pacing = false },
+        },
+    );
+    defer client.deinit();
+
+    const Shared = struct {
+        endpoint: *quic.runtime.Endpoint,
+        peer: std.Io.net.IpAddress,
+        receive_keys: quic.protection.PacketProtectionKeys,
+        send_keys: quic.protection.PacketProtectionKeys,
+        err: ?anyerror = null,
+        body_ok: bool = false,
+
+        fn run(shared: *@This()) void {
+            var session = runtime.HandshakeServerSession.initPreconfigured(
+                shared.endpoint,
+                shared.peer,
+                .{},
+                .{
+                    .receive_keys = shared.receive_keys,
+                    .send_keys = shared.send_keys,
+                    .local_connection_id = "no-expect-server",
+                    .peer_connection_id = "no-expect-client",
+                    .one_rtt = .{ .enable_pacing = false },
+                },
+            ) catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer session.deinit();
+            var request = session.receiveRequestWithTimeout(
+                .fromSeconds(5),
+            ) catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer request.deinit(std.testing.allocator);
+            shared.body_ok = std.mem.eql(u8, request.request.body, "ping");
+            session.sendResponse(request.stream_id, .{
+                .status = 200,
+                .body = "pong",
+            }) catch |err| {
+                shared.err = err;
+            };
+        }
+    };
+    var shared = Shared{
+        .endpoint = &server_endpoint,
+        .peer = client.address(),
+        .receive_keys = client_keys,
+        .send_keys = server_keys,
+    };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    defer thread.join();
+
+    const stream_id = try client.startRequest(.{
+        .method = "POST",
+        .path = "/aggregate-no-expect",
+        .authority = "localhost",
+        .headers = &.{},
+    }, 4);
+    try client.sendRequestBody(stream_id, "ping", true);
+
+    const Observer = struct {
+        saw_informational: bool = false,
+
+        fn onResponse(
+            context: *anyopaque,
+            response: http3.InformationalResponseHead,
+        ) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (response.status < 200) self.saw_informational = true;
+        }
+    };
+    var observer = Observer{};
+    var response = try client.receiveResponseWithInformationalAndTimeout(
+        stream_id,
+        .{
+            .context = &observer,
+            .on_response = Observer.onResponse,
+        },
+        .fromSeconds(5),
+    );
+    defer response.deinit(allocator);
+
+    if (shared.err) |err| return err;
+    try std.testing.expect(shared.body_ok);
+    try std.testing.expect(!observer.saw_informational);
+    try std.testing.expectEqual(@as(u16, 200), response.response.status);
+    try std.testing.expectEqualStrings("pong", response.response.body);
+}
