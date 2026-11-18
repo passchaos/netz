@@ -1595,7 +1595,7 @@ fn connectAttempt(
             platform_verifier = quic.tls.platform.Verifier.init(
                 endpoint.allocator,
                 .{},
-            ) catch |err| switch (err) {
+            ) catch |err| switch (@as(anyerror, err)) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => return error.NativeTrustStoreUnavailable,
             };
@@ -1607,7 +1607,7 @@ fn connectAttempt(
             system_store = root_trust.initBundledStore(
                 endpoint.allocator,
                 auth_now,
-            ) catch |err| switch (err) {
+            ) catch |err| switch (@as(anyerror, err)) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => return error.NativeTrustStoreUnavailable,
             };
@@ -1623,7 +1623,7 @@ fn connectAttempt(
                 endpoint.io,
                 auth_now,
                 environ,
-            ) catch |err| switch (err) {
+            ) catch |err| switch (@as(anyerror, err)) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => return error.NativeTrustStoreUnavailable,
             };
