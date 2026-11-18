@@ -6436,6 +6436,11 @@ unmasked responses, caller/reader-owned receive storage, and copy each echo
 back to the next send buffer. Handshake time is excluded; this comparison uses
 the public backend-neutral `std.Io` TCP runtime.
 
+A CPU-0-pinned 2026-11-19 zio-era smoke of the netz-self path recorded
+13,659 ns/roundtrip, 73,209 roundtrips/s, and 571.95 logical payload MiB/s for
+one persistent 4-KiB binary echo (20 warmups, 200 measured). This refreshes
+the backend identity and shape only; it is not a new cross-library ratio.
+
 Twenty alternating CPU-0 samples with TCP_NODELAY enabled on both clients:
 
 ```text
