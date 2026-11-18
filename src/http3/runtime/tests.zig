@@ -9053,3 +9053,27 @@ test {
     _ = @import("response_scheduler/tests/integration.zig");
     _ = @import("response_scheduler/tests/protected.zig");
 }
+
+test "HTTP/3 Expect parsing accepts case-insensitive comma lists" {
+    const list = [_]http3.Qpack.HeaderField{
+        .{ .name = "expect", .value = "custom, 100-Continue" },
+    };
+    try std.testing.expect(runtime.requestHeadersExpectContinue(&list));
+
+    const repeated = [_]http3.Qpack.HeaderField{
+        .{ .name = "x-other", .value = "100-continue" },
+        .{ .name = "Expect", .value = "custom" },
+        .{ .name = "expect", .value = "100-continue, other" },
+    };
+    try std.testing.expect(runtime.requestHeadersExpectContinue(&repeated));
+
+    const absent = [_]http3.Qpack.HeaderField{
+        .{ .name = "expect", .value = "custom" },
+    };
+    try std.testing.expect(!runtime.requestHeadersExpectContinue(&absent));
+
+    const near = [_]http3.Qpack.HeaderField{
+        .{ .name = "expect", .value = "100-continuex" },
+    };
+    try std.testing.expect(!runtime.requestHeadersExpectContinue(&near));
+}
