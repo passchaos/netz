@@ -323,10 +323,9 @@ Concurrency contract:
   `receiveRequestEvent*` paths. The response send layer tracks the byte offset
   consumed by informational heads, so the final response head and body start
   after every 1xx section instead of conflicting at stream offset zero.
-- HTTP/3 aggregate `receiveRequest` still waits for the complete request before
-  decoding headers. A peer that blocks on `100 Continue` before sending its
-  body must use the streaming event API; aggregate callers should not rely on
-  automatic 100-continue.
+- HTTP/3 aggregate `receiveRequest*` decodes a complete request head as soon as
+  it arrives and sends `100 Continue` before waiting for the body, matching the
+  streaming paths. A head that ends the stream never receives an interim head.
 
 ## Build status
 

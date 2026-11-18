@@ -3739,10 +3739,73 @@ fn receiveConnectionRequestStreamBytes(
         peer_promised_push_ids,
         null,
         null,
+        null,
     ) catch |err| switch (err) {
         error.Timeout, error.ConcurrencyUnavailable => unreachable,
         else => |other| return @errorCast(other),
     };
+}
+
+/// Sends the interim `100 Continue` for an aggregate request. The callback
+/// runs only when a complete, QPACK-unblocked request head asked for it.
+pub const ContinueSink = struct {
+    context: *anyopaque,
+    send: *const fn (
+        context: *anyopaque,
+        stream_id: u62,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void,
+};
+
+/// Parse the RFC 9110 `Expect` field as a comma-separated case-insensitive
+/// list. Unknown expectations are ignored; only `100-continue` changes
+/// server behavior.
+pub fn requestHeadersExpectContinue(
+    headers: []const http3.Qpack.HeaderField,
+) bool {
+    for (headers) |header| {
+        if (!std.ascii.eqlIgnoreCase(header.name, "expect")) continue;
+        var rest = header.value;
+        while (rest.len != 0) {
+            const comma = std.mem.indexOfScalar(u8, rest, ',') orelse rest.len;
+            const token = std.mem.trim(u8, rest[0..comma], " \t");
+            if (std.ascii.eqlIgnoreCase(token, "100-continue")) {
+                return true;
+            }
+            rest = if (comma == rest.len) "" else rest[comma + 1 ..];
+        }
+    }
+    return false;
+}
+
+fn sendAggregateContinues(
+    connection: *quic.one_rtt.Connection,
+    request_streams: *RequestStreamSet,
+    table: http3.Qpack.DynamicTable,
+    options: HandshakeSessionOptions,
+    sink: ContinueSink,
+    deadline: ?std.Io.Clock.Timestamp,
+) ReceiveTimeoutError!void {
+    while (try request_streams.previewHead(
+        table,
+        options.local_settings,
+    )) |preview| {
+        var head = preview.head;
+        if (!preview.request_finished and
+            requestHeadersExpectContinue(head.headers))
+        {
+            sink.send(
+                sink.context,
+                preview.stream_id,
+                deadline,
+            ) catch |err| {
+                head.deinit(connection.endpoint.allocator);
+                return err;
+            };
+        }
+        head.deinit(connection.endpoint.allocator);
+        request_streams.markContinueChecked(preview.stream_id);
+    }
 }
 
 pub fn receiveConnectionRequestStreamBytesUntil(
@@ -3757,6 +3820,7 @@ pub fn receiveConnectionRequestStreamBytesUntil(
     peer_promised_push_ids: PromisedPushIds,
     detached_streams: ?*connect_datagram.Registry,
     deadline: ?std.Io.Clock.Timestamp,
+    continue_sink: ?ContinueSink,
 ) ReceiveTimeoutError!PreparedRequest {
     if (try request_streams.prepareReady(
         qpack_decode.table,
@@ -3764,6 +3828,16 @@ pub fn receiveConnectionRequestStreamBytesUntil(
     )) |ready| return ready;
 
     while (true) {
+        if (continue_sink) |sink| {
+            try sendAggregateContinues(
+                connection,
+                request_streams,
+                qpack_decode.table,
+                options,
+                sink,
+                deadline,
+            );
+        }
         var context: ConnectionRequestReceiveContext = .{
             .connection = connection,
             .control = control,

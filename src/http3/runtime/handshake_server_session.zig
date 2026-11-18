@@ -75,6 +75,7 @@ const releaseStreamingReaderCapacity = runtime.releaseStreamingReaderCapacity;
 const releaseStreamingReaderCapacityOnce = runtime.releaseStreamingReaderCapacityOnce;
 const requestEndedBeforeHeaders = runtime.requestEndedBeforeHeaders;
 const requestHasProtocol = runtime.requestHasProtocol;
+const requestHeadersExpectContinue = runtime.requestHeadersExpectContinue;
 const requestPriority = runtime.requestPriority;
 const requestResetError = runtime.requestResetError;
 const request_failure = runtime.request_failure;
@@ -604,6 +605,7 @@ pub const HandshakeServerSession = struct {
             .{ .set = &self.promised_push_ids },
             &self.connect_datagrams,
             deadline,
+            .{ .context = self, .send = sendContinueForAggregate },
         ) catch |err| switch (err) {
             error.RequestCancelled, error.RequestRejected => {
                 try self.sendQpackFeedback();
@@ -879,7 +881,7 @@ pub const HandshakeServerSession = struct {
             .response => return,
         };
         if (request.request_finished) return;
-        if (!requestHeadExpectsContinue(request.headers)) return;
+        if (!requestHeadersExpectContinue(request.headers)) return;
         try self.sendInformationalResponseUntil(
             message.stream_id,
             .{ .status = 100 },
@@ -887,22 +889,19 @@ pub const HandshakeServerSession = struct {
         );
     }
 
-    fn requestHeadExpectsContinue(
-        headers: []const http3.Qpack.HeaderField,
-    ) bool {
-        for (headers) |header| {
-            if (!std.ascii.eqlIgnoreCase(header.name, "expect")) continue;
-            var rest = header.value;
-            while (rest.len != 0) {
-                const comma = std.mem.indexOfScalar(u8, rest, ',') orelse rest.len;
-                const token = std.mem.trim(u8, rest[0..comma], " \t");
-                if (std.ascii.eqlIgnoreCase(token, "100-continue")) {
-                    return true;
-                }
-                rest = if (comma == rest.len) "" else rest[comma + 1 ..];
-            }
-        }
-        return false;
+    fn sendContinueForAggregate(
+        context: *anyopaque,
+        stream_id: u62,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        const self: *HandshakeServerSession = @ptrCast(@alignCast(context));
+        // The aggregate path has not admitted the request into the response
+        // lifecycle yet, so send the interim head through the unchecked body.
+        try self.writeInformationalResponseUntil(
+            stream_id,
+            .{ .status = 100 },
+            deadline,
+        );
     }
 
     /// Return the next request event already present in QUIC stream state.
@@ -2656,6 +2655,22 @@ pub const HandshakeServerSession = struct {
         if (!self.request_lifecycle.contains(stream_id)) {
             return error.UnexpectedStream;
         }
+        return self.writeInformationalResponseUntil(
+            stream_id,
+            response,
+            deadline,
+        );
+    }
+
+    /// Write an interim head for a stream that is not yet admitted into the
+    /// response lifecycle. The aggregate receiver uses this to release an
+    /// `Expect: 100-continue` peer before the full request has arrived.
+    fn writeInformationalResponseUntil(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        response: http3.InformationalResponse,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
         const allocator = self.established.connection.endpoint.allocator;
         try self.informational_offsets.ensureUnusedCapacity(allocator, 1);
         self.flushResponseCancellations();

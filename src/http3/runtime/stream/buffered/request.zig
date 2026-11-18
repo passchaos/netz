@@ -13,6 +13,9 @@ pub const Set = struct {
     const Entry = struct {
         receive: quic.stream_state.RecvState,
         from: net.IpAddress,
+        /// True once the aggregate receiver inspected this stream's head for
+        /// `Expect: 100-continue`, so previewing never repeats the work.
+        continue_checked: bool = false,
 
         fn deinit(self: *Entry) void {
             self.receive.deinit();
@@ -127,6 +130,64 @@ pub const Set = struct {
             .bytes = try self.allocator.dupe(u8, bytes),
             .owns_bytes = true,
         };
+    }
+
+    /// A decoded request head whose stream may still be receiving DATA.
+    /// `request_finished` is true when the HEADERS frame consumed the whole
+    /// stream, so no interim `100 Continue` is owed.
+    pub const PreviewHead = struct {
+        stream_id: u62,
+        request_finished: bool,
+        head: http3.DecodedRequestHead,
+    };
+
+    /// Decode the first complete request head that has not yet been inspected
+    /// for `Expect: 100-continue`. Returns null when no stream has a complete,
+    /// QPACK-unblocked HEADERS section. The caller owns `head` and must call
+    /// `deinit` on it, then `markContinueChecked` for the stream.
+    pub fn previewHead(
+        self: *Set,
+        table: http3.Qpack.DynamicTable,
+        settings: http3.Settings,
+    ) Error!?PreviewHead {
+        for (self.entries.items) |*entry| {
+            if (entry.continue_checked) continue;
+            const bytes = entry.receive.available();
+            if (bytes.len == 0) continue;
+            const frame = http3.Frame.parse(bytes) catch |err| switch (err) {
+                error.OutOfMemory => return err,
+                else => continue,
+            };
+            if (frame.frame_type != http3.FrameType.headers) continue;
+            var head = http3.decodeRequestHeadFieldSectionWithDynamicTable(
+                self.allocator,
+                frame.payload,
+                settings,
+                table,
+            ) catch |err| switch (err) {
+                error.OutOfMemory => return err,
+                // Blocked sections become decodable once encoder instructions
+                // arrive; invalid heads are reported by the aggregate decode.
+                else => continue,
+            };
+            head.consumed = frame.consumed;
+            const request_finished = if (entry.receive.final_size) |final|
+                frame.consumed == final
+            else
+                false;
+            return .{
+                .stream_id = @intCast(entry.receive.stream_id),
+                .request_finished = request_finished,
+                .head = head,
+            };
+        }
+        return null;
+    }
+
+    pub fn markContinueChecked(self: *Set, stream_id: u62) void {
+        if (self.entry_index.count() == 0) return;
+        const index = self.entry_index.get(stream_id) orelse return;
+        self.entries.items[index].continue_checked = true;
     }
 
     fn readyEntry(
