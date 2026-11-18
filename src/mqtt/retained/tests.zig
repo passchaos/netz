@@ -767,3 +767,43 @@ fn testRetainedAllocationFailures(
         .now = std.Io.Timestamp.zero,
     });
 }
+
+test "retained deep wildcard matching covers sibling and subtree branches" {
+    const allocator = std.testing.allocator;
+    var store = Store.init(allocator, .{});
+    defer store.deinit();
+    const now = std.Io.Timestamp.zero;
+
+    var topic_a_buffer: [1024]u8 = undefined;
+    var topic_b_buffer: [1024]u8 = undefined;
+    var filter_buffer: [1024]u8 = undefined;
+    const topic_a = try writeDeepTopic(&topic_a_buffer, 70, "a");
+    const topic_b = try writeDeepTopic(&topic_b_buffer, 70, "b");
+    const plus_filter = try writeDeepPlusFilter(&filter_buffer, 70);
+    _ = try store.applyPublish(topic_a, "a", .{
+        .retain = true,
+        .now = now,
+    });
+    _ = try store.applyPublish(topic_b, "b", .{
+        .retain = true,
+        .now = now,
+    });
+
+    var matches: [2]Match = undefined;
+    const found = try store.matchInto(plus_filter, now, &matches);
+    try std.testing.expectEqual(@as(usize, 2), found.len);
+
+    var deeper_buffer: [1024]u8 = undefined;
+    var hash_buffer: [1024]u8 = undefined;
+    const deeper = try writeDeepTopic(&deeper_buffer, 80, "leaf");
+    const hash_filter = try writeDeepTopic(&hash_buffer, 70, "#");
+    _ = try store.applyPublish(deeper, "deep", .{
+        .retain = true,
+        .now = now,
+    });
+
+    var hash_matches: [3]Match = undefined;
+    const hash_found = try store.matchInto(hash_filter, now, &hash_matches);
+    try std.testing.expectEqual(@as(usize, 3), hash_found.len);
+    try std.testing.expectEqualStrings(deeper, hash_found[2].topic);
+}
