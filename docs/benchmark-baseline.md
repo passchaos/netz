@@ -8226,6 +8226,13 @@ and
 `d7db2830160b9503074cc9b4e7c682e8f340d5e8f2a863064d4e3932cca51231`.
 Artifacts are retained under `zig-out/mqtt-session-free-slot-ab`.
 
+A CPU-0-pinned 2026-11-19 zio-era smoke of `bench-mqtt-session` recorded resume
+102 ns/op, offline queue 395 ns/message, reconnect drain 1,223 ns/session,
+independent fanout 308 ns/target versus shared 62 ns/target (16,896 vs 768
+allocations; 11,345,920 vs 3,052,544 live bytes), full-window empty drain
+8 ns/op, and tail-slot churn 273 ns/op. This refreshes the backend identity and
+scenario shape only.
+
 The corresponding five-pair durable QoS 2 broker control completed all 50
 arms with exact delivery counts and checksums. Throughput paired medians were
 0.9981x, 1.0011x, 0.9941x, 1.0017x and 1.0068x in the five-shape order, with
@@ -9350,6 +9357,12 @@ validation runs once per lookup while the scenario performs 4,096 matches; a
 noinline variant measured the same delta. The change is retained as an explicit
 trade-off for the 17.6-20.6% exact win. Evidence is in
 [the filter kind evidence](evidence/mqtt_retained/2026-11-08-filter-kind-validation.json).
+
+A CPU-0-pinned 2026-11-19 zio-era smoke of the sampler-backed retained
+benchmark recorded exact 19 ns/op, broad `devices/+/state` 71,363 ns/op,
+`devices/#` 32,312 ns/op, selective `devices/+/state` 108,016 ns/op, and
+selective `devices/1234/#` 267 ns/op. This refreshes the backend identity and
+scenario shape only.
 
 ## MQTT ACL filter boundary precomputation (2026-11-08)
 
