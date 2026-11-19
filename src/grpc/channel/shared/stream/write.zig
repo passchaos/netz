@@ -3,6 +3,10 @@ const std = @import("std");
 const call_module = @import("call.zig");
 const deadline_policy = @import("../../../../internal/deadline.zig");
 
+/// Payloads at or above this size are written as prefix+payload slices
+/// instead of being copied into a queued staging allocation.
+const const_borrow_threshold: usize = 64 * 1024;
+
 pub fn submit(call: anytype, input: call_module.WriteInput) @TypeOf(call.parent.*).Failure!void {
     const state = call.parent;
     if (input.payload.len > call.options.requestMessageLimit()) return error.GrpcMessageTooLarge;
@@ -10,7 +14,15 @@ pub fn submit(call: anytype, input: call_module.WriteInput) @TypeOf(call.parent.
     var owned = input;
     owned.deadline = deadline_policy.earlier(call.deadline, input.deadline);
     if (owned.deadline) |until| _ = try deadline_policy.usableAwake(state.io, until);
-    const command = try call_module.Write.create(state.allocator, owned);
+    const command = if (!owned.finish_only and
+        owned.payload.len >= const_borrow_threshold)
+        try call_module.Write.createConstBorrowed(
+            state.allocator,
+            owned.payload,
+            owned,
+        )
+    else
+        try call_module.Write.create(state.allocator, owned);
     return submitCommand(call, command);
 }
 

@@ -999,3 +999,23 @@ const-payload `Writer.writeMessage` still copies once; callers that can
 serialize into prefix-reserved storage should use `writeBorrowedMessage` or the
 owned-write APIs. Rows and commands are in
 `docs/evidence/grpc_shared/2026-11-19-copy-boundaries.json`.
+
+### 2026-11-19 SharedChannel const-payload writes
+
+`bench-grpc-shared` now reports `write_path` alongside `write_storage`. The
+default `Writer.writeMessage` path writes const payloads of 64 KiB or more as
+prefix+payload slices instead of copying them into a queued staging
+allocation; smaller messages keep the staged path. Three CPU-0 persistent
+samples per variant used 262,144-byte messages, 100 warmups, 2,000 measured
+roundtrips, and the default 16-KiB frame/65,535-byte windows:
+
+| Write path | Median ns/roundtrip | Median roundtrips/s | Median p99 ns |
+| --- | ---: | ---: | ---: |
+| const-borrowed (default) | 398,743 | 2,507 | 432,435 |
+| caller-prefix borrowed | 414,295 | 2,413 | 446,078 |
+
+The historical 2026-11-07 staged median for the same shape was 474,010
+ns/roundtrip, so the default const-borrowed path removes about 15.9% of the
+roundtrip time while keeping the explicit caller-prefix API available. The
+small-message path is unchanged. Rows and commands are in
+`docs/evidence/grpc_shared/2026-11-19-const-borrowed-writes.json`.

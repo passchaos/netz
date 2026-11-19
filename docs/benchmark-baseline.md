@@ -9453,12 +9453,14 @@ faster than grpc-cpp. With the library's 256-KiB frame default and the opt-in
 cached allocator, the current configuration measures 1.053x persistent and
 0.925x per-call, making the large per-call mode faster than grpc-cpp. Small-message
 native times remain lower in this fixture, but broad gRPC performance
-completion is still open: the default borrowed Writer still clones its caller
-payload, while generic ClientDuplex, ServerDuplex and SharedChannel owned-write
-APIs close that boundary for callers that serialize directly into prefix-
-reserved storage. Borrowed server responses still stage a contiguous message,
-first cross-DATA reassembly remains, and grpc-core retains more general
-segmented `SliceBuffer` ownership. Three attempts to pass retained HTTP/2 DATA
+completion is still open. The default SharedChannel path now writes const
+payloads of 64 KiB or more as prefix+payload slices instead of cloning them; a
+2026-11-19 persistent 256-KiB run measured 398,743 ns/roundtrip versus 474,010
+ns for the historical staged path. Generic ClientDuplex, ServerDuplex and
+SharedChannel owned-write APIs remain available for callers that serialize
+directly into prefix-reserved storage. Borrowed server responses still stage a
+contiguous message, first cross-DATA reassembly remains, and grpc-core retains
+more general segmented `SliceBuffer` ownership. Three attempts to pass retained HTTP/2 DATA
 through a Shared-call queue were rejected after all lost the 0-byte instruction
 guard in 8/8 pairs; future work must preserve the existing Call layout and
 small-DATA path.

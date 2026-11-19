@@ -49,6 +49,9 @@ pub const Write = struct {
     payload_released: bool = false,
     /// Caller-owned prefix-reserved storage; never freed by this command.
     borrowed: bool = false,
+    /// Caller-owned const payload that has no reserved prefix. The owner
+    /// writes it as prefix+payload slices and never frees it.
+    payload_borrowed: ?[]const u8 = null,
     options: codec.MessageOptions,
     final: bool,
     finish_only: bool,
@@ -118,6 +121,29 @@ pub const Write = struct {
         };
         return command;
     }
+    /// Borrow a const payload with no reserved prefix. The owner writes it
+    /// as prefix+payload slices; the submitter must keep it valid until the
+    /// command completes.
+    pub fn createConstBorrowed(
+        allocator: std.mem.Allocator,
+        bytes: []const u8,
+        input: WriteInput,
+    ) (std.mem.Allocator.Error || error{InvalidStreamState})!*Write {
+        std.debug.assert(!input.finish_only);
+        const command = try allocator.create(Write);
+        errdefer allocator.destroy(command);
+        command.* = .{
+            .allocator = allocator,
+            .storage = &.{},
+            .borrowed = true,
+            .payload_borrowed = bytes,
+            .options = input.options,
+            .final = input.final,
+            .finish_only = false,
+            .deadline = input.deadline,
+        };
+        return command;
+    }
     pub fn retain(self: *Write) void {
         _ = self.refs.fetchAdd(1, .monotonic);
     }
@@ -128,10 +154,12 @@ pub const Write = struct {
     }
     pub fn payload(self: *const Write) []const u8 {
         std.debug.assert(!self.payload_released and !self.finish_only);
+        if (self.payload_borrowed) |bytes| return bytes;
         return self.storage[5..];
     }
     pub fn messageStorage(self: *Write) []u8 {
         std.debug.assert(!self.payload_released and !self.finish_only);
+        std.debug.assert(self.payload_borrowed == null);
         return self.storage;
     }
     /// The transport staging buffer owns the encoded message after this point.
@@ -139,6 +167,7 @@ pub const Write = struct {
         std.debug.assert(!self.payload_released);
         if (!self.borrowed) self.allocator.free(self.storage);
         self.storage = &.{};
+        self.payload_borrowed = null;
         self.payload_released = true;
     }
     /// Transfer the prefix-reserved allocation to the transport staging

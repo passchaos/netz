@@ -261,10 +261,28 @@ pub const ClientDuplex = struct {
             if (payload.len > self.encoder.max_message_size) {
                 return error.GrpcMessageTooLarge;
             }
-            return self.writeBorrowedMessage(payload, options, false);
+            return self.writeBorrowedMessage(payload, options, false, null);
         }
         try self.stageMessage(payload, options);
         return self.resumeMessage();
+    }
+
+    /// Write a caller-owned const payload as prefix+payload slices. The
+    /// payload is read only during this call; a response that interrupts a
+    /// partial write copies the unsent suffix into `pending_message`.
+    pub fn writeBorrowedPayload(
+        self: *ClientDuplex,
+        payload: []const u8,
+        options: codec.MessageOptions,
+        end_stream: bool,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!WriteResult {
+        try self.ensureWritable();
+        if (self.pending_message != null) return error.InvalidStreamState;
+        if (payload.len > self.encoder.max_message_size) {
+            return error.GrpcMessageTooLarge;
+        }
+        return self.writeBorrowedMessage(payload, options, end_stream, deadline);
     }
 
     fn writeBorrowedMessage(
@@ -272,6 +290,7 @@ pub const ClientDuplex = struct {
         payload: []const u8,
         options: codec.MessageOptions,
         end_stream: bool,
+        deadline: ?std.Io.Clock.Timestamp,
     ) Error!WriteResult {
         const algorithm: compression.Algorithm =
             if (options.disable_compression) .identity else self.encoder.algorithm;
@@ -302,7 +321,11 @@ pub const ClientDuplex = struct {
         };
         const slices = [_][]const u8{ &prefix, encoded.bytes };
         const committed_before = self.transport.requestCommittedBytes();
-        const result = if (self.deadline) |until|
+        const effective = if (self.deadline) |rpc|
+            if (deadline) |until| earlierDeadline(rpc, until) else rpc
+        else
+            deadline;
+        const result = if (effective) |until|
             self.transport.writeRequestSlicesWithDeadline(
                 &slices,
                 end_stream,
@@ -432,7 +455,7 @@ pub const ClientDuplex = struct {
             if (payload.len > self.encoder.max_message_size) {
                 return error.GrpcMessageTooLarge;
             }
-            return self.writeBorrowedMessage(payload, options, true);
+            return self.writeBorrowedMessage(payload, options, true, null);
         }
         try self.stageFinalMessage(payload, options);
         return self.resumeMessage();

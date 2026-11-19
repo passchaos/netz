@@ -240,7 +240,26 @@ pub fn Owner(comptime State: type) type {
                         state.unlock();
                         progress = true;
                     } else {
-                        if (!command.staged) {
+                        var write_completed = false;
+                        if (command.payload_borrowed) |payload| {
+                            const result = active.stream.writeBorrowedPayload(
+                                payload,
+                                command.options,
+                                command.final,
+                                until,
+                            ) catch |err| {
+                                fail(worker, index, err);
+                                progress = true;
+                                continue;
+                            };
+                            // The payload is either fully written or its
+                            // unsent suffix has been copied into the stream's
+                            // pending message.
+                            command.releasePayload();
+                            command.staged = true;
+                            write_completed = result == .complete;
+                            progress = true;
+                        } else if (!command.staged) {
                             const storage = command.messageStorage();
                             if (command.borrowed) {
                                 active.stream.stageBorrowedMessageStorage(
@@ -274,6 +293,13 @@ pub fn Owner(comptime State: type) type {
                                 } else command.releasePayload();
                             }
                             progress = true;
+                        }
+                        if (write_completed) {
+                            state.lock();
+                            call.request_finished = command.final;
+                            call.finishWriteLocked(null);
+                            state.unlock();
+                            continue;
                         }
                         const before = active.stream.transport.requestCommittedBytes();
                         const result = active.stream.pollResumeMessageWithDeadline(until, state.options.max_write_bytes_per_turn) catch |err| {

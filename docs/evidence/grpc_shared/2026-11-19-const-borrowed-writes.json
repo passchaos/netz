@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "date": "2026-11-19",
+  "feature": "gRPC SharedChannel const-payload request writes",
+  "decision": "retained: large const payloads are written as prefix+payload slices without a staging copy",
+  "head": "10f3cd07",
+  "benchmark": "examples/benchmarks/bench_grpc_shared.zig",
+  "command": "taskset -c 0 zig build bench-grpc-shared -Doptimize=ReleaseFast -- --mode=persistent --payload=262144 --warmup=100 --iterations=2000 [--borrowed-writes]",
+  "workload": {
+    "protocol": "gRPC over cleartext HTTP/2",
+    "client_api": "shared",
+    "mode": "persistent",
+    "payload_bytes": 262144,
+    "warmup": 100,
+    "iterations": 2000,
+    "allocator": "smp",
+    "validation": "full-bytes",
+    "stream_window": 65535,
+    "connection_window": 65535,
+    "max_frame_size": 16384
+  },
+  "variants": {
+    "const_borrowed_default": {
+      "write_path": "const-borrowed",
+      "samples_ns_per_roundtrip": [405071, 397945, 398743],
+      "median_ns_per_roundtrip": 398743,
+      "median_roundtrips_per_second": 2507,
+      "median_p99_ns": 432435
+    },
+    "caller_prefix_borrowed": {
+      "write_path": "caller-prefix",
+      "samples_ns_per_roundtrip": [414198, 414295, 415104],
+      "median_ns_per_roundtrip": 414295,
+      "median_roundtrips_per_second": 2413,
+      "median_p99_ns": 446078
+    }
+  },
+  "historical_reference": {
+    "date": "2026-11-07",
+    "staged_median_ns_per_roundtrip": 474010,
+    "borrowed_median_ns_per_roundtrip": 408439,
+    "evidence": "docs/evidence/grpc_shared/2026-11-07-borrowed-shared-writes/"
+  },
+  "conclusion": "The default SharedChannel path now writes const payloads of 64 KiB or more as prefix+payload slices instead of copying them into a queued staging allocation. It is 15.9% faster than the historical staged path and 3.8% faster than explicit caller-prefix borrowed storage in the same persistent 256-KiB shape. Small messages keep the staged path."
+}
