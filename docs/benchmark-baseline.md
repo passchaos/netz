@@ -2520,6 +2520,12 @@ command completed and printed `io backend: zio-std-io`; the request status
 totals and transfer byte counts were exact. These short runs establish the new
 runtime path and are not performance comparisons.
 
+A 2026-11-19 zio-era CPU-0 smoke of the same benchmark with 1-MiB bodies
+measured 294.20 MiB/s upload and 337.50 MiB/s download for one stream, and
+265.02/281.26 MiB/s for four streams. Every run reported status 200 and exact
+1,048,576-byte bodies. These are single-iteration runtime smokes, not
+comparative performance evidence.
+
 ```sh
 taskset -c 0 zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=16777216 --mode=upload --streams=1
 taskset -c 0 zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=16777216 --mode=download --streams=1
