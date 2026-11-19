@@ -1,0 +1,6 @@
+Isolated source: /tmp/netz-optimization-review-pxmfoy38/netz
+Only visibility and the test root change in this copy.
+audit review: exit=1; log=/tmp/netz-optimization-review-pxmfoy38/ownership-and-fractional-refill.log
+audit overflow: exit=1; log=/tmp/netz-optimization-review-pxmfoy38/overflow.log
+audit boundary: exit=0; log=/tmp/netz-optimization-review-pxmfoy38/packetization.log
+At the audited baseline, the first two probes fail and the boundary probe passes.

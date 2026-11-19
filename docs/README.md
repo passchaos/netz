@@ -10,6 +10,7 @@ performance record.
 | Document | Purpose |
 | --- | --- |
 | [architecture.md](architecture.md) | Layered design, performance invariants P1-P10, memory/concurrency doctrine, change acceptance checklist, known structural gaps. |
+| [architecture/optimization-backlog.md](architecture/optimization-backlog.md) | November 19 project review: reproduced relay/rate defects, prioritized optimization work, structural findings, and validation requirements. |
 | [trust_roots.md](trust_roots.md) | System versus compiled-in Mozilla trust roots, precedence, protocol surfaces, and store reuse. |
 | [build.md](build.md) | Build, test, fuzz, interop, release-archive, and evidence gates. |
 | [http_forms.md](http_forms.md) | URL-encoded and streaming multipart forms, `body_source`, limits, and HTTP/3 caveats. |

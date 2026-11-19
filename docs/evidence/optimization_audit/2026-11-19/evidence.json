@@ -1,0 +1,127 @@
+{
+  "schema": 1,
+  "date": "2026-11-19",
+  "feature": "Project-wide implementation and optimization review",
+  "head": "425a9e1c99052ff393fa6a920452f8f9f54a8d9d",
+  "decision": "document confirmed proxy defects and prioritized improvements; production code unchanged",
+  "host": {
+    "os": "Linux",
+    "architecture": "x86_64",
+    "zig_version": "0.16.0",
+    "dependency_heads": {
+      "vail": "d93847a7e091c835406ee10c0a86fd064f1475dd",
+      "vort": "a48e1151872a30a574363e994ec312969b3c7818",
+      "pbz": "a6f96bba53dfc57206ae812ffaa54dd748573cf8",
+      "regexz": "3c0d8cf37b9081dfb6165f0fa48975c9566707f3",
+      "harnessz": "80117591603f35b1b084b9a5eafd040810ab4b3d",
+      "kron": "77b9572a0256da0ece836c6b49024b3282bd1d5b",
+      "webpkiz": "35c9f4bfecb51a7794670d474c01b3c6fe541e9e"
+    }
+  },
+  "source_sha256": {
+    "src/proxy/internal/relay_queue.zig": "b3ec015943f8eee854688716b6e81335aaa4d4090bb78bfdcd76f9c876a3573a",
+    "src/proxy/internal/byte_bucket.zig": "a536d800a8ad70d3e09ee78ae4ad66a68805b3aeb08d452120634d8d9a8252ae",
+    "src/proxy/tuic/shared/server.zig": "ee1f6e32fa213ab14b16cf60ea4bc47fd243825a05a3098686a77abd8a4b5703",
+    "src/proxy/hysteria/shared/server.zig": "53632895d1ec7d2f6610d313fcfdba24234a061281953345c8b39e557b8641fb",
+    "src/proxy/tuic/config.zig": "26bd87c2b940b6d88e8ec201b23ab3367046e9f043a8dd3d2636dbd323c38e6a",
+    "src/proxy/hysteria/config.zig": "f0691baaf1e57ab7cda51a807efc254e65da653b2e6b09f12aab5aa0d76ccb0e",
+    "src/proxy/hysteria/v3_protocol.zig": "ee2a1db278612c86e1e0745df30977a5ead4add43aff5cbf8c846ef215c8144d",
+    "src/quic/endpoint_server.zig": "910cfeaf04fc3106e72588698a5febc722da36a4e033fcd2aab1a43b4cd9ded6",
+    "src/quic/one_rtt/connection.zig": "2069a212d8dfc0c4d3878531a8e52ce0e97b52761989fea08babe9da33e21bb7",
+    "build.zig": "3ae79e976ddc4eff63a117a2780db34743823c54ddfb42b92e2da49b917d82c9",
+    "docs/evidence/optimization_audit/2026-11-19/reproduce.py": "f2e9cbd3cc92a75d55ac35138b948d25992074b7708aa8eeb095caf5108036c2",
+    "docs/evidence/optimization_audit/2026-11-19/reproduction_tests.zig": "81ecbe7ce595ed52b503d6fbb800d029cee952732724163029d281f790093759"
+  },
+  "command": "python3 docs/evidence/optimization_audit/2026-11-19/reproduce.py",
+  "reproduction_setup": "copy src/build and the package manifests; reuse sibling dependencies and fixtures; change only Hysteria flushRelayOutbound visibility and library test root in the copy; probes call the unchanged method body and real ByteBucket/one-RTT code",
+  "results": {
+    "relay_backpressure": {
+      "input_items": 3,
+      "retained_items": 1,
+      "orphaned_items": 2,
+      "expected_retained_items": 3,
+      "actual_method": "Hysteria Connection.flushRelayOutbound",
+      "TUIC": "identical production drain loop inspected; no separate TUIC refusal reproduction"
+    },
+    "fractional_refill": {
+      "rate_bytes_per_second": 1,
+      "poll_count": 1000,
+      "poll_interval_ns": 1000000,
+      "elapsed_ns": 1000000000,
+      "actual_sent_bytes": 0,
+      "expected_sent_bytes": 1
+    },
+    "ownership_and_fractional_probes": {
+      "total_tests": 33,
+      "passed": 31,
+      "failed": 2,
+      "exit_code": 1
+    },
+    "overflow": {
+      "rate": "18446744073709551615",
+      "elapsed_ns": 2,
+      "build_mode": "Debug",
+      "result": "integer overflow at ByteBucket.refill, signal ABRT",
+      "exit_code": 1,
+      "scope": "primitive reproduction; no full authenticated peer attack or ReleaseFast run"
+    },
+    "packetization": {
+      "tcp_payload_bytes": 16384,
+      "configured_datagram_bytes": 4096,
+      "raw_quic_result": "DatagramTooLarge",
+      "total_tests": 31,
+      "passed": 31,
+      "exit_code": 0,
+      "scope": "actual one-RTT API boundary; proxy error-handling/default configuration inspected"
+    },
+    "existing_shared_endpoint_tests": {
+      "command": "zig build test-lib -Dtest-filter='shared endpoint serves' --summary all",
+      "passed": 216,
+      "total": 216,
+      "exit_code": 0,
+      "includes": "matching repository tests plus imported dependency tests"
+    },
+    "initial_evidence_audit": {
+      "command": "zig build verify-evidence -- --max-unresolved=24",
+      "files": 288,
+      "entries": 10797,
+      "matched": 6634,
+      "stale": 4163,
+      "unresolved": 0,
+      "invalid": 0,
+      "unreadable": 0,
+      "exit_code": 0
+    },
+    "initial_markdown_link_check": {
+      "documents_checked": 79,
+      "missing_local_targets": 0
+    },
+    "post_review_evidence_audit": {
+      "files": 289,
+      "entries": 10809,
+      "matched": 6646,
+      "stale": 4163,
+      "unresolved": 0,
+      "invalid": 0,
+      "unreadable": 0,
+      "exit_code": 0
+    }
+  },
+  "artifacts": "docs/evidence/optimization_audit/2026-11-19",
+  "conclusion": "The review found real queue ownership and rate arithmetic/liveness defects plus a relay packet-size mismatch. Existing focused tests pass but do not cover these boundaries. Endpoint fairness, reusable storage, owner decomposition and reproducible validation remain optimization candidates without new timing claims.",
+  "saved_runner_verification": {
+    "executed": true,
+    "filters": [
+      "audit review",
+      "audit overflow",
+      "audit boundary"
+    ],
+    "actual_exit_codes": [
+      1,
+      1,
+      0
+    ],
+    "matches_expected_baseline_results": true
+  },
+  "log_storage": "Captured text logs with trailing blank lines removed."
+}

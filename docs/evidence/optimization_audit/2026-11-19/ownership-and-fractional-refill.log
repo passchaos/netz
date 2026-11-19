@@ -1,0 +1,42 @@
+test-lib
++- run test 31 pass, 2 fail (33 total)
+error: 'audit_review.test.audit review backpressured relay retains the complete FIFO suffix' failed:
+       audit relay input=3 retained=1 orphaned=2
+       expected 3, found 1
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/std/testing.zig:118:17: 0x1297e69 in expectEqualInner__anon_43016 (std.zig)
+                       return error.TestExpectedEqual;
+                       ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/std/testing.zig:83:5: 0x1299bbf in expectEqual (audit_review.zig)
+           return expectEqualInner(T, expected, actual);
+           ^
+       /tmp/netz-optimization-review-pxmfoy38/netz/src/audit_review.zig:34:5: 0x1299c35 in test.audit review backpressured relay retains the complete FIFO suffix (audit_review.zig)
+           try std.testing.expectEqual(@as(usize, 3), retained);
+           ^
+error: 'audit_review.test.audit review fractional rate refill preserves elapsed credit' failed:
+       audit limiter rate=1 byte/s polls=1000 elapsed=1s sent=0 tokens=0
+       expected 1, found 0
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/std/testing.zig:118:17: 0x1297e69 in expectEqualInner__anon_43016 (std.zig)
+                       return error.TestExpectedEqual;
+                       ^
+       /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib/std/testing.zig:83:5: 0x129815c in expectEqual (audit_review.zig)
+           return expectEqualInner(T, expected, actual);
+           ^
+       /tmp/netz-optimization-review-pxmfoy38/netz/src/audit_review.zig:45:5: 0x12981b5 in test.audit review fractional rate refill preserves elapsed credit (audit_review.zig)
+           try std.testing.expectEqual(@as(usize, 1), sent);
+           ^
+failed command: /home/passchaos/project-z/netz/.zig-cache/o/20506bb56a6fcbf1512caacc5dab08ef/test --cache-dir=/home/passchaos/project-z/netz/.zig-cache --seed=0x2ac730e0 --listen=-
+
+Build Summary: 6/8 steps succeeded (1 failed); 31/33 tests passed (2 failed)
+test-lib transitive failure
++- run test 31 pass, 2 fail (33 total)
+   +- compile test Debug native success 823ms MaxRSS:728M
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native success 316ms MaxRSS:139M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native success 317ms MaxRSS:141M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options cached
+
+error: the following build command failed with exit code 1:
+/home/passchaos/project-z/netz/.zig-cache/o/818f5afcbf3ae4e4254bcbcaa5f37fc0/build /home/passchaos/Temp/zig-x86_64-linux-0.16.0/zig /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib /tmp/netz-optimization-review-pxmfoy38/netz /home/passchaos/project-z/netz/.zig-cache /home/passchaos/.cache/zig --seed 0x2ac730e0 -Zd9bb18ced678987c test-lib -Dtest-filter=audit review --summary all

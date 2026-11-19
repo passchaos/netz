@@ -1,0 +1,266 @@
+# Project-wide optimization review, 2026-11-19
+
+Audited baseline: `425a9e1c99052ff393fa6a920452f8f9f54a8d9d`, branch
+`optimize/audit-batch-1`, Zig 0.16.0, Linux x86_64. This is an implementation
+and evidence review, with isolated boundary reproductions. It does not claim
+an exhaustive line-by-line review or a new full-library/performance result.
+The production implementation is unchanged by this review.
+
+The most valuable next work is proxy relay correctness, followed by endpoint
+fairness and reusable relay storage. Several codec paths have already received
+measured optimizations; their rejected experiments should remain part of the
+decision record. Structural work should make the existing owners easier to
+audit without introducing another reader or changing public import paths.
+
+## Priority queue
+
+All entries are open. P0 means a confirmed correctness defect; P1 means a
+common-path integration defect or a resource/fairness concern; P2 means an
+engineering or validation improvement; P3 means a less common optimization.
+An observed mechanism is distinguished from an unmeasured performance benefit.
+
+| ID | Priority | Work | Evidence strength |
+| --- | --- | --- | --- |
+| R1 | P0 | Preserve the complete relay FIFO suffix across QUIC backpressure | Actual Hysteria drain reproduced; identical TUIC code inspected |
+| R2 | P0 | Make negotiated rate arithmetic safe and retain fractional credit | Actual ByteBucket assertion failure and Debug overflow reproduced |
+| R3 | P1 | Packetize TCP relay chunks before raw QUIC sends | Actual raw QUIC boundary verified; both proxy callers inspected |
+| R4 | P1 | Give the shared proxy pump a bounded, fair service turn | Blocking timeouts and unbounded drain loops inspected; latency unmeasured |
+| R5 | P1 | Reuse bounded relay payload storage | One allocation/copy per TCP read inspected; throughput unmeasured |
+| R6 | P2 | Split large owner responsibilities and public-surface/build tests | File/function counts and build graph inspected |
+| R7 | P2 | Unify dependency pins and distinguish current from historical evidence | Local/CI revisions and evidence audit measured |
+| R8 | P2 | Complete independent interop and performance coverage | Current parity documents and latest recorded runs inspected |
+| R9 | P3 | Offer reusable scratch for deep retained filters | Allocation fallback inspected; workload importance unmeasured |
+
+## R1: relay batches lose ownership under backpressure
+
+Locations: [TUIC drain](../../src/proxy/tuic/shared/server.zig),
+[Hysteria drain](../../src/proxy/hysteria/shared/server.zig), and
+[shared relay queue](../../src/proxy/internal/relay_queue.zig).
+
+`flushRelayOutbound` removes up to eight `Outbound` items from the queue. If
+`sendRelayItem` returns false for item k, it stores only that item in
+`pending_out` and returns. Items k+1 through the end of the local batch have
+already left the queue and have no owner. DATA chunks can be lost and their
+allocations leaked; a queued FIN can be lost too. Relay teardown frees only
+`pending_out` and items still in the queue.
+
+The isolated probe calls the actual Hysteria method with three queued chunks
+and a rate cap that prevents the first send. It observes `input=3 retained=1
+orphaned=2`. TUIC has the same drain loop, with congestion, pacing, flow-control
+and anti-amplification refusals as its false-return cases. The probe uses
+stack-backed chunks to observe ownership without intentionally leaking heap
+memory; heap-leak consequences follow from the production reader's `dupe`
+and teardown paths.
+
+Use either one-item dequeue with one pending item, or relay-owned batch
+storage with a retained cursor. Preserve FIFO order and account for every
+item during fatal send errors and teardown. Add production regressions for
+first/middle/last refusal, repeated refusal followed by recovery, DATA plus
+FIN, exact byte order, and zero live bytes after shutdown. Exercise both
+protocols and the actual QUIC refusal modes.
+
+## R2: rate arithmetic, liveness, and commit accounting
+
+Locations: [ByteBucket](../../src/proxy/internal/byte_bucket.zig),
+[Hysteria shared server](../../src/proxy/hysteria/shared/server.zig),
+[legacy single-connection server](../../src/proxy/hysteria/v3_server.zig), and
+[hello codec](../../src/proxy/hysteria/v3_protocol.zig).
+
+Two failures are reproduced directly against ByteBucket:
+
+- `refill` calculates `elapsed * rate` in u64. An accepted wire rate of
+  `maxInt(u64)` and elapsed time of two nanoseconds produces an integer-overflow
+  panic in Debug. The hello codec accepts u64 rates; with the default unlimited
+  server setting, `negotiateRate` selects the client's finite rate. The primitive
+  crash is reproduced; a complete authenticated malicious-peer exchange was
+  not run. ReleaseFast behavior is not validated by this Debug reproduction.
+- `refill` rounds to whole bytes and always advances `last_refill_ns`, losing
+  fractional credit. After consuming a one-byte initial burst at one byte/s,
+  1,000 polls spaced one millisecond apart yield zero bytes instead of one.
+
+Related integration concerns are visible in the same path. Capacity equals
+one second of the rate, while a TCP chunk can be larger than that capacity;
+whole-chunk `tryConsume` can never succeed in that case, and the legacy
+`wait` cannot accumulate enough tokens. The shared sender consumes tokens
+before `trySend` and does not refund a retryable refusal. The receive path
+ignores a `tryConsume` result when queuing TCP data, then charges the pending
+buffer again when flushing. These accounting/liveness consequences are source
+findings, rather than separate end-to-end reproductions.
+
+Use wider intermediate arithmetic or checked/saturating arithmetic with a
+defined supported range, preserve fractional byte-nanosecond credit, and
+define a burst budget independently of the average rate. TCP output needs a
+byte cursor so a low rate can make partial progress. Charge each committed
+byte once, preserving credit on failed/retried output. Validate zero/unlimited,
+very low and maximum rates, frequent polls, long idle intervals, partial writes,
+QUIC backpressure, cancellation, and both Debug and ReleaseSafe arithmetic.
+
+## R3: default relay reads exceed a raw QUIC packet
+
+Both proxy configs default to a 16-KiB TCP read buffer. Their shared
+`sendRelayItem` passes the complete read as one STREAM frame to
+`endpoint_server.Server.trySend`. That API forwards to one-RTT `trySend`,
+which attempts one protected packet and rejects oversized output; it does not
+split an application buffer.
+
+The isolated boundary probe uses an actual one-RTT connection with a 4,096-byte
+datagram limit and verifies that a 16,384-byte STREAM chunk returns
+`DatagramTooLarge`. Both proxy sender branches treat this as a fatal error,
+free the chunk and close the relay. The exact maximum can be smaller after
+transport negotiation and includes packet/frame overhead. Existing small-echo
+tests do not establish correctness for a full default-sized TCP read.
+
+Add a packet-size-aware cursor that queries the connection's current payload
+budget, advances offsets only after committed sends, retains the unsent suffix,
+and emits FIN only after all DATA. Cover reads of 4/16/64 KiB, changing packet
+number widths, low peer datagram limits, flow/congestion refusal halfway through,
+and exact TCP round trips against an independent peer. Batch already-valid
+packets through the existing endpoint batch API only after ownership is sound.
+
+## R4: shared endpoint fairness
+
+The receive owner is now correct: TUIC and Hysteria share the QUIC endpoint
+pump. However, service still walks every connection, association and relay.
+Each idle UDP association attempts a receive with a one-millisecond timeout;
+each blocked TCP write can occupy up to ten milliseconds. These waits happen
+on the pump. Read-ready UDP associations and outbound TCP queues are drained
+until empty, with no per-turn item/byte budget. A continuously ready source
+can therefore monopolize a turn; N blocked TCP targets can add approximately
+N times the write quantum before another connection is serviced. This is a
+mechanism finding, not a measured p99 bound.
+
+Move target-socket reads and writes to explicit per-association/relay owners
+that publish through bounded queues, or use readiness-aware nonblocking
+operations. Keep one QUIC receive owner. Give the pump packet/byte/time budgets
+and a round-robin cursor; schedule only ready owners while handling expiry.
+Profile mixed hot/idle connections, permanently blocked targets and continuous
+UDP producers. Require bounded sibling delay, clean shutdown, and stable
+p50/p99, throughput, CPU and allocation metrics against fixed binaries.
+
+## R5: allocation-free relay steady state
+
+`Relay.readerTask` allocates its read buffer once, then duplicates every TCP
+read into a new allocation. Both UDP association paths also allocate encoded
+packets and free them after each send. A block-cache backend may recycle
+backing blocks, but these paths still make allocator calls and copy payloads.
+The eight-item queue bounds item count; it does not establish allocation-free
+steady state. Inbound storage also compacts consumed bytes with `copyForwards`.
+
+After R1/R3, use a bounded block pool or fixed slots sized from the packet/read
+budgets. Ownership must stay with a slot until QUIC has accepted or copied its
+data; then return the slot to the reader. Preserve queue and total-byte bounds.
+Measure allocation calls per MiB, peak live bytes and throughput for small and
+large packets plus backpressure. Use a fail-after-warmup allocator only on
+operations whose ownership contract makes zero allocations achievable.
+
+## R6: owner structure and verification costs
+
+The source inventory contains 1,988 Zig files and 862,412 lines including
+tests. Already-extracted tests do not explain the largest owner files:
+
+| File | Lines | Indented function declarations | Named test bodies |
+| --- | ---: | ---: | ---: |
+| `src/http2/runtime/connection.zig` | 15,986 | 588 | 0 |
+| `src/quic/one_rtt/connection.zig` | 15,390 | 661 | 0 |
+| `src/http3/runtime/handshake_client.zig` | 8,347 | 339 | 0 |
+| `src/mqtt/broker/core.zig` | 6,329 | 152 | 0 |
+
+Split coherent operations and their private state into flow/credit, header
+assembly, request/response batches, recovery/send, and shutdown/lifecycle
+modules. Existing HTTP/2 `Receiver`/`Lifecycle` helpers provide a pattern.
+Keep owner-local invariants, explicit context and public re-exports; avoid
+exposing every private method merely to enable extraction. Measure compile
+time and code size before claiming a build or runtime benefit.
+
+`test/package_test.zig` has 11,611 lines in only 24 named tests, often with
+many scenarios inside one test. Split by protocol and public behavior so a
+filter can select the smallest reproducible surface. `build.zig` still has
+1,065 lines despite its eleven helper modules. Move executable/checker
+registrations into existing protocol/build responsibilities. `tools/interop`
+has 275 directly tracked files: group stable fixture families and update
+evidence path mappings as part of any move.
+
+The current `test-lib` filter compiles a shared package root, and imported
+dependency tests can still run. Focused module roots and minimum matched-test
+checks would improve iteration and prevent a green filtered command from
+being mistaken for coverage of an uninstantiated surface. Keep a final package
+and complete-library gate for changes that cross protocol boundaries.
+
+## R7: reproducibility and evidence freshness
+
+The existing evidence gate passes: 288 source-hash-bearing JSON files, 10,797
+entries, 6,634 matched, 4,163 stale, zero unresolved, invalid or unreadable.
+Historical source hashes are valid historical records, so drift does not prove
+a regression and rewriting them to current hashes would destroy provenance.
+
+Add a small current-evidence index per protocol/runtime/host profile that pins
+the accepted source revision, dependency revisions, binary hashes and raw
+results. Apply strict checks to that index while retaining historical records.
+The current auditor also skips missing/wrongly typed source-hash fields; a
+schema for acceptance records can prevent incomplete claims from looking valid.
+
+CI repeats seven dependency pins across four job configurations, and the source
+archive tool maintains its own constants. Local path dependencies currently
+differ from CI for pbz (94 commits beyond the pin), regexz (22), harnessz (2)
+and vail (1), all with clean local trees. This proves different inputs, not API
+incompatibility. Use one pin manifest plus a local check/bootstrap command;
+verify a clean pinned cohort before updating pins. The README's zio commit
+description also predates the pin in `build.zig.zon`.
+
+Eight sampler-backed baseline gates are already serialized. Keep timing off
+shared compile/test workloads; a dedicated controlled performance job or runner
+is more useful than a noisy threshold on generic CI. Record fixed-peer role,
+CPU layout, window/chunk policy and full source/dependency hashes.
+
+## R8: protocol coverage and next measurements
+
+| Area | Current evidence / conclusion | Next useful work |
+| --- | --- | --- |
+| HTTP/1 and unified HTTP | Borrowed parse/SIMD paths and pooled deadline/retirement behavior already covered | Large-body streaming/aggregation and idle-pool churn profiles; preserve ownership/deadlines |
+| HTTP/2 and gRPC data plane | HPACK, borrowed frames and batch encoder reuse already optimized; ordinary owned empty exchanges still have two header allocations | Profile retained header ownership, slow-stream fairness and many concurrent RPCs; an owned response allocation alone is not a defect |
+| QUIC and HTTP/3 | Precise scratch, prepared certificate compression and recovery work already landed | Current packet/recovery/receive-buffer allocation profiles, connection-count scaling and tail scheduling |
+| HTTP/3 comparison | Nov 19 kernel captures complete with zero drops; sender datagram ratios 1.016 upload and 1.005 download, packet-size sequences differ | Treat as the same application shape; isolate fixed-peer A/B and explain ACK/padding/control differences before an equal-wire claim |
+| WebSocket | Masking and H1/H2/H3 sliced writes already have evidence | Persistent/mostly-idle and compressed-message reference profiles before more codec micro-tuning |
+| WebTransport | Nov 19 native wtransport and churn reruns pass; Chrome rerun passes | Current controlled throughput/memory comparison and broader independent H2 capsule coverage; Firefox snap launch failure is environmental, STOP_SENDING remains separately open |
+| MQTT | Latest pinned serial durable QoS2 sample is 1.059x Mosquitto throughput and 0.612x peak RSS; old RSS penalty is not reproduced in that shape | Order-balanced multi-publisher/fanout/QoS/durable/restart matrix; a short serial sample does not establish broad superiority |
+| gRPC/xDS | Managed TLS refresh now self-drives; ADS/SDS/delta/LRS and shared ownership have extensive in-repo gates | Repeated rotation/failover with live RPCs, official peers, memory/queue bounds and many-cluster profiles |
+| TLS, runtime and internal helpers | Explicit backend, trust policy, prepared/cache and deadline facilities exist | Many-connection stack/crypto/trust cache budgets; keep cryptographic optimization in vail and execution optimization in zio |
+| Proxy | sing-box gates exist for Shadowsocks/Trojan/VLESS/VMess/TUIC; Hysteria v3 has no independent current-toolchain peer | R1-R5 first, then payload/backpressure/churn and fixed-binary proxy throughput/RSS comparisons |
+| WireGuard / mesh DERP | Bounded codecs/state machines, unit tests and fuzz; no independent peer gate | wireguard-go handshake/transport and DERP peer/churn checks, then codec/crypto/forwarding benchmarks; product policy stays in vpnz/meshz |
+
+Latest evidence pointers:
+[HTTP/3 captures](../evidence/http3_equal_wire_capture/2026-11-19/evidence.json),
+[MQTT current serial comparison](../evidence/mqtt_qos2_serial_profile/2026-11-19.json),
+[Chrome/Firefox rerun](../evidence/webtransport_chrome/2026-11-19-rerun.json), and
+[wtransport rerun](../evidence/webtransport_wtransport/2026-11-19-rerun.json).
+Protocol authorities remain in [the documentation index](../README.md).
+
+## R9: deeper retained-filter scratch
+
+The retained trie already bounds index bytes, reuses match bitmaps and handles
+normal filters without allocation. For filters deeper than 64 levels,
+`matchBitsInto` allocates level-end and traversal arrays, with a linear scan
+fallback on allocation failure. Offer caller-owned or bounded reusable scratch
+if deep-filter workloads matter. Compare shallow and deep selective/wildcard
+cases with allocation telemetry; keep exact ordering and the OOM fallback.
+This is lower priority than common relay, HTTP and QUIC paths.
+
+## Review validation and execution order
+
+The recorded [review evidence](../evidence/optimization_audit/2026-11-19/evidence.json)
+includes reproducible isolated probes and logs. Existing
+`zig build test-lib -Dtest-filter='shared endpoint serves' --summary all`
+passed 216/216 tests. The targeted ownership and fractional-refill probes fail
+their two assertions, and the separate overflow probe aborts in Debug.
+The packet-size boundary probe passes by requiring `DatagramTooLarge` from
+the actual raw QUIC API. Those are observations of the audited baseline,
+not newly introduced failures in the production tree.
+
+The 79 active Markdown documents checked before this addition have no missing
+local link targets. No full test, new external interop run or timed benchmark
+was performed for this documentation review.
+
+Implement R1-R3 with production regressions first; then combine R4/R5 with
+small owner extractions and fixed-binary measurements. R6/R7 can proceed in
+separate commits that retain protocol behavior. Refresh the affected independent
+gates before broadening performance claims in R8. Keep R9 workload-driven.

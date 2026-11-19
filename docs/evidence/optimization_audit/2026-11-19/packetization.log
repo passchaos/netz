@@ -1,0 +1,16 @@
+test-lib
++- run test w
+audit raw relay payload=16384 datagram_limit=4096 error=DatagramTooLarge
+failed command: /home/passchaos/project-z/netz/.zig-cache/o/903edbb4c154f414ae77b76d763a9d34/test --cache-dir=/home/passchaos/project-z/netz/.zig-cache --seed=0x5d9f789b --listen=-
+
+Build Summary: 8/8 steps succeeded; 31/31 tests passed
+test-lib success
++- run test 31 pass (31 total) 10ms MaxRSS:15M
+   +- compile test Debug native success 623ms MaxRSS:419M
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 5ms MaxRSS:38M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 5ms MaxRSS:38M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options cached
