@@ -8360,6 +8360,7 @@ pub const Connection = struct {
         .header = queueClientDuplexHeader,
         .decoded = deferredHeaderIsDecoded,
         .connectionFrame = handleConnectionFrameUntil,
+        .pushed = receivePushedFrame,
         .sibling = queueDuplexSiblingFrameUntil,
         .discardCanceled = discardQueuedResetFramesUntil,
         .goaway = recordClientDuplexGoAway,

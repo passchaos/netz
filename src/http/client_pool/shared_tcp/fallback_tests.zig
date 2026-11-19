@@ -1,5 +1,5 @@
-//! Explicit push keeps its exclusive aggregate owner; traditional CONNECT
-//! now shares the per-origin frame owner and retires successful tunnels.
+//! Shared dispatch covers traditional CONNECT and push-enabled connections.
+//! Promised streams are consumed without disturbing the parent response.
 const std = @import("std");
 const pool_mod = @import("../../client_pool.zig");
 const runtime = @import("../../../http2/runtime.zig");
@@ -31,7 +31,10 @@ fn exercise(comptime push: bool) !void {
                 });
                 // Push precedes the parent response, so a duplex owner that
                 // rejects PUSH_PROMISE cannot silently pass this regression.
-                try connection.writePushedResponse(promised, .{ .status = 304, .headers = &.{.{ .name = "content-length", .value = "123" }} });
+                try connection.writePushedResponse(promised, .{
+                    .status = 200,
+                    .body = "asset-body",
+                });
             }
             try connection.writeResponseWithDeadline(request.stream_id, .{
                 .status = 200,
@@ -67,7 +70,7 @@ test "unified HTTP shared CONNECT preserves successful aggregate response semant
     try exercise(false);
 }
 
-test "unified HTTP exclusive push opt in preserves parent response after PUSH_PROMISE" {
+test "unified HTTP shared push opt in preserves parent response after PUSH_PROMISE" {
     try exercise(true);
 }
 

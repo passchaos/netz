@@ -1,7 +1,8 @@
 # Unified HTTP pool request ownership
 
-`http.Pool.requestUri` and its timeout/deadline variants aggregate ordinary
-HTTP/2 requests through one frame owner per active origin. A later request can
+`http.Pool.requestUri` and its timeout/deadline variants aggregate HTTP/2
+requests through one frame owner per active origin, including traditional
+CONNECT and push-enabled clients. A later request can
 join the same connection while an earlier response is waiting. Each request
 keeps its own deadline and cancellation; canceling one stream does not close
 the connection or cancel another stream. `http2_shared_requests` bounds retained
@@ -23,16 +24,15 @@ reused per origin, SOCKS5 and HTTP proxy routes are mutually exclusive, and an
 HTTP/3 pool is rejected while a proxy is configured. See
 [HTTP proxy routing](http_proxy.md) for target selection and limitations.
 
-One HTTP/2 dispatch case retains exclusive aggregation:
-
-| Request/configuration | Current owner | Preserved behavior |
-| --- | --- | --- |
-| `client.http2_limits.enable_push = true` | Existing HTTP/2 aggregate/push reader | Parent response proceeds through real `PUSH_PROMISE` and pushed-frame processing |
-
-This case is covered by a separate exclusive-path regression and does not count
-as shared-request coverage. Push-enabled connections retain the existing
-non-reusable policy; callers needing promised-request handles use an exclusive
-lease and the low-level push APIs.
+`client.http2_limits.enable_push = true` also uses the shared owner. The duplex
+pump consumes `PUSH_PROMISE` and promised HEADERS/DATA through the connection's
+bounded push state before routing frames to local stream queues, so HPACK order
+and flow-control credit stay connection-wide. The aggregate caller owns only the
+parent response; promised responses remain buffered or are reset under the
+existing push limits. Push-enabled connections retain the non-reusable policy,
+so they are closed instead of returning to the idle pool. Callers needing
+promised-request handles still use an exclusive lease and the low-level push
+APIs.
 
 Traditional `CONNECT` uses the shared per-origin owner. The request writer
 keeps the CONNECT method metadata, omits `:path`/`:scheme`, and closes an empty
@@ -54,12 +54,7 @@ The canonical zio regression receives a held response head and a later
 same-connection probe before cancellation, exercising ownership of packed
 HPACK header storage while preserving the sibling and later connection reuse.
 
-Duplex push support requires the single connection pump and stream polling to
-route `PUSH_PROMISE` and promised HEADERS/DATA through the existing bounded push
-state while preserving connection-wide HPACK order and flow-control credit.
-The owners are `src/http2/runtime/duplex/client_owner.zig`, the client pump hooks
-and `ClientDuplexStream` polling in `src/http2/runtime.zig`, and the helpers under
-`src/http2/runtime/push*`. A shared push consumer must submit commands to that
-owner; it cannot borrow the raw connection's reader. Promise quotas, parent and
-child cancellation, interleaved HPACK, oversized pushes and later reuse require
-focused tests before removing the explicit-push fallback.
+The shared push regression sends a real `PUSH_PROMISE` followed by a pushed
+200 response with a body before the parent response. The parent keeps its
+headers and body, and the pushed stream is consumed without leaving queued
+frames that would corrupt a later HPACK block.

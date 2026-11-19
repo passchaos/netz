@@ -45,6 +45,10 @@ pub fn ingest(connection: anytype, input: anytype, deadline: ?std.Io.Clock.Times
     var owned = true;
     defer if (owned) frame.deinit(connection.allocator);
     try hooks.sequence(connection, frame.frame, deadline);
+    // PUSH_PROMISE and promised-stream frames advance connection HPACK and
+    // flow-control state. Consume them before routing the frame to a local
+    // stream queue; the aggregate caller only owns the parent response.
+    if (try hooks.pushed(connection, frame.frame, deadline)) return .progress;
     switch (frame.frame.header.frame_type) {
         .headers, .continuation => {
             if (try hooks.header(connection, frame)) owned = false;
@@ -87,6 +91,7 @@ pub fn read(
         var owned = true;
         defer if (owned) frame.deinit(connection.allocator);
         try hooks.sequence(connection, frame.frame, deadline);
+        if (try hooks.pushed(connection, frame.frame, deadline)) continue;
         switch (frame.frame.header.frame_type) {
             .headers, .continuation => {
                 if (try hooks.header(connection, frame)) owned = false;
