@@ -63,7 +63,7 @@ pub const Forward = struct {
     path_rewrite: ?PathRewrite = null,
     host_rewrite: ?HostRewrite = null,
 };
-pub const OverrideKind = enum { rbac, fault };
+pub const OverrideKind = enum { rbac, fault, header_mutation };
 /// One `typed_per_filter_config` entry. `kind` is null when a disabled
 /// `FilterConfig` omitted its inner config; the projection resolves it by
 /// matching the HCM filter name.

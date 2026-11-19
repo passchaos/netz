@@ -29,6 +29,7 @@ const Parser = struct {
     fn overrideKind(type_name: []const u8) ?model.OverrideKind {
         if (std.mem.eql(u8, type_name, "envoy.extensions.filters.http.rbac.v3.RBACPerRoute")) return .rbac;
         if (std.mem.eql(u8, type_name, "envoy.extensions.filters.http.fault.v3.HTTPFault")) return .fault;
+        if (std.mem.eql(u8, type_name, "envoy.extensions.filters.http.header_mutation.v3.HeaderMutationPerRoute")) return .header_mutation;
         return null;
     }
     fn rbacPerRoute(self: *Parser, bytes: []const u8) pb.Error!model.Override {
@@ -65,10 +66,12 @@ const Parser = struct {
             const nested = try self.parseAny(value);
             if (overrideKind(nested.type_name) == .rbac) return try self.rbacPerRoute(nested.value);
             if (overrideKind(nested.type_name) == .fault) return .{ .kind = .fault, .config = nested.value };
+            if (overrideKind(nested.type_name) == .header_mutation) return .{ .kind = .header_mutation, .config = nested.value };
             return null;
         }
         if (overrideKind(parsed.type_name) == .rbac) return try self.rbacPerRoute(parsed.value);
         if (overrideKind(parsed.type_name) == .fault) return .{ .kind = .fault, .config = parsed.value };
+        if (overrideKind(parsed.type_name) == .header_mutation) return .{ .kind = .header_mutation, .config = parsed.value };
         return null;
     }
     fn overrideEntry(self: *Parser, bytes: []const u8) pb.Error!?model.Override {

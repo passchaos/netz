@@ -109,3 +109,61 @@ pub fn encode(gpa: std.mem.Allocator, options: Options) ![]u8 {
     try out.bytes(19, api.data.items);
     return out.data.toOwnedSlice(gpa);
 }
+
+/// One route-level `typed_per_filter_config` entry for the header-mutation
+/// filter, encoded as Route field 13. The per-route policy replaces the
+/// listener-level filter config for the selected route.
+pub fn headerMutationPerRoute(
+    allocator: std.mem.Allocator,
+    name: []const u8,
+    key: []const u8,
+    value: []const u8,
+) ![]u8 {
+    var header = Builder{ .allocator = allocator };
+    defer header.deinit();
+    try header.bytes(1, key);
+    try header.bytes(2, value);
+    var option = Builder{ .allocator = allocator };
+    defer option.deinit();
+    try option.bytes(1, header.data.items);
+    var element = Builder{ .allocator = allocator };
+    defer element.deinit();
+    try element.bytes(2, option.data.items);
+    var mutations = Builder{ .allocator = allocator };
+    defer mutations.deinit();
+    try mutations.bytes(1, element.data.items);
+    var per_route = Builder{ .allocator = allocator };
+    defer per_route.deinit();
+    try per_route.bytes(1, mutations.data.items);
+    var any = Builder{ .allocator = allocator };
+    defer any.deinit();
+    try any.bytes(1, "type.googleapis.com/envoy.extensions.filters.http.header_mutation.v3.HeaderMutationPerRoute");
+    try any.bytes(2, per_route.data.items);
+    var entry = Builder{ .allocator = allocator };
+    defer entry.deinit();
+    try entry.bytes(1, name);
+    try entry.bytes(2, any.data.items);
+    var out = Builder{ .allocator = allocator };
+    errdefer out.deinit();
+    try out.bytes(13, entry.data.items);
+    return out.data.toOwnedSlice(allocator);
+}
+
+/// Disable the header-mutation filter for one route via `FilterConfig`.
+pub fn headerMutationDisabled(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
+    var filter_config = Builder{ .allocator = allocator };
+    defer filter_config.deinit();
+    try filter_config.number(3, 1);
+    var any = Builder{ .allocator = allocator };
+    defer any.deinit();
+    try any.bytes(1, "type.googleapis.com/envoy.config.route.v3.FilterConfig");
+    try any.bytes(2, filter_config.data.items);
+    var entry = Builder{ .allocator = allocator };
+    defer entry.deinit();
+    try entry.bytes(1, name);
+    try entry.bytes(2, any.data.items);
+    var out = Builder{ .allocator = allocator };
+    errdefer out.deinit();
+    try out.bytes(13, entry.data.items);
+    return out.data.toOwnedSlice(allocator);
+}

@@ -18,9 +18,15 @@ const FaultOverride = union(enum) {
     disabled,
     policy: *fault.Policy,
 };
+const HeaderMutationOverride = union(enum) {
+    inherit,
+    disabled,
+    policy: @import("filter.zig").HeaderMutationPolicy,
+};
 const Compiled = struct {
     rbac: RbacOverride = .inherit,
     fault: FaultOverride = .inherit,
+    header_mutation: HeaderMutationOverride = .inherit,
     request_mutations: ?[]const call.HeaderMutation = null,
     request_removals: ?[]const []const u8 = null,
     response_mutations: ?[]const call.HeaderMutation = null,
@@ -108,7 +114,6 @@ pub const Projection = struct {
         return self;
     }
     fn compileOverrides(self: *Projection, rbac_name: []const u8, fault_name: []const u8, header_mutation_name: []const u8) !void {
-        _ = header_mutation_name;
         const hosts = self.source.resource.value.virtual_hosts;
         if (hosts.len == 0) return;
         const arena = self.arena.allocator();
@@ -117,16 +122,25 @@ pub const Projection = struct {
         for (hosts, 0..) |host, host_index| {
             var compiled = Compiled{};
             for (host.overrides) |entry| {
-                try self.applyOverride(&compiled, entry, rbac_name, fault_name);
+                try self.applyOverride(&compiled, entry, rbac_name, fault_name, header_mutation_name);
             }
             self.vhost_overrides[host_index] = compiled;
             const routes = try arena.alloc(Compiled, host.routes.len);
             for (host.routes, 0..) |route, route_index| {
                 var route_compiled = Compiled{};
                 for (route.overrides) |entry| {
-                    try self.applyOverride(&route_compiled, entry, rbac_name, fault_name);
+                    try self.applyOverride(&route_compiled, entry, rbac_name, fault_name, header_mutation_name);
                 }
-                if (self.header_mutation) |mutation| {
+                const effective_mutation: ?@import("filter.zig").HeaderMutationPolicy = switch (route_compiled.header_mutation) {
+                    .inherit => switch (compiled.header_mutation) {
+                        .inherit => self.header_mutation,
+                        .disabled => null,
+                        .policy => |policy| policy,
+                    },
+                    .disabled => null,
+                    .policy => |policy| policy,
+                };
+                if (effective_mutation) |mutation| {
                     route_compiled.request_mutations = try concatValues(
                         arena,
                         call.HeaderMutation,
@@ -157,7 +171,7 @@ pub const Projection = struct {
             self.route_overrides[host_index] = routes;
         }
     }
-    fn applyOverride(self: *Projection, compiled: *Compiled, entry: rds.resource.Override, rbac_name: []const u8, fault_name: []const u8) !void {
+    fn applyOverride(self: *Projection, compiled: *Compiled, entry: rds.resource.Override, rbac_name: []const u8, fault_name: []const u8, header_mutation_name: []const u8) !void {
         if (entry.name.len == 0) return;
         if (rbac_name.len != 0 and std.mem.eql(u8, entry.name, rbac_name)) {
             if (entry.disabled) {
@@ -182,6 +196,24 @@ pub const Projection = struct {
                     const policy = try self.arena.allocator().create(fault.Policy);
                     policy.* = try fault.decode(self.arena.allocator(), entry.config, .{});
                     compiled.fault = .{ .policy = policy };
+                }
+            }
+        }
+        if (header_mutation_name.len != 0 and std.mem.eql(u8, entry.name, header_mutation_name)) {
+            if (entry.disabled) {
+                compiled.header_mutation = .disabled;
+            } else if (entry.kind != null and entry.kind.? == .header_mutation) {
+                if (entry.config.len == 0) {
+                    compiled.header_mutation = .disabled;
+                } else {
+                    compiled.header_mutation = .{ .policy = try @import("filter.zig").decodeHeaderMutation(
+                        self.arena.allocator(),
+                        entry.config,
+                        .{
+                            .max_text_bytes = std.math.maxInt(usize),
+                            .max_header_mutations = std.math.maxInt(usize),
+                        },
+                    ) };
                 }
             }
         }

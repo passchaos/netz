@@ -414,3 +414,74 @@ test "gRPC LDS applies header mutations to resolved calls" {
     try std.testing.expectEqual(@as(usize, 1), resolved.options.xds_response_header_removals.len);
     try std.testing.expectEqualStrings("x-resp-remove", resolved.options.xds_response_header_removals[0]);
 }
+
+test "gRPC LDS header-mutation per-route override replaces the listener policy" {
+    var threaded = std.Io.Threaded.init(gpa, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var channel = try grpc.SharedChannel.init(gpa, io, .{ .resolved = .{ .endpoints = &.{.{ .cleartext_ip = .{ .address = .{ .ip4 = .loopback(1) }, .hierarchical_path = &.{"cluster:a"} } }} } }, .{ .service_config_json = manager });
+    defer channel.deinit();
+    var sender = channel.sender();
+    defer sender.deinit();
+    var client = try ads.Client.init(gpa, sender, .{ .node = .{ .id = "test" } });
+    defer client.deinit();
+    var controller = try lds.Controller.init(gpa, .{ .listener_name = "frontend", .authority = "backend.test" });
+    defer controller.deinit();
+    try controller.subscribe(&client);
+    const mutation = try fixture.headerMutation(gpa);
+    defer gpa.free(mutation);
+    const override = try fixture.headerMutationPerRoute(gpa, "hm", "x-route", "override");
+    defer gpa.free(override);
+    const routes = try route_fixture.encode(gpa, "routes-a", &.{"backend.test"}, &.{.{ .prefix = "/", .route_extra = override }}, null);
+    defer gpa.free(routes);
+    const listener = try fixture.encode(gpa, .{
+        .inline_rds = routes,
+        .filters = &.{
+            .{ .name = "hm", .type_name = lds.resource.header_mutation_type, .value = mutation },
+            .{},
+        },
+    });
+    defer gpa.free(listener);
+    try apply(&controller, &client, channel, io, lds.type_url, "hm-override", listener);
+    const resolved = try resolve(channel, io);
+    try std.testing.expectEqual(@as(usize, 1), resolved.options.xds_request_header_mutations.len);
+    try std.testing.expectEqualStrings("x-route", resolved.options.xds_request_header_mutations[0].name);
+    try std.testing.expectEqualStrings("override", resolved.options.xds_request_header_mutations[0].value);
+    try std.testing.expectEqual(@as(usize, 0), resolved.options.xds_request_header_removals.len);
+    try std.testing.expectEqual(@as(usize, 0), resolved.options.xds_response_header_mutations.len);
+}
+
+test "gRPC LDS header-mutation per-route disable removes listener mutations" {
+    var threaded = std.Io.Threaded.init(gpa, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var channel = try grpc.SharedChannel.init(gpa, io, .{ .resolved = .{ .endpoints = &.{.{ .cleartext_ip = .{ .address = .{ .ip4 = .loopback(1) }, .hierarchical_path = &.{"cluster:a"} } }} } }, .{ .service_config_json = manager });
+    defer channel.deinit();
+    var sender = channel.sender();
+    defer sender.deinit();
+    var client = try ads.Client.init(gpa, sender, .{ .node = .{ .id = "test" } });
+    defer client.deinit();
+    var controller = try lds.Controller.init(gpa, .{ .listener_name = "frontend", .authority = "backend.test" });
+    defer controller.deinit();
+    try controller.subscribe(&client);
+    const mutation = try fixture.headerMutation(gpa);
+    defer gpa.free(mutation);
+    const disabled = try fixture.headerMutationDisabled(gpa, "hm");
+    defer gpa.free(disabled);
+    const routes = try route_fixture.encode(gpa, "routes-a", &.{"backend.test"}, &.{.{ .prefix = "/", .route_extra = disabled }}, null);
+    defer gpa.free(routes);
+    const listener = try fixture.encode(gpa, .{
+        .inline_rds = routes,
+        .filters = &.{
+            .{ .name = "hm", .type_name = lds.resource.header_mutation_type, .value = mutation },
+            .{},
+        },
+    });
+    defer gpa.free(listener);
+    try apply(&controller, &client, channel, io, lds.type_url, "hm-disabled", listener);
+    const resolved = try resolve(channel, io);
+    try std.testing.expectEqual(@as(usize, 0), resolved.options.xds_request_header_mutations.len);
+    try std.testing.expectEqual(@as(usize, 0), resolved.options.xds_request_header_removals.len);
+    try std.testing.expectEqual(@as(usize, 0), resolved.options.xds_response_header_mutations.len);
+    try std.testing.expectEqual(@as(usize, 0), resolved.options.xds_response_header_removals.len);
+}

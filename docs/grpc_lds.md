@@ -110,8 +110,12 @@ the existing route-level mutation path; interleaved HCM rule order is not
 preserved. Header names/values use the same bounded validation as RDS route
 mutations; an empty value is ignored unless `keep_empty_value` is set, and
 percent-encoded substitution remains unsupported. A disabled filter or an
-optional unknown filter is ignored. Header-mutation `typed_per_filter_config`
-overrides are not implemented yet.
+optional unknown filter is ignored. Route and virtual-host
+`typed_per_filter_config` entries keyed by the header-mutation filter name
+replace the listener policy for that scope; route scope takes precedence over
+virtual-host scope, and a `FilterConfig` marked `disabled` removes the filter's
+mutations for that scope. The route's own header mutations still merge with the
+effective policy.
 
 Route and virtual-host `typed_per_filter_config` overrides are decoded for RBAC
 and fault filters. An entry whose key matches the HCM filter instance name
