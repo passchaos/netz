@@ -72,7 +72,13 @@ mask and accepts zero-length termination chunks.
 
 Open verification work:
 
-- no independent peer gate for TUIC or Hysteria;
+- no independent peer gate for TUIC or Hysteria. Building the TUIC server
+  exposed and fixed latent compile errors (const endpoint and ignored
+  `fetchAdd`/`fetchSub` results), and a single-connection `serveOne` API now
+  supports focused tests. A multi-connection gate still needs the QUIC endpoint
+  receive owner to support the TUIC server's per-connection thread shape; the
+  current `serve` loop and the endpoint's single-owner receive path contend for
+  the same UDP socket;
 - no fixed-binary performance baseline against a reference proxy
   implementation.
 

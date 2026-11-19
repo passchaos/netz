@@ -65,7 +65,7 @@ pub const Server = struct {
         config: Config,
     ) !Server {
         if (config.password.len == 0) return error.AuthenticationFailed;
-        const endpoint = try quic.runtime.Endpoint.bind(
+        var endpoint = try quic.runtime.Endpoint.bind(
             allocator,
             io,
             bind_address,
@@ -105,36 +105,51 @@ pub const Server = struct {
         return self.endpoint.address();
     }
 
+    fn acceptOne(self: *Server) !quic.handshake.EstablishedConnection {
+        var local_cid: [4]u8 = undefined;
+        self.io.random(&local_cid);
+        var random: [32]u8 = undefined;
+        self.io.random(&random);
+        var x25519: [32]u8 = undefined;
+        self.io.random(&x25519);
+        return quic.handshake.accept(
+            &self.endpoint,
+            .{
+                .local_connection_id = &local_cid,
+                .alpn_protocol = self.config.alpn_protocol,
+                .identity = self.config.identity,
+                .random = random,
+                .x25519_secret_key = x25519,
+                .max_crypto_buffer = 64 * 1024,
+            },
+        );
+    }
+
+    /// Accept and serve exactly one QUIC connection on the calling thread.
+    /// This keeps the endpoint single-owner for interop and focused tests.
+    pub fn serveOne(self: *Server) !void {
+        var established = try self.acceptOne();
+        defer established.deinit();
+        return processEstablished(
+            self.allocator,
+            self.io,
+            &established,
+            self.config,
+            &self.limiter,
+        );
+    }
+
     pub fn serve(self: *Server) !void {
         while (self.running.load(.acquire)) {
-            var local_cid: [4]u8 = undefined;
-            self.io.random(&local_cid);
-            var random: [32]u8 = undefined;
-            self.io.random(&random);
-            var x25519: [32]u8 = undefined;
-            self.io.random(&x25519);
-            var established = quic.handshake.accept(
-                &self.endpoint,
-                .{
-                    .local_connection_id = &local_cid,
-                    .alpn_protocol = self.config.alpn_protocol,
-                    .identity = self.config.identity,
-                    .random = random,
-                    .x25519_secret_key = x25519,
-                    .max_crypto_buffer = 64 * 1024,
-                },
-            ) catch |err| switch (err) {
-                error.Timeout => continue,
-                else => continue,
-            };
+            var established = self.acceptOne() catch continue;
             const job = self.allocator.create(Job) catch {
                 established.deinit();
                 continue;
             };
             job.* = .{ .server = self, .established = established };
-            self.active_jobs.fetchAdd(1, .monotonic);
+            _ = self.active_jobs.fetchAdd(1, .monotonic);
             const thread = std.Thread.spawn(.{}, Job.run, .{job}) catch {
-                self.active_jobs.fetchSub(1, .release);
+                _ = self.active_jobs.fetchSub(1, .release);
                 self.allocator.destroy(job);
                 job.established.deinit();
                 continue;
@@ -149,7 +164,7 @@ pub const Server = struct {
 
         fn run(self: *Job) void {
             const server = self.server;
-            defer server.active_jobs.fetchSub(1, .release);
+            defer _ = server.active_jobs.fetchSub(1, .release);
             defer server.allocator.destroy(self);
             defer self.established.deinit();
             processEstablished(
