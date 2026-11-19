@@ -297,11 +297,13 @@ pub const Pump = struct {
             return;
         };
         self.connections.append(self.allocator, conn) catch {
+            _ = self.shared.removeConnection(handle) catch false;
             conn.release();
             return;
         };
         self.by_handle.put(self.allocator, handle, conn) catch {
             _ = self.connections.pop();
+            _ = self.shared.removeConnection(handle) catch false;
             conn.release();
             return;
         };

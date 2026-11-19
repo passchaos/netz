@@ -78,7 +78,7 @@ fn echoLoop(io: std.Io, listener: *net.Server, count: usize) void {
 fn udpEchoLoop(io: std.Io, socket: net.Socket) void {
     const deadline = std.Io.Clock.Timestamp.fromNow(io, .{
         .clock = .awake,
-        .raw = .fromSeconds(10),
+        .raw = .fromSeconds(3),
     });
     var buffer: [1024]u8 = undefined;
     while (deadline.durationFromNow(io).raw.nanoseconds > 0) {
