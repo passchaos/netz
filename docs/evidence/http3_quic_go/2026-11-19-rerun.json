@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "date": "2026-11-19",
+  "feature": "HTTP/3 quic-go same-application-shape upload rerun",
+  "decision": "evidence refresh; capture gate blocked by host permissions",
+  "head": "96ed139c",
+  "peer": "quic-go v0.59.0 from the repository-owned Go fixture (Go 1.24.7)",
+  "command": "PATH=/tmp/go1.24.7/bin:$PATH zig build bench-http3-quic-go -Doptimize=ReleaseFast -- --mode=upload --warmup=2 --iterations=5 --streams=4 --body-bytes=4194304",
+  "workload": {
+    "mode": "upload",
+    "streams": 4,
+    "body_bytes_per_stream": 4194304,
+    "warmup": 2,
+    "iterations": 5,
+    "connection_scope": "fresh-per-sample",
+    "quic_version": 1,
+    "benchmark_scope": "same-application-shape"
+  },
+  "results": {
+    "netz_client_to_quic_go_server_mib_s": [118.054, 131.384, 142.063, 88.838, 145.187],
+    "netz_client_to_quic_go_server_median_mib_s": 131.384,
+    "quic_go_client_to_netz_server_mib_s": [122.324, 122.687, 122.263, 122.452, 122.745],
+    "quic_go_client_to_netz_server_median_mib_s": 122.452
+  },
+  "verification": "every sample reported status 200, four finished streams, 16,777,216 bytes, checksum 2,139,095,040, per-stream verification, and matching zio-std-io/quic-go-netpoll runtime identities",
+  "capture": "zig build bench-http3-quic-go ... --capture failed with 'Linux packet capture requires CAP_NET_RAW (AF_PACKET was denied)' on this host",
+  "complete": true
+}

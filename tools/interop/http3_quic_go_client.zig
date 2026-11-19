@@ -84,7 +84,9 @@ pub fn main(init: std.process.Init) !void {
         .bundle = &ca_bundle,
         .now_seconds = now.toSeconds(),
     };
-    const server_verifier = bundle_verifier.clientVerifier();
+    const server_verifier = netz.quic.tls.auth.ClientVerifier.fromTrustVerifier(
+        bundle_verifier.clientVerifier(),
+    );
     if (redirect) {
         try runRedirect(
             allocator,
@@ -370,7 +372,9 @@ fn runBenchmark(_: std.process.Init, args: []const []const u8) !void {
             allocator,
             io,
             port,
-            verifier.clientVerifier(),
+            netz.quic.tls.auth.ClientVerifier.fromTrustVerifier(
+                verifier.clientVerifier(),
+            ),
             config,
             &original_dcid,
             &client_cid,

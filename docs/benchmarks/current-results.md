@@ -2572,7 +2572,17 @@ history from one sample changing the next. Both sides use a fixed 1 MiB stream
 window by default; connection credit is that window times at least eight, and
 therefore grows to 16 MiB for the 16-stream shape. The steady-state MTU is 1280
 bytes and the effective application chunk is 1152 bytes. Netz explicitly
-disables GSO/GRO; quic-go reports its implementation defaults. The current
+disables GSO/GRO; quic-go reports its implementation defaults. A 2026-11-19 rerun at the current head with the pinned quic-go v0.59.0
+fixture and Go 1.24.7 measured upload medians of 131.384 MiB/s for the
+netz-client/quic-go-server pairing and 122.452 MiB/s for the
+quic-go-client/netz-server pairing (5 samples, 4 streams, 4 MiB per stream,
+fresh connection per sample). Every sample verified status 200, 16,777,216
+bytes, checksum 2,139,095,040, and four finished streams. The capture arm could
+not run on this host because `AF_PACKET` was denied without `CAP_NET_RAW`; the
+capture-backed equal-wire comparison therefore remains open. Rows are in
+`docs/evidence/http3_quic_go/2026-11-19-rerun.json`.
+
+The current
 netz client and server use zio behind `std.Io`. Config, client-owned result,
 server-completion, and memory records carry `client_io` and `server_io`; the
 strict checker also verifies endpoint ownership, the complete benchmark shape,
