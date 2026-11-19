@@ -62,15 +62,20 @@ const Mode = enum { upload, handshake, echo, stream_churn, lifecycle_churn, aggr
 pub fn main(init: std.process.Init) !void {
     var config = try parseArgs(init, std.heap.smp_allocator);
     const server_key = try makeBenchmarkServerKey();
-    var prepared_certificate: ?netz.quic.tls.certificate_compression.Prepared =
-        null;
-    defer if (prepared_certificate) |*prepared| prepared.deinit();
-    var prepared_views: [1]netz.quic.tls.certificate_compression.PreparedView =
+    var prepared_certificates: [3]netz.quic.tls.certificate_compression.Prepared =
+        undefined;
+    var prepared_count: usize = 0;
+    defer for (prepared_certificates[0..prepared_count]) |*prepared| {
+        prepared.deinit();
+    };
+    var prepared_views: [3]netz.quic.tls.certificate_compression.PreparedView =
         undefined;
     if (config.prepare_certificate_compression) {
-        // Prepare the RFC 8879 compressed Certificate once per process so the
+        // Prepare every RFC 8879 representation once per process so the
         // handshake benchmark measures the connection path rather than
-        // re-running the compressor for every fresh connection.
+        // re-running a compressor for every fresh connection. Covering all
+        // default server algorithms keeps the client's offered order from
+        // falling back to on-demand preparation.
         var certificate_message: std.ArrayList(u8) = .empty;
         defer certificate_message.deinit(std.heap.smp_allocator);
         try netz.quic.tls.auth.writeCertificate(
@@ -78,14 +83,30 @@ pub fn main(init: std.process.Init) !void {
             std.heap.smp_allocator,
             &.{&benchmark_server_public},
         );
-        prepared_certificate = try netz.quic.tls.certificate_compression.Prepared
-            .initZlib(
+        const Prepared = netz.quic.tls.certificate_compression.Prepared;
+        prepared_certificates[prepared_count] = try Prepared.initZlib(
             std.heap.smp_allocator,
             certificate_message.items,
             .amortized,
         );
-        prepared_views[0] = prepared_certificate.?.view();
-        config.prepared_certificate_compression = &prepared_views;
+        prepared_count += 1;
+        prepared_certificates[prepared_count] = try Prepared.initBrotli(
+            std.heap.smp_allocator,
+            certificate_message.items,
+            .amortized,
+        );
+        prepared_count += 1;
+        prepared_certificates[prepared_count] = try Prepared.initZstd(
+            std.heap.smp_allocator,
+            certificate_message.items,
+            .amortized,
+        );
+        prepared_count += 1;
+        for (prepared_certificates[0..prepared_count], 0..) |*prepared, index| {
+            prepared_views[index] = prepared.view();
+        }
+        config.prepared_certificate_compression =
+            prepared_views[0..prepared_count];
     }
     var backend = try netz.runtime.Backend.init(std.heap.smp_allocator);
     defer backend.deinit();

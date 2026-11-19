@@ -1500,6 +1500,16 @@ prepared-reuse rows) with p50 222.1 us and 4,028.3 conn/s; the timing move is
 noise-level, so only the allocation reduction is claimed. Rows are in
 `docs/evidence/quic_handshake_allocations/2026-11-19-scratch-capacity.json`.
 
+The default client offers brotli before zlib, so a zlib-only prepared view
+still let every handshake run on-demand brotli and zstd preparation. The
+benchmark now prepares all three default server algorithms once per process.
+Three runs measured 5,801 allocations (58.01 per connection), 6,676,706 bytes
+(66,767 per connection), p50 191.6 us, and 4,643.6 conn/s. Against the
+original on-demand baseline that is -82.6% allocated bytes and -38.2% p50;
+against the scratch-only rows it removes 19 allocations and 10,467 bytes per
+connection. Rows are in
+`docs/evidence/quic_handshake_allocations/2026-11-19-prepared-all-algorithms.json`.
+
 The cross-process counterpart uses a long-running server and a fresh client
 UDP endpoint plus full handshake for every sample:
 
