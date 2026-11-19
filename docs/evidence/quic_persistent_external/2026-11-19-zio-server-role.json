@@ -1,0 +1,54 @@
+{
+  "schema": 1,
+  "date": "2026-11-19",
+  "feature": "zio-era fixed-binary QUIC aggregate role matrix",
+  "decision": "evidence refresh; all four role pairings favor netz in this shape",
+  "head": "f0939316",
+  "command": "PATH=/tmp/go1.24.7/bin:$PATH zig build bench-quic-persistent-external -Doptimize=ReleaseFast -- --mode=aggregate --samples=3 --connections=4 --streams=1 --bytes-per-stream=1048576 --server-topology=independent",
+  "workload": {
+    "protocol": "QUIC v1",
+    "mode": "aggregate",
+    "connections": 4,
+    "streams_per_connection": 1,
+    "bytes_per_stream": 1048576,
+    "transferred_bytes": 4194304,
+    "checksum": 534773760,
+    "samples": 3,
+    "cpu_layout": "client:0,server:1",
+    "go_version": "go1.24.7",
+    "netz_io": "zio-std-io",
+    "quic_go_io": "quic-go-netpoll",
+    "gso": false,
+    "gro": false
+  },
+  "medians": {
+    "netz_client_quic_go_server": {
+      "client_sender_mib_s": 166.242,
+      "server_sender_mib_s": 107.384
+    },
+    "quic_go_client_quic_go_server": {
+      "client_sender_mib_s": 110.262,
+      "server_sender_mib_s": 109.769
+    },
+    "quic_go_client_netz_server": {
+      "client_sender_mib_s": 106.832,
+      "server_sender_mib_s": 170.343
+    },
+    "netz_client_netz_server": {
+      "client_sender_mib_s": 134.644,
+      "server_sender_mib_s": 136.381
+    }
+  },
+  "ratios_netz_over_quic_go": {
+    "client_sender_fixed_quic_go_server": 1.508,
+    "client_sender_fixed_netz_server": 1.260,
+    "server_sender_fixed_netz_client": 1.270,
+    "server_sender_fixed_quic_go_client": 1.552
+  },
+  "historical_reference": {
+    "date": "2026-09-10",
+    "server_sender_fixed_netz_client_ratio": 0.726,
+    "server_sender_fixed_quic_go_client_ratio": 0.661
+  },
+  "conclusion": "The zio-era fixed-binary 4x1-MiB aggregate matrix now favors netz in all four role pairings. The historical 0.726x/0.661x server-sender deficit is reversed to 1.270x/1.552x in this configuration. This is a same-application-shape result, not an equal-wire or universal claim."
+}

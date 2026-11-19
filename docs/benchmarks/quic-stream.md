@@ -175,7 +175,7 @@ netz server sender. Both result and server-completion records identified
 four completed connections. The server-sender record shows the shared endpoint
 receiving 3,692 datagrams through 2,034 receive calls while sending 948
 datagrams. This refreshes the zio runtime-path evidence; the fixed-binary
-quic-go server-role matrix remains the open cross-library comparison.
+quic-go server-role matrix is recorded below.
 
 ```sh
 zig build bench-quic-persistent-external -Doptimize=ReleaseFast -- \
@@ -224,6 +224,27 @@ two pinned process CPUs. This is useful evidence of both the sender fast path
 and a remaining same-process scheduling bottleneck, not a universal superiority
 claim. This original topology uses one UDP socket per connection; the following
 shared-server extension isolates the alternative production ownership model.
+
+A 2026-11-19 zio-era fixed-binary matrix reran the same 4 x 1-MiB aggregate
+shape against the pinned quic-go v0.59.0 fixture with Go 1.24.7, three samples
+per role pairing, CPU-pinned client/server processes, GSO/GRO disabled, and
+exact byte/checksum validation. Medians:
+
+| Fixed endpoint | Sender implementation | Median MiB/s (netz / quic-go) | Netz / quic-go |
+| --- | --- | ---: | ---: |
+| quic-go server | client | 166.242 / 110.262 | 1.508x |
+| netz server | client | 134.644 / 106.832 | 1.260x |
+| netz client | server | 136.381 / 107.384 | 1.270x |
+| quic-go client | server | 170.343 / 109.769 | 1.552x |
+
+Every record identified the netz side as `zio-std-io` and the quic-go side as
+`quic-go-netpoll`, verified 4,194,304 bytes and checksum 534,773,760, and
+reported four completed connections. The historical server-sender deficits
+(0.726x with a fixed netz client and 0.661x with a fixed quic-go client) are
+reversed to 1.270x and 1.552x in this zio-era configuration. This is still a
+same-application-shape comparison, not an equal-wire or universal claim. Rows
+and the command are in
+`docs/evidence/quic_persistent_external/2026-11-19-zio-server-role.json`.
 
 Raw QUIC now also exposes `quic.endpoint_server.Server`, a protocol-neutral
 single-owner loop for bounded concurrent TLS handshakes, CID routing, aggregate
