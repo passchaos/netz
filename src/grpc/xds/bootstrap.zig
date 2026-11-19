@@ -472,14 +472,26 @@ fn parseCertificateProviders(arena: std.mem.Allocator, value: std.json.Value, li
         const body = try jsonObject(entry.value_ptr.*);
         const plugin = try optionalText(body, "plugin_name", limits);
         if (plugin.len == 0) return error.InvalidBootstrap;
-        if (!std.mem.eql(u8, plugin, "file_watcher")) return error.UnsupportedBootstrapFeature;
+        const file_watcher = std.mem.eql(u8, plugin, "file_watcher");
+        const static_file = std.mem.eql(u8, plugin, "static_file");
+        if (!file_watcher and !static_file) return error.UnsupportedBootstrapFeature;
         var config: CertificateProvider = .{ .name = name, .plugin_name = plugin };
         if (body.get("config")) |raw| {
             const config_object = try jsonObject(raw);
             config.certificate_file = try optionalText(config_object, "certificate_file", limits);
             config.private_key_file = try optionalText(config_object, "private_key_file", limits);
             config.ca_certificate_file = try optionalText(config_object, "ca_certificate_file", limits);
-            config.refresh_interval = if (config_object.get("refresh_interval")) |duration| try parseDuration(duration, limits) else .fromSeconds(600);
+            if (config_object.get("refresh_interval") != null) {
+                // `static_file` is loaded once; a refresh schedule would
+                // silently turn it into a watcher.
+                if (static_file) return error.InvalidBootstrap;
+                config.refresh_interval = try parseDuration(config_object.get("refresh_interval").?, limits);
+            } else {
+                config.refresh_interval = if (static_file)
+                    .fromNanoseconds(0)
+                else
+                    .fromSeconds(600);
+            }
             if ((config.certificate_file.len == 0) != (config.private_key_file.len == 0)) return error.InvalidBootstrap;
             if (config.certificate_file.len == 0 and config.ca_certificate_file.len == 0) return error.InvalidBootstrap;
         } else return error.InvalidBootstrap;

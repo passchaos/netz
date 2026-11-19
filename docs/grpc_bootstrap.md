@@ -31,7 +31,7 @@ try plane.failoverWithDeadline(deadline);
 | `server_uri` | Required DNS/IP `host:port`, `dns:///host:port`, or HTTP/HTTPS alias; DNS defaults to port 443, HTTP/HTTPS aliases to 80/443; IPv6 brackets accepted |
 | `channel_creds` | Required array of `{type, config}`; at least one known type (`insecure`, `tls`, `google_default`, `xds`) |
 | `tls` config | `ca_certificate_file`, `certificate_file`, `private_key_file`, `refresh_interval`, `root_certificate_provider`, `identity_certificate_provider`; certificate/key must be paired; direct files and provider references are mutually exclusive |
-| `certificate_providers` | Optional map of provider name to `{plugin_name, config}`; `file_watcher` config supports `certificate_file`, `private_key_file`, `ca_certificate_file`, `refresh_interval` |
+| `certificate_providers` | Optional map of provider name to `{plugin_name, config}`; `file_watcher` supports `certificate_file`, `private_key_file`, `ca_certificate_file`, `refresh_interval`; `static_file` supports the same files but loads once and rejects `refresh_interval` |
 | `server_features` | Optional string array; the four grpc-core feature names set booleans, unknown entries are retained but inert |
 | `node` | Optional `{id, cluster, locality, metadata}`; `id` is required when present |
 | `authorities` | Optional map of authority name to `{xds_servers, client_listener_resource_name_template, fallback_on_reachability_only}` |
@@ -41,9 +41,9 @@ try plane.failoverWithDeadline(deadline);
 Authority templates must begin with `xdstp://<authority>/`. Duplicate JSON
 fields, malformed JSON, empty server lists, non-object nodes, invalid URIs,
 unknown provider references and unknown-only channel credentials fail parsing.
-`file_watcher` is the only supported certificate-provider plugin; non-empty
-`allowed_grpc_services` remains rejected as unsupported rather than silently
-ignored.
+`file_watcher` and `static_file` are the supported certificate-provider
+plugins; non-empty `allowed_grpc_services` remains rejected as unsupported
+rather than silently ignored.
 
 `node.metadata` is encoded into a bounded `google.protobuf.Struct` image
 (`Struct` map entries, `Value` oneofs, nested structs/lists, booleans, numbers,
@@ -67,8 +67,9 @@ creation or failover. `refresh_interval` accepts the gRPC duration form
 returns its next boundary. `reloadIfDueWithDeadline` reloads and reconnects only
 when that boundary has passed, so discovery can call it between stream
 operations. `root_certificate_provider` and `identity_certificate_provider`
-reference `file_watcher` providers; their file paths and the shorter of the
+reference file-backed providers; their file paths and the shorter of the
 referenced refresh intervals are used for the control-plane TLS material.
+`static_file` providers contribute a zero interval, so they are loaded once.
 Provider rotation still reloads through the same caller-driven reconnect
 schedule rather than updating live transports in place.
 `runtime.Options.applyServerFeatures(plane.server())` copies the selected
@@ -135,7 +136,7 @@ server or node-less configurations. See
 
 ## Remaining integration
 
-Certificate-provider plugins other than `file_watcher`, a self-driving refresh
+Certificate-provider plugins other than `file_watcher`/`static_file`, a self-driving refresh
 task, a background retry schedule and further gRPC resolver target families
 remain follow-up work. DNS/IP target spelling is supported. `reloadIfDue`
 exposes the bootstrap-derived schedule, while the discovery-owning task calls

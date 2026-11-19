@@ -141,7 +141,7 @@ Typed delta CDS/EDS publication is available through the automatic runtime;
 delta CDS/EDS TTL expiry is covered. Bootstrap parsing and control-plane
 failover are available. LDS/RDS routing and authority-specific control planes
 are implemented through the automatic runtime; certificate providers other
-than `file_watcher`, automatic bootstrap refresh scheduling and full security
+than `file_watcher`/`static_file`, automatic bootstrap refresh scheduling and full security
 integration remain open.
 
 `zig build interop-grpc-cds --summary all` compares valid fixture policies and

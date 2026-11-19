@@ -187,7 +187,7 @@ available through the automatic runtime. Bootstrap parsing and insecure
 control-plane failover are available; automatic multi-cluster CDS/EDS
 orchestration, authority-specific control planes and automatic LRS reporting
 are implemented through the automatic runtime. Certificate providers other
-than `file_watcher`, automatic bootstrap refresh scheduling, HTTP filter
+than `file_watcher`/`static_file`, automatic bootstrap refresh scheduling, HTTP filter
 overrides beyond RBAC/fault and non-URI-template `path_rewrite_policy` formats
 remain open.
 Delta route TTL expiry is covered. Literal prefix/whole-path and authority

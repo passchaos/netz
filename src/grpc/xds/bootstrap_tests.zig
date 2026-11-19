@@ -196,7 +196,7 @@ test "gRPC xDS bootstrap parses TLS refresh intervals" {
     try std.testing.expectEqual(@as(i96, 315576000000 * std.time.ns_per_s), parsed.servers[2].tlsConfig().?.refresh_interval.nanoseconds);
 }
 
-test "gRPC xDS bootstrap parses file_watcher certificate providers" {
+test "gRPC xDS bootstrap parses file_watcher and static_file certificate providers" {
     const parsed = try bootstrap.parse(gpa,
         \\{"xds_servers":[{"server_uri":"https://host","channel_creds":[{"type":"tls","config":{"root_certificate_provider":"roots","identity_certificate_provider":"identity"}}]}],
         \\ "certificate_providers":{
@@ -212,7 +212,29 @@ test "gRPC xDS bootstrap parses file_watcher certificate providers" {
     try std.testing.expectEqualStrings("roots", tls.root_certificate_provider);
     try std.testing.expectEqualStrings("identity", tls.identity_certificate_provider);
     try std.testing.expectError(error.InvalidBootstrap, bootstrap.parse(gpa, "{\"xds_servers\":[{\"server_uri\":\"https://host\",\"channel_creds\":[{\"type\":\"tls\",\"config\":{\"root_certificate_provider\":\"missing\"}}]}]}", .{}));
-    try std.testing.expectError(error.UnsupportedBootstrapFeature, bootstrap.parse(gpa, "{\"xds_servers\":[{\"server_uri\":\"http://host\",\"channel_creds\":[{\"type\":\"insecure\"}]}],\"certificate_providers\":{\"p\":{\"plugin_name\":\"static_file\",\"config\":{}}}}", .{}));
+    try std.testing.expectError(error.UnsupportedBootstrapFeature, bootstrap.parse(gpa, "{\"xds_servers\":[{\"server_uri\":\"http://host\",\"channel_creds\":[{\"type\":\"insecure\"}]}],\"certificate_providers\":{\"p\":{\"plugin_name\":\"future_provider\",\"config\":{}}}}", .{}));
+}
+
+test "gRPC xDS bootstrap parses static_file providers without refresh" {
+    const parsed = try bootstrap.parse(gpa,
+        \\{"xds_servers":[{"server_uri":"https://host","channel_creds":[{"type":"tls","config":{"root_certificate_provider":"roots","identity_certificate_provider":"identity"}}]}],
+        \\ "certificate_providers":{
+        \\  "roots":{"plugin_name":"static_file","config":{"ca_certificate_file":"/ca.pem"}},
+        \\  "identity":{"plugin_name":"static_file","config":{"certificate_file":"/cert.pem","private_key_file":"/key.pem"}}}}
+    , .{});
+    defer parsed.deinit();
+    const roots = parsed.certificateProvider("roots").?;
+    try std.testing.expectEqualStrings("static_file", roots.plugin_name);
+    try std.testing.expectEqualStrings("/ca.pem", roots.ca_certificate_file);
+    try std.testing.expectEqual(@as(i96, 0), roots.refresh_interval.nanoseconds);
+    const identity = parsed.certificateProvider("identity").?;
+    try std.testing.expectEqualStrings("/cert.pem", identity.certificate_file);
+    try std.testing.expectEqualStrings("/key.pem", identity.private_key_file);
+    try std.testing.expectEqual(@as(i96, 0), identity.refresh_interval.nanoseconds);
+    try std.testing.expectError(error.InvalidBootstrap, bootstrap.parse(gpa,
+        \\{"xds_servers":[{"server_uri":"https://host","channel_creds":[{"type":"tls","config":{"root_certificate_provider":"roots"}}]}],
+        \\ "certificate_providers":{"roots":{"plugin_name":"static_file","config":{"ca_certificate_file":"/ca.pem","refresh_interval":"5s"}}}}
+    , .{}));
 }
 
 test "gRPC xDS bootstrap rejects invalid and unsupported shapes" {
