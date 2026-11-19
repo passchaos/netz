@@ -1,0 +1,43 @@
+{
+  "schema": 1,
+  "date": "2026-11-19",
+  "feature": "gRPC 256-KiB in-process request/response copy boundaries",
+  "decision": "owned-request path retained as the recommended large-message boundary; borrowed responses are not faster in this shape",
+  "head": "10f3cd07",
+  "benchmark": "examples/benchmarks/bench_grpc_unary.zig",
+  "command": "taskset -c 0 zig build bench-grpc-unary -Doptimize=ReleaseFast -- --payload=262144 --warmup=20 --iterations=200 [--owned-request] [--borrowed-response]",
+  "workload": {
+    "protocol": "gRPC over cleartext HTTP/2",
+    "client_api": "ordinary-unary",
+    "payload_bytes": 262144,
+    "warmup": 20,
+    "iterations": 200,
+    "allocator": "smp",
+    "validation": "full-bytes"
+  },
+  "variants": {
+    "staged_request_owned_response": {
+      "samples_ns_per_roundtrip": [408413, 406263, 405730],
+      "median_ns_per_roundtrip": 406263,
+      "median_roundtrips_per_second": 2461
+    },
+    "owned_request_owned_response": {
+      "samples_ns_per_roundtrip": [342746, 341776, 341757],
+      "median_ns_per_roundtrip": 341776,
+      "median_roundtrips_per_second": 2925,
+      "change_vs_default_percent": -15.9
+    },
+    "staged_request_borrowed_response": {
+      "samples_ns_per_roundtrip": [468089, 468363, 471513],
+      "median_ns_per_roundtrip": 468363,
+      "median_roundtrips_per_second": 2135,
+      "change_vs_default_percent": 15.3
+    },
+    "owned_request_borrowed_response": {
+      "samples_ns_per_roundtrip": [405455, 404578, 404961],
+      "median_ns_per_roundtrip": 404961,
+      "median_roundtrips_per_second": 2469
+    }
+  },
+  "conclusion": "For 256-KiB unary messages the owned-request API removes the client copy and is 15.9% faster than the staged default. The borrowed-response path stages a contiguous message and is 15.3% slower than the owned-response default, so owned responses remain the recommended server path. The remaining default-path cost is the const-payload Writer clone on the request side."
+}

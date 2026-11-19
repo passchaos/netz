@@ -976,3 +976,26 @@ is stable across CPUs. The per-call large-message mode is now faster than
 grpc-cpp in this configuration; persistent ping-pong remains about 5% slower.
 Rows are in `docs/evidence/grpc_cpp_official_borrowed/2026-11-07/largeframe/`.
 `max_frame_payload`, from advertising a frame it cannot receive.
+
+### 2026-11-19 in-process copy-boundary refresh
+
+`bench-grpc-unary` now measures the request and response ownership variants
+directly over one in-process cleartext HTTP/2 pair. Three CPU-0 samples per
+variant used 262,144-byte messages, 20 warmups, 200 measured roundtrips, the
+default `smp` allocator, and full-byte validation. Medians:
+
+| Request storage | Response storage | Median ns/roundtrip | Median roundtrips/s | Change |
+| --- | --- | ---: | ---: | ---: |
+| staged | owned | 406,263 | 2,461 | baseline |
+| owned | owned | 341,776 | 2,925 | -15.9% |
+| staged | borrowed | 468,363 | 2,135 | +15.3% |
+| owned | borrowed | 404,961 | 2,469 | -0.3% |
+
+The owned-request path removes the 256-KiB client copy and is the recommended
+large-message boundary. The borrowed-response path stages a contiguous message
+and is slower than owned responses in this shape, so `allocMessage` +
+`writeOwnedMessage` remains the recommended server path. The default
+const-payload `Writer.writeMessage` still copies once; callers that can
+serialize into prefix-reserved storage should use `writeBorrowedMessage` or the
+owned-write APIs. Rows and commands are in
+`docs/evidence/grpc_shared/2026-11-19-copy-boundaries.json`.
