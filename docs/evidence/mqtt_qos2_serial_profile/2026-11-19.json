@@ -1,0 +1,62 @@
+{
+  "schema": 1,
+  "date": "2026-11-19",
+  "feature": "MQTT QoS2 serial durable-session broker current-state smoke",
+  "decision": "evidence refresh; no code change required",
+  "head": "e87d866ceffc834ed8c1cdabd3f2dc176a4907c5",
+  "workload": {
+    "protocol": "MQTT 5 over TCP",
+    "qos": 2,
+    "publishers": 1,
+    "subscribers": 1,
+    "payload_bytes": 256,
+    "warmup": 256,
+    "messages": 20000,
+    "publisher_window": 1,
+    "server_queue_capacity": 20000,
+    "session_expiry_seconds": 3600,
+    "server": "zig-out/bin/netz-mqtt-vector-broker --bind=127.0.0.1:18833 --connections=2 --max-queued-deliveries=20000 --max-outgoing-inflight=64",
+    "client": "netz-bench-mqtt-broker --address=127.0.0.1:18833 --publishers=1 --subscribers=1 --qos=2 --publisher-window=1 --messages=20000 --warmup-messages=256 --payload-bytes=256 --server-queue-capacity=20000 --session-expiry-seconds=3600 --server-implementation=netz --server-io=zio-std-io"
+  },
+  "commands": {
+    "pinned": "taskset -c 1 ./zig-out/bin/netz-mqtt-vector-broker --bind=127.0.0.1:18833 --connections=2 --max-queued-deliveries=20000 --max-outgoing-inflight=64 & taskset -c 0 zig build bench-mqtt-broker -Doptimize=ReleaseFast -- --address=127.0.0.1:18833 --publishers=1 --subscribers=1 --qos=2 --publisher-window=1 --messages=20000 --warmup-messages=256 --payload-bytes=256 --server-queue-capacity=20000 --session-expiry-seconds=3600 --server-implementation=netz --server-io=zio-std-io",
+    "unpinned": "zig build build-mqtt-vector-broker -Doptimize=ReleaseFast && ./zig-out/bin/netz-mqtt-vector-broker --bind=127.0.0.1:18832 --connections=2 --max-queued-deliveries=20000 --max-outgoing-inflight=64 & zig build bench-mqtt-broker -Doptimize=ReleaseFast -- --address=127.0.0.1:18832 --publishers=1 --subscribers=1 --qos=2 --publisher-window=1 --messages=20000 --warmup-messages=256 --payload-bytes=256 --server-queue-capacity=20000 --session-expiry-seconds=3600 --server-implementation=netz --server-io=zio-std-io"
+  },
+  "results": {
+    "pinned": {
+      "publishes_per_s": 31894,
+      "deliveries_per_s": 31894,
+      "p50_ns": 25395,
+      "p99_ns": 29205,
+      "p999_ns": 32518,
+      "elapsed_ns": 627073300,
+      "client_alloc_count": 141826,
+      "client_total_allocated_bytes": 10068929,
+      "client_peak_live_bytes": 163865,
+      "checksum": 4962720,
+      "client_io": "zio-std-io",
+      "server_io": "zio-std-io",
+      "timing_usable": true,
+      "complete": true
+    },
+    "unpinned": {
+      "publishes_per_s": 33613,
+      "deliveries_per_s": 33613,
+      "p50_ns": 23967,
+      "p99_ns": 39840,
+      "p999_ns": 158803,
+      "elapsed_ns": 594996504,
+      "checksum": 4962720,
+      "complete": true
+    }
+  },
+  "historical_reference": {
+    "date": "2026-11-02",
+    "publishes_per_s": 20581,
+    "p50_ns": 40945,
+    "p99_ns": 67797,
+    "driver": "separate external driver",
+    "evidence": "docs/evidence/mqtt_qos2_serial_profile/2026-11-02.json"
+  },
+  "conclusion": "The current zio-era serial QoS2 path measures 31,894 publishes/s pinned (33,613 unpinned) for the same broker workload shape, versus 20,581 publishes/s in the 2026-11-02 profile. The historical profile used a separate driver, so this is a current-shape smoke rather than a controlled A/B. It shows the earlier event-loop/clock-cost gap is no longer at the historical level. Broker RSS versus Mosquitto remains unmeasured here."
+}

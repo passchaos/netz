@@ -6232,3 +6232,13 @@ hotspot: the serial gap is dominated by event-loop wakeups, parking, and clock
 reads. Future work should reduce task wakeups or ownership boundaries rather
 than reworking the route/flush helpers. Rows, hashes and the command are in
 `docs/evidence/mqtt_qos2_serial_profile/2026-11-02.json`.
+
+A 2026-11-19 current-state smoke repeated the same broker workload shape with
+the in-repo benchmark client. CPU-pinned runs measured 31,894 publishes/s
+(p50 25.4 us, p99 29.2 us, p99.9 32.5 us), and an unpinned run measured 33,613
+publishes/s. Both sides reported `zio-std-io`, exact 20,000 deliveries and
+checksum 4,962,720. The historical 2026-11-02 figure used a separate driver, so
+this is a current-shape smoke rather than a controlled A/B; it shows the
+serial path is no longer at the earlier 20,581 publishes/s level. Broker RSS
+versus Mosquitto was not measured in this run. See
+`docs/evidence/mqtt_qos2_serial_profile/2026-11-19.json`.
