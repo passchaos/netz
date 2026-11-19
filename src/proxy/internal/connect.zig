@@ -146,16 +146,25 @@ test "resolved connect falls back across refused addresses" {
             };
             defer stream.close(self.io);
             var buffer: [4]u8 = undefined;
-            const count = ioRead(self.io, stream, &buffer);
-            if (count) |value| {
+            var total: usize = 0;
+            while (total < buffer.len) {
+                const value = ioRead(
+                    self.io,
+                    stream,
+                    buffer[total..],
+                ) catch break;
+                if (value == 0) break;
+                total += value;
+            }
+            if (total != 0) {
                 _ = self.io.vtable.netWrite(
                     self.io.userdata,
                     stream.socket.handle,
-                    buffer[0..value],
+                    buffer[0..total],
                     &.{""},
                     0,
                 ) catch {};
-            } else |_| {}
+            }
         }
 
         fn ioRead(task_io: std.Io, stream: net.Stream, buffer: []u8) !usize {
@@ -186,13 +195,18 @@ test "resolved connect falls back across refused addresses" {
         0,
     );
     var echoed: [4]u8 = undefined;
-    var read_parts = [_][]u8{&echoed};
-    const count = try io.vtable.netRead(
-        io.userdata,
-        stream.socket.handle,
-        &read_parts,
-    );
-    try std.testing.expectEqualSlices(u8, &probe, echoed[0..count]);
+    var total: usize = 0;
+    while (total < echoed.len) {
+        var read_parts = [_][]u8{echoed[total..]};
+        const count = try io.vtable.netRead(
+            io.userdata,
+            stream.socket.handle,
+            &read_parts,
+        );
+        if (count == 0) break;
+        total += count;
+    }
+    try std.testing.expectEqualSlices(u8, &probe, echoed[0..total]);
     thread.join();
     if (accept.err) |err| return err;
 }
