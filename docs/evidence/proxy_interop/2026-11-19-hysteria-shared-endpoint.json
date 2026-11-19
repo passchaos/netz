@@ -4,8 +4,8 @@
   "head": "716b2b88",
   "feature": "Hysteria v3 shared-endpoint multi-connection server",
   "source_sha256": {
-    "src/proxy/hysteria/shared/server.zig": "b97edc4639a0f56ef10270e389d6189739bae1c82bbd9919e092479474a01cc5",
-    "src/proxy/hysteria/shared/tests.zig": "4fe0af8e04fc0c9d97e59e779351c4c73efb10942b2babde1314be5713a1e420",
+    "src/proxy/hysteria/shared/server.zig": "53632895d1ec7d2f6610d313fcfdba24234a061281953345c8b39e557b8641fb",
+    "src/proxy/hysteria/shared/tests.zig": "523b3f19e4bd754585a47546fa975d9ac36e8304741f870acf4396e2be248ddb",
     "src/proxy/hysteria/config.zig": "f0691baaf1e57ab7cda51a807efc254e65da653b2e6b09f12aab5aa0d76ccb0e",
     "src/proxy/hysteria/v3_server.zig": "7b80ce2a844265d3250f2002cfe02529eb951a2e38c26415e8fb62518fc7b43e",
     "src/proxy/hysteria/mod.zig": "6713254d51e557fdefb91f385f6ee54df52cabb4d0174b1ea78fbcf618b8aa51",
