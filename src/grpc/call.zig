@@ -923,6 +923,9 @@ pub fn writeUnaryResponse(
     var compressed_frame: ?[]u8 = null;
     defer if (compressed_frame) |bytes| allocator.free(bytes);
     var framed_bytes: []const u8 = &.{};
+    // Identity `.message` responses are written as prefix+payload DATA
+    // contributions instead of being copied into `framed`.
+    var identity_message: ?[]const u8 = null;
     const response_algorithm: Algorithm =
         if (has_message and
         options.request_accepted_encodings.contains(
@@ -955,13 +958,17 @@ pub fn writeUnaryResponse(
             message,
             options.compression_level,
         );
-        try writeMessage(
-            &framed,
-            allocator,
-            encoded_message.?.bytes,
-            encoded_message.?.compressed,
-        );
-        framed_bytes = framed.items;
+        if (response_algorithm == .identity) {
+            identity_message = message;
+        } else {
+            try writeMessage(
+                &framed,
+                allocator,
+                encoded_message.?.bytes,
+                encoded_message.?.compressed,
+            );
+            framed_bytes = framed.items;
+        }
     }
     var status_buffer: [2]u8 = undefined;
     const status_value = std.fmt.bufPrint(
@@ -995,7 +1002,11 @@ pub fn writeUnaryResponse(
     ) catch return error.MessageTooLarge;
     const initial_extra = std.math.add(
         usize,
-        initial_base,
+        std.math.add(
+            usize,
+            initial_base,
+            @intFromBool(identity_message != null),
+        ) catch return error.MessageTooLarge,
         if (options.trailers_only) trailing_count else 0,
     ) catch return error.MessageTooLarge;
     const initial_count = std.math.add(
@@ -1036,6 +1047,20 @@ pub fn writeUnaryResponse(
     });
     initial.appendSliceAssumeCapacity(options.initial_metadata);
     initial.appendSliceAssumeCapacity(initial_binary.fields);
+    var content_length_buffer: [32]u8 = undefined;
+    if (identity_message) |message| {
+        const framed_len = try @import("wire.zig").encodedMessageLen(
+            message.len,
+        );
+        initial.appendAssumeCapacity(.{
+            .name = "content-length",
+            .value = std.fmt.bufPrint(
+                &content_length_buffer,
+                "{d}",
+                .{framed_len},
+            ) catch unreachable,
+        });
+    }
 
     var trailing_storage: [16]http2.Hpack.HeaderField = undefined;
     const trailing_buffer = if (trailing_count <= trailing_storage.len)
@@ -1077,6 +1102,25 @@ pub fn writeUnaryResponse(
         return connection.writeResponse(stream_id, .{
             .headers = initial.items,
         });
+    }
+    if (identity_message) |message| {
+        var writer = try connection.startResponse(stream_id, .{
+            .status = 200,
+            .headers = initial.items,
+        });
+        errdefer writer.deinit();
+        var prefix: [5]u8 = undefined;
+        prefix[0] = 0;
+        std.mem.writeInt(
+            u32,
+            prefix[1..5],
+            @intCast(message.len),
+            .big,
+        );
+        try writer.write(&prefix);
+        try writer.write(message);
+        try writer.finishTrailers(trailing.items);
+        return;
     }
     return connection.writeResponse(stream_id, .{
         .headers = initial.items,
