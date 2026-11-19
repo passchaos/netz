@@ -39,6 +39,38 @@ const ServerDuplexStream = runtime.ServerDuplexStream;
 const Tunnel = runtime.Tunnel;
 const DuplexHeaderBlock = runtime.DuplexHeaderBlock;
 const FlowWindow = runtime.FlowWindow;
+
+/// Restore credit that was reserved earlier. The pre-reservation window was
+/// valid, so failure means another operation already violated the invariant.
+/// Debug and ReleaseSafe still trap through `assert`; ReleaseFast keeps the
+/// conservative window value instead of executing undefined behavior.
+fn restoreWindow(window: *FlowWindow, amount: u31) void {
+    window.update(amount) catch |err| {
+        std.debug.assert(err == error.FlowControlViolation);
+    };
+}
+
+fn restoreWindowDelta(window: *FlowWindow, delta: i64) void {
+    window.adjust(delta) catch |err| {
+        std.debug.assert(err == error.FlowControlViolation);
+    };
+}
+
+fn accountCredit(
+    controls: anytype,
+    state_index: usize,
+    before: i64,
+    after: i64,
+    adaptive_increment: u31,
+) void {
+    flow_credit.account(
+        controls,
+        state_index,
+        before,
+        after,
+        adaptive_increment,
+    ) catch |err| std.debug.assert(err == error.MessageTooLarge);
+}
 const freeHeaders = runtime.freeHeaders;
 const OwnedRequest = runtime.OwnedRequest;
 const ReceivedDataPayload = runtime.ReceivedDataPayload;
@@ -3384,13 +3416,15 @@ pub const Connection = struct {
             var reserved_connection_bytes: usize = 0;
             var wire_write_started = false;
             errdefer if (!wire_write_started) {
-                self.send_connection_window.update(
+                restoreWindow(
+                    &self.send_connection_window,
                     @intCast(reserved_connection_bytes),
-                ) catch unreachable;
+                );
                 for (views, round_reserved) |view, bytes| {
                     if (bytes == 0) continue;
-                    (self.sendStreamWindow(view.stream_id) catch unreachable)
-                        .update(@intCast(bytes)) catch unreachable;
+                    if (self.sendStreamWindow(view.stream_id) catch null) |window| {
+                        restoreWindow(window, @intCast(bytes));
+                    }
                 }
             };
 
@@ -3546,13 +3580,15 @@ pub const Connection = struct {
             var reserved_connection_bytes: usize = 0;
             var wire_write_started = false;
             errdefer if (!wire_write_started) {
-                self.send_connection_window.update(
+                restoreWindow(
+                    &self.send_connection_window,
                     @intCast(reserved_connection_bytes),
-                ) catch unreachable;
+                );
                 for (views, round_reserved) |view, bytes| {
                     if (bytes == 0) continue;
-                    (self.sendStreamWindow(view.stream_id) catch unreachable)
-                        .update(@intCast(bytes)) catch unreachable;
+                    if (self.sendStreamWindow(view.stream_id) catch null) |window| {
+                        restoreWindow(window, @intCast(bytes));
+                    }
                 }
             };
 
@@ -7864,7 +7900,13 @@ pub const Connection = struct {
                         frame.header.stream_id,
                         frame,
                     );
-                    defer flow_credit.account(credits[0..initialized], index, connection_before, self.recv_connection_window.value, data.adaptive_connection_increment) catch unreachable;
+                    defer accountCredit(
+                        credits[0..initialized],
+                        index,
+                        connection_before,
+                        self.recv_connection_window.value,
+                        data.adaptive_connection_increment,
+                    );
                     defer self.releaseDataFrameBudget(data);
                     if (done[index]) {
                         self.releaseDiscardedMessageCapacityBefore(frame.payload.len, cleanup_budget.get(self, deadline, false));
@@ -10012,16 +10054,17 @@ pub const Connection = struct {
                 // restored exactly. The successful write clears these counts;
                 // any transport error thereafter retains conservative credit
                 // because the emitted prefix is unknowable.
-                self.send_connection_window.update(
+                restoreWindow(
+                    &self.send_connection_window,
                     @intCast(reserved_connection_bytes),
-                ) catch unreachable;
+                );
                 for (views, round_reserved) |rollback_view, bytes| {
                     if (bytes == 0) continue;
-                    (self.sendStreamWindow(
+                    if (self.sendStreamWindow(
                         rollback_view.stream_id,
-                    ) catch unreachable).update(
-                        @intCast(bytes),
-                    ) catch unreachable;
+                    ) catch null) |window| {
+                        restoreWindow(window, @intCast(bytes));
+                    }
                 }
             };
             const pass_start = next_stream;
@@ -10107,13 +10150,15 @@ pub const Connection = struct {
         stream_window: *FlowWindow,
     ) Error!void {
         try self.send_connection_window.reserve(contribution_len);
-        errdefer self.send_connection_window.update(
+        errdefer restoreWindow(
+            &self.send_connection_window,
             @intCast(contribution_len),
-        ) catch unreachable;
+        );
         try stream_window.reserve(contribution_len);
-        errdefer stream_window.update(
+        errdefer restoreWindow(
+            stream_window,
             @intCast(contribution_len),
-        ) catch unreachable;
+        );
 
         const contribution_end = offset.* + contribution_len;
         while (offset.* < contribution_end) {
@@ -12498,18 +12543,20 @@ pub const Connection = struct {
         var encoded_len: usize = 0;
         var updated_connection: ?u31 = null;
         errdefer if (updated_connection) |increment| {
-            self.recv_connection_window.adjust(
+            restoreWindowDelta(
+                &self.recv_connection_window,
                 -@as(i64, increment),
-            ) catch unreachable;
+            );
         };
         var updated_stream: ?struct {
             window: *FlowWindow,
             increment: u31,
         } = null;
         errdefer if (updated_stream) |update| {
-            update.window.adjust(
+            restoreWindowDelta(
+                update.window,
                 -@as(i64, update.increment),
-            ) catch unreachable;
+            );
         };
         if (connection_increment) |increment| {
             try self.recv_connection_window.update(increment);
@@ -14206,13 +14253,15 @@ pub const Connection = struct {
 
         var burst_committed = false;
         try self.send_connection_window.reserve(first_data_len);
-        errdefer if (!burst_committed) self.send_connection_window.update(
+        errdefer if (!burst_committed) restoreWindow(
+            &self.send_connection_window,
             @intCast(first_data_len),
-        ) catch unreachable;
+        );
         try stream_window.reserve(first_data_len);
-        errdefer if (!burst_committed) stream_window.update(
+        errdefer if (!burst_committed) restoreWindow(
+            stream_window,
             @intCast(first_data_len),
-        ) catch unreachable;
+        );
 
         var headers_frame: [http2.FrameHeader.encoded_len]u8 = undefined;
         try encodeFrameHeader(
@@ -15238,13 +15287,15 @@ pub const Connection = struct {
             chunk_size *| max_data_frames_per_write);
 
         try self.send_connection_window.reserve(payload.len);
-        errdefer self.send_connection_window.update(
+        errdefer restoreWindow(
+            &self.send_connection_window,
             @intCast(payload.len),
-        ) catch unreachable;
+        );
         try stream_window.reserve(payload.len);
-        errdefer stream_window.update(
+        errdefer restoreWindow(
+            stream_window,
             @intCast(payload.len),
-        ) catch unreachable;
+        );
 
         var submitted = false;
         flow_output.writeBurst(max_data_frames_per_write, self.allocator, self.transportForIo(), stream_id, payload, end_stream, chunk_size, &self.write_batch, deadline, &submitted) catch |err| {
@@ -15270,13 +15321,15 @@ pub const Connection = struct {
             chunk_size *| max_data_frames_per_write);
 
         try self.send_connection_window.reserve(payload_len);
-        errdefer self.send_connection_window.update(
+        errdefer restoreWindow(
+            &self.send_connection_window,
             @intCast(payload_len),
-        ) catch unreachable;
+        );
         try stream_window.reserve(payload_len);
-        errdefer stream_window.update(
+        errdefer restoreWindow(
+            stream_window,
             @intCast(payload_len),
-        ) catch unreachable;
+        );
 
         var headers: [max_data_frames_per_write][
             http2.FrameHeader.encoded_len
@@ -15568,7 +15621,10 @@ pub const Connection = struct {
         errdefer {
             var index: usize = 0;
             while (index < adjusted) : (index += 1) {
-                self.send_stream_windows.items[index].window.adjust(-delta) catch unreachable;
+                restoreWindowDelta(
+                    &self.send_stream_windows.items[index].window,
+                    -delta,
+                );
             }
         }
 
@@ -15849,6 +15905,8 @@ fn RequestBatchHandlerTask(
         index: usize,
 
         fn run(task: Self) std.Io.Cancelable!void {
+            // The queue capacity is exactly the batch request count and each
+            // task publishes one completion, so admission cannot block.
             task.completions.putOneUncancelable(task.io, .{
                 .index = task.index,
                 .result = handler(task.context, task.request.*),
