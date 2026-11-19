@@ -175,7 +175,24 @@ test "resolved connect falls back across refused addresses" {
     const addresses = [_]net.IpAddress{ refused, address };
     const stream = try resolvedWithDeadline(io, &addresses, null);
     defer stream.close(io);
-    try std.testing.expect(stream.socket.address.eql(&address));
+    // The accept thread echoes four bytes. Use the data path rather than the
+    // local socket address, which std reports as the ephemeral client port.
+    const probe = [_]u8{ 0xde, 0xad, 0xbe, 0xef };
+    _ = try io.vtable.netWrite(
+        io.userdata,
+        stream.socket.handle,
+        &probe,
+        &.{""},
+        0,
+    );
+    var echoed: [4]u8 = undefined;
+    var read_parts = [_][]u8{&echoed};
+    const count = try io.vtable.netRead(
+        io.userdata,
+        stream.socket.handle,
+        &read_parts,
+    );
+    try std.testing.expectEqualSlices(u8, &probe, echoed[0..count]);
     thread.join();
     if (accept.err) |err| return err;
 }
