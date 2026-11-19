@@ -37,12 +37,19 @@ through the SOCKS5, HTTP CONNECT, Trojan, VLESS, VMess, TUIC, and Hysteria
 codecs. Existing external gates cover SOCKS5 and HTTP CONNECT compositions used
 by HTTP, WebSocket, MQTT, gRPC, HTTP/3, and WebTransport.
 
+`zig build interop-shadowsocks-sing-box` adds an independent Shadowsocks AEAD
+gate. A sing-box 1.14.x SOCKS5 inbound forwards through its Shadowsocks
+outbound to the netz server, which relays to a loopback HTTP target; the gate
+requires the exact body for `aes-256-gcm`, `aes-128-gcm`, and
+`chacha20-ietf-poly1305`. The gate also exposed and fixed a zio compatibility
+bug in the proxy deadline read path: `io.operateTimeout` race groups panic under
+zio, so deadline reads now use `std.Io.Select` with a timeout arm.
+
 Open verification work:
 
-- no independent peer gate for Shadowsocks, Trojan, VLESS, VMess, TUIC, or
-  Hysteria;
+- no independent peer gate for Trojan, VLESS, VMess, TUIC, or Hysteria;
 - no fixed-binary performance baseline against a reference proxy
   implementation.
 
-Until those gates exist, claims for these protocols are limited to the
-in-repo codec and relay tests.
+Until those gates exist, claims for those protocols are limited to the in-repo
+codec and relay tests.

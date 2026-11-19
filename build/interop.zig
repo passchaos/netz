@@ -27,6 +27,27 @@ pub fn addAll(
             .{ .name = "harnessz", .module = harnessz_dep.module("harnessz") },
         },
     });
+    const shadowsocks_server = b.addExecutable(.{
+        .name = "netz-shadowsocks-server",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/interop/shadowsocks_server.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    b.step(
+        "build-shadowsocks-server",
+        "Build the standalone Shadowsocks AEAD TCP server",
+    ).dependOn(&b.addInstallArtifact(shadowsocks_server, .{}).step);
+    const shadowsocks_gate = b.addSystemCommand(&.{"tools/interop/shadowsocks_sing_box.sh"});
+    shadowsocks_gate.addArtifactArg(shadowsocks_server);
+    if (b.args) |args| shadowsocks_gate.addArgs(args);
+    b.step(
+        "interop-shadowsocks-sing-box",
+        "Verify the netz Shadowsocks AEAD server against a sing-box client",
+    ).dependOn(&shadowsocks_gate.step);
+
     const mqtt_mtls_server = b.addExecutable(.{
         .name = "netz-mqtt-mtls-server",
         .root_module = b.createModule(.{

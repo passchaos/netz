@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "date": "2026-11-19",
+  "feature": "Shadowsocks AEAD independent-peer interop",
+  "decision": "gate retained; fixed a zio deadline-read panic",
+  "head": "128d71757984263e89e53c216b1ef8f0153ec2b7",
+  "peer": "sing-box 1.14.4 linux-amd64",
+  "command": "SING_BOX_BIN=/tmp/sing-box-1.14.4/sing-box zig build interop-shadowsocks-sing-box -Doptimize=ReleaseFast",
+  "role_pair": "sing-box-client+netz-server",
+  "methods": ["aes-256-gcm", "aes-128-gcm", "chacha20-ietf-poly1305"],
+  "target": "python3 -m http.server on 127.0.0.1:18390",
+  "result": "exact 27-byte body through SOCKS5 -> sing-box Shadowsocks -> netz server -> HTTP target for every method",
+  "bug_found": "src/proxy/internal/io.zig readSomeWithDeadline used io.operateTimeout race groups, which panic under zio with 'Race groups are not supported in blocking mode'; replaced with a std.Io.Select read/timeout pair",
+  "complete": true
+}

@@ -216,37 +216,76 @@ fn readSomeWithDeadline(
     buffer: []u8,
     deadline: std.Io.Clock.Timestamp,
 ) ReadError!usize {
-    if (builtin.os.tag == .windows) {
-        var incoming: net.IncomingMessage = .init;
-        const maybe_err, const message_count = (try io.operateTimeout(
-            .{ .net_receive = .{
-                .socket_handle = stream.socket.handle,
-                .message_buffer = (&incoming)[0..1],
-                .data_buffer = buffer,
-                .flags = .{},
-            } },
-            .{ .deadline = deadline },
-        )).net_receive;
-        if (maybe_err) |err| return err;
-        std.debug.assert(message_count == 1);
-        return incoming.data.len;
+    if (deadline.durationFromNow(io).raw.nanoseconds <= 0) {
+        return error.Timeout;
     }
 
-    var buffers = [_][]u8{buffer};
-    const result = try io.operateTimeout(
-        .{ .file_read_streaming = .{
-            .file = .{
-                .handle = stream.socket.handle,
-                .flags = .{ .nonblocking = false },
-            },
-            .data = &buffers,
-        } },
-        .{ .deadline = deadline },
-    );
-    return result.file_read_streaming catch |err| switch (err) {
-        error.EndOfStream => 0,
-        else => return @errorCast(err),
+    const Task = struct {
+        io: std.Io,
+        stream: net.Stream,
+        buffer: []u8,
+        result: ?ReadError!usize = null,
+
+        fn read(self: *@This()) void {
+            var parts = [_][]u8{self.buffer};
+            const count = self.io.vtable.netRead(
+                self.io.userdata,
+                self.stream.socket.handle,
+                &parts,
+            ) catch |err| {
+                self.result = err;
+                return;
+            };
+            self.result = count;
+        }
+
+        fn waitUntil(
+            task_io: std.Io,
+            task_deadline: std.Io.Clock.Timestamp,
+        ) std.Io.Cancelable!void {
+            try task_deadline.wait(task_io);
+        }
     };
+    const Wake = union(enum) { read: void, timeout: std.Io.Cancelable!void };
+    var task = Task{
+        .io = io,
+        .stream = stream,
+        .buffer = buffer,
+    };
+    var wake_storage: [2]Wake = undefined;
+    var select: std.Io.Select(Wake) = .init(io, &wake_storage);
+    defer select.cancelDiscard();
+    try select.concurrent(.read, Task.read, .{&task});
+    select.concurrent(.timeout, Task.waitUntil, .{ io, deadline }) catch |err| {
+        select.cancelDiscard();
+        if (task.result) |result| {
+            if (result) |count| return count else |_| {}
+        }
+        return err;
+    };
+    const wake = select.await() catch |err| {
+        select.cancelDiscard();
+        if (task.result) |result| {
+            if (result) |count| return count else |_| {}
+        }
+        return err;
+    };
+    switch (wake) {
+        .read => {
+            const result = task.result orelse error.EndOfStream;
+            return result;
+        },
+        .timeout => |result| {
+            select.cancelDiscard();
+            if (task.result) |read_result| {
+                if (read_result) |count| return count else |_| {}
+            }
+            result catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+            };
+            return error.Timeout;
+        },
+    }
 }
 
 fn writeSomeWithDeadline(
