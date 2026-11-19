@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "date": "2026-11-19",
+  "head": "d0bf4f5e",
+  "gate": "managed xDS federation self-driving TLS material refresh",
+  "source_sha256": {
+    "src/grpc/xds/control_plane.zig": "dc540c6a6456e8c6020dd6bdd4cbdff7f2330d242d78681d399fa8d11f3f175c",
+    "src/grpc/xds/runtime/managed.zig": "f5b1a74c1dc264e5ccbff0e892c5b644459cbb8acc812e6740dd7accba00d444",
+    "src/grpc/xds/runtime/managed/session.zig": "3378ceb54ebd5ab5fe70193ef4bb62f74a9c63c9d94250d4589820391c574cb8",
+    "src/grpc/xds/runtime/managed/tests.zig": "5717449d655fcb5065d16deb40634750b5f5f76c861b620085cc681324b4f829",
+    "src/grpc/xds/control_plane_tests.zig": "411e2ced62e7729e97cefb4cd05b1ee218cced3ad4092021b4399417ef0f4c15",
+    "docs/grpc_bootstrap.md": "db55a15ca372bbc43259c3c129708ba3a91894f4989047d0d401a01ff6f0ba16"
+  },
+  "commands": {
+    "xds": "zig build test-lib -Dtest-filter=\"gRPC xDS\" --summary all",
+    "focused": "zig build test-lib -Dtest-filter=\"refreshes TLS material between reads\" --summary all"
+  },
+  "result": {
+    "xds": {
+      "passed": 312,
+      "total": 312,
+      "failed": 0,
+      "exit_code": 0
+    },
+    "focused_repetitions": 8,
+    "focused_failures": 0
+  },
+  "behavior": "Managed federation caps each discovery wait at the earliest active session's nextRefreshDeadline, reloads due sessions between reads through Session.reloadIfDue, and moves that session's own delta client onto the refreshed channel. ControlPlane records every refresh attempt, so a failed load keeps the old material and is retried on the next interval instead of spinning. A failed reload leaves the previous channel installed; the next read reconnects through the normal path.",
+  "conclusion": "The remaining self-driving refresh integration item is implemented for managed federation and covered by a TLS rotation test that observes a second accepted control-plane connection before the discovery read completes."
+}

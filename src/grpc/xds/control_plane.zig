@@ -151,6 +151,10 @@ pub const ControlPlane = struct {
     channel: shared.SharedChannel,
     client: delta.Client,
     last_reload_ns: ?i96 = null,
+    /// Time of the most recent refresh attempt, including failures. Failed
+    /// loads keep the previous channel and material, but must still wait a
+    /// full interval before retrying rather than spinning on a missing file.
+    last_refresh_attempt_ns: ?i96 = null,
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, configuration: *bootstrap.Bootstrap, options: Options) Error!*ControlPlane {
         const node = options.node orelse configuration.adsNode() orelse return error.InvalidBootstrapNode;
@@ -331,6 +335,17 @@ pub const ControlPlane = struct {
         return self.reconnectLrsWithDeadline(client, .fromNow(self.io, .{ .clock = .awake, .raw = timeout }));
     }
     fn rebindServer(self: *ControlPlane, selected: usize) Error!void {
+        return self.rebindServerForClient(selected, &self.client);
+    }
+    /// Recreate the current server's channel and material, then move one
+    /// caller-owned client onto it. Managed sessions own separate delta
+    /// clients, so the control plane's own client is not always the one that
+    /// must follow a TLS reload.
+    fn rebindServerForClient(
+        self: *ControlPlane,
+        selected: usize,
+        client: *delta.Client,
+    ) Error!void {
         const source = try Source.create(self.allocator, self.bootstrap, self.servers[selected], self.source.node, self.source.request);
         errdefer source.release();
         const target_server = source.server;
@@ -341,7 +356,7 @@ pub const ControlPlane = struct {
         var new_sender = channel.sender();
         var sender_owned = true;
         defer if (sender_owned) new_sender.deinit();
-        try self.client.rebindWithSource(new_sender, source.request, source);
+        try client.rebindWithSource(new_sender, source.request, source);
         sender_owned = false;
         self.channel.deinit();
         self.material.deinit();
@@ -448,7 +463,7 @@ pub const ControlPlane = struct {
     /// is disabled.
     pub fn nextRefreshDeadline(self: *const ControlPlane) ?std.Io.Clock.Timestamp {
         const interval = self.refreshInterval() orelse return null;
-        const last = self.last_reload_ns orelse return null;
+        const last = self.refreshBaseNs() orelse return null;
         return .{ .clock = .awake, .raw = .{ .nanoseconds = last + interval.nanoseconds } };
     }
     /// Reload the current server's TLS files when the bootstrap
@@ -459,11 +474,38 @@ pub const ControlPlane = struct {
     pub fn reloadIfDueWithDeadline(self: *ControlPlane, deadline: std.Io.Clock.Timestamp) Error!bool {
         _ = try deadline_policy.usableAwake(self.io, deadline);
         const interval = self.refreshInterval() orelse return false;
-        const last = self.last_reload_ns orelse return false;
+        const last = self.refreshBaseNs() orelse return false;
         const now = std.Io.Clock.Timestamp.now(self.io, .awake);
         if (now.raw.nanoseconds < last + interval.nanoseconds) return false;
+        // Record the attempt before touching any file so a failed load is
+        // retried on the next interval instead of immediately.
+        self.last_refresh_attempt_ns = now.raw.nanoseconds;
         try self.reloadServerWithDeadline(deadline);
         return true;
+    }
+    /// Reload the current server's TLS files when due and move a caller-owned
+    /// delta client (for example a managed session's client) onto the refreshed
+    /// channel. Returns false when refresh is disabled or not yet due.
+    pub fn reloadClientIfDueWithDeadline(
+        self: *ControlPlane,
+        client: *delta.Client,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!bool {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        const interval = self.refreshInterval() orelse return false;
+        const last = self.refreshBaseNs() orelse return false;
+        const now = std.Io.Clock.Timestamp.now(self.io, .awake);
+        if (now.raw.nanoseconds < last + interval.nanoseconds) return false;
+        self.last_refresh_attempt_ns = now.raw.nanoseconds;
+        try self.rebindServerForClient(self.server_index, client);
+        try client.connectWithDeadline(deadline);
+        return true;
+    }
+    fn refreshBaseNs(self: *const ControlPlane) ?i96 {
+        const reloaded = self.last_reload_ns orelse
+            return self.last_refresh_attempt_ns;
+        const attempted = self.last_refresh_attempt_ns orelse return reloaded;
+        return @max(reloaded, attempted);
     }
     pub fn reloadIfDueWithTimeout(self: *ControlPlane, timeout: std.Io.Duration) Error!bool {
         if (timeout.nanoseconds <= 0) return error.Timeout;

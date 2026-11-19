@@ -2,6 +2,9 @@
 const std = @import("std");
 const grpc = @import("../../../mod.zig");
 const managed = @import("../managed.zig");
+const bootstrap = @import("../../bootstrap.zig");
+const tls_testing = @import("../../../../tls/testing.zig");
+const test_tmp = @import("../../../../internal/test_tmp_dir.zig");
 const lds = @import("../../lds.zig");
 const rds = @import("../../rds.zig");
 const cds = @import("../../cds.zig");
@@ -342,4 +345,186 @@ test "gRPC federated managed subscriptions roll back second-authority allocation
 test "gRPC federated managed source features isolate authority caches" {
     try sourceFeatures(.sotw);
     try sourceFeatures(.delta);
+}
+
+const RefreshPeer = struct {
+    listener: *grpc.runtime.TlsServer,
+    io: std.Io,
+    second_accepted: std.atomic.Value(bool) = .init(false),
+    release: std.Io.Event = .unset,
+
+    fn run(self: *RefreshPeer) void {
+        self.runFallible() catch |err| {
+            std.debug.print(
+                "managed refresh peer error: {s}\n",
+                .{@errorName(err)},
+            );
+        };
+    }
+
+    fn runFallible(self: *RefreshPeer) !void {
+        var first = try self.listener.acceptWithTimeout(.fromSeconds(3));
+        defer first.deinit();
+        var first_duplex = try first.acceptDuplexWithTimeout(
+            .fromSeconds(3),
+        );
+        defer first_duplex.deinit();
+        try readManagedRequest(&first_duplex);
+        var second = try self.listener.acceptWithTimeout(.fromSeconds(3));
+        self.second_accepted.store(true, .release);
+        defer second.deinit();
+        var second_duplex = try second.acceptDuplexWithTimeout(
+            .fromSeconds(3),
+        );
+        defer second_duplex.deinit();
+        try readManagedRequest(&second_duplex);
+        // Keep the refreshed stream open until the caller has observed the
+        // reconnect; closing first would race the subscription flush.
+        self.release.waitTimeout(self.io, .{ .duration = .{
+            .clock = .awake,
+            .raw = .fromSeconds(5),
+        } }) catch {};
+    }
+};
+
+fn readManagedRequest(duplex: anytype) !void {
+    const Collector = struct {
+        seen: bool = false,
+        fn consume(self: *@This(), _: grpc.StreamingMessage) !void {
+            self.seen = true;
+        }
+    };
+    var collector: Collector = .{};
+    while (!collector.seen) {
+        var event = try duplex.readRequestEventWithTimeout(
+            .fromSeconds(3),
+            &collector,
+            Collector.consume,
+        );
+        defer event.deinit();
+        if (event == .finished or event == .reset) return error.EndedEarly;
+    }
+}
+
+test "gRPC federated managed refreshes TLS material between reads" {
+    var threaded = std.Io.Threaded.init(gpa, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+    const key_pair = try tls_testing.serverKeyPair();
+    var server = try grpc.runtime.TlsServer.listen(
+        gpa,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .transport = .{ .identity = .{
+            .certificate_chain = &.{&certificate_der},
+            .signer = .{ .ecdsa_p256_sha256 = .{ .key_pair = key_pair } },
+        } } },
+    );
+    defer server.deinit();
+    var tmp = test_tmp.tmpDir(.{});
+    defer tmp.cleanup();
+    const pem = try std.fmt.allocPrint(
+        gpa,
+        "-----BEGIN CERTIFICATE-----\n{s}\n-----END CERTIFICATE-----\n",
+        .{tls_testing.certificate_base64},
+    );
+    defer gpa.free(pem);
+    try tmp.dir.writeFile(io, .{ .sub_path = "ca.pem", .data = pem });
+    var ca_buffer: [256]u8 = undefined;
+    const ca_path = try tmp.path(&ca_buffer, "ca.pem");
+    const json = try std.fmt.allocPrint(
+        gpa,
+        "{{\"xds_servers\":[{{\"server_uri\":\"https://localhost:{d}\",\"channel_creds\":[{{\"type\":\"tls\",\"config\":{{\"ca_certificate_file\":\"{s}\",\"refresh_interval\":\"10s\"}}}}]}}],\"node\":{{\"id\":\"node-1\"}},\"authorities\":{{\"A\":{{\"xds_servers\":[{{\"server_uri\":\"https://localhost:{d}\",\"channel_creds\":[{{\"type\":\"tls\",\"config\":{{\"ca_certificate_file\":\"{s}\",\"refresh_interval\":\"10s\"}}}}]}}]}}}}}}",
+        .{
+            server.address().getPort(),
+            ca_path,
+            server.address().getPort(),
+            ca_path,
+        },
+    );
+    defer gpa.free(json);
+    const config = try bootstrap.parse(gpa, json, .{});
+    defer config.deinit();
+    var data = try grpc.SharedChannel.init(
+        gpa,
+        io,
+        .{ .cleartext_ip = .{ .address = .{ .ip4 = .loopback(1) } } },
+        .{},
+    );
+    defer data.deinit();
+    const facade = try managed.Managed(.delta).createForTarget(
+        gpa,
+        io,
+        config,
+        data,
+        "xds://A/frontend",
+        .{},
+    );
+    defer facade.deinit();
+    var peer = RefreshPeer{ .listener = &server, .io = io };
+    var task = io.async(RefreshPeer.run, .{&peer});
+    defer task.cancel(io);
+    _ = try facade.startWithDeadline(.fromNow(io, .{
+        .clock = .awake,
+        .raw = .fromSeconds(3),
+    }));
+    // Make the authority-A session active without waiting for a resource
+    // publication; the refresh schedule only covers desired authorities.
+    var staged = try facade.registry.router().prepare(
+        &.{.{ .type_url = cds.type_url, .names = &.{
+            "xdstp://A/envoy.config.cluster.v3.Cluster/a",
+        } }},
+        .fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(3) }),
+    );
+    defer staged.deinit();
+    staged.commit();
+    const session = try facade.registry.forAuthority("A");
+    try std.testing.expect(facade.registry.active(session));
+    try std.testing.expect(session.control_plane.refreshInterval() != null);
+    try std.testing.expect(session.control_plane.nextRefreshDeadline() != null);
+    // Establish the initial stream. The peer deliberately sends no response,
+    // so this read expires at the caller deadline.
+    var initial = try facade.nextWithDeadline(.fromNow(io, .{
+        .clock = .awake,
+        .raw = .fromMilliseconds(500),
+    }));
+    defer initial.deinit();
+    try std.testing.expectError(error.Timeout, initial.result);
+    // Force the schedule due; subsequent calls must reload TLS and reconnect.
+    // A stale stream cancellation from the pre-reload read may surface as the
+    // first event, so keep reading until the peer observes the new connect.
+    const now = std.Io.Clock.Timestamp.now(io, .awake);
+    session.control_plane.last_reload_ns =
+        now.raw.nanoseconds - 11 * std.time.ns_per_s;
+    session.control_plane.last_refresh_attempt_ns =
+        session.control_plane.last_reload_ns;
+    var attempts: usize = 0;
+    while (attempts < 4) : (attempts += 1) {
+        var refreshed = facade.nextWithDeadline(.fromNow(io, .{
+            .clock = .awake,
+            .raw = .fromMilliseconds(300),
+        })) catch |err| {
+            std.debug.print("refresh next error: {s}\n", .{@errorName(err)});
+            return err;
+        };
+        defer refreshed.deinit();
+        if (refreshed.result) |_| {} else |err| {
+            if (err != error.Timeout) {
+                std.debug.print(
+                    "refresh read error: {s}\n",
+                    .{@errorName(err)},
+                );
+                return err;
+            }
+        }
+        if (peer.second_accepted.load(.acquire)) break;
+    }
+    try std.testing.expect(peer.second_accepted.load(.acquire));
+    peer.release.set(io);
+    task.await(io);
 }

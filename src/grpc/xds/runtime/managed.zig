@@ -13,9 +13,11 @@ const names = @import("managed/names.zig");
 const features = @import("managed/features.zig");
 const status = @import("managed/status.zig");
 const csds = @import("../csds.zig");
+const plane = @import("../control_plane.zig");
+const deadline_policy = @import("../../../internal/deadline.zig");
 pub const Mode = registry_mod.Mode;
 pub const ResourceStatus = controller_mod.ResourceStatus;
-pub const Error = controller_mod.Error || target.Error || std.Io.ConcurrentError || error{ WrongDiscoverySession, MissingDiscoverySource };
+pub const Error = controller_mod.Error || target.Error || std.Io.ConcurrentError || plane.Error || error{ WrongDiscoverySession, MissingDiscoverySource };
 pub const Options = struct { controller: controller_mod.Options, discovery: registry_mod.Options = .{}, diagnostics: status.Options = .{} };
 pub const TargetOptions = struct {
     discovery: registry_mod.Options = .{},
@@ -115,35 +117,94 @@ pub fn Managed(comptime mode: Mode) type {
 
         pub fn nextWithDeadline(self: *Self, deadline: std.Io.Clock.Timestamp) Error!Event {
             if (!self.started) return error.XdsNotStarted;
-            for (self.registry.sessions.items) |session| if (session.pending) |result| {
-                session.pending = null;
-                if (!self.registry.active(session)) {
-                    if (result) |value| {
-                        var discarded = value;
-                        discarded.deinit();
-                    } else |_| {}
-                    continue;
+            while (true) {
+                for (self.registry.sessions.items) |session| if (session.pending) |result| {
+                    session.pending = null;
+                    if (!self.registry.active(session)) {
+                        if (result) |value| {
+                            var discarded = value;
+                            discarded.deinit();
+                        } else |_| {}
+                        continue;
+                    }
+                    // A timeout produced at the refresh boundary is stale:
+                    // the reload below replaces that stream before the caller
+                    // should observe a timeout.
+                    if (result) |_| {} else |err| {
+                        if (err == error.Timeout and self.refreshDue(session)) continue;
+                    }
+                    return .{ .session = session.retain(), .result = result };
+                };
+                // The discovery owner is the only task allowed to touch the
+                // session clients, so scheduled TLS refresh happens here
+                // between reads instead of in a racing background thread.
+                if (try self.reloadDueSessions(deadline)) continue;
+                const refresh_deadline = self.earliestRefreshDeadline();
+                const read_deadline =
+                    deadline_policy.earlier(deadline, refresh_deadline) orelse
+                    deadline;
+                const refresh_caps = if (refresh_deadline) |refresh|
+                    read_deadline.raw.nanoseconds == refresh.raw.nanoseconds
+                else
+                    false;
+                const storage = try self.allocator.alloc(Wake, self.registry.sessions.items.len);
+                defer self.allocator.free(storage);
+                var select: std.Io.Select(Wake) = .init(self.io, storage);
+                defer while (select.cancel()) |wake| {
+                    const outcome = wake.response;
+                    if (outcome.result) |value| outcome.session.pending = value else |err| {
+                        if (err != error.Canceled) outcome.session.pending = err;
+                    }
+                };
+                var active: usize = 0;
+                for (self.registry.sessions.items) |session| {
+                    if (!self.registry.active(session)) continue;
+                    try select.concurrent(.response, read, .{ session, read_deadline });
+                    active += 1;
                 }
-                return .{ .session = session.retain(), .result = result };
-            };
-            const storage = try self.allocator.alloc(Wake, self.registry.sessions.items.len);
-            defer self.allocator.free(storage);
-            var select: std.Io.Select(Wake) = .init(self.io, storage);
-            defer while (select.cancel()) |wake| {
-                const outcome = wake.response;
-                if (outcome.result) |value| outcome.session.pending = value else |err| {
-                    if (err != error.Canceled) outcome.session.pending = err;
+                if (active == 0) return error.XdsNotStarted;
+                const outcome = (try select.await()).response;
+                if (outcome.result) |_| {
+                    return .{ .session = outcome.session.retain(), .result = outcome.result };
+                } else |err| {
+                    if (err == error.Timeout and refresh_caps) {
+                        const now = std.Io.Clock.Timestamp.now(self.io, .awake);
+                        if (now.raw.nanoseconds < deadline.raw.nanoseconds) continue;
+                    }
+                    return .{ .session = outcome.session.retain(), .result = outcome.result };
                 }
-            };
-            var active: usize = 0;
+            }
+        }
+
+        fn earliestRefreshDeadline(self: *Self) ?std.Io.Clock.Timestamp {
+            var earliest: ?std.Io.Clock.Timestamp = null;
             for (self.registry.sessions.items) |session| {
                 if (!self.registry.active(session)) continue;
-                try select.concurrent(.response, read, .{ session, deadline });
-                active += 1;
+                earliest = deadline_policy.earlier(
+                    earliest,
+                    session.control_plane.nextRefreshDeadline(),
+                );
             }
-            if (active == 0) return error.XdsNotStarted;
-            const outcome = (try select.await()).response;
-            return .{ .session = outcome.session.retain(), .result = outcome.result };
+            return earliest;
+        }
+
+        fn reloadDueSessions(self: *Self, deadline: std.Io.Clock.Timestamp) Error!bool {
+            const now = std.Io.Clock.Timestamp.now(self.io, .awake);
+            if (deadline.raw.nanoseconds <= now.raw.nanoseconds) return false;
+            var reloaded = false;
+            for (self.registry.sessions.items) |session| {
+                if (!self.registry.active(session)) continue;
+                if (!self.refreshDue(session)) continue;
+                if (try session.reloadIfDue(deadline)) reloaded = true;
+            }
+            return reloaded;
+        }
+
+        fn refreshDue(self: *Self, session: *Session) bool {
+            const due = session.control_plane.nextRefreshDeadline() orelse
+                return false;
+            const now = std.Io.Clock.Timestamp.now(self.io, .awake);
+            return due.raw.nanoseconds <= now.raw.nanoseconds;
         }
         pub fn nextWithTimeout(self: *Self, timeout: std.Io.Duration) Error!Event {
             if (timeout.nanoseconds <= 0) return error.Timeout;

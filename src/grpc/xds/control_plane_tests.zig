@@ -278,6 +278,25 @@ test "gRPC xDS control plane schedules TLS material refresh" {
     defer second.deinit();
     try std.testing.expectEqual(grpc.Status.ok, second.terminal.status);
     try std.testing.expect(!try plane.reloadIfDueWithDeadline(deadline(io)));
+    // A failed refresh records its attempt so discovery does not spin on the
+    // same broken file; the previously loaded material stays installed.
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "ca.pem",
+        .data = "not a certificate",
+    });
+    const failed_at = std.Io.Clock.Timestamp.now(io, .awake);
+    plane.last_reload_ns = failed_at.raw.nanoseconds -
+        11 * std.time.ns_per_s;
+    plane.last_refresh_attempt_ns = plane.last_reload_ns;
+    try std.testing.expectError(
+        error.InvalidBootstrapTls,
+        plane.reloadIfDueWithDeadline(deadline(io)),
+    );
+    try std.testing.expect(!try plane.reloadIfDueWithDeadline(deadline(io)));
+    try std.testing.expect(
+        plane.nextRefreshDeadline().?.raw.nanoseconds >
+            failed_at.raw.nanoseconds,
+    );
     try task.await(io);
 }
 

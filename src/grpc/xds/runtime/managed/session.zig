@@ -65,5 +65,15 @@ pub fn Session(comptime mode: Mode) type {
             }
             try self.client.connectWithDeadline(deadline);
         }
+
+        /// Reload this authority's TLS material when the bootstrap schedule is
+        /// due and move this session's own client onto the refreshed channel.
+        pub fn reloadIfDue(self: *Self, deadline: std.Io.Clock.Timestamp) Error!bool {
+            if (mode == .sotw) return false;
+            return self.control_plane.reloadClientIfDueWithDeadline(
+                &self.client,
+                deadline,
+            );
+        }
     };
 }

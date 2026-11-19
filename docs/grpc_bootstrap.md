@@ -66,12 +66,20 @@ creation or failover. `refresh_interval` accepts the gRPC duration form
 `refreshInterval` returns the current server's period and `nextRefreshDeadline`
 returns its next boundary. `reloadIfDueWithDeadline` reloads and reconnects only
 when that boundary has passed, so discovery can call it between stream
-operations. `root_certificate_provider` and `identity_certificate_provider`
+operations. `reloadClientIfDueWithDeadline` performs the same reload for a
+caller-owned delta client, which is what managed federation uses: between
+reads it caps the discovery wait at the earliest active session's refresh
+deadline, reloads each due session through `Session.reloadIfDue`, and moves
+that session's own client onto the refreshed channel. Failed reload attempts
+are timestamped as well, so a missing or invalid file is retried on the next
+interval instead of spinning. Direct `ControlPlane` callers still drive
+`reloadIfDueWithDeadline` themselves.
+`root_certificate_provider` and `identity_certificate_provider`
 reference file-backed providers; their file paths and the shorter of the
 referenced refresh intervals are used for the control-plane TLS material.
 `static_file` providers contribute a zero interval, so they are loaded once.
-Provider rotation still reloads through the same caller-driven reconnect
-schedule rather than updating live transports in place.
+Provider rotation still reloads through the same reconnect schedule rather
+than updating live transports in place.
 `runtime.Options.applyServerFeatures(plane.server())` copies the selected
 server's `ignore_resource_deletion`, `fail_on_data_errors`,
 `trusted_xds_server` and `resource_timer_is_transient_error` booleans before
@@ -136,9 +144,10 @@ server or node-less configurations. See
 
 ## Remaining integration
 
-Certificate-provider plugins other than `file_watcher`/`static_file`, a self-driving refresh
-task, a background retry schedule and further gRPC resolver target families
-remain follow-up work. DNS/IP target spelling is supported. `reloadIfDue`
-exposes the bootstrap-derived schedule, while the discovery-owning task calls
-it at the reconnect boundary. Managed federation dispatches authority watches
-and applies each server's features to its own resource operations.
+Certificate-provider plugins other than `file_watcher`/`static_file`, a general
+background retry/backoff policy, and further gRPC resolver target families
+remain follow-up work. DNS/IP target spelling is supported. Managed federation
+now owns the refresh schedule and reloads due authority sessions between
+reads; direct `ControlPlane` callers still invoke `reloadIfDue` at their own
+reconnect boundary. Managed federation dispatches authority watches and
+applies each server's features to its own resource operations.
