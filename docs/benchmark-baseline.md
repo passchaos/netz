@@ -3925,6 +3925,16 @@ run verified all 22,528 bytes and checksum 2,872,320. Every record identified
 both endpoints as `zio-std-io`. These single-sample results establish runtime
 and verifier coverage only; they are not comparative performance evidence.
 
+A 2026-11-19 zio-era single-sample smoke at the current head used the shared
+server topology, four connections, and one 1-MiB stream per connection. It
+measured 162.732 MiB/s for the netz client sender and 62.131 MiB/s for the
+netz server sender. Both result and server-completion records identified
+`zio-std-io`, verified 4,194,304 bytes with checksum 534,773,760, and reported
+four completed connections. The server-sender record shows the shared endpoint
+receiving 3,692 datagrams through 2,034 receive calls while sending 948
+datagrams. This refreshes the zio runtime-path evidence; the fixed-binary
+quic-go server-role matrix remains the open cross-library comparison.
+
 ```sh
 zig build bench-quic-persistent-external -Doptimize=ReleaseFast -- \
   --mode=echo --samples=5 --warmup=200 --iterations=5000 \

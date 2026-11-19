@@ -1291,7 +1291,9 @@ const ClientWorker = struct {
                 .available_versions = &.{.version_1},
                 .server_name = "localhost",
                 .alpn_protocols = &.{alpn},
-                .server_auth = verifier.clientVerifier(),
+                .server_auth = netz.quic.tls.auth.ClientVerifier.fromTrustVerifier(
+                    verifier.clientVerifier(),
+                ),
                 .local_transport_parameters = try self.config.transportParameters(),
                 .max_crypto_buffer = 64 * 1024,
                 .initial_one_rtt_config = try self.config.clientOneRttConfig(),
