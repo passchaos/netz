@@ -100,8 +100,18 @@ inverted, regex, and string matchers. `downstream_nodes` and
 `response_rate_limit` change which requests or bytes are affected and remain
 rejected as unsupported.
 
-Route and virtual-host `typed_per_filter_config` overrides are decoded for both
-supported filters. An entry whose key matches the HCM filter instance name
+The HCM `envoy.filters.http.header_mutation.v3.HeaderMutation` filter is
+supported. Its `Mutations` request/response add and remove lists are decoded at
+listener validation and merged into every resolved call: request mutations run
+before route-level additions, and response mutations run after route-level
+additions. Header names/values use the same bounded validation as RDS route
+mutations; an empty value is ignored unless `keep_empty_value` is set, and
+percent-encoded substitution remains unsupported. A disabled filter or an
+optional unknown filter is ignored. Header-mutation `typed_per_filter_config`
+overrides are not implemented yet.
+
+Route and virtual-host `typed_per_filter_config` overrides are decoded for RBAC
+and fault filters. An entry whose key matches the HCM filter instance name
 replaces that filter for the selected route, with route scope taking precedence
 over virtual-host scope. A direct `RBACPerRoute` value replaces
 the listener policy. `RBACPerRoute.rbac` contains the HTTP filter message, whose

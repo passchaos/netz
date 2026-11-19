@@ -51,6 +51,9 @@ pub const Controller = struct {
     /// Raw fault-injection config from the accepted listener.
     fault_config: ?[]const u8 = null,
     fault_name: ?[]const u8 = null,
+    /// Raw header-mutation config from the accepted listener.
+    header_mutation_config: ?[]const u8 = null,
+    header_mutation_name: ?[]const u8 = null,
     pub fn init(gpa: std.mem.Allocator, options: Options) Error!Controller {
         if (options.listener_name.len == 0 or options.listener_name.len > options.limits.max_text_bytes or !std.unicode.utf8ValidateSlice(options.listener_name) or options.authority.len == 0 or options.authority.len > options.limits.rds.max_text_bytes or !std.unicode.utf8ValidateSlice(options.authority) or options.max_header_bytes == 0) return error.InvalidLdsOptions;
         var self = Controller{ .allocator = gpa, .arena = .init(gpa), .options = options };
@@ -156,7 +159,7 @@ pub const Controller = struct {
         }
         const rejecting = try self.empty("_");
         defer rejecting.release();
-        const projection = try Projection.create(self.allocator, rejecting, null, null, null, null, null);
+        const projection = try Projection.create(self.allocator, rejecting, null, null, null, null, null, null, null);
         defer projection.release();
         const revision = try self.publishDelta(client, projection, destination, deadline);
         if (subscription) |*prepared| prepared.commit();
@@ -166,6 +169,8 @@ pub const Controller = struct {
         self.rbac_name = null;
         self.fault_config = null;
         self.fault_name = null;
+        self.header_mutation_config = null;
+        self.header_mutation_name = null;
         if (self.routes) |previous| previous.release();
         self.routes = null;
         self.routes_accepted = false;
@@ -188,7 +193,7 @@ pub const Controller = struct {
         if (client.subscriptions.find(rds.type_url) != null) try client.subscriptions.forget(rds.type_url, name);
         const rejecting = try self.empty(name);
         defer rejecting.release();
-        const projection = try Projection.create(self.allocator, rejecting, listener.value.hcm.max_stream_duration, self.rbac_config, self.fault_config, self.rbac_name, self.fault_name);
+        const projection = try Projection.create(self.allocator, rejecting, listener.value.hcm.max_stream_duration, self.rbac_config, self.fault_config, self.rbac_name, self.fault_name, self.header_mutation_config, self.header_mutation_name);
         defer projection.release();
         const revision = try self.publishDelta(client, projection, destination, deadline);
         rejecting.retain();

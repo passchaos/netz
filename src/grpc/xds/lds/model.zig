@@ -6,6 +6,7 @@ pub const hcm_type = "envoy.extensions.filters.network.http_connection_manager.v
 pub const router_type = "envoy.extensions.filters.http.router.v3.Router";
 pub const rbac_type = "envoy.extensions.filters.http.rbac.v3.RBAC";
 pub const fault_type = "envoy.extensions.filters.http.fault.v3.HTTPFault";
+pub const header_mutation_type = "envoy.extensions.filters.http.header_mutation.v3.HeaderMutation";
 pub const Error = rds.resource.Error || error{
     InvalidLdsResource,
     LdsLimitExceeded,
@@ -21,6 +22,7 @@ pub const Limits = struct {
     max_bytes: usize = 8 * 1024 * 1024,
     max_text_bytes: usize = 4096,
     max_http_filters: usize = 128,
+    max_header_mutations: usize = 256,
     max_storage_bytes: usize = 64 * 1024 * 1024,
     rds: rds.resource.Limits = .{},
 };
@@ -45,6 +47,10 @@ pub const Hcm = struct {
     fault_config: ?[]const u8 = null,
     /// HCM filter instance name that owns fault overrides.
     fault_name: ?[]const u8 = null,
+    /// Raw `envoy.filters.http.header_mutation.v3.HeaderMutation` config.
+    header_mutation_config: ?[]const u8 = null,
+    /// HCM filter instance name that owns header-mutation overrides.
+    header_mutation_name: ?[]const u8 = null,
 };
 pub const Listener = struct { name: []const u8, hcm: Hcm };
 pub const Owned = struct {

@@ -375,3 +375,42 @@ test "gRPC LDS fault route override disables injection for the matched route" {
     const inherited = try resolvePathWith(channel, io, "/demo.Service/Other", &.{});
     try std.testing.expect(inherited.options.fault_policy != null);
 }
+
+test "gRPC LDS applies header mutations to resolved calls" {
+    var threaded = std.Io.Threaded.init(gpa, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var channel = try grpc.SharedChannel.init(gpa, io, .{ .resolved = .{ .endpoints = &.{.{ .cleartext_ip = .{ .address = .{ .ip4 = .loopback(1) }, .hierarchical_path = &.{"cluster:a"} } }} } }, .{ .service_config_json = manager });
+    defer channel.deinit();
+    var sender = channel.sender();
+    defer sender.deinit();
+    var client = try ads.Client.init(gpa, sender, .{ .node = .{ .id = "test" } });
+    defer client.deinit();
+    var controller = try lds.Controller.init(gpa, .{ .listener_name = "frontend", .authority = "backend.test" });
+    defer controller.deinit();
+    try controller.subscribe(&client);
+    const routes = try route_fixture.encode(gpa, "routes-a", &.{"backend.test"}, &.{.{ .prefix = "/" }}, null);
+    defer gpa.free(routes);
+    const mutation = try fixture.headerMutation(gpa);
+    defer gpa.free(mutation);
+    const listener = try fixture.encode(gpa, .{
+        .inline_rds = routes,
+        .filters = &.{
+            .{ .name = "hm", .type_name = lds.resource.header_mutation_type, .value = mutation },
+            .{},
+        },
+    });
+    defer gpa.free(listener);
+    try apply(&controller, &client, channel, io, lds.type_url, "hm", listener);
+    const resolved = try resolve(channel, io);
+    try std.testing.expectEqual(@as(usize, 1), resolved.options.xds_request_header_mutations.len);
+    try std.testing.expectEqualStrings("x-req", resolved.options.xds_request_header_mutations[0].name);
+    try std.testing.expectEqualStrings("one", resolved.options.xds_request_header_mutations[0].value);
+    try std.testing.expectEqual(@as(usize, 1), resolved.options.xds_request_header_removals.len);
+    try std.testing.expectEqualStrings("x-remove", resolved.options.xds_request_header_removals[0]);
+    try std.testing.expectEqual(@as(usize, 1), resolved.options.xds_response_header_mutations.len);
+    try std.testing.expectEqualStrings("x-resp", resolved.options.xds_response_header_mutations[0].name);
+    try std.testing.expectEqualStrings("two", resolved.options.xds_response_header_mutations[0].value);
+    try std.testing.expectEqual(@as(usize, 1), resolved.options.xds_response_header_removals.len);
+    try std.testing.expectEqualStrings("x-resp-remove", resolved.options.xds_response_header_removals[0]);
+}

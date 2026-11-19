@@ -502,7 +502,7 @@ pub const Controller = struct {
         defer subscription.deinit();
         const empty = try self.listener.?.empty("_");
         defer empty.release();
-        const projection = try @import("../lds/projection.zig").Projection.create(self.allocator, empty, null, null, null, null, null);
+        const projection = try @import("../lds/projection.zig").Projection.create(self.allocator, empty, null, null, null, null, null, null, null);
         defer projection.release();
         var plan = try Plan.create(self, projection);
         defer plan.deinit();
@@ -560,7 +560,7 @@ pub const Controller = struct {
         defer subscription.deinit();
         const empty = try self.listener.?.empty("_");
         defer empty.release();
-        const projection = try @import("../lds/projection.zig").Projection.create(self.allocator, empty, null, null, null, null, null);
+        const projection = try @import("../lds/projection.zig").Projection.create(self.allocator, empty, null, null, null, null, null, null, null);
         defer projection.release();
         var plan = try Plan.create(self, projection);
         defer plan.deinit();

@@ -6,6 +6,7 @@ const fault = @import("../../fault.zig");
 const routing = @import("../routing/mod.zig");
 const selector = @import("../../channel/call_selector.zig");
 const service = @import("../../service_config.zig");
+const call = @import("../../call.zig");
 
 const RbacOverride = union(enum) {
     inherit,
@@ -20,7 +21,26 @@ const FaultOverride = union(enum) {
 const Compiled = struct {
     rbac: RbacOverride = .inherit,
     fault: FaultOverride = .inherit,
+    request_mutations: ?[]const call.HeaderMutation = null,
+    request_removals: ?[]const []const u8 = null,
+    response_mutations: ?[]const call.HeaderMutation = null,
+    response_removals: ?[]const []const u8 = null,
 };
+
+fn concatValues(
+    arena: std.mem.Allocator,
+    comptime T: type,
+    first: []const T,
+    second: []const T,
+) std.mem.Allocator.Error!?[]const T {
+    if (first.len == 0 and second.len == 0) return null;
+    if (first.len == 0) return second;
+    if (second.len == 0) return first;
+    const merged = try arena.alloc(T, first.len + second.len);
+    @memcpy(merged[0..first.len], first);
+    @memcpy(merged[first.len..], second);
+    return merged;
+}
 
 pub const Projection = struct {
     allocator: std.mem.Allocator,
@@ -34,6 +54,7 @@ pub const Projection = struct {
     arena: std.heap.ArenaAllocator,
     rbac: ?*rbac.Policy = null,
     fault: ?fault.Policy = null,
+    header_mutation: ?@import("filter.zig").HeaderMutationPolicy = null,
     vhost_overrides: []Compiled = &.{},
     route_overrides: [][]Compiled = &.{},
     pub fn create(
@@ -44,6 +65,8 @@ pub const Projection = struct {
         fault_config: ?[]const u8,
         rbac_name: ?[]const u8,
         fault_name: ?[]const u8,
+        header_mutation_config: ?[]const u8,
+        header_mutation_name: ?[]const u8,
     ) (std.mem.Allocator.Error || rbac.Error || fault.Error)!*Projection {
         const self = try gpa.create(Projection);
         errdefer gpa.destroy(self);
@@ -64,10 +87,28 @@ pub const Projection = struct {
         if (fault_config) |bytes| {
             self.fault = try fault.decode(self.arena.allocator(), bytes, .{});
         }
-        try self.compileOverrides(rbac_name orelse "", fault_name orelse "");
+        if (header_mutation_config) |bytes| {
+            // The listener decoder already enforced the configured limits;
+            // re-decode with generous bounds so a larger configured limit is
+            // not rejected by this projection pass.
+            self.header_mutation = try @import("filter.zig").decodeHeaderMutation(
+                self.arena.allocator(),
+                bytes,
+                .{
+                    .max_text_bytes = std.math.maxInt(usize),
+                    .max_header_mutations = std.math.maxInt(usize),
+                },
+            );
+        }
+        try self.compileOverrides(
+            rbac_name orelse "",
+            fault_name orelse "",
+            header_mutation_name orelse "",
+        );
         return self;
     }
-    fn compileOverrides(self: *Projection, rbac_name: []const u8, fault_name: []const u8) !void {
+    fn compileOverrides(self: *Projection, rbac_name: []const u8, fault_name: []const u8, header_mutation_name: []const u8) !void {
+        _ = header_mutation_name;
         const hosts = self.source.resource.value.virtual_hosts;
         if (hosts.len == 0) return;
         const arena = self.arena.allocator();
@@ -84,6 +125,32 @@ pub const Projection = struct {
                 var route_compiled = Compiled{};
                 for (route.overrides) |entry| {
                     try self.applyOverride(&route_compiled, entry, rbac_name, fault_name);
+                }
+                if (self.header_mutation) |mutation| {
+                    route_compiled.request_mutations = try concatValues(
+                        arena,
+                        call.HeaderMutation,
+                        mutation.request_add,
+                        route.request_headers_to_add,
+                    );
+                    route_compiled.request_removals = try concatValues(
+                        arena,
+                        []const u8,
+                        mutation.request_remove,
+                        route.request_headers_to_remove,
+                    );
+                    route_compiled.response_mutations = try concatValues(
+                        arena,
+                        call.HeaderMutation,
+                        route.response_headers_to_add,
+                        mutation.response_add,
+                    );
+                    route_compiled.response_removals = try concatValues(
+                        arena,
+                        []const u8,
+                        route.response_headers_to_remove,
+                        mutation.response_remove,
+                    );
                 }
                 routes[route_index] = route_compiled;
             }
@@ -118,6 +185,24 @@ pub const Projection = struct {
                 }
             }
         }
+    }
+    fn compiledFor(self: *Projection, selection: rds.Selection) ?*const Compiled {
+        if (selection.virtual_host < self.route_overrides.len and
+            selection.route < self.route_overrides[selection.virtual_host].len)
+        {
+            return &self.route_overrides[selection.virtual_host][selection.route];
+        }
+        if (selection.virtual_host < self.vhost_overrides.len) {
+            return &self.vhost_overrides[selection.virtual_host];
+        }
+        return null;
+    }
+    fn applyHeaderMutations(self: *Projection, selection: rds.Selection, options: anytype) void {
+        const compiled = self.compiledFor(selection) orelse return;
+        if (compiled.request_mutations) |value| options.xds_request_header_mutations = value;
+        if (compiled.request_removals) |value| options.xds_request_header_removals = value;
+        if (compiled.response_mutations) |value| options.xds_response_header_mutations = value;
+        if (compiled.response_removals) |value| options.xds_response_header_removals = value;
     }
     fn rbacFor(self: *Projection, selection: rds.Selection) ?*rbac.Policy {
         if (selection.virtual_host < self.route_overrides.len and
@@ -213,6 +298,7 @@ pub const Projection = struct {
         try self.authorize(active, self.requestFor(base.options), selection);
         var resolved = try rds.Snapshot.applyUnary(active, base, selection);
         resolved.options.fault_policy = self.faultFor(selection);
+        self.applyHeaderMutations(selection, &resolved.options);
         return resolved;
     }
     fn streaming(context: *anyopaque, active: selector.Context, base: service.ResolvedStreaming) selector.Error!service.ResolvedStreaming {
@@ -221,6 +307,7 @@ pub const Projection = struct {
         try self.authorize(active, self.requestFor(base.options), selection);
         var resolved = try rds.Snapshot.applyStreaming(base, selection);
         resolved.options.fault_policy = self.faultFor(selection);
+        self.applyHeaderMutations(selection, &resolved.options);
         return resolved;
     }
     pub fn descriptor(self: *Projection) selector.Selector {

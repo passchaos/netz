@@ -144,7 +144,7 @@ pub fn expireDelta(self: *ctl.Controller, client: *delta.Client, destination: sh
                     }
                 }
                 rejecting = try listener.empty("_");
-                projection = try Projection.create(self.allocator, rejecting.?, null, null, null, null, null);
+                projection = try Projection.create(self.allocator, rejecting.?, null, null, null, null, null, null, null);
             }
         }
         if (!drop_listener and due(listener.routes_deadline, now)) {
@@ -157,7 +157,7 @@ pub fn expireDelta(self: *ctl.Controller, client: *delta.Client, destination: sh
                         try removals.append(self.allocator, .{ .type_url = rds.type_url, .name = resource_name });
                         rejecting = try listener.empty(resource_name);
                         const hcm = listener.listener.?.value.hcm;
-                        projection = try Projection.create(self.allocator, rejecting.?, hcm.max_stream_duration, listener.rbac_config, listener.fault_config, listener.rbac_name, listener.fault_name);
+                        projection = try Projection.create(self.allocator, rejecting.?, hcm.max_stream_duration, listener.rbac_config, listener.fault_config, listener.rbac_name, listener.fault_name, listener.header_mutation_config, listener.header_mutation_name);
                     }
                 }
             } else if (self.inResponseScope(listener.options.listener_name)) clear_route_timer = true;
@@ -243,6 +243,8 @@ pub fn expireDelta(self: *ctl.Controller, client: *delta.Client, destination: sh
             listener.rbac_name = null;
             listener.fault_config = null;
             listener.fault_name = null;
+            listener.header_mutation_config = null;
+            listener.header_mutation_name = null;
             if (listener.routes) |old| old.release();
             listener.routes = null;
             listener.routes_accepted = false;

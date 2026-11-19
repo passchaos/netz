@@ -44,5 +44,7 @@ pub fn decode(gpa: std.mem.Allocator, bytes: []const u8, limits: model.Limits) p
         .rbac_name = validated.rbac_name,
         .fault_config = validated.fault,
         .fault_name = validated.fault_name,
+        .header_mutation_config = validated.header_mutation,
+        .header_mutation_name = validated.header_mutation_name,
     };
 }

@@ -56,7 +56,7 @@ pub fn apply(self: *ctl.Controller, client: *ads.Client, update: ads.Update, des
         } else try self.empty(hcm.route_source.rds);
         var source_owned = true;
         defer if (source_owned) source.release();
-        const projection = try Projection.create(self.allocator, source, hcm.max_stream_duration, hcm.rbac_config, hcm.fault_config, hcm.rbac_name, hcm.fault_name);
+        const projection = try Projection.create(self.allocator, source, hcm.max_stream_duration, hcm.rbac_config, hcm.fault_config, hcm.rbac_name, hcm.fault_name, hcm.header_mutation_config, hcm.header_mutation_name);
         projection.pending = hcm.route_source == .rds and !cached_accepted;
         projection.remote_rds = if (hcm.route_source == .rds) source.resource.value.name else null;
         defer projection.release();
@@ -69,6 +69,8 @@ pub fn apply(self: *ctl.Controller, client: *ads.Client, update: ads.Update, des
         self.rbac_name = hcm.rbac_name;
         self.fault_config = hcm.fault_config;
         self.fault_name = hcm.fault_name;
+        self.header_mutation_config = hcm.header_mutation_config;
+        self.header_mutation_name = hcm.header_mutation_name;
         if (self.routes) |previous| previous.release();
         self.routes = source;
         self.routes_accepted = hcm.route_source == .inline_rds or cached_accepted;
@@ -88,7 +90,7 @@ pub fn apply(self: *ctl.Controller, client: *ads.Client, update: ads.Update, des
     }
     const empty = try self.empty("_");
     defer empty.release();
-    const projection = try Projection.create(self.allocator, empty, null, null, null, null, null);
+    const projection = try Projection.create(self.allocator, empty, null, null, null, null, null, null, null);
     defer projection.release();
     const revision = try self.publish(client, projection, destination, deadline);
     if (self.listener) |*previous| previous.deinit();

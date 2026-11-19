@@ -12,6 +12,40 @@ pub const Options = struct {
     filters: []const Filter = &.{.{}},
     hcm_extra: []const u8 = "",
 };
+pub fn headerMutation(allocator: std.mem.Allocator) ![]u8 {
+    var request_header = Builder{ .allocator = allocator };
+    defer request_header.deinit();
+    try request_header.bytes(1, "x-req");
+    try request_header.bytes(2, "one");
+    var request_option = Builder{ .allocator = allocator };
+    defer request_option.deinit();
+    try request_option.bytes(1, request_header.data.items);
+    var append = Builder{ .allocator = allocator };
+    defer append.deinit();
+    try append.number(1, 1);
+    try request_option.bytes(2, append.data.items);
+
+    var response_header = Builder{ .allocator = allocator };
+    defer response_header.deinit();
+    try response_header.bytes(1, "x-resp");
+    try response_header.bytes(2, "two");
+    var response_option = Builder{ .allocator = allocator };
+    defer response_option.deinit();
+    try response_option.bytes(1, response_header.data.items);
+
+    var mutations = Builder{ .allocator = allocator };
+    defer mutations.deinit();
+    try mutations.bytes(1, request_option.data.items);
+    try mutations.bytes(2, "x-remove");
+    try mutations.bytes(3, response_option.data.items);
+    try mutations.bytes(4, "x-resp-remove");
+
+    var config = Builder{ .allocator = allocator };
+    defer config.deinit();
+    try config.bytes(1, mutations.data.items);
+    return config.data.toOwnedSlice(allocator);
+}
+
 pub fn encode(gpa: std.mem.Allocator, options: Options) ![]u8 {
     var hcm = Builder{ .allocator = gpa };
     defer hcm.deinit();

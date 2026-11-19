@@ -243,3 +243,36 @@ test "gRPC LDS rejects malformed and unsupported fault filters" {
     defer gpa.free(no_percentage_bytes);
     try std.testing.expectError(error.InvalidFaultResource, lds.decode(gpa, no_percentage_bytes, .{}));
 }
+
+test "gRPC LDS accepts a header-mutation filter" {
+    const config = try fixture.headerMutation(gpa);
+    defer gpa.free(config);
+    const bytes = try fixture.encode(gpa, .{ .filters = &.{
+        .{ .name = "hm", .type_name = lds.resource.header_mutation_type, .value = config },
+        .{},
+    } });
+    defer gpa.free(bytes);
+    var owned = try lds.decode(gpa, bytes, .{});
+    defer owned.deinit();
+    try std.testing.expect(owned.value.hcm.header_mutation_config != null);
+    try std.testing.expectEqualStrings("hm", owned.value.hcm.header_mutation_name.?);
+
+    var bad_name = fixture.Builder{ .allocator = gpa };
+    defer bad_name.deinit();
+    try bad_name.bytes(1, "Bad Name");
+    var bad_option = fixture.Builder{ .allocator = gpa };
+    defer bad_option.deinit();
+    try bad_option.bytes(1, bad_name.data.items);
+    var bad_mutations = fixture.Builder{ .allocator = gpa };
+    defer bad_mutations.deinit();
+    try bad_mutations.bytes(1, bad_option.data.items);
+    var bad_config = fixture.Builder{ .allocator = gpa };
+    defer bad_config.deinit();
+    try bad_config.bytes(1, bad_mutations.data.items);
+    const bad_bytes = try fixture.encode(gpa, .{ .filters = &.{
+        .{ .name = "hm", .type_name = lds.resource.header_mutation_type, .value = bad_config.data.items },
+        .{},
+    } });
+    defer gpa.free(bad_bytes);
+    try std.testing.expectError(error.InvalidLdsResource, lds.decode(gpa, bad_bytes, .{}));
+}

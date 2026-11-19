@@ -68,4 +68,6 @@ The matching engine also accepts an optional RPC budget, checking cancellation
 and the original deadline during evaluation. [Typed RDS and immutable per-RPC
 selector publication](grpc_rds.md) now use these primitives. Hash-policy regex
 rewriting and full LDS/RDS/CDS resolver orchestration are implemented. HTTP
-filter overrides beyond RBAC/fault remain follow-up work.
+filter overrides beyond RBAC/fault remain follow-up work; the HCM
+header-mutation filter itself is implemented, while its per-filter overrides
+are not.
