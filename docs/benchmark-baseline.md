@@ -9464,9 +9464,12 @@ payloads of 64 KiB or more as prefix+payload slices instead of cloning them; a
 2026-11-19 persistent 256-KiB run measured 398,743 ns/roundtrip versus 474,010
 ns for the historical staged path. Generic ClientDuplex, ServerDuplex and
 SharedChannel owned-write APIs remain available for callers that serialize
-directly into prefix-reserved storage. Borrowed server responses still stage a
-contiguous message, first cross-DATA reassembly remains, and grpc-core retains
-more general segmented `SliceBuffer` ownership. Three attempts to pass retained HTTP/2 DATA
+directly into prefix-reserved storage. The synchronous `.message` unary
+response path now writes the 5-byte prefix and payload as separate DATA
+contributions instead of a contiguous framed copy; a 2026-11-19 follow-up
+measured 406,003 ns versus 468,363 ns before the change. First cross-DATA
+reassembly remains, and grpc-core retains more general segmented `SliceBuffer`
+ownership. Three attempts to pass retained HTTP/2 DATA
 through a Shared-call queue were rejected after all lost the 0-byte instruction
 guard in 8/8 pairs; future work must preserve the existing Call layout and
 small-DATA path.

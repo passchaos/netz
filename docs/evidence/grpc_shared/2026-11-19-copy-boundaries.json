@@ -17,27 +17,57 @@
   },
   "variants": {
     "staged_request_owned_response": {
-      "samples_ns_per_roundtrip": [408413, 406263, 405730],
+      "samples_ns_per_roundtrip": [
+        408413,
+        406263,
+        405730
+      ],
       "median_ns_per_roundtrip": 406263,
       "median_roundtrips_per_second": 2461
     },
     "owned_request_owned_response": {
-      "samples_ns_per_roundtrip": [342746, 341776, 341757],
+      "samples_ns_per_roundtrip": [
+        342746,
+        341776,
+        341757
+      ],
       "median_ns_per_roundtrip": 341776,
       "median_roundtrips_per_second": 2925,
       "change_vs_default_percent": -15.9
     },
     "staged_request_borrowed_response": {
-      "samples_ns_per_roundtrip": [468089, 468363, 471513],
+      "samples_ns_per_roundtrip": [
+        468089,
+        468363,
+        471513
+      ],
       "median_ns_per_roundtrip": 468363,
       "median_roundtrips_per_second": 2135,
       "change_vs_default_percent": 15.3
     },
     "owned_request_borrowed_response": {
-      "samples_ns_per_roundtrip": [405455, 404578, 404961],
+      "samples_ns_per_roundtrip": [
+        405455,
+        404578,
+        404961
+      ],
       "median_ns_per_roundtrip": 404961,
       "median_roundtrips_per_second": 2469
     }
   },
-  "conclusion": "For 256-KiB unary messages the owned-request API removes the client copy and is 15.9% faster than the staged default. The borrowed-response path stages a contiguous message and is 15.3% slower than the owned-response default, so owned responses remain the recommended server path. The remaining default-path cost is the const-payload Writer clone on the request side."
+  "conclusion": "For 256-KiB unary messages the owned-request API removes the client copy and is 15.9% faster than the staged default. The .message unary response path now writes the 5-byte prefix and payload as separate DATA contributions; a follow-up run measured 406,003 ns versus 468,363 ns before the change (13.3% faster), so .message is no longer a response copy boundary. Owned responses remain the recommended path for callers that already serialize into prefix-reserved storage. The remaining default-path cost is the const-payload Writer clone on the request side.",
+  "follow_up": {
+    "head": "cd713c2db1c1c7c85c6096eada16cf056425a05c",
+    "feature": "identity .message unary responses write prefix+payload DATA instead of a contiguous framed copy",
+    "staged_request_borrowed_response_after": {
+      "samples_ns_per_roundtrip": [
+        406003,
+        405812,
+        406212
+      ],
+      "median_ns_per_roundtrip": 406003,
+      "median_roundtrips_per_second": 2463,
+      "change_vs_before_percent": -13.3
+    }
+  }
 }

@@ -988,16 +988,20 @@ default `smp` allocator, and full-byte validation. Medians:
 | --- | --- | ---: | ---: | ---: |
 | staged | owned | 406,263 | 2,461 | baseline |
 | owned | owned | 341,776 | 2,925 | -15.9% |
-| staged | borrowed | 468,363 | 2,135 | +15.3% |
-| owned | borrowed | 404,961 | 2,469 | -0.3% |
+| staged | `.message` (before) | 468,363 | 2,135 | +15.3% |
+| staged | `.message` (after) | 406,003 | 2,463 | 0.0% |
+| owned | `.message` | 404,961 | 2,469 | -0.3% |
 
 The owned-request path removes the 256-KiB client copy and is the recommended
-large-message boundary. The borrowed-response path stages a contiguous message
-and is slower than owned responses in this shape, so `allocMessage` +
-`writeOwnedMessage` remains the recommended server path. The default
-const-payload `Writer.writeMessage` still copies once; callers that can
-serialize into prefix-reserved storage should use `writeBorrowedMessage` or the
-owned-write APIs. Rows and commands are in
+large-message boundary. The synchronous `.message` unary response path
+previously copied the framed prefix+payload into one buffer; it now writes the
+5-byte prefix and the payload as separate DATA contributions, which removed
+13.3% of the roundtrip and brought it level with the owned-response path.
+`allocMessage` + `writeOwnedMessage` remains the recommended server path for
+callers that already serialize into prefix-reserved storage. The default
+const-payload `Writer.writeMessage` still copies once on the request side;
+callers that can serialize into prefix-reserved storage should use
+`writeBorrowedMessage` or the owned-write APIs. Rows and commands are in
 `docs/evidence/grpc_shared/2026-11-19-copy-boundaries.json`.
 
 ### 2026-11-19 SharedChannel const-payload writes
