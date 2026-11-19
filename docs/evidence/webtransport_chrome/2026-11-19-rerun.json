@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "date": "2026-11-19",
+  "feature": "WebTransport browser-facing interop rerun",
+  "decision": "Chrome gate passed; Firefox launcher blocked by the local snap wrapper",
+  "head": "4048e3165ca963206feeaf154f172e2a8409c9e9",
+  "chrome": {
+    "version": "Google Chrome 146.0.7680.164",
+    "command": "zig build interop-webtransport-chrome -Doptimize=ReleaseFast",
+    "result": "success in 26 s",
+    "coverage": "launched browser version/image hash/User-Agent, Extended CONNECT, DATAGRAM, bidirectional and unidirectional streams, mapped RESET_STREAM/STOP_SENDING, sibling survival, and CLOSE_WEBTRANSPORT_SESSION code 77/reason 'netz done'"
+  },
+  "firefox": {
+    "version": "Mozilla Firefox 157.0.1 (snap package)",
+    "command": "FIREFOX=/usr/bin/firefox zig build interop-webtransport-firefox -Doptimize=ReleaseFast",
+    "result": "launcher failed before the gate: 'Could not find profile folder' from the snap wrapper",
+    "classification": "environment limitation, not a netz protocol failure"
+  },
+  "open": "Firefox STOP_SENDING remains the separately documented browser gap; capture-backed equal-wire throughput remains open",
+  "complete": true
+}

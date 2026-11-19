@@ -167,7 +167,14 @@ close code/reason proves it skipped DRAIN without losing capsule framing.
 A 2026-11-19 rerun at the current head passed both
 `interop-webtransport-wtransport` (18 s) and
 `interop-webtransport-wtransport-churn` (12 s) against the pinned local
-wtransport checkout. The native gate and churn gate still exercise both
+wtransport checkout.
+
+A 2026-11-19 Chrome rerun (`Google Chrome 146.0.7680.164`) also passed
+`interop-webtransport-chrome` in 26 s. The Firefox gate could not launch on
+this host because `/usr/bin/firefox` is a snap wrapper that puppeteer reports
+as `Could not find profile folder`; this is an environment limitation, not a
+protocol failure. Firefox STOP_SENDING remains the separately documented
+browser gap. The native gate and churn gate still exercise both
 directions, DATAGRAM/stream exchange, mapped reset/stop codes, sibling
 survival, and close-code validation. This refreshes the external interop
 runtime-path evidence; capture-backed equal-wire throughput remains open. The
