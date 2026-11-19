@@ -5,7 +5,7 @@
   "feature": "TUIC v5 shared-endpoint multi-connection server and sing-box interop gate",
   "source_sha256": {
     "src/proxy/tuic/shared/server.zig": "ee1f6e32fa213ab14b16cf60ea4bc47fd243825a05a3098686a77abd8a4b5703",
-    "src/proxy/tuic/shared/relay.zig": "0f7e4253ff64bd90541d4a9b8ffecbe8bd7c777c3638380d35ce5cfe82b95cb9",
+    "src/proxy/internal/relay_queue.zig": "b3ec015943f8eee854688716b6e81335aaa4d4090bb78bfdcd76f9c876a3573a",
     "src/proxy/tuic/shared/tests.zig": "6a5a885444528223d5f77728ae9828d2fb075bfcd99a9ee62bb8eb07ef8dc220",
     "src/proxy/tuic/config.zig": "26bd87c2b940b6d88e8ec201b23ab3367046e9f043a8dd3d2636dbd323c38e6a",
     "src/proxy/tuic/server.zig": "1db9ef8d0c24bcc1b2c34859a9740114b18263b1d546b832380bc960d2a45194",
