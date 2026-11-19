@@ -101,10 +101,13 @@ inverted, regex, and string matchers. `downstream_nodes` and
 rejected as unsupported.
 
 The HCM `envoy.filters.http.header_mutation.v3.HeaderMutation` filter is
-supported. Its `Mutations` request/response add and remove lists are decoded at
-listener validation and merged into every resolved call: request mutations run
-before route-level additions, and response mutations run after route-level
-additions. Header names/values use the same bounded validation as RDS route
+supported. Its `Mutations` message contains ordered request and response lists
+of `mutation_rules.v3.HeaderMutation` oneofs (`remove` or `append`); each entry
+is decoded at listener validation and merged into every resolved call. Request
+mutations run before route-level additions, and response mutations run after
+route-level additions. The call path applies removals before additions, matching
+the existing route-level mutation path; interleaved HCM rule order is not
+preserved. Header names/values use the same bounded validation as RDS route
 mutations; an empty value is ignored unless `keep_empty_value` is set, and
 percent-encoded substitution remains unsupported. A disabled filter or an
 optional unknown filter is ignored. Header-mutation `typed_per_filter_config`

@@ -107,51 +107,55 @@ pub fn decodeHeaderMutation(
     var total: usize = 0;
     var reader = pb.Reader{ .bytes = bytes };
     while (try reader.next()) |field| {
+        // HeaderMutation field 1 is the Mutations message. Field 2 controls
+        // per-route ordering and does not change this listener-level policy.
         if (field.number != 1 or field.wire_type != 2) {
             try reader.skip(field);
             continue;
         }
         var mutations = pb.Reader{ .bytes = try reader.bytesValue() };
         while (try mutations.next()) |entry| {
-            if (entry.number == 1 and entry.wire_type == 2) {
-                if (total >= limits.max_header_mutations) {
-                    return error.LdsLimitExceeded;
-                }
-                if (try headerMutationOption(
-                    try mutations.bytesValue(),
-                    limits.max_text_bytes,
-                )) |mutation| {
-                    try request_add.append(arena, mutation);
+            const request = entry.number == 1;
+            const response = entry.number == 2;
+            if ((!request and !response) or entry.wire_type != 2) {
+                try mutations.skip(entry);
+                continue;
+            }
+            if (total >= limits.max_header_mutations) {
+                return error.LdsLimitExceeded;
+            }
+            const rule_bytes = try mutations.bytesValue();
+            var rule = pb.Reader{ .bytes = rule_bytes };
+            var saw_action = false;
+            while (try rule.next()) |action| {
+                if (action.number == 1 and action.wire_type == 2) {
+                    if (saw_action) return error.InvalidLdsResource;
+                    saw_action = true;
+                    const name = try pb.text(&rule, limits.max_text_bytes);
+                    if (!headerNameValid(name)) return error.InvalidLdsResource;
+                    if (request) {
+                        try request_remove.append(arena, name);
+                    } else {
+                        try response_remove.append(arena, name);
+                    }
                     total += 1;
-                }
-            } else if (entry.number == 2 and entry.wire_type == 2) {
-                if (total >= limits.max_header_mutations) {
-                    return error.LdsLimitExceeded;
-                }
-                const name = try pb.text(&mutations, limits.max_text_bytes);
-                if (!headerNameValid(name)) return error.InvalidLdsResource;
-                try request_remove.append(arena, name);
-                total += 1;
-            } else if (entry.number == 3 and entry.wire_type == 2) {
-                if (total >= limits.max_header_mutations) {
-                    return error.LdsLimitExceeded;
-                }
-                if (try headerMutationOption(
-                    try mutations.bytesValue(),
-                    limits.max_text_bytes,
-                )) |mutation| {
-                    try response_add.append(arena, mutation);
-                    total += 1;
-                }
-            } else if (entry.number == 4 and entry.wire_type == 2) {
-                if (total >= limits.max_header_mutations) {
-                    return error.LdsLimitExceeded;
-                }
-                const name = try pb.text(&mutations, limits.max_text_bytes);
-                if (!headerNameValid(name)) return error.InvalidLdsResource;
-                try response_remove.append(arena, name);
-                total += 1;
-            } else try mutations.skip(entry);
+                } else if (action.number == 2 and action.wire_type == 2) {
+                    if (saw_action) return error.InvalidLdsResource;
+                    saw_action = true;
+                    if (try headerMutationOption(
+                        try rule.bytesValue(),
+                        limits.max_text_bytes,
+                    )) |mutation| {
+                        if (request) {
+                            try request_add.append(arena, mutation);
+                        } else {
+                            try response_add.append(arena, mutation);
+                        }
+                        total += 1;
+                    }
+                } else try rule.skip(action);
+            }
+            if (!saw_action) return error.InvalidLdsResource;
         }
     }
     return .{

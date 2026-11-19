@@ -24,6 +24,12 @@ pub fn headerMutation(allocator: std.mem.Allocator) ![]u8 {
     defer append.deinit();
     try append.number(1, 1);
     try request_option.bytes(2, append.data.items);
+    var request_append = Builder{ .allocator = allocator };
+    defer request_append.deinit();
+    try request_append.bytes(2, request_option.data.items);
+    var request_remove = Builder{ .allocator = allocator };
+    defer request_remove.deinit();
+    try request_remove.bytes(1, "x-remove");
 
     var response_header = Builder{ .allocator = allocator };
     defer response_header.deinit();
@@ -32,13 +38,19 @@ pub fn headerMutation(allocator: std.mem.Allocator) ![]u8 {
     var response_option = Builder{ .allocator = allocator };
     defer response_option.deinit();
     try response_option.bytes(1, response_header.data.items);
+    var response_append = Builder{ .allocator = allocator };
+    defer response_append.deinit();
+    try response_append.bytes(2, response_option.data.items);
+    var response_remove = Builder{ .allocator = allocator };
+    defer response_remove.deinit();
+    try response_remove.bytes(1, "x-resp-remove");
 
     var mutations = Builder{ .allocator = allocator };
     defer mutations.deinit();
-    try mutations.bytes(1, request_option.data.items);
-    try mutations.bytes(2, "x-remove");
-    try mutations.bytes(3, response_option.data.items);
-    try mutations.bytes(4, "x-resp-remove");
+    try mutations.bytes(1, request_append.data.items);
+    try mutations.bytes(1, request_remove.data.items);
+    try mutations.bytes(2, response_append.data.items);
+    try mutations.bytes(2, response_remove.data.items);
 
     var config = Builder{ .allocator = allocator };
     defer config.deinit();
