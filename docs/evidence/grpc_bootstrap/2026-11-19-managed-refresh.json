@@ -4,9 +4,9 @@
   "head": "d0bf4f5e",
   "gate": "managed xDS federation self-driving TLS material refresh",
   "source_sha256": {
-    "src/grpc/xds/control_plane.zig": "dc540c6a6456e8c6020dd6bdd4cbdff7f2330d242d78681d399fa8d11f3f175c",
+    "src/grpc/xds/control_plane.zig": "b3769bc20d0215b434b55cb7e3e34a32d7d9c90372baedb53e2cd5e31866a4da",
     "src/grpc/xds/runtime/managed.zig": "f5b1a74c1dc264e5ccbff0e892c5b644459cbb8acc812e6740dd7accba00d444",
-    "src/grpc/xds/runtime/managed/session.zig": "3378ceb54ebd5ab5fe70193ef4bb62f74a9c63c9d94250d4589820391c574cb8",
+    "src/grpc/xds/runtime/managed/session.zig": "04a6d6d86191d0fa07b29fdc1154cc79ceae9d8e38d53fc9a78fec4007ada55f",
     "src/grpc/xds/runtime/managed/tests.zig": "5717449d655fcb5065d16deb40634750b5f5f76c861b620085cc681324b4f829",
     "src/grpc/xds/control_plane_tests.zig": "411e2ced62e7729e97cefb4cd05b1ee218cced3ad4092021b4399417ef0f4c15",
     "docs/grpc_bootstrap.md": "db55a15ca372bbc43259c3c129708ba3a91894f4989047d0d401a01ff6f0ba16"

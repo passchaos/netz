@@ -680,7 +680,11 @@ The preceding decoded-message snapshot recorded 2.343x and 1.989x for the two
 advantage, but does not close large-message parity. The borrowed public Writer
 API still requires one caller-payload clone; the synchronous server response
 still stages a framed buffer, and first cross-DATA receive reassembly remains
-contiguous. Debug and ReleaseFast gRPC filters each pass 390/390, package tests
+contiguous. That receive path already uses one exact-size allocation whose
+ownership transfers to the consumer, so only the first-segment copy remains;
+a segmented payload model would change every decoder's message shape to remove
+one memcpy, which is not currently planned. Debug and ReleaseFast gRPC filters
+each pass 390/390, package tests
 pass 22/22, and the pinned grpc-cpp h2c/TLS matrix passes across compression,
 large messages, slow consumers, cancellation, deadlines and soak. Full raw
 rows, identities and failure contracts are in

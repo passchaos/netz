@@ -344,7 +344,7 @@ pub const ControlPlane = struct {
     fn rebindServerForClient(
         self: *ControlPlane,
         selected: usize,
-        client: *delta.Client,
+        client: anytype,
     ) Error!void {
         const source = try Source.create(self.allocator, self.bootstrap, self.servers[selected], self.source.node, self.source.request);
         errdefer source.release();
@@ -488,7 +488,7 @@ pub const ControlPlane = struct {
     /// channel. Returns false when refresh is disabled or not yet due.
     pub fn reloadClientIfDueWithDeadline(
         self: *ControlPlane,
-        client: *delta.Client,
+        client: anytype,
         deadline: std.Io.Clock.Timestamp,
     ) Error!bool {
         _ = try deadline_policy.usableAwake(self.io, deadline);
