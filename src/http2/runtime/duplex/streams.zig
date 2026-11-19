@@ -49,6 +49,7 @@ pub const ClientDuplexStream = struct {
     request_written: usize = 0,
     request_finished: bool = false,
     head_request: bool = false,
+    connect_request: bool = false,
     extended_connect: bool = false,
     response_head_seen: bool = false,
     response_finished: bool = false,
@@ -724,7 +725,14 @@ pub const ClientDuplexStream = struct {
             self.response_content_length = lookup.content_length;
             self.response_body_forbidden = responseForbidsBody(
                 status,
-                if (self.extended_connect) "CONNECT" else if (self.head_request) "HEAD" else "POST",
+                if (self.extended_connect)
+                    "CONNECT"
+                else if (self.connect_request)
+                    "CONNECT"
+                else if (self.head_request)
+                    "HEAD"
+                else
+                    "POST",
                 self.extended_connect,
             );
             if (status == 204 and lookup.content_length != null) {
@@ -736,7 +744,11 @@ pub const ClientDuplexStream = struct {
             {
                 return error.MessageTooLarge;
             }
-            if (end_stream) {
+            const traditional_connect =
+                self.connect_request and !self.extended_connect;
+            if (end_stream or
+                (traditional_connect and status >= 200 and status < 300))
+            {
                 if (!self.response_body_forbidden) {
                     try validateExpectedContentLength(
                         self.response_content_length,

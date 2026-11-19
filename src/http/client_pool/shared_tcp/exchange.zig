@@ -17,6 +17,14 @@ pub const Exchange = struct {
     body: std.ArrayList(u8) = .empty,
 
     pub fn init(connection: *runtime.Connection, target: []const u8, request: client.RequestOptions, until: std.Io.Clock.Timestamp) !Exchange {
+        // The shared aggregate path owns only the CONNECT response head. A
+        // request body or trailers would be tunnel bytes the caller cannot
+        // consume through this API.
+        if (std.mem.eql(u8, request.method, "CONNECT") and
+            (request.body.len != 0 or request.trailers.len != 0))
+        {
+            return error.InvalidContentLength;
+        }
         var stack: [mapping.max_stack_headers]http2.Hpack.HeaderField = undefined;
         var headers = try mapping.mapHttp2(connection.allocator, request.headers, &stack);
         defer headers.deinit(connection.allocator);

@@ -1538,11 +1538,12 @@ pub const Connection = struct {
         if (self.role != .client) return error.UnexpectedFrame;
         try self.synchronizePeerResetAdmissionUntil(deadline);
         self.last_peer_reset = null;
-        if (methodIsConnect(options.method)) {
-            return error.InvalidContentLength;
-        }
         var request_options = options;
         request_options.authority = self.resolveRequestAuthorityFromHeaders(request_options.authority, request_options.headers);
+        const method_is_connect = methodIsConnect(request_options.method);
+        if (method_is_connect and request_options.authority == null) {
+            return error.MissingPseudoHeader;
+        }
         const scheme = request_options.scheme orelse
             self.default_scheme orelse "https";
 
@@ -1568,14 +1569,18 @@ pub const Connection = struct {
             .name = ":method",
             .value = request_options.method,
         });
-        fields.appendAssumeCapacity(.{
-            .name = ":path",
-            .value = request_options.path,
-        });
-        fields.appendAssumeCapacity(.{
-            .name = ":scheme",
-            .value = scheme,
-        });
+        // Traditional HTTP/2 CONNECT omits :path and :scheme; its DATA
+        // frames are tunnel bytes rather than an HTTP request body.
+        if (!method_is_connect) {
+            fields.appendAssumeCapacity(.{
+                .name = ":path",
+                .value = request_options.path,
+            });
+            fields.appendAssumeCapacity(.{
+                .name = ":scheme",
+                .value = scheme,
+            });
+        }
         if (request_options.authority) |authority| {
             fields.appendAssumeCapacity(.{
                 .name = ":authority",
@@ -1597,14 +1602,19 @@ pub const Connection = struct {
         );
 
         const declared_length = try contentLength(fields.items);
-        const expected_length = request_options.body_length orelse
-            declared_length;
+        if (method_is_connect and (declared_length orelse 0) != 0) {
+            return error.InvalidContentLength;
+        }
+        const expected_length = if (method_is_connect)
+            null
+        else
+            request_options.body_length orelse declared_length;
         if (request_options.body_length) |body_length| {
             if (declared_length) |declared| {
                 if (declared != body_length) {
                     return error.InvalidContentLength;
                 }
-            } else {
+            } else if (!method_is_connect) {
                 var content_length_buffer: [32]u8 = undefined;
                 const value = std.fmt.bufPrint(
                     &content_length_buffer,
@@ -1625,13 +1635,21 @@ pub const Connection = struct {
         const stream_id = try self.reserveNextClientStreamId();
         var stream_owned = true;
         errdefer if (stream_owned) self.releaseLocalStream(stream_id);
-        try self.writeHeadersUntil(stream_id, fields.items, false, deadline);
+        // An aggregate CONNECT carries no tunnel bytes through this API, so
+        // close its request half at HEADERS. A streaming tunnel keeps the
+        // request side open and writes DATA later.
+        const end_stream = method_is_connect and
+            (request_options.body_length orelse 0) == 0 and
+            declared_length == null;
+        try self.writeHeadersUntil(stream_id, fields.items, end_stream, deadline);
         stream_owned = false;
         return .{
             .connection = self,
             .stream_id = stream_id,
             .expected_length = expected_length,
             .head_request = methodIsHead(request_options.method),
+            .connect_request = method_is_connect,
+            .body_finished = end_stream,
         };
     }
 

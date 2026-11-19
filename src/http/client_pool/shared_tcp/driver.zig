@@ -203,6 +203,15 @@ pub fn Driver(comptime State: type, comptime Pool: type, comptime Lease: type) t
                         continue;
                     };
                     if (response) |value| {
+                        // A successful traditional CONNECT turns the stream
+                        // into a tunnel. The aggregate caller owns only the
+                        // response head, so the connection must not return to
+                        // the idle pool for ordinary requests.
+                        if (std.mem.eql(u8, command.request.method, "CONNECT") and
+                            value.status >= 200 and value.status < 300)
+                        {
+                            self.discard_connection = true;
+                        }
                         self.finish(command, .{ .response = .{ .allocator = self.owner.allocator, .value = .{ .http2 = value } } });
                         progress = true;
                         continue;

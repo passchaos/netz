@@ -931,6 +931,9 @@ pub const RequestWriter = struct {
     stream_id: u31,
     expected_length: ?usize,
     head_request: bool,
+    /// Traditional CONNECT response semantics: a 2xx response is a tunnel
+    /// head rather than an HTTP body. Defaults keep test literals compatible.
+    connect_request: bool = false,
     written: usize = 0,
     body_finished: bool = false,
     completed: bool = false,
@@ -1455,6 +1458,7 @@ pub const RequestWriter = struct {
             .request_written = self.written,
             .request_finished = self.body_finished,
             .head_request = self.head_request,
+            .connect_request = self.connect_request,
         };
         self.completed = true;
         return duplex;
