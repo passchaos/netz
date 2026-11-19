@@ -66,6 +66,27 @@ pub fn readSome(
     );
 }
 
+/// Write as much as the socket accepts without looping. A partial write is
+/// reported to the caller so a shared receive owner can buffer the remainder
+/// and retry on its next turn instead of blocking the whole server.
+pub fn writeSome(
+    io: std.Io,
+    stream: net.Stream,
+    bytes: []const u8,
+    deadline: ?std.Io.Clock.Timestamp,
+) WriteError!usize {
+    if (deadline) |absolute| {
+        return writeSomeWithDeadline(io, stream, bytes, absolute);
+    }
+    return io.vtable.netWrite(
+        io.userdata,
+        stream.socket.handle,
+        bytes,
+        &.{""},
+        0,
+    );
+}
+
 pub fn writeAll(
     io: std.Io,
     stream: net.Stream,

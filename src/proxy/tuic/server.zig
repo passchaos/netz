@@ -15,26 +15,7 @@ const io_helpers = @import("../internal/io.zig");
 const quic = netz.quic;
 const net = std.Io.net;
 
-pub const Config = struct {
-    uuid: [16]u8,
-    password: []const u8,
-    identity: quic.tls.auth.ServerIdentity,
-    alpn_protocol: []const u8 = "h3",
-    acl: acl.Policy = .{},
-    /// Optional hot-reloadable ACL. Takes precedence over `acl`.
-    policy_store: ?*reload.Reloadable = null,
-    limits: limits.Options = .{},
-    connect_timeout: std.Io.Duration = .fromSeconds(10),
-    idle_timeout: std.Io.Duration = .fromSeconds(120),
-    auth_timeout: std.Io.Duration = .fromSeconds(10),
-    max_datagram_size: usize = 4096,
-    relay_buffer_size: usize = 16 * 1024,
-    /// Maximum concurrent UDP associations per QUIC connection.
-    max_assocs: usize = 64,
-    max_relays: usize = 64,
-    stats: ?*stats_mod.Stats = null,
-    rate_limiter: ?*rate_limit.Limiter = null,
-};
+pub const Config = @import("config.zig").Config;
 
 pub const Error = error{
     RateLimited,
@@ -139,43 +120,12 @@ pub const Server = struct {
         );
     }
 
+    /// Serve concurrent connections through the shared endpoint owner. The
+    /// pump thread owns the UDP socket and every established connection; TCP
+    /// relays use bounded queues and short async tasks for DNS/connect.
     pub fn serve(self: *Server) !void {
-        while (self.running.load(.acquire)) {
-            var established = self.acceptOne() catch continue;
-            const job = self.allocator.create(Job) catch {
-                established.deinit();
-                continue;
-            };
-            job.* = .{ .server = self, .established = established };
-            _ = self.active_jobs.fetchAdd(1, .monotonic);
-            const thread = std.Thread.spawn(.{}, Job.run, .{job}) catch {
-                _ = self.active_jobs.fetchSub(1, .release);
-                self.allocator.destroy(job);
-                job.established.deinit();
-                continue;
-            };
-            thread.detach();
-        }
+        return @import("shared/server.zig").serve(self);
     }
-
-    const Job = struct {
-        server: *Server,
-        established: quic.handshake.EstablishedConnection,
-
-        fn run(self: *Job) void {
-            const server = self.server;
-            defer _ = server.active_jobs.fetchSub(1, .release);
-            defer server.allocator.destroy(self);
-            defer self.established.deinit();
-            processEstablished(
-                server.allocator,
-                server.io,
-                &self.established,
-                server.config,
-                &server.limiter,
-            ) catch {};
-        }
-    };
 };
 
 const Relay = struct {

@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "date": "2026-11-19",
+  "head": "716b2b88",
+  "feature": "TUIC v5 shared-endpoint multi-connection server and sing-box interop gate",
+  "source_sha256": {
+    "src/proxy/tuic/shared/server.zig": "ed9e0d350e32c3f7a859b7492a64febc96aa461245bb25b2aa1c81926d7c6b9c",
+    "src/proxy/tuic/shared/relay.zig": "0f7e4253ff64bd90541d4a9b8ffecbe8bd7c777c3638380d35ce5cfe82b95cb9",
+    "src/proxy/tuic/shared/tests.zig": "6a5a885444528223d5f77728ae9828d2fb075bfcd99a9ee62bb8eb07ef8dc220",
+    "src/proxy/tuic/config.zig": "26bd87c2b940b6d88e8ec201b23ab3367046e9f043a8dd3d2636dbd323c38e6a",
+    "src/proxy/tuic/server.zig": "1db9ef8d0c24bcc1b2c34859a9740114b18263b1d546b832380bc960d2a45194",
+    "src/proxy/tuic/mod.zig": "2529dbb9aa3401c6624f2be85320624d8cf56fddce0d3dec37ca740871d57134",
+    "src/proxy/internal/io.zig": "842e56905d84d0e592d0f9f4659dc4ffc258a41f6138697033156507ad9efff5",
+    "tools/interop/tuic_server.zig": "94927fad1fae023dcb25556143d6f18600df2d8a793ed3f94241870d1654f01a",
+    "tools/interop/tuic_sing_box.sh": "d7daef4fc62d2729beb1c3dcd42b94dd909a598bf39e69cca6200093fdc8ae29",
+    "build/interop.zig": "0661285c7210d806979dbf539ef5e28126e80e6d7d4b49c841581dd2b73cc6e6",
+    "docs/proxy_parity.md": "cda659e8ccf274685a4e5434a5aa4e6979c1865173654b813667f9283e7a6a3a"
+  },
+  "commands": {
+    "unit": "zig build test-lib -Dtest-filter=\"TUIC shared endpoint\" --summary all",
+    "gate": "SING_BOX_BIN=/tmp/sing-box-1.14.4/sing-box TUIC_UDP_RELAY_MODE=<native|quic> tools/interop/tuic_sing_box.sh zig-out/bin/netz-tuic-server"
+  },
+  "results": {
+    "unit": {
+      "passed": 215,
+      "total": 215,
+      "failed": 0
+    },
+    "gate": {
+      "sing_box": "1.14.4",
+      "udp_relay_modes": ["native", "quic"],
+      "runs_per_mode": 3,
+      "failures": 0,
+      "tcp_bytes": 20,
+      "udp_bytes": 17
+    }
+  },
+  "behavior": "The TUIC server now runs on quic.endpoint_server.Server: one pump owns the UDP socket and every established connection, CID routing replaces the per-connection blocking receive, DNS/TCP connect work runs on two bounded worker threads, and TCP relays publish chunks through bounded queues with short partial-write turns. Two concurrent connections are covered by an in-repo test, and sing-box 1.14.4 verifies TCP plus SOCKS5 UDP associate in both native DATAGRAM and QUIC uni-stream UDP relay modes.",
+  "conclusion": "The TUIC multi-connection gate is green against an independent client. Hysteria v3 still uses the older blocking receive shape and needs the same port before it can claim an equivalent gate."
+}

@@ -15,7 +15,7 @@ modules; it is not duplicated here.
 | Trojan | `src/proxy/trojan/` | TLS + password request codec and server relay |
 | VLESS | `src/proxy/vless/` | Request codec and TLS, WebSocket, HTTP/2, QUIC, and gRPC server transports |
 | VMess | `src/proxy/vmess/` | AEAD wire codec, request/body codecs, and TLS, WebSocket, HTTP/2, QUIC, and gRPC server transports |
-| TUIC v5 | `src/proxy/tuic/` | QUIC CONNECT codec, ACL integration, and server relay |
+| TUIC v5 | `src/proxy/tuic/` | QUIC CONNECT codec, ACL integration, and a shared-endpoint multi-connection server relay (TCP plus native/quic UDP modes) |
 | Hysteria v3 | `src/proxy/hysteria/` | CONNECT-over-QUIC codec, ACL integration, and server relay |
 
 ## Shared runtime primitives
@@ -70,18 +70,24 @@ not the `ChunkMasking` stream-body option, so every real AES/chacha client
 failed on the first body chunk. The body codec now applies the SHAKE128 length
 mask and accepts zero-length termination chunks.
 
+`zig build interop-tuic-sing-box` adds an independent TUIC v5 gate. A sing-box
+1.14.x SOCKS5 inbound forwards through its TUIC outbound to the netz QUIC
+server. The gate requires the exact HTTP body over a TCP relay and a UDP
+echo through the SOCKS5 UDP associate in both `udp_relay_mode=native` (QUIC
+DATAGRAM) and `udp_relay_mode=quic` (unidirectional stream). The server is
+driven by the shared `quic.endpoint_server.Server` pump, so two concurrent
+connections no longer contend for the single UDP receive owner.
+
 Open verification work:
 
-- no independent peer gate for TUIC or Hysteria. Building the TUIC server
-  exposed and fixed latent compile errors (const endpoint and ignored
-  `fetchAdd`/`fetchSub` results), and a single-connection `serveOne` API now
-  supports focused tests. A multi-connection gate still needs both proxy
-  servers ported onto the shared `quic.endpoint_server.Server` receive owner:
-  its dispatcher already routes established packets by CID, while the current
-  per-connection blocking `receiveStreamWithTimeout` shape contends with the
-  accept loop for the single UDP socket. TUIC and Hysteria v3 share this shape,
-  so the port should cover both before either gate claims multi-connection
-  interop;
+- Hysteria v3 still lacks an independent peer gate. TUIC v5 now has one:
+  `src/proxy/tuic/shared/` moves the server onto the shared
+  `quic.endpoint_server.Server` receive owner, serves multiple concurrent
+  connections from one pump, and passes sing-box 1.14.4 in both
+  `udp_relay_mode=native` and `udp_relay_mode=quic` (TCP plus SOCKS5 UDP
+  associate). Hysteria v3 keeps the older per-connection blocking receive
+  shape and should be ported to the same owner before it claims a
+  multi-connection gate;
 - no fixed-binary performance baseline against a reference proxy
   implementation.
 

@@ -7,4 +7,5 @@ pub const server = @import("server.zig");
 test {
     _ = protocol;
     _ = server;
+    _ = @import("shared/tests.zig");
 }

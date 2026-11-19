@@ -107,6 +107,26 @@ pub fn addAll(
         "interop-vmess-sing-box",
         "Verify the netz VMess AEAD TLS server against a sing-box client",
     ).dependOn(&vmess_gate.step);
+    const tuic_server = b.addExecutable(.{
+        .name = "netz-tuic-server",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/interop/tuic_server.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    b.step(
+        "build-tuic-server",
+        "Build the standalone TUIC v5 QUIC server",
+    ).dependOn(&b.addInstallArtifact(tuic_server, .{}).step);
+    const tuic_gate = b.addSystemCommand(&.{"tools/interop/tuic_sing_box.sh"});
+    tuic_gate.addArtifactArg(tuic_server);
+    if (b.args) |args| tuic_gate.addArgs(args);
+    b.step(
+        "interop-tuic-sing-box",
+        "Verify the netz TUIC v5 server against a sing-box client",
+    ).dependOn(&tuic_gate.step);
     const mqtt_mtls_server = b.addExecutable(.{
         .name = "netz-mqtt-mtls-server",
         .root_module = b.createModule(.{
