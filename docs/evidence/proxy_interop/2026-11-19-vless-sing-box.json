@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "date": "2026-11-19",
+  "feature": "VLESS TLS/WS independent-peer interop",
+  "decision": "gate retained; fixed a missing VLESS response header",
+  "head": "128d71757984263e89e53c216b1ef8f0153ec2b7",
+  "peer": "sing-box 1.14.4 linux-amd64",
+  "command": "SING_BOX_BIN=/tmp/sing-box-1.14.4/sing-box zig build interop-vless-sing-box -Doptimize=ReleaseFast",
+  "role_pair": "sing-box-client+netz-server",
+  "transports": ["tls", "ws"],
+  "uuid": "00000000-0000-4000-8000-000000000001",
+  "target": "python3 -m http.server on 127.0.0.1:18448",
+  "result": "exact 21-byte body through SOCKS5 -> sing-box VLESS -> netz server -> HTTP target for both transports",
+  "bug_found": "src/proxy/vless/server.zig parsed requests but never wrote the VLESS response prefix (version 0 + empty addon); sing-box failed with 'unknown version: 72' because the first HTTP byte was read as the response version",
+  "complete": true
+}

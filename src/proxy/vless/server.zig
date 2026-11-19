@@ -65,7 +65,7 @@ pub const Server = struct {
         address: net.IpAddress,
         config: Config,
     ) !Server {
-        const listener = try address.listen(io, .{ .reuse_address = true });
+        var listener = try address.listen(io, .{ .reuse_address = true });
         errdefer listener.deinit(io);
         var limiter = try limits.ConnectionLimiter.init(
             allocator,
@@ -108,9 +108,9 @@ pub const Server = struct {
                 continue;
             };
             job.* = .{ .server = self, .stream = stream, .peer = peer };
-            self.active_jobs.fetchAdd(1, .monotonic);
+            _ = self.active_jobs.fetchAdd(1, .monotonic);
             const thread = std.Thread.spawn(.{}, Job.run, .{job}) catch {
-                self.active_jobs.fetchSub(1, .release);
+                _ = self.active_jobs.fetchSub(1, .release);
                 self.allocator.destroy(job);
                 stream.close(self.io);
                 continue;
@@ -126,13 +126,16 @@ pub const Server = struct {
 
         fn run(self: *Job) void {
             const server = self.server;
-            defer server.active_jobs.fetchSub(1, .release);
+            defer _ = server.active_jobs.fetchSub(1, .release);
             defer server.allocator.destroy(self);
             var connection = tls_server.Connection.accept(
                 server.allocator,
                 server.io,
                 self.stream,
-                server.config.tls,
+                server.config.tls orelse {
+                    self.stream.close(server.io);
+                    return;
+                },
             ) catch {
                 self.stream.close(server.io);
                 return;
@@ -215,6 +218,10 @@ pub fn processTlsConnection(
 
     var address_storage: [1 + 1 + 255 + 16]u8 = undefined;
     const decoded = try readAddress(connection, &address_storage, port);
+
+    // VLESS response header: version 0 and an empty addon. Real clients
+    // consume this prefix before the relayed payload.
+    try writeAll(connection, &.{ 0, 0 });
 
     switch (command) {
         .tcp => {
@@ -343,6 +350,10 @@ fn readExact(connection: anytype, output: []u8) !void {
         if (count == 0) return error.TruncatedRequest;
         offset += count;
     }
+}
+
+fn writeAll(connection: anytype, bytes: []const u8) !void {
+    try connection.writeAll(bytes);
 }
 
 test "VLESS server rejects an unsupported command before connecting" {

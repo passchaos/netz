@@ -58,6 +58,11 @@ SHADOWSOCKS_METHOD=aes-128-gcm zig build interop-shadowsocks-sing-box -Doptimize
 # both the plain TLS and WebSocket transports.
 zig build interop-trojan-sing-box -Doptimize=ReleaseFast
 TROJAN_TRANSPORT=ws zig build interop-trojan-sing-box -Doptimize=ReleaseFast
+# Verify the netz VLESS TLS server against an independent sing-box client.
+# The gate uses a fixed UUID and the hashed password-free VLESS handshake, and
+# requires the exact body over both the plain TLS and WebSocket transports.
+zig build interop-vless-sing-box -Doptimize=ReleaseFast
+VLESS_TRANSPORT=ws zig build interop-vless-sing-box -Doptimize=ReleaseFast
 # Requires h2spec 2.6.0 on PATH, or H2SPEC=/absolute/path/to/h2spec. The gate
 # rejects other reported versions, always enables strict mode, and rejects
 # empty, skipped, or failed runs. Supplying H2SPEC_SOURCE_ROOT and

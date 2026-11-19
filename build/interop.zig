@@ -67,6 +67,26 @@ pub fn addAll(
         "interop-trojan-sing-box",
         "Verify the netz Trojan TLS server against a sing-box client",
     ).dependOn(&trojan_gate.step);
+    const vless_server = b.addExecutable(.{
+        .name = "netz-vless-server",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/interop/vless_server.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    b.step(
+        "build-vless-server",
+        "Build the standalone VLESS TLS server",
+    ).dependOn(&b.addInstallArtifact(vless_server, .{}).step);
+    const vless_gate = b.addSystemCommand(&.{"tools/interop/vless_sing_box.sh"});
+    vless_gate.addArtifactArg(vless_server);
+    if (b.args) |args| vless_gate.addArgs(args);
+    b.step(
+        "interop-vless-sing-box",
+        "Verify the netz VLESS TLS server against a sing-box client",
+    ).dependOn(&vless_gate.step);
 
     const mqtt_mtls_server = b.addExecutable(.{
         .name = "netz-mqtt-mtls-server",
