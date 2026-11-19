@@ -45,9 +45,17 @@ requires the exact body for `aes-256-gcm`, `aes-128-gcm`, and
 bug in the proxy deadline read path: `io.operateTimeout` race groups panic under
 zio, so deadline reads now use `std.Io.Select` with a timeout arm.
 
+`zig build interop-trojan-sing-box` adds an independent Trojan gate. A
+sing-box 1.14.x SOCKS5 inbound forwards through its Trojan outbound to the netz
+TLS server, which relays to a loopback HTTP target; the gate requires the exact
+body over both the plain TLS and WebSocket transports. Building the standalone
+server also fixed two latent compile errors in `src/proxy/trojan/server.zig`
+(a const listener and ignored `fetchAdd`/`fetchSub` results) that the codec-only
+tests had not instantiated.
+
 Open verification work:
 
-- no independent peer gate for Trojan, VLESS, VMess, TUIC, or Hysteria;
+- no independent peer gate for VLESS, VMess, TUIC, or Hysteria;
 - no fixed-binary performance baseline against a reference proxy
   implementation.
 

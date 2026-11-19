@@ -65,7 +65,7 @@ pub const Server = struct {
         config: Config,
     ) !Server {
         if (config.password.len == 0) return error.InvalidPassword;
-        const listener = try address.listen(io, .{ .reuse_address = true });
+        var listener = try address.listen(io, .{ .reuse_address = true });
         errdefer listener.deinit(io);
         var limiter = try limits.ConnectionLimiter.init(
             allocator,
@@ -108,9 +108,9 @@ pub const Server = struct {
                 continue;
             };
             job.* = .{ .server = self, .stream = stream, .peer = peer };
-            self.active_jobs.fetchAdd(1, .monotonic);
+            _ = self.active_jobs.fetchAdd(1, .monotonic);
             const thread = std.Thread.spawn(.{}, Job.run, .{job}) catch {
-                self.active_jobs.fetchSub(1, .release);
+                _ = self.active_jobs.fetchSub(1, .release);
                 self.allocator.destroy(job);
                 stream.close(self.io);
                 continue;
@@ -126,7 +126,7 @@ pub const Server = struct {
 
         fn run(self: *Job) void {
             const server = self.server;
-            defer server.active_jobs.fetchSub(1, .release);
+            defer _ = server.active_jobs.fetchSub(1, .release);
             defer server.allocator.destroy(self);
             var connection = tls_server.Connection.accept(
                 server.allocator,

@@ -47,6 +47,26 @@ pub fn addAll(
         "interop-shadowsocks-sing-box",
         "Verify the netz Shadowsocks AEAD server against a sing-box client",
     ).dependOn(&shadowsocks_gate.step);
+    const trojan_server = b.addExecutable(.{
+        .name = "netz-trojan-server",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/interop/trojan_server.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    b.step(
+        "build-trojan-server",
+        "Build the standalone Trojan TLS server",
+    ).dependOn(&b.addInstallArtifact(trojan_server, .{}).step);
+    const trojan_gate = b.addSystemCommand(&.{"tools/interop/trojan_sing_box.sh"});
+    trojan_gate.addArtifactArg(trojan_server);
+    if (b.args) |args| trojan_gate.addArgs(args);
+    b.step(
+        "interop-trojan-sing-box",
+        "Verify the netz Trojan TLS server against a sing-box client",
+    ).dependOn(&trojan_gate.step);
 
     const mqtt_mtls_server = b.addExecutable(.{
         .name = "netz-mqtt-mtls-server",

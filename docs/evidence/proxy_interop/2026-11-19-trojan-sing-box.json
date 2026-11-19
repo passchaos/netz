@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "date": "2026-11-19",
+  "feature": "Trojan TLS/WS independent-peer interop",
+  "decision": "gate retained; fixed two latent Trojan server compile errors",
+  "head": "128d71757984263e89e53c216b1ef8f0153ec2b7",
+  "peer": "sing-box 1.14.4 linux-amd64",
+  "command": "SING_BOX_BIN=/tmp/sing-box-1.14.4/sing-box zig build interop-trojan-sing-box -Doptimize=ReleaseFast",
+  "role_pair": "sing-box-client+netz-server",
+  "transports": ["tls", "ws"],
+  "password_mode": "hashed (hex SHA-224)",
+  "target": "python3 -m http.server on 127.0.0.1:18445",
+  "result": "exact 22-byte body through SOCKS5 -> sing-box Trojan -> netz server -> HTTP target for both transports",
+  "bug_found": "src/proxy/trojan/server.zig used a const listener with a mutating deinit and ignored fetchAdd/fetchSub results; the standalone server had never been instantiated by codec-only tests",
+  "complete": true
+}
