@@ -1,0 +1,12 @@
+record=verified protocol=tuic transport=quic udp_relay_mode=native role_pair=sing-box-client+netz-server tcp_bytes=20 udp_bytes=17 complete=true
+Build Summary: 8/8 steps succeeded
+interop-tuic-sing-box success
++- run tools/interop/tuic_sing_box.sh success 215ms
+   +- compile exe netz-tuic-server ReleaseFast native success 2m MaxRSS:3G
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal ReleaseFast native cached 8ms MaxRSS:40M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 ReleaseFast native cached 8ms MaxRSS:39M
+      +- compile obj vort-br-record-optimal ReleaseFast native (reused)
+      +- compile obj vort-zstd-huffman-x2 ReleaseFast native (reused)
+      +- options cached

@@ -4,9 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import io
+import json
 from pathlib import Path
 import shutil
 import subprocess
+import tarfile
 import tempfile
 
 
@@ -15,6 +18,7 @@ def main() -> int:
     parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[4])
     parser.add_argument("--zig", default="zig")
     parser.add_argument("--prepare-only", action="store_true")
+    parser.add_argument("--revision", help="Audited source revision; defaults to the recorded evidence head")
     args = parser.parse_args()
     repo = args.repo.resolve()
     fixture = Path(__file__).resolve().parent
@@ -22,10 +26,17 @@ def main() -> int:
     isolated = cohort / "netz"
     isolated.mkdir()
 
-    for directory in ("src", "build"):
-        shutil.copytree(repo / directory, isolated / directory)
-    for name in ("build.zig", "build.zig.zon"):
-        shutil.copy2(repo / name, isolated / name)
+    # The ownership probe intentionally forces the original sender's refusal
+    # before it reaches a QUIC endpoint. Replaying it against a changed sender
+    # would violate that fixture's assumptions, so always use a Git snapshot.
+    recorded_head = json.loads((fixture / "evidence.json").read_text())["head"]
+    revision = args.revision or recorded_head
+    archive = subprocess.run(
+        ["git", "-C", str(repo), "archive", revision, "src", "build", "build.zig", "build.zig.zon"],
+        check=True, stdout=subprocess.PIPE,
+    ).stdout
+    with tarfile.open(fileobj=io.BytesIO(archive)) as sources:
+        sources.extractall(isolated, filter="data")
     for name in ("tools", "examples", "test", "docs", "benchmarks", "zig-pkg"):
         if (repo / name).exists():
             (isolated / name).symlink_to(repo / name, target_is_directory=True)
@@ -48,6 +59,7 @@ def main() -> int:
     build.write_text(source.replace(root_entry, 'b.path("src/audit_review.zig")', 1))
 
     print(f"Isolated source: {isolated}", flush=True)
+    print(f"Audited source revision: {revision}", flush=True)
     print("Only visibility and the test root change in this copy.", flush=True)
     if args.prepare_only:
         return 0

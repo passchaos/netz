@@ -96,3 +96,36 @@ Open verification work:
 
 Until an independent Hysteria v3 peer exists, its claims are limited to the
 in-repo client/server tests.
+
+## Relay ownership, packet sizing and rate boundaries
+
+The TUIC/Hysteria shared servers now use one FIFO owner for outbound TCP
+chunks. It retains an unsent chunk and cursor across backpressure, releases
+storage after complete commitment, and preserves queued DATA/FIN during
+teardown. Each send queries exact protected packet length at the current packet
+number and commits only the socket-visible prefix. Destination-connect input
+retains its small allocation-free buffer and grows within
+`max_pending_stream_bytes` (default 256 KiB); asynchronous domain targets own
+their host bytes independently of that buffer.
+
+Hysteria rate buckets retain fractional byte credit and use wide arithmetic.
+`rate_burst_bytes` (default 64 KiB) bounds bursts independently of the average
+rate. Shared and single-connection writers charge actual committed TCP bytes
+and retain/refund credit on refusal, timeout or cancellation. Atomic UDP output
+larger than a configured finite burst is discarded rather than retained forever.
+
+```sh
+zig build test-proxy-queues --summary all
+zig build test-proxy -Dtest-filter='shared endpoint' --summary all
+zig build test-proxy -Dtest-filter='Hysteria negotiated maximum' --summary all
+zig build test-proxy -Dtest-filter='Hysteria single connection' --summary all
+```
+
+Regression cases cover concurrent 16/64-KiB TUIC bodies, 4/64-KiB Hysteria
+bodies under a 512-byte burst, maximum u64 wire rates on both Hysteria runtime
+paths, first/middle/last/FIN refusal, protected-but-unsent packet numbers,
+socket-visible output followed by an error, and packet-number width changes.
+The sing-box gate additionally requires an exact 128-KiB TCP response before
+its UDP exchange. These are correctness and ownership gates; the fair-scheduler
+and reusable-storage performance work remains tracked in
+[the optimization backlog](architecture/optimization-backlog.md).

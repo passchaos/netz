@@ -1,0 +1,23 @@
+Build Summary: 13/13 steps succeeded; 225/225 tests passed
+test-proxy-queues success
++- run test 59 pass (59 total) 11ms MaxRSS:15M
+   +- compile test ReleaseSafe native success 24s MaxRSS:1G
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal ReleaseSafe native success 14s MaxRSS:477M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 ReleaseSafe native success 14s MaxRSS:467M
+      +- compile obj vort-br-record-optimal ReleaseSafe native (reused)
+      +- compile obj vort-zstd-huffman-x2 ReleaseSafe native (reused)
+      +- options cached
+      +- options cached
+test-proxy success
++- run test 166 pass (166 total) 15s MaxRSS:19M
+   +- compile test ReleaseSafe native success 3m MaxRSS:4G
+      +- WriteFile (reused)
+      +- compile obj vort-br-record-optimal ReleaseSafe native (reused)
+      +- WriteFile (reused)
+      +- compile obj vort-zstd-huffman-x2 ReleaseSafe native (reused)
+      +- compile obj vort-br-record-optimal ReleaseSafe native (reused)
+      +- compile obj vort-zstd-huffman-x2 ReleaseSafe native (reused)
+      +- options success
+      +- options (reused)

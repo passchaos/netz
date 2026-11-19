@@ -22,6 +22,23 @@ zig build verify-release-source
 zig build verify-evidence
 ```
 
+Focused protocol gates use independently compiled roots. Their default filter
+selects the protocol namespace, and an explicit filter must match at least one
+named test owned by that protocol. Imported dependency or aggregator tests
+cannot satisfy this check:
+
+```sh
+zig build test-proxy-queues -Doptimize=ReleaseSafe --summary all
+zig build test-proxy -Dtest-filter='Hysteria shared endpoint' --summary all
+zig build test-http2 -Dtest-filter='complete request' --summary all
+```
+
+The corresponding roots are `test-http`, `test-http1`, `test-http2`,
+`test-http3`, `test-quic`, `test-grpc`, `test-mqtt`, `test-websocket`,
+`test-webtransport`, `test-tls`, `test-vpn`, and `test-mesh`. Use the focused
+roots for iteration and retain `test-lib`, `test-package`, `test-compile` and
+the complete `test` gate for their documented repository-wide scopes.
+
 Runnable examples are under `examples/` and are wired into the build:
 
 ```sh

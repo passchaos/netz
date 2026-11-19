@@ -25,9 +25,13 @@ pub const Config = struct {
     max_datagram_size: usize = 4096,
     relay_buffer_size: usize = 16 * 1024,
     max_relays: usize = 64,
+    /// Per-stream bytes retained while the destination connection is pending.
+    max_pending_stream_bytes: usize = 256 * 1024,
     max_assocs: usize = 64,
     send_bps: u64 = 0,
     recv_bps: u64 = 0,
+    /// Independent byte burst bound for negotiated finite bandwidth rates.
+    rate_burst_bytes: u64 = 64 * 1024,
     stats: ?*stats_mod.Stats = null,
     rate_limiter: ?*rate_limit.Limiter = null,
 };

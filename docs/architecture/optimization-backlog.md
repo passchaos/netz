@@ -4,7 +4,8 @@ Audited baseline: `425a9e1c99052ff393fa6a920452f8f9f54a8d9d`, branch
 `optimize/audit-batch-1`, Zig 0.16.0, Linux x86_64. This is an implementation
 and evidence review, with isolated boundary reproductions. It does not claim
 an exhaustive line-by-line review or a new full-library/performance result.
-The production implementation is unchanged by this review.
+The opening findings describe that audit baseline. Implementation progress is
+recorded below, with separate acceptance evidence for each completed batch.
 
 The most valuable next work is proxy relay correctness, followed by endpoint
 fairness and reusable relay storage. Several codec paths have already received
@@ -14,7 +15,7 @@ audit without introducing another reader or changing public import paths.
 
 ## Priority queue
 
-All entries are open. P0 means a confirmed correctness defect; P1 means a
+P0 means a confirmed correctness defect; P1 means a
 common-path integration defect or a resource/fairness concern; P2 means an
 engineering or validation improvement; P3 means a less common optimization.
 An observed mechanism is distinguished from an unmeasured performance benefit.
@@ -30,6 +31,29 @@ An observed mechanism is distinguished from an unmeasured performance benefit.
 | R7 | P2 | Unify dependency pins and distinguish current from historical evidence | Local/CI revisions and evidence audit measured |
 | R8 | P2 | Complete independent interop and performance coverage | Current parity documents and latest recorded runs inspected |
 | R9 | P3 | Offer reusable scratch for deep retained filters | Allocation fallback inspected; workload importance unmeasured |
+
+### Implementation progress
+
+| Item | Current state |
+| --- | --- |
+| R1 | Shared FIFO owner implemented; first/middle/last/FIN refusal, fatal send and teardown regressions pass. Batch gates complete; acceptance evidence recorded below. |
+| R2 | Wide/fractional rate accounting, independent burst limits and committed-prefix charging implemented; shared and single-connection TCP/UDP maximum-rate regressions pass. Batch gates complete; acceptance evidence recorded below. |
+| R3 | Exact packet-sized cursor and bounded pre-connect input implemented; both proxy large-body regressions and real socket-prefix/packet-number-width tests pass. Batch gates complete; acceptance evidence recorded below. |
+| R4 | In progress: persistent target-writer owner prepared. Integration, fair ready scheduling and mixed hot/idle measurements remain pending. |
+| R5 | Pending: reusable relay blocks and allocation/peak-memory/throughput measurements. |
+| R6 | Focused protocol roots and a no-matching-test guard implemented. Owner, package-test and build-registration extraction remains pending. |
+| R7 | Historical reproducer now replays the audited Git revision. Shared dependency pins and current-evidence index remain pending. |
+| R8 | Independent TUIC 128-KiB body and native/quic UDP modes verified. Remaining peer gates, workload matrices and profiles are pending. |
+| R9 | Pending: caller-owned/reusable deep-filter scratch and comparative telemetry. |
+
+R1-R3 implementation acceptance is in
+[the relay evidence](../evidence/proxy_relay/2026-11-19/evidence.json): 225/225
+ReleaseSafe component/proxy tests, six final-source scenarios (55/55 runner
+tests including aggregators), and an exact 128-KiB response plus UDP in both
+independent sing-box modes. The complete repository gate remains part of the
+final R1-R9 audit.
+
+The original R1-R9 scope and acceptance requirements below remain active.
 
 ## R1: relay batches lose ownership under backpressure
 

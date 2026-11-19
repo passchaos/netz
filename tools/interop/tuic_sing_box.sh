@@ -32,6 +32,11 @@ cleanup() {
 trap cleanup EXIT
 
 printf 'netz-tuic-interop-ok\n' >"$work/test.txt"
+python3 - "$work/large.bin" <<'PYFILE'
+from pathlib import Path
+import sys
+Path(sys.argv[1]).write_bytes(bytes(range(256)) * 512)
+PYFILE
 (cd "$work" && exec python3 -m http.server 18451 --bind 127.0.0.1 >/dev/null 2>&1) &
 http_pid=$!
 
@@ -98,6 +103,10 @@ if [[ $body != "$expected" ]]; then
   exit 1
 fi
 
+curl -sS --max-time 15 --socks5-hostname 127.0.0.1:18450 \
+  http://127.0.0.1:18451/large.bin -o "$work/large.reply"
+cmp "$work/large.bin" "$work/large.reply"
+
 cat >"$work/socks_udp.py" <<'PY'
 import socket
 import struct
@@ -133,4 +142,4 @@ if [[ $udp_body != "udp-ok" ]]; then
   exit 1
 fi
 
-echo "record=verified protocol=tuic transport=quic udp_relay_mode=$udp_mode role_pair=sing-box-client+netz-server tcp_bytes=${#expected} udp_bytes=17 complete=true"
+echo "record=verified protocol=tuic transport=quic udp_relay_mode=$udp_mode role_pair=sing-box-client+netz-server tcp_bytes=${#expected} large_tcp_bytes=131072 udp_bytes=17 complete=true"

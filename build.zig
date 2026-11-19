@@ -11,6 +11,7 @@ const websocket = @import("build/websocket.zig");
 const quic = @import("build/quic.zig");
 const webtransport = @import("build/webtransport.zig");
 const protocols = @import("build/protocols.zig");
+const focused_tests = @import("build/testing/focused.zig");
 
 const required_zig_version = "0.16.0";
 const package_version = @import("build.zig.zon").version;
@@ -142,6 +143,7 @@ pub fn build(b: *std.Build) void {
         "Compile and run the Netz library unit tests",
     );
     test_lib_step.dependOn(&run_lib_tests.step);
+    focused_tests.add(b, target, optimize, netz_mod, test_filters);
 
     const package_tests = b.addTest(.{
         .root_module = b.createModule(.{

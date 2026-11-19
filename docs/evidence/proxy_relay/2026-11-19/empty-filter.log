@@ -1,0 +1,24 @@
+test-proxy-queues
++- run test 4 pass, 1 fail (5 total)
+error: 'test_scope.test_0' failed:
+       focused suite proxy_queues: no named protocol test matches the requested filters
+       /home/passchaos/project-z/netz/src/test_scope.zig:40:9: 0x12650aa in test_0 (test_scope.zig)
+               return error.NoMatchingProtocolTests;
+               ^
+failed command: ./.zig-cache/o/8e5163087a176f5cc98e7218a48f54b9/test --cache-dir=./.zig-cache --seed=0x644b7d90 --listen=-
+
+Build Summary: 7/9 steps succeeded (1 failed); 4/5 tests passed (1 failed)
+test-proxy-queues transitive failure
++- run test 4 pass, 1 fail (5 total)
+   +- compile test Debug native success 587ms MaxRSS:418M
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 7ms MaxRSS:39M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 6ms MaxRSS:39M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options success
+      +- options cached
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/a184208afbe19f55385bea633beb7a13/build /home/passchaos/Temp/zig-x86_64-linux-0.16.0/zig /home/passchaos/Temp/zig-x86_64-linux-0.16.0/lib /home/passchaos/project-z/netz .zig-cache /home/passchaos/.cache/zig --seed 0x644b7d90 -Z07fa207e2412e182 test-proxy-queues -Dtest-filter=__netz_no_matching_test__ --summary all

@@ -1,0 +1,12 @@
+Build Summary: 9/9 steps succeeded; 51/51 tests passed
+test-proxy success
++- run test 51 pass (51 total) 6s MaxRSS:34M
+   +- compile test Debug native success 26s MaxRSS:1G
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 6ms MaxRSS:39M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 7ms MaxRSS:39M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options success
+      +- options cached

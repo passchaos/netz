@@ -17,6 +17,8 @@ const reload = @import("../../runtime/reload.zig");
 const destination = @import("../../runtime/destination.zig");
 const byte_bucket = @import("../../internal/byte_bucket.zig");
 const relay_mod = @import("../../internal/relay_queue.zig");
+const pending_input = @import("../../internal/relay_queue/pending_input.zig");
+const stream_sender = @import("../../internal/relay_queue/stream_send.zig");
 
 const quic = netz.quic;
 const Relay = relay_mod.Relay;
@@ -25,14 +27,12 @@ const max_events = 32;
 const max_fragments: u8 = 16;
 const max_fragment_entries = 64;
 const fragment_idle_ns: i64 = 5 * std.time.ns_per_s;
-const pending_buffer_size = 2048;
 const inbox_capacity = 16;
 const assoc_pending_sends = 8;
 
 const Pending = struct {
     stream_id: u64 = 0,
-    buffer: [pending_buffer_size]u8 = undefined,
-    used: usize = 0,
+    input: pending_input.Buffer = .{},
     active: bool = false,
     connecting: bool = false,
     command_end: usize = 0,
@@ -401,12 +401,14 @@ pub const Connection = struct {
             .peer = peer,
             .created_ns = now,
             .last_activity_ns = now,
-            .send_bucket = byte_bucket.ByteBucket.init(
+            .send_bucket = byte_bucket.ByteBucket.initWithBurst(
                 pump.config.send_bps,
+                pump.config.rate_burst_bytes,
                 now,
             ),
-            .recv_bucket = byte_bucket.ByteBucket.init(
+            .recv_bucket = byte_bucket.ByteBucket.initWithBurst(
                 pump.config.recv_bps,
+                pump.config.rate_burst_bytes,
                 now,
             ),
             .datagram_buffer = datagram_buffer,
@@ -447,6 +449,7 @@ pub const Connection = struct {
         for (&self.fragments) |*fragment| {
             fragment.deinit(self.pump.allocator);
         }
+        for (&self.pending) |*pending| pending.input.deinit(self.pump.allocator);
         self.pump.allocator.free(self.datagram_buffer);
         if (self.pump.config.stats) |value| value.connectionClosed();
         self.pump.limiter.release(self.peer);
@@ -483,6 +486,16 @@ pub const Connection = struct {
                     ready.tcp.close(self.pump.io);
                     return;
                 }
+                if (self.relays.items.len >= self.pump.config.max_relays) {
+                    ready.tcp.close(self.pump.io);
+                    self.failPending(pending);
+                    return;
+                }
+                self.relays.ensureUnusedCapacity(self.pump.allocator, 1) catch {
+                    ready.tcp.close(self.pump.io);
+                    self.failPending(pending);
+                    return;
+                };
                 const relay = Relay.create(
                     self.pump.allocator,
                     self.pump.io,
@@ -495,16 +508,11 @@ pub const Connection = struct {
                     self.failPending(pending);
                     return;
                 };
-                if (self.relays.items.len >= self.pump.config.max_relays) {
-                    relay.deinit();
-                    self.failPending(pending);
-                    return;
-                }
                 relay.send_offset = pending.response_len;
-                try self.relays.append(self.pump.allocator, relay);
-                if (pending.used > pending.command_end) {
+                self.relays.appendAssumeCapacity(relay);
+                if (pending.input.len > pending.command_end) {
                     relay.queueInbound(
-                        pending.buffer[pending.command_end..pending.used],
+                        pending.input.bytes()[pending.command_end..pending.input.len],
                     ) catch {
                         relay.deinit();
                         _ = self.relays.pop();
@@ -514,7 +522,7 @@ pub const Connection = struct {
                 }
                 if (pending.fin) relay.quic_done.store(true, .release);
                 pending.active = false;
-                pending.used = 0;
+                pending.input.deinit(self.pump.allocator);
                 pending.connecting = false;
                 pending.fin = false;
                 self.touch();
@@ -529,9 +537,9 @@ pub const Connection = struct {
 
     fn failPending(self: *Connection, pending: *Pending) void {
         const stream_id = pending.stream_id;
-        const final_size = pending.used;
+        const final_size = pending.response_len;
         pending.active = false;
-        pending.used = 0;
+        pending.input.deinit(self.pump.allocator);
         pending.connecting = false;
         pending.fin = false;
         pending.response_sent = false;
@@ -539,13 +547,16 @@ pub const Connection = struct {
     }
 
     fn sendReset(self: *Connection, stream_id: u64, final_size: usize) void {
-        self.pump.shared.trySend(self.handle, &.{.{
+        self.pump.shared.trySend(self.handle, &.{ .{
             .reset_stream = .{
                 .stream_id = stream_id,
                 .application_error_code = 0,
                 .final_size = final_size,
             },
-        }}) catch {};
+        }, .{ .stop_sending = .{
+            .stream_id = stream_id,
+            .application_error_code = 0,
+        } } }) catch {};
     }
 
     fn pendingForId(self: *Connection, stream_id: u64) ?*Pending {
@@ -559,6 +570,7 @@ pub const Connection = struct {
         if (self.pendingForId(stream_id)) |pending| return pending;
         for (&self.pending) |*pending| {
             if (!pending.active) {
+                pending.input.deinit(self.pump.allocator);
                 pending.* = .{ .stream_id = stream_id, .active = true };
                 return pending;
             }
@@ -606,10 +618,6 @@ pub const Connection = struct {
         if (self.authenticated and stream_id == self.control_stream) return;
         if (self.findRelay(stream_id)) |relay| {
             if (data.len != 0) {
-                _ = self.recv_bucket.tryConsume(
-                    data.len,
-                    nowNs(self.pump.io),
-                );
                 relay.queueInbound(data) catch {
                     relay.closed.store(true, .release);
                     return;
@@ -640,12 +648,10 @@ pub const Connection = struct {
         }
         const pending = self.pendingSlot(stream_id) orelse
             return error.InvalidRequest;
-        if (pending.used + data.len > pending.buffer.len) {
+        pending.input.append(self.pump.allocator, self.pump.config.max_pending_stream_bytes, data) catch {
             self.failPending(pending);
             return;
-        }
-        @memcpy(pending.buffer[pending.used..][0..data.len], data);
-        pending.used += data.len;
+        };
         if (fin) pending.fin = true;
         if (pending.connecting or pending.response_sent) return;
         self.tryStartPending(pending);
@@ -675,8 +681,8 @@ pub const Connection = struct {
             hello.send_bps,
         );
         const now = nowNs(self.pump.io);
-        self.send_bucket = byte_bucket.ByteBucket.init(send_bps, now);
-        self.recv_bucket = byte_bucket.ByteBucket.init(recv_bps, now);
+        self.send_bucket = byte_bucket.ByteBucket.initWithBurst(send_bps, self.pump.config.rate_burst_bytes, now);
+        self.recv_bucket = byte_bucket.ByteBucket.initWithBurst(recv_bps, self.pump.config.rate_burst_bytes, now);
         self.control_response = try protocol.buildServerHello(
             self.pump.allocator,
             true,
@@ -724,7 +730,7 @@ pub const Connection = struct {
 
     fn tryStartPending(self: *Connection, pending: *Pending) void {
         const request = protocol.parseRequest(
-            pending.buffer[0..pending.used],
+            pending.input.bytes()[0..pending.input.len],
         ) catch |err| switch (err) {
             error.Incomplete => return,
             else => {
@@ -806,7 +812,7 @@ pub const Connection = struct {
             };
             if (pending.fin) assoc.closed = true;
             pending.active = false;
-            pending.used = 0;
+            pending.input.deinit(self.pump.allocator);
             pending.fin = false;
             self.touch();
             return;
@@ -816,7 +822,7 @@ pub const Connection = struct {
             self.failPending(pending);
             return;
         }
-        const host = pending.buffer[pending.host_start..][0..pending.host_len];
+        const host = pending.input.bytes()[pending.host_start..][0..pending.host_len];
         const target = parseTarget(host, pending.port) orelse {
             self.failPending(pending);
             return;
@@ -992,10 +998,8 @@ pub const Connection = struct {
     ) void {
         const assoc = self.findAssoc(session_id) orelse return;
         const target = parseTarget(host, port) orelse return;
-        if (!self.recv_bucket.tryConsume(
-            data.len,
-            nowNs(self.pump.io),
-        )) return;
+        const now = nowNs(self.pump.io);
+        if (self.recv_bucket.available(data.len, now) != data.len) return;
         const resolved = switch (target) {
             .ip => |ip| ip,
             .domain => |domain| destination.resolveTarget(
@@ -1011,6 +1015,8 @@ pub const Connection = struct {
             ) catch return,
         };
         assoc.socket.send(self.pump.io, &resolved, data) catch return;
+        const charged = self.recv_bucket.tryConsume(data.len, now);
+        std.debug.assert(charged);
         if (self.pump.config.stats) |value| {
             value.addBytesIn(@intCast(data.len));
         }
@@ -1080,15 +1086,15 @@ pub const Connection = struct {
     fn flushAssocSends(self: *Connection, assoc: *Assoc) void {
         for (&assoc.pending_sends) |*slot| {
             const encoded = slot.* orelse continue;
-            if (encoded.len > self.pump.config.max_datagram_size) {
+            if (encoded.len > self.pump.config.max_datagram_size or
+                (self.send_bucket.rate != 0 and encoded.len > self.send_bucket.capacity))
+            {
                 self.pump.allocator.free(encoded);
                 slot.* = null;
                 continue;
             }
-            if (!self.send_bucket.tryConsume(
-                encoded.len,
-                nowNs(self.pump.io),
-            )) return;
+            const now = nowNs(self.pump.io);
+            if (self.send_bucket.available(encoded.len, now) != encoded.len) return;
             self.established.connection.trySendDatagram(
                 encoded,
             ) catch |err| switch (err) {
@@ -1102,6 +1108,8 @@ pub const Connection = struct {
                     continue;
                 },
             };
+            const charged = self.send_bucket.tryConsume(encoded.len, now);
+            std.debug.assert(charged);
             if (self.pump.config.stats) |value| {
                 value.addBytesOut(@intCast(encoded.len));
             }
@@ -1114,16 +1122,12 @@ pub const Connection = struct {
         var index: usize = 0;
         while (index < self.relays.items.len) {
             const relay = self.relays.items[index];
-            const pending_bytes =
-                relay.inbound.items.len - relay.inbound_start;
-            if (pending_bytes != 0 and
-                self.recv_bucket.tryConsume(
-                    pending_bytes,
-                    nowNs(self.pump.io),
-                ))
-            {
-                _ = relay.flushInbound();
-            }
+            const pending_bytes = relay.inbound.items.len - relay.inbound_start;
+            const now = nowNs(self.pump.io);
+            const allowed = self.recv_bucket.available(pending_bytes, now);
+            const written = relay.flushInboundUpTo(@intCast(allowed));
+            const charged = self.recv_bucket.tryConsume(written, now);
+            std.debug.assert(charged);
             self.flushRelayOutbound(relay);
             if (relay.quic_done.load(.acquire) and
                 relay.inbound.items.len == relay.inbound_start)
@@ -1142,85 +1146,32 @@ pub const Connection = struct {
     }
 
     fn flushRelayOutbound(self: *Connection, relay: *Relay) void {
-        while (true) {
-            if (relay.pending_out) |item| {
-                if (!self.sendRelayItem(relay, item)) return;
-                relay.pending_out = null;
-            }
-            var batch: [8]relay_mod.Outbound = undefined;
-            const count = relay.outbound.get(
-                self.pump.io,
-                &batch,
-                0,
-            ) catch return;
-            if (count == 0) return;
-            for (batch[0..count]) |item| {
-                if (!self.sendRelayItem(relay, item)) {
-                    relay.pending_out = item;
-                    return;
-                }
-            }
-        }
+        relay.flushOutbound(self, sendRelayItem);
     }
 
     fn sendRelayItem(
         self: *Connection,
         relay: *Relay,
         item: relay_mod.Outbound,
-    ) bool {
-        switch (item) {
-            .data => |bytes| {
-                if (!self.send_bucket.tryConsume(
-                    bytes.len,
-                    nowNs(self.pump.io),
-                )) return false;
-                self.pump.shared.trySend(self.handle, &.{.{
-                    .stream = .{
-                        .stream_id = relay.stream_id,
-                        .offset = relay.send_offset,
-                        .data = bytes,
-                        .fin = false,
-                    },
-                }}) catch |err| switch (err) {
-                    error.CongestionLimited,
-                    error.PacingLimited,
-                    error.FlowControlBlocked,
-                    error.AntiAmplificationLimited,
-                    => return false,
-                    else => {
-                        relay.closed.store(true, .release);
-                        self.pump.allocator.free(bytes);
-                        return true;
-                    },
-                };
-                relay.send_offset += bytes.len;
-                relay.touch();
-                self.pump.allocator.free(bytes);
-                return true;
-            },
-            .fin => {
-                self.pump.shared.trySend(self.handle, &.{.{
-                    .stream = .{
-                        .stream_id = relay.stream_id,
-                        .offset = relay.send_offset,
-                        .data = &.{},
-                        .fin = true,
-                    },
-                }}) catch |err| switch (err) {
-                    error.CongestionLimited,
-                    error.PacingLimited,
-                    error.FlowControlBlocked,
-                    error.AntiAmplificationLimited,
-                    => return false,
-                    else => {
-                        relay.closed.store(true, .release);
-                        return true;
-                    },
-                };
-                relay.touch();
-                return true;
-            },
-        }
+    ) relay_mod.SendResult {
+        const now = nowNs(self.pump.io);
+        const remaining = switch (item) {
+            .data => |bytes| bytes.len - relay.pending_data_start,
+            .fin => 0,
+        };
+        const allowed = @as(usize, @intCast(self.send_bucket.available(remaining, now)));
+        if (remaining != 0 and allowed == 0) return .blocked;
+        var progress: stream_sender.Progress = .{};
+        const established = self.pump.shared.connection(self.handle) orelse return .fatal;
+        const result = stream_sender.send(quic, &established.connection, relay, item, allowed, &progress);
+        const charged = self.send_bucket.tryConsume(progress.committed_bytes, now);
+        std.debug.assert(charged);
+        self.pump.shared.dispatcher.refreshConnectionTimer(self.handle) catch return .fatal;
+        result catch |err| switch (err) {
+            error.CongestionLimited, error.PacingLimited, error.FlowControlBlocked, error.AntiAmplificationLimited => return .blocked,
+            else => return .fatal,
+        };
+        return if (progress.complete) .complete else .progress;
     }
 
     fn findRelay(self: *Connection, stream_id: u64) ?*Relay {
@@ -1235,6 +1186,11 @@ pub const Connection = struct {
     }
 
     fn closeRelayStream(self: *Connection, stream_id: u64) void {
+        if (self.pendingForId(stream_id)) |pending| {
+            pending.input.deinit(self.pump.allocator);
+            pending.active = false;
+            pending.connecting = false;
+        }
         if (self.findRelay(stream_id)) |relay| {
             relay.closed.store(true, .release);
         }

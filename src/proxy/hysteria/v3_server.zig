@@ -16,6 +16,7 @@ const rate_limit = @import("../runtime/rate_limit.zig");
 const destination = @import("../runtime/destination.zig");
 const io_helpers = @import("../internal/io.zig");
 const byte_bucket = @import("../internal/byte_bucket.zig");
+const rate_stream = @import("../internal/byte_bucket/stream.zig");
 
 const quic = netz.quic;
 const net = std.Io.net;
@@ -182,12 +183,14 @@ pub fn processEstablished(
         .io = io,
         .established = established,
         .config = config,
-        .send_bucket = byte_bucket.ByteBucket.init(
+        .send_bucket = byte_bucket.ByteBucket.initWithBurst(
             config.send_bps,
+            config.rate_burst_bytes,
             @intCast(std.Io.Timestamp.now(io, .awake).nanoseconds),
         ),
-        .recv_bucket = byte_bucket.ByteBucket.init(
+        .recv_bucket = byte_bucket.ByteBucket.initWithBurst(
             config.recv_bps,
+            config.rate_burst_bytes,
             @intCast(std.Io.Timestamp.now(io, .awake).nanoseconds),
         ),
         .last_activity = @intCast(std.Io.Timestamp.now(io, .awake).nanoseconds),
@@ -255,8 +258,8 @@ fn authenticate(state: *State) !void {
                 const now_ns: i64 = @intCast(
                     std.Io.Timestamp.now(state.io, .awake).nanoseconds,
                 );
-                state.send_bucket = byte_bucket.ByteBucket.init(send_bps, now_ns);
-                state.recv_bucket = byte_bucket.ByteBucket.init(recv_bps, now_ns);
+                state.send_bucket = byte_bucket.ByteBucket.initWithBurst(send_bps, state.config.rate_burst_bytes, now_ns);
+                state.recv_bucket = byte_bucket.ByteBucket.initWithBurst(recv_bps, state.config.rate_burst_bytes, now_ns);
                 const response = try protocol.buildServerHello(
                     state.allocator,
                     true,
@@ -359,16 +362,7 @@ fn handleDataStream(
     }
     if (findRelay(state, stream_id)) |relay| {
         if (data.len > 0) {
-            state.recv_bucket.wait(data.len, state.io);
-            try io_helpers.writeAll(
-                state.io,
-                relay.tcp,
-                data,
-                currentDeadline(state.io, state.config.idle_timeout),
-            );
-            if (state.config.stats) |value| {
-                value.addBytesIn(@intCast(data.len));
-            }
+            try writeRateLimited(state, relay.tcp, data);
         }
         if (fin) {
             relay.tcp.shutdown(state.io, .send) catch {};
@@ -452,16 +446,7 @@ fn handleDataStream(
         pending.used = 0;
         if (request_end < pending_used) {
             const initial = pending.buffer[request_end..pending_used];
-            state.recv_bucket.wait(initial.len, state.io);
-            try io_helpers.writeAll(
-                state.io,
-                tcp,
-                initial,
-                currentDeadline(state.io, state.config.idle_timeout),
-            );
-            if (state.config.stats) |value| {
-                value.addBytesIn(@intCast(initial.len));
-            }
+            try writeRateLimited(state, tcp, initial);
         }
         if (fin) {
             tcp.shutdown(state.io, .send) catch {};
@@ -648,8 +633,12 @@ fn forwardUdp(
         .udp_associate,
         state.config.connect_timeout,
     ) catch return;
-    state.recv_bucket.wait(data.len, state.io);
-    assoc.socket.send(state.io, &resolved, data) catch return;
+    if (state.recv_bucket.rate != 0 and data.len > state.recv_bucket.capacity) return;
+    try state.recv_bucket.waitWithDeadline(data.len, state.io, try io_helpers.deadlineFromTimeout(state.io, state.config.idle_timeout));
+    assoc.socket.send(state.io, &resolved, data) catch {
+        state.recv_bucket.refund(data.len);
+        return;
+    };
     if (state.config.stats) |value| {
         value.addBytesIn(@intCast(data.len));
     }
@@ -703,8 +692,12 @@ fn drainAssocReads(state: *State) !void {
             defer state.allocator.free(encoded);
             assoc.next_msg_id +%= 1;
             if (encoded.len > state.config.max_datagram_size) continue;
-            state.send_bucket.wait(encoded.len, state.io);
-            state.established.connection.sendDatagram(encoded) catch continue;
+            if (state.send_bucket.rate != 0 and encoded.len > state.send_bucket.capacity) continue;
+            try state.send_bucket.waitWithDeadline(encoded.len, state.io, try io_helpers.deadlineFromTimeout(state.io, state.config.idle_timeout));
+            state.established.connection.sendDatagram(encoded) catch {
+                state.send_bucket.refund(encoded.len);
+                continue;
+            };
             if (state.config.stats) |value| {
                 value.addBytesOut(@intCast(message.data.len));
             }
@@ -852,6 +845,13 @@ fn shutdownAllRelays(state: *State) void {
     }
 }
 
+fn writeRateLimited(state: *State, stream: net.Stream, data: []const u8) !void {
+    var committed: usize = 0;
+    const result = rate_stream.write(&state.recv_bucket, state.io, stream, data, &committed, try io_helpers.deadlineFromTimeout(state.io, state.config.idle_timeout));
+    if (state.config.stats) |value| value.addBytesIn(@intCast(committed));
+    try result;
+}
+
 fn sendStreamData(
     state: *State,
     stream_id: u64,
@@ -860,27 +860,29 @@ fn sendStreamData(
     fin: bool,
 ) !usize {
     if (data.len == 0 and !fin) return 0;
-    state.send_bucket.wait(data.len, state.io);
+    const deadline = (try io_helpers.deadlineFromTimeout(state.io, state.config.idle_timeout)).?;
     var sent: usize = 0;
-    var attempts: usize = 0;
-    while (attempts < 200) : (attempts += 1) {
+    for (0..200) |_| {
+        const available = try state.send_bucket.waitAvailable(data.len - sent, state.io, deadline);
+        const end = sent + @as(usize, @intCast(available));
+        var call_deadline = std.Io.Clock.Timestamp.fromNow(state.io, .{ .clock = .awake, .raw = .fromMilliseconds(20) });
+        call_deadline.raw.nanoseconds = @min(call_deadline.raw.nanoseconds, deadline.raw.nanoseconds);
         var committed: usize = 0;
-        const result = state.established.connection.sendStreamWithTimeout(
+        const result = state.established.connection.sendStreamWithDeadline(
             stream_id,
             offset + sent,
-            data[sent..],
-            fin,
+            data[sent..end],
+            fin and end == data.len,
             &committed,
-            .fromMilliseconds(20),
+            call_deadline,
         );
+        const charged = state.send_bucket.tryConsume(committed, @intCast(std.Io.Timestamp.now(state.io, .awake).nanoseconds));
+        std.debug.assert(charged);
         sent += committed;
         if (result) |_| {
             if (data.len == 0 or sent >= data.len) return sent;
-            continue;
         } else |err| switch (err) {
-            error.Timeout => {
-                std.Io.sleep(state.io, .fromMilliseconds(1), .awake) catch {};
-            },
+            error.Timeout => try std.Io.sleep(state.io, .fromMilliseconds(1), .awake),
             else => return err,
         }
     }

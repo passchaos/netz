@@ -9,11 +9,10 @@
 const std = @import("std");
 const net = std.Io.net;
 const io_helpers = @import("io.zig");
+const outbound_queue = @import("relay_queue/outbound.zig");
 
-pub const Outbound = union(enum) {
-    data: []u8,
-    fin,
-};
+pub const Outbound = outbound_queue.Item;
+pub const SendResult = outbound_queue.Result;
 
 pub const Relay = struct {
     allocator: std.mem.Allocator,
@@ -26,6 +25,8 @@ pub const Relay = struct {
     buffer_size: usize,
     /// One item in flight after a backpressured send.
     pending_out: ?Outbound = null,
+    /// Socket-visible prefix of the retained outbound DATA item.
+    pending_data_start: usize = 0,
     outbound_storage: [8]Outbound = undefined,
     outbound: std.Io.Queue(Outbound) = undefined,
     reader_future: ?std.Io.Future(void) = null,
@@ -74,17 +75,7 @@ pub const Relay = struct {
             self.reader_future = null;
         }
         self.tcp.close(self.io);
-        if (self.pending_out) |item| self.freeOutbound(item);
-        while (true) {
-            var batch: [8]Outbound = undefined;
-            const count = self.outbound.get(
-                self.io,
-                &batch,
-                0,
-            ) catch break;
-            if (count == 0) break;
-            for (batch[0..count]) |item| self.freeOutbound(item);
-        }
+        self.discardOutbound();
         self.inbound.deinit(self.allocator);
         self.allocator.destroy(self);
     }
@@ -108,11 +99,18 @@ pub const Relay = struct {
     /// for longer than a short scheduling quantum. Returns true when all
     /// buffered bytes were written.
     pub fn flushInbound(self: *Relay) bool {
+        _ = self.flushInboundUpTo(std.math.maxInt(usize));
+        return self.inbound_start == self.inbound.items.len;
+    }
+
+    /// Return exact TCP progress so the owner charges only committed bytes.
+    pub fn flushInboundUpTo(self: *Relay, maximum_bytes: usize) usize {
         if (self.inbound_start == self.inbound.items.len) {
             self.inbound.clearRetainingCapacity();
             self.inbound_start = 0;
-            return true;
+            return 0;
         }
+        if (maximum_bytes == 0) return 0;
         const deadline = io_helpers.deadlineFromTimeout(
             self.io,
             .fromMilliseconds(10),
@@ -120,22 +118,25 @@ pub const Relay = struct {
         const written = io_helpers.writeSome(
             self.io,
             self.tcp,
-            self.inbound.items[self.inbound_start..],
+            self.inbound.items[self.inbound_start .. self.inbound_start + @min(
+                maximum_bytes,
+                self.inbound.items.len - self.inbound_start,
+            )],
             deadline,
         ) catch |err| switch (err) {
             error.Timeout => 0,
             else => {
                 self.closed.store(true, .release);
-                return false;
+                return 0;
             },
         };
-        if (written == 0) return false;
+        if (written == 0) return 0;
         self.inbound_start += written;
         self.touch();
         if (self.inbound_start == self.inbound.items.len) {
             self.inbound.clearRetainingCapacity();
             self.inbound_start = 0;
-            return true;
+            return written;
         }
         if (self.inbound_start > self.inbound_cap / 2) {
             const remaining = self.inbound.items.len - self.inbound_start;
@@ -147,14 +148,23 @@ pub const Relay = struct {
             self.inbound.items.len = remaining;
             self.inbound_start = 0;
         }
-        return false;
+        return written;
     }
 
     pub fn shutdownTcpSend(self: *Relay) void {
         self.tcp.shutdown(self.io, .send) catch {};
     }
 
-    fn freeOutbound(self: *Relay, item: Outbound) void {
+    /// The callback borrows each item; only this queue releases its storage.
+    pub fn flushOutbound(self: *Relay, context: anytype, comptime send: anytype) void {
+        outbound_queue.drain(self, context, send);
+    }
+
+    pub fn discardOutbound(self: *Relay) void {
+        outbound_queue.discard(self);
+    }
+
+    pub fn freeOutbound(self: *Relay, item: Outbound) void {
         switch (item) {
             .data => |bytes| self.allocator.free(bytes),
             .fin => {},
@@ -194,4 +204,8 @@ pub const Relay = struct {
 
 fn nowNs(io: std.Io) i64 {
     return @intCast(std.Io.Timestamp.now(io, .awake).nanoseconds);
+}
+
+test {
+    _ = @import("relay_queue/tests.zig");
 }

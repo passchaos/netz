@@ -99,9 +99,11 @@ const ClientContext = struct {
     payload: []const u8,
     index: u8,
     err: ?anyerror = null,
+    stage: enum { handshake, send, receive } = .handshake,
 
     fn run(self: *@This()) void {
         self.runFallible() catch |err| {
+            std.debug.print("TUIC relay client {d} stage={s}: {s}\n", .{ self.index, @tagName(self.stage), @errorName(err) });
             self.err = err;
         };
     }
@@ -166,14 +168,15 @@ const ClientContext = struct {
             .data = command,
             .fin = false,
         } }});
-        try established.connection.send(&.{.{ .stream = .{
-            .stream_id = stream_id,
-            .offset = command.len,
-            .data = self.payload,
-            .fin = true,
-        } }});
+        self.stage = .send;
+        var committed: usize = 0;
+        try established.connection.sendStreamWithTimeout(stream_id, command.len, self.payload, true, &committed, .fromSeconds(5));
+        try std.testing.expectEqual(self.payload.len, committed);
 
-        var buffer: [128]u8 = undefined;
+        self.stage = .receive;
+        var buffer: [4096]u8 = undefined;
+        const received_buffer = try allocator.alloc(u8, self.payload.len);
+        defer allocator.free(received_buffer);
         var received: usize = 0;
         var saw_fin = false;
         while (!saw_fin) {
@@ -186,9 +189,10 @@ const ClientContext = struct {
             switch (event) {
                 .reset => return error.UnexpectedStreamReset,
                 .data => |data| {
-                    if (received + data.bytes > buffer.len) {
+                    if (received + data.bytes > received_buffer.len) {
                         return error.UnexpectedPayload;
                     }
+                    @memcpy(received_buffer[received..][0..data.bytes], buffer[0..data.bytes]);
                     received += data.bytes;
                     saw_fin = data.fin;
                 },
@@ -197,12 +201,12 @@ const ClientContext = struct {
         try std.testing.expectEqualSlices(
             u8,
             self.payload,
-            buffer[0..received],
+            received_buffer[0..received],
         );
     }
 };
 
-test "TUIC shared endpoint serves two concurrent TCP relays" {
+fn runConcurrent(payloads: [2][]const u8) !void {
     var threaded = std.Io.Threaded.init(gpa, .{
         .async_limit = .unlimited,
     });
@@ -265,7 +269,7 @@ test "TUIC shared endpoint serves two concurrent TCP relays" {
             .target = target,
             .uuid = uuid,
             .password = password,
-            .payload = "hello-0",
+            .payload = payloads[0],
             .index = 0,
         },
         .{
@@ -274,7 +278,7 @@ test "TUIC shared endpoint serves two concurrent TCP relays" {
             .target = target,
             .uuid = uuid,
             .password = password,
-            .payload = "hello-1",
+            .payload = payloads[1],
             .index = 1,
         },
     };
@@ -287,4 +291,16 @@ test "TUIC shared endpoint serves two concurrent TCP relays" {
     for (clients) |client| if (client.err) |err| {
         return err;
     };
+}
+
+test "TUIC shared endpoint serves two concurrent TCP relays" {
+    try runConcurrent(.{ "hello-0", "hello-1" });
+}
+
+test "TUIC shared endpoint packetizes 16 and 64 KiB relay bodies" {
+    var first: [16 * 1024]u8 = undefined;
+    var second: [64 * 1024]u8 = undefined;
+    for (&first, 0..) |*byte, index| byte.* = @intCast(index % 251);
+    for (&second, 0..) |*byte, index| byte.* = @intCast((index * 13) % 251);
+    try runConcurrent(.{ &first, &second });
 }

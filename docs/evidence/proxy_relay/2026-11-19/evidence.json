@@ -1,0 +1,111 @@
+{
+  "schema": 1,
+  "date": "2026-11-19",
+  "feature": "R1-R3: bounded proxy relay ownership, committed rate credit and packet-sized TCP output",
+  "decision": "correctness implementation; no performance claim",
+  "baseline": "edb08855",
+  "acceptance_status": "passed",
+  "source_sha256": {
+    "src/proxy/internal/relay_queue.zig": "ff9be579ed2aa91f2e45089d883cc8f42acef6692966d12e2ded1b6bb53a11be",
+    "src/proxy/internal/relay_queue/outbound.zig": "ee56638814c6350e8e9b2a7328620629340918a6ec942a55d0bff626341a62dc",
+    "src/proxy/internal/relay_queue/stream_send.zig": "63d98b8ddc16bee36c6812c0529df9653f7ffc857403f7b4729b24af39491cb3",
+    "src/proxy/internal/relay_queue/stream_send_tests.zig": "e49efd51ebfb046c400f68771f5ad9d5430906041fe03d8d39c73542b5b0cab8",
+    "src/proxy/internal/relay_queue/pending_input.zig": "574da932a09209703dda3bd3cc5b1a5ffa58bec0c13d71d73022f96b70f7f6b4",
+    "src/proxy/internal/relay_queue/pending_input_tests.zig": "1e2ab400b1d94f613ea8283b860555e281a1b3f1f89e789e9c5cc28ea4726820",
+    "src/proxy/internal/relay_queue/tests.zig": "9c54b086065994f6007ec5c98b528c0f355d023e87232d081dbeb64c92c7dd57",
+    "src/proxy/internal/byte_bucket.zig": "98e5cf30464d88c116cd1279ccc84fd35245ce4b2c10f83071b0727b28acaf7a",
+    "src/proxy/internal/byte_bucket/tests.zig": "087de05d46c55ce1c9eb7cc0b80e27e3fee7ab8938879e3c523e24641b002d11",
+    "src/proxy/internal/byte_bucket/stream.zig": "c159d12e6bf4e2dc826eed658d44a18acbbe9e41894dafa6804cba34d51e3a22",
+    "src/proxy/internal/byte_bucket/stream_tests.zig": "e0a5f4f96fb3f3c39536d8ae7bf921b833e75d3b2e8fb41b5f3ee22f93ba5413",
+    "src/proxy/tuic/shared/server.zig": "06fecdb2c1e3f888e6f6ef38cd4722ec44cd7e88cd8087de5f6ea9202b42b18e",
+    "src/proxy/tuic/shared/tests.zig": "b881a64046f0cedc64ac7f7a10e6dfa0875f1a73eb4eedff4b328efe77e0088f",
+    "src/proxy/hysteria/shared/server.zig": "fc46bf563e97ce72d9edbfaefeb7e9d4f0c628217b9bb5e099e8e78b1d936010",
+    "src/proxy/hysteria/shared/tests.zig": "be011bb4715af06a68aa01e72cfd3c7e2349d92c58b88d9edbebe96e446b2371",
+    "src/proxy/hysteria/v3_server.zig": "000019c1baefd1fdf43ebd4f232fa63b2516d782e15ca9c6a7d01f1921154288",
+    "src/proxy/tuic/config.zig": "471511ff8a0c25bf88e4460d56a334b8b1d348d60a85521d4bc19ab9c4c9b892",
+    "src/proxy/hysteria/config.zig": "6a4ef2c91a68dd0112780fdea41a918f5739a7e2b67bbd5470e0670c5549d86b",
+    "src/test_scope.zig": "1cba1d203bf83a58a5198d070477dc9b1e365d94a5df590abf0cbbaef819aa00",
+    "build/testing/focused.zig": "d551d46f8929d504df32dddbf463a3be1a036c4484ecc382ce03b7f8f3ae3d68",
+    "build.zig": "5836494a711a7736b0d59b695b8b835af0c99340d0ee52a14f4ddc298bdafee9",
+    "tools/interop/tuic_sing_box.sh": "0a9cf4697033210b3610ffc97389c59dad6d52b500ae0726aabcec52e89f47d1",
+    "src/proxy/internal/mod.zig": "2e390bb40cfeaa3418e3b58375a52f52b02507feb6c647ac1fae73b724937e7d"
+  },
+  "results": {
+    "queue_components_debug": {
+      "tests": 59,
+      "passed": 59
+    },
+    "release_safe_proxy_and_queues": {
+      "tests": 225,
+      "passed": 225,
+      "source_note": "before final nullable-handle lookup guard; current-source smoke/interop is revalidated separately"
+    },
+    "stream_prefix_socket_and_packet_number_width": {
+      "tests": 39,
+      "passed": 39,
+      "matching_scenarios": 4
+    },
+    "tuic_concurrent_bodies": [
+      16384,
+      65536
+    ],
+    "hysteria_concurrent_bodies": {
+      "bytes": [
+        4096,
+        65536
+      ],
+      "rate_bytes_per_second": 65536,
+      "burst_bytes": 512
+    },
+    "hysteria_single_tcp_udp": "passed",
+    "hysteria_maximum_wire_rate": {
+      "rate": "18446744073709551615",
+      "shared_and_single_tcp_udp": "passed"
+    },
+    "empty_filter": {
+      "expected_exit_code": 1,
+      "actual_exit_code": 1,
+      "error": "NoMatchingProtocolTests"
+    },
+    "independent_tuic": {
+      "modes": [
+        "native",
+        "quic"
+      ],
+      "tcp_bytes": 20,
+      "large_tcp_bytes": 131072,
+      "udp_bytes": 17,
+      "complete": true,
+      "binary_sha256": "4446703f222605d28f79766e4e108a768ba2622053f9c28a19ef61445c74e1e0"
+    },
+    "format_check": {
+      "exit_code": 0,
+      "scope": "build.zig build src test tools"
+    },
+    "final_source_release_safe": {
+      "tests": 55,
+      "passed": 55,
+      "matching_scenarios": 6,
+      "command": "zig build test-proxy -Dtest-filter='shared endpoint' -Dtest-filter='Hysteria negotiated maximum' -Doptimize=ReleaseSafe --summary all"
+    },
+    "evidence_audit": {
+      "files": 290,
+      "entries": 10831,
+      "matched": 6648,
+      "stale": 4183,
+      "unresolved": 0,
+      "invalid": 0,
+      "unreadable": 0,
+      "exit_code": 0,
+      "note": "Historical drift is expected; recorded before the final internal-module hash was added."
+    }
+  },
+  "peer": {
+    "name": "sing-box",
+    "version": "1.14.4",
+    "revision": "c005f35300ce76427dc285481ec5695f5b179cd2",
+    "binary_sha256": "1264361b5f8868c8768f7555d3e77e20118bf503c41ac08bb290a0d99056aa3a"
+  },
+  "artifacts": "docs/evidence/proxy_relay/2026-11-19",
+  "scope": "queue and parser memory failures, QUIC refusal/socket prefix, large concurrent TCP/UDP and rate arithmetic; repository-wide final gate and R4-R9 remain separate"
+}

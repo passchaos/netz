@@ -99,12 +99,24 @@ fn udpEchoLoop(io: std.Io, socket: net.Socket) void {
 
 const ServeContext = struct {
     server: *server_mod.Server,
+    single: bool = false,
     err: ?anyerror = null,
 
     fn run(self: *@This()) void {
-        self.server.serve() catch |err| {
+        self.runFallible() catch |err| {
             self.err = err;
         };
+    }
+
+    fn runFallible(self: *@This()) !void {
+        if (!self.single) return self.server.serve();
+        var established = try quic.handshake.acceptWithTimeout(&self.server.endpoint, .{
+            .local_connection_id = "single-server",
+            .alpn_protocol = self.server.config.alpn_protocol,
+            .identity = self.server.config.identity,
+        }, .fromSeconds(5));
+        defer established.deinit();
+        try server_mod.processEstablished(self.server.allocator, self.server.io, &established, self.server.config, &self.server.limiter);
     }
 };
 
@@ -120,6 +132,7 @@ const ClientContext = struct {
     password: []const u8,
     payload: []const u8,
     index: u8,
+    offered_rate: u64 = 0,
     err: ?anyerror = null,
 
     fn run(self: *@This()) void {
@@ -164,8 +177,8 @@ const ClientContext = struct {
         const control_stream = try established.connection.openStream();
         const hello = try protocol.buildClientHello(
             allocator,
-            0,
-            0,
+            self.offered_rate,
+            self.offered_rate,
             self.password,
         );
         defer allocator.free(hello);
@@ -211,16 +224,14 @@ const ClientContext = struct {
             .data = request,
             .fin = false,
         } }});
-        try established.connection.send(&.{.{ .stream = .{
-            .stream_id = data_stream,
-            .offset = request.len,
-            .data = self.payload,
-            .fin = true,
-        } }});
+        var committed: usize = 0;
+        try established.connection.sendStreamWithTimeout(data_stream, request.len, self.payload, true, &committed, .fromSeconds(5));
+        try std.testing.expectEqual(self.payload.len, committed);
 
         const response_len = 7;
-        var buffer: [128]u8 = undefined;
-        var received_buffer: [256]u8 = undefined;
+        var buffer: [4096]u8 = undefined;
+        const received_buffer = try allocator.alloc(u8, response_len + self.payload.len);
+        defer allocator.free(received_buffer);
         var received: usize = 0;
         var saw_fin = false;
         while (!saw_fin) {
@@ -245,7 +256,7 @@ const ClientContext = struct {
                 },
             }
         }
-        try std.testing.expect(received >= response_len + self.payload.len);
+        try std.testing.expectEqual(response_len + self.payload.len, received);
         try std.testing.expectEqualSlices(
             u8,
             self.payload,
@@ -315,7 +326,9 @@ const ClientContext = struct {
     }
 };
 
-test "Hysteria shared endpoint serves concurrent TCP and UDP relays" {
+fn runConcurrent(payloads: [2][]const u8, rate: u64, burst: u64, options: struct { single: bool = false, offered_rate: u64 = 0 }) !void {
+    const single = options.single;
+    const client_count: usize = if (single) 1 else 2;
     var threaded = std.Io.Threaded.init(gpa, .{
         .async_limit = .unlimited,
     });
@@ -332,7 +345,7 @@ test "Hysteria shared endpoint serves concurrent TCP and UDP relays" {
     var echo_thread = try std.Thread.spawn(
         .{},
         echoLoop,
-        .{ io, &echo_listener, 2 },
+        .{ io, &echo_listener, client_count },
     );
     defer echo_thread.join();
 
@@ -366,12 +379,15 @@ test "Hysteria shared endpoint serves concurrent TCP and UDP relays" {
             },
             .acl = .{ .default_action = .allow },
             .connect_timeout = .fromSeconds(3),
-            .idle_timeout = .fromSeconds(10),
+            .idle_timeout = .fromSeconds(if (single) 1 else 10),
             .auth_timeout = .fromSeconds(3),
+            .send_bps = rate,
+            .recv_bps = rate,
+            .rate_burst_bytes = burst,
         },
     );
     defer server.deinit();
-    var serve_context = ServeContext{ .server = &server };
+    var serve_context = ServeContext{ .server = &server, .single = single };
     const serve_thread = try std.Thread.spawn(
         .{},
         ServeContext.run,
@@ -389,7 +405,8 @@ test "Hysteria shared endpoint serves concurrent TCP and UDP relays" {
             .target = target,
             .udp_target = udp_target,
             .password = password,
-            .payload = "hello-0",
+            .payload = payloads[0],
+            .offered_rate = options.offered_rate,
             .index = 0,
         },
         .{
@@ -398,15 +415,40 @@ test "Hysteria shared endpoint serves concurrent TCP and UDP relays" {
             .target = target,
             .udp_target = null,
             .password = password,
-            .payload = "hello-1",
+            .payload = payloads[1],
+            .offered_rate = options.offered_rate,
             .index = 1,
         },
     };
     var threads: [clients.len]std.Thread = undefined;
-    for (&clients, &threads) |*client, *thread| {
+    for (clients[0..client_count], threads[0..client_count]) |*client, *thread| {
         thread.* = try std.Thread.spawn(.{}, ClientContext.run, .{client});
     }
-    for (&threads) |thread| thread.join();
+    for (threads[0..client_count]) |thread| thread.join();
     if (serve_context.err) |err| return err;
-    for (clients) |client| if (client.err) |err| return err;
+    for (clients[0..client_count]) |client| if (client.err) |err| return err;
+}
+
+test "Hysteria shared endpoint serves concurrent TCP and UDP relays" {
+    try runConcurrent(.{ "hello-0", "hello-1" }, 0, 64 * 1024, .{});
+}
+
+test "Hysteria shared endpoint packetizes 4 and 64 KiB below its rate burst" {
+    var first: [4 * 1024]u8 = undefined;
+    var second: [64 * 1024]u8 = undefined;
+    for (&first, 0..) |*byte, index| byte.* = @intCast(index % 251);
+    for (&second, 0..) |*byte, index| byte.* = @intCast((index * 13) % 251);
+    try runConcurrent(.{ &first, &second }, 64 * 1024, 512, .{});
+}
+
+test "Hysteria single connection processes rate-limited TCP and UDP" {
+    try runConcurrent(.{ "hello-0", "unused" }, 64 * 1024, 512, .{ .single = true });
+}
+
+test "Hysteria negotiated maximum rate keeps shared TCP and UDP alive" {
+    try runConcurrent(.{ "hello-0", "hello-1" }, 0, 512, .{ .offered_rate = std.math.maxInt(u64) });
+}
+
+test "Hysteria negotiated maximum rate keeps single TCP and UDP alive" {
+    try runConcurrent(.{ "hello-0", "unused" }, 0, 512, .{ .offered_rate = std.math.maxInt(u64), .single = true });
 }
