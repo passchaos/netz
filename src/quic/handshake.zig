@@ -229,6 +229,13 @@ pub const ServerOptions = struct {
     /// client offered the algorithm and it reduces the message size.
     certificate_compression_algorithms: []const quic.tls.certificate_compression.Algorithm =
         &quic.tls_client_hello.default_certificate_compression_algorithms,
+    /// Optional caller-prepared compressed Certificate messages. A prepared
+    /// entry that matches the configured certificate message and the client's
+    /// offered algorithm is emitted directly, avoiding per-handshake
+    /// compression buffers and CPU. Callers prepare these once at startup and
+    /// keep them alive for as long as connections may be accepted. Entries
+    /// that do not match are ignored, falling back to on-demand compression.
+    prepared_certificate_compression: []const quic.tls.certificate_compression.PreparedView = &.{},
 };
 
 pub const OneRttConfig = struct {
@@ -2708,6 +2715,28 @@ fn acceptInternal(
                 }
             }
             if (!enabled) continue;
+            var used_prepared = false;
+            var prepared_matched = false;
+            for (options.prepared_certificate_compression) |prepared| {
+                if (prepared.algorithm != algorithm) continue;
+                if (!prepared.matchesCertificateMessage(certificate.items)) {
+                    continue;
+                }
+                prepared_matched = true;
+                if (!prepared.savesBytes(certificate.items.len)) continue;
+                prepared.write(
+                    &compressed_certificate,
+                    endpoint.allocator,
+                ) catch continue;
+                certificate_wire = compressed_certificate.items;
+                used_prepared = true;
+                break;
+            }
+            if (used_prepared) break;
+            // A matching prepared entry is authoritative for this algorithm:
+            // callers prepared it once precisely to avoid per-handshake work,
+            // and falling back would defeat that reuse.
+            if (prepared_matched) continue;
             var prepared = switch (algorithm) {
                 .zlib => quic.tls.certificate_compression.Prepared.initZlib(
                     endpoint.allocator,

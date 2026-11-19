@@ -4,6 +4,7 @@ const std = @import("std");
 
 pub const bucket_count = 7;
 pub const exact_size_capacity = 128;
+pub const site_capacity = 32;
 pub const bucket_labels = [_][]const u8{
     "<=64", "<=256", "<=1K", "<=4K", "<=16K", "<=64K", ">64K",
 };
@@ -21,6 +22,8 @@ pub const Snapshot = struct {
     alloc_bucket_bytes: [bucket_count]usize,
     exact_sizes: [exact_size_capacity]ExactSize,
     exact_size_len: usize,
+    sites: [site_capacity]AllocationSite,
+    site_len: usize,
 
     pub fn print(self: Snapshot) void {
         std.debug.print(
@@ -63,10 +66,24 @@ pub const Snapshot = struct {
             std.debug.print("    {d} bytes: {d}\n", .{ entry.size, entry.count });
             ceiling = entry.count;
         }
+        if (self.site_len == 0) return;
+        std.debug.print("  large allocation sites:\n", .{});
+        for (self.sites[0..self.site_len]) |site| {
+            std.debug.print(
+                "    {x}: count={d}, bytes={d}\n",
+                .{ site.address, site.count, site.bytes },
+            );
+        }
     }
 };
 
 pub const ExactSize = struct { size: usize = 0, count: usize = 0 };
+
+pub const AllocationSite = struct {
+    address: usize = 0,
+    count: usize = 0,
+    bytes: usize = 0,
+};
 
 pub const CountingAllocator = struct {
     backing: std.mem.Allocator,
@@ -86,6 +103,14 @@ pub const CountingAllocator = struct {
     exact_sizes: [exact_size_capacity]ExactSize =
         .{ExactSize{}} ** exact_size_capacity,
     exact_size_len: usize = 0,
+    /// Allocations of at least this many bytes record their caller's return
+    /// address. Disabled by default; benchmarks opt in when attributing large
+    /// per-operation allocations to call sites.
+    capture_threshold: usize = std.math.maxInt(usize),
+    site_mutex: std.atomic.Mutex = .unlocked,
+    sites: [site_capacity]AllocationSite =
+        .{AllocationSite{}} ** site_capacity,
+    site_len: usize = 0,
 
     const vtable: std.mem.Allocator.VTable = .{
         .alloc = alloc,
@@ -116,6 +141,8 @@ pub const CountingAllocator = struct {
             .alloc_bucket_bytes = undefined,
             .exact_sizes = undefined,
             .exact_size_len = 0,
+            .sites = undefined,
+            .site_len = 0,
         };
         for (0..bucket_count) |index| {
             result.alloc_buckets[index] =
@@ -131,6 +158,11 @@ pub const CountingAllocator = struct {
             result.exact_sizes[0..self.exact_size_len],
             self.exact_sizes[0..self.exact_size_len],
         );
+        result.site_len = self.site_len;
+        @memcpy(
+            result.sites[0..self.site_len],
+            self.sites[0..self.site_len],
+        );
         return result;
     }
 
@@ -140,6 +172,7 @@ pub const CountingAllocator = struct {
             return null;
         _ = self.alloc_count.fetchAdd(1, .monotonic);
         self.recordAlloc(len);
+        if (len >= self.capture_threshold) self.recordSite(ret_addr, len);
         return ptr;
     }
 
@@ -198,6 +231,28 @@ pub const CountingAllocator = struct {
             .count = 1,
         };
         self.exact_size_len += 1;
+    }
+
+    fn recordSite(self: *CountingAllocator, ret_addr: usize, len: usize) void {
+        self.lockSites();
+        defer self.site_mutex.unlock();
+        for (self.sites[0..self.site_len]) |*site| {
+            if (site.address != ret_addr) continue;
+            site.count += 1;
+            site.bytes += len;
+            return;
+        }
+        if (self.site_len == self.sites.len) return;
+        self.sites[self.site_len] = .{
+            .address = ret_addr,
+            .count = 1,
+            .bytes = len,
+        };
+        self.site_len += 1;
+    }
+
+    fn lockSites(self: *CountingAllocator) void {
+        while (!self.site_mutex.tryLock()) std.atomic.spinLoopHint();
     }
 
     fn recordResize(self: *CountingAllocator, old_len: usize, new_len: usize) void {

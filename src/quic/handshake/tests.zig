@@ -4823,3 +4823,146 @@ test "QUIC client accepts an RFC 8879 compressed server Certificate" {
         ),
     );
 }
+
+test "QUIC server emits a caller-prepared RFC 8879 compressed Certificate" {
+    const allocator = std.testing.allocator;
+    const EcdsaP256Sha256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
+    // The benchmark identity, reused here so the leaf entry is a raw SEC1
+    // P-256 public key rather than a full X.509 certificate.
+    const server_public = [65]u8{
+        0x04, 0x6a, 0x96, 0x1e, 0x4a, 0x09, 0x85, 0x77,
+        0xd5, 0x2e, 0xa2, 0x86, 0x11, 0x86, 0xda, 0xe0,
+        0x6b, 0xd3, 0x69, 0x39, 0x6d, 0x44, 0x4a, 0xc0,
+        0x95, 0x12, 0xf7, 0xfb, 0xfc, 0x8a, 0xb6, 0x62,
+        0xb8, 0xb2, 0xd1, 0x3e, 0x9f, 0x36, 0xed, 0x52,
+        0xb2, 0x41, 0xd8, 0xdd, 0x24, 0x16, 0x6f, 0xd8,
+        0x1d, 0x0b, 0xae, 0xcb, 0x12, 0x88, 0x86, 0xc7,
+        0xda, 0x00, 0xd1, 0x63, 0x6d, 0x47, 0xe8, 0xa7,
+        0xdf,
+    };
+    const server_secret = [32]u8{
+        0x9b, 0xce, 0xc3, 0x15, 0x18, 0x9b, 0x65, 0xee,
+        0x7a, 0xe0, 0xd7, 0x1d, 0xec, 0x0d, 0x1c, 0xa6,
+        0xb3, 0xf4, 0x67, 0x72, 0x4e, 0x0c, 0x8e, 0x14,
+        0xd4, 0x6a, 0xa2, 0xd2, 0x69, 0xd1, 0xa9, 0xae,
+    };
+    const key_pair = try EcdsaP256Sha256.KeyPair.fromSecretKey(
+        try EcdsaP256Sha256.SecretKey.fromBytes(server_secret),
+    );
+
+    // The second chain entry pads the Certificate message so the prepared
+    // zlib body actually saves bytes. The trust callback below accepts the
+    // chain, while CertificateVerify still proves possession of the leaf key.
+    const padding = [_]u8{0x7c} ** 4096;
+    var certificate_message: std.ArrayList(u8) = .empty;
+    defer certificate_message.deinit(allocator);
+    try quic.tls.auth.writeCertificate(
+        &certificate_message,
+        allocator,
+        &.{ &server_public, &padding },
+    );
+    var prepared = try quic.tls.certificate_compression.Prepared.initZlib(
+        allocator,
+        certificate_message.items,
+        .amortized,
+    );
+    defer prepared.deinit();
+    const prepared_views = [_]quic.tls.certificate_compression.PreparedView{
+        prepared.view(),
+    };
+    try std.testing.expect(
+        prepared.view().savesBytes(certificate_message.items.len),
+    );
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+
+    const original_dcid = [_]u8{ 0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97 };
+    const client_cid = [_]u8{ 0xa0, 0xa1, 0xa2, 0xa3 };
+    const server_cid = [_]u8{ 0xb0, 0xb1, 0xb2, 0xb3 };
+
+    const Shared = struct {
+        endpoint: *quic.runtime.Endpoint,
+        cid: []const u8,
+        chain: []const []const u8,
+        key_pair: EcdsaP256Sha256.KeyPair,
+        prepared: []const quic.tls.certificate_compression.PreparedView,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(shared: *@This()) !void {
+            var established = try handshake.accept(shared.endpoint, .{
+                .local_connection_id = shared.cid,
+                .random = [_]u8{0x62} ** 32,
+                .x25519_secret_key = [_]u8{0x64} ** 32,
+                .identity = .{
+                    .certificate_chain = shared.chain,
+                    .signer = .{ .ecdsa_p256_sha256 = .{
+                        .key_pair = shared.key_pair,
+                    } },
+                },
+                .prepared_certificate_compression = shared.prepared,
+                .max_crypto_buffer = 64 * 1024,
+            });
+            defer established.deinit();
+        }
+    };
+
+    const chain = [_][]const u8{ &server_public, &padding };
+    var shared = Shared{
+        .endpoint = &server_endpoint,
+        .cid = &server_cid,
+        .chain = &chain,
+        .key_pair = key_pair,
+        .prepared = &prepared_views,
+    };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    const AcceptAnyTrust = struct {
+        fn verify(_: ?*anyopaque, _: quic.tls.auth.TrustContext) anyerror!void {}
+    };
+    var established = try handshake.connect(
+        &client_endpoint,
+        server_endpoint.address(),
+        .{
+            .original_destination_connection_id = &original_dcid,
+            .local_connection_id = &client_cid,
+            .server_name = "localhost",
+            .random = [_]u8{0x61} ** 32,
+            .x25519_secret_key = [_]u8{0x63} ** 32,
+            .server_auth = .{ .verify_trust = AcceptAnyTrust.verify },
+            // Offer only the algorithm the server prepared so the prepared
+            // path is selected instead of on-demand brotli.
+            .certificate_compression_algorithms = &.{.zlib},
+            .max_crypto_buffer = 64 * 1024,
+        },
+    );
+    defer established.deinit();
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(
+        quic.tls.certificate_compression.Algorithm.zlib,
+        established.certificate_compression.?,
+    );
+}

@@ -1475,6 +1475,23 @@ is not reproduced by the current `--stats` measurement; this is a baseline for
 future pre-trust allocation work, not a regression claim. Rows are in
 `docs/evidence/quic_handshake_allocations/2026-11-19.json`.
 
+A follow-up attribution pass recorded caller return addresses for allocations
+of at least 64 KiB (`--capture-large=65536`) and resolved them with
+`addr2line`. Both the 65,536-byte and 230,096-byte per-connection allocations
+came from `acceptInternal` preparing a zlib certificate compressor
+(`Prepared.initZlib`) for a 65-byte test certificate whose compressed form
+cannot pay for RFC 8879's 12-byte framing. `ServerOptions` now accepts
+caller-prepared `PreparedView`s, and the benchmark prepares one zlib view once
+per process. A prepared entry that matches the configured Certificate message
+is authoritative for its algorithm, so the handshake skips both the
+per-connection deflate window and the compressor state when compression cannot
+save bytes. In the same fixed binary, prepared reuse measured 7,701
+allocations and 8,770,970 bytes (77.01 allocations / 87,710 bytes per
+connection) with p50 218.6 us and 3,662.1 conn/s, versus 8,101 allocations and
+38,357,340 bytes (81.01 / 383,573) with p50 309.8 us and 2,730.3 conn/s under
+`--no-prepared-compression`. Rows are in
+`docs/evidence/quic_handshake_allocations/2026-11-19-prepared-certificate-compression.json`.
+
 The cross-process counterpart uses a long-running server and a fresh client
 UDP endpoint plus full handshake for every sample:
 

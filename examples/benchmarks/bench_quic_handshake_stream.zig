@@ -60,8 +60,33 @@ fn makeBenchmarkServerKey() !EcdsaP256Sha256.KeyPair {
 const Mode = enum { upload, handshake, echo, stream_churn, lifecycle_churn, aggregate, loss, reorder, corrupt };
 
 pub fn main(init: std.process.Init) !void {
-    const config = try parseArgs(init, std.heap.smp_allocator);
+    var config = try parseArgs(init, std.heap.smp_allocator);
     const server_key = try makeBenchmarkServerKey();
+    var prepared_certificate: ?netz.quic.tls.certificate_compression.Prepared =
+        null;
+    defer if (prepared_certificate) |*prepared| prepared.deinit();
+    var prepared_views: [1]netz.quic.tls.certificate_compression.PreparedView =
+        undefined;
+    if (config.prepare_certificate_compression) {
+        // Prepare the RFC 8879 compressed Certificate once per process so the
+        // handshake benchmark measures the connection path rather than
+        // re-running the compressor for every fresh connection.
+        var certificate_message: std.ArrayList(u8) = .empty;
+        defer certificate_message.deinit(std.heap.smp_allocator);
+        try netz.quic.tls.auth.writeCertificate(
+            &certificate_message,
+            std.heap.smp_allocator,
+            &.{&benchmark_server_public},
+        );
+        prepared_certificate = try netz.quic.tls.certificate_compression.Prepared
+            .initZlib(
+            std.heap.smp_allocator,
+            certificate_message.items,
+            .amortized,
+        );
+        prepared_views[0] = prepared_certificate.?.view();
+        config.prepared_certificate_compression = &prepared_views;
+    }
     var backend = try netz.runtime.Backend.init(std.heap.smp_allocator);
     defer backend.deinit();
     const io = backend.io();
@@ -90,6 +115,7 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
     var counting = CountingAllocator.init(std.heap.smp_allocator);
+    counting.capture_threshold = config.capture_large;
     const allocator = if (config.stats)
         counting.allocator()
     else
@@ -189,6 +215,12 @@ const Config = struct {
     corrupt_every: usize = 0,
     reset_every: usize = default_reset_every,
     verify_server: bool = true,
+    /// When non-zero, record the caller return address of every allocation at
+    /// least this large so `--stats` can attribute large per-connection
+    /// allocations to call sites.
+    capture_large: usize = std.math.maxInt(usize),
+    prepare_certificate_compression: bool = true,
+    prepared_certificate_compression: []const netz.quic.tls.certificate_compression.PreparedView = &.{},
 };
 
 const IterationResult = struct {
@@ -426,6 +458,7 @@ fn runIteration(
         local_peer_mode: bool,
         echo_connection: *?netz.quic.handshake.EstablishedConnection,
         server_key: EcdsaP256Sha256.KeyPair,
+        prepared_certificate_compression: []const netz.quic.tls.certificate_compression.PreparedView,
         err: ?anyerror = null,
 
         fn run(shared: *@This()) void {
@@ -459,6 +492,7 @@ fn runIteration(
                             .key_pair = shared.server_key,
                         } },
                     },
+                    .prepared_certificate_compression = shared.prepared_certificate_compression,
                     .max_crypto_buffer = 64 * 1024,
                 },
             );
@@ -541,6 +575,7 @@ fn runIteration(
             config.mode == .lifecycle_churn,
         .echo_connection = &echo_connection,
         .server_key = server_key,
+        .prepared_certificate_compression = config.prepared_certificate_compression,
     };
     // Use the benchmark's existing I/O executor rather than creating and
     // destroying an OS thread for every fresh connection. `concurrent` still
@@ -1734,6 +1769,12 @@ fn parseArgs(
             config.verbose = true;
         } else if (std.mem.eql(u8, arg, "--stats")) {
             config.stats = true;
+        } else if (std.mem.startsWith(u8, arg, "--capture-large=")) {
+            config.capture_large = try parsePositiveUsize(
+                arg["--capture-large=".len..],
+            );
+        } else if (std.mem.eql(u8, arg, "--no-prepared-compression")) {
+            config.prepare_certificate_compression = false;
         } else if (std.mem.eql(u8, arg, "--disable-hystart")) {
             config.enable_hystart = false;
         } else if (std.mem.eql(u8, arg, "--disable-pacing")) {
@@ -2054,6 +2095,7 @@ fn runLossBenchmark(
     server_key: EcdsaP256Sha256.KeyPair,
 ) !void {
     var counting = CountingAllocator.init(allocator);
+    counting.capture_threshold = config.capture_large;
     const selected = if (config.stats) counting.allocator() else allocator;
     const result = try runIteration(
         selected,
@@ -2129,6 +2171,7 @@ fn aggregateWorker(context: AggregateWorkerContext) void {
 
 fn aggregateWorkerFallible(context: AggregateWorkerContext) !void {
     var counting = CountingAllocator.init(std.heap.smp_allocator);
+    counting.capture_threshold = context.config.capture_large;
     const allocator = if (context.config.stats)
         counting.allocator()
     else
