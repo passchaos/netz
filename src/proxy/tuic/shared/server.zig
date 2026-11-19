@@ -15,7 +15,7 @@ const Config = @import("../config.zig").Config;
 const limits = @import("../../runtime/limits.zig");
 const reload = @import("../../runtime/reload.zig");
 const destination = @import("../../runtime/destination.zig");
-const relay_mod = @import("relay.zig");
+const relay_mod = @import("../../internal/relay_queue.zig");
 
 const quic = netz.quic;
 const Relay = relay_mod.Relay;

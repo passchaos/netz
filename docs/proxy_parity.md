@@ -16,7 +16,7 @@ modules; it is not duplicated here.
 | VLESS | `src/proxy/vless/` | Request codec and TLS, WebSocket, HTTP/2, QUIC, and gRPC server transports |
 | VMess | `src/proxy/vmess/` | AEAD wire codec, request/body codecs, and TLS, WebSocket, HTTP/2, QUIC, and gRPC server transports |
 | TUIC v5 | `src/proxy/tuic/` | QUIC CONNECT codec, ACL integration, and a shared-endpoint multi-connection server relay (TCP plus native/quic UDP modes) |
-| Hysteria v3 | `src/proxy/hysteria/` | CONNECT-over-QUIC codec, ACL integration, and server relay |
+| Hysteria v3 | `src/proxy/hysteria/` | CONNECT-over-QUIC codec, ACL integration, and a shared-endpoint multi-connection server relay (TCP plus UDP datagrams) |
 
 ## Shared runtime primitives
 
@@ -78,18 +78,21 @@ DATAGRAM) and `udp_relay_mode=quic` (unidirectional stream). The server is
 driven by the shared `quic.endpoint_server.Server` pump, so two concurrent
 connections no longer contend for the single UDP receive owner.
 
+Hysteria v3 uses the same shared endpoint pump
+(`src/proxy/hysteria/shared/`). A two-connection integration test covers the
+control hello, TCP relay, and a QUIC DATAGRAM UDP relay, including the
+fragment cache and rate-bucket paths. No independent Hysteria v3 peer is
+available in the current toolchain (sing-box implements Hysteria v2), so this
+remains an in-repo client/server test rather than an external gate.
+
 Open verification work:
 
-- Hysteria v3 still lacks an independent peer gate. TUIC v5 now has one:
-  `src/proxy/tuic/shared/` moves the server onto the shared
-  `quic.endpoint_server.Server` receive owner, serves multiple concurrent
-  connections from one pump, and passes sing-box 1.14.4 in both
-  `udp_relay_mode=native` and `udp_relay_mode=quic` (TCP plus SOCKS5 UDP
-  associate). Hysteria v3 keeps the older per-connection blocking receive
-  shape and should be ported to the same owner before it claims a
-  multi-connection gate;
+- Hysteria v3 has no independent peer gate because no external v3 client is
+  available. The receive-owner blocker is resolved: the server now shares the
+  `quic.endpoint_server.Server` pump with TUIC and no longer spawns a blocking
+  per-connection receive loop;
 - no fixed-binary performance baseline against a reference proxy
   implementation.
 
-Until those gates exist, claims for those protocols are limited to the in-repo
-codec and relay tests.
+Until an independent Hysteria v3 peer exists, its claims are limited to the
+in-repo client/server tests.

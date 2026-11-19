@@ -20,26 +20,7 @@ const byte_bucket = @import("../internal/byte_bucket.zig");
 const quic = netz.quic;
 const net = std.Io.net;
 
-pub const Config = struct {
-    password: []const u8,
-    identity: quic.tls.auth.ServerIdentity,
-    alpn_protocol: []const u8 = "hysteria",
-    acl: acl.Policy = .{},
-    /// Optional hot-reloadable ACL. Takes precedence over `acl`.
-    policy_store: ?*reload.Reloadable = null,
-    limits: limits.Options = .{},
-    connect_timeout: std.Io.Duration = .fromSeconds(10),
-    idle_timeout: std.Io.Duration = .fromSeconds(120),
-    auth_timeout: std.Io.Duration = .fromSeconds(10),
-    max_datagram_size: usize = 4096,
-    relay_buffer_size: usize = 16 * 1024,
-    max_relays: usize = 64,
-    max_assocs: usize = 64,
-    send_bps: u64 = 0,
-    recv_bps: u64 = 0,
-    stats: ?*stats_mod.Stats = null,
-    rate_limiter: ?*rate_limit.Limiter = null,
-};
+pub const Config = @import("config.zig").Config;
 
 pub const Error = error{
     RateLimited,
@@ -66,7 +47,7 @@ pub const Server = struct {
         config: Config,
     ) !Server {
         if (config.password.len == 0) return error.AuthenticationFailed;
-        const endpoint = try quic.runtime.Endpoint.bind(
+        var endpoint = try quic.runtime.Endpoint.bind(
             allocator,
             io,
             bind_address,
@@ -106,59 +87,10 @@ pub const Server = struct {
         return self.endpoint.address();
     }
 
+    /// Serve concurrent connections through the shared endpoint owner.
     pub fn serve(self: *Server) !void {
-        while (self.running.load(.acquire)) {
-            var local_cid: [4]u8 = undefined;
-            self.io.random(&local_cid);
-            var random: [32]u8 = undefined;
-            self.io.random(&random);
-            var x25519: [32]u8 = undefined;
-            self.io.random(&x25519);
-            var established = quic.handshake.accept(
-                &self.endpoint,
-                .{
-                    .local_connection_id = &local_cid,
-                    .alpn_protocol = self.config.alpn_protocol,
-                    .identity = self.config.identity,
-                    .random = random,
-                    .x25519_secret_key = x25519,
-                    .max_crypto_buffer = 64 * 1024,
-                },
-            ) catch continue;
-            const job = self.allocator.create(Job) catch {
-                established.deinit();
-                continue;
-            };
-            job.* = .{ .server = self, .established = established };
-            _ = self.active_jobs.fetchAdd(1, .monotonic);
-            const thread = std.Thread.spawn(.{}, Job.run, .{job}) catch {
-                _ = self.active_jobs.fetchSub(1, .release);
-                self.allocator.destroy(job);
-                job.established.deinit();
-                continue;
-            };
-            thread.detach();
-        }
+        return @import("shared/server.zig").serve(self);
     }
-
-    const Job = struct {
-        server: *Server,
-        established: quic.handshake.EstablishedConnection,
-
-        fn run(self: *Job) void {
-            const server = self.server;
-            defer _ = server.active_jobs.fetchSub(1, .release);
-            defer server.allocator.destroy(self);
-            defer self.established.deinit();
-            processEstablished(
-                server.allocator,
-                server.io,
-                &self.established,
-                server.config,
-                &server.limiter,
-            ) catch {};
-        }
-    };
 };
 
 const Relay = struct {

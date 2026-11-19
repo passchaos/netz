@@ -7,4 +7,5 @@ pub const v3_server = @import("v3_server.zig");
 test {
     _ = v3_protocol;
     _ = v3_server;
+    _ = @import("shared/tests.zig");
 }

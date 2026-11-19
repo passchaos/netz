@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "date": "2026-11-19",
+  "head": "716b2b88",
+  "feature": "Hysteria v3 shared-endpoint multi-connection server",
+  "source_sha256": {
+    "src/proxy/hysteria/shared/server.zig": "b97edc4639a0f56ef10270e389d6189739bae1c82bbd9919e092479474a01cc5",
+    "src/proxy/hysteria/shared/tests.zig": "4fe0af8e04fc0c9d97e59e779351c4c73efb10942b2babde1314be5713a1e420",
+    "src/proxy/hysteria/config.zig": "f0691baaf1e57ab7cda51a807efc254e65da653b2e6b09f12aab5aa0d76ccb0e",
+    "src/proxy/hysteria/v3_server.zig": "7b80ce2a844265d3250f2002cfe02529eb951a2e38c26415e8fb62518fc7b43e",
+    "src/proxy/hysteria/mod.zig": "6713254d51e557fdefb91f385f6ee54df52cabb4d0174b1ea78fbcf618b8aa51",
+    "src/proxy/internal/relay_queue.zig": "b3ec015943f8eee854688716b6e81335aaa4d4090bb78bfdcd76f9c876a3573a",
+    "docs/proxy_parity.md": "271e3bae6752b18d3c3fe8e436c0c15e48efd26f7b7164ed9e80e2bdbd8bb1da"
+  },
+  "commands": {
+    "unit": "zig build test-lib -Dtest-filter=\"Hysteria\" --summary all"
+  },
+  "results": {
+    "unit": {
+      "passed": 217,
+      "total": 217,
+      "failed": 0
+    },
+    "integration": {
+      "connections": 2,
+      "transports": ["tcp", "quic-datagram"],
+      "failures": 0
+    }
+  },
+  "behavior": "The Hysteria v3 server now runs on quic.endpoint_server.Server. One pump owns the UDP socket and all connections; destination connects run on bounded workers; TCP relays use bounded queues and short partial-write turns; UDP associations are created from request streams and replies use QUIC DATAGRAM frames. The integration test covers the control hello, two concurrent TCP relays, and a UDP echo through the datagram relay.",
+  "conclusion": "The Hysteria v3 receive-owner blocker is resolved. No independent Hysteria v3 peer is available in the current toolchain, so verification remains an in-repo client/server integration test."
+}

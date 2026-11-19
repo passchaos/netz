@@ -1,4 +1,4 @@
-//! TCP relay queues for the shared-endpoint TUIC server.
+//! TCP relay queues for shared-endpoint QUIC proxy servers.
 //!
 //! The endpoint pump owns every QUIC connection. TCP reads therefore run in
 //! one async task per relay and publish chunks through a bounded queue; the
@@ -8,7 +8,7 @@
 
 const std = @import("std");
 const net = std.Io.net;
-const io_helpers = @import("../../internal/io.zig");
+const io_helpers = @import("io.zig");
 
 pub const Outbound = union(enum) {
     data: []u8,
