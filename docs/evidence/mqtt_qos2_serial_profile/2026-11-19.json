@@ -58,5 +58,27 @@
     "driver": "separate external driver",
     "evidence": "docs/evidence/mqtt_qos2_serial_profile/2026-11-02.json"
   },
-  "conclusion": "The current zio-era serial QoS2 path measures 31,894 publishes/s pinned (33,613 unpinned) for the same broker workload shape, versus 20,581 publishes/s in the 2026-11-02 profile. The historical profile used a separate driver, so this is a current-shape smoke rather than a controlled A/B. It shows the earlier event-loop/clock-cost gap is no longer at the historical level. Broker RSS versus Mosquitto remains unmeasured here."
+  "conclusion": "The current zio-era serial QoS2 path measures 31,894 publishes/s pinned (33,613 unpinned) for the same broker workload shape, versus 20,581 publishes/s in the 2026-11-02 profile. The historical profile used a separate driver, so this is a current-shape smoke rather than a controlled A/B. It shows the earlier event-loop/clock-cost gap is no longer at the historical level. Broker RSS versus Mosquitto remains unmeasured here. A Mosquitto 2.0.18 same-workload run measured 39,768 publishes/s with 7,608 kB peak RSS versus netz 33,195 publishes/s with 4,600 kB, so the historical RSS penalty is reversed in this shape (0.605x) while the throughput gap remains about 0.835x.",
+  "mosquitto_comparison": {
+    "date": "2026-11-19",
+    "mosquitto_version": "2.0.18-1build3 (Ubuntu noble package extracted under /tmp)",
+    "workload": "same netz-bench-mqtt-broker client: 1 publisher, 1 subscriber, QoS2, window 1, 20,000 x 256 B, session expiry 3600",
+    "netz": {
+      "publishes_per_s": 33195,
+      "p50_ns": 22976,
+      "p99_ns": 41757,
+      "vm_hwm_kb": 4600
+    },
+    "mosquitto": {
+      "publishes_per_s": 39768,
+      "p50_ns": 20870,
+      "p99_ns": 29237,
+      "vm_hwm_kb": 7608
+    },
+    "ratios_netz_over_mosquitto": {
+      "throughput": 0.835,
+      "vm_hwm": 0.605
+    },
+    "conclusion": "In this single unpinned same-workload run the netz broker used 0.605x Mosquitto peak RSS (4,600 vs 7,608 kB) while throughput was 0.835x. The historical 1.29-1.70x RSS penalty is not reproduced in this configuration."
+  }
 }

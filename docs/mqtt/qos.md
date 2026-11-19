@@ -1438,6 +1438,13 @@ the in-repo benchmark client. CPU-pinned runs measured 31,894 publishes/s
 publishes/s. Both sides reported `zio-std-io`, exact 20,000 deliveries and
 checksum 4,962,720. The historical 2026-11-02 figure used a separate driver, so
 this is a current-shape smoke rather than a controlled A/B; it shows the
-serial path is no longer at the earlier 20,581 publishes/s level. Broker RSS
-versus Mosquitto was not measured in this run. See
-`docs/evidence/mqtt_qos2_serial_profile/2026-11-19.json`.
+serial path is no longer at the earlier 20,581 publishes/s level.
+
+A same-workload comparison against Mosquitto 2.0.18 (Ubuntu noble package) used
+the same client, 20,000 x 256-byte QoS 2 messages, publisher window 1, and
+session expiry 3600. The unpinned run measured netz 33,195 publishes/s
+(p50 23.0 us, p99 41.8 us) with 4,600 kB peak RSS, versus Mosquitto 39,768
+publishes/s (p50 20.9 us, p99 29.2 us) with 7,608 kB peak RSS. Netz therefore
+used 0.605x Mosquitto peak RSS while throughput was 0.835x in this single
+sample. The historical 1.29-1.70x RSS penalty is not reproduced in this
+configuration. See `docs/evidence/mqtt_qos2_serial_profile/2026-11-19.json`.
