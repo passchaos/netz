@@ -135,7 +135,7 @@ and failure-percentage threshold/enforcement/minimum-hosts/request-volume.
 Consecutive-5xx, gateway-failure and local-origin controls, ejection jitter,
 active-health-check unejection and monitors have no gRPC counterpart and are
 rejected when enabled. The generated policy passes the ordinary ServiceConfig
-parser before publication. Aggregate/custom cluster discovery is unsupported.
+parser before publication. `envoy.clusters.aggregate` discovery is supported; custom cluster extensions other than that aggregate type remain unsupported.
 This slice handles EDS-backed, STATIC, STRICT_DNS and LOGICAL_DNS clusters.
 Typed delta CDS/EDS publication is available through the automatic runtime;
 delta CDS/EDS TTL expiry is covered. Bootstrap parsing and control-plane
