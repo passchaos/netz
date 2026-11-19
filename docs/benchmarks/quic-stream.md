@@ -1465,6 +1465,16 @@ require the remaining IDs in order, covering the unordered fallback.
 
 ### Raw QUIC TLS 1.3 handshake latency, rate, and memory
 
+A 2026-11-19 in-process `--mode=handshake --iterations=100 --stats` run at the
+current head recorded 8,101 allocations and 38,357,402 bytes for 100 handshakes
+(81.01 allocations and 383,574 bytes per connection), with 2,892.9 conn/s and
+p50 318.5 us. The two largest per-connection allocations are one >64-KiB
+allocation (~230,096 bytes) and one <=64-KiB allocation (65,536 bytes). The
+historical ~57-allocations/connection figure came from a different harness and
+is not reproduced by the current `--stats` measurement; this is a baseline for
+future pre-trust allocation work, not a regression claim. Rows are in
+`docs/evidence/quic_handshake_allocations/2026-11-19.json`.
+
 The cross-process counterpart uses a long-running server and a fresh client
 UDP endpoint plus full handshake for every sample:
 
