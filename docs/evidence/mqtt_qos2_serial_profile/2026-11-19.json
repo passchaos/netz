@@ -58,7 +58,7 @@
     "driver": "separate external driver",
     "evidence": "docs/evidence/mqtt_qos2_serial_profile/2026-11-02.json"
   },
-  "conclusion": "The current zio-era serial QoS2 path measures 31,894 publishes/s pinned (33,613 unpinned) for the same broker workload shape, versus 20,581 publishes/s in the 2026-11-02 profile. The historical profile used a separate driver, so this is a current-shape smoke rather than a controlled A/B. It shows the earlier event-loop/clock-cost gap is no longer at the historical level. Broker RSS versus Mosquitto remains unmeasured here. A Mosquitto 2.0.18 same-workload run measured 39,768 publishes/s with 7,608 kB peak RSS versus netz 33,195 publishes/s with 4,600 kB, so the historical RSS penalty is reversed in this shape (0.605x) while the throughput gap remains about 0.835x.",
+  "conclusion": "The current zio-era serial QoS2 path measures 31,894 publishes/s pinned (33,613 unpinned) for the same broker workload shape, versus 20,581 publishes/s in the 2026-11-02 profile. The historical profile used a separate driver, so this is a current-shape smoke rather than a controlled A/B. It shows the earlier event-loop/clock-cost gap is no longer at the historical level. Broker RSS versus Mosquitto remains unmeasured here. A Mosquitto 2.0.18 same-workload run measured 39,768 publishes/s with 7,608 kB peak RSS versus netz 33,195 publishes/s with 4,600 kB, so the historical RSS penalty is reversed in this shape (0.605x) while the throughput gap remains about 0.835x. A pinned rerun (broker CPU 1, client CPU 0) measured netz 31,944 publishes/s at 4,616 kB peak RSS versus Mosquitto 30,176 publishes/s at 7,540 kB, i.e. 1.059x throughput and 0.612x RSS.",
   "mosquitto_comparison": {
     "date": "2026-11-19",
     "mosquitto_version": "2.0.18-1build3 (Ubuntu noble package extracted under /tmp)",
@@ -80,5 +80,31 @@
       "vm_hwm": 0.605
     },
     "conclusion": "In this single unpinned same-workload run the netz broker used 0.605x Mosquitto peak RSS (4,600 vs 7,608 kB) while throughput was 0.835x. The historical 1.29-1.70x RSS penalty is not reproduced in this configuration."
+  },
+  "pinned_mosquitto_comparison": {
+    "date": "2026-11-19",
+    "workload": "1 publisher, 1 subscriber, QoS2, window 1, 20,000 x 256 B, session expiry 3600",
+    "cpu_layout": "broker/server on CPU 1, benchmark client on CPU 0",
+    "netz": {
+      "publishes_per_s_samples": [
+        31944,
+        31944
+      ],
+      "median_publishes_per_s": 31944,
+      "vm_hwm_kb": 4616
+    },
+    "mosquitto": {
+      "publishes_per_s_samples": [
+        29923,
+        30429
+      ],
+      "median_publishes_per_s": 30176,
+      "vm_hwm_kb": 7540
+    },
+    "ratios_netz_over_mosquitto": {
+      "throughput": 1.059,
+      "vm_hwm": 0.612
+    },
+    "conclusion": "With both broker processes pinned to CPU 1 and the client to CPU 0, netz sustained 31,944 publishes/s versus Mosquitto 30,176/s (1.059x) while using 4,616 kB versus 7,540 kB peak RSS (0.612x)."
   }
 }

@@ -1446,5 +1446,11 @@ session expiry 3600. The unpinned run measured netz 33,195 publishes/s
 (p50 23.0 us, p99 41.8 us) with 4,600 kB peak RSS, versus Mosquitto 39,768
 publishes/s (p50 20.9 us, p99 29.2 us) with 7,608 kB peak RSS. Netz therefore
 used 0.605x Mosquitto peak RSS while throughput was 0.835x in this single
-sample. The historical 1.29-1.70x RSS penalty is not reproduced in this
-configuration. See `docs/evidence/mqtt_qos2_serial_profile/2026-11-19.json`.
+unpinned sample. The historical 1.29-1.70x RSS penalty is not reproduced in
+this configuration.
+
+A CPU-pinned rerun (broker on CPU 1, benchmark client on CPU 0, two samples
+each) measured netz **31,944 publishes/s** with **4,616 kB** peak RSS versus
+Mosquitto **30,176 publishes/s** with **7,540 kB**. That is 1.059x throughput
+and 0.612x peak RSS for netz in this shape. See
+`docs/evidence/mqtt_qos2_serial_profile/2026-11-19.json`.
