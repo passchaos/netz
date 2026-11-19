@@ -1,0 +1,68 @@
+{
+  "schema": 1,
+  "date": "2026-11-19",
+  "head": "1b635c67",
+  "feature": "HTTP/3 capture-backed equal-wire comparison against quic-go v0.59.0",
+  "decision": "run the kernel-capture arm under CAP_NET_RAW and record directional IP/UDP accounting plus packet-size sequences",
+  "source_sha256": {
+    "tools/interop/http3_packet_capture.py": "7394277485fd3fe2f8745e01f483cb235019ef1c839cc10f2cdb28a28322e05c",
+    "tools/interop/http3_packet_capture_check.py": "682481314717d2062c9c3d99e6019c9f93d95da592dea044d8297615d50799e2",
+    "tools/interop/http3_packet_capture_compare.py": "e3f5c582b8aa59549a77da5519ef661676a9d50819a90ec9025552607323728c",
+    "tools/interop/http3_quic_go.sh": "b2e65bd1745cca345a7655962a076539f760ae63629eb67fbe623ced958c6293",
+    "docs/benchmarks/current-results.md": "3889ecce771f28f672935ea645553727cb504805272f812c40869869722e0f9d"
+  },
+  "command": "sudo env GO_BIN=<go1.24.7> GOMODCACHE=<user-go-module-cache> bash tools/interop/http3_quic_go.sh <netz-client> <netz-server> --bench --capture --warmup=1 --iterations=3 --streams=1 --body-bytes=1048576 --chunk-bytes=16384 --stream-window=1048576 --timeout-ms=30000",
+  "prerequisite": "sysctl -w net.core.rmem_max=33554432 (restored to 212992 after the gate); capture, client, and server pinned to CPUs 2, 0, and 1",
+  "results": {
+    "upload": {
+      "netz_sender_datagrams": 3744,
+      "netz_sender_udp_payload_bytes": 4356492,
+      "netz_sender_ip_bytes": 4461324,
+      "netz_peer_datagrams": 1885,
+      "netz_peer_udp_payload_bytes": 82802,
+      "netz_peer_ip_bytes": 135582,
+      "quic_go_sender_datagrams": 3684,
+      "quic_go_sender_udp_payload_bytes": 4343008,
+      "quic_go_sender_ip_bytes": 4446160,
+      "quic_go_peer_datagrams": 1868,
+      "quic_go_peer_udp_payload_bytes": 70650,
+      "quic_go_peer_ip_bytes": 122954,
+      "sender_datagram_ratio": 1.016,
+      "sender_payload_byte_ratio": 1.003,
+      "sender_ip_byte_ratio": 1.003,
+      "netz_client_pcap_sha256": "968c4cb1307e2c070b83218a043dfca8f375116d6903d077e292c85ff107d022",
+      "quic_go_client_pcap_sha256": "7f39118e4d75b78a09fa40153699fb384b9622ee57b2a979015691bfa22d9698"
+    },
+    "download": {
+      "netz_sender_datagrams": 3728,
+      "netz_sender_udp_payload_bytes": 4343004,
+      "netz_sender_ip_bytes": 4447388,
+      "netz_peer_datagrams": 1867,
+      "netz_peer_udp_payload_bytes": 86800,
+      "netz_peer_ip_bytes": 139076,
+      "quic_go_sender_datagrams": 3709,
+      "quic_go_sender_udp_payload_bytes": 4339384,
+      "quic_go_sender_ip_bytes": 4443236,
+      "quic_go_peer_datagrams": 1888,
+      "quic_go_peer_udp_payload_bytes": 76706,
+      "quic_go_peer_ip_bytes": 129570,
+      "sender_datagram_ratio": 1.005,
+      "sender_payload_byte_ratio": 1.001,
+      "sender_ip_byte_ratio": 1.001,
+      "netz_client_pcap_sha256": "eb29bf6dd38052af01f7c45c722128e7e9025841f2a2517eab4561e979e5edf3",
+      "quic_go_client_pcap_sha256": "8fae8522d638b69c0b8bd570b8ff32520a2266025babd0616be5eb9d0e8320b0"
+    },
+    "capture": {
+      "capture_source": "linux-af-packet",
+      "packet_socket": "SOCK_DGRAM",
+      "capture_receive_buffer_bytes": 33554432,
+      "socket_drops": 0,
+      "captured_totals_equal": false,
+      "sender_packet_size_sequence_equal": false,
+      "peer_packet_size_sequence_equal": false,
+      "complete": true
+    }
+  },
+  "artifacts": "docs/evidence/http3_equal_wire_capture/2026-11-19/ (gate.log, directional logs, comparison logs, bounded DLT_RAW PCAP prefixes, capture tool copy)",
+  "conclusion": "The HTTP/3 capture arm now runs on this host with CAP_NET_RAW and a 32 MiB effective packet-socket buffer. All four mixed-role captures completed with zero drops. The workloads are close but not equal-wire: netz/quic-go sender datagram ratios are 1.016 upload and 1.005 download, while the packet-size sequences differ. Timing results remain explicitly same-application-shape; this evidence removes the kernel-capture gap without claiming byte-identical wire behavior."
+}

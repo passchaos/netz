@@ -2577,10 +2577,15 @@ fixture and Go 1.24.7 measured upload medians of 131.384 MiB/s for the
 netz-client/quic-go-server pairing and 122.452 MiB/s for the
 quic-go-client/netz-server pairing (5 samples, 4 streams, 4 MiB per stream,
 fresh connection per sample). Every sample verified status 200, 16,777,216
-bytes, checksum 2,139,095,040, and four finished streams. The capture arm could
-not run on this host because `AF_PACKET` was denied without `CAP_NET_RAW`; the
-capture-backed equal-wire comparison therefore remains open. Rows are in
-`docs/evidence/http3_quic_go/2026-11-19-rerun.json`.
+bytes, checksum 2,139,095,040, and four finished streams. A 2026-11-19 capture
+arm then ran with `CAP_NET_RAW` and a 32 MiB effective packet-socket buffer at
+1 MiB, one stream, three iterations. All four mixed-role captures completed
+with zero packet-socket drops. The shapes are close but not equal-wire:
+netz/quic-go sender datagram ratios were 1.016 upload and 1.005 download,
+payload-byte ratios 1.003 and 1.001, and the packet-size sequences differed.
+Timing rows remain explicitly same-application-shape. PCAPs, directional logs,
+and the comparison rows are in
+`docs/evidence/http3_equal_wire_capture/2026-11-19/`.
 
 The current
 netz client and server use zio behind `std.Io`. Config, client-owned result,
