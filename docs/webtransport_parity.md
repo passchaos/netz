@@ -162,7 +162,15 @@ gate cannot mistake a clean CONNECT-stream FIN for a peer connection close.
 Immediately before its detailed close, netz now sends WT_DRAIN_SESSION on the
 same ordered CONNECT stream. The audited wtransport driver has no public drain
 event and treats this capsule as unknown, but receiving the following exact
-close code/reason proves it skipped DRAIN without losing capsule framing. The
+close code/reason proves it skipped DRAIN without losing capsule framing.
+
+A 2026-11-19 rerun at the current head passed both
+`interop-webtransport-wtransport` (18 s) and
+`interop-webtransport-wtransport-churn` (12 s) against the pinned local
+wtransport checkout. The native gate and churn gate still exercise both
+directions, DATAGRAM/stream exchange, mapped reset/stop codes, sibling
+survival, and close-code validation. This refreshes the external interop
+runtime-path evidence; capture-backed equal-wire throughput remains open. The
 response stream is now opened before each peer sends STOP_SENDING, and the
 receiver withholds its reply until it observes that cancellation. In the
 netz-client half, the first mapped STOP_SENDING datagram is deliberately

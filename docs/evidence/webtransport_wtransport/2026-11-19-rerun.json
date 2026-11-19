@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "date": "2026-11-19",
+  "feature": "WebTransport native wtransport interop rerun",
+  "decision": "evidence refresh; gates pass at the current head",
+  "head": "4048e3165ca963206feeaf154f172e2a8409c9e9",
+  "peer": "local /home/passchaos/Work/wtransport checkout (audited d96cbb8 fixture)",
+  "commands": [
+    "zig build interop-webtransport-wtransport -Doptimize=ReleaseFast",
+    "zig build interop-webtransport-wtransport-churn -Doptimize=ReleaseFast"
+  ],
+  "results": {
+    "native_gate_seconds": 18,
+    "churn_gate_seconds": 12,
+    "native_gate": "success",
+    "churn_gate": "success"
+  },
+  "coverage": "both endpoint-role pairings, Extended CONNECT, DATAGRAM and bidirectional/unidirectional streams, mapped RESET_STREAM/STOP_SENDING codes, sibling survival, and QUIC application close validation",
+  "open": "capture-backed equal-wire throughput comparison",
+  "complete": true
+}
