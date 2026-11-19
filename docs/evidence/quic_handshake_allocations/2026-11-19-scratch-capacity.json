@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "date": "2026-11-19",
+  "feature": "QUIC established-connection scratch precise capacity",
+  "decision": "size fixed packet and ACK scratch lists precisely instead of paying geometric ArrayList overhang per connection",
+  "head": "825fc905",
+  "source_sha256": {
+    "src/quic/one_rtt/scratch.zig": "400ff587032c6ee9061319bfe042ce8e799474cec0d5f0a11d294e179432dcda",
+    "docs/benchmarks/quic-stream.md": "83e7d1768294b22678d8782033f320e8ec25a7ede73fdd4a635fe86269abc446"
+  },
+  "command": "taskset -c 0 zig build bench-quic-handshake-stream -Doptimize=ReleaseFast -- --mode=handshake --iterations=100 --stats",
+  "workload": {
+    "mode": "handshake",
+    "iterations": 100,
+    "io_backend": "zio-std-io",
+    "tls": "QUIC v1, TLS 1.3, pinned P-256 CertificateVerify"
+  },
+  "results": {
+    "runs": 3,
+    "connections_per_s": [3945.4, 4028.3, 4048.9],
+    "p50_ns": [227028, 222101, 221439],
+    "alloc_count": 7701,
+    "alloc_count_per_connection": 77.01,
+    "allocated_bytes": [7723502, 7723522, 7723400],
+    "allocated_bytes_per_connection": 77234,
+    "previous_bytes_per_connection": 87710,
+    "delta_bytes_per_connection": -10476,
+    "delta_percent": -11.9
+  },
+  "conclusion": "The send packet, receive packet, and ACK-range scratch regions have known upper bounds, so precise capacities remove the 50% ArrayList growth overhang without changing the allocation count. Three runs saved 10,476 bytes per connection (-11.9%) relative to the prepared-certificate-compression rows; handshake timing stayed noise-level, so only the allocation reduction is claimed."
+}

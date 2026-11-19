@@ -46,15 +46,18 @@ pub const Buffers = struct {
             } else .empty,
         };
         errdefer buffers.deinit(allocator);
-        try buffers.send_packet.ensureTotalCapacity(
+        // These are fixed-capacity packet/ACK scratch regions, not growing
+        // collections. Precise capacities avoid the 50% geometric overhang on
+        // every connection while leaving normal append paths intact.
+        try buffers.send_packet.ensureTotalCapacityPrecise(
             allocator,
             send_packet_capacity,
         );
-        try buffers.receive_packet.ensureTotalCapacity(
+        try buffers.receive_packet.ensureTotalCapacityPrecise(
             allocator,
             receive_packet_capacity,
         );
-        try buffers.receive_ack_ranges.ensureTotalCapacity(
+        try buffers.receive_ack_ranges.ensureTotalCapacityPrecise(
             allocator,
             receive_ack_range_capacity,
         );
@@ -74,10 +77,10 @@ test "QUIC one-RTT scratch reserves reusable packet state" {
     var buffers = try Buffers.init(std.testing.allocator, 1400, 4096, 32);
     defer buffers.deinit(std.testing.allocator);
 
-    try std.testing.expect(buffers.send_packet.capacity >= 1400);
-    try std.testing.expect(buffers.receive_packet.capacity >= 4096);
+    try std.testing.expectEqual(@as(usize, 1400), buffers.send_packet.capacity);
+    try std.testing.expectEqual(@as(usize, 4096), buffers.receive_packet.capacity);
     try std.testing.expectEqual(@as(usize, 0), buffers.receive_frames.capacity);
-    try std.testing.expect(buffers.receive_ack_ranges.capacity >= 32);
+    try std.testing.expectEqual(@as(usize, 32), buffers.receive_ack_ranges.capacity);
 }
 
 test "QUIC one-RTT scratch initialization rolls back every allocation" {

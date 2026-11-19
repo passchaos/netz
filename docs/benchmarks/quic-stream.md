@@ -1492,6 +1492,14 @@ connection) with p50 218.6 us and 3,662.1 conn/s, versus 8,101 allocations and
 `--no-prepared-compression`. Rows are in
 `docs/evidence/quic_handshake_allocations/2026-11-19-prepared-certificate-compression.json`.
 
+The established-connection scratch regions are fixed packet and ACK buffers,
+so the next pass replaced their geometric `ArrayList` growth with precise
+capacities. Allocation count stayed at 7,701, while three runs measured
+7,723,400-7,723,522 bytes (77,234 bytes per connection, 11.9% below the
+prepared-reuse rows) with p50 222.1 us and 4,028.3 conn/s; the timing move is
+noise-level, so only the allocation reduction is claimed. Rows are in
+`docs/evidence/quic_handshake_allocations/2026-11-19-scratch-capacity.json`.
+
 The cross-process counterpart uses a long-running server and a fresh client
 UDP endpoint plus full handshake for every sample:
 
