@@ -61,9 +61,18 @@ protocol bug: the server never wrote the VLESS response header (version 0 plus
 an empty addon), so real clients treated the first payload byte as a version
 and closed the connection. The server now writes that prefix before relaying.
 
+`zig build interop-vmess-sing-box` adds an independent VMess gate. A sing-box
+1.14.x SOCKS5 inbound forwards through its VMess outbound to the netz TLS
+server, which relays to a loopback HTTP target; the gate covers
+`aes-128-gcm` and `chacha20-poly1305` over both TLS and WebSocket. The gate
+exposed a real interoperability bug: netz implemented the VMess header AEAD but
+not the `ChunkMasking` stream-body option, so every real AES/chacha client
+failed on the first body chunk. The body codec now applies the SHAKE128 length
+mask and accepts zero-length termination chunks.
+
 Open verification work:
 
-- no independent peer gate for VMess, TUIC, or Hysteria;
+- no independent peer gate for TUIC or Hysteria;
 - no fixed-binary performance baseline against a reference proxy
   implementation.
 

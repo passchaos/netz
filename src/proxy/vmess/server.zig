@@ -69,7 +69,7 @@ pub const Server = struct {
         address: net.IpAddress,
         config: Config,
     ) !Server {
-        const listener = try address.listen(io, .{ .reuse_address = true });
+        var listener = try address.listen(io, .{ .reuse_address = true });
         errdefer listener.deinit(io);
         var limiter = try limits.ConnectionLimiter.init(
             allocator,
@@ -112,9 +112,9 @@ pub const Server = struct {
                 continue;
             };
             job.* = .{ .server = self, .stream = stream, .peer = peer };
-            self.active_jobs.fetchAdd(1, .monotonic);
+            _ = self.active_jobs.fetchAdd(1, .monotonic);
             const thread = std.Thread.spawn(.{}, Job.run, .{job}) catch {
-                self.active_jobs.fetchSub(1, .release);
+                _ = self.active_jobs.fetchSub(1, .release);
                 self.allocator.destroy(job);
                 stream.close(self.io);
                 continue;
@@ -130,7 +130,7 @@ pub const Server = struct {
 
         fn run(self: *Job) void {
             const server = self.server;
-            defer server.active_jobs.fetchSub(1, .release);
+            defer _ = server.active_jobs.fetchSub(1, .release);
             defer server.allocator.destroy(self);
             const tls_config = server.config.tls orelse {
                 self.stream.close(server.io);
@@ -292,17 +292,29 @@ fn connectAndRelay(
                         .aes_128_gcm
                     else
                         .chacha20_poly1305;
-                var encryptor = body.Encryptor.init(
-                    algorithm,
-                    keys.key,
-                    keys.iv,
-                );
+                // Authenticated-length AEAD chunks are a separate framing;
+                // the current stream codec supports the legacy masked form.
+                if ((decoded.session.option & 16) != 0) {
+                    return error.UnsupportedSecurity;
+                }
+                const masked = (decoded.session.option & 4) != 0;
+                var encryptor = if (masked)
+                    body.Encryptor.initMasked(algorithm, keys.key, keys.iv)
+                else
+                    body.Encryptor.init(algorithm, keys.key, keys.iv);
                 defer encryptor.deinit();
-                var decryptor = body.Decryptor.init(
-                    algorithm,
-                    decoded.session.body_key,
-                    decoded.session.body_iv,
-                );
+                var decryptor = if (masked)
+                    body.Decryptor.initMasked(
+                        algorithm,
+                        decoded.session.body_key,
+                        decoded.session.body_iv,
+                    )
+                else
+                    body.Decryptor.init(
+                        algorithm,
+                        decoded.session.body_key,
+                        decoded.session.body_iv,
+                    );
                 defer decryptor.deinit();
                 return relayBody(
                     allocator,
@@ -430,7 +442,12 @@ fn relayUdpBody(
     decryptor: anytype,
     encryptor: anytype,
 ) !void {
-    const plain = try allocator.alloc(u8, config.relay_buffer_size);
+    // A peer may send one maximum-size VMess chunk regardless of our relay
+    // quantum; the decryptor needs the full plaintext capacity.
+    const plain = try allocator.alloc(
+        u8,
+        @max(config.relay_buffer_size, body.max_payload_len),
+    );
     defer allocator.free(plain);
     const wire = try allocator.alloc(
         u8,
@@ -529,7 +546,12 @@ fn relayBody(
     decryptor: anytype,
     encryptor: anytype,
 ) !void {
-    const plain = try allocator.alloc(u8, config.relay_buffer_size);
+    // A peer may send one maximum-size VMess chunk regardless of our relay
+    // quantum; the decryptor needs the full plaintext capacity.
+    const plain = try allocator.alloc(
+        u8,
+        @max(config.relay_buffer_size, body.max_payload_len),
+    );
     defer allocator.free(plain);
     const wire = try allocator.alloc(
         u8,

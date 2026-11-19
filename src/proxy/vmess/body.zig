@@ -86,6 +86,7 @@ pub const Encryptor = struct {
     context: Context,
     iv: [16]u8,
     counter: u16 = 0,
+    mask: ?std.crypto.hash.sha3.Shake128 = null,
 
     pub fn init(
         algorithm: Algorithm,
@@ -96,6 +97,20 @@ pub const Encryptor = struct {
             .context = contextFor(algorithm, key),
             .iv = iv,
         };
+    }
+
+    /// Legacy stream chunks with the `ChunkMasking` option: each 2-byte
+    /// length is XORed with the next SHAKE128 output word.
+    pub fn initMasked(
+        algorithm: Algorithm,
+        key: [16]u8,
+        iv: [16]u8,
+    ) Encryptor {
+        var self = init(algorithm, key, iv);
+        var shake = std.crypto.hash.sha3.Shake128.init(.{});
+        shake.update(&iv);
+        self.mask = shake;
+        return self;
     }
 
     pub fn deinit(self: *Encryptor) void {
@@ -111,7 +126,12 @@ pub const Encryptor = struct {
         if (payload.len > max_payload_len) return error.ChunkTooLarge;
         const total = 2 + payload.len + tag_length;
         if (output.len < total) return error.BufferTooSmall;
-        const size: u16 = @intCast(payload.len + tag_length);
+        var size: u16 = @intCast(payload.len + tag_length);
+        if (self.mask) |*shake| {
+            var mask_bytes: [2]u8 = undefined;
+            shake.squeeze(&mask_bytes);
+            size ^= std.mem.readInt(u16, &mask_bytes, .big);
+        }
         std.mem.writeInt(u16, output[0..2], size, .big);
 
         var nonce: [12]u8 = self.iv[0..12].*;
@@ -138,6 +158,7 @@ pub const Decryptor = struct {
     context: Context,
     iv: [16]u8,
     counter: u16 = 0,
+    mask: ?std.crypto.hash.sha3.Shake128 = null,
 
     pub fn init(
         algorithm: Algorithm,
@@ -148,6 +169,18 @@ pub const Decryptor = struct {
             .context = contextFor(algorithm, key),
             .iv = iv,
         };
+    }
+
+    pub fn initMasked(
+        algorithm: Algorithm,
+        key: [16]u8,
+        iv: [16]u8,
+    ) Decryptor {
+        var self = init(algorithm, key, iv);
+        var shake = std.crypto.hash.sha3.Shake128.init(.{});
+        shake.update(&iv);
+        self.mask = shake;
+        return self;
     }
 
     pub fn deinit(self: *Decryptor) void {
@@ -166,7 +199,13 @@ pub const Decryptor = struct {
         const read = try readExactAllowEof(connection, &size_bytes);
         if (read == 0) return null;
         if (read != 2) return error.TruncatedChunk;
-        const size = std.mem.readInt(u16, &size_bytes, .big);
+        var size = std.mem.readInt(u16, &size_bytes, .big);
+        if (self.mask) |*shake| {
+            var mask_bytes: [2]u8 = undefined;
+            shake.squeeze(&mask_bytes);
+            size ^= std.mem.readInt(u16, &mask_bytes, .big);
+        }
+        if (size == 0) return null;
         if (size < tag_length) return error.InvalidChunk;
         if (output.len < size - tag_length) return error.BufferTooSmall;
 

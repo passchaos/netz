@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "date": "2026-11-19",
+  "feature": "VMess AEAD independent-peer interop",
+  "decision": "gate retained; fixed missing ChunkMasking body support",
+  "head": "128d71757984263e89e53c216b1ef8f0153ec2b7",
+  "peer": "sing-box 1.14.4 linux-amd64",
+  "command": "SING_BOX_BIN=/tmp/sing-box-1.14.4/sing-box zig build interop-vmess-sing-box -Doptimize=ReleaseFast",
+  "role_pair": "sing-box-client+netz-server",
+  "transports": ["tls", "ws"],
+  "security": ["aes-128-gcm", "chacha20-poly1305"],
+  "uuid": "00000000-0000-4000-8000-000000000002",
+  "target": "python3 -m http.server on 127.0.0.1:18451",
+  "result": "exact 21-byte body through SOCKS5 -> sing-box VMess -> netz server -> HTTP target for all four combinations",
+  "bug_found": "src/proxy/vmess/body.zig implemented the VMess header AEAD but only the unmasked legacy stream-body format. sing-box sets option bit 4 (ChunkMasking), so the 2-byte length is XORed with SHAKE128 output and the server misread the first body chunk. Added masked encryptor/decryptor and zero-length termination handling; also sized the plaintext chunk buffer for maximum-size peer chunks and fixed latent server compile errors.",
+  "complete": true
+}

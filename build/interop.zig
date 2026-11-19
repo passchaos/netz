@@ -87,6 +87,26 @@ pub fn addAll(
         "interop-vless-sing-box",
         "Verify the netz VLESS TLS server against a sing-box client",
     ).dependOn(&vless_gate.step);
+    const vmess_server = b.addExecutable(.{
+        .name = "netz-vmess-server",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/interop/vmess_server.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    b.step(
+        "build-vmess-server",
+        "Build the standalone VMess AEAD TLS server",
+    ).dependOn(&b.addInstallArtifact(vmess_server, .{}).step);
+    const vmess_gate = b.addSystemCommand(&.{"tools/interop/vmess_sing_box.sh"});
+    vmess_gate.addArtifactArg(vmess_server);
+    if (b.args) |args| vmess_gate.addArgs(args);
+    b.step(
+        "interop-vmess-sing-box",
+        "Verify the netz VMess AEAD TLS server against a sing-box client",
+    ).dependOn(&vmess_gate.step);
 
     const mqtt_mtls_server = b.addExecutable(.{
         .name = "netz-mqtt-mtls-server",
