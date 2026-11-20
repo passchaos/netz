@@ -190,20 +190,27 @@ by all three protocols. The caller writes the request body incrementally and
 receives the response through callbacks; neither direction is buffered whole.
 
 ```zig
-var handle = try connection.startRequest("/upload", .{ // HTTP/1 or HTTP/2
+const until = std.Io.Clock.Timestamp.fromNow(io, .{
+    .clock = .awake,
+    .raw = .fromSeconds(10),
+});
+var handle = try connection.startRequestWithDeadline("/upload", .{
     .method = "POST",
     .headers = &.{.{ .name = "te", .value = "trailers" }},
+    .trailers = &.{.{ .name = "x-checksum", .value = "" }},
     .body_length = .unknown, // or .{ .exact = n }; derived when omitted
-});
+}, until);
 defer handle.deinit();
 
-try handle.writeBody("chunk-1");
-try handle.writeBody("chunk-2");
-try handle.finishTrailers(&.{.{ .name = "x-checksum", .value = "1" }});
+var progress: netz.http.UploadProgress = .{};
+try handle.writeBodyWithDeadline("chunk-1", &progress, until);
+try handle.writeBodyWithDeadline("chunk-2", &progress, until);
+try handle.finishTrailersWithDeadline(
+    &.{.{ .name = "x-checksum", .value = "1" }}, &progress, until,
+);
 
 var sink = MySink{};
-const head = try handle.readResponse(sink.responseSink());
-// or: try handle.readResponseWithDeadline(sink.responseSink(), deadline);
+const head = try handle.readResponseWithDeadline(sink.responseSink(), until);
 ```
 
 Request headers, declared trailers, `finishTrailers` and response callbacks
@@ -211,6 +218,8 @@ all use the same `http.Header` type. `http.DuplexHeader` is a compatibility
 alias; callers do not need a separate trailer array. H2/H3 never-indexed
 metadata is preserved in both directions. H1 trailer declarations keep the
 stack fast path and allocate exact descriptor overflow for larger field sets.
+For a manual H1 upload, `RequestOptions.trailers` announces the field names;
+`finishTrailers` supplies their final values.
 
 A completed response can be read again to obtain its retained final head;
 the second call performs no I/O and does not repeat begin/data/end or interim
@@ -236,6 +245,32 @@ from `body` or `body_source`. `Handle.writeBody` surfaces
 `error.ResponseAvailable` when a peer rejects the request early; call
 `readResponse` to drain the already-received final response. HTTP/1
 `Expect: 100-continue` is handled on the first body write.
+
+`RequestHandle` and `Pool.StreamHandle` have matching `writeBodyWithDeadline`,
+`finishBodyWithDeadline` and `finishTrailersWithDeadline` methods, with timeout
+forms as well. `UploadProgress` is reset for each call: `accepted_bytes` reports
+the body prefix accepted by that call and `end_accepted` reports message-end
+acceptance. H1 transport failures keep their terminal connection policy;
+H2/H3 interrupted writes can continue with their unaccepted suffix where the
+native owner remains usable. An expired call accepts nothing and retains an
+unobserved H1 Continue wait. Calls after body completion return
+`error.RequestBodyFinished`.
+
+Pooled H3 progress means ownership transferred into its bounded dispatcher
+queue; it does not establish delivery or peer acknowledgement. Both endpoint
+backends split large contributions while retaining at most 64 KiB of queued
+body data plus one worker contribution. The worker uses packet/credit-aware
+STREAM fragments, retaining its cursor across backpressure. A timed-out caller
+can inspect the accepted prefix and retry only the suffix. FIN/trailers are
+accepted once, and known body lengths are checked before accepting a call's
+prefix. Empty non-final writes queue no work. Ordinary pooled `writeBody` and
+Reader uploads wait for this queue's capacity.
+
+Request setup has explicit deadline/timeout forms on `Connection` and `Pool`,
+and standalone H3 has `startHttp3RequestWithDeadline`/`WithTimeout`. Setup bounds
+connection admission and head output; subsequent body/read operations use
+explicit deadlines. Reader-source I/O deadline composition remains separate
+from these network-write bounds.
 
 Timed and ordinary TCP reads use the same socket I/O surface. Canceling a
 timed wait joins its read before releasing the receive buffer; bytes or EOF

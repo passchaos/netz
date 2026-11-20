@@ -51,8 +51,11 @@ pub const BodyLength = types.BodyLength;
 pub const RequestHandle = duplex.Handle;
 pub const ResponseSink = duplex.ResponseSink;
 pub const ResponseHead = duplex.ResponseHead;
+pub const UploadProgress = duplex.UploadProgress;
 pub const DuplexHeader = duplex.Header;
 pub const startHttp3Request = duplex.startHttp3;
+pub const startHttp3RequestWithDeadline = duplex.startHttp3WithDeadline;
+pub const startHttp3RequestWithTimeout = duplex.startHttp3WithTimeout;
 pub const RequestOptions = types.RequestOptions;
 pub const RedirectOptions = types.RedirectOptions;
 pub const Options = types.Options;
@@ -206,6 +209,21 @@ pub const Connection = struct {
         target: []const u8,
         options: RequestOptions,
     ) Error!RequestHandle {
+        return self.startRequestBefore(target, options, null);
+    }
+
+    /// Bound request-head setup; the returned handle takes explicit body and
+    /// response deadlines for later operations.
+    pub fn startRequestWithDeadline(self: *Connection, target: []const u8, options: RequestOptions, deadline: std.Io.Clock.Timestamp) Error!RequestHandle {
+        _ = try deadline_policy.usableAwake(connectionIo(self), deadline);
+        return self.startRequestBefore(target, options, deadline);
+    }
+
+    pub fn startRequestWithTimeout(self: *Connection, target: []const u8, options: RequestOptions, timeout: std.Io.Duration) Error!RequestHandle {
+        return self.startRequestWithDeadline(target, options, (try deadline_policy.fromTimeout(connectionIo(self), timeout)).?);
+    }
+
+    fn startRequestBefore(self: *Connection, target: []const u8, options: RequestOptions, deadline: ?std.Io.Clock.Timestamp) Error!RequestHandle {
         if (self.forward_proxy != null) return error.StreamingBodyUnsupported;
         switch (self.value) {
             .http1 => |*client| {
@@ -226,13 +244,14 @@ pub const Connection = struct {
                 var trailer_names: [max_stack_trailers][]const u8 = undefined;
                 var names = try header_mapping.names(self.allocator, trailers.items, &trailer_names);
                 defer names.deinit(self.allocator);
-                const writer = try client.startRequest(.{
+                const request_options: http1_runtime.StreamingRequestOptions = .{
                     .method = try http1.Method.parse(options.method),
                     .target = target,
                     .headers = headers.items,
                     .body_length = requestBodyLength(options),
                     .trailer_names = names.items,
-                });
+                };
+                const writer = if (deadline) |absolute| try client.startRequestWithDeadline(request_options, absolute) else try client.startRequest(request_options);
                 return RequestHandle.initHttp1(self.allocator, writer);
             },
             .http2 => |*connection| {
@@ -252,12 +271,13 @@ pub const Connection = struct {
                     &trailer_stack,
                 );
                 defer trailers.deinit(self.allocator);
-                const writer = try connection.startRequest(.{
+                const request_options: http2_runtime.StreamingRequestOptions = .{
                     .method = options.method,
                     .path = target,
                     .headers = headers.items,
                     .body_length = requestBodyLength(options),
-                });
+                };
+                const writer = if (deadline) |absolute| try connection.startRequestWithDeadline(request_options, absolute) else try connection.startRequest(request_options);
                 return RequestHandle.initHttp2(self.allocator, writer);
             },
         }

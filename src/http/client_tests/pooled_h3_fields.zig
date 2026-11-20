@@ -74,7 +74,49 @@ const Sink = struct {
     }
 };
 
+fn receiveStreamingUpload(session: *h3.HandshakeServerSession, io: std.Io, expected: []const u8) !u62 {
+    var stream_id: ?u62 = null;
+    var offset: usize = 0;
+    var saw_trailers = false;
+    var buffer: [16 * 1024]u8 = undefined;
+    while (true) {
+        var event = try session.receiveRequestEventWithDeadline(deadline(io));
+        defer event.deinit(allocator);
+        if (event != .message) return error.TestUnexpectedResult;
+        const message = event.message;
+        if (stream_id) |id| try std.testing.expectEqual(id, message.stream_id) else stream_id = message.stream_id;
+        switch (message.value) {
+            .head => |head| try std.testing.expect(head == .request),
+            .data_available => {
+                const count = try session.readRequestData(message.stream_id, &buffer);
+                try std.testing.expect(count <= expected.len - offset);
+                try std.testing.expectEqualSlices(u8, expected[offset..][0..count], buffer[0..count]);
+                offset += count;
+            },
+            .trailers => |trailers| {
+                try std.testing.expectEqual(@as(usize, field_count), trailers.fields.len);
+                for (trailers.fields) |field| {
+                    try std.testing.expect(field.never_indexed);
+                    try std.testing.expectEqualStrings("done", field.value);
+                }
+                saw_trailers = true;
+            },
+            .finished => {
+                try std.testing.expectEqual(expected.len, offset);
+                try std.testing.expect(saw_trailers);
+                return stream_id.?;
+            },
+            .push_promise => return error.TestUnexpectedResult,
+        }
+    }
+}
+
 fn exercise(comptime shared_endpoint: bool) !void {
+    return exerciseWithDeadlines(shared_endpoint, false);
+}
+
+fn exerciseWithDeadlines(comptime shared_endpoint: bool, comptime timed: bool) !void {
+    const upload: []const u8 = if (timed) "u" ** (128 * 1024 + 3) else "upload";
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
     defer threaded.deinit();
     const io = threaded.io();
@@ -104,32 +146,35 @@ fn exercise(comptime shared_endpoint: bool) !void {
         }
     };
     const UdpWorker = struct {
-        fn run(server: *h3.HandshakeServer, worker_io: std.Io, done: *std.Io.Event) !void {
+        fn run(server: *h3.HandshakeServer, worker_io: std.Io, done: *std.Io.Event, expected: []const u8) !void {
             var session = try server.acceptWithTimeout(.fromSeconds(5));
             defer session.deinit();
             var names: [field_count][24]u8 = undefined;
             var fields: [field_count]protocol.Qpack.HeaderField = undefined;
             for (&names, &fields, 0..) |*name, *field, index| field.* = .{ .name = try std.fmt.bufPrint(name, "x-response-{d}", .{index}), .value = "v", .never_indexed = true };
             for (0..2) |_| {
-                var request = try session.receiveRequestWithDeadline(deadline(worker_io));
-                defer request.deinit(allocator);
-                try std.testing.expectEqualStrings("upload", request.request.body);
-                try std.testing.expectEqual(@as(usize, field_count), request.request.trailers.len);
-                for (request.request.trailers) |field| {
-                    try std.testing.expect(field.never_indexed);
-                    try std.testing.expectEqualStrings("done", field.value);
-                }
-                try session.sendInformationalResponse(request.stream_id, .{ .status = 103, .headers = &fields });
-                try session.startResponse(request.stream_id, .{ .status = 200, .headers = &fields }, 4);
-                try session.sendResponseBodyPaced(request.stream_id, "body", false);
-                try session.finishResponseTrailersPaced(request.stream_id, &fields);
+                const stream_id = if (timed) try receiveStreamingUpload(&session, worker_io, expected) else blk: {
+                    var request = try session.receiveRequestWithDeadline(deadline(worker_io));
+                    defer request.deinit(allocator);
+                    try std.testing.expectEqualStrings(expected, request.request.body);
+                    try std.testing.expectEqual(@as(usize, field_count), request.request.trailers.len);
+                    for (request.request.trailers) |field| {
+                        try std.testing.expect(field.never_indexed);
+                        try std.testing.expectEqualStrings("done", field.value);
+                    }
+                    break :blk request.stream_id;
+                };
+                try session.sendInformationalResponse(stream_id, .{ .status = 103, .headers = &fields });
+                try session.startResponse(stream_id, .{ .status = 200, .headers = &fields }, 4);
+                try session.sendResponseBodyPaced(stream_id, "body", false);
+                try session.finishResponseTrailersPaced(stream_id, &fields);
             }
             try done.wait(worker_io);
         }
     };
     var tcp_task = try io.concurrent(TcpWorker.run, .{ &tcp, alt_svc, &release });
     defer _ = tcp_task.cancel(io) catch {};
-    var udp_task = try io.concurrent(UdpWorker.run, .{ &udp, io, &release });
+    var udp_task = try io.concurrent(UdpWorker.run, .{ &udp, io, &release, upload });
     defer _ = udp_task.cancel(io) catch {};
     defer release.set(io);
     var pool = try http.Pool.init(allocator, io, .{
@@ -145,12 +190,23 @@ fn exercise(comptime shared_endpoint: bool) !void {
     var names: [field_count][24]u8 = undefined;
     var trailers: [field_count]http.Header = undefined;
     for (&names, &trailers, 0..) |*name, *field, index| field.* = .{ .name = try std.fmt.bufPrint(name, "x-upload-{d}", .{index}), .value = "done", .never_indexed = true };
-    for (0..2) |_| {
+    for (0..2) |index| {
         var handle = try pool.startRequestWithDeadline(uri, .{ .method = "POST", .body_length = .unknown }, deadline(io));
         defer handle.deinit();
         try std.testing.expectEqual(http.Protocol.http3, handle.protocol());
-        try handle.writeBody("upload");
-        try handle.finishTrailers(&trailers);
+        if (timed) {
+            var progress: http.UploadProgress = .{};
+            if (index == 0) {
+                try handle.writeBodyWithDeadline(upload, &progress, deadline(io));
+                try std.testing.expectEqual(upload.len, progress.accepted_bytes);
+            } else try handle.writeBody(upload);
+            try handle.finishTrailersWithDeadline(&trailers, &progress, deadline(io));
+            try std.testing.expect(progress.end_accepted);
+            try std.testing.expectError(error.RequestBodyFinished, handle.writeBodyWithDeadline("later", &progress, deadline(io)));
+        } else {
+            try handle.writeBody(upload);
+            try handle.finishTrailers(&trailers);
+        }
         var sink = Sink{};
         defer sink.body.deinit(allocator);
         const head = try handle.readResponseWithDeadline(sink.responseSink(), deadline(io));
@@ -176,4 +232,9 @@ test "unified HTTP pooled H3 fields and interim callbacks share endpoint" {
 
 test "unified HTTP pooled H3 fields and interim callbacks use exclusive endpoint" {
     try exercise(false);
+}
+
+test "unified HTTP streaming deadlines accept oversized pooled H3 uploads on both endpoints" {
+    try exerciseWithDeadlines(true, true);
+    try exerciseWithDeadlines(false, true);
 }

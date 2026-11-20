@@ -12,8 +12,11 @@ const http1_runtime = @import("../../http1/runtime.zig");
 const http2_runtime = @import("../../http2/runtime.zig");
 const http3_runtime = @import("../../http3/runtime.zig");
 const types = @import("../client/types.zig");
+const upload = @import("upload.zig");
+const Fifo = @import("../../internal/fifo.zig").Fifo;
 
 pub const Header = types.Header;
+pub const UploadProgress = upload.Progress;
 
 pub const ResponseHead = struct {
     protocol: types.Protocol,
@@ -40,6 +43,7 @@ pub const Handle = struct {
     h1_continue_pending: bool = false,
     h1_buffered_response: ?http1_runtime.OwnedResponse = null,
     h3_pending_event: ?http3_runtime.StreamingEvent = null,
+    h3_pending_interims: Fifo(http3_runtime.StreamingEvent) = .{},
     response_available: bool = false,
     body_finished: bool = false,
     response_complete: bool = false,
@@ -118,6 +122,11 @@ pub const Handle = struct {
         if (self.h3_pending_event) |*event| {
             event.deinit(self.allocator);
         }
+        for (self.h3_pending_interims.slice()) |queued| {
+            var event = queued;
+            event.deinit(self.allocator);
+        }
+        self.h3_pending_interims.deinit(self.allocator);
         if (self.response_headers.len != 0) {
             self.allocator.free(self.response_headers);
         }
@@ -127,140 +136,16 @@ pub const Handle = struct {
         self.* = undefined;
     }
 
-    pub fn writeBody(self: *Handle, bytes: []const u8) !void {
-        switch (self.state) {
-            .http1 => |*writer| {
-                if (self.h1_continue_pending) {
-                    self.h1_continue_pending = false;
-                    switch (try writer.waitForContinue()) {
-                        .proceed => {},
-                        .final_response => |response| {
-                            self.h1_buffered_response = response;
-                            self.response_available = true;
-                            return error.ResponseAvailable;
-                        },
-                    }
-                }
-                try writer.write(bytes);
-            },
-            .http2 => |*writer| {
-                writer.write(bytes) catch |err| switch (err) {
-                    error.ResponseAvailable => {
-                        self.response_available = true;
-                        self.body_finished = true;
-                        return error.ResponseAvailable;
-                    },
-                    else => return err,
-                };
-            },
-            .http3 => |*h3| {
-                h3.client.sendRequestBodyPaced(
-                    h3.stream_id,
-                    bytes,
-                    false,
-                ) catch |err| switch (err) {
-                    error.RequestCancelled, error.RequestRejected => {
-                        if (try self.stashHttp3Head(h3)) {
-                            self.response_available = true;
-                            return error.ResponseAvailable;
-                        }
-                        return err;
-                    },
-                    else => return err,
-                };
-            },
-        }
-    }
-
-    /// Pump `reader` into the request body until EOF.
-    pub fn writeBodyFromReader(
-        self: *Handle,
-        reader: *std.Io.Reader,
-    ) !void {
-        var buffer: [16 * 1024]u8 = undefined;
-        while (true) {
-            const count = try reader.readSliceShort(&buffer);
-            if (count == 0) break;
-            try self.writeBody(buffer[0..count]);
-        }
-    }
-
-    pub fn finishBody(self: *Handle) !void {
-        switch (self.state) {
-            .http1 => |*writer| {
-                try writer.finish();
-            },
-            .http2 => |*writer| {
-                writer.finish() catch |err| switch (err) {
-                    error.ResponseAvailable => {
-                        self.response_available = true;
-                        self.body_finished = true;
-                        return;
-                    },
-                    else => return err,
-                };
-            },
-            .http3 => |*h3| {
-                h3.client.sendRequestBodyPaced(
-                    h3.stream_id,
-                    &.{},
-                    true,
-                ) catch |err| switch (err) {
-                    error.RequestCancelled, error.RequestRejected => {
-                        if (try self.stashHttp3Head(h3)) {
-                            self.response_available = true;
-                            self.body_finished = true;
-                            return;
-                        }
-                        return err;
-                    },
-                    else => return err,
-                };
-            },
-        }
-        self.body_finished = true;
-    }
-
-    pub fn finishTrailers(self: *Handle, trailers: []const Header) !void {
-        switch (self.state) {
-            .http1 => |*writer| {
-                const mapped = try mapToHttp1(self.allocator, trailers);
-                defer self.allocator.free(mapped);
-                try writer.finishTrailers(mapped);
-            },
-            .http2 => |*writer| {
-                const mapped = try mapToHttp2(self.allocator, trailers);
-                defer self.allocator.free(mapped);
-                writer.finishTrailers(mapped) catch |err| switch (err) {
-                    error.ResponseAvailable => {
-                        self.response_available = true;
-                        self.body_finished = true;
-                        return;
-                    },
-                    else => return err,
-                };
-            },
-            .http3 => |*h3| {
-                const mapped = try mapToHttp3(self.allocator, trailers);
-                defer self.allocator.free(mapped);
-                h3.client.finishRequestTrailersPaced(
-                    h3.stream_id,
-                    mapped,
-                ) catch |err| switch (err) {
-                    error.RequestCancelled, error.RequestRejected => {
-                        if (try self.stashHttp3Head(h3)) {
-                            self.response_available = true;
-                            self.body_finished = true;
-                            return;
-                        }
-                        return err;
-                    },
-                    else => return err,
-                };
-            },
-        }
-        self.body_finished = true;
-    }
+    pub const writeBody = upload.writeBody;
+    pub const writeBodyWithDeadline = upload.writeBodyWithDeadline;
+    pub const writeBodyWithTimeout = upload.writeBodyWithTimeout;
+    pub const writeBodyFromReader = upload.writeBodyFromReader;
+    pub const finishBody = upload.finishBody;
+    pub const finishBodyWithDeadline = upload.finishBodyWithDeadline;
+    pub const finishBodyWithTimeout = upload.finishBodyWithTimeout;
+    pub const finishTrailers = upload.finishTrailers;
+    pub const finishTrailersWithDeadline = upload.finishTrailersWithDeadline;
+    pub const finishTrailersWithTimeout = upload.finishTrailersWithTimeout;
 
     /// Stream the final response into `sink`. `head.headers` and trailer
     /// slices are valid only for the duration of the corresponding callback.
@@ -385,33 +270,6 @@ pub const Handle = struct {
         return head;
     }
 
-    /// Move an already buffered final response head out of the H3 event
-    /// queue. Used when a request-body write observes an early rejection and
-    /// the caller should read the response instead of sending more body.
-    fn stashHttp3Head(self: *Handle, h3: *const Http3) !bool {
-        if (self.h3_pending_event != null) return true;
-        while (try h3.client.pollResponseEvent(h3.stream_id)) |event| {
-            switch (event) {
-                .head => |head| switch (head) {
-                    .request => return error.InvalidResponse,
-                    .response => |response| {
-                        if (response.status >= 200) {
-                            self.h3_pending_event = event;
-                            return true;
-                        }
-                        var informational = event;
-                        informational.deinit(self.allocator);
-                    },
-                },
-                .data_available, .trailers, .finished, .push_promise => {
-                    var ignored = event;
-                    ignored.deinit(self.allocator);
-                },
-            }
-        }
-        return false;
-    }
-
     fn readResponseHttp3(
         self: *Handle,
         h3: *const Http3,
@@ -427,7 +285,9 @@ pub const Handle = struct {
         var use_pending = pending != null;
 
         while (true) {
-            var event = if (use_pending) blk: {
+            var event = if (self.h3_pending_interims.popFront()) |interim|
+                interim
+            else if (use_pending) blk: {
                 use_pending = false;
                 const value = pending.?;
                 pending = null;
@@ -611,8 +471,8 @@ pub const Handle = struct {
 
 /// Open a streaming HTTP/3 request on an exclusive `HandshakeClient`.
 ///
-/// The client must not be bound to a pool dispatcher; H3 pool requests stay
-/// buffered until the dispatcher grows a streaming command channel.
+/// The client must not be bound to a pool dispatcher. Pooled streams use
+/// `Pool.startRequest` and retain their dispatcher-owned command channel.
 pub fn startHttp3(
     allocator: std.mem.Allocator,
     client: *http3_runtime.HandshakeClient,
@@ -623,37 +483,14 @@ pub fn startHttp3(
     return Handle.initHttp3(allocator, client, stream_id);
 }
 
-fn mapToHttp1(
-    allocator: std.mem.Allocator,
-    headers: []const Header,
-) ![]http1.Header {
-    const result = try allocator.alloc(http1.Header, headers.len);
-    for (headers, result) |source, *target| {
-        target.* = .{ .name = source.name, .value = source.value };
-    }
-    return result;
+pub fn startHttp3WithDeadline(allocator: std.mem.Allocator, client: *http3_runtime.HandshakeClient, request: http3.Request, body_length: ?usize, deadline: std.Io.Clock.Timestamp) !Handle {
+    const stream_id = try client.startRequestWithDeadline(request, body_length, deadline);
+    return Handle.initHttp3(allocator, client, stream_id);
 }
 
-fn mapToHttp2(
-    allocator: std.mem.Allocator,
-    headers: []const Header,
-) ![]http2.Hpack.HeaderField {
-    const result = try allocator.alloc(http2.Hpack.HeaderField, headers.len);
-    for (headers, result) |source, *target| {
-        target.* = .{ .name = source.name, .value = source.value, .never_index = source.never_indexed };
-    }
-    return result;
-}
-
-fn mapToHttp3(
-    allocator: std.mem.Allocator,
-    headers: []const Header,
-) ![]http3.Qpack.HeaderField {
-    const result = try allocator.alloc(http3.Qpack.HeaderField, headers.len);
-    for (headers, result) |source, *target| {
-        target.* = .{ .name = source.name, .value = source.value, .never_indexed = source.never_indexed };
-    }
-    return result;
+pub fn startHttp3WithTimeout(allocator: std.mem.Allocator, client: *http3_runtime.HandshakeClient, request: http3.Request, body_length: ?usize, timeout: std.Io.Duration) !Handle {
+    const stream_id = try client.startRequestWithTimeout(request, body_length, timeout);
+    return Handle.initHttp3(allocator, client, stream_id);
 }
 
 fn mapHeaders1(

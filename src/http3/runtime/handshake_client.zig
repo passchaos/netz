@@ -3859,6 +3859,14 @@ pub const HandshakeClient = struct {
         );
     }
 
+    /// Submit one packet-sized STREAM fragment of a retained DATA
+    /// contribution. The caller keeps `data` and `state` until completion;
+    /// this method neither waits for pacing nor reads the UDP endpoint.
+    pub fn trySendRequestBodyFragment(self: *HandshakeClient, stream_id: u62, data: []const u8, fin: bool, state: *runtime.BodyWriteState) Error!void {
+        if (!self.request_lifecycle.contains(stream_id)) return error.UnexpectedStream;
+        return runtime.body_fragment.write(&self.established.connection, &self.outbound_bodies, stream_id, data, fin, state, self.options);
+    }
+
     /// Submit several borrowed slices as one DATA frame and one QUIC packet
     /// without waiting for pacing or reading UDP. The entire contribution is
     /// retryable after backpressure because no offset is committed unless the

@@ -116,6 +116,22 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
                 try self.stream.writeBodyBlocking(data, fin, deadline);
             }
 
+            pub fn writeBodyBlockingTracked(self: *StreamHandle, data: []const u8, fin: bool, accepted: *usize, deadline: ?std.Io.Clock.Timestamp) !void {
+                return self.stream.writeBodyBlockingTracked(data, fin, accepted, deadline);
+            }
+
+            pub fn acceptedBodyBytes(self: *StreamHandle) usize {
+                return self.stream.acceptedBodyBytes();
+            }
+
+            pub fn isRequestClosed(self: *StreamHandle) bool {
+                return self.stream.isRequestClosed();
+            }
+
+            pub fn writeTrailersWithDeadline(self: *StreamHandle, trailers: []const http3.Qpack.HeaderField, deadline: std.Io.Clock.Timestamp) !void {
+                return self.stream.writeTrailersWithDeadline(trailers, deadline);
+            }
+
             pub fn writeTrailers(
                 self: *StreamHandle,
                 trailers: []const http3.Qpack.HeaderField,
@@ -403,6 +419,7 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
                 const stream = try allocator.create(StreamType);
                 errdefer allocator.destroy(stream);
                 stream.* = StreamType.init(state.pool, allocator, state.io);
+                stream.expected_body_length = body_length orelse try http3.contentLength(request_value.headers);
                 errdefer stream.deinit();
                 const handle = try allocator.create(StreamHandle);
                 errdefer allocator.destroy(handle);
@@ -1248,11 +1265,12 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
                 if (stream.worker_write == null) {
                     stream.worker_write = stream.takeWrite();
                 }
-                if (stream.worker_write) |write| {
-                    client.trySendRequestBody(
+                if (stream.worker_write) |*write| {
+                    client.trySendRequestBodyFragment(
                         stream_id,
                         write.data,
                         write.fin,
+                        &write.fragment,
                     ) catch |err| switch (err) {
                         error.PacingLimited,
                         error.CongestionLimited,
@@ -1267,6 +1285,7 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
                             return @errorCast(err);
                         },
                     };
+                    if (!write.fragment.complete) continue;
                     state.pool.allocator.free(write.data);
                     stream.worker_write = null;
                     continue;

@@ -63,6 +63,7 @@ const testing = runtime.testing;
 const validateHandshakeSessionOptions = runtime.validateHandshakeSessionOptions;
 
 test {
+    _ = @import("shared_handshake_client_pool/stream_command.zig");
     _ = @import("body_streaming_tests.zig");
     _ = @import("concurrent_tests.zig");
     _ = @import("connect_datagram_tests.zig");

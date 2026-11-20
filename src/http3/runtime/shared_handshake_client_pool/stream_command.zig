@@ -6,6 +6,8 @@
 //! `activity` whenever the caller enqueues work.
 
 const std = @import("std");
+const Guard = @import("../../../internal/mutex_guard.zig").Guard;
+const deadline_policy = @import("../../../internal/deadline.zig");
 const http3 = @import("../../mod.zig");
 const Fifo = @import("../../../internal/fifo.zig").Fifo;
 
@@ -38,6 +40,10 @@ pub fn Stream(comptime Pool: type) type {
         allocator: std.mem.Allocator,
         io: std.Io,
         mutex: std.Io.Mutex = .init,
+        writer_mutex: std.Io.Mutex = .init,
+        accepted_body_bytes: usize = 0,
+        expected_body_length: ?usize = null,
+        request_closed: bool = false,
         user_ready: std.Io.Event = .unset,
         worker_ready: std.Io.Event = .unset,
         /// Wakes a caller blocked in `writeBodyBlocking` after the worker
@@ -69,6 +75,7 @@ pub fn Stream(comptime Pool: type) type {
         pub const Write = struct {
             data: []u8,
             fin: bool,
+            fragment: @import("../send/body_fragment.zig").State = .{},
         };
 
         pub const OwnedTrailers = struct {
@@ -132,90 +139,120 @@ pub fn Stream(comptime Pool: type) type {
             return self.stream_id;
         }
 
-        /// Queue one request DATA contribution. Returns `error.Backpressure`
-        /// without committing when the bounded write queue is full.
-        pub fn writeBody(
-            self: *Self,
-            data: []const u8,
-            fin: bool,
-        ) !void {
-            self.mutex.lockUncancelable(self.io);
-            defer self.mutex.unlock(self.io);
-            if (self.finished or self.cancelled) {
-                return error.RequestCancelled;
-            }
-            if (self.pending_write_bytes +| data.len >
-                max_pending_write_bytes)
-            {
-                return error.Backpressure;
-            }
+        /// Queue one atomic DATA contribution, or report backpressure without
+        /// accepting a prefix. Empty non-final contributions are no-ops.
+        pub fn writeBody(self: *Self, data: []const u8, fin: bool) !void {
+            if (!self.writer_mutex.tryLock()) return error.ConcurrentWrite;
+            defer self.writer_mutex.unlock(self.io);
+            var guard = Guard.init(&self.mutex, self.io);
+            defer guard.unlock();
+            try self.checkRequestOpenLocked();
+            try self.validateBodyLengthLocked(data.len, fin);
+            if (data.len == 0 and !fin) return;
+            if (self.pending_write_bytes +| data.len > max_pending_write_bytes) return error.Backpressure;
             return self.appendBodyLocked(data, fin);
         }
 
-        /// Queue one request DATA contribution, waiting for the worker to
-        /// drain the bounded write queue instead of reporting backpressure.
-        /// The caller must keep `data` valid until this call returns; it is
-        /// copied into the queue before the wait completes.
-        pub fn writeBodyBlocking(
-            self: *Self,
-            data: []const u8,
-            fin: bool,
-            deadline: ?std.Io.Clock.Timestamp,
-        ) !void {
-            self.mutex.lockUncancelable(self.io);
+        /// Accept a contribution in bounded pieces while the worker drains
+        /// the queue. `acceptedBodyBytes` retains any prefix accepted before
+        /// an error; callers retry only the unaccepted suffix.
+        pub fn writeBodyBlocking(self: *Self, data: []const u8, fin: bool, deadline: ?std.Io.Clock.Timestamp) !void {
+            var accepted: usize = 0;
+            return self.writeBodyBlockingTracked(data, fin, &accepted, deadline);
+        }
+
+        /// Per-call progress counts copied application bytes owned by the
+        /// dispatcher. FIN is queued only with the final accepted piece.
+        pub fn writeBodyBlockingTracked(self: *Self, data: []const u8, fin: bool, accepted: *usize, deadline: ?std.Io.Clock.Timestamp) !void {
+            accepted.* = 0;
+            if (deadline) |absolute| _ = try deadline_policy.usableAwake(self.io, absolute);
+            var writing = try Guard.initBefore(&self.writer_mutex, self.io, deadline);
+            defer writing.unlock();
+            {
+                var guard = try Guard.initBefore(&self.mutex, self.io, deadline);
+                defer guard.unlock();
+                try self.checkRequestOpenLocked();
+                try self.validateBodyLengthLocked(data.len, fin);
+            }
             while (true) {
-                if (self.finished or self.cancelled) {
-                    self.mutex.unlock(self.io);
-                    return error.RequestCancelled;
+                if (deadline) |absolute| _ = try deadline_policy.usableAwake(self.io, absolute);
+                var guard = try Guard.initBefore(&self.mutex, self.io, deadline);
+                defer guard.unlock();
+                try self.checkRequestOpenLocked();
+                const remaining = data[accepted.*..];
+                if (remaining.len == 0 and !fin) return;
+                const available = max_pending_write_bytes - self.pending_write_bytes;
+                if (remaining.len == 0 or available != 0) {
+                    const count = @min(remaining.len, available);
+                    const final = count == remaining.len;
+                    try self.appendBodyLocked(remaining[0..count], fin and final);
+                    accepted.* += count;
+                    if (final) return;
+                    continue;
                 }
-                if (self.pending_write_bytes +| data.len <=
-                    max_pending_write_bytes)
-                {
-                    const result = self.appendBodyLocked(data, fin);
-                    self.mutex.unlock(self.io);
-                    return result;
-                }
-                // Reset under the queue mutex so a concurrent `takeWrite`
-                // cannot publish a wake between the capacity check and the
-                // wait.
                 self.write_ready.reset();
-                self.mutex.unlock(self.io);
-                if (deadline) |absolute| {
-                    self.write_ready.waitTimeout(
-                        self.io,
-                        .{ .deadline = absolute },
-                    ) catch |err| switch (err) {
-                        error.Timeout => return error.Timeout,
-                        error.Canceled => return error.Canceled,
-                    };
-                } else {
-                    self.write_ready.wait(self.io) catch |err| return err;
-                }
-                self.mutex.lockUncancelable(self.io);
+                guard.unlock();
+                if (deadline) |absolute|
+                    try self.write_ready.waitTimeout(self.io, .{ .deadline = absolute })
+                else
+                    try self.write_ready.wait(self.io);
             }
         }
 
-        fn appendBodyLocked(
-            self: *Self,
-            data: []const u8,
-            fin: bool,
-        ) !void {
-            const copy = self.allocator.dupe(u8, data) catch |err| return err;
+        pub fn acceptedBodyBytes(self: *Self) usize {
+            var guard = Guard.init(&self.mutex, self.io);
+            defer guard.unlock();
+            return self.accepted_body_bytes;
+        }
+
+        pub fn isRequestClosed(self: *Self) bool {
+            var guard = Guard.init(&self.mutex, self.io);
+            defer guard.unlock();
+            return self.request_closed;
+        }
+
+        fn checkRequestOpenLocked(self: *Self) !void {
+            if (self.err) |err| return err;
+            if (self.finished or self.cancelled) return error.RequestCancelled;
+            if (self.request_closed) return error.RequestBodyFinished;
+        }
+
+        fn validateBodyLengthLocked(self: *Self, additional: usize, finishing: bool) !void {
+            const total = try std.math.add(usize, self.accepted_body_bytes, additional);
+            if (self.expected_body_length) |expected| {
+                if (total > expected or (finishing and total != expected)) return error.InvalidContentLength;
+            }
+        }
+
+        fn appendBodyLocked(self: *Self, data: []const u8, fin: bool) !void {
+            const total = try std.math.add(usize, self.accepted_body_bytes, data.len);
+            const copy = try self.allocator.dupe(u8, data);
             errdefer self.allocator.free(copy);
-            self.writes.append(self.allocator, .{
-                .data = copy,
-                .fin = fin,
-            }) catch |err| return err;
+            try self.writes.append(self.allocator, .{ .data = copy, .fin = fin });
             self.pending_write_bytes += copy.len;
+            self.accepted_body_bytes = total;
+            if (fin) self.request_closed = true;
             self.activity.set(self.io);
         }
 
-        /// Queue request trailers. The stream is closed when the worker sends
-        /// them.
-        pub fn writeTrailers(
-            self: *Self,
-            trailers: []const http3.Qpack.HeaderField,
-        ) !void {
+        pub fn writeTrailers(self: *Self, trailers: []const http3.Qpack.HeaderField) !void {
+            return self.writeTrailersBefore(trailers, null);
+        }
+
+        pub fn writeTrailersWithDeadline(self: *Self, trailers: []const http3.Qpack.HeaderField, deadline: std.Io.Clock.Timestamp) !void {
+            _ = try deadline_policy.usableAwake(self.io, deadline);
+            return self.writeTrailersBefore(trailers, deadline);
+        }
+
+        fn writeTrailersBefore(self: *Self, trailers: []const http3.Qpack.HeaderField, deadline: ?std.Io.Clock.Timestamp) !void {
+            var writing = try Guard.initBefore(&self.writer_mutex, self.io, deadline);
+            defer writing.unlock();
+            {
+                var guard = try Guard.initBefore(&self.mutex, self.io, deadline);
+                defer guard.unlock();
+                try self.checkRequestOpenLocked();
+                try self.validateBodyLengthLocked(0, true);
+            }
             var total: usize = 0;
             for (trailers) |field| {
                 total = try std.math.add(usize, total, field.name.len);
@@ -239,24 +276,12 @@ pub fn Stream(comptime Pool: type) type {
                 target.* = .{ .name = name, .value = value, .never_indexed = source.never_indexed };
             }
 
-            self.mutex.lockUncancelable(self.io);
-            if (self.finished or self.cancelled or
-                self.queued_trailers != null)
-            {
-                self.mutex.unlock(self.io);
-                self.allocator.free(storage);
-                self.allocator.free(fields);
-                return if (self.queued_trailers != null)
-                    error.InvalidHeader
-                else
-                    error.RequestCancelled;
-            }
-            self.queued_trailers = .{
-                .storage = storage,
-                .fields = fields,
-            };
+            var guard = try Guard.initBefore(&self.mutex, self.io, deadline);
+            defer guard.unlock();
+            try self.checkRequestOpenLocked();
+            self.queued_trailers = .{ .storage = storage, .fields = fields };
+            self.request_closed = true;
             self.activity.set(self.io);
-            self.mutex.unlock(self.io);
         }
 
         /// Deliver response events to `sink` until the stream finishes.
@@ -533,94 +558,6 @@ pub fn Stream(comptime Pool: type) type {
     };
 }
 
-test "stream response callbacks preserve interims and complete once across poll and read" {
-    const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-    const TestPool = struct {};
-    var pool: TestPool = .{};
-    const Recorder = struct {
-        events: [8]u8 = undefined,
-        count: usize = 0,
-        fn append(self: *@This(), event: u8) void {
-            if (self.count < self.events.len) self.events[self.count] = event;
-            self.count += 1;
-        }
-        fn informational(context: *anyopaque, head: http3.DecodedResponseHead) void {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            self.append(if (head.status == 100) 'a' else 'b');
-        }
-        fn begin(context: *anyopaque, head: http3.DecodedResponseHead) !void {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            try std.testing.expectEqual(@as(u16, 200), head.status);
-            self.append('H');
-        }
-        fn data(context: *anyopaque, bytes: []const u8) !void {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            try std.testing.expectEqualStrings("body", bytes);
-            self.append('D');
-        }
-        fn end(context: *anyopaque, _: []const http3.Qpack.HeaderField) !void {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            self.append('E');
-        }
-        fn makeHead(status: u16) http3.DecodedResponseHead {
-            return .{ .status = status, .headers = &.{}, .content_length = null, .body_allowed = status >= 200, .consumed = 0, .qpack_section_acknowledgments = 0 };
-        }
-    };
-    for ([_]bool{ true, false }) |observe_interims| {
-        var stream = Stream(TestPool).init(&pool, allocator, io);
-        defer stream.deinit();
-        try stream.deliverInformational(Recorder.makeHead(100));
-        try stream.deliverInformational(Recorder.makeHead(103));
-        stream.deliverHead(Recorder.makeHead(200));
-        try stream.deliverData("body");
-        stream.finish();
-        var recorder = Recorder{};
-        const sink: CallbackSink = .{ .context = &recorder, .begin = Recorder.begin, .data = Recorder.data, .end = Recorder.end, .informational = if (observe_interims) Recorder.informational else null };
-        try std.testing.expect(try stream.pollResponse(sink));
-        try std.testing.expect(try stream.pollResponse(sink));
-        _ = try stream.readResponse(sink, null);
-        try std.testing.expectEqualStrings(if (observe_interims) "abHDE" else "HDE", recorder.events[0..recorder.count]);
-    }
-}
-
-test "stream blocking body write waits for queue capacity" {
-    const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    const TestPool = struct {};
-    var pool: TestPool = .{};
-    var stream = Stream(TestPool).init(&pool, allocator, io);
-    defer stream.deinit();
-
-    var chunk: [max_pending_write_bytes]u8 = @splat(0);
-    try stream.writeBody(&chunk, false);
-    try std.testing.expectError(
-        error.Backpressure,
-        stream.writeBody("x", false),
-    );
-
-    const expired = std.Io.Clock.Timestamp.fromNow(io, .{
-        .raw = .fromNanoseconds(-1),
-        .clock = .awake,
-    });
-    try std.testing.expectError(
-        error.Timeout,
-        stream.writeBodyBlocking("x", false, expired),
-    );
-
-    const drained = stream.takeWrite().?;
-    allocator.free(drained.data);
-    try stream.writeBodyBlocking("x", true, .fromNow(io, .{
-        .raw = .fromSeconds(1),
-        .clock = .awake,
-    }));
-    const final = stream.takeWrite().?;
-    defer allocator.free(final.data);
-    try std.testing.expectEqualStrings("x", final.data);
-    try std.testing.expect(final.fin);
+test {
+    _ = @import("stream_command/tests.zig");
 }

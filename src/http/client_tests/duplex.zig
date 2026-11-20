@@ -77,12 +77,17 @@ const DuplexSink = struct {
 };
 
 test "HTTP/1 duplex handle streams request and response" {
+    try exercise1(false);
+}
+
+fn exercise1(comptime timed: bool) !void {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
         .async_limit = .unlimited,
     });
     defer threaded.deinit();
     const io = threaded.io();
+    const until = std.Io.Clock.Timestamp.fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(10) });
     var server = try http1_runtime.Server.listen(
         allocator,
         io,
@@ -158,19 +163,35 @@ test "HTTP/1 duplex handle streams request and response" {
 
     var client = try http.Client.init(allocator, io, .{});
     defer client.deinit();
-    var connection = try client.connectUri(uri);
+    var connection = if (timed) try client.connectUriWithDeadline(uri, until) else try client.connectUri(uri);
     defer connection.close();
-    var handle = try connection.startRequest("/upload", .{
+    const request_options: http.RequestOptions = .{
         .method = "POST",
         .headers = &.{.{ .name = "te", .value = "trailers" }},
         .body_length = .unknown,
-    });
+    };
+    var handle = if (timed) try connection.startRequestWithDeadline("/upload", request_options, until) else try connection.startRequest("/upload", request_options);
     defer handle.deinit();
 
-    try handle.writeBody("hello ");
-    var body_reader = std.Io.Reader.fixed("world");
-    try handle.writeBodyFromReader(&body_reader);
-    try handle.finishBody();
+    if (timed) {
+        var progress = http.UploadProgress{ .accepted_bytes = 999, .end_accepted = true };
+        try std.testing.expectError(error.Timeout, handle.writeBodyWithDeadline("ignored", &progress, .{ .clock = .awake, .raw = .zero }));
+        try std.testing.expectEqual(@as(usize, 0), progress.accepted_bytes);
+        try std.testing.expect(!progress.end_accepted);
+        try handle.writeBodyWithDeadline("hello ", &progress, until);
+        try std.testing.expectEqual(@as(usize, 6), progress.accepted_bytes);
+        try handle.writeBodyWithTimeout("world", &progress, .fromSeconds(10));
+        try std.testing.expectEqual(@as(usize, 5), progress.accepted_bytes);
+        try handle.finishBodyWithDeadline(&progress, until);
+        try std.testing.expect(progress.end_accepted);
+        try std.testing.expectError(error.RequestBodyFinished, handle.writeBodyWithDeadline("later", &progress, until));
+        try std.testing.expectEqual(@as(usize, 0), progress.accepted_bytes);
+    } else {
+        try handle.writeBody("hello ");
+        var body_reader = std.Io.Reader.fixed("world");
+        try handle.writeBodyFromReader(&body_reader);
+        try handle.finishBody();
+    }
 
     var sink = DuplexSink{ .allocator = allocator };
     defer sink.deinit();
@@ -195,12 +216,17 @@ test "HTTP/1 duplex handle streams request and response" {
 }
 
 test "HTTP/2 duplex handle streams request and response" {
+    try exercise2(false);
+}
+
+fn exercise2(comptime timed: bool) !void {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
         .async_limit = .unlimited,
     });
     defer threaded.deinit();
     const io = threaded.io();
+    const until = std.Io.Clock.Timestamp.fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(10) });
     var server = try http2_runtime.Server.listen(
         allocator,
         io,
@@ -278,17 +304,33 @@ test "HTTP/2 duplex handle streams request and response" {
         .cleartext_protocol = .http2_prior_knowledge,
     });
     defer client.deinit();
-    var connection = try client.connectUri(uri);
+    var connection = if (timed) try client.connectUriWithDeadline(uri, until) else try client.connectUri(uri);
     defer connection.close();
-    var handle = try connection.startRequest("/upload", .{
+    const request_options: http.RequestOptions = .{
         .method = "POST",
         .body_length = .{ .exact = "hello world".len },
-    });
+    };
+    var handle = if (timed) try connection.startRequestWithDeadline("/upload", request_options, until) else try connection.startRequest("/upload", request_options);
     defer handle.deinit();
 
-    try handle.writeBody("hello ");
-    try handle.writeBody("world");
-    try handle.finishTrailers(&.{.{ .name = "x-upload", .value = "done", .never_indexed = true }});
+    if (timed) {
+        var progress = http.UploadProgress{ .accepted_bytes = 999, .end_accepted = true };
+        try std.testing.expectError(error.Timeout, handle.writeBodyWithDeadline("ignored", &progress, .{ .clock = .awake, .raw = .zero }));
+        try std.testing.expectEqual(@as(usize, 0), progress.accepted_bytes);
+        try std.testing.expect(!progress.end_accepted);
+        try handle.writeBodyWithDeadline("hello ", &progress, until);
+        try std.testing.expectEqual(@as(usize, 6), progress.accepted_bytes);
+        try handle.writeBodyWithTimeout("world", &progress, .fromSeconds(10));
+        try std.testing.expectEqual(@as(usize, 5), progress.accepted_bytes);
+        try handle.finishTrailersWithDeadline(&.{.{ .name = "x-upload", .value = "done", .never_indexed = true }}, &progress, until);
+        try std.testing.expect(progress.end_accepted);
+        try std.testing.expectError(error.RequestBodyFinished, handle.writeBodyWithDeadline("later", &progress, until));
+        try std.testing.expectEqual(@as(usize, 0), progress.accepted_bytes);
+    } else {
+        try handle.writeBody("hello ");
+        try handle.writeBody("world");
+        try handle.finishTrailers(&.{.{ .name = "x-upload", .value = "done", .never_indexed = true }});
+    }
 
     var sink = DuplexSink{ .allocator = allocator };
     defer sink.deinit();
@@ -312,10 +354,15 @@ test "HTTP/2 duplex handle streams request and response" {
 }
 
 test "HTTP/3 duplex handle streams request and response" {
+    try exercise3(false);
+}
+
+fn exercise3(comptime timed: bool) !void {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
+    const until = std.Io.Clock.Timestamp.fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(10) });
 
     const original_dcid = [_]u8{ 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xc8 };
     const client_cid = [_]u8{ 0xc9, 0xca, 0xcb, 0xcc };
@@ -406,21 +453,31 @@ test "HTTP/3 duplex handle streams request and response" {
     );
     defer client.deinit();
 
-    var handle = try http.startHttp3Request(
-        allocator,
-        &client,
-        .{
-            .method = "POST",
-            .path = "/upload",
-            .authority = "localhost",
-        },
-        "hello world".len,
-    );
+    const request_options: @import("../../http3/mod.zig").Request = .{ .method = "POST", .path = "/upload", .authority = "localhost" };
+    var handle = if (timed)
+        try http.startHttp3RequestWithDeadline(allocator, &client, request_options, "hello world".len, until)
+    else
+        try http.startHttp3Request(allocator, &client, request_options, "hello world".len);
     defer handle.deinit();
 
-    try handle.writeBody("hello ");
-    try handle.writeBody("world");
-    try handle.finishTrailers(&.{.{ .name = "x-upload", .value = "done", .never_indexed = true }});
+    if (timed) {
+        var progress = http.UploadProgress{ .accepted_bytes = 999, .end_accepted = true };
+        try std.testing.expectError(error.Timeout, handle.writeBodyWithDeadline("ignored", &progress, .{ .clock = .awake, .raw = .zero }));
+        try std.testing.expectEqual(@as(usize, 0), progress.accepted_bytes);
+        try std.testing.expect(!progress.end_accepted);
+        try handle.writeBodyWithDeadline("hello ", &progress, until);
+        try std.testing.expectEqual(@as(usize, 6), progress.accepted_bytes);
+        try handle.writeBodyWithTimeout("world", &progress, .fromSeconds(10));
+        try std.testing.expectEqual(@as(usize, 5), progress.accepted_bytes);
+        try handle.finishTrailersWithDeadline(&.{.{ .name = "x-upload", .value = "done", .never_indexed = true }}, &progress, until);
+        try std.testing.expect(progress.end_accepted);
+        try std.testing.expectError(error.RequestBodyFinished, handle.writeBodyWithDeadline("later", &progress, until));
+        try std.testing.expectEqual(@as(usize, 0), progress.accepted_bytes);
+    } else {
+        try handle.writeBody("hello ");
+        try handle.writeBody("world");
+        try handle.finishTrailers(&.{.{ .name = "x-upload", .value = "done", .never_indexed = true }});
+    }
 
     var sink = DuplexSink{ .allocator = allocator };
     defer sink.deinit();
@@ -441,4 +498,113 @@ test "HTTP/3 duplex handle streams request and response" {
     thread.join();
     joined = true;
     if (worker.err) |err| return err;
+}
+
+test "unified HTTP streaming deadlines cover H1 H2 and exclusive H3 with progress" {
+    try exercise1(true);
+    try exercise2(true);
+    try exercise3(true);
+}
+
+test "unified HTTP streaming deadlines preserve H1 Continue after an expired body call" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try http1_runtime.Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{});
+    defer server.deinit();
+    const Peer = struct {
+        fn run(listener: *http1_runtime.Server) !void {
+            var connection = try listener.acceptWithTimeout(.fromSeconds(5));
+            defer connection.close();
+            var request = try connection.readRequestWithDeadline(.{}, .fromNow(listener.io, .{ .clock = .awake, .raw = .fromSeconds(5) }));
+            defer request.deinit(std.testing.allocator);
+            try std.testing.expectEqualStrings("body", request.request.body);
+            try connection.writeResponseWithTimeout(.{ .body = "ok" }, .fromSeconds(5));
+        }
+    };
+    var peer = try io.concurrent(Peer.run, .{&server});
+    defer _ = peer.cancel(io) catch {};
+    const uri = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/continue", .{server.address().getPort()});
+    defer allocator.free(uri);
+    var client = try http.Client.init(allocator, io, .{});
+    defer client.deinit();
+    var connection = try client.connectUri(uri);
+    defer connection.close();
+    const until = std.Io.Clock.Timestamp.fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(5) });
+    var handle = try connection.startRequestWithDeadline("/continue", .{ .method = "POST", .body_length = .{ .exact = 4 }, .headers = &.{.{ .name = "expect", .value = "100-continue" }} }, until);
+    defer handle.deinit();
+    var progress: http.UploadProgress = .{};
+    try std.testing.expectError(error.Timeout, handle.writeBodyWithDeadline("body", &progress, .{ .clock = .awake, .raw = .zero }));
+    try std.testing.expect(handle.h1_continue_pending);
+    try std.testing.expectEqual(@as(usize, 0), progress.accepted_bytes);
+    try handle.writeBodyWithDeadline("body", &progress, until);
+    try std.testing.expect(!handle.h1_continue_pending);
+    try std.testing.expectEqual(@as(usize, 4), progress.accepted_bytes);
+    try handle.finishBodyWithDeadline(&progress, until);
+    var sink = DuplexSink{ .allocator = allocator };
+    defer sink.deinit();
+    _ = try handle.readResponseWithDeadline(sink.sink(), until);
+    try std.testing.expectEqualStrings("ok", sink.body.items);
+    try peer.await(io);
+}
+
+fn pooledTcpDeadlines(comptime h2: bool) !void {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = if (h2)
+        try http2_runtime.Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{})
+    else
+        try http1_runtime.Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{});
+    defer server.deinit();
+    var release: std.Io.Event = .unset;
+    const Peer = struct {
+        fn run(listener: *@TypeOf(server), done: *std.Io.Event) !void {
+            var connection = try listener.acceptWithTimeout(.fromSeconds(5));
+            defer connection.close();
+            for (0..2) |index| {
+                const until = std.Io.Clock.Timestamp.fromNow(listener.io, .{ .clock = .awake, .raw = .fromSeconds(5) });
+                var request = if (h2) try connection.readRequestWithDeadline(until) else try connection.readRequestWithDeadline(.{}, until);
+                defer request.deinit(std.testing.allocator);
+                const body = if (h2) request.body else request.request.body;
+                try std.testing.expectEqualStrings(if (index == 0) "upload" else "", body);
+                if (h2) try connection.writeResponseWithDeadline(request.stream_id, .{ .body = "ok" }, until) else try connection.writeResponseWithDeadline(.{ .body = "ok" }, until);
+            }
+            try done.wait(listener.io);
+        }
+    };
+    var peer = try io.concurrent(Peer.run, .{ &server, &release });
+    defer _ = peer.cancel(io) catch {};
+    defer release.set(io);
+    var pool = try http.Pool.init(allocator, io, .{ .max_connections = 1, .client = .{ .cleartext_protocol = if (h2) .http2_prior_knowledge else .http1 } });
+    defer pool.deinit();
+    const uri = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/pooled", .{server.address().getPort()});
+    defer allocator.free(uri);
+    const until = std.Io.Clock.Timestamp.fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(5) });
+    {
+        var handle = try pool.startRequestWithDeadline(uri, .{ .method = "POST", .body_length = .{ .exact = 6 } }, until);
+        defer handle.deinit();
+        var progress: http.UploadProgress = .{};
+        try handle.writeBodyWithDeadline("upload", &progress, until);
+        try std.testing.expectEqual(@as(usize, 6), progress.accepted_bytes);
+        try handle.finishBodyWithTimeout(&progress, .fromSeconds(5));
+        try std.testing.expect(progress.end_accepted);
+        var sink = DuplexSink{ .allocator = allocator };
+        defer sink.deinit();
+        _ = try handle.readResponseWithDeadline(sink.sink(), until);
+        try std.testing.expectEqualStrings("ok", sink.body.items);
+    }
+    var response = try pool.requestUriWithDeadline(uri, .{}, until);
+    defer response.deinit();
+    try std.testing.expectEqualStrings("ok", response.body());
+    try std.testing.expectEqual(@as(usize, 1), pool.connectionCount());
+    release.set(io);
+    try peer.await(io);
+}
+
+test "unified HTTP streaming deadlines return H1 H2 pool leases for same connection reuse" {
+    try pooledTcpDeadlines(false);
+    try pooledTcpDeadlines(true);
 }

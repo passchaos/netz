@@ -79,6 +79,13 @@ pub const StreamHandle = union(enum) {
     shared: *runtime.SharedHandshakeClientPoolRequestDispatcher.StreamHandle,
     exclusive: *runtime.HandshakeClientPoolSharedDispatcher.StreamHandle,
 
+    pub fn io(self: *const StreamHandle) std.Io {
+        return switch (self.*) {
+            .shared => |handle| handle.stream.io,
+            .exclusive => |handle| handle.stream.io,
+        };
+    }
+
     pub fn writeBody(self: *StreamHandle, data: []const u8, fin: bool) !void {
         switch (self.*) {
             .shared => |handle| try handle.writeBody(data, fin),
@@ -96,6 +103,20 @@ pub const StreamHandle = union(enum) {
             .shared => |handle| try handle.writeBodyBlocking(data, fin, deadline),
             .exclusive => |handle| try handle.writeBodyBlocking(data, fin, deadline),
         }
+    }
+
+    pub fn writeBodyBlockingTracked(self: *StreamHandle, data: []const u8, fin: bool, accepted: *usize, deadline: ?std.Io.Clock.Timestamp) !void {
+        return switch (self.*) {
+            .shared => |handle| handle.writeBodyBlockingTracked(data, fin, accepted, deadline),
+            .exclusive => |handle| handle.writeBodyBlockingTracked(data, fin, accepted, deadline),
+        };
+    }
+
+    pub fn writeTrailersWithDeadline(self: *StreamHandle, trailers: []const http3.Qpack.HeaderField, deadline: std.Io.Clock.Timestamp) !void {
+        return switch (self.*) {
+            .shared => |handle| handle.writeTrailersWithDeadline(trailers, deadline),
+            .exclusive => |handle| handle.writeTrailersWithDeadline(trailers, deadline),
+        };
     }
 
     pub fn writeTrailers(

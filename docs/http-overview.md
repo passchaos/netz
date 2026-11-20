@@ -171,7 +171,11 @@ framing while preserving the existing terminal policy for transport failures.
 Request/response writers and response sequence helpers now have cohesive owning
 modules. [Delivery evidence](evidence/http1_streaming_deadlines/2026-11-20/README.md)
 covers both I/O backends, all output strategies, partial progress and reuse.
-Unified/pool upload deadline and Reader composition remain the next API work.
+Unified/pool upload deadline forms and acceptance progress are delivered as well.
+Pooled H3 now accepts oversized contributions through a bounded queue and
+packet-aware fragments, preserving interruption prefixes and one message end.
+Reader-source deadline composition and explicit H3 Client/Connection entrypoints
+remain the next API work.
 
 The fixed HTTP proxy has explicit product limits: no TLS connection to the
 proxy itself, authentication challenge exchange, PAC or automatic proxy
