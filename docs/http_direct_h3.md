@@ -47,6 +47,10 @@ hostname remains the TLS SNI/verification identity and HTTP authority.
 Common `Options.tls` verifier, client identity and trust settings are inherited
 when their native H3 counterparts are unset. System certificate verification
 is enabled by default.
+QUIC client/server handshakes retain up to 256 KiB of CRYPTO data per encryption
+level by default, matching the TCP/TLS handshake budget. Storage grows on demand;
+explicit `handshake.handshake.max_crypto_buffer` values retain their configured
+bound. The old 4-KiB default could reject ordinary server certificate flights.
 
 `connectUri*`, `request*`, Reader reads, body output and response reads preserve
 one absolute operation deadline. A custom Reader must cooperate with `std.Io`

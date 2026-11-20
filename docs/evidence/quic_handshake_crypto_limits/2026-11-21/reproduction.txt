@@ -1,0 +1,2 @@
+QUIC CRYPTO diagnostic: offset=3845 bytes=264 end=4109 limit=4096
+error: CryptoBufferTooLarge

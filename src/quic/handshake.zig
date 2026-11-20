@@ -19,6 +19,10 @@ pub const ServerNistHybridKeyMaterial =
     key_exchange.ServerNistHybridKeyMaterial;
 pub const ServerRetryPolicy = retry.Policy;
 
+/// Bounded per-encryption-level CRYPTO span for full certificate flights,
+/// matching the unified TCP/TLS handshake budget. Storage grows on demand.
+pub const default_max_crypto_buffer: usize = 256 * 1024;
+
 pub const Error = quic.runtime.Error || quic.protection.Error || quic.crypto_stream.Error || quic.tls_client_hello.Error || quic.tls.auth.Error || quic.tls.client_auth.Error || quic.one_rtt.Error || quic.zero_rtt.handshake.Error || quic.zero_rtt.replay_filter.Error || quic.resumption.tls_psk.Error || quic.resumption.ticket.handshake.Error || quic.Error || std.Io.RandomSecureError || std.Io.Writer.Error || error{
     DiscardedInitialPacket,
     InvalidHandshakeFlight,
@@ -56,7 +60,7 @@ pub const ClientOptions = struct {
     transport_parameters: []const u8 = &.{},
     local_transport_parameters: quic.TransportParameters = quic.practical_transport_parameters,
     address_validation_token: []const u8 = &.{},
-    max_crypto_buffer: usize = 4096,
+    max_crypto_buffer: usize = default_max_crypto_buffer,
     max_crypto_frame_data_len: usize = 1024,
     client_initial_packet_number: u64 = 0,
     client_handshake_packet_number: u64 = 0,
@@ -183,7 +187,7 @@ pub const ServerOptions = struct {
     /// server sends Version Negotiation, keep this aligned with that response so
     /// clients can authenticate that the selected version was not downgraded.
     available_versions: []const quic.Version = &.{ .version_1, .version_2 },
-    max_crypto_buffer: usize = 4096,
+    max_crypto_buffer: usize = default_max_crypto_buffer,
     max_crypto_frame_data_len: usize = 1024,
     server_initial_packet_number: u64 = 0,
     server_handshake_packet_number: u64 = 0,
@@ -4310,6 +4314,7 @@ pub fn appendTestHandshakeMessage(
 }
 
 test {
+    _ = @import("handshake/default_limits_tests.zig");
     _ = @import("handshake/certificate_ownership_tests.zig");
     _ = @import("handshake/failure_tests.zig");
     _ = @import("handshake/tests.zig");

@@ -1,0 +1,7 @@
+Command: zig build run
+Working directory: /Users/bytedance/Work/agent-learn
+Exit code: 0
+received robotics: protocol=.http3 status=200
+http client received: protocol=.http2 status=200
+DebugAllocator reports: 0
+CryptoBufferTooLarge reports: 0
