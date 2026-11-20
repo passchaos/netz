@@ -1,0 +1,15 @@
+{
+  "src/http/client.zig": "eab8a813842507bd87eae42e3d7506ea397309e1634acf10cbe3655b4cde3151",
+  "src/http/client/protocol_selection.zig": "d7edc6d106b25fef2b71f17c96581545d168c6482894f0e2aa43cc3cb85f5bc4",
+  "src/http/client/types.zig": "0a262dc8d1ca1bb8cdc51da292c52fef32b04b3b2f194bceaebef0019e87fd98",
+  "src/http/client_pool.zig": "fb3fc8f11677a438ec4bf39c3699d86f48bbe0c350ffdb0162e1b4f578fd9142",
+  "src/http/client_pool/requests.zig": "a16be2285598b0d5648967a318e1b85d540d8e9e68573c585b97dc322a68771e",
+  "src/http/client_pool/shared_tcp/driver.zig": "7a41d05721b23a5bd5e485984ca57e22e1af493f03c8678224f9527db6d2006f",
+  "src/http/client_pool/shared_tcp/state.zig": "8f11cb7cb74451bf5b2d5701a6a40f7afd9147e3e7fee7ba3f0e4e441546995c",
+  "src/http/client_pool/stream_handle.zig": "cc159a7bec0408b4c9e7526bf848bce88dffa1051a0ea482212f097d4e6d4c84",
+  "src/http/client_pool/tickets.zig": "45835a6123409b7edecf4abeda1e5cfbdbd4bf2abe052094c5fbcb9a6946f4c5",
+  "src/http/client_tests.zig": "a87b4a0b337a4c98008cab0acafca6400a6d1a8bba473587afaf9a356b50542c",
+  "src/http/client_tests/direct_h3.zig": "28faad9af9235e82b0668bbc96eeda01f76c8a7b5a79c5b3a51e6e425975c85d",
+  "src/http/client_tests/protocol_policy.zig": "eeebf2f0a4d120fcb86796160da6fa5053ca8166286a24b8f2aa56ad6431e2ac",
+  "src/http/mod.zig": "0f856dbd765ffc18ac975c64e9c24bd2ddd8862817a4f422dd1965447a6518f1"
+}

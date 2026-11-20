@@ -54,7 +54,7 @@ flowchart TD
     quic --> result
 ```
 
-`http.Client` opens H1/H2 connections, or explicit H3 with `http3_only`, and
+`http.Client` opens H1/H2 connections, or H3 with `prefer_http3`/`http3_only`, and
 implements one-shot URI requests; `http.Connection` retains the transport for reuse.
 `http.Pool` adds authority-keyed reuse, shared ordinary H2 requests and the
 optional H3 route. Direct H3 uses an exclusive QUIC owner and the same request
@@ -62,13 +62,13 @@ and duplex methods; see [direct H3](http_direct_h3.md).
 
 | Capability | Behavior and boundary |
 | --- | --- |
-| Protocol selection | HTTPS defaults to preferring H2, offering H2/H1 in one authenticated handshake; cleartext defaults to H1 and needs explicit H2 prior knowledge. The low-level H2 runtime also supports h2c Upgrade. |
+| Protocol selection | `prefer_http3` tries H3 then H2/H1 before sending a request; `prefer_http2` offers H2/H1 in one authenticated handshake and remains the default. Cleartext defaults to H1 and needs explicit H2 prior knowledge. See [policy](http_protocol_policy.md). |
 | Endpoint resolution | Hostnames, IPv4 and bracketed IPv6; configurable resolver, sequential address fallback or bounded Happy Eyeballs. TCP identity remains bound to the origin URI rather than the chosen socket address. |
 | Complete requests | Common method/header/body/trailer options and owned responses. Repeated headers and trailers remain individually accessible through iterators, including separate Set-Cookie fields. Pooled H3 callbacks preserve interim ordering and never-indexed fields without an extra trailer-count ceiling. |
 | Request body sources | `body_source.slice` or `body_source.reader` overrides `body` across standalone and pooled H1/H2/H3. Reader production is bounded, and complete-request deadlines include cooperative source reads. |
 | Duplex requests | `Connection.startRequest`, `Pool.startRequest`, `http.startHttp3Request`; incremental body writes, trailers, final response callbacks and optional informational callbacks. The connection/pool must outlive its handle. Completed reads return the retained final head without replaying callbacks. |
 | Ordinary H2 concurrency | One owner per active origin drives HPACK, frames, uploads and independent stream deadlines. Later requests can join while earlier responses wait. Queue and stream admission are bounded. |
-| Manual leases | `Pool.acquireUri` returns an exclusive H1/H2 lease. It does not expose an H3 lease or share its frame reader with ordinary Pool requests. |
+| Manual leases | `Pool.acquireUri` returns an exclusive H1/H2/H3 primary connection lease under the common protocol policy. Optional Alt-Svc H3 dispatcher commands retain their separate ownership. |
 | Pool lifecycle | Idle/leased/connecting accounting, per-origin/global idle caps, monotonic expiry, global LRU, FIFO capacity admission, close wakeups and lifecycle counters. An optional total budget spans TCP and H3. |
 | Redirects | Explicit `requestUriFollowingRedirects*` calls, relative Location resolution, loop/count bounds, final URI metadata, method/body rewrite policy and one chain deadline. Single-pass Readers are rejected; explicitly replayable Readers reset for preserving hops. |
 | Credential policy | Cross-origin credentials and client identities are restricted by default; HTTPS downgrade requires opt-in. Origin/ALPN-scoped ticket caches support resumed TCP and QUIC connections. |
@@ -133,8 +133,8 @@ convenience decoders do not mean the connection runtimes lack dynamic tables.
 
 | Default | Value / implication |
 | --- | --- |
-| Unified selection | `prefer_http2`, cleartext H1, allowed authenticated no-ALPN H1 fallback. Client H3 requires `http3_only`; Pool H3 configuration defaults to null. |
-| Unified TCP pool | 64 total TCP connections, 32 idle globally, 8 idle per origin, 90-second idle expiry. |
+| Unified selection | `prefer_http2`, cleartext H1, allowed authenticated no-ALPN H1 fallback. `prefer_http3` advances through H3/H2/H1; strict H3 uses `http3_only`. Both apply to Client and primary Pool leases. |
+| Unified primary pool | 64 primary H1/H2/H3 connections, 32 idle globally, 8 idle per origin, 90-second idle expiry. |
 | Combined TCP/H3 cap | `max_total_connections = 0`: backend caps are independent until an explicit combined cap is configured. Optional H3 backend defaults to 32 connections. |
 | Ordinary shared H2 requests | 256 retained requests, 64 local streams per connection, 16-KiB upload quantum; peer SETTINGS can impose a lower stream limit. |
 | H1 runtime | 64-KiB head, 100 request headers in serve helpers, 65,534-byte request target and 16-MiB body cap. |
@@ -158,6 +158,7 @@ convenience decoders do not mean the connection runtimes lack dynamic tables.
 | F8 | Resolved | H1 native and unified/pool upload operations compose setup, body, finish and trailer deadlines, with explicit acceptance progress. Oversized pooled H3 contributions use bounded queues and packet-aware fragments. | [Native H1 evidence](evidence/http1_streaming_deadlines/2026-11-20/README.md), [unified upload evidence](evidence/http_streaming_upload_deadlines/2026-11-20/README.md). |
 | F9 | Resolved | `Client`/`Connection` expose explicit H3 with common requests, streaming, negotiation metadata and redirect policy. Reader deadlines include cooperative source waits and retain interrupted upload suffixes. | [Direct H3 and Reader delivery](evidence/http_direct_h3/2026-11-20/README.md); [public H3 guide](http_direct_h3.md). |
 | F10 | Resolved | Common response sinks compose with `std.Io.Writer`, support discard and optional callbacks; direct and pool handles offer response timeout forms. Explicit `Pool.StreamHandle.discard()` now closes its TCP lease. | [Streaming contracts](http_streaming.md) cover callback lifetimes, writer flushing, error propagation and release behavior. |
+| F11 | Resolved | `prefer_http3` selects H3 then H2/H1 before sending a request, with bounded H3 feasibility and one caller deadline. Client and primary Pool leases share this policy, including strict H3 and manual leases. | [Protocol policy](http_protocol_policy.md), [selection evidence](evidence/http_protocol_policy/2026-11-20/README.md). |
 
 The existing macOS/zio packed-head cancellation hang is also repaired. Timed
 TCP reads used a file operation that replaced, then deleted, the same fd's

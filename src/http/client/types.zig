@@ -28,14 +28,25 @@ pub const NegotiatedProtocol = enum {
 };
 
 pub const ProtocolPolicy = enum {
+    /// Offer H2 before H1 in the TCP TLS ALPN list.
     prefer_http2,
     http1_only,
     http2_only,
     /// Establish QUIC/TLS directly for HTTPS URIs using `Options.http3`.
     http3_only,
+    /// Try authenticated QUIC first, then negotiate H2/H1 over TCP.
+    prefer_http3,
+
+    pub fn attemptsHttp3(self: ProtocolPolicy) bool {
+        return self == .prefer_http3 or self == .http3_only;
+    }
 };
 
 pub const Http3ConnectOptions = struct {
+    /// H3 feasibility budget before TCP fallback under `prefer_http3`.
+    /// At most half the remaining caller connection deadline is used.
+    /// `http3_only` uses the ordinary connection/handshake budgets instead.
+    preference_timeout: std.Io.Duration = .fromMilliseconds(250),
     /// Null selects an ephemeral wildcard bind in each resolved peer family.
     local_address: ?std.Io.net.IpAddress = null,
     limits: http3_runtime.Limits = .{},
@@ -540,7 +551,7 @@ pub fn verifiedTlsOptions(
         .request_ocsp = tls.request_ocsp,
         .client_identity = tls.client_identity,
         .alpn_protocols = switch (options.protocol_policy) {
-            .prefer_http2 => &alpn_prefer_http2,
+            .prefer_http3, .prefer_http2 => &alpn_prefer_http2,
             .http1_only => &alpn_http1_only,
             .http2_only => &alpn_http2_only,
             .http3_only => &.{},
@@ -582,6 +593,14 @@ pub fn selectedProtocol(
 }
 
 test "unified HTTP ALPN policy selects only permitted protocols" {
+    for ([_]ProtocolPolicy{ .prefer_http2, .prefer_http3 }) |policy| {
+        const options: Options = .{ .protocol_policy = policy };
+        const tls = verifiedTlsOptions("localhost", options);
+        try std.testing.expectEqualStrings("h2", tls.alpn_protocols[0]);
+        try std.testing.expectEqualStrings("http/1.1", tls.alpn_protocols[1]);
+        try std.testing.expectEqual(NegotiatedProtocol.http2, try selectedProtocol("h2", options));
+        try std.testing.expectEqual(NegotiatedProtocol.http1, try selectedProtocol("http/1.1", options));
+    }
     try std.testing.expectEqual(
         NegotiatedProtocol.http2,
         try selectedProtocol("h2", .{}),

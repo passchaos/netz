@@ -528,7 +528,7 @@ fn RedirectAdapter(comptime PoolType: type) type {
         }
 
         pub fn clientIdentityConfigured(pool: *const PoolType) bool {
-            if (pool.options.client.tls.client_identity != null) return true;
+            if (pool.options.client.tls.client_identity != null or pool.options.client.http3.handshake.handshake.client_identity != null) return true;
             return if (pool.options.http3) |options|
                 options.handshake.handshake.client_identity != null
             else

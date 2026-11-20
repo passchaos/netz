@@ -315,9 +315,9 @@ when H2 siblings mix deadline and no-deadline requests.
 Surfaces:
 
 - `http.Connection.startRequest` for an owned HTTP/1, HTTP/2 or explicit
-  HTTP/3 connection. H3 uses `Client.Options.protocol_policy = .http3_only`;
+  HTTP/3 connection. H3 uses `prefer_http3` or `http3_only`;
   see [direct H3 configuration](http_direct_h3.md).
-- `http.Pool.startRequest` for a pooled HTTP/1 or HTTP/2 lease, or for the
+- `http.Pool.startRequest` for a pooled HTTP/1, HTTP/2 or direct HTTP/3 lease, or for the
   HTTP/3 dispatcher when a live Alt-Svc route selects H3. The returned
   `Pool.StreamHandle` returns a completed TCP exchange to the idle pool and
   cancels an abandoned H3 stream. Explicit `discard()` closes a TCP lease;

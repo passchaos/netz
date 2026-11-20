@@ -1,4 +1,4 @@
-//! A pooled streaming request owns a TCP lease or one H3 dispatcher command.
+//! A pooled streaming request owns a connection lease or H3 dispatcher command.
 const std = @import("std");
 const client = @import("../client.zig");
 const Lease = @import("../client_pool.zig").Lease;
@@ -14,11 +14,11 @@ pub const StreamHandle = struct {
     reader_upload: reader_upload.Pump = .{},
 
     const Kind = union(enum) {
-        tcp: Tcp,
+        leased: Leased,
         http3: Http3,
     };
 
-    const Tcp = struct {
+    const Leased = struct {
         allocator: std.mem.Allocator,
         lease: *Lease,
         handle: client.RequestHandle,
@@ -44,7 +44,7 @@ pub const StreamHandle = struct {
 
     fn uploadIo(self: *const StreamHandle) std.Io {
         return switch (self.kind) {
-            .tcp => |tcp| tcp.lease.pool.io,
+            .leased => |leased| leased.lease.pool.io,
             .http3 => |h3| h3.handle.io(),
         };
     }
@@ -64,8 +64,8 @@ pub const StreamHandle = struct {
 
     fn writeBodyBefore(self: *StreamHandle, bytes: []const u8, progress: *client.UploadProgress, deadline: ?std.Io.Clock.Timestamp) !void {
         switch (self.kind) {
-            .tcp => |*tcp| if (deadline) |until| try tcp.handle.writeBodyWithDeadline(bytes, progress, until) else {
-                try tcp.handle.writeBody(bytes);
+            .leased => |*leased| if (deadline) |until| try leased.handle.writeBodyWithDeadline(bytes, progress, until) else {
+                try leased.handle.writeBody(bytes);
                 progress.accepted_bytes = bytes.len;
             },
             .http3 => |*h3| {
@@ -98,7 +98,7 @@ pub const StreamHandle = struct {
 
     fn writeBodyFromReaderBefore(self: *StreamHandle, reader: *std.Io.Reader, progress: *client.UploadProgress, deadline: ?std.Io.Clock.Timestamp) !void {
         switch (self.kind) {
-            .tcp => |*tcp| if (deadline) |until| return tcp.handle.writeBodyFromReaderWithDeadline(reader, progress, until) else return tcp.handle.writeBodyFromReader(reader),
+            .leased => |*leased| if (deadline) |until| return leased.handle.writeBodyFromReaderWithDeadline(reader, progress, until) else return leased.handle.writeBodyFromReader(reader),
             .http3 => |*h3| {
                 if (h3.body_finished) return error.RequestBodyFinished;
                 return self.reader_upload.run(h3.allocator, self.uploadIo(), reader, self, writeBodyBefore, progress, deadline);
@@ -109,7 +109,7 @@ pub const StreamHandle = struct {
     pub fn finishBody(self: *StreamHandle) !void {
         try self.reader_upload.ensureDrained();
         switch (self.kind) {
-            .tcp => |*tcp| try tcp.handle.finishBody(),
+            .leased => |*leased| try leased.handle.finishBody(),
             .http3 => |*h3| {
                 if (h3.body_finished) return error.RequestBodyFinished;
                 try h3.handle.writeBodyBlocking(&.{}, true, null);
@@ -123,7 +123,7 @@ pub const StreamHandle = struct {
         _ = try deadline_policy.usableAwake(self.uploadIo(), deadline);
         try self.reader_upload.ensureDrained();
         switch (self.kind) {
-            .tcp => |*tcp| try tcp.handle.finishBodyWithDeadline(progress, deadline),
+            .leased => |*leased| try leased.handle.finishBodyWithDeadline(progress, deadline),
             .http3 => |*h3| {
                 if (h3.body_finished) return error.RequestBodyFinished;
                 try h3.handle.writeBodyBlockingTracked(&.{}, true, &progress.accepted_bytes, deadline);
@@ -157,9 +157,9 @@ pub const StreamHandle = struct {
     fn finishTrailersBefore(self: *StreamHandle, trailers: []const client.DuplexHeader, progress: *client.UploadProgress, deadline: ?std.Io.Clock.Timestamp) !void {
         try self.reader_upload.ensureDrained();
         switch (self.kind) {
-            .tcp => |*tcp| {
-                if (deadline) |absolute| try tcp.handle.finishTrailersWithDeadline(trailers, progress, absolute) else {
-                    try tcp.handle.finishTrailers(trailers);
+            .leased => |*leased| {
+                if (deadline) |absolute| try leased.handle.finishTrailersWithDeadline(trailers, progress, absolute) else {
+                    try leased.handle.finishTrailers(trailers);
                     progress.end_accepted = true;
                 }
             },
@@ -180,7 +180,7 @@ pub const StreamHandle = struct {
         sink: client.ResponseSink,
     ) !client.ResponseHead {
         switch (self.kind) {
-            .tcp => |*tcp| return tcp.handle.readResponse(sink),
+            .leased => |*leased| return leased.handle.readResponse(sink),
             .http3 => |*h3| return readHttp3Response(h3, sink, null),
         }
     }
@@ -191,7 +191,7 @@ pub const StreamHandle = struct {
         deadline: std.Io.Clock.Timestamp,
     ) !client.ResponseHead {
         switch (self.kind) {
-            .tcp => |*tcp| return tcp.handle.readResponseWithDeadline(
+            .leased => |*leased| return leased.handle.readResponseWithDeadline(
                 sink,
                 deadline,
             ),
@@ -205,13 +205,14 @@ pub const StreamHandle = struct {
 
     pub fn protocol(self: *const StreamHandle) client.Protocol {
         return switch (self.kind) {
-            .tcp => |tcp| tcp.lease.protocol(),
+            .leased => |leased| leased.lease.protocol(),
             .http3 => .http3,
         };
     }
 
-    /// Close a TCP lease instead of returning it to the idle pool. H3 releases
-    /// the dispatcher command and cancels an unfinished request stream.
+    /// Close an exclusive connection lease instead of returning it to idle.
+    /// The shared H3 backend releases its dispatcher command and cancels an
+    /// unfinished request stream.
     pub fn discard(self: *StreamHandle) void {
         self.deinitReturning(false);
     }
@@ -220,13 +221,13 @@ pub const StreamHandle = struct {
         self.deinitReturning(true);
     }
 
-    fn deinitReturning(self: *StreamHandle, return_tcp: bool) void {
+    fn deinitReturning(self: *StreamHandle, return_lease: bool) void {
         switch (self.kind) {
-            .tcp => |*tcp| {
-                self.reader_upload.deinit(tcp.allocator);
-                tcp.handle.deinit();
-                if (return_tcp) tcp.lease.release() else tcp.lease.discard();
-                tcp.allocator.destroy(tcp.lease);
+            .leased => |*leased| {
+                self.reader_upload.deinit(leased.allocator);
+                leased.handle.deinit();
+                if (return_lease) leased.lease.release() else leased.lease.discard();
+                leased.allocator.destroy(leased.lease);
             },
             .http3 => |*h3| {
                 self.reader_upload.deinit(h3.allocator);

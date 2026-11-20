@@ -69,7 +69,7 @@ pub fn State(comptime PoolType: type, comptime LeaseType: type) type {
         }
 
         pub fn request(self: *Self, pool: *PoolType, uri: []const u8, target: []const u8, options: client.RequestOptions, deadline: ?std.Io.Clock.Timestamp, isolate_origin: bool) !Result {
-            if (pool.options.client.protocol_policy == .http1_only or
+            if (pool.options.client.protocol_policy == .http1_only or pool.options.client.protocol_policy == .http3_only or
                 (std.mem.startsWith(u8, uri, "http:") and pool.options.client.cleartext_protocol == .http1))
                 return .{ .fallback = null };
             var command = Command{ .request = options, .target = target, .deadline = deadline };

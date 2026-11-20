@@ -59,6 +59,7 @@ pub const client = @import("client.zig");
 pub const client_pool = @import("client_pool.zig");
 pub const Client = client.Client;
 pub const Connection = client.Connection;
+pub const ClientOptions = client.Options;
 pub const Pool = client_pool.Pool;
 pub const Lease = client_pool.Lease;
 pub const PoolOptions = client_pool.Options;

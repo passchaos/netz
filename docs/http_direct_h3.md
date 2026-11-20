@@ -1,8 +1,9 @@
 # Direct HTTP/3 through the unified client
 
-`netz.http.Client` and `netz.http.Connection` support explicit HTTP/3 using
-`protocol_policy = .http3_only`. This opens a QUIC/TLS 1.3 connection to an
-HTTPS URI. The default policy remains `prefer_http2`.
+`netz.http.Client` and `netz.http.Connection` support HTTP/3 using
+`prefer_http3` (H3 then H2/H1) or `http3_only` (required H3). H3 opens a
+QUIC/TLS 1.3 connection to an HTTPS URI. The default remains `prefer_http2`;
+see [ordered selection](http_protocol_policy.md) for feasibility and deadlines.
 
 ```zig
 var client = try netz.http.Client.init(allocator, io, .{
@@ -60,13 +61,14 @@ default. Negotiation metadata reports `h3`, TLS 1.3 and the native resume flag.
 TCP session-ticket getters return null on an H3 connection; QUIC resumption
 uses the native H3 handshake inputs.
 
-The direct H3 policy requires HTTPS and an H3 ALPN list. TLS-1.2-only policy,
+The strict H3 policy requires HTTPS and an H3 ALPN list. TLS-1.2-only policy,
 HTTP/SOCKS proxy options, invalid connection budgets and raw early-data offers
-are rejected during initialization. Direct H3 does not perform Alt-Svc discovery
-or TCP fallback. For discovery, shared concurrent requests, SOCKS5 UDP routing
+are rejected during initialization. `http3_only` does not perform TCP fallback;
+`prefer_http3` advances to H2/H1 when H3 connection selection is unavailable.
+For discovery, shared concurrent requests, SOCKS5 UDP routing
 and managed 0-RTT replay, use the existing
 [`Pool.Options.http3`](http_client_pool.md) configuration. `Pool.Options.client`
-configures its TCP backend and rejects `http3_only`.
+configures primary H1/H2/H3 leases and accepts both H3 policies.
 
 Focused loopback evidence is in
 [the direct H3 delivery record](evidence/http_direct_h3/2026-11-20/README.md).

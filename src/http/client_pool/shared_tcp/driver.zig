@@ -166,8 +166,8 @@ pub fn Driver(comptime State: type, comptime Pool: type, comptime Lease: type) t
                     self.expire(storage);
                     if (self.retired) return;
                 }
-                if (self.lease.?.protocol() == .http1) {
-                    // Hand H1 back to the established exclusive path. Further
+                if (self.lease.?.protocol() != .http2) {
+                    // Hand H1/H3 back to the established exclusive path. Further
                     // requests may use other sockets under ordinary admission.
                     const values = self.snapshot(storage, false);
                     const lease = self.lease.?;

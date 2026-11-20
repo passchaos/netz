@@ -1,4 +1,4 @@
-//! Bounded authority-keyed pool for negotiated HTTP/1.1 and HTTP/2 clients.
+//! Bounded authority-keyed pool for negotiated HTTP/1.1, HTTP/2 and HTTP/3.
 //!
 //! A connection is negotiated exactly once, then retained with its selected
 //! protocol. The total budget covers idle, leased, and connecting sockets;
@@ -47,10 +47,10 @@ pub const OperationError = Error || std.Io.Timeout.Error ||
     std.Io.ConcurrentError;
 
 pub const Options = struct {
-    /// Maximum sockets owned by the pool, including idle entries, leases, and
-    /// connection attempts in the TCP backend. Zero is unbounded.
+    /// Maximum primary connections, including idle entries, leases, and
+    /// connection attempts in the primary Client backend. Zero is unbounded.
     max_connections: usize = 64,
-    /// Maximum connections across the TCP and optional HTTP/3 backends,
+    /// Maximum connections across the primary and optional Alt-Svc backends,
     /// including idle entries, leases, and connection attempts. Zero is
     /// unbounded. Per-backend limits still apply independently.
     max_total_connections: usize = 0,
@@ -67,7 +67,7 @@ pub const Options = struct {
     /// Maximum cached RFC 8446 TLS 1.3 tickets across origin/ALPN keys.
     max_tls13_session_tickets: usize = 32,
     /// Enable Alt-Svc-driven HTTP/3 with an explicit QUIC/TLS policy. Null
-    /// preserves the H1/H2-only behavior and never creates a UDP socket.
+    /// uses only the primary Client backend and its protocol policy.
     http3: ?h3_support.Options = null,
 };
 
@@ -118,9 +118,6 @@ pub const Pool = struct {
         io: std.Io,
         options: Options,
     ) Error!Pool {
-        // This field configures the TCP backend. Pooled H3 remains owned by
-        // the explicit H3 route/dispatcher configured below.
-        if (options.client.protocol_policy == .http3_only) return error.InvalidPoolOptions;
         if (options.max_idle_per_origin > options.max_idle_connections) {
             return error.InvalidPoolOptions;
         }
@@ -237,10 +234,6 @@ pub const Pool = struct {
                     }
                     return error.ConnectionLimitReached;
                 },
-                error.Timeout,
-                error.Canceled,
-                error.ConcurrencyUnavailable,
-                => unreachable,
                 else => |other| return @errorCast(other),
             };
         }
@@ -337,7 +330,7 @@ pub const Pool = struct {
     pub const requestUriFollowingRedirectsDetailedWithDeadline =
         request_ops.requestUriFollowingRedirectsDetailedWithDeadline;
 
-    /// Open a streaming request on a leased HTTP/1 or HTTP/2 connection, or
+    /// Open a streaming request on a leased H1/H2/H3 connection, or
     /// on the HTTP/3 dispatcher when a live Alt-Svc route selects H3.
     pub fn startRequest(
         self: *Pool,
@@ -346,10 +339,6 @@ pub const Pool = struct {
     ) Error!StreamHandle {
         return self.startRequestBefore(uri_text, request, null) catch |err|
             switch (err) {
-                error.Timeout,
-                error.Canceled,
-                error.ConcurrencyUnavailable,
-                => unreachable,
                 else => |other| return @errorCast(other),
             };
     }
@@ -453,7 +442,7 @@ pub const Pool = struct {
             try connection.startRequestWithDeadline(request_target, request, absolute)
         else
             try connection.startRequest(request_target, request);
-        return .{ .kind = .{ .tcp = .{
+        return .{ .kind = .{ .leased = .{
             .allocator = self.allocator,
             .lease = lease,
             .handle = handle,
@@ -486,7 +475,7 @@ pub const Pool = struct {
         return self.connections;
     }
 
-    /// Connections owned across TCP and HTTP/3, including idle entries,
+    /// Connections owned across primary and Alt-Svc backends, including idle entries,
     /// active leases, and in-progress connection attempts.
     pub fn totalConnectionCount(self: *Pool) usize {
         return self.shared_budget.connectionCount();
@@ -559,6 +548,8 @@ pub const Pool = struct {
         return state.cache.stats();
     }
 
+    /// Count connections in the optional Alt-Svc H3 dispatcher backend.
+    /// Direct H3 leases are included in `connectionCount` instead.
     pub fn http3ConnectionCount(self: *Pool) usize {
         const state = self.http3 orelse return 0;
         return state.connectionCount();
@@ -994,8 +985,9 @@ pub const Lease = struct {
     }
 };
 
-/// Streaming request handle that owns its pooled connection lease. Dropping it
-/// returns a completed exchange to the idle pool and closes an abandoned one.
+/// Streaming request handle that owns its connection lease or dispatcher
+/// command. Native writers cancel unfinished streams; usable leases return
+/// to idle reuse unless explicitly discarded.
 pub const StreamHandle = @import("client_pool/stream_handle.zig").StreamHandle;
 
 fn dropConnection(_: std.mem.Allocator, connection_value: IdleConnection) void {
@@ -1063,6 +1055,10 @@ fn clientOptionsForOriginIsolation(
     var isolated = options;
     isolated.tls.tls12_ticket_resumption = null;
     isolated.tls.tls13_ticket_resumption = null;
+    isolated.http3.handshake.handshake.resumption_session = null;
+    isolated.http3.handshake.handshake.resumption_server_id = null;
+    isolated.http3.handshake.handshake.auto_resumption = null;
+    isolated.http3.handshake.handshake.early_data = null;
     return isolated;
 }
 
@@ -1076,19 +1072,21 @@ test "unified HTTP pool validates idle limits" {
     ));
 }
 
-test "unified HTTP pool isolates explicit TLS tickets across origins" {
+test "unified HTTP pool isolates explicit TLS and QUIC tickets across origins" {
     var tls12: tls_stream.Tls12SessionTicket = undefined;
     var tls13: tls_stream.Tls13SessionTicket = undefined;
-    const options: client.Options = .{ .tls = .{
+    const options: client.Options = .{ .http3 = .{ .handshake = .{ .handshake = .{ .original_destination_connection_id = &.{}, .local_connection_id = &.{}, .resumption_server_id = "first-origin" } } }, .tls = .{
         .tls12_ticket_resumption = &tls12,
         .tls13_ticket_resumption = &tls13,
     } };
     const same_origin = clientOptionsForOriginIsolation(options, false);
     try std.testing.expect(same_origin.tls.tls12_ticket_resumption != null);
     try std.testing.expect(same_origin.tls.tls13_ticket_resumption != null);
+    try std.testing.expect(same_origin.http3.handshake.handshake.resumption_server_id != null);
     const cross_origin = clientOptionsForOriginIsolation(options, true);
     try std.testing.expect(cross_origin.tls.tls12_ticket_resumption == null);
     try std.testing.expect(cross_origin.tls.tls13_ticket_resumption == null);
+    try std.testing.expect(cross_origin.http3.handshake.handshake.resumption_server_id == null);
 }
 
 test {

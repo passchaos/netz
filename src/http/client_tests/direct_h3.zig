@@ -35,7 +35,7 @@ const Sink = struct {
     }
 };
 
-fn exercise(io: std.Io, comptime ipv6: bool) !void {
+fn exercise(io: std.Io, comptime ipv6: bool, comptime policy: http.ProtocolPolicy) !void {
     var certificate: [tls_testing.certificate_der_len]u8 = undefined;
     try std.base64.standard.Decoder.decode(&certificate, tls_testing.certificate_base64);
     const key = try tls_testing.serverKeyPair();
@@ -75,9 +75,9 @@ fn exercise(io: std.Io, comptime ipv6: bool) !void {
     var peer = try io.concurrent(Peer.run, .{ &server, io, &release });
     defer _ = peer.cancel(io) catch {};
     defer release.set(io);
-    const uri = try std.fmt.allocPrint(allocator, "https://{s}:{d}/direct", .{ if (ipv6) "[::1]" else "127.0.0.1", server.address().getPort() });
+    const uri = try std.fmt.allocPrint(allocator, "https://{s}:{d}/direct", .{ if (ipv6) "[::1]" else if (policy == .prefer_http3) "localhost" else "127.0.0.1", server.address().getPort() });
     defer allocator.free(uri);
-    var client = try http.Client.init(allocator, io, .{ .protocol_policy = .http3_only, .tls = .{ .server_verifier = .{ .pinned_ecdsa_p256_public_key = pin } }, .http3 = .{ .limits = limits } });
+    var client = try http.Client.init(allocator, io, .{ .protocol_policy = policy, .tls = .{ .server_verifier = .{ .pinned_ecdsa_p256_public_key = pin } }, .http3 = .{ .limits = limits } });
     defer client.deinit();
     var connection = try client.connectUriWithDeadline(uri, deadline(io));
     defer connection.close();
@@ -149,12 +149,23 @@ fn exercise(io: std.Io, comptime ipv6: bool) !void {
 test "unified HTTP direct H3 Client Connection request sources streaming metadata and reuse" {
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
     defer threaded.deinit();
-    try exercise(threaded.io(), false);
-    try exercise(threaded.io(), true);
+    try exercise(threaded.io(), false, .http3_only);
+    try exercise(threaded.io(), true, .http3_only);
     var backend = try backend_mod.Backend.initZio(allocator);
     defer backend.deinit();
-    try exercise(backend.io(), false);
-    try exercise(backend.io(), true);
+    try exercise(backend.io(), false, .http3_only);
+    try exercise(backend.io(), true, .http3_only);
+}
+
+test "unified HTTP protocol policy prefers H3 on both address families and I/O backends" {
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    try exercise(threaded.io(), false, .prefer_http3);
+    try exercise(threaded.io(), true, .prefer_http3);
+    var backend = try backend_mod.Backend.initZio(allocator);
+    defer backend.deinit();
+    try exercise(backend.io(), false, .prefer_http3);
+    try exercise(backend.io(), true, .prefer_http3);
 }
 
 test "unified HTTP direct H3 rejects unsupported proxy cleartext and expired setup" {
@@ -163,7 +174,8 @@ test "unified HTTP direct H3 rejects unsupported proxy cleartext and expired set
     const io = threaded.io();
     try std.testing.expectError(error.InvalidClientOptions, http.Client.init(allocator, io, .{ .protocol_policy = .http3_only, .http_proxy = .{ .uri = "http://127.0.0.1:1" } }));
     try std.testing.expectError(error.InvalidClientOptions, http.Client.init(allocator, io, .{ .protocol_policy = .http3_only, .socks5_proxy = .{ .host = "localhost" } }));
-    try std.testing.expectError(error.InvalidPoolOptions, http.Pool.init(allocator, io, .{ .client = .{ .protocol_policy = .http3_only } }));
+    var h3_pool = try http.Pool.init(allocator, io, .{ .client = .{ .protocol_policy = .http3_only } });
+    h3_pool.deinit();
     try std.testing.expectError(error.InvalidClientOptions, http.Client.init(allocator, io, .{ .protocol_policy = .http3_only, .http3 = .{ .handshake = .{ .connect_timeout = .zero, .handshake = .{ .original_destination_connection_id = &.{}, .local_connection_id = &.{} } } } }));
     try std.testing.expectError(error.InvalidClientOptions, http.Client.init(allocator, io, .{ .protocol_policy = .http3_only, .http3 = .{ .handshake = .{ .handshake = .{ .original_destination_connection_id = &.{}, .local_connection_id = &.{}, .alpn_protocols = &.{"h2"} } } } }));
     var client = try http.Client.init(allocator, io, .{ .protocol_policy = .http3_only });

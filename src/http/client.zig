@@ -12,6 +12,7 @@ const http2 = @import("../http2/mod.zig");
 const http2_runtime = @import("../http2/runtime.zig");
 const http3_runtime = @import("../http3/runtime.zig");
 const http3_connection = @import("client/http3_connection.zig");
+const protocol_selection = @import("client/protocol_selection.zig");
 const deadline_policy = @import("../internal/deadline.zig");
 const tcp_connect = @import("../internal/tcp_connect.zig");
 const address_resolver = @import("../internal/address_resolver.zig");
@@ -628,11 +629,12 @@ pub const Client = struct {
         options: Options,
     ) Error!Client {
         if (options.protocol_policy == .http3_only and (options.http_proxy != null or options.socks5_proxy != null or !options.tls.protocol_policy.offersTls13())) return error.InvalidClientOptions;
-        if (options.protocol_policy == .http3_only) {
+        if (options.protocol_policy.attemptsHttp3()) {
             const handshake = options.http3.handshake;
             if (handshake.handshake.alpn_protocols.len != 1 or !std.mem.eql(u8, handshake.handshake.alpn_protocols[0], "h3") or handshake.handshake.early_data != null) return error.InvalidClientOptions;
             if (handshake.connect_timeout) |duration| if (duration.nanoseconds <= 0) return error.InvalidClientOptions;
             if (handshake.address_attempt_timeout) |duration| if (duration.nanoseconds <= 0) return error.InvalidClientOptions;
+            if (options.http3.preference_timeout.nanoseconds <= 0) return error.InvalidClientOptions;
             try tcp_connect.validateAddressConnectPolicy(options.http3.address_connect_policy);
         }
         if (options.connect_timeout) |timeout| {
@@ -738,9 +740,8 @@ pub const Client = struct {
                 self.io,
                 self.options.connect_timeout,
             );
-        if (self.options.protocol_policy == .http3_only) {
-            if (!secure) return error.UnsupportedScheme;
-            return .{ .allocator = self.allocator, .value = .{ .http3 = try http3_connection.Owner.connect(self.allocator, self.io, uri, self.options, connect_deadline) } };
+        if (try protocol_selection.selectHttp3(self.allocator, self.io, uri, self.options, connect_deadline)) |owner| {
+            return .{ .allocator = self.allocator, .value = .{ .http3 = owner } };
         }
         if (self.options.http_proxy) |proxy| {
             if (secure) {

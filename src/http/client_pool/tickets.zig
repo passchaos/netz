@@ -70,7 +70,7 @@ pub const Manager = struct {
                 try self.tls12.cloneForAlpnBefore(host, port, "", now, deadline)
             else
                 null,
-            .prefer_http2 => (try self.tls12.cloneForAlpnBefore(
+            .prefer_http3, .prefer_http2 => (try self.tls12.cloneForAlpnBefore(
                 host,
                 port,
                 "h2",
@@ -117,7 +117,7 @@ pub const Manager = struct {
                 try self.tls13.cloneForAlpnBefore(host, port, "", now, deadline)
             else
                 null,
-            .prefer_http2 => (try self.tls13.cloneForAlpnBefore(
+            .prefer_http3, .prefer_http2 => (try self.tls13.cloneForAlpnBefore(
                 host,
                 port,
                 "h2",

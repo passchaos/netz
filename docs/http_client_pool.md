@@ -9,7 +9,8 @@ the connection or cancel another stream. `http2_shared_requests` bounds retained
 requests, concurrent streams, upload quanta and control/output work. Peer
 SETTINGS also bound stream admission.
 
-The owner acquires an ordinary unified TCP lease. This preserves the existing
+The H2 owner acquires an ordinary unified connection lease and hands H1/H3
+connections to the exclusive path. This preserves the existing
 socket and combined TCP/H3 budgets, origin key, TLS verification, ALPN choice,
 ticket caches and idle-return accounting. Negotiated HTTP/1.1 returns to the
 exclusive request path. Public `acquireUri` leases remain exclusive and never
