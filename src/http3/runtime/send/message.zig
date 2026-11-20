@@ -505,6 +505,26 @@ pub fn trySendConnectionResponseLiteral(
     fin: bool,
     release_received: usize,
 ) Error!u64 {
+    return trySendConnectionResponseLiteralWithOptions(connection, scratch, stream_id, response, peer_settings, .{
+        .fin = fin,
+        .release_received = release_received,
+    });
+}
+
+pub const ResponseLiteralOptions = struct {
+    fin: bool = true,
+    initial_offset: u64 = 0,
+    release_received: usize = 0,
+};
+
+pub fn trySendConnectionResponseLiteralWithOptions(
+    connection: *quic.one_rtt.Connection,
+    scratch: *StreamMessageSendScratch,
+    stream_id: u62,
+    response: http3.Response,
+    peer_settings: http3.Settings,
+    options: ResponseLiteralOptions,
+) Error!u64 {
     scratch.reset();
     try response.writeWithSettings(
         &scratch.encoded,
@@ -512,12 +532,13 @@ pub fn trySendConnectionResponseLiteral(
         peer_settings,
     );
     var send = quic.stream_state.SendState.init(stream_id);
+    send.next_offset = options.initial_offset;
     try send.appendFrames(
         &scratch.frames,
         connection.endpoint.allocator,
         scratch.encoded.items,
         @max(@as(usize, 1), scratch.encoded.items.len),
-        fin,
+        options.fin,
     );
     std.debug.assert(scratch.frames.items.len == 1);
     if (try connection.packetLenForFramesAtOffset(
@@ -526,12 +547,12 @@ pub fn trySendConnectionResponseLiteral(
     ) > connection.currentSendDatagramSize()) {
         return error.DatagramTooLarge;
     }
-    if (release_received == 0) {
+    if (options.release_received == 0) {
         try connection.trySend(scratch.frames.items);
     } else {
         try connection.trySendAndReleaseReceivedCapacity(
             stream_id,
-            release_received,
+            options.release_received,
             scratch.frames.items[0],
         );
     }

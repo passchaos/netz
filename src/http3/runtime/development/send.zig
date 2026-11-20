@@ -163,6 +163,23 @@ pub fn responsePrefix(
     offsets: *std.AutoHashMapUnmanaged(u62, u64),
     fin: bool,
 ) Error!void {
+    return responsePrefixUntil(endpoint, to, scratch, stream_id, max_stream_frame_data, offsets, fin, null, null) catch |err| switch (err) {
+        error.Timeout, error.ConcurrencyUnavailable => unreachable,
+        else => |other| return @errorCast(other),
+    };
+}
+
+pub fn responsePrefixUntil(
+    endpoint: *quic.runtime.Endpoint,
+    to: net.IpAddress,
+    scratch: *send_scratch.Message,
+    stream_id: u62,
+    max_stream_frame_data: usize,
+    offsets: *std.AutoHashMapUnmanaged(u62, u64),
+    fin: bool,
+    deadline: ?std.Io.Clock.Timestamp,
+    send_attempted: ?*bool,
+) runtime_error.ReceiveTimeoutError!void {
     const slot = try offsets.getOrPut(endpoint.allocator, stream_id);
     const previous_offset = if (slot.found_existing) slot.value_ptr.* else 0;
     errdefer {
@@ -179,13 +196,14 @@ pub fn responsePrefix(
         max_stream_frame_data,
         fin,
     );
-    try packetizer.sendEndpoint(
+    try packetizer.sendEndpointUntil(
         endpoint.allocator,
         endpoint,
         to,
         scratch.frames.items,
         1,
-        null,
+        send_attempted,
+        deadline,
     );
     slot.value_ptr.* = send.next_offset;
 }

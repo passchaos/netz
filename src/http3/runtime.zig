@@ -371,6 +371,9 @@ pub const trySendConnectionStreamingRequestHeadLiteral =
     message_sender.trySendConnectionStreamingRequestHeadLiteral;
 pub const trySendConnectionResponseLiteral =
     message_sender.trySendConnectionResponseLiteral;
+pub const ResponseLiteralOptions = message_sender.ResponseLiteralOptions;
+pub const trySendConnectionResponseLiteralWithOptions =
+    message_sender.trySendConnectionResponseLiteralWithOptions;
 pub const trySendConnectionStreamingResponseHeadLiteral =
     message_sender.trySendConnectionStreamingResponseHeadLiteral;
 const sendProtectedMessage = message_sender.sendProtectedMessage;
@@ -2963,6 +2966,14 @@ pub fn cancelHandshakeRequestWithDeadline(
 pub const HandshakeServerSession = @import("runtime/handshake_server_session.zig").HandshakeServerSession;
 
 const HandshakeConcurrentAdapter = struct {
+    pub fn peerSettings(session: *HandshakeServerSession) http3.Settings {
+        return session.control.settings.peer;
+    }
+    pub fn sendInformational(session: *HandshakeServerSession, from: net.IpAddress, stream_id: u62, response: http3.InformationalResponse, deadline: ?std.Io.Clock.Timestamp) anyerror!void {
+        _ = from;
+        if (deadline) |until| return session.sendInformationalResponseWithDeadline(stream_id, response, until);
+        return session.sendInformationalResponse(stream_id, response);
+    }
     pub fn maxStreams(session: *HandshakeServerSession) usize {
         return session.options.max_concurrent_request_streams;
     }
@@ -3028,29 +3039,21 @@ const HandshakeConcurrentAdapter = struct {
         request_method: ?[]const u8,
     ) Error!void {
         _ = from;
-        var value = response;
-        value.body = data;
-        value.request_method = request_method;
-        var headers_stack: [server_response.header_stack_capacity]http3.Qpack.HeaderField =
-            undefined;
+        var headers_stack: [server_response.header_stack_capacity]http3.Qpack.HeaderField = undefined;
         var length_buffer: [20]u8 = undefined;
-        if (body_length) |length| {
-            if (server_response.headerValue(value.headers, "content-length") == null) {
-                if (value.headers.len == headers_stack.len) return error.InvalidHeader;
-                @memcpy(headers_stack[0..value.headers.len], value.headers);
-                headers_stack[value.headers.len] = .{
-                    .name = "content-length",
-                    .value = std.fmt.bufPrint(
-                        &length_buffer,
-                        "{d}",
-                        .{length},
-                    ) catch return error.InvalidHeader,
-                };
-                value.headers = headers_stack[0 .. value.headers.len + 1];
-            }
-        }
-        return session.trySendResponseLiteral(stream_id, value);
+        var prepared = try @import("runtime/concurrent/response.zig").prepare(
+            session.established.connection.endpoint.allocator,
+            response,
+            body_length,
+            data,
+            request_method,
+            &headers_stack,
+            &length_buffer,
+        );
+        defer prepared.deinit(session.established.connection.endpoint.allocator);
+        return session.trySendResponseLiteral(stream_id, prepared.value);
     }
+
     pub fn sendCompleteResponseWithInformational(
         session: *HandshakeServerSession,
         from: net.IpAddress,
@@ -3062,33 +3065,21 @@ const HandshakeConcurrentAdapter = struct {
         request_method: ?[]const u8,
     ) Error!void {
         _ = from;
-        var value = response;
-        value.body = data;
-        value.request_method = request_method;
-        var headers_stack: [server_response.header_stack_capacity]http3.Qpack.HeaderField =
-            undefined;
+        var headers_stack: [server_response.header_stack_capacity]http3.Qpack.HeaderField = undefined;
         var length_buffer: [20]u8 = undefined;
-        if (body_length) |length| {
-            if (server_response.headerValue(value.headers, "content-length") == null) {
-                if (value.headers.len == headers_stack.len) return error.InvalidHeader;
-                @memcpy(headers_stack[0..value.headers.len], value.headers);
-                headers_stack[value.headers.len] = .{
-                    .name = "content-length",
-                    .value = std.fmt.bufPrint(
-                        &length_buffer,
-                        "{d}",
-                        .{length},
-                    ) catch return error.InvalidHeader,
-                };
-                value.headers = headers_stack[0 .. value.headers.len + 1];
-            }
-        }
-        return session.sendResponseWithInformational(
-            stream_id,
-            informational,
-            value,
+        var prepared = try @import("runtime/concurrent/response.zig").prepare(
+            session.established.connection.endpoint.allocator,
+            response,
+            body_length,
+            data,
+            request_method,
+            &headers_stack,
+            &length_buffer,
         );
+        defer prepared.deinit(session.established.connection.endpoint.allocator);
+        return session.sendResponseWithInformational(stream_id, informational, prepared.value);
     }
+
     pub fn finishTrailers(
         session: *HandshakeServerSession,
         from: net.IpAddress,

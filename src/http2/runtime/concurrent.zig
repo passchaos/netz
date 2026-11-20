@@ -77,6 +77,11 @@ pub fn Engine(
             abandoned: std.atomic.Value(bool) = .init(false),
 
             const Kind = union(enum) {
+                informational: struct {
+                    status: u16,
+                    headers: []const http2.Hpack.HeaderField,
+                    deadline: ?std.Io.Clock.Timestamp = null,
+                },
                 start_response: ResponseOptions,
                 write_body: struct {
                     data: []const u8,
@@ -186,6 +191,16 @@ pub fn Engine(
             ) anyerror!void {
                 var command = Command{ .slot = self.slot, .kind = .{ .start_response = options } };
                 return self.engine.submit(&command, null);
+            }
+
+            pub fn writeInformationalResponse(self: Stream, status: u16, headers: []const http2.Hpack.HeaderField) anyerror!void {
+                var command = Command{ .slot = self.slot, .kind = .{ .informational = .{ .status = status, .headers = headers } } };
+                return self.engine.submit(&command, null);
+            }
+
+            pub fn writeInformationalResponseWithDeadline(self: Stream, status: u16, headers: []const http2.Hpack.HeaderField, deadline: std.Io.Clock.Timestamp) anyerror!void {
+                var command = Command{ .slot = self.slot, .kind = .{ .informational = .{ .status = status, .headers = headers, .deadline = deadline } } };
+                return self.engine.submit(&command, deadline);
             }
 
             pub fn startResponseWithDeadline(
@@ -980,6 +995,13 @@ pub fn Engine(
             _ = self;
             const slot = command.slot;
             switch (command.kind) {
+                .informational => |value| {
+                    if (value.deadline) |deadline| {
+                        try slot.stream.writeInformationalResponseWithDeadline(value.status, value.headers, deadline);
+                    } else {
+                        try slot.stream.writeInformationalResponse(value.status, value.headers);
+                    }
+                },
                 .start_response => |options| {
                     try slot.stream.startResponse(options);
                 },

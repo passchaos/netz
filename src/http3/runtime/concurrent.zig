@@ -93,8 +93,14 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
             result: ?anyerror = null,
             done: std.Io.Event = .unset,
             abandoned: std.atomic.Value(bool) = .init(false),
+            informational_written: usize = 0,
+            response_started: bool = false,
 
             const Kind = union(enum) {
+                informational: struct {
+                    response: http3.InformationalResponse,
+                    deadline: ?std.Io.Clock.Timestamp = null,
+                },
                 start_response: struct {
                     response: http3.Response,
                     body_length: ?usize,
@@ -152,6 +158,7 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
             body_error: ?anyerror = null,
             reset_code: ?u64 = null,
             response_finished: bool = false,
+            response_started: bool = false,
             suppress_body: bool = false,
             handler_done: bool = false,
             handler_error: ?anyerror = null,
@@ -228,6 +235,16 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                 return self.engine.submit(&command, null);
             }
 
+            pub fn writeInformationalResponse(self: Stream, status: u16, headers: []const http3.Qpack.HeaderField) anyerror!void {
+                var command = Command{ .slot = self.slot, .kind = .{ .informational = .{ .response = .{ .status = status, .headers = headers } } } };
+                return self.engine.submit(&command, null);
+            }
+
+            pub fn writeInformationalResponseWithDeadline(self: Stream, status: u16, headers: []const http3.Qpack.HeaderField, deadline: std.Io.Clock.Timestamp) anyerror!void {
+                var command = Command{ .slot = self.slot, .kind = .{ .informational = .{ .response = .{ .status = status, .headers = headers }, .deadline = deadline } } };
+                return self.engine.submit(&command, deadline);
+            }
+
             pub fn startResponseWithDeadline(
                 self: Stream,
                 response: http3.Response,
@@ -277,8 +294,9 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                 return self.engine.submit(&command, deadline);
             }
 
-            /// Submit a complete buffered response with interim 1xx heads.
-            /// This path requires a final DATA frame and no trailers.
+            /// Submit interim heads, the final head and the first body part.
+            /// Non-final bodies may continue through writeData/trailers; a
+            /// final part also sends any trailers supplied in `response`.
             pub fn startResponseWithBodyAndInformational(
                 self: Stream,
                 response: http3.Response,
@@ -1074,48 +1092,67 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
         fn execute(self: *Self, command: *Command) anyerror!void {
             const slot = command.slot;
             switch (command.kind) {
+                .informational => |value| {
+                    if (slot.response_started or slot.response_finished) return error.UnexpectedFrame;
+                    try Adapter.sendInformational(self.session, slot.from, slot.stream_id, value.response, value.deadline);
+                },
                 .start_response => |value| {
+                    var response = value.response;
+                    response.request_method = slot.head.method;
                     try Adapter.startResponse(
                         self.session,
                         slot.from,
                         slot.stream_id,
-                        value.response,
+                        response,
                         value.body_length,
                     );
-                    slot.suppress_body = value.response.suppressesBody();
+                    slot.response_started = true;
+                    slot.suppress_body = response.suppressesBody();
                     if (value.body_length == 0 or slot.suppress_body) {
                         slot.response_finished = true;
                     }
                 },
                 .start_response_with_body => |value| {
-                    slot.suppress_body = value.response.suppressesBody();
-                    if (slot.suppress_body) {
-                        // HEAD/204/304: the head already ended the stream.
-                        try Adapter.startResponse(
-                            self.session,
-                            slot.from,
-                            slot.stream_id,
-                            value.response,
-                            value.body_length,
-                        );
-                        if (value.data.len != 0) return error.InvalidContentLength;
-                        if (value.fin) slot.response_finished = true;
-                        return;
-                    }
-                    if (value.informational.len != 0) {
-                        if (!value.fin or value.response.trailers.len != 0) {
-                            return error.InformationalStreamingUnsupported;
+                    if (!command.response_started and slot.response_started) return error.UnexpectedFrame;
+                    var response = value.response;
+                    response.request_method = slot.head.method;
+                    if (!command.response_started) {
+                        var validation = response;
+                        validation.body = value.data;
+                        try validation.validateHead(self.allocator, Adapter.peerSettings(self.session));
+                        const declared = try http3.contentLength(response.headers);
+                        if (declared != null and value.body_length != null and declared.? != value.body_length.?) return error.InvalidContentLength;
+                        const expected = value.body_length orelse declared;
+                        if (!response.suppressesBody()) {
+                            if (expected) |length| {
+                                if (value.data.len > length or (value.fin and value.data.len != length)) return error.InvalidContentLength;
+                            }
                         }
+                        for (value.informational) |info| try info.validate(self.allocator, Adapter.peerSettings(self.session));
+                    }
+                    slot.suppress_body = response.suppressesBody();
+                    if (value.informational.len != 0 and value.fin and !slot.suppress_body) {
                         try Adapter.sendCompleteResponseWithInformational(
                             self.session,
                             slot.from,
                             slot.stream_id,
                             value.informational,
-                            value.response,
+                            response,
                             value.body_length,
                             value.data,
                             slot.head.method,
                         );
+                        slot.response_started = true;
+                        slot.response_finished = true;
+                        return;
+                    }
+                    while (command.informational_written < value.informational.len) {
+                        try Adapter.sendInformational(self.session, slot.from, slot.stream_id, value.informational[command.informational_written], null);
+                        command.informational_written += 1;
+                    }
+                    if (slot.suppress_body) {
+                        try Adapter.startResponse(self.session, slot.from, slot.stream_id, response, value.body_length);
+                        slot.response_started = true;
                         slot.response_finished = true;
                         return;
                     }
@@ -1124,7 +1161,7 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                     // path requires the endpoint control streams to be ready;
                     // a very early first response falls back to the regular
                     // head+body path instead of failing the stream.
-                    if (self.active <= 1 and
+                    if (!command.response_started and self.active <= 1 and
                         value.fin and
                         value.data.len != 0 and
                         value.response.trailers.len == 0 and
@@ -1135,32 +1172,32 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                             self.session,
                             slot.from,
                             slot.stream_id,
-                            value.response,
+                            response,
                             value.body_length,
                             value.data,
                             slot.head.method,
                         )) |_| {
+                            slot.response_started = true;
                             slot.response_finished = true;
                             return;
                         } else |err| switch (err) {
-                            error.MissingSettings => {},
+                            error.MissingSettings, error.DatagramTooLarge, error.FlowControlBlocked => {},
                             else => return err,
                         }
                     }
-                    try Adapter.startResponse(
-                        self.session,
-                        slot.from,
-                        slot.stream_id,
-                        value.response,
-                        value.body_length,
-                    );
+                    if (!command.response_started) {
+                        try Adapter.startResponse(self.session, slot.from, slot.stream_id, response, value.body_length);
+                        command.response_started = true;
+                        slot.response_started = true;
+                    }
                     try Adapter.sendBody(
                         self.session,
                         slot.from,
                         slot.stream_id,
                         value.data,
-                        value.fin,
+                        value.fin and response.trailers.len == 0,
                     );
+                    if (value.fin and response.trailers.len != 0) try Adapter.finishTrailers(self.session, slot.from, slot.stream_id, response.trailers);
                     if (value.fin) slot.response_finished = true;
                 },
                 .write_body => |value| {

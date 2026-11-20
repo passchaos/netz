@@ -1,0 +1,21 @@
+{
+  "parent": "739d7a33f5a955598e115d99768faa49d9672088",
+  "zig": "0.16.0",
+  "platform": "macOS aarch64",
+  "sources": {
+    "src/http2/runtime/concurrent.zig": "cad35a0dbe51bfba84f75a72254dc8ed136afbb3ba4ede5c34d522d22b830750",
+    "src/http2/runtime/concurrent_tests.zig": "74bb2854686aed6fa1076fdf292eae62bc276d45080f3fbf7b8b49643523f227",
+    "src/http2/runtime/duplex/streams.zig": "1bb17ace146c0f241b22e327cede7ad315679aa85a69000e7cdc3950520295e0",
+    "src/http3/mod.zig": "7cd48ccc9b08226d24db7189547719da9d8ce0b31659a1a2142549d52f9c6c91",
+    "src/http3/runtime.zig": "cd71c793759c7ac959239f1eda9299c219a8568fbaaab4c522e5573ad2dea4da",
+    "src/http3/runtime/concurrent.zig": "5c17a185f36a01e28e7715aecaf881b0d1635b56cbf78ba3de510c7fac5a9d97",
+    "src/http3/runtime/concurrent_tests.zig": "092f03598a708dece70b131ada7e65ae705380bde04f15181ad66b6800faec53",
+    "src/http3/runtime/development/send.zig": "dae9c102198f4e0980d045eccc433929f942fc09cc36f61243b46da1319ae320",
+    "src/http3/runtime/handshake_server_session.zig": "691487a3d232d6931a26ac3a0af6ad9f85b2fb972836f8c626e38cf8df5c6d99",
+    "src/http3/runtime/send/message.zig": "1ccb3c9044af51892793899b8865ee6d0362891462114eca3a31b46527a5a771",
+    "src/http3/runtime/server.zig": "9e64300a0a0361d7a4020912fa3acba4cb5b20a79c919f65be89996e1c260cc9",
+    "src/http2/runtime/concurrent/informational_tests.zig": "eb596f30c55b3fb4694cabc41e1bb55a09171046e2ea7f2325a421e595e666f3",
+    "src/http3/runtime/concurrent/informational_tests.zig": "dad9c486462c0a6196f1edbf2ba7c404295d12475c813e8dc7ea6fd1887d1938",
+    "src/http3/runtime/concurrent/response.zig": "6134d039a3284f3593c84917233924e4bf45c8820c1a7ca8e617d078a57fab4b"
+  }
+}

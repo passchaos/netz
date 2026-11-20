@@ -1419,15 +1419,23 @@ pub const Server = struct {
 
     /// Emit one informational response on an admitted streaming request. The
     /// next final response continues at the recorded stream offset.
-    pub fn sendInformationalResponse(
-        self: *Server,
-        to: net.IpAddress,
-        stream_id: u62,
-        response: http3.InformationalResponse,
-    ) Error!void {
-        self.peer_state_mutex.lockUncancelable(
-            self.quic_server.endpoint.io,
-        );
+    pub fn sendInformationalResponse(self: *Server, to: net.IpAddress, stream_id: u62, response: http3.InformationalResponse) Error!void {
+        return self.sendInformationalResponseUntil(to, stream_id, response, null) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn sendInformationalResponseWithDeadline(self: *Server, to: net.IpAddress, stream_id: u62, response: http3.InformationalResponse, deadline: std.Io.Clock.Timestamp) ReceiveTimeoutError!void {
+        return self.sendInformationalResponseUntil(to, stream_id, response, deadline);
+    }
+
+    fn sendInformationalResponseUntil(self: *Server, to: net.IpAddress, stream_id: u62, response: http3.InformationalResponse, deadline: ?std.Io.Clock.Timestamp) ReceiveTimeoutError!void {
+        const io = self.quic_server.endpoint.io;
+        if (deadline) |until| {
+            _ = try deadline_policy.usableAwake(io, until);
+            if (!self.peer_state_mutex.tryLock()) return error.ConcurrencyUnavailable;
+        } else self.peer_state_mutex.lockUncancelable(io);
         defer self.peer_state_mutex.unlock(self.quic_server.endpoint.io);
         const peer = self.streaming_peers.find(to) orelse
             return error.UnexpectedStream;
@@ -1435,9 +1443,10 @@ pub const Server = struct {
             stream_id,
             self.streaming_mode,
         );
-        self.response_send_mutex.lockUncancelable(
-            self.quic_server.endpoint.io,
-        );
+        if (deadline) |until| {
+            _ = try deadline_policy.usableAwake(io, until);
+            if (!self.response_send_mutex.tryLock()) return error.ConcurrencyUnavailable;
+        } else self.response_send_mutex.lockUncancelable(io);
         defer self.response_send_mutex.unlock(self.quic_server.endpoint.io);
         try response.writeDynamic(
             &response_context.scratch.encoded,
@@ -1446,7 +1455,8 @@ pub const Server = struct {
             stream_id,
             response_context.qpack_encode,
         );
-        sendRuntimeResponsePrefix(
+        var send_attempted = false;
+        development_send.responsePrefixUntil(
             &self.quic_server.endpoint,
             to,
             response_context.scratch,
@@ -1454,8 +1464,10 @@ pub const Server = struct {
             self.limits.max_stream_frame_data,
             response_context.response_send_offsets,
             false,
+            deadline,
+            &send_attempted,
         ) catch |err| {
-            peer.markSendFailed();
+            if (send_attempted) peer.markSendFailed();
             return err;
         };
     }
@@ -1802,6 +1814,13 @@ pub const Server = struct {
 };
 
 const DevelopmentConcurrentAdapter = struct {
+    pub fn peerSettings(_: *Server) http3.Settings {
+        return development_settings;
+    }
+    pub fn sendInformational(session: *Server, from: net.IpAddress, stream_id: u62, response: http3.InformationalResponse, deadline: ?std.Io.Clock.Timestamp) anyerror!void {
+        if (deadline) |until| return session.sendInformationalResponseWithDeadline(from, stream_id, response, until);
+        return session.sendInformationalResponse(from, stream_id, response);
+    }
     pub fn maxStreams(session: *Server) usize {
         return session.limits.max_concurrent_request_streams;
     }

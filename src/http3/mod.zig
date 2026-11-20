@@ -1821,6 +1821,19 @@ pub const Response = struct {
         );
     }
 
+    /// Validate a streaming head and its body policy without encoding or
+    /// mutating QPACK state. Body-length completion remains the writer's job.
+    pub fn validateHead(self: Response, allocator: std.mem.Allocator, peer_settings: Settings) Error!void {
+        var stack: [header_fields.stack_capacity]Qpack.HeaderField = undefined;
+        const storage = try header_fields.acquire(allocator, &stack, try responseHeaderFieldCapacity(self, 1));
+        defer header_fields.release(allocator, &stack, storage);
+        var status_buf: [3]u8 = undefined;
+        const fields = try self.headerFields(storage, &status_buf);
+        try validateHeaderBlock(fields, .response);
+        try validateFieldSectionSize(fields, peer_settings.max_field_section_size);
+        try self.validateBodySemantics();
+    }
+
     pub fn headerFields(self: Response, out: []Qpack.HeaderField, status_buf: *[3]u8) Error![]Qpack.HeaderField {
         var count: usize = 0;
         if (self.status < 100 or self.status > 999) return error.InvalidStatus;
@@ -2026,7 +2039,7 @@ pub const Response = struct {
             semantics,
         );
         if (body_forbidden) {
-            if (!semantics.head) {
+            if (!semantics.head and self.status != 304) {
                 if (body_length) |length| {
                     if (length != 0) return error.InvalidContentLength;
                 }
@@ -2128,7 +2141,7 @@ pub const Response = struct {
             semantics,
         );
         if (body_forbidden) {
-            if (!semantics.head) {
+            if (!semantics.head and self.status != 304) {
                 if (body_length) |length| {
                     if (length != 0) return error.InvalidContentLength;
                 }
@@ -2376,6 +2389,18 @@ fn responseShouldDefaultContentLengthValue(
 pub const InformationalResponse = struct {
     status: u16,
     headers: []const Qpack.HeaderField = &.{},
+
+    /// Preflight a compound response before any interim head reaches the wire.
+    pub fn validate(self: InformationalResponse, allocator: std.mem.Allocator, peer_settings: Settings) Error!void {
+        var stack: [header_fields.stack_capacity]Qpack.HeaderField = undefined;
+        const storage = try header_fields.acquire(allocator, &stack, try informationalHeaderFieldCapacity(self));
+        defer header_fields.release(allocator, &stack, storage);
+        var status_buf: [3]u8 = undefined;
+        const fields = try self.headerFields(storage, &status_buf);
+        try validateHeaderBlock(fields, .response);
+        try validateFieldSectionSize(fields, peer_settings.max_field_section_size);
+        try validateResponseBodyForStatus(self.status, fields, &.{}, &.{});
+    }
 
     pub fn headerFields(self: InformationalResponse, out: []Qpack.HeaderField, status_buf: *[3]u8) Error![]Qpack.HeaderField {
         if (self.status < 100 or self.status >= 200) return error.InvalidStatus;
@@ -3848,7 +3873,7 @@ fn validateFieldSectionSize(headers: []const Qpack.HeaderField, max_field_sectio
     }
 }
 
-fn contentLength(headers: []const Qpack.HeaderField) Error!?usize {
+pub fn contentLength(headers: []const Qpack.HeaderField) Error!?usize {
     var found: ?usize = null;
     for (headers) |header| {
         if (!std.ascii.eqlIgnoreCase(header.name, "content-length")) continue;

@@ -909,6 +909,16 @@ pub const ServerDuplexStream = struct {
         return self.startResponseUntil(options, null);
     }
 
+    pub fn writeInformationalResponse(self: *ServerDuplexStream, status: u16, headers: []const http2.Hpack.HeaderField) Error!void {
+        if (self.response_started or self.released) return error.UnexpectedFrame;
+        try self.connection.writeInformationalResponse(self.stream_id, status, headers);
+    }
+
+    pub fn writeInformationalResponseWithDeadline(self: *ServerDuplexStream, status: u16, headers: []const http2.Hpack.HeaderField, deadline: std.Io.Clock.Timestamp) ResponseTimeoutError!void {
+        if (self.response_started or self.released) return error.UnexpectedFrame;
+        try self.connection.writeInformationalResponseWithDeadline(self.stream_id, status, headers, deadline);
+    }
+
     /// Send a buffered response head and body as one logical write. The
     /// connection combines the HEADERS block and the first DATA burst when
     /// flow-control credit permits, avoiding a second tiny submission for

@@ -327,6 +327,30 @@ Concurrency contract:
 
 ## Expect: 100-continue
 
+Concurrent H2/H3 handler streams can send interim responses independently of
+the final response and its body:
+
+```zig
+try stream.writeInformationalResponse(103, &.{.{
+    .name = "link", .value = "</style.css>; rel=preload",
+}});
+// Start the final response, write its DATA contributions, then finish/trailer.
+```
+
+`writeInformationalResponseWithDeadline` bounds both admission and the interim
+head output with the supplied awake-clock deadline. Interim writes after the
+final head are rejected without sending bytes. The H3
+`startResponseWithBodyAndInformational` convenience method also accepts a
+non-final first body part followed by `writeData`/`finishWithTrailers`; a final
+part sends any trailers supplied in the response. Compound calls preflight the
+entire interim list before sending its first head. HEAD/204/304 responses retain
+their status/method-specific body rules and still deliver the interim heads.
+For a HEAD or 304 H3 streaming response, `body_length` describes the selected
+representation length and may be non-zero while the wire content is empty.
+204/205 continue to reject non-zero content lengths. A literal `try*` send that
+fails before socket progress retains the prior interim offset for a later
+streaming fallback; receive-credit release is a separate named send option.
+
 - HTTP/1 exposes `RequestWriter.waitForContinue*` on the client and sends the
   interim head before an expected body is read on the server.
 - HTTP/2 servers send `100 Continue` before consuming request DATA in both

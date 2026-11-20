@@ -1,4 +1,7 @@
 const std = @import("std");
+test {
+    _ = @import("concurrent/informational_tests.zig");
+}
 const http3 = @import("../mod.zig");
 const runtime = @import("../runtime.zig");
 const netz_runtime = @import("../../runtime.zig");

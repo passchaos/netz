@@ -116,7 +116,7 @@ const trySendConnectionBodyChunk = runtime.trySendConnectionBodyChunk;
 const trySendConnectionBodyParts = runtime.trySendConnectionBodyParts;
 const trySendConnectionControlFrame = runtime.trySendConnectionControlFrame;
 const trySendConnectionQpackFeedback = runtime.trySendConnectionQpackFeedback;
-const trySendConnectionResponseLiteral = runtime.trySendConnectionResponseLiteral;
+const trySendConnectionResponseLiteralWithOptions = runtime.trySendConnectionResponseLiteralWithOptions;
 const trySendConnectionStreamingResponseHeadLiteral = runtime.trySendConnectionStreamingResponseHeadLiteral;
 const trySendConnectionTrailersLiteral = runtime.trySendConnectionTrailersLiteral;
 const validateHandshakeSessionOptions = runtime.validateHandshakeSessionOptions;
@@ -2451,15 +2451,15 @@ pub const HandshakeServerSession = struct {
         defer prepared.deinit(
             self.established.connection.endpoint.allocator,
         );
-        _ = try trySendConnectionResponseLiteral(
+        _ = try trySendConnectionResponseLiteralWithOptions(
             &self.established.connection,
             &self.stream_send_scratch,
             stream_id,
             prepared.value,
             self.control.settings.peer,
-            true,
-            0,
+            .{ .initial_offset = self.informational_offsets.get(stream_id) orelse 0 },
         );
+        _ = self.informational_offsets.remove(stream_id);
         finishServerRequest(&self.control, &self.request_lifecycle, stream_id);
     }
 
@@ -2500,8 +2500,9 @@ pub const HandshakeServerSession = struct {
             trailers_pending,
             self.options,
             self.control.settings.peer,
-            self.takeInformationalOffset(stream_id),
+            self.informational_offsets.get(stream_id) orelse 0,
         );
+        _ = self.informational_offsets.remove(stream_id);
         if (!retained) {
             finishServerRequest(
                 &self.control,
@@ -3589,15 +3590,15 @@ pub const HandshakeServerSession = struct {
             return error.InvalidContentLength;
         }
         try self.outbound_bodies.reserveOpen(stream_id);
-        const next_offset = try trySendConnectionResponseLiteral(
+        const next_offset = try trySendConnectionResponseLiteralWithOptions(
             &self.established.connection,
             &self.stream_send_scratch,
             stream_id,
             prepared.value,
             self.control.settings.peer,
-            false,
-            release_received,
+            .{ .fin = false, .initial_offset = self.informational_offsets.get(stream_id) orelse 0, .release_received = release_received },
         );
+        _ = self.informational_offsets.remove(stream_id);
         var body_send = quic.stream_state.SendState.init(stream_id);
         body_send.next_offset = next_offset;
         self.outbound_bodies.appendOpenAssumeCapacity(
