@@ -417,13 +417,21 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
                 );
                 const allocator = state.pool.allocator;
                 const stream = try allocator.create(StreamType);
-                errdefer allocator.destroy(stream);
+                // Ownership moves into `handle` once the command is enqueued.
+                // Before that point raw errdefers release the allocations; after
+                // it, every failure path calls `handle.deinit()`. Keeping both
+                // armed caused a double free on a stream-start timeout.
+                var stream_owned = true;
+                errdefer if (stream_owned) {
+                    stream.deinit();
+                    allocator.destroy(stream);
+                };
                 stream.* = StreamType.init(state.pool, allocator, state.io);
                 stream.worker_activity = &state.activity;
                 stream.expected_body_length = body_length orelse try http3.contentLength(request_value.headers);
-                errdefer stream.deinit();
                 const handle = try allocator.create(StreamHandle);
-                errdefer allocator.destroy(handle);
+                var handle_owned = true;
+                errdefer if (handle_owned) allocator.destroy(handle);
                 handle.* = .{
                     .state = state,
                     .command = .{
@@ -440,6 +448,8 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
                     .allocator = allocator,
                 };
                 try enqueue(state, &handle.command);
+                handle_owned = false;
+                stream_owned = false;
                 stream.mutex.lockUncancelable(state.io);
                 while (stream.stream_id == null and
                     stream.err == null and !stream.finished)
@@ -1778,6 +1788,9 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
             command.state = .completed;
             state.completed_requests +|= 1;
             state.mutex.unlock(state.io);
+            // Stream callers wait on the stream's own event, not command.done.
+            // A pending connection failure must wake them here.
+            if (err) |value| if (command.stream) |stream| stream.fail(value);
             command.done.set(state.io);
         }
 

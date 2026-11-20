@@ -93,6 +93,10 @@ pub fn requestUriBefore(
                 break :h3_attempt;
             if (alternative == null) break :h3_attempt;
             defer alternative.?.deinit();
+            // A connection-level H3 failure happens before any request output.
+            // Only an attempt that started the request needs method/replay
+            // gating; a setup failure can use the configured TCP route.
+            var request_started = false;
             if (requestHttp3(
                 pool,
                 h3_state,
@@ -103,6 +107,7 @@ pub fn requestUriBefore(
                 deadline,
                 crossed_origin,
                 forward_client_identity,
+                &request_started,
             )) |owned| {
                 _ = h3_state.cache.recordSuccess(origin);
                 var result = owned;
@@ -112,11 +117,22 @@ pub fn requestUriBefore(
                 if (h3FailureAffectsAlternative(err)) {
                     _ = h3_state.cache.recordFailure(origin);
                 }
-                if (!h3FallbackAllowed(h3_state, request.method, err)) {
-                    return @errorCast(err);
-                }
-                if (err != error.StreamingBodyUnsupported and !try request.bodySource().prepareReplay()) {
-                    return @errorCast(err);
+                if (request_started) {
+                    if (!h3FallbackAllowed(h3_state, request.method, err)) {
+                        return @errorCast(err);
+                    }
+                    if (!try request.bodySource().prepareReplay()) {
+                        return @errorCast(err);
+                    }
+                } else switch (err) {
+                    // Local failures that a TCP retry cannot fix.
+                    error.OutOfMemory,
+                    error.InvalidHeader,
+                    error.InvalidUri,
+                    error.Canceled,
+                    error.ConcurrencyUnavailable,
+                    => return @errorCast(err),
+                    else => {},
                 }
             }
         }
@@ -195,7 +211,9 @@ fn requestHttp3(
     deadline: ?std.Io.Clock.Timestamp,
     crossed_origin: bool,
     forward_client_identity: bool,
+    request_started: *bool,
 ) !client.OwnedResponse {
+    request_started.* = false;
     const PoolType = @typeInfo(@TypeOf(pool)).pointer.child;
     var header_stack: [header_mapping.max_stack_headers]http3.Qpack.HeaderField =
         undefined;
@@ -224,6 +242,7 @@ fn requestHttp3(
             trailers.items,
             reader_body,
             deadline,
+            request_started,
         ),
         .slice => {},
     };
@@ -231,6 +250,9 @@ fn requestHttp3(
         .slice => |body| body,
         .reader => unreachable,
     } else request.body;
+    // The aggregate call emits the head and body internally; a failure may
+    // already have reached the peer.
+    request_started.* = true;
     const response = try state.request(
         origin,
         uri_text,
@@ -271,6 +293,7 @@ fn requestHttp3ReaderBody(
     trailers: []const http3.Qpack.HeaderField,
     reader_body: client.ReaderBody,
     deadline: ?std.Io.Clock.Timestamp,
+    request_started: *bool,
 ) !client.OwnedResponse {
     const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
     var endpoint = try http1_runtime.uriEndpoint(pool.allocator, uri, 443);
@@ -296,6 +319,9 @@ fn requestHttp3ReaderBody(
     var collector = H3ResponseCollector{ .allocator = pool.allocator };
     defer collector.deinit();
 
+    // The request head is now on the wire. Mark the attempt before touching
+    // the source: a later failure must use the method/replay policy.
+    request_started.* = true;
     var buffer: [16 * 1024]u8 = undefined;
     while (true) {
         const count = try reader_io.readBefore(pool.io, reader_body.reader, &buffer, deadline);

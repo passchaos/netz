@@ -1,0 +1,16 @@
+test-http3 full suite and isolated filter both hang.
+
+Reproduced on a clean worktree at 28dd7d76 (before the Handshake CRYPTO
+fragmentation change) with the same stack:
+
+  http3.runtime.body_streaming_tests.test.HTTP/3 handshake client drains GRO response batch one packet at a time
+    Thread.join
+      ...Shared.runFallible
+        HandshakeServerSession.receiveRequest
+          receiveConnectionRequestStreamBytesUntil
+            Connection.receiveDatagramsIntoServicingTimers
+              Endpoint.receiveManyBytesIntoTimeout
+                Socket.receiveManyTimeout
+
+The current worktree shows the identical stack. This is a pre-existing test or
+aggregate-receive issue, not a result of the second-pass dispatcher changes.

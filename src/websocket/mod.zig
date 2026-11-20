@@ -2008,4 +2008,5 @@ pub const stream_connection = @import("stream_connection.zig");
 
 test {
     _ = @import("tests.zig");
+    _ = stream_connection;
 }

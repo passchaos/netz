@@ -1,0 +1,9 @@
+{
+  "src/http/client_pool/requests.zig": "58cefaf6dd887093216e232d625b67e5e3148265e1ad59465ef25d66e946970c",
+  "src/http/client_tests/reader_replay_h3.zig": "e0acab835c93141df3c7ae9d7b555e4a626fdf0a0ab74ae2ef7b77bc49652865",
+  "src/http3/runtime/handshake_client_pool/shared.zig": "f748793e30cb5fd9d3f6b7b2d53bd9bc6494c061e3322837deaba4eed62bcd05",
+  "src/http3/runtime/shared_handshake_client_pool/dispatcher.zig": "03df270940e5585eddddac4d97a348a075c817df81e37b6fa1be51bba1662764",
+  "src/websocket/mod.zig": "8f6ce7bab662b2f81fcf73226c874d6d3e483fcc4c7b25cc6bf144ee122f716e",
+  "src/websocket/stream_connection.zig": "2a9c5713db4da6ff721a948dda9205b3dd915621d5aa59f43f8bd5b6adf6e40b",
+  "src/websocket/stream_connection_tests.zig": "a94cf1883d9c6d98e26111565cbe94fa4c603a626a0bdbaa17e943ff437a840a"
+}

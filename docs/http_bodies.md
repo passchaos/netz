@@ -94,7 +94,9 @@ Manual `writeBodyFromReaderWithDeadline`/`WithTimeout` calls cover both source
 waits and output. They retain an unaccepted suffix inside the handle, so a later
 call with the same Reader can continue a usable writer without losing source
 bytes. Ordinary complete-request calls end their attempt on failure; automatic
-replay still requires the explicit rewind declaration above. Response bodies
+replay still requires the explicit rewind declaration above. An Alt-Svc H3
+attempt that fails before emitting the request head can use the configured TCP
+route without rewinding, because the source was never read. Response bodies
 can stream directly into `ResponseSink.toWriter(&writer)` or be drained through
 `ResponseSink.discard()`.
 

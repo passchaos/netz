@@ -72,12 +72,67 @@ left out of this batch.
 
 | ID | Area | Finding | Suggested direction |
 | --- | --- | --- | --- |
-| P1 | HTTP Pool Alt-Svc fallback | After an H3 *connection* failure the body was never read, yet fallback for an idempotent method still calls `bodySource().prepareReplay()`. A single-pass Reader is rejected even though no byte was consumed. | Track whether the attempt consumed source bytes; require rewind only after consumption. |
+| P1 | Resolved in the second pass | After an H3 *connection* failure the body was never read, yet fallback for an idempotent method still called `bodySource().prepareReplay()`, rejecting a single-pass Reader. | The attempt now records whether the request started; setup failures fall back without replay, started requests keep method/replay gating. |
 | P2 | QUIC anti-amplification | `InitialHandshakeFlight` reserves the complete Initial+Handshake flight before sending. Large chains therefore depend on PTO-driven budget growth from client retransmissions; correctness holds, but the first valid send can be delayed. | Send the prefix that fits, retain an ACK-aware CRYPTO cursor, and continue as the budget grows. |
 | P3 | WebTransport options | The legacy Protected adapter returns `WebTransportNotNegotiated` for caller configuration it cannot support (`initial_flow_limits`). That reads as a peer negotiation failure rather than an unsupported option. | Add a distinct configuration error and update the option docs. |
 | P4 | HTTP H3 options | `Client.Options.http3.handshake.handshake.alpn_protocols` nests two `handshake` levels because the facade wraps the native handshake options. | Add flat accessors or a `quic` sub-struct while keeping the existing fields as deprecated aliases. |
+| P6 | HTTP/3 GRO test | `drains GRO response batch one packet at a time` hangs at `28dd7d76` and current main: the server blocks in `receiveRequest` after two client requests, while the client joins. | Determine whether the second aggregate request is consumed by the first receive or lost in the GRO batch, then add a bounded receive deadline to the fixture. |
 | P5 | WebSocket byte-stream adapter | `websocket.stream_connection.Connection.close()` has no deadline form and `receiveMessage()` has no absolute-deadline variant; the adapter is documented as caller-driven byte-stream framing. | Add deadline variants if H2/H3 extended-CONNECT embedders need bounded framing reads. |
 
 Counts include imported support tests and overlap between bundles. The evidence
 is scoped loopback and source-boundary verification; it is not a new
 external-peer matrix or performance claim.
+
+
+## Second pass: H3 stream ownership and fallback wake
+
+The P1 follow-up exposed two deeper defects that are now fixed.
+
+### Stream-start double free
+
+Both H3 dispatchers armed raw `errdefer allocator.destroy(...)` for the stream
+and handle *and* called `handle.deinit()` on timeout. DebugAllocator reported a
+double free at `startStream` after a pending connection failure. Ownership is
+now explicit: raw errdefers are armed only before the command is enqueued; after
+enqueue every failure path calls `handle.deinit()`.
+
+### Pending connect failures did not wake stream callers
+
+`complete()` set `command.done` but stream callers wait on the stream's own
+`user_ready` event. A failed pending H3 connection therefore stayed invisible
+until the outer request deadline: a 150-ms H3 connect budget surfaced as a
+5001-ms `Timeout`. `complete()` now fails the attached stream before setting
+`command.done`, and the request falls back to TCP at the configured budget.
+
+### Alt-Svc fallback without a started request
+
+`requestHttp3` now reports whether the request head was emitted. A connection
+setup failure can use the configured TCP route for any method without a rewind;
+once the request starts, the existing method/replay policy still applies.
+This preserves the existing test where an H3 upload rejection must not replay a
+consumed single-pass Reader.
+
+### WebSocket byte-stream close state
+
+The generic adapter allowed data frames after either side started the closing
+handshake, and marked a failed Close write as sent. It now rejects non-Close
+frames after the closing handshake starts, refuses further receives after a
+peer Close, and marks `close_sent` only after a successful write.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| H3 fallback, direct H3, pooled H3, streaming deadlines | 119/119 | `h3-fallback-debug.log` |
+| WebSocket stream adapter close state | 10/10 | `websocket-close-debug.log` |
+| H3 runtime suite | Blocked by a pre-existing GRO-test hang, reproduced at base `28dd7d76` | `http3-gro-hang.txt` |
+
+The H3 fallback case uses a discovery Alt-Svc entry pointing at a closed UDP
+port, a 150-ms H3 connect budget and a single-pass PUT Reader. It now reaches
+TCP in about the connect budget instead of consuming the 5-second request
+deadline, and the Reader is consumed exactly once.
+
+The complete `test-http3` suite could not finish because
+`HTTP/3 handshake client drains GRO response batch one packet at a time`
+blocks: the client joins its server thread while the server waits in
+`receiveRequest` for a request that never arrives. A clean worktree at
+`28dd7d76` reproduces the identical stack, so it is unrelated to this batch and
+is recorded as an open finding (P6) rather than hidden as a pass.

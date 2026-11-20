@@ -8,6 +8,10 @@ const std = @import("std");
 const websocket = @import("mod.zig");
 const assembler = @import("message/assembler.zig");
 
+test {
+    _ = @import("stream_connection_tests.zig");
+}
+
 pub const Role = enum { client, server };
 
 pub const Transport = struct {
@@ -98,6 +102,7 @@ pub const Connection = struct {
     }
 
     pub fn receiveMessage(self: *Connection) !Message {
+        if (self.close_received) return error.ConnectionClosed;
         while (true) {
             var frame = try self.readFrame();
             defer frame.deinit(self.allocator);
@@ -158,8 +163,10 @@ pub const Connection = struct {
             @memcpy(payload[2..][0..copy], reason[0..copy]);
             length += copy;
         }
-        self.close_sent = true;
+        // Mark the close only after the frame is written so a failed write
+        // remains retryable.
         try self.sendFrame(.close, payload[0..length]);
+        self.close_sent = true;
     }
 
     fn sendFrame(
@@ -168,6 +175,11 @@ pub const Connection = struct {
         payload: []const u8,
     ) !void {
         if (self.closed) return error.ConnectionClosed;
+        // After either side starts the closing handshake only the Close frame
+        // itself may be written.
+        if (opcode != .close and (self.close_sent or self.close_received)) {
+            return error.ConnectionClosed;
+        }
         self.write_mutex.lockUncancelable(self.io);
         defer self.write_mutex.unlock(self.io);
         self.write_buffer.clearRetainingCapacity();
