@@ -13,10 +13,7 @@ const http2_runtime = @import("../../http2/runtime.zig");
 const http3_runtime = @import("../../http3/runtime.zig");
 const types = @import("../client/types.zig");
 
-pub const Header = struct {
-    name: []const u8,
-    value: []const u8,
-};
+pub const Header = types.Header;
 
 pub const ResponseHead = struct {
     protocol: types.Protocol,
@@ -640,7 +637,7 @@ fn mapToHttp2(
 ) ![]http2.Hpack.HeaderField {
     const result = try allocator.alloc(http2.Hpack.HeaderField, headers.len);
     for (headers, result) |source, *target| {
-        target.* = .{ .name = source.name, .value = source.value };
+        target.* = .{ .name = source.name, .value = source.value, .never_index = source.never_indexed };
     }
     return result;
 }
@@ -651,7 +648,7 @@ fn mapToHttp3(
 ) ![]http3.Qpack.HeaderField {
     const result = try allocator.alloc(http3.Qpack.HeaderField, headers.len);
     for (headers, result) |source, *target| {
-        target.* = .{ .name = source.name, .value = source.value };
+        target.* = .{ .name = source.name, .value = source.value, .never_indexed = source.never_indexed };
     }
     return result;
 }
@@ -673,7 +670,7 @@ fn mapHeaders2(
 ) ![]Header {
     const result = try allocator.alloc(Header, headers.len);
     for (headers, result) |source, *target| {
-        target.* = .{ .name = source.name, .value = source.value };
+        target.* = .{ .name = source.name, .value = source.value, .never_indexed = source.never_index };
     }
     return result;
 }
@@ -684,7 +681,7 @@ fn mapHeaders3(
 ) ![]Header {
     const result = try allocator.alloc(Header, headers.len);
     for (headers, result) |source, *target| {
-        target.* = .{ .name = source.name, .value = source.value };
+        target.* = .{ .name = source.name, .value = source.value, .never_indexed = source.never_indexed };
     }
     return result;
 }
@@ -735,7 +732,7 @@ fn copyHeaderPairs(
         const value = storage[offset..][0..source.value.len];
         @memcpy(value, source.value);
         offset += source.value.len;
-        target.* = .{ .name = name, .value = value };
+        target.* = .{ .name = name, .value = value, .never_indexed = if (comptime @hasField(@TypeOf(source), "never_indexed")) source.never_indexed else false };
     }
     headers_out.* = result;
     storage_out.* = storage;

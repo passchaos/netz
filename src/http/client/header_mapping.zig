@@ -9,6 +9,34 @@ const types = @import("types.zig");
 pub const max_stack_headers: usize = 32;
 pub const max_stack_trailers: usize = 16;
 
+pub const HeaderNames = struct {
+    items: []const []const u8,
+    owned: ?[][]const u8 = null,
+
+    pub fn deinit(self: *HeaderNames, allocator: std.mem.Allocator) void {
+        if (self.owned) |owned| allocator.free(owned);
+        self.* = undefined;
+    }
+};
+
+/// Borrow field names with the same stack/overflow policy as field mapping.
+/// The returned descriptors only need to live through the writer's head setup.
+pub fn names(
+    allocator: std.mem.Allocator,
+    headers: []const http1.Header,
+    stack: [][]const u8,
+) std.mem.Allocator.Error!HeaderNames {
+    const out = if (headers.len <= stack.len)
+        stack[0..headers.len]
+    else
+        try allocator.alloc([]const u8, headers.len);
+    for (headers, out) |header, *name| name.* = header.name;
+    return .{
+        .items = out,
+        .owned = if (headers.len <= stack.len) null else out,
+    };
+}
+
 pub const Http1Headers = struct {
     items: []const http1.Header,
     owned: ?[]http1.Header = null,

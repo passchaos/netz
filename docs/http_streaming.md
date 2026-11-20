@@ -165,6 +165,12 @@ const head = try handle.readResponse(sink.responseSink());
 // or: try handle.readResponseWithDeadline(sink.responseSink(), deadline);
 ```
 
+Request headers, declared trailers, `finishTrailers` and response callbacks
+all use the same `http.Header` type. `http.DuplexHeader` is a compatibility
+alias; callers do not need a separate trailer array. H2/H3 never-indexed
+metadata is preserved in both directions. H1 trailer declarations keep the
+stack fast path and allocate exact descriptor overflow for larger field sets.
+
 `ResponseSink` has four callbacks:
 
 - `begin(head)` once with the final `status` and owned header copies;

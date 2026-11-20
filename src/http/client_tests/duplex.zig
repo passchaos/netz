@@ -13,6 +13,8 @@ const DuplexSink = struct {
     header_count: usize = 0,
     body: std.ArrayList(u8) = .empty,
     trailer_count: usize = 0,
+    header_never_indexed: bool = false,
+    trailer_never_indexed: bool = false,
     trailer_name: std.ArrayList(u8) = .empty,
     trailer_value: std.ArrayList(u8) = .empty,
     informational_count: usize = 0,
@@ -41,6 +43,9 @@ const DuplexSink = struct {
         const self: *DuplexSink = @ptrCast(@alignCast(context));
         self.status = head.status;
         self.header_count = head.headers.len;
+        for (head.headers) |header| if (std.mem.eql(u8, header.name, "content-type")) {
+            self.header_never_indexed = header.never_indexed;
+        };
     }
 
     fn data(context: *anyopaque, bytes: []const u8) !void {
@@ -52,6 +57,7 @@ const DuplexSink = struct {
         const self: *DuplexSink = @ptrCast(@alignCast(context));
         self.trailer_count = trailers.len;
         if (trailers.len != 0) {
+            self.trailer_never_indexed = trailers[0].never_indexed;
             try self.trailer_name.appendSlice(
                 self.allocator,
                 trailers[0].name,
@@ -220,6 +226,7 @@ test "HTTP/2 duplex handle streams request and response" {
             var request = try connection.readRequest();
             defer request.deinit(self.server.allocator);
             try std.testing.expectEqualStrings("hello world", request.body);
+            try std.testing.expect(request.trailers[0].never_index);
             try connection.writeInformationalResponse(
                 request.stream_id,
                 103,
@@ -234,6 +241,7 @@ test "HTTP/2 duplex handle streams request and response" {
                     .headers = &.{.{
                         .name = "content-type",
                         .value = "text/plain",
+                        .never_index = true,
                     }},
                     .request_method = "POST",
                 },
@@ -243,6 +251,7 @@ test "HTTP/2 duplex handle streams request and response" {
             try response.finishTrailers(&.{.{
                 .name = "x-checksum",
                 .value = "1",
+                .never_index = true,
             }});
             try self.release.wait(self.server.io);
         }
@@ -278,7 +287,7 @@ test "HTTP/2 duplex handle streams request and response" {
 
     try handle.writeBody("hello ");
     try handle.writeBody("world");
-    try handle.finishBody();
+    try handle.finishTrailers(&.{.{ .name = "x-upload", .value = "done", .never_indexed = true }});
 
     var sink = DuplexSink{ .allocator = allocator };
     defer sink.deinit();
@@ -287,6 +296,8 @@ test "HTTP/2 duplex handle streams request and response" {
     try std.testing.expectEqual(@as(u16, 200), head.status);
     try std.testing.expectEqualStrings("resp-1resp-2", sink.body.items);
     try std.testing.expectEqual(@as(usize, 1), sink.trailer_count);
+    try std.testing.expect(sink.header_never_indexed);
+    try std.testing.expect(sink.trailer_never_indexed);
     try std.testing.expectEqualStrings("x-checksum", sink.trailer_name.items);
     try std.testing.expectEqualStrings("1", sink.trailer_value.items);
     try std.testing.expectEqual(@as(usize, 1), sink.informational_count);
@@ -343,11 +354,13 @@ test "HTTP/3 duplex handle streams request and response" {
                 "hello world",
                 request.request.body,
             );
+            try std.testing.expect(request.request.trailers[0].never_indexed);
             try session.startResponse(request.stream_id, .{
                 .status = 200,
                 .headers = &.{.{
                     .name = "content-type",
                     .value = "text/plain",
+                    .never_indexed = true,
                 }},
             }, null);
             try session.sendResponseBodyPaced(
@@ -362,7 +375,7 @@ test "HTTP/3 duplex handle streams request and response" {
             );
             try session.finishResponseTrailersPaced(
                 request.stream_id,
-                &.{.{ .name = "x-checksum", .value = "1" }},
+                &.{.{ .name = "x-checksum", .value = "1", .never_indexed = true }},
             );
         }
     };
@@ -405,7 +418,7 @@ test "HTTP/3 duplex handle streams request and response" {
 
     try handle.writeBody("hello ");
     try handle.writeBody("world");
-    try handle.finishBody();
+    try handle.finishTrailers(&.{.{ .name = "x-upload", .value = "done", .never_indexed = true }});
 
     var sink = DuplexSink{ .allocator = allocator };
     defer sink.deinit();
@@ -417,6 +430,8 @@ test "HTTP/3 duplex handle streams request and response" {
     try std.testing.expectEqual(@as(u16, 200), head.status);
     try std.testing.expectEqualStrings("resp-1resp-2", sink.body.items);
     try std.testing.expectEqual(@as(usize, 1), sink.trailer_count);
+    try std.testing.expect(sink.header_never_indexed);
+    try std.testing.expect(sink.trailer_never_indexed);
     try std.testing.expectEqualStrings("x-checksum", sink.trailer_name.items);
     try std.testing.expectEqualStrings("1", sink.trailer_value.items);
 

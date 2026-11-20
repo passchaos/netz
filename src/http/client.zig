@@ -221,15 +221,14 @@ pub const Connection = struct {
                 );
                 defer trailers.deinit(self.allocator);
                 var trailer_names: [max_stack_trailers][]const u8 = undefined;
-                for (trailers.items, 0..) |trailer, index| {
-                    trailer_names[index] = trailer.name;
-                }
+                var names = try header_mapping.names(self.allocator, trailers.items, &trailer_names);
+                defer names.deinit(self.allocator);
                 const writer = try client.startRequest(.{
                     .method = try http1.Method.parse(options.method),
                     .target = target,
                     .headers = headers.items,
                     .body_length = requestBodyLength(options),
-                    .trailer_names = trailer_names[0..trailers.items.len],
+                    .trailer_names = names.items,
                 });
                 return RequestHandle.initHttp1(self.allocator, writer);
             },
@@ -431,15 +430,14 @@ fn streamHttp1Body(
     deadline: ?std.Io.Clock.Timestamp,
 ) ResponseTimeoutError!OwnedResponse {
     var trailer_names: [max_stack_trailers][]const u8 = undefined;
-    for (trailers, 0..) |trailer, index| {
-        trailer_names[index] = trailer.name;
-    }
+    var names = try header_mapping.names(allocator, trailers, &trailer_names);
+    defer names.deinit(allocator);
     var writer = try client.startRequest(.{
         .method = method,
         .target = target,
         .headers = headers,
         .body_length = body.length,
-        .trailer_names = trailer_names[0..trailers.len],
+        .trailer_names = names.items,
     });
     defer writer.deinit();
 
