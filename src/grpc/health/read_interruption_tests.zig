@@ -11,14 +11,23 @@ const ReadIo = struct {
     fault: ?Fault = null,
     hits: usize = 0,
     var active: ?*ReadIo = null;
-    fn awaitConcurrent(userdata: ?*anyopaque, batch: *std.Io.Batch, timeout: std.Io.Timeout) std.Io.Batch.AwaitConcurrentError!void {
+    fn groupConcurrent(userdata: ?*anyopaque, group: *std.Io.Group, context: []const u8, alignment: std.mem.Alignment, start: *const fn (*const anyopaque) void) std.Io.ConcurrentError!void {
         const self = active.?;
-        if (self.fault) |fault| {
+        if (self.fault == .executor) {
             self.fault = null;
             self.hits += 1;
-            return if (fault == .executor) error.ConcurrencyUnavailable else error.Canceled;
+            return error.ConcurrencyUnavailable;
         }
-        return self.base.vtable.batchAwaitConcurrent(userdata, batch, timeout);
+        return self.base.vtable.groupConcurrent(userdata, group, context, alignment, start);
+    }
+    fn futexWait(userdata: ?*anyopaque, ptr: *const u32, expected: u32, timeout: std.Io.Timeout) std.Io.Cancelable!void {
+        const self = active.?;
+        if (self.fault == .cancellation) {
+            self.fault = null;
+            self.hits += 1;
+            return error.Canceled;
+        }
+        return self.base.vtable.futexWait(userdata, ptr, expected, timeout);
     }
 };
 
@@ -78,7 +87,8 @@ fn exercise(fault: Fault, split: usize) !void {
     ReadIo.active = &probe;
     defer ReadIo.active = null;
     var table = base.vtable.*;
-    table.batchAwaitConcurrent = ReadIo.awaitConcurrent;
+    table.groupConcurrent = ReadIo.groupConcurrent;
+    table.futexWait = ReadIo.futexWait;
     const io: std.Io = .{ .userdata = base.userdata, .vtable = &table };
     var watch = try grpc.health.ReconnectingWatch.init(allocator, io, .{ .cleartext_ip = .{ .address = server.address() } }, .{ .watch = .{ .service = "demo.Echo" } });
     defer watch.deinit();

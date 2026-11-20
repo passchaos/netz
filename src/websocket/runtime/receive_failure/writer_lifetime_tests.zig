@@ -12,13 +12,13 @@ const Gate = struct {
     stable: bool = true,
     var active: std.atomic.Value(?*Gate) = .init(null);
 
-    fn read(userdata: ?*anyopaque, batch: *std.Io.Batch, timeout: std.Io.Timeout) std.Io.Batch.AwaitConcurrentError!void {
+    fn read(userdata: ?*anyopaque, socket: std.Io.net.Socket.Handle, buffers: [][]u8) std.Io.net.Stream.Reader.Error!usize {
         const self = active.load(.acquire).?;
         if (self.read_armed.swap(false, .acq_rel)) {
             self.read_entered.set(self.delegate);
             self.read_release.waitUncancelable(self.delegate);
         }
-        return self.delegate.vtable.batchAwaitConcurrent(userdata, batch, timeout);
+        return self.delegate.vtable.netRead(userdata, socket, buffers);
     }
 
     fn write(userdata: ?*anyopaque, socket: std.Io.net.Socket.Handle, header: []const u8, parts: []const []const u8, splat: usize) std.Io.net.Stream.Writer.Error!usize {
@@ -44,7 +44,7 @@ test "WebSocket fatal receive cleanup retains active writer buffers until joined
     Gate.active.store(&gate, .release);
     defer Gate.active.store(null, .release);
     var table = base.vtable.*;
-    table.batchAwaitConcurrent = Gate.read;
+    table.netRead = Gate.read;
     table.netWrite = Gate.write;
     const io = std.Io{ .userdata = base.userdata, .vtable = &table };
     var connection = runtime.testing.initDirectConnection(allocator, io, stream, .client, .{});

@@ -1,7 +1,7 @@
-//! One retained stream read under the caller's absolute deadline.
+//! Socket reads under an absolute deadline, with joined cancellation.
 const std = @import("std");
-const builtin = @import("builtin");
 const net = std.Io.net;
+const native = @import("../../runtime/timed_socket.zig");
 
 pub const TimedReadError = net.Stream.Reader.Error ||
     std.Io.Operation.FileReadStreaming.UnendingError ||
@@ -12,59 +12,71 @@ test {
     _ = @import("timed_read_tests.zig");
 }
 
-/// Backend timeout notifications may be early. Keep the original batch and
-/// timestamp until completion or actual expiry, joining cancellation before
-/// caller-owned descriptors and receive buffers leave scope.
+/// Keep socket and file registrations separate. Native zio reads share the
+/// socket owner with ordinary netRead; other backends and wrapped vtables use
+/// their netRead operation, joined before caller-owned buffers leave scope.
 pub fn readSomeWithDeadline(io: std.Io, stream: net.Stream, buffer: []u8, deadline: std.Io.Clock.Timestamp) TimedReadError!usize {
     if (buffer.len == 0) return 0;
+    if (native.tryRead(io, stream, buffer, deadline)) |value| return value;
     _ = try @import("../deadline.zig").usableAwake(io, deadline);
-    var incoming: net.IncomingMessage = .init;
-    var bufs = [_][]u8{buffer};
-    const operation: std.Io.Operation = if (builtin.os.tag == .windows)
-        .{ .net_receive = .{
-            .socket_handle = stream.socket.handle,
-            .message_buffer = (&incoming)[0..1],
-            .data_buffer = buffer,
-            .flags = .{},
-        } }
-    else
-        .{ .file_read_streaming = .{
-            .file = .{ .handle = stream.socket.handle, .flags = .{ .nonblocking = false } },
-            .data = &bufs,
-        } };
-    var storage: [1]std.Io.Operation.Storage = undefined;
-    var batch: std.Io.Batch = .init(&storage);
-    defer batch.cancel(io);
-    batch.addAt(0, operation);
-    while (true) {
-        batch.awaitConcurrent(io, .{ .deadline = deadline }) catch |err| {
-            if (err == error.Timeout and deadline.durationFromNow(io).raw.nanoseconds > 0) {
-                if (batch.next()) |completion| return result(completion.result, &incoming);
-                continue;
-            }
-            batch.cancel(io);
-            if (batch.next()) |completion| {
-                const count = try result(completion.result, &incoming);
-                // Returning bytes already consumed by the socket must retain
-                // cancellation for the caller's next cancellation point.
-                if (err == error.Canceled) std.Io.recancel(io);
-                return count;
-            }
-            return err;
-        };
-        if (batch.next()) |completion| return result(completion.result, &incoming);
-    }
-}
+    const Task = struct {
+        io: std.Io,
+        stream: net.Stream,
+        buffer: []u8,
+        deadline: std.Io.Clock.Timestamp,
+        result: ?TimedReadError!usize = null,
 
-fn result(value: std.Io.Operation.Result, incoming: *const net.IncomingMessage) TimedReadError!usize {
-    if (builtin.os.tag == .windows) {
-        const maybe_err, const count = value.net_receive;
-        if (maybe_err) |err| return err;
-        std.debug.assert(count == 1);
-        return incoming.data.len;
-    }
-    return value.file_read_streaming catch |err| switch (err) {
-        error.EndOfStream => 0,
-        else => return @errorCast(err),
+        fn read(self: *@This()) void {
+            _ = @import("../deadline.zig").usableAwake(self.io, self.deadline) catch |err| {
+                self.result = err;
+                return;
+            };
+            var bufs = [_][]u8{self.buffer};
+            self.result = self.io.vtable.netRead(self.io.userdata, self.stream.socket.handle, &bufs);
+        }
+
+        fn waitUntil(task_io: std.Io, absolute: std.Io.Clock.Timestamp) std.Io.Cancelable!void {
+            while (absolute.durationFromNow(task_io).raw.nanoseconds > 0) {
+                try absolute.wait(task_io);
+            }
+        }
     };
+    const Wake = union(enum) { read: void, timeout: std.Io.Cancelable!void };
+    var task = Task{ .io = io, .stream = stream, .buffer = buffer, .deadline = deadline };
+    var wake_buffer: [2]Wake = undefined;
+    var select: std.Io.Select(Wake) = .init(io, &wake_buffer);
+    defer select.cancelDiscard();
+    try select.concurrent(.read, Task.read, .{&task});
+    select.concurrent(.timeout, Task.waitUntil, .{ io, deadline }) catch |err| {
+        select.cancelDiscard();
+        if (task.result) |value| if (value) |count| return count else |read_err| {
+            if (read_err != error.Canceled) return read_err;
+        };
+        return err;
+    };
+    const wake = select.await() catch |err| {
+        select.cancelDiscard();
+        if (task.result) |value| if (value) |count| {
+            // Bytes (including EOF) already accepted cannot be discarded.
+            // Preserve cancellation for the next operation instead.
+            if (err == error.Canceled) std.Io.recancel(io);
+            return count;
+        } else |read_err| {
+            if (read_err != error.Canceled) return read_err;
+        };
+        return err;
+    };
+    switch (wake) {
+        .read => return task.result.?,
+        .timeout => |value| {
+            try value;
+            select.cancelDiscard();
+            if (task.result) |result| {
+                if (result) |count| return count else |err| {
+                    if (err != error.Canceled) return err;
+                }
+            }
+            return error.Timeout;
+        },
+    }
 }

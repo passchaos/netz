@@ -49,6 +49,8 @@ fn exercise(backend: Backend, fault: support.Fault, cut: usize, qos: mqtt.QoS) !
     defer support.InterruptedIo.next = null;
     var vtable = base.vtable.*;
     vtable.batchAwaitConcurrent = support.InterruptedIo.awaitConcurrent;
+    vtable.groupConcurrent = support.InterruptedIo.groupConcurrent;
+    vtable.futexWait = support.InterruptedIo.futexWait;
     const io: std.Io = .{ .userdata = base.userdata, .vtable = &vtable };
     var certificate: [tls_testing.certificate_der_len]u8 = undefined;
     try std.base64.standard.Decoder.decode(&certificate, tls_testing.certificate_base64);

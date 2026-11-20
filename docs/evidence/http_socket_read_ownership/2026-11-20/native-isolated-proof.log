@@ -1,0 +1,264 @@
+1/96 test_scope.test_0...OK
+2/96 http.mod.test_0...OK
+3/96 http.digest.test_0...OK
+4/96 http.multipart.test_0...OK
+5/96 http.authority.mod.test_0...OK
+6/96 http.cookies.mod.test_0...OK
+7/96 http.client_pool.test_0...OK
+8/96 http.client_tests.test_0...OK
+9/96 http.client_pool.shared_tcp.tests.test.unified HTTP ordinary H2 zio cancels an owned packed response head and preserves sibling reuse...ZTRACE park fd=5 c=10c6c7480 loop=104ae0a58 owner=104ae0a58
+KTRACE change fd=5 filter=-2 flags=21 udata=fffffffffffffffe
+KTRACE event fd=5 filter=-2 flags=21 udata=fffffffffffffffe data=146988
+ZTRACE serviced fd=5 c=10c6c7480 state=.{ .phase = .running, .cancel_requested = false, .cancel_inflight = false, ._reserved = 0 } err=null
+TRACE socket read fd=5 capacity=9
+ZTRACE park fd=5 c=10c6bba58 loop=104ae0a58 owner=104ae0a58
+ZTRACE wait c=10c6bba58 task=104c404a0 state=.{ .phase = .running, .cancel_requested = false, .cancel_inflight = false, ._reserved = 0 } count=0
+KTRACE change fd=5 filter=-1 flags=21 udata=fffffffffffffffe
+KTRACE event fd=5 filter=-2 flags=21 udata=fffffffffffffffe data=146988
+ZTRACE completed c=109ed0bf8 loop=104ae0a58 home=104ae0a58 old=.{ .phase = .running, .cancel_requested = false, .cancel_inflight = false, ._reserved = 0 } cb=true
+ZTRACE completed c=109ed0848 loop=104ae0a58 home=104ae0a58 old=.{ .phase = .running, .cancel_requested = false, .cancel_inflight = false, ._reserved = 0 } cb=true
+ZTRACE completed c=109ed04a8 loop=104ae0a58 home=104ae0a58 old=.{ .phase = .running, .cancel_requested = false, .cancel_inflight = false, ._reserved = 0 } cb=true
+KTRACE event fd=5 filter=-1 flags=21 udata=fffffffffffffffe data=48
+ZTRACE serviced fd=5 c=10c6bba58 state=.{ .phase = .running, .cancel_requested = false, .cancel_inflight = false, ._reserved = 0 } err=null
+ZTRACE completed c=10c6bba58 loop=104ae0a58 home=104ae0a58 old=.{ .phase = .running, .cancel_requested = false, .cancel_inflight = false, ._reserved = 0 } cb=false
+ZTRACE drain c=10c6bba58 exec=0 waiter=10c6bb6f8 task=104c404a0
+KTRACE event fd=5 filter=-1 flags=21 udata=fffffffffffffffe data=39
+ZTRACE return c=10c6bba58 task=104c404a0 state=.{ .phase = .dead, .cancel_requested = false, .cancel_inflight = false, ._reserved = 0 } count=1
+TRACE socket read fd=5 count=9
+TRACE socket read fd=5 capacity=30
+ZTRACE completed c=10c6bb6b8 loop=104ae0a58 home=104ae0a58 old=.{ .phase = .running, .cancel_requested = false, .cancel_inflight = false, ._reserved = 0 } cb=false
+ZTRACE wait c=10c6bb6b8 task=104c404a0 state=.{ .phase = .dead, .cancel_requested = false, .cancel_inflight = false, ._reserved = 0 } count=0
+ZTRACE drain c=10c6bb6b8 exec=0 waiter=10c6bb358 task=104c404a0
+ZTRACE return c=10c6bb6b8 task=104c404a0 state=.{ .phase = .dead, .cancel_requested = false, .cancel_inflight = false, ._reserved = 0 } count=1
+TRACE socket read fd=5 count=30
+TRACE socket read fd=5 capacity=9
+ZTRACE completed c=10c6bba58 loop=104ae0a58 home=104ae0a58 old=.{ .phase = .running, .cancel_requested = false, .cancel_inflight = false, ._reserved = 0 } cb=false
+ZTRACE wait c=10c6bba58 task=104c404a0 state=.{ .phase = .dead, .cancel_requested = false, .cancel_inflight = false, ._reserved = 0 } count=0
+ZTRACE drain c=10c6bba58 exec=0 waiter=10c6bb6f8 task=104c404a0
+ZTRACE completed c=109ed2b18 loop=104ae0a58 home=104ae0a58 old=.{ .phase = .running, .cancel_requested = false, .cancel_inflight = false, ._reserved = 0 } cb=true
+KTRACE event fd=5 filter=-2 flags=21 udata=fffffffffffffffe data=146988
+ZTRACE return c=10c6bba58 task=104c404a0 state=.{ .phase = .dead, .cancel_requested = false, .cancel_inflight = false, ._reserved = 0 } count=1
+TRACE socket read fd=5 count=9
+ZTRACE completed c=109ed2b18 loop=104ae0a58 home=104ae0a58 old=.{ .phase = .running, .cancel_requested = false, .cancel_inflight = false, ._reserved = 0 } cb=true
+KTRACE event fd=5 filter=-2 flags=21 udata=fffffffffffffffe data=146988
+ZTRACE completed c=109ed2688 loop=104ae0a58 home=104ae0a58 old=.{ .phase = .running, .cancel_requested = false, .cancel_inflight = false, ._reserved = 0 } cb=true
+ZTRACE completed c=109ed2688 loop=104ae0a58 home=104ae0a58 old=.{ .phase = .running, .cancel_requested = false, .cancel_inflight = false, ._reserved = 0 } cb=true
+KTRACE event fd=5 filter=-2 flags=21 udata=fffffffffffffffe data=146962
+ZTRACE completed c=109ed2688 loop=104ae0a58 home=104ae0a58 old=.{ .phase = .running, .cancel_requested = false, .cancel_inflight = false, ._reserved = 0 } cb=true
+TRACE pump enter usable=true owners=1
+KTRACE event fd=5 filter=-2 flags=21 udata=fffffffffffffffe data=146988
+TRACE socket read fd=5 capacity=65536
+ZTRACE park fd=5 c=10b6e8138 loop=104ae0a58 owner=104ae0a58
+ZTRACE wait c=10b6e8138 task=104cc1020 state=.{ .phase = .running, .cancel_requested = false, .cancel_inflight = false, ._reserved = 0 } count=0
+ZTRACE completed c=10b6e8138 loop=104ae0a58 home=104ae0a58 old=.{ .phase = .running, .cancel_requested = true, .cancel_inflight = true, ._reserved = 0 } cb=false
+ZTRACE drain c=10b6e8138 exec=0 waiter=10b6e7dd8 task=104cc1020
+TRACE socket read fd=5 error=Canceled
+TRACE pump result .{ .wake = void }
+ZTRACE completed c=109ed2b18 loop=104ae0a58 home=104ae0a58 old=.{ .phase = .running, .cancel_requested = false, .cancel_inflight = false, ._reserved = 0 } cb=true
+TRACE pump enter usable=true owners=2
+ZTRACE completed c=109ed2688 loop=104ae0a58 home=104ae0a58 old=.{ .phase = .running, .cancel_requested = false, .cancel_inflight = false, ._reserved = 0 } cb=true
+TRACE socket read fd=5 capacity=65536
+ZTRACE park fd=5 c=10cef4138 loop=104ae0a58 owner=104ae0a58
+ZTRACE wait c=10cef4138 task=104cc1020 state=.{ .phase = .running, .cancel_requested = false, .cancel_inflight = false, ._reserved = 0 } count=0
+KTRACE event fd=5 filter=-2 flags=21 udata=fffffffffffffffe data=146988
+KTRACE event fd=5 filter=-1 flags=21 udata=fffffffffffffffe data=61
+ZTRACE serviced fd=5 c=10cef4138 state=.{ .phase = .running, .cancel_requested = false, .cancel_inflight = false, ._reserved = 0 } err=null
+ZTRACE completed c=10cef4138 loop=104ae0a58 home=104ae0a58 old=.{ .phase = .running, .cancel_requested = false, .cancel_inflight = false, ._reserved = 0 } cb=false
+ZTRACE drain c=10cef4138 exec=0 waiter=10cef3dd8 task=104cc1020
+ZTRACE return c=10cef4138 task=104cc1020 state=.{ .phase = .dead, .cancel_requested = false, .cancel_inflight = false, ._reserved = 0 } count=1
+TRACE socket read fd=5 count=75
+KTRACE event fd=5 filter=-1 flags=21 udata=fffffffffffffffe data=54
+TRACE pump result .{ .stream = 1 }
+TRACE pump enter usable=true owners=2
+TRACE pump result .{ .stream = 1 }
+TRACE pump enter usable=true owners=2
+TRACE socket read fd=5 capacity=65536
+ZTRACE completed c=10cef4138 loop=104ae0a58 home=104ae0a58 old=.{ .phase = .running, .cancel_requested = false, .cancel_inflight = false, ._reserved = 0 } cb=false
+ZTRACE wait c=10cef4138 task=104cc1020 state=.{ .phase = .dead, .cancel_requested = false, .cancel_inflight = false, ._reserved = 0 } count=0
+ZTRACE drain c=10cef4138 exec=0 waiter=10cef3dd8 task=104cc1020
+ZTRACE return c=10cef4138 task=104cc1020 state=.{ .phase = .dead, .cancel_requested = false, .cancel_inflight = false, ._reserved = 0 } count=1
+TRACE socket read fd=5 count=54
+TRACE pump result .{ .stream = 1 }
+TRACE finish /first response
+TRACE finish delivered
+TRACE pump enter usable=true owners=1
+TRACE pump result .{ .stream = 3 }
+TRACE pump enter usable=true owners=1
+TRACE pump result .{ .stream = 3 }
+TRACE finish /second response
+TRACE finish delivered
+ZTRACE completed c=109ed2b18 loop=104ae0a58 home=104ae0a58 old=.{ .phase = .running, .cancel_requested = false, .cancel_inflight = false, ._reserved = 0 } cb=true
+KTRACE event fd=5 filter=-2 flags=21 udata=fffffffffffffffe data=146979
+TRACE pump enter usable=true owners=1
+TRACE socket read fd=5 capacity=65536
+ZTRACE completed c=10beec138 loop=104ae0a58 home=104ae0a58 old=.{ .phase = .running, .cancel_requested = false, .cancel_inflight = false, ._reserved = 0 } cb=false
+ZTRACE wait c=10beec138 task=104cc1020 state=.{ .phase = .dead, .cancel_requested = false, .cancel_inflight = false, ._reserved = 0 } count=0
+ZTRACE drain c=10beec138 exec=0 waiter=10beebdd8 task=104cc1020
+KTRACE event fd=5 filter=-2 flags=21 udata=fffffffffffffffe data=146988
+ZTRACE return c=10beec138 task=104cc1020 state=.{ .phase = .dead, .cancel_requested = false, .cancel_inflight = false, ._reserved = 0 } count=1
+TRACE socket read fd=5 count=42
+TRACE pump result .{ .stream = 5 }
+ZTRACE completed c=109ed2b18 loop=104ae0a58 home=104ae0a58 old=.{ .phase = .running, .cancel_requested = false, .cancel_inflight = false, ._reserved = 0 } cb=true
+KTRACE event fd=5 filter=-2 flags=21 udata=fffffffffffffffe data=146979
+TRACE pump enter usable=true owners=2
+ZTRACE completed c=109ed2688 loop=104ae0a58 home=104ae0a58 old=.{ .phase = .running, .cancel_requested = false, .cancel_inflight = false, ._reserved = 0 } cb=true
+TRACE socket read fd=5 capacity=65536
+ZTRACE park fd=5 c=10beec138 loop=104ae0a58 owner=104ae0a58
+ZTRACE wait c=10beec138 task=104c404a0 state=.{ .phase = .running, .cancel_requested = false, .cancel_inflight = false, ._reserved = 0 } count=0
+KTRACE event fd=5 filter=-2 flags=21 udata=fffffffffffffffe data=146988
+ZTRACE completed c=10beec138 loop=104ae0a58 home=104ae0a58 old=.{ .phase = .running, .cancel_requested = true, .cancel_inflight = true, ._reserved = 0 } cb=false
+ZTRACE drain c=10beec138 exec=0 waiter=10beebdd8 task=104c404a0
+TRACE socket read fd=5 error=Canceled
+TRACE pump result .{ .wake = void }
+ZTRACE completed c=109ed2b18 loop=104ae0a58 home=104ae0a58 old=.{ .phase = .running, .cancel_requested = false, .cancel_inflight = false, ._reserved = 0 } cb=true
+KTRACE event fd=5 filter=-2 flags=21 udata=fffffffffffffffe data=146979
+TRACE pump enter usable=true owners=3
+ZTRACE completed c=109ed2688 loop=104ae0a58 home=104ae0a58 old=.{ .phase = .running, .cancel_requested = false, .cancel_inflight = false, ._reserved = 0 } cb=true
+ZTRACE park fd=5 c=10b6e7ac8 loop=104ae0a58 owner=104ae0a58
+KTRACE event fd=5 filter=-2 flags=21 udata=fffffffffffffffe data=146988
+KTRACE event fd=5 filter=-1 flags=21 udata=fffffffffffffffe data=15
+ZTRACE serviced fd=5 c=10b6e7ac8 state=.{ .phase = .running, .cancel_requested = false, .cancel_inflight = false, ._reserved = 0 } err=null
+ZTRACE completed c=10b6e7ac8 loop=104ae0a58 home=104ae0a58 old=.{ .phase = .running, .cancel_requested = false, .cancel_inflight = false, ._reserved = 0 } cb=true
+TRACE server survivor wait
+TRACE pump result .{ .stream = 9 }
+TRACE pump enter usable=true owners=3
+TRACE pump result .{ .stream = 9 }
+TRACE finish /cancel-head-seen response
+TRACE finish delivered
+TRACE pump enter usable=true owners=2
+TRACE socket read fd=5 capacity=65536
+ZTRACE park fd=5 c=10b6e8138 loop=104ae0a58 owner=104ae0a58
+ZTRACE wait c=10b6e8138 task=104c404a0 state=.{ .phase = .running, .cancel_requested = false, .cancel_inflight = false, ._reserved = 0 } count=0
+ZTRACE completed c=10b6e8138 loop=104ae0a58 home=104ae0a58 old=.{ .phase = .running, .cancel_requested = true, .cancel_inflight = true, ._reserved = 0 } cb=false
+ZTRACE drain c=10b6e8138 exec=0 waiter=10b6e7dd8 task=104c404a0
+TRACE socket read fd=5 error=Canceled
+TRACE pump result .{ .wake = void }
+TRACE failure /cancel Canceled
+TRACE finish /cancel failure
+TRACE finish delivered
+TRACE pump enter usable=true owners=1
+TRACE caller releasing survivor
+TRACE socket read fd=5 capacity=65536
+ZTRACE park fd=5 c=10beec138 loop=104ae0a58 owner=104ae0a58
+ZTRACE wait c=10beec138 task=104c404a0 state=.{ .phase = .running, .cancel_requested = false, .cancel_inflight = false, ._reserved = 0 } count=0
+TRACE server survivor released
+TRACE server survivor sent
+ZTRACE completed c=109ed2b18 loop=104ae0a58 home=104ae0a58 old=.{ .phase = .running, .cancel_requested = false, .cancel_inflight = false, ._reserved = 0 } cb=true
+KTRACE event fd=5 filter=-1 flags=21 udata=fffffffffffffffe data=32
+ZTRACE serviced fd=5 c=10beec138 state=.{ .phase = .running, .cancel_requested = false, .cancel_inflight = false, ._reserved = 0 } err=null
+ZTRACE completed c=10beec138 loop=104ae0a58 home=104ae0a58 old=.{ .phase = .running, .cancel_requested = false, .cancel_inflight = false, ._reserved = 0 } cb=false
+KTRACE event fd=5 filter=-2 flags=21 udata=fffffffffffffffe data=146988
+ZTRACE drain c=10beec138 exec=0 waiter=10beebdd8 task=104c404a0
+ZTRACE return c=10beec138 task=104c404a0 state=.{ .phase = .dead, .cancel_requested = false, .cancel_inflight = false, ._reserved = 0 } count=1
+TRACE socket read fd=5 count=32
+TRACE pump result .{ .stream = 7 }
+TRACE pump enter usable=true owners=1
+TRACE pump result .{ .stream = 7 }
+TRACE finish /survivor response
+TRACE finish delivered
+ZTRACE completed c=109ed2b18 loop=104ae0a58 home=104ae0a58 old=.{ .phase = .running, .cancel_requested = false, .cancel_inflight = false, ._reserved = 0 } cb=true
+ZTRACE completed c=109ed2688 loop=104ae0a58 home=104ae0a58 old=.{ .phase = .running, .cancel_requested = false, .cancel_inflight = false, ._reserved = 0 } cb=true
+TRACE pump enter usable=true owners=1
+ZTRACE park fd=5 c=10cef3ac8 loop=104ae0a58 owner=104ae0a58
+KTRACE event fd=5 filter=-2 flags=21 udata=fffffffffffffffe data=146988
+KTRACE event fd=5 filter=-1 flags=21 udata=fffffffffffffffe data=15
+ZTRACE serviced fd=5 c=10cef3ac8 state=.{ .phase = .running, .cancel_requested = false, .cancel_inflight = false, ._reserved = 0 } err=null
+ZTRACE completed c=10cef3ac8 loop=104ae0a58 home=104ae0a58 old=.{ .phase = .running, .cancel_requested = false, .cancel_inflight = false, ._reserved = 0 } cb=true
+KTRACE close fd=6
+TRACE pump result .{ .stream = 11 }
+TRACE pump enter usable=true owners=1
+ZTRACE completed c=10cef3ac8 loop=104ae0a58 home=104ae0a58 old=.{ .phase = .running, .cancel_requested = false, .cancel_inflight = false, ._reserved = 0 } cb=true
+TRACE pump result .{ .stream = 11 }
+TRACE finish /later response
+TRACE finish delivered
+KTRACE close fd=5
+KTRACE close fd=4
+OK
+10/96 http.cookies.syntax.test_0...OK
+11/96 http2.runtime.test_0...OK
+12/96 http2.mod.test_0...OK
+13/96 http2.mod.test_1...OK
+14/96 http1.mod.test_0...OK
+15/96 http1.mod.test_1...OK
+16/96 http1.mod.test_2...OK
+17/96 http1.runtime.test_0...OK
+18/96 tls.mod.test_0...OK
+19/96 tls.stream.mod.test_0...OK
+20/96 internal.stream_io.test_0...OK
+21/96 internal.stream_io.timed_read.test_0...OK
+22/96 tls.stream.record_stream.test_0...OK
+23/96 internal.tcp_connect.test_0...OK
+24/96 http3.runtime.test_0...OK
+25/96 http3.mod.test_0...OK
+26/96 http3.mod.test_1...OK
+27/96 http3.mod.test_2...OK
+28/96 http3.mod.test_3...OK
+29/96 http3.mod.test_4...OK
+30/96 quic.mod.test_0...OK
+31/96 quic.mod.test_1...OK
+32/96 quic.mod.test_2...OK
+33/96 quic.runtime.test_0...OK
+34/96 quic.runtime.test_1...OK
+35/96 quic.handshake.test_0...OK
+36/96 quic.protection.test_0...OK
+37/96 quic.tls_client_hello.test_0...OK
+38/96 quic.resumption.mod.test_0...OK
+39/96 quic.tls.mod.test_0...OK
+40/96 quic.one_rtt.test_0...OK
+41/96 quic.packet_space.test_0...OK
+42/96 quic.recovery.test_0...OK
+43/96 quic.congestion.test_0...OK
+44/96 quic.path_validation.test_0...OK
+45/96 quic.connection_id.test_0...OK
+46/96 quic.load_balancing.quic_lb.mod.test_0...OK
+47/96 quic.stream.test_0...OK
+48/96 quic.zero_rtt.mod.test_0...OK
+49/96 quic.resumption.ticket.mod.test_0...OK
+50/96 quic.endpoint_dispatcher.test_0...OK
+51/96 http3.origin_pool.test_0...OK
+52/96 quic.handshake.retransmit.test_0...OK
+53/96 http3.settings.test_0...OK
+54/96 http3.runtime.datagram.test_0...OK
+55/96 http3.runtime.datagram.test_1...OK
+56/96 internal.pool_returns.test_0...OK
+57/96 internal.retired_capacity.test_0...OK
+58/96 internal.owned_fifo_admission.test_0...OK
+59/96 internal.priority.test_0...OK
+60/96 http1.runtime.write.test_0...OK
+61/96 http3.runtime.qpack.encoder.test_0...OK
+62/96 quic.pacing.test_0...OK
+63/96 quic.pmtu.test_0...OK
+64/96 quic.observability.qlog.mod.test_0...OK
+65/96 http3.runtime.body_batch.test_0...OK
+66/96 http.authority.host.test_0...OK
+67/96 internal.stream_io.timed_write.test_0...OK
+68/96 http2.runtime.transport.output.test_0...OK
+69/96 http.field_name.test_0...OK
+70/96 http.field_value.test_0...OK
+71/96 http3.runtime.client.complete_request.test_0...OK
+72/96 quic.initial_exchange.flight.test_0...OK
+73/96 quic.address_validation_token.test_0...OK
+74/96 http3.socks5_runtime.test_0...OK
+75/96 quic.endpoint_dispatcher.tests.test_0...OK
+76/96 quic.one_rtt.tests.mod.test_0...OK
+77/96 quic.handshake.tests.test_0...OK
+78/96 quic.endpoint_server.test_0...OK
+79/96 quic.endpoint_server.tests.test_0...OK
+80/96 http3.runtime.tests.test_0...OK
+81/96 http3.runtime.tests.test_1...OK
+82/96 http3.runtime.development.tests.send.test_0...OK
+83/96 http3.runtime.stream.reader_tests.test_0...OK
+84/96 http3.runtime.concurrent_tests.test_0...OK
+85/96 http3.runtime.receive.field_value_tests.test_0...OK
+86/96 tls.stream.alpn_tests.test_0...OK
+87/96 tls.server_identity_file.test_0...OK
+88/96 http1.runtime.tests.test_0...OK
+89/96 http2.runtime.tests.test_0...OK
+90/96 http2.runtime.tests.test_1...OK
+91/96 http2.runtime.tests.test_2...OK
+92/96 http2.runtime.response.allocation_failure_tests.test_0...OK
+93/96 http2.runtime.response.forbidden_body_tests.test_0...OK
+94/96 http2.runtime.request.credit_failure_tests.test_0...OK
+95/96 http2.runtime.refusal_tests.test_0...OK
+96/96 http2.runtime.concurrent_tests.test_0...OK
+All 96 tests passed.

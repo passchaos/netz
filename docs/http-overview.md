@@ -154,12 +154,15 @@ convenience decoders do not mean the connection runtimes lack dynamic tables.
 | F5 | P2 documentation | weft integration request 8 remained open after empty H2 body completion and `bodyFinished()` were delivered; the docs index described content digests as authentication. | EOF regression passed in this review; current [createSlot](../src/http2/runtime/concurrent.zig) seeds completed state. Integration status and index wording corrected with this review. Historical evidence READMEs retain their original scope. |
 | F6 | P2 structure/evidence | Several runtime/owner files remain large, and feature descriptions are spread through a 4,000+ line parity log. | Keep this overview as an entry point; extract cohesive owner responsibilities without changing single-reader ownership. Add a current feature/evidence index rather than interpreting old counts as current certification. |
 
-An additional existing macOS/zio ownership issue remains open: the ordinary
-H2 packed-response-head cancellation regression waits indefinitely for a
-surviving response when using its no-deadline request helper. The unchanged
-`b0d5d8ec` baseline and the working implementation reached the same await;
-[stack samples](evidence/http_body_sources/2026-11-20/README.md) retain that
-evidence. It is not counted as a passing ownership gate.
+The existing macOS/zio packed-head cancellation hang is also repaired. Timed
+TCP reads used a file operation that replaced, then deleted, the same fd's
+persistent socket read registration. A later untimed read therefore waited
+without a kernel watcher. The shared stream adapter now uses socket reads for
+both forms: native timed zio receives, or joined `std.Io.netRead` calls for
+foreign backends and wrapped vtables. The original no-deadline H2 survivor
+gate and the equivalent wrapped-vtable gate cover cancellation and later
+same-connection reuse. [Delivery evidence](evidence/http_socket_read_ownership/2026-11-20/README.md)
+retains the registration trace; historical baseline samples remain archived.
 
 The fixed HTTP proxy has explicit product limits: no TLS connection to the
 proxy itself, authentication challenge exchange, PAC or automatic proxy

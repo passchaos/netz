@@ -4,19 +4,9 @@ const fixture = @import("testing/record_fixture.zig");
 const record_io = @import("record_io.zig");
 const allocator = std.testing.allocator;
 
-const Fault = enum { executor, cancellation };
-const Probe = struct {
-    threadlocal var fault: ?Fault = null;
-    threadlocal var base: std.Io = undefined;
-
-    fn awaitConcurrent(userdata: ?*anyopaque, batch: *std.Io.Batch, timeout: std.Io.Timeout) std.Io.Batch.AwaitConcurrentError!void {
-        if (fault) |value| {
-            fault = null;
-            return if (value == .executor) error.ConcurrencyUnavailable else error.Canceled;
-        }
-        return base.vtable.batchAwaitConcurrent(userdata, batch, timeout);
-    }
-};
+const support = @import("../../internal/testing/read_interruption.zig");
+const Fault = support.Fault;
+const Probe = support.InterruptedIo;
 
 fn seal(comptime old: bool, sender: anytype, output: []u8, payload: []const u8) !usize {
     if (old) return sender.write_traffic.seal(23, payload, output);
@@ -37,10 +27,12 @@ fn exercise(comptime old: bool, fault: Fault, cut: usize) !void {
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
     defer threaded.deinit();
     const base = threaded.io();
-    Probe.base = base;
-    defer Probe.fault = null;
+    Probe.delegate = base;
+    defer Probe.next = null;
     var vtable = base.vtable.*;
     vtable.batchAwaitConcurrent = Probe.awaitConcurrent;
+    vtable.groupConcurrent = Probe.groupConcurrent;
+    vtable.futexWait = Probe.futexWait;
     const io = std.Io{ .userdata = base.userdata, .vtable = &vtable };
     var listener = try (std.Io.net.IpAddress{ .ip4 = .loopback(0) }).listen(base, .{ .reuse_address = true });
     defer listener.deinit(base);
@@ -59,7 +51,7 @@ fn exercise(comptime old: bool, fault: Fault, cut: usize) !void {
     var output: [64]u8 = undefined;
     try std.testing.expectError(error.Timeout, receiver.readWithDeadline(io, peer, &output, .fromNow(base, .{ .clock = .awake, .raw = .fromMilliseconds(10) })));
     try std.testing.expectEqual(cut, receiver.record_reader.encoded_len);
-    Probe.fault = fault;
+    Probe.next = fault;
     const expected = if (fault == .executor) error.ConcurrencyUnavailable else error.Canceled;
     try std.testing.expectError(expected, receiver.readWithDeadline(io, peer, &output, .fromNow(base, .{ .clock = .awake, .raw = .fromSeconds(1) })));
     try std.testing.expect(!receiver.failed);

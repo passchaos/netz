@@ -23,13 +23,13 @@ test "ordinary Channel health gate retains SERVING during active Watch read admi
             _ = self.owner.cmpxchgStrong(0, std.Thread.getCurrentId(), .acq_rel, .acquire);
             return http2.runtime.Client.connectWithDeadline(gpa, io, self.address, .{}, deadline);
         }
-        fn read(userdata: ?*anyopaque, batch: *std.Io.Batch, timeout: std.Io.Timeout) std.Io.Batch.AwaitConcurrentError!void {
+        fn groupConcurrent(userdata: ?*anyopaque, group: *std.Io.Group, context: []const u8, alignment: std.mem.Alignment, start: *const fn (*const anyopaque) void) std.Io.ConcurrentError!void {
             const self = active.?;
             if (self.owner.load(.acquire) == std.Thread.getCurrentId() and self.enabled.swap(false, .acq_rel)) {
                 _ = self.hits.fetchAdd(1, .acq_rel);
                 return error.ConcurrencyUnavailable;
             }
-            return self.base.vtable.batchAwaitConcurrent(userdata, batch, timeout);
+            return self.base.vtable.groupConcurrent(userdata, group, context, alignment, start);
         }
         fn sleep(userdata: ?*anyopaque, timeout: std.Io.Timeout) std.Io.Cancelable!void {
             const self = active.?;
@@ -71,7 +71,7 @@ test "ordinary Channel health gate retains SERVING during active Watch read admi
     Probe.active = &probe;
     defer Probe.active = null;
     var table = base.vtable.*;
-    table.batchAwaitConcurrent = Probe.read;
+    table.groupConcurrent = Probe.groupConcurrent;
     table.sleep = Probe.sleep;
     const io: std.Io = .{ .userdata = base.userdata, .vtable = &table };
     var channel = try grpc.Channel.init(allocator, io, .{ .custom = .{ .context = &probe, .connect_fn = Probe.connect } }, .{ .health_check_service = "demo.Echo" });

@@ -196,6 +196,13 @@ from `body` or `body_source`. `Handle.writeBody` surfaces
 `readResponse` to drain the already-received final response. HTTP/1
 `Expect: 100-continue` is handled on the first body write.
 
+Timed and ordinary TCP reads use the same socket I/O surface. Canceling a
+timed wait joins its read before releasing the receive buffer; bytes or EOF
+accepted during that join are retained, and a caller cancellation is rearmed
+for its next cancellation point. Wrapped `std.Io` vtables continue to receive
+their own `netRead` calls. This preserves the persistent socket registration
+when H2 siblings mix deadline and no-deadline requests.
+
 Surfaces:
 
 - `http.Connection.startRequest` for an owned HTTP/1 or HTTP/2 connection.

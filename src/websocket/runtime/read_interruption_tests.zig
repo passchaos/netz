@@ -25,6 +25,8 @@ fn exercise(mode: Mode, fault: Fault, partial: bool) !void {
     defer InterruptedIo.next = null;
     var vtable = base_io.vtable.*;
     vtable.batchAwaitConcurrent = InterruptedIo.awaitConcurrent;
+    vtable.groupConcurrent = InterruptedIo.groupConcurrent;
+    vtable.futexWait = InterruptedIo.futexWait;
     const io = std.Io{ .userdata = base_io.userdata, .vtable = &vtable };
     var listener = try (std.Io.net.IpAddress{ .ip4 = .loopback(0) }).listen(base_io, .{ .reuse_address = true });
     defer listener.deinit(base_io);

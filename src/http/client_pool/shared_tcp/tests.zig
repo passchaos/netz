@@ -202,3 +202,12 @@ test "unified HTTP ordinary H2 zio cancels an owned packed response head and pre
     defer backend.deinit();
     try exercise(backend.io(), true);
 }
+
+test "unified HTTP ordinary H2 wrapped zio keeps timed and untimed socket reads reusable" {
+    var backend = try backend_mod.Backend.initZio(allocator);
+    defer backend.deinit();
+    const delegate = backend.io();
+    var vtable = delegate.vtable.*;
+    const wrapped: std.Io = .{ .userdata = delegate.userdata, .vtable = &vtable };
+    try exercise(wrapped, true);
+}

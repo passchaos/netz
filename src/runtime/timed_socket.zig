@@ -1,4 +1,4 @@
-//! Native timed socket writes for matching zio tasks behind std.Io.
+//! Native timed socket reads and writes for matching zio tasks behind std.Io.
 const std = @import("std");
 const zio = @import("zio");
 const deadline_policy = @import("../internal/deadline.zig");
@@ -63,4 +63,22 @@ fn mapError(err: anyerror) Error {
         error.SystemResources => error.SystemResources,
         else => error.Unexpected,
     };
+}
+
+/// Socket reads share the socket registration with ordinary netRead calls.
+pub fn tryRead(io: std.Io, stream: std.Io.net.Stream, buffer: []u8, deadline: std.Io.Clock.Timestamp) ?(std.Io.net.Stream.Reader.Error || std.Io.Timeout.Error)!usize {
+    if (!available(io)) return null;
+    const ReadError = std.Io.net.Stream.Reader.Error || std.Io.Timeout.Error;
+    _ = deadline_policy.usableAwake(io, deadline) catch |err| return @as(ReadError!usize, err);
+    var storage: [1]zio.os.iovec = undefined;
+    const result = zio.net.readBuf(netHandle(stream), .fromSlice(buffer, &storage), .fromStd(.{ .deadline = deadline })) catch |err| return @as(ReadError!usize, switch (err) {
+        error.Timeout => error.Timeout,
+        error.Canceled => error.Canceled,
+        error.ConnectionResetByPeer, error.ConnectionAborted, error.ConnectionTimedOut => error.ConnectionResetByPeer,
+        error.SocketNotConnected, error.SocketShutdown => error.SocketUnconnected,
+        error.NetworkDown => error.NetworkDown,
+        error.SystemResources => error.SystemResources,
+        else => error.Unexpected,
+    });
+    return @as(ReadError!usize, result);
 }

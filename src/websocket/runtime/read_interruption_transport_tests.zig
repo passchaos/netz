@@ -23,6 +23,8 @@ fn tlsCase(backend: Backend, fault: support.Fault) !void {
     defer support.InterruptedIo.next = null;
     var vtable = base.vtable.*;
     vtable.batchAwaitConcurrent = support.InterruptedIo.awaitConcurrent;
+    vtable.groupConcurrent = support.InterruptedIo.groupConcurrent;
+    vtable.futexWait = support.InterruptedIo.futexWait;
     const io: std.Io = .{ .userdata = base.userdata, .vtable = &vtable };
     var certificate: [tls_testing.certificate_der_len]u8 = undefined;
     try std.base64.standard.Decoder.decode(&certificate, tls_testing.certificate_base64);
@@ -83,6 +85,8 @@ fn h2Case(fault: support.Fault) !void {
     defer support.InterruptedIo.next = null;
     var vtable = base.vtable.*;
     vtable.batchAwaitConcurrent = support.InterruptedIo.awaitConcurrent;
+    vtable.groupConcurrent = support.InterruptedIo.groupConcurrent;
+    vtable.futexWait = support.InterruptedIo.futexWait;
     const io: std.Io = .{ .userdata = base.userdata, .vtable = &vtable };
     var server = try http2.Server.listen(allocator, base, .{ .ip4 = .loopback(0) }, .{ .enable_connect_protocol = true });
     defer server.deinit();
@@ -139,6 +143,8 @@ fn h3Case(fault: support.Fault) !void {
     defer support.InterruptedIo.next = null;
     var vtable = base.vtable.*;
     vtable.batchAwaitConcurrent = support.InterruptedIo.awaitConcurrent;
+    vtable.groupConcurrent = support.InterruptedIo.groupConcurrent;
+    vtable.futexWait = support.InterruptedIo.futexWait;
     const io: std.Io = .{ .userdata = base.userdata, .vtable = &vtable };
     const original = [_]u8{ 0x77, 0x73, 0x14, 1, 2, 3, 4, 5 };
     const server_cid = [_]u8{ 0x77, 0x73, 0x14, 6 };

@@ -16,10 +16,9 @@ pub const TimedWriteError = net.Stream.Writer.Error ||
 
 /// Read connected stream bytes under an absolute deadline.
 ///
-/// Windows socket handles require the network operation. POSIX stream sockets
-/// are file descriptors, where the streaming file operation avoids asking
-/// recvmsg to populate an irrelevant source address. A zero result uniformly
-/// represents EOF so protocol layers can map it to their own close error.
+/// Timed and ordinary reads use the same socket operation and registration.
+/// A zero result uniformly represents EOF so protocol layers can map it to
+/// their own close error.
 pub const readSomeWithDeadline = timed_read.readSomeWithDeadline;
 
 const timed_write = @import("stream_io/timed_write.zig");
