@@ -152,7 +152,19 @@ engine returned `error.MessageTooLarge`, ending the whole connection.
 
 ## 8. HTTP/2 body completion for a request that ends at HEADERS
 
-Status: open, optional for weft.
+Status: delivered. The concurrent engine seeds `body_finished` from the
+accepted stream's request completion state in `createSlot`, so a HEADERS frame
+carrying END_STREAM is visible before the handler's first body read.
+`ConcurrentStream.bodyFinished()` exposes this state under the body mutex.
+
+The real h2c regression `HTTP/2 concurrent bodyless request observes body EOF
+without waiting` verifies `bodyFinished()` and immediate `nextBody() == null`
+before sending a response. A focused rerun on 2026-11-20 passed 33/33 tests
+including imported support tests. Weft can now replace the declared-length
+heuristic with the completion-aware API; adoption in weft was not checked in
+this review.
+
+Original report:
 
 Weft now buffers HTTP/2 non-streaming request bodies only when the request
 declares a non-zero `Content-Length`. A request without a declared length

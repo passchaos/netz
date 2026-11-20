@@ -1,0 +1,17 @@
+{
+  "baseline": "a8015e85e6c0bbd1a33e3719219e50229ac9c00c",
+  "platform": "macOS aarch64",
+  "zig_version": "0.16.0",
+  "scope": "HTTP functionality review; only pooled H2 body source defect reproduced here",
+  "sources": {
+    "src/http/client/types.zig": "3b1b9dd89e19fd0127386247cabe1f16c439ac0eea5f92c44ffd7c6f58f5c8d3",
+    "src/http/client.zig": "e92a24ca7426ab76e1b31f1354230909fa102b6f60f14fe41b8150f27f92c993",
+    "src/http/client/header_mapping.zig": "1be9a9562067f0aee1fb599b906f39ea1295fb07542a94b700d4ce8c6346ff06",
+    "src/http/client_pool/requests.zig": "30e9063ae2ec1a6aa8bf98213df7690f893ff0dc31076393d10bd4a3c52f293c",
+    "src/http/client_pool/shared_tcp/state.zig": "7d9715448f872ebfdfab751e5109a3ed7af44ca338f3c4200eb20c4df9849626",
+    "src/http/client_pool/shared_tcp/driver.zig": "5a52784366924ccf4d2cd9b559bfde5fc9730841767dbceb899f145d727867a3",
+    "src/http/client_pool/shared_tcp/exchange.zig": "b0bc8053706ca9d52c1a1cd5a160cf096ec52bcd6ff716e9613e977147b12ac4",
+    "src/http2/runtime/concurrent.zig": "cf2b10f750d83f17f3e33d9c648137e2240e78af3f64f7476e73f6d60fa54084",
+    "src/http2/runtime/concurrent_tests.zig": "f43de35c0fd10d8ed139a9c77ad947ffbad15d50f4289d298d70a10a7dc006df"
+  }
+}

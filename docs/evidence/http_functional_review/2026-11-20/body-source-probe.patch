@@ -1,0 +1,76 @@
+diff --git a/src/http/client_tests.zig b/src/http/client_tests.zig
+index 95c61e8a..29d6cb63 100644
+--- a/src/http/client_tests.zig
++++ b/src/http/client_tests.zig
+@@ -12,3 +12,4 @@
+ test {
+     _ = @import("client_tests/duplex.zig");
++    _ = @import("client_tests/review_probe.zig");
+ }
+diff --git a/src/http/client_tests/review_probe.zig b/src/http/client_tests/review_probe.zig
+new file mode 100644
+index 00000000..36b6c13c
+--- /dev/null
++++ b/src/http/client_tests/review_probe.zig
+@@ -0,0 +1,61 @@
++//! Temporary loopback probe for the HTTP functional review.
++const std = @import("std");
++const http = @import("../mod.zig");
++const h2 = @import("../../http2/runtime.zig");
++
++test "HTTP functional review pooled H2 body sources" {
++    const allocator = std.testing.allocator;
++    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
++    defer threaded.deinit();
++    const io = threaded.io();
++    var server = try h2.Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{});
++    defer server.deinit();
++    const Worker = struct {
++        server: *h2.Server,
++        release: *std.Io.Event,
++        err: ?anyerror = null,
++        fn run(self: *@This()) void {
++            self.serve() catch |err| { self.err = err; };
++        }
++        fn serve(self: *@This()) !void {
++            var connection = try self.server.acceptWithTimeout(.fromSeconds(5));
++            defer connection.close();
++            for (0..2) |_| {
++                var request = try connection.readRequestWithTimeout(.fromSeconds(5));
++                defer request.deinit(self.server.allocator);
++                try connection.writeResponse(request.stream_id, .{
++                    .body = request.body,
++                    .request_method = request.method,
++                });
++            }
++            try self.release.wait(self.server.io);
++        }
++    };
++    var release: std.Io.Event = .unset;
++    var worker = Worker{ .server = &server, .release = &release };
++    const thread = try std.Thread.spawn(.{}, Worker.run, .{&worker});
++    defer { release.set(io); thread.join(); }
++    var pool = try http.Pool.init(allocator, io, .{
++        .client = .{ .cleartext_protocol = .http2_prior_knowledge },
++    });
++    defer pool.deinit();
++    const uri = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/upload", .{server.address().getPort()});
++    defer allocator.free(uri);
++    var reader = std.Io.Reader.fixed("reader-body");
++    var read_response = try pool.requestUriWithTimeout(uri, .{
++        .method = "POST",
++        .body = "fallback",
++        .body_source = .{ .reader = .{ .reader = &reader } },
++    }, .fromSeconds(5));
++    defer read_response.deinit();
++    var slice_response = try pool.requestUriWithTimeout(uri, .{
++        .method = "POST",
++        .body = "fallback",
++        .body_source = .{ .slice = "slice-body" },
++    }, .fromSeconds(5));
++    defer slice_response.deinit();
++    std.debug.print("review probe: reader source received={s}; slice source received={s}\n", .{read_response.body(), slice_response.body()});
++    // Validate intended public RequestOptions precedence after observing both.
++    try std.testing.expectEqualStrings("reader-body", read_response.body());
++    try std.testing.expectEqualStrings("slice-body", slice_response.body());
++}

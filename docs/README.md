@@ -10,6 +10,7 @@ performance record.
 | Document | Purpose |
 | --- | --- |
 | [architecture.md](architecture.md) | Layered design, performance invariants P1-P10, memory/concurrency doctrine, change acceptance checklist, known structural gaps. |
+| [http-overview.md](http-overview.md) | HTTP/1.1, HTTP/2 and HTTP/3 functionality, unified APIs, defaults, ownership boundaries and verified integration findings. |
 | [architecture/optimization-backlog.md](architecture/optimization-backlog.md) | November 19 project review: reproduced relay/rate defects, prioritized optimization work, structural findings, and validation requirements. |
 | [trust_roots.md](trust_roots.md) | System versus compiled-in Mozilla trust roots, precedence, protocol surfaces, and store reuse. |
 | [build.md](build.md) | Build, test, fuzz, interop, release-archive, and evidence gates. |
@@ -23,7 +24,7 @@ performance record.
 | --- | --- |
 | [coverage.md](coverage.md) | Feature-level coverage inventory and bounded fuzz/live-network verification targets. |
 | [grpc_parity.md](grpc_parity.md) | gRPC behavior, xDS, official C++ interop scenarios, channel features. |
-| [hyper_parity.md](hyper_parity.md) | HTTP/1.1 and HTTP/2 behavior versus Hyper. |
+| [hyper_parity.md](hyper_parity.md) | HTTP/1.1, HTTP/2 and HTTP/3 behavior, reference peers and implementation evidence. |
 | [quicz_parity.md](quicz_parity.md) | QUIC behavior versus quicz. |
 | [proxy_parity.md](proxy_parity.md) | SOCKS5, HTTP CONNECT, Shadowsocks, Trojan, VLESS/VMess, TUIC, and Hysteria coverage and verification status. |
 | [vpn_mesh_parity.md](vpn_mesh_parity.md) | WireGuard, mesh disco, and DERP frame/relay coverage and verification status. |
@@ -52,7 +53,7 @@ performance record.
 | [http3_complete_requests.md](http3_complete_requests.md) | Complete-request HTTP/3 path. |
 | [http3_complete_responses.md](http3_complete_responses.md) | Complete-response HTTP/3 path. |
 | [http3_multipath.md](http3_multipath.md) | Application-level multipath over independent QUIC connections, the cross-host probe, and the multi-NIC test recipe. |
-| [http_digest.md](http_digest.md) | HTTP Digest authentication. |
+| [http_digest.md](http_digest.md) | RFC 9530 content/representation digests, algorithm preferences and streaming integrity verification. |
 | [http_proxy.md](http_proxy.md) | HTTP proxy behavior. |
 | [webtransport_http2_capsules.md](webtransport_http2_capsules.md) | WebTransport over HTTP/2 capsule protocol. |
 | [webtransport_application_protocol.md](webtransport_application_protocol.md) | WebTransport application protocol negotiation. |
