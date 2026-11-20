@@ -1058,15 +1058,10 @@ pub const StreamHandle = struct {
         switch (self.kind) {
             .tcp => |*tcp| try tcp.handle.finishTrailers(trailers),
             .http3 => |*h3| {
-                var stack: [32]http3.Qpack.HeaderField = undefined;
-                if (trailers.len > stack.len) return error.TooManyTrailers;
-                for (trailers, stack[0..trailers.len]) |source, *target| {
-                    target.* = .{
-                        .name = source.name,
-                        .value = source.value,
-                    };
-                }
-                try h3.handle.writeTrailers(stack[0..trailers.len]);
+                var stack: [header_mapping.max_stack_trailers]http3.Qpack.HeaderField = undefined;
+                var mapped = try header_mapping.mapHttp3(h3.allocator, trailers, &stack);
+                defer mapped.deinit(h3.allocator);
+                try h3.handle.writeTrailers(mapped.items);
             },
         }
     }
@@ -1149,6 +1144,7 @@ pub const StreamHandle = struct {
                 .begin = begin,
                 .data = data,
                 .end = end,
+                .informational = if (self.response_sink.informational != null) informational else null,
             };
         }
 
@@ -1179,7 +1175,7 @@ pub const StreamHandle = struct {
                 const value = storage[offset..][0..source.value.len];
                 @memcpy(value, source.value);
                 offset += source.value.len;
-                target.* = .{ .name = name, .value = value };
+                target.* = .{ .name = name, .value = value, .never_indexed = source.never_indexed };
             }
             self.http3.head = .{
                 .headers = headers,
@@ -1197,22 +1193,26 @@ pub const StreamHandle = struct {
             try self.response_sink.data(self.response_sink.context, bytes);
         }
 
+        fn informational(context: *anyopaque, head: http3.DecodedResponseHead) void {
+            const self: *H3Adapter = @ptrCast(@alignCast(context));
+            const observe = self.response_sink.informational orelse return;
+            var stack: [header_mapping.max_stack_headers]client.Header = undefined;
+            var mapped = header_mapping.fromHttp3(self.http3.allocator, head.headers, &stack) catch return;
+            defer mapped.deinit(self.http3.allocator);
+            observe(self.response_sink.context, .{ .protocol = .http3, .status = head.status, .headers = mapped.items });
+        }
+
         fn end(
             context: *anyopaque,
             trailers: []const http3.Qpack.HeaderField,
         ) !void {
             const self: *H3Adapter = @ptrCast(@alignCast(context));
-            var stack: [32]client.DuplexHeader = undefined;
-            if (trailers.len > stack.len) return error.TooManyTrailers;
-            for (trailers, stack[0..trailers.len]) |source, *target| {
-                target.* = .{
-                    .name = source.name,
-                    .value = source.value,
-                };
-            }
+            var stack: [header_mapping.max_stack_trailers]client.Header = undefined;
+            var mapped = try header_mapping.fromHttp3(self.http3.allocator, trailers, &stack);
+            defer mapped.deinit(self.http3.allocator);
             try self.response_sink.end(
                 self.response_sink.context,
-                stack[0..trailers.len],
+                mapped.items,
             );
         }
     };

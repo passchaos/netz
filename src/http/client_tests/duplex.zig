@@ -180,6 +180,7 @@ test "HTTP/1 duplex handle streams request and response" {
     );
     try std.testing.expectEqual(http.Protocol.http1, head.protocol);
     try std.testing.expectEqual(@as(u16, 200), head.status);
+    _ = try handle.readResponse(sink.sink());
     try std.testing.expectEqualStrings("resp-1resp-2", sink.body.items);
     try std.testing.expectEqual(@as(usize, 1), sink.trailer_count);
     try std.testing.expectEqualStrings("x-checksum", sink.trailer_name.items);
@@ -294,6 +295,7 @@ test "HTTP/2 duplex handle streams request and response" {
     const head = try handle.readResponse(sink.sink());
     try std.testing.expectEqual(http.Protocol.http2, head.protocol);
     try std.testing.expectEqual(@as(u16, 200), head.status);
+    _ = try handle.readResponse(sink.sink());
     try std.testing.expectEqualStrings("resp-1resp-2", sink.body.items);
     try std.testing.expectEqual(@as(usize, 1), sink.trailer_count);
     try std.testing.expect(sink.header_never_indexed);
@@ -428,6 +430,7 @@ test "HTTP/3 duplex handle streams request and response" {
     );
     try std.testing.expectEqual(http.Protocol.http3, head.protocol);
     try std.testing.expectEqual(@as(u16, 200), head.status);
+    _ = try handle.readResponse(sink.sink());
     try std.testing.expectEqualStrings("resp-1resp-2", sink.body.items);
     try std.testing.expectEqual(@as(usize, 1), sink.trailer_count);
     try std.testing.expect(sink.header_never_indexed);

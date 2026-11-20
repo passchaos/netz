@@ -282,6 +282,7 @@ pub const Handle = struct {
         sink: ResponseSink,
         deadline: ?std.Io.Clock.Timestamp,
     ) !ResponseHead {
+        if (self.response_complete) return self.response_head orelse error.MissingResponseHead;
         if (self.h1_buffered_response) |response| {
             return self.emitBufferedResponse(response, sink);
         }
@@ -349,6 +350,7 @@ pub const Handle = struct {
                 return self.readResponseHttp3(h3, sink, deadline);
             },
         }
+        self.response_complete = true;
         return self.response_head orelse error.MissingResponseHead;
     }
 
@@ -379,6 +381,7 @@ pub const Handle = struct {
         );
         defer self.allocator.free(trailers);
         try sink.end(sink.context, trailers);
+        self.response_complete = true;
         return head;
     }
 

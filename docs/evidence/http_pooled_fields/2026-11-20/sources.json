@@ -1,0 +1,17 @@
+{
+  "parent": "43cf33d23d56c92fec673905453ec98581687b09",
+  "zig": "0.16.0",
+  "platform": "macOS aarch64",
+  "sources": {
+    "src/http/client/duplex.zig": "d84a29ae036410a8112cebd8ea454efda29b9cfe426b6556a297a1bab4f1ede1",
+    "src/http/client/header_mapping.zig": "bc1cb5d804408fc9b8c1c7e5e0f8021f1e374c2a715c726116ccad38ef395009",
+    "src/http/client_pool.zig": "b330c0d48a513e9778a71ea5731226a175cf034a1bb7f778a2874ec455087ae2",
+    "src/http/client_tests.zig": "f8de9ae1209a9811bb49acec693f0cd97d0e086d37bb99e7264c6c9b8f9bfa8f",
+    "src/http/client_tests/duplex.zig": "d9dd96fbe52d73977b32cd0156a3c6b0b0a34affd57627d3f81b5c7cdaf2876c",
+    "src/http3/runtime/handshake_client_pool/shared.zig": "0a35f1601fb8613c6e6001bbc0d1f424782efa8c0f1446beea9ad506f56f9403",
+    "src/http3/runtime/shared_handshake_client_pool/dispatcher.zig": "576a953678961e22ea75a31aa716dad2da1efb28080c47b4c1bbafecce5ecd4a",
+    "src/http3/runtime/shared_handshake_client_pool/stream.zig": "84ffc6aec2be4d07d12f772db16d523f04730735d78fdf1a42c7f4c03b9a99cb",
+    "src/http3/runtime/shared_handshake_client_pool/stream_command.zig": "a73bf480c77715c88626903250d63303cbd07342e2486a6c9c8d4b32979d142c",
+    "src/http/client_tests/pooled_h3_fields.zig": "4f5a2cc699629f005ef64de7e8d40249cc787054ae420e9973141dfc26a11565"
+  }
+}

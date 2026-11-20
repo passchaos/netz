@@ -1362,9 +1362,12 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
                             head.deinit(state.pool.allocator);
                             return false;
                         }
-                        var decoded = head.response;
+                        const decoded = head.response;
                         if (decoded.status < 200) {
-                            decoded.deinit(state.pool.allocator);
+                            stream.deliverInformational(decoded) catch |err| {
+                                stream.fail(err);
+                                return @errorCast(err);
+                            };
                             return false;
                         }
                         stream.deliverHead(decoded);

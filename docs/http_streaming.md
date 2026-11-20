@@ -171,6 +171,14 @@ alias; callers do not need a separate trailer array. H2/H3 never-indexed
 metadata is preserved in both directions. H1 trailer declarations keep the
 stack fast path and allocate exact descriptor overflow for larger field sets.
 
+A completed response can be read again to obtain its retained final head;
+the second call performs no I/O and does not repeat begin/data/end or interim
+callbacks. Final head fields stay valid until handle deinitialization. Body,
+interim and trailer views remain callback-scoped. Both H3 pool backends forward
+interim heads in wire order; their common-field adapter preserves Never Indexed
+metadata and uses exact descriptor overflow instead of a separate trailer-count
+ceiling.
+
 `ResponseSink` has four callbacks:
 
 - `begin(head)` once with the final `status` and owned header copies;

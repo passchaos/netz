@@ -128,3 +128,20 @@ pub fn mapHttp3(
         .owned = if (headers.len <= stack.len) null else out,
     };
 }
+
+pub const UnifiedHeaders = struct {
+    items: []const types.Header,
+    owned: ?[]types.Header = null,
+
+    pub fn deinit(self: *UnifiedHeaders, allocator: std.mem.Allocator) void {
+        if (self.owned) |owned| allocator.free(owned);
+        self.* = undefined;
+    }
+};
+
+/// Field bytes remain borrowed; only descriptor overflow is allocated.
+pub fn fromHttp3(allocator: std.mem.Allocator, headers: []const http3.Qpack.HeaderField, stack: []types.Header) std.mem.Allocator.Error!UnifiedHeaders {
+    const out = if (headers.len <= stack.len) stack[0..headers.len] else try allocator.alloc(types.Header, headers.len);
+    for (headers, out) |source, *target| target.* = .{ .name = source.name, .value = source.value, .never_indexed = source.never_indexed };
+    return .{ .items = out, .owned = if (headers.len <= stack.len) null else out };
+}

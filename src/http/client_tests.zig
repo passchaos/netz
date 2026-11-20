@@ -16,6 +16,7 @@ test {
     _ = @import("client_tests/reader_concurrency.zig");
     _ = @import("client_tests/reader_replay.zig");
     _ = @import("client_tests/reader_replay_h3.zig");
+    _ = @import("client_tests/pooled_h3_fields.zig");
 }
 
 fn findHeader(headers: anytype, name: []const u8) ?[]const u8 {

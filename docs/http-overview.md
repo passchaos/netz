@@ -63,9 +63,9 @@ optional H3 route. Standalone `Client`/`Connection` does not select H3.
 | --- | --- |
 | Protocol selection | HTTPS defaults to preferring H2, offering H2/H1 in one authenticated handshake; cleartext defaults to H1 and needs explicit H2 prior knowledge. The low-level H2 runtime also supports h2c Upgrade. |
 | Endpoint resolution | Hostnames, IPv4 and bracketed IPv6; configurable resolver, sequential address fallback or bounded Happy Eyeballs. TCP identity remains bound to the origin URI rather than the chosen socket address. |
-| Complete requests | Common method/header/body/trailer options and owned responses. Repeated headers and trailers remain individually accessible through iterators, including separate Set-Cookie fields. |
+| Complete requests | Common method/header/body/trailer options and owned responses. Repeated headers and trailers remain individually accessible through iterators, including separate Set-Cookie fields. Pooled H3 callbacks preserve interim ordering and never-indexed fields without an extra trailer-count ceiling. |
 | Request body sources | `body_source.slice` or `body_source.reader` is documented to override `body`. Standalone H1/H2 and H3 pool uploads have implementations; ordinary shared H2 Pool calls now honor that precedence with bounded Reader production. |
-| Duplex requests | `Connection.startRequest`, `Pool.startRequest`, `http.startHttp3Request`; incremental body writes, trailers, final response callbacks and optional informational callbacks. The connection/pool must outlive its handle. |
+| Duplex requests | `Connection.startRequest`, `Pool.startRequest`, `http.startHttp3Request`; incremental body writes, trailers, final response callbacks and optional informational callbacks. The connection/pool must outlive its handle. Completed reads return the retained final head without replaying callbacks. |
 | Ordinary H2 concurrency | One owner per active origin drives HPACK, frames, uploads and independent stream deadlines. Later requests can join while earlier responses wait. Queue and stream admission are bounded. |
 | Manual leases | `Pool.acquireUri` returns an exclusive H1/H2 lease. It does not expose an H3 lease or share its frame reader with ordinary Pool requests. |
 | Pool lifecycle | Idle/leased/connecting accounting, per-origin/global idle caps, monotonic expiry, global LRU, FIFO capacity admission, close wakeups and lifecycle counters. An optional total budget spans TCP and H3. |
@@ -167,6 +167,14 @@ selection. Its forward-H1 path rejects Reader and duplex body streaming. H3
 through an HTTP proxy is rejected rather than bypassing that route. Streaming
 multipart parsing exists, but nested multipart is not supported. These are
 supported-scope boundaries rather than the reproduced H2 precedence defect.
+
+Pooled H3 streaming field/callback parity is also delivered: both endpoint
+backends preserve 40 request trailers, 40 response fields/trailers, interim
+callbacks and Never Indexed metadata. Mixed poll/read completion is one-shot;
+raw H1/H2/H3 handles share successful-read memoization. The focused gates pass
+102/102 in Debug and ReleaseFast, including support tests;
+[owning evidence](evidence/http_pooled_fields/2026-11-20/README.md) records the
+exact sources and commands.
 
 ## Verification and further reading
 

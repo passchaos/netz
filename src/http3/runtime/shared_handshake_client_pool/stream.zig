@@ -43,6 +43,7 @@ pub fn Transaction(
                 context: *anyopaque,
                 trailers: []const http3.Qpack.HeaderField,
             ) anyerror!void,
+            informational: ?*const fn (*anyopaque, http3.DecodedResponseHead) void = null,
         };
 
         /// Open the request head on `lease`. Backpressure errors
@@ -216,7 +217,8 @@ pub fn Transaction(
                         }
                         var decoded = head.response;
                         if (decoded.status < 200) {
-                            decoded.deinit(self.pool.allocator);
+                            defer decoded.deinit(self.pool.allocator);
+                            if (sink.informational) |observe| observe(sink.context, decoded);
                             return;
                         }
                         if (self.response_head != null or

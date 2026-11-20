@@ -28,6 +28,8 @@ pub const CallbackSink = struct {
         context: *anyopaque,
         trailers: []const http3.Qpack.HeaderField,
     ) anyerror!void,
+    /// Interim heads borrow their queued storage only for this callback.
+    informational: ?*const fn (*anyopaque, http3.DecodedResponseHead) void = null,
 };
 
 pub fn Stream(comptime Pool: type) type {
@@ -46,6 +48,9 @@ pub fn Stream(comptime Pool: type) type {
         stream_id: ?u62 = null,
         head: ?http3.DecodedResponseHead = null,
         head_delivered: bool = false,
+        end_delivered: bool = false,
+        /// Bounded by the underlying response reader's configured 1xx limit.
+        informational: Fifo(http3.DecodedResponseHead) = .{},
         trailers: ?http3.DecodedTrailers = null,
         data: Fifo([]u8) = .{},
         pending_read_bytes: usize = 0,
@@ -95,6 +100,11 @@ pub fn Stream(comptime Pool: type) type {
         }
 
         pub fn deinit(self: *Self) void {
+            for (self.informational.slice()) |value| {
+                var head = value;
+                head.deinit(self.allocator);
+            }
+            self.informational.deinit(self.allocator);
             for (self.writes.slice()) |write| self.allocator.free(write.data);
             self.writes.deinit(self.allocator);
             for (self.data.slice()) |bytes| self.allocator.free(bytes);
@@ -226,7 +236,7 @@ pub fn Stream(comptime Pool: type) type {
                 const value = storage[offset..][0..source.value.len];
                 @memcpy(value, source.value);
                 offset += source.value.len;
-                target.* = .{ .name = name, .value = value };
+                target.* = .{ .name = name, .value = value, .never_indexed = source.never_indexed };
             }
 
             self.mutex.lockUncancelable(self.io);
@@ -257,6 +267,13 @@ pub fn Stream(comptime Pool: type) type {
         ) anyerror!*const http3.DecodedResponseHead {
             while (true) {
                 self.mutex.lockUncancelable(self.io);
+                if (!self.informational.isEmpty()) {
+                    var head = self.informational.popFront().?;
+                    self.mutex.unlock(self.io);
+                    defer head.deinit(self.allocator);
+                    if (sink.informational) |observe| observe(sink.context, head);
+                    continue;
+                }
                 if (self.err) |err| {
                     self.mutex.unlock(self.io);
                     return err;
@@ -287,8 +304,10 @@ pub fn Stream(comptime Pool: type) type {
                         trailers.fields
                     else
                         &.{};
+                    const notify_end = !self.end_delivered;
+                    self.end_delivered = true;
                     self.mutex.unlock(self.io);
-                    try sink.end(sink.context, fields);
+                    if (notify_end) try sink.end(sink.context, fields);
                     return &self.head.?;
                 }
                 self.mutex.unlock(self.io);
@@ -316,6 +335,13 @@ pub fn Stream(comptime Pool: type) type {
         ) anyerror!bool {
             while (true) {
                 self.mutex.lockUncancelable(self.io);
+                if (!self.informational.isEmpty()) {
+                    var head = self.informational.popFront().?;
+                    self.mutex.unlock(self.io);
+                    defer head.deinit(self.allocator);
+                    if (sink.informational) |observe| observe(sink.context, head);
+                    continue;
+                }
                 if (self.err) |err| {
                     self.mutex.unlock(self.io);
                     return err;
@@ -338,12 +364,18 @@ pub fn Stream(comptime Pool: type) type {
                     continue;
                 }
                 if (self.finished) {
+                    if (self.head == null) {
+                        self.mutex.unlock(self.io);
+                        return error.RequestCancelled;
+                    }
                     const fields = if (self.trailers) |trailers|
                         trailers.fields
                     else
                         &.{};
+                    const notify_end = !self.end_delivered;
+                    self.end_delivered = true;
                     self.mutex.unlock(self.io);
-                    try sink.end(sink.context, fields);
+                    if (notify_end) try sink.end(sink.context, fields);
                     return true;
                 }
                 self.mutex.unlock(self.io);
@@ -423,6 +455,19 @@ pub fn Stream(comptime Pool: type) type {
             self.mutex.unlock(self.io);
         }
 
+        /// Adopt an already-decoded interim head in wire order. The sole
+        /// receive owner enforces the configured informational/field limits.
+        pub fn deliverInformational(self: *Self, head: http3.DecodedResponseHead) !void {
+            var owned = head;
+            errdefer owned.deinit(self.allocator);
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            if (self.finished or self.cancelled) return error.RequestCancelled;
+            if (self.head != null or head.status >= 200) return error.UnexpectedStream;
+            try self.informational.append(self.allocator, owned);
+            self.user_ready.set(self.io);
+        }
+
         pub fn deliverTrailers(
             self: *Self,
             trailers: http3.DecodedTrailers,
@@ -486,6 +531,59 @@ pub fn Stream(comptime Pool: type) type {
             self.mutex.unlock(self.io);
         }
     };
+}
+
+test "stream response callbacks preserve interims and complete once across poll and read" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const TestPool = struct {};
+    var pool: TestPool = .{};
+    const Recorder = struct {
+        events: [8]u8 = undefined,
+        count: usize = 0,
+        fn append(self: *@This(), event: u8) void {
+            if (self.count < self.events.len) self.events[self.count] = event;
+            self.count += 1;
+        }
+        fn informational(context: *anyopaque, head: http3.DecodedResponseHead) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.append(if (head.status == 100) 'a' else 'b');
+        }
+        fn begin(context: *anyopaque, head: http3.DecodedResponseHead) !void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            try std.testing.expectEqual(@as(u16, 200), head.status);
+            self.append('H');
+        }
+        fn data(context: *anyopaque, bytes: []const u8) !void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            try std.testing.expectEqualStrings("body", bytes);
+            self.append('D');
+        }
+        fn end(context: *anyopaque, _: []const http3.Qpack.HeaderField) !void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.append('E');
+        }
+        fn makeHead(status: u16) http3.DecodedResponseHead {
+            return .{ .status = status, .headers = &.{}, .content_length = null, .body_allowed = status >= 200, .consumed = 0, .qpack_section_acknowledgments = 0 };
+        }
+    };
+    for ([_]bool{ true, false }) |observe_interims| {
+        var stream = Stream(TestPool).init(&pool, allocator, io);
+        defer stream.deinit();
+        try stream.deliverInformational(Recorder.makeHead(100));
+        try stream.deliverInformational(Recorder.makeHead(103));
+        stream.deliverHead(Recorder.makeHead(200));
+        try stream.deliverData("body");
+        stream.finish();
+        var recorder = Recorder{};
+        const sink: CallbackSink = .{ .context = &recorder, .begin = Recorder.begin, .data = Recorder.data, .end = Recorder.end, .informational = if (observe_interims) Recorder.informational else null };
+        try std.testing.expect(try stream.pollResponse(sink));
+        try std.testing.expect(try stream.pollResponse(sink));
+        _ = try stream.readResponse(sink, null);
+        try std.testing.expectEqualStrings(if (observe_interims) "abHDE" else "HDE", recorder.events[0..recorder.count]);
+    }
 }
 
 test "stream blocking body write waits for queue capacity" {
