@@ -71,6 +71,47 @@ usable for keep-alive and pipelining after the request completes; the next
 read boundaries are covered by `src/http1/runtime/body_reader_tests.zig`,
 `src/http1/runtime/body_pull_tests.zig`, and the message/chunk tests.
 
+### Native writer deadlines
+
+HTTP/1 `Client.startRequestWithDeadline` and
+`Connection.startResponseWithDeadline` bound head setup. Their `WithTimeout`
+forms derive one awake-clock deadline for that setup. Subsequent body writes,
+finish operations and response reads take their own explicit bounds; reusing
+one absolute timestamp composes an overall operation budget:
+
+```zig
+var writer = try client.startRequestWithDeadline(.{
+    .method = .POST,
+    .target = "/upload",
+    .host = "example.com",
+    .body_length = null, // unknown length; native H1 uses ?usize
+}, until);
+defer writer.deinit();
+try writer.writeWithDeadline(chunk, until);
+try writer.finishWithDeadline(until);
+var response = try writer.readResponseWithDeadline(until);
+defer response.deinit(allocator);
+```
+
+Request and response writers expose `writeWithDeadline`,
+`writeChunksWithDeadline`, `finishWithDeadline` and
+`finishTrailersWithDeadline`, together with corresponding timeout forms.
+`committedBytes()` counts application body bytes rather than chunk headers,
+CRLF or trailers. It retains the known prefix after partial timed output and
+remains stable for a completed writer when the connection starts a new
+exchange. An untimed transport failure may have an unknown additional prefix.
+HTTP/1 transport output failures retire the connection; the count does not
+permit replay on that failed byte stream. A pre-expired call starts no I/O and
+leaves an active writer usable.
+
+`waitForContinueWithDeadline` and its informational/timeout forms include the
+body of an early final response in the same budget, while still observing
+ordered 103/100 heads. `Connection.writeResponseWithDeadline` and
+`writeResponseWithTimeout` cover a complete buffered head/body/trailer message.
+The advanced `StreamingBodyWriter.init` constructor remains available; timed
+operations require the I/O and tracked output hook supplied by
+`initWithDeadline`. Native request/response constructors install them.
+
 ## HTTP/2
 
 Two stable shapes are available:

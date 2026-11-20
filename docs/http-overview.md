@@ -19,7 +19,7 @@ See [findings](#findings-and-next-work) before choosing an upload API.
 | --- | --- | --- |
 | Shared HTTP semantics | `netz.http` | Unified client/pool, URI policies, headers, cookies, forms, content decoding and digests; [exports](../src/http/mod.zig), [request/response types](../src/http/client/types.zig). |
 | HTTP/1.1 codecs | `netz.http1` | Request/response heads, methods, Host/target checks, framing, chunked bodies and trailers; [module](../src/http1/mod.zig), `head/`, `response_framing.zig`, `chunk_size.zig`, `transfer_encoding.zig`. |
-| HTTP/1.1 runtime | `netz.http1.runtime` | TCP/Unix/TLS transports, persistent clients/servers, pull/push bodies, request writers and tunnel handoff; [connection](../src/http1/runtime/connection.zig), [client](../src/http1/runtime/client.zig), `runtime/message/`, `runtime/body_writer.zig`. |
+| HTTP/1.1 runtime | `netz.http1.runtime` | TCP/Unix/TLS transports, persistent clients/servers, pull/push bodies, request writers and tunnel handoff; [connection](../src/http1/runtime/connection.zig), [client](../src/http1/runtime/client.zig), [request writer](../src/http1/runtime/request_writer.zig), [response writer](../src/http1/runtime/response_writer.zig), `runtime/message/`, `runtime/body_writer.zig`. |
 | HTTP/2 codecs | `netz.http2` | Frames, SETTINGS, HPACK/Huffman, priority and peer metadata; [module](../src/http2/mod.zig), `hpack/`. |
 | HTTP/2 runtime | `netz.http2.runtime` | Stream state, connection/stream flow control, one frame reader, concurrent serving, shared requests, push and CONNECT; [connection](../src/http2/runtime/connection.zig), `runtime/frame/`, `runtime/headers/`, `runtime/flow/`, `runtime/duplex/`, `runtime/concurrent.zig`. |
 | HTTP/3 codecs | `netz.http3` | HTTP/3 messages/control streams, SETTINGS, QPACK, ORIGIN, priority, capsules and CONNECT datagrams; [module](../src/http3/mod.zig), `codec/`, `qpack/`, `settings.zig`, `control.zig`. |
@@ -163,6 +163,15 @@ foreign backends and wrapped vtables. The original no-deadline H2 survivor
 gate and the equivalent wrapped-vtable gate cover cancellation and later
 same-connection reuse. [Delivery evidence](evidence/http_socket_read_ownership/2026-11-20/README.md)
 retains the registration trace; historical baseline samples remain archived.
+
+Native H1 deadline parity is now delivered for request/response head setup,
+streaming write/chunk/finish/trailer methods, Continue waits, and complete
+buffered responses. Tracked writes count body bytes across fixed and chunked
+framing while preserving the existing terminal policy for transport failures.
+Request/response writers and response sequence helpers now have cohesive owning
+modules. [Delivery evidence](evidence/http1_streaming_deadlines/2026-11-20/README.md)
+covers both I/O backends, all output strategies, partial progress and reuse.
+Unified/pool upload deadline and Reader composition remain the next API work.
 
 The fixed HTTP proxy has explicit product limits: no TLS connection to the
 proxy itself, authentication challenge exchange, PAC or automatic proxy

@@ -1036,6 +1036,16 @@ pub const Connection = struct {
         );
     }
 
+    pub fn writeResponseWithDeadline(self: *Connection, response: ResponseOptions, deadline: std.Io.Clock.Timestamp) Error!void {
+        _ = try runtime.deadline_policy.usableAwake(self.io, deadline);
+        try self.writer_state.ensureAvailable();
+        return self.writeResponseFailClosedUntil(response, self.defaultResponseDate(), deadline);
+    }
+
+    pub fn writeResponseWithTimeout(self: *Connection, response: ResponseOptions, timeout: std.Io.Duration) Error!void {
+        return self.writeResponseWithDeadline(response, (try runtime.deadline_policy.fromTimeout(self.io, timeout)).?);
+    }
+
     /// Keep deterministic validation/allocation failures retryable, but retire
     /// the connection after any transport write error because an unknown wire
     /// prefix may already be visible to the peer.
@@ -1044,6 +1054,10 @@ pub const Connection = struct {
         response: ResponseOptions,
         default_date: ?[]const u8,
     ) Error!void {
+        return self.writeResponseFailClosedUntil(response, default_date, null);
+    }
+
+    fn writeResponseFailClosedUntil(self: *Connection, response: ResponseOptions, default_date: ?[]const u8, deadline: ?std.Io.Clock.Timestamp) Error!void {
         const parts = try runtime_write.prepareServerResponse(
             self.allocator,
             response,
@@ -1051,14 +1065,12 @@ pub const Connection = struct {
             &self.write_scratch,
         );
         var transport_started = false;
-        writeMessagePartsWithStrategy(
-            self.allocator,
-            self.transport(),
-            self.limits.write_strategy,
-            parts,
-            &self.write_scratch,
-            &transport_started,
-        ) catch |err| {
+        var committed: usize = 0;
+        const output = if (deadline) |absolute|
+            @import("writer_output.zig").connection(self, &.{ parts.header, parts.body }, &committed, &transport_started, absolute)
+        else
+            writeMessagePartsWithStrategy(self.allocator, self.transport(), self.limits.write_strategy, parts, &self.write_scratch, &transport_started);
+        output catch |err| {
             if (transport_started) self.writer_state.phase = .unusable;
             return err;
         };
@@ -1072,6 +1084,19 @@ pub const Connection = struct {
         self: *Connection,
         options: StreamingResponseOptions,
     ) Error!ResponseWriter {
+        return self.startResponseUntil(options, null);
+    }
+
+    pub fn startResponseWithDeadline(self: *Connection, options: StreamingResponseOptions, deadline: std.Io.Clock.Timestamp) Error!ResponseWriter {
+        _ = try runtime.deadline_policy.usableAwake(self.io, deadline);
+        return self.startResponseUntil(options, deadline);
+    }
+
+    pub fn startResponseWithTimeout(self: *Connection, options: StreamingResponseOptions, timeout: std.Io.Duration) Error!ResponseWriter {
+        return self.startResponseWithDeadline(options, (try runtime.deadline_policy.fromTimeout(self.io, timeout)).?);
+    }
+
+    fn startResponseUntil(self: *Connection, options: StreamingResponseOptions, deadline: ?std.Io.Clock.Timestamp) Error!ResponseWriter {
         const generation = try self.writer_state.begin();
         errdefer if (self.writer_state.phase == .writing) {
             self.writer_state.phase = .idle;
@@ -1085,12 +1110,17 @@ pub const Connection = struct {
         );
         const announced_trailers = self.write_scratch.trailerHeaders();
         const active_transport = self.transport();
-        active_transport.writeAll(prepared.head) catch |err| {
+        var committed: usize = 0;
+        const output = if (deadline) |absolute|
+            active_transport.writeAllWithDeadline(prepared.head, &committed, absolute)
+        else
+            active_transport.writeAll(prepared.head);
+        output catch |err| {
             self.writer_state.phase = .unusable;
             return err;
         };
         return .{
-            .body = StreamingBodyWriter.init(
+            .body = StreamingBodyWriter.initWithDeadline(
                 self.allocator,
                 &self.writer_state,
                 generation,
@@ -1100,6 +1130,8 @@ pub const Connection = struct {
                 prepared,
                 announced_trailers,
                 true,
+                self.io,
+                @import("writer_output.zig").connection,
             ),
         };
     }

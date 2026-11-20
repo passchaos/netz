@@ -60,6 +60,7 @@ test {
     _ = @import("close_and_drain_tests.zig");
     _ = @import("keep_alive_and_pipeline_tests.zig");
     _ = @import("writer_framing_and_reader_tests.zig");
+    _ = @import("writer_deadline_tests.zig");
     _ = @import("message/continue_retry_tests.zig");
     _ = @import("message/continue_body_retry_tests.zig");
     _ = @import("message/allocation_retry_tests.zig");

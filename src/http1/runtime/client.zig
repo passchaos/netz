@@ -1639,6 +1639,21 @@ pub const Client = struct {
         self: *Client,
         request_options: StreamingRequestOptions,
     ) Error!RequestWriter {
+        return self.startRequestUntil(request_options, null);
+    }
+
+    /// Bound request-head setup; later body and response operations choose
+    /// their own deadlines on the returned writer.
+    pub fn startRequestWithDeadline(self: *Client, options: StreamingRequestOptions, deadline: std.Io.Clock.Timestamp) Error!RequestWriter {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        return self.startRequestUntil(options, deadline);
+    }
+
+    pub fn startRequestWithTimeout(self: *Client, options: StreamingRequestOptions, timeout: std.Io.Duration) Error!RequestWriter {
+        return self.startRequestWithDeadline(options, (try deadline_policy.fromTimeout(self.io, timeout)).?);
+    }
+
+    fn startRequestUntil(self: *Client, request_options: StreamingRequestOptions, deadline: ?std.Io.Clock.Timestamp) Error!RequestWriter {
         const generation = try self.writer_state.begin();
         errdefer if (self.writer_state.phase == .writing) {
             self.writer_state.phase = .idle;
@@ -1652,7 +1667,12 @@ pub const Client = struct {
             &self.write_scratch,
         );
         const announced_trailers = self.write_scratch.trailerHeaders();
-        self.transport().writeAll(prepared.head) catch |err| {
+        var committed: usize = 0;
+        const output = if (deadline) |absolute|
+            self.transport().writeAllWithDeadline(prepared.head, &committed, absolute)
+        else
+            self.transport().writeAll(prepared.head);
+        output catch |err| {
             self.writer_state.phase = .unusable;
             return err;
         };
@@ -1660,7 +1680,7 @@ pub const Client = struct {
             .client = self,
             .method = options.method,
             .expects_continue = requestShouldSendContinue(prepared.head),
-            .body = StreamingBodyWriter.init(
+            .body = StreamingBodyWriter.initWithDeadline(
                 self.allocator,
                 &self.writer_state,
                 generation,
@@ -1670,6 +1690,8 @@ pub const Client = struct {
                 prepared,
                 announced_trailers,
                 false,
+                self.io,
+                @import("writer_output.zig").client,
             ),
         };
     }
