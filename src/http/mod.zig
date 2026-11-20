@@ -77,6 +77,7 @@ pub const HappyEyeballsOptions = client.HappyEyeballsOptions;
 pub const Header = client.Header;
 pub const HeaderIterator = client.HeaderIterator;
 pub const ReaderBody = client.ReaderBody;
+pub const ReaderReplay = client.ReaderReplay;
 pub const BodySource = client.BodySource;
 pub const BodyLength = client.BodyLength;
 pub const RequestHandle = client.RequestHandle;

@@ -1,0 +1,24 @@
+{
+  "parent": "b0d5d8ec0a1e81d5451ee4469c216be9e1c85c92",
+  "zig": "0.16.0",
+  "platform": "macOS aarch64",
+  "sources": {
+    "src/http/client.zig": "e2bfcf5e8efee5f10e5b4547e0b79bc530930e74ef1715f998980fecfdf5df51",
+    "src/http/client/types.zig": "980e6dcbf23219e6a18d4a2fa709170c91873914254b294955b803a386833951",
+    "src/http/client/redirect.zig": "8215b3420bf6b2dc360b677f77fc1a48e833182954cb8b95e40d57ee8e0591ee",
+    "src/http/client_pool.zig": "d29285c5847a4e93303928649bd064829776c316b91d266c29c6cd473f36c963",
+    "src/http/client_pool/requests.zig": "0afa748616406aea72a8dfb801f8514581f99b088c4ce439717565bddb50c309",
+    "src/http/client_pool/shared_tcp/exchange.zig": "59f2035727cce47e853ae231b6bd66d80133755dab3e7c793a681c908119ee3d",
+    "src/http/client_pool/shared_tcp/driver.zig": "541f0ce3e9b09af9f8babf51141794b3c6c70094b7d27207a452287e5ad3d22c",
+    "src/http/client_pool/shared_tcp/body_reader.zig": "bdfa2e5cd5c5e7af4d238276107451df73a92bb3045d21798d6d24639cd6cd37",
+    "src/http/client/duplex.zig": "977af49fa83692011bb9e5035bba8a23646499e6eb4f7d814b3539ea80b8b6c0",
+    "src/http/client/header_mapping.zig": "75b61295d54fe6a2905eb0137f1ce36d6b2807383c091ab3fb2b692682be7e0a",
+    "src/http/client_tests/body_sources.zig": "96d2db38f9df41dbf19d42e11644fc9235863b4824cd59d8c22af1963adf3b6e",
+    "src/http/client_tests/reader_concurrency.zig": "854600dda6111d0a3701fe50d74526ee074d1815521e7555785fd40b90a5dcd8",
+    "src/http/client_tests/reader_replay.zig": "fb968ca57696abc105192410dad987ebc8ea62736cbfc99b7d316cfa62d8bc9d",
+    "src/http/client_tests/reader_replay_h3.zig": "1fa6048a0388ed505f3c40bba0b14d2686b029560eedde4afc8ba194178c4553",
+    "src/http/client_tests/trailers.zig": "6391384f2e9eb82ec566ccb49295adc198168d1b0ff3cc54be4b3c27205b57cd"
+  },
+  "pending_ownership_baseline": "b0d5d8ec",
+  "pending_ownership_scope": "Existing ordinary H2 zio packed-head cancellation hangs at tests.zig:175 on baseline and pre-source-validation WIP; unresolved."
+}

@@ -191,7 +191,7 @@ pub fn Driver(comptime State: type, comptime Pool: type, comptime Lease: type) t
                             self.failure(command, err);
                             continue;
                         };
-                        command.exchange = Exchange.init(connection, command.target, command.request, self.until(command)) catch |err| {
+                        command.exchange = Exchange.init(connection, command.target, command.request, self.until(command), &self.wake, self.owner.options.write_chunk_bytes) catch |err| {
                             self.failure(command, err);
                             continue;
                         };

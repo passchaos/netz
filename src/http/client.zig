@@ -27,6 +27,8 @@ pub const Error = http1_runtime.Error || http2_runtime.Error ||
     InvalidAddressConnectPolicy,
     InvalidClientOptions,
     StreamingBodyUnsupported,
+    /// A request source failed, independently of the connection transport.
+    RequestBodyReadFailed,
 };
 pub const ResponseTimeoutError = Error || std.Io.Timeout.Error ||
     std.Io.ConcurrentError;
@@ -43,6 +45,7 @@ pub const HttpProxyOptions = types.HttpProxyOptions;
 pub const Header = types.Header;
 pub const HeaderIterator = types.HeaderIterator;
 pub const ReaderBody = types.ReaderBody;
+pub const ReaderReplay = types.ReaderReplay;
 pub const BodySource = types.BodySource;
 pub const BodyLength = types.BodyLength;
 pub const RequestHandle = duplex.Handle;
@@ -458,7 +461,7 @@ fn streamHttp1Body(
         if (deadline) |absolute| {
             _ = try deadline_policy.usableAwake(client.io, absolute);
         }
-        const read = try body.reader.readSliceShort(&buffer);
+        const read = body.reader.readSliceShort(&buffer) catch return error.RequestBodyReadFailed;
         if (read == 0) break;
         try writer.write(buffer[0..read]);
     }
@@ -503,7 +506,7 @@ fn streamHttp2Body(
 
     var buffer: [streaming_chunk_size]u8 = undefined;
     while (true) {
-        const read = try body.reader.readSliceShort(&buffer);
+        const read = body.reader.readSliceShort(&buffer) catch return error.RequestBodyReadFailed;
         if (read == 0) break;
         if (deadline) |absolute| {
             writer.writeWithDeadline(buffer[0..read], absolute) catch |err| switch (err) {
@@ -557,19 +560,7 @@ fn streamHttp2Body(
 }
 
 fn requestBodyLength(options: RequestOptions) ?usize {
-    if (options.body_length) |declared| {
-        return switch (declared) {
-            .unknown => null,
-            .exact => |length| length,
-        };
-    }
-    if (options.body_source) |source| {
-        return switch (source) {
-            .slice => |body| body.len,
-            .reader => |reader| reader.length,
-        };
-    }
-    return options.body.len;
+    return options.bodyLength();
 }
 
 fn connectAuthority(

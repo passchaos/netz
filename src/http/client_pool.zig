@@ -1230,19 +1230,7 @@ fn dropConnectionWithoutCloseNotify(_: std.mem.Allocator, connection_value: Idle
 }
 
 fn streamBodyLength(options: client.RequestOptions) ?usize {
-    if (options.body_length) |declared| {
-        return switch (declared) {
-            .unknown => null,
-            .exact => |length| length,
-        };
-    }
-    if (options.body_source) |source| {
-        return switch (source) {
-            .slice => |body| body.len,
-            .reader => |reader| reader.length,
-        };
-    }
-    return options.body.len;
+    return options.bodyLength();
 }
 
 fn originKeyForUri(

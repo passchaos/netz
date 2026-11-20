@@ -1,0 +1,50 @@
+Analysis of sampling test (pid 52824) every 1 millisecond
+Process:         test [52824]
+Path:            /Users/USER/*/test
+Load Address:    0x100eac000
+Identifier:      test
+Version:         0
+Code Type:       ARM64
+Platform:        macOS
+Parent Process:  build [24539]
+Target Type:     live task
+
+Date/Time:       2026-11-20 18:04:05.807 +0800
+Launch Time:     2026-11-20 18:03:24.262 +0800
+OS Version:      macOS 26.6.2 (25G83)
+Report Version:  7
+Analysis Tool:   /usr/bin/sample
+
+Physical footprint:         5488K
+Physical footprint (peak):  5552K
+Idle exit:                  untracked
+----
+
+Call graph:
+    893 Thread_160556466   DispatchQueue_1: com.apple.main-thread  (serial)
+      893 start  (in dyld) + 6992  [0x187e004e4]
+        893 main  (in test) + 664  [0x10120403c]  start.zig:663
+          893 test_runner.main  (in test) + 1192  [0x101206278]  test_runner.zig:71
+            893 test_runner.mainServer  (in test) + 3240  [0x101205bc8]  test_runner.zig:140
+              893 http.client_pool.shared_tcp.tests.test.unified HTTP ordinary H2 zio cancels an owned packed response head and preserves sibling reuse  (in test) + 160  [0x101237248]  tests.zig:203
+                893 http.client_pool.shared_tcp.tests.exercise__anon_38797  (in test) + 21360  [0x10123367c]  tests.zig:175
+                  893 Io.Future(@typeInfo(@typeInfo(@TypeOf(http.client_pool.shared_tcp.tests.request)).@"fn".return_type.?).error_union.error_set!http.client.types.OwnedResponse).await  (in test) + 300  [0x1013421d8]  Io.zig:1201
+                    893 io.awaitImpl  (in test) + 72  [0x101f801e0]  io.zig:345
+                      893 io.awaitOrCancel  (in test) + 116  [0x101f7f0d0]  io.zig:337
+                        893 select.waitUntilComplete__anon_10903753  (in test) + 28  [0x101f7f350]  select.zig:651
+                          893 select.waitInternal__anon_10903780  (in test) + 292  [0x101f7f554]  select.zig:605
+                            893 common.Waiter.wait__anon_51226  (in test) + 208  [0x10128b7f0]  common.zig:378
+                              893 common.Waiter.waitTask__anon_53737  (in test) + 168  [0x10128c4f8]  common.zig:546
+                                893 task.AnyTask.yield__anon_53797  (in test) + 56  [0x10128c60c]  task.zig:274
+                                  893 task.AnyTask.yieldFrom__anon_53808  (in test) + 296  [0x10128e714]  task.zig:302
+                                    893 runtime.Executor.run  (in test) + 808  [0x10128e1f8]  runtime.zig:882
+                                      893 runtime.Executor.parkAndSearch  (in test) + 448  [0x10128dd9c]  runtime.zig:946
+                                        893 runtime.Executor.park  (in test) + 428  [0x10128d59c]  runtime.zig:996
+                                          893 ev.loop.Loop.poll  (in test) + 1000  [0x10128d2bc]  loop.zig:1454
+                                            893 ev.backends.kqueue.poll  (in test) + 472  [0x10128c94c]  kqueue.zig:741
+                                              893 kevent  (in libsystem_kernel.dylib) + 8  [0x18818dfc4]
+
+Total number in stack (recursive counted multiple, when >=5):
+
+Sort by top of stack, same collapsed (when >= 5):
+        kevent  (in libsystem_kernel.dylib)        893

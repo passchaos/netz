@@ -114,6 +114,9 @@ pub fn requestUriBefore(
                 if (!h3FallbackAllowed(h3_state, request.method, err)) {
                     return @errorCast(err);
                 }
+                if (err != error.StreamingBodyUnsupported and !try request.bodySource().prepareReplay()) {
+                    return @errorCast(err);
+                }
             }
         }
     }
@@ -128,7 +131,7 @@ pub fn requestUriBefore(
             },
             .failure => |failure| {
                 if (retry_stale and failure.was_reused and http_method.isIdempotent(request.method) and
-                    retryableStaleConnectionError(failure.err))
+                    retryableStaleConnectionError(failure.err) and try request.bodySource().prepareReplay())
                 {
                     retry_stale = false;
                     continue;
@@ -160,7 +163,7 @@ pub fn requestUriBefore(
             lease.discard();
             if (retry_stale and was_reused and
                 http_method.isIdempotent(request.method) and
-                retryableStaleConnectionError(err))
+                retryableStaleConnectionError(err) and try request.bodySource().prepareReplay())
             {
                 retry_stale = false;
                 continue;
@@ -294,7 +297,7 @@ fn requestHttp3ReaderBody(
 
     var buffer: [16 * 1024]u8 = undefined;
     while (true) {
-        const count = try reader_body.reader.readSliceShort(&buffer);
+        const count = reader_body.reader.readSliceShort(&buffer) catch return error.RequestBodyReadFailed;
         if (count == 0) break;
         handle.writeBodyBlocking(buffer[0..count], false, deadline) catch |err|
             switch (err) {
@@ -480,6 +483,7 @@ fn h3FallbackAllowed(
         error.OutOfMemory,
         error.InvalidHeader,
         error.InvalidUri,
+        error.RequestBodyReadFailed,
         => return false,
         else => {},
     }
@@ -498,6 +502,7 @@ fn h3FailureAffectsAlternative(err: anyerror) bool {
         error.InvalidHeader,
         error.InvalidUri,
         error.StreamingBodyUnsupported,
+        error.RequestBodyReadFailed,
         => false,
         else => true,
     };

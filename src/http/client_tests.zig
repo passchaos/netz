@@ -12,6 +12,10 @@ const vort = @import("vort");
 test {
     _ = @import("client_tests/duplex.zig");
     _ = @import("client_tests/trailers.zig");
+    _ = @import("client_tests/body_sources.zig");
+    _ = @import("client_tests/reader_concurrency.zig");
+    _ = @import("client_tests/reader_replay.zig");
+    _ = @import("client_tests/reader_replay_h3.zig");
 }
 
 fn findHeader(headers: anytype, name: []const u8) ?[]const u8 {

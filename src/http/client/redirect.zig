@@ -13,12 +13,7 @@ pub fn followDetailed(
     deadline: ?std.Io.Clock.Timestamp,
     comptime Adapter: type,
 ) OperationError!types.RedirectedResponse {
-    if (request.body_source) |source| {
-        switch (source) {
-            .reader => return error.StreamingBodyUnsupported,
-            .slice => {},
-        }
-    }
+    if (!request.bodySource().isReplayable()) return error.StreamingBodyUnsupported;
     const allocator = client.allocator;
     const policy = redirect_options.policy;
     var chain = uri_redirect.Chain.init(allocator, policy);
@@ -84,6 +79,9 @@ pub fn followDetailed(
             response.status(),
             hop_request.method,
         );
+        if (action == .preserve) {
+            if (!try hop_request.bodySource().prepareReplay()) return error.StreamingBodyUnsupported;
+        }
         const remove_credentials = next.cross_origin and
             !policy.forward_cross_origin_credentials;
         hop_request.headers = try redirectHeaders(

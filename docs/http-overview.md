@@ -7,9 +7,10 @@ loopback checks. Historical peer and performance evidence is identified
 separately; this review does not certify every protocol path or rerun benchmarks.
 
 The HTTP implementation covers codecs, live clients and servers, pooling,
-streaming, shared request ownership, and application content helpers. The main
-integration defect found here is that ordinary pooled H2 requests ignore
-`RequestOptions.body_source`, although standalone and duplex APIs support it.
+streaming, shared request ownership, and application content helpers. The original main
+integration defect was that ordinary pooled H2 requests ignored
+`RequestOptions.body_source`; that behavior and consumed-body replay are now
+repaired. The finding table records current delivery status.
 See [findings](#findings-and-next-work) before choosing an upload API.
 
 ## Ownership and module map
@@ -63,14 +64,14 @@ optional H3 route. Standalone `Client`/`Connection` does not select H3.
 | Protocol selection | HTTPS defaults to preferring H2, offering H2/H1 in one authenticated handshake; cleartext defaults to H1 and needs explicit H2 prior knowledge. The low-level H2 runtime also supports h2c Upgrade. |
 | Endpoint resolution | Hostnames, IPv4 and bracketed IPv6; configurable resolver, sequential address fallback or bounded Happy Eyeballs. TCP identity remains bound to the origin URI rather than the chosen socket address. |
 | Complete requests | Common method/header/body/trailer options and owned responses. Repeated headers and trailers remain individually accessible through iterators, including separate Set-Cookie fields. |
-| Request body sources | `body_source.slice` or `body_source.reader` is documented to override `body`. Standalone H1/H2 and H3 pool uploads have implementations; ordinary shared H2 Pool calls currently violate that precedence. |
+| Request body sources | `body_source.slice` or `body_source.reader` is documented to override `body`. Standalone H1/H2 and H3 pool uploads have implementations; ordinary shared H2 Pool calls now honor that precedence with bounded Reader production. |
 | Duplex requests | `Connection.startRequest`, `Pool.startRequest`, `http.startHttp3Request`; incremental body writes, trailers, final response callbacks and optional informational callbacks. The connection/pool must outlive its handle. |
 | Ordinary H2 concurrency | One owner per active origin drives HPACK, frames, uploads and independent stream deadlines. Later requests can join while earlier responses wait. Queue and stream admission are bounded. |
 | Manual leases | `Pool.acquireUri` returns an exclusive H1/H2 lease. It does not expose an H3 lease or share its frame reader with ordinary Pool requests. |
 | Pool lifecycle | Idle/leased/connecting accounting, per-origin/global idle caps, monotonic expiry, global LRU, FIFO capacity admission, close wakeups and lifecycle counters. An optional total budget spans TCP and H3. |
-| Redirects | Explicit `requestUriFollowingRedirects*` calls, relative Location resolution, loop/count bounds, final URI metadata, method/body rewrite policy and one chain deadline. Reader-backed bodies are rejected because they cannot be replayed automatically. |
+| Redirects | Explicit `requestUriFollowingRedirects*` calls, relative Location resolution, loop/count bounds, final URI metadata, method/body rewrite policy and one chain deadline. Single-pass Readers are rejected; explicitly replayable Readers reset for preserving hops. |
 | Credential policy | Cross-origin credentials and client identities are restricted by default; HTTPS downgrade requires opt-in. Origin/ALPN-scoped ticket caches support resumed TCP and QUIC connections. |
-| Stale retry / H3 fallback | One stale reused TCP retry for classified idempotent methods. H3 can back off failed alternatives and fall back under its configured method policy. Consumed Reader replay needs additional guards; see findings. |
+| Stale retry / H3 fallback | One stale reused TCP retry for classified idempotent methods. H3 can back off failed alternatives and fall back under its configured method policy. Reader replay requires an explicit reset callback; single-pass sources preserve their first error. See [body sources](http_bodies.md). |
 | HTTP proxy | Fixed cleartext HTTP/1.1 proxy: absolute-form HTTP; HTTPS CONNECT followed by origin TLS/ALPN. Proxy headers stay proxy-only. H3 is rejected while this proxy is configured. |
 | SOCKS5 | TCP CONNECT for H1/H2 and UDP ASSOCIATE for H3, including shared H3 endpoint routing and proxy-side destination DNS. Mutually exclusive with the HTTP proxy option. |
 
@@ -146,12 +147,19 @@ convenience decoders do not mean the connection runtimes lack dynamic tables.
 
 | ID | Priority | Finding | Evidence / next action |
 | --- | --- | --- | --- |
-| F1 | P1 correctness | Ordinary shared H2 Pool requests ignore `body_source`, using `body` for Content-Length and DATA. Reader/slice precedence differs from the standalone client and H1/H3 paths. | **Reproduced** on a real h2c connection: both sources delivered `fallback`. [Exchange.init/write](../src/http/client_pool/shared_tcp/exchange.zig), [probe evidence](evidence/http_functional_review/2026-11-20/README.md). Add both source variants to pooled tests and implement source-aware bounded ownership or a validated fallback. Until then use standalone Connection or `Pool.startRequest` for these H2 uploads. |
+| F1 | Resolved | Ordinary shared H2 Pool requests now resolve `body_source` before Content-Length or DATA and stream Reader bodies through one bounded producer per request. | Real h2c coverage checks 70-KiB slice/known/unknown Reader bodies under a 320-byte stream window, empty Reader trailers, late siblings and zio cancellation with same-connection reuse. [Delivery evidence](evidence/http_body_sources/2026-11-20/README.md). |
 | F2 | Resolved | H1 streaming trailer names now use stack storage through 16 fields and exact overflow allocation above that capacity. | Reader-backed and duplex uploads exercise 16/17/40 trailers over one persistent H1 connection. `DuplexHeader` now aliases the common `http.Header`, including H2/H3 never-indexed metadata. The original static finding was at the audit baseline. The focused trailer/duplex bundle passed 93/93 tests on 2026-11-20, including support tests. |
-| F3 | P1 replay | Stale TCP retry and H3 fallback check method/error policy without tracking whether a Reader has already been consumed or can restart. | **Static inspection**, no fault-injected replay result: [retry/fallback](../src/http/client_pool/requests.zig), [Reader type](../src/http/client/types.zig). Idempotency does not reconstruct an exhausted body. Add consumed-prefix/disconnect tests, and suppress automatic replay or require a restartable source. |
+| F3 | Resolved | Stale TCP retry, H3 fallback and body-preserving redirects require a replayable source. Reader rewind is explicit, and source read failures are distinct from transport failure. | Real tests cover consumed single-pass refusal, complete stale replay, failed rewind without redial, source failure without retry, 307 redirects and H3 upload rejection followed by exact TCP replay. [Body API](http_bodies.md). |
 | F4 | P2 facade coverage | H3 concurrent `startResponseWithBodyAndInformational` rejects non-final initial body contributions or response trailers when informational heads are supplied. | Explicit `InformationalStreamingUnsupported` branch in [concurrent.zig](../src/http3/runtime/concurrent.zig). Lower-level H3 1xx support is broader. Decide whether the facade needs independent informational writes, then test 103 + several DATA chunks + trailers. |
 | F5 | P2 documentation | weft integration request 8 remained open after empty H2 body completion and `bodyFinished()` were delivered; the docs index described content digests as authentication. | EOF regression passed in this review; current [createSlot](../src/http2/runtime/concurrent.zig) seeds completed state. Integration status and index wording corrected with this review. Historical evidence READMEs retain their original scope. |
 | F6 | P2 structure/evidence | Several runtime/owner files remain large, and feature descriptions are spread through a 4,000+ line parity log. | Keep this overview as an entry point; extract cohesive owner responsibilities without changing single-reader ownership. Add a current feature/evidence index rather than interpreting old counts as current certification. |
+
+An additional existing macOS/zio ownership issue remains open: the ordinary
+H2 packed-response-head cancellation regression waits indefinitely for a
+surviving response when using its no-deadline request helper. The unchanged
+`b0d5d8ec` baseline and the working implementation reached the same await;
+[stack samples](evidence/http_body_sources/2026-11-20/README.md) retain that
+evidence. It is not counted as a passing ownership gate.
 
 The fixed HTTP proxy has explicit product limits: no TLS connection to the
 proxy itself, authentication challenge exchange, PAC or automatic proxy

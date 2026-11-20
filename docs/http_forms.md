@@ -109,9 +109,10 @@ const head = try handle.readResponse(sink.responseSink());
 `HandshakeClient`. See [http_streaming.md](http_streaming.md) for the full
 `ResponseSink`, informational-response, trailer, and deadline contract.
 
-Reader-backed bodies are also rejected by redirect following and by the
-HTTP/1 forward-proxy path, because those paths may need to replay or rewrite
-the request body. Use a slice body, or drive the redirect/proxy manually.
+Single-pass Reader bodies are rejected by redirect following. A Reader with
+an explicit `replay` reset callback can follow body-preserving redirects;
+see [body sources and replay](http_bodies.md). The HTTP/1 forward-proxy path
+still rejects Reader bodies. Use a slice body or drive that proxy manually.
 
 The reader and its backing storage must outlive the request call. A
 `multipart.Reader` reports encoding failures as `error.ReadFailed`; call

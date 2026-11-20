@@ -70,16 +70,52 @@ pub const Header = struct {
     never_indexed: bool = false,
 };
 
+/// Optional explicit reset for a body that can be reproduced on another
+/// request attempt. Called only after the previous attempt has stopped reading.
+pub const ReaderReplay = struct {
+    context: ?*anyopaque = null,
+    rewind: *const fn (?*anyopaque, *std.Io.Reader) std.Io.Reader.Error!void,
+};
+
 pub const ReaderBody = struct {
     reader: *std.Io.Reader,
     /// Exact body size when known. HTTP/1 uses fixed framing when present and
     /// chunked framing otherwise; HTTP/2 adds Content-Length when present.
     length: ?usize = null,
+    /// Without a reset callback, the Reader is single-pass and automatic
+    /// retries/fallback/redirect replay are disabled even for idempotent methods.
+    replay: ?ReaderReplay = null,
 };
 
 pub const BodySource = union(enum) {
     slice: []const u8,
     reader: ReaderBody,
+
+    pub fn contentLength(self: BodySource) ?usize {
+        return switch (self) {
+            .slice => |bytes| bytes.len,
+            .reader => |body| body.length,
+        };
+    }
+
+    pub fn isReplayable(self: BodySource) bool {
+        return switch (self) {
+            .slice => true,
+            .reader => |body| body.replay != null,
+        };
+    }
+
+    /// Prepare a fresh attempt without ever replaying an exhausted Reader.
+    pub fn prepareReplay(self: BodySource) std.Io.Reader.Error!bool {
+        switch (self) {
+            .slice => return true,
+            .reader => |body| {
+                const replay = body.replay orelse return false;
+                try replay.rewind(replay.context, body.reader);
+                return true;
+            },
+        }
+    }
 };
 
 /// Manual duplex-streaming body declaration for `Connection.startRequest`.
@@ -106,6 +142,19 @@ pub const RequestOptions = struct {
     /// Permit an explicitly configured HTTP/3 pool to use 0-RTT for this
     /// request. HTTP/1, HTTP/2, and reused HTTP/3 connections ignore it.
     allow_early_data: bool = true,
+
+    pub fn bodySource(self: RequestOptions) BodySource {
+        return self.body_source orelse .{ .slice = self.body };
+    }
+
+    /// Manual streaming declarations override the source's inferred length.
+    pub fn bodyLength(self: RequestOptions) ?usize {
+        if (self.body_length) |length| return switch (length) {
+            .unknown => null,
+            .exact => |exact| exact,
+        };
+        return self.bodySource().contentLength();
+    }
 };
 
 pub const RedirectOptions = struct {

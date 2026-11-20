@@ -11,6 +11,7 @@ performance record.
 | --- | --- |
 | [architecture.md](architecture.md) | Layered design, performance invariants P1-P10, memory/concurrency doctrine, change acceptance checklist, known structural gaps. |
 | [http-overview.md](http-overview.md) | HTTP/1.1, HTTP/2 and HTTP/3 functionality, unified APIs, defaults, ownership boundaries and verified integration findings. |
+| [http_bodies.md](http_bodies.md) | Common request body sources, bounded shared H2 Reader uploads and explicit replay across retries, fallback and redirects. |
 | [architecture/optimization-backlog.md](architecture/optimization-backlog.md) | November 19 project review: reproduced relay/rate defects, prioritized optimization work, structural findings, and validation requirements. |
 | [trust_roots.md](trust_roots.md) | System versus compiled-in Mozilla trust roots, precedence, protocol surfaces, and store reuse. |
 | [build.md](build.md) | Build, test, fuzz, interop, release-archive, and evidence gates. |
@@ -54,6 +55,7 @@ performance record.
 | [http3_complete_responses.md](http3_complete_responses.md) | Complete-response HTTP/3 path. |
 | [http3_multipath.md](http3_multipath.md) | Application-level multipath over independent QUIC connections, the cross-host probe, and the multi-NIC test recipe. |
 | [http_digest.md](http_digest.md) | RFC 9530 content/representation digests, algorithm preferences and streaming integrity verification. |
+| [authentication.md](authentication.md) | HTTP/WebSocket/WebTransport/MQTT credential transport, TLS client identity, verifier and admission boundaries. |
 | [http_proxy.md](http_proxy.md) | HTTP proxy behavior. |
 | [webtransport_http2_capsules.md](webtransport_http2_capsules.md) | WebTransport over HTTP/2 capsule protocol. |
 | [webtransport_application_protocol.md](webtransport_application_protocol.md) | WebTransport application protocol negotiation. |
