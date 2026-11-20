@@ -557,15 +557,26 @@ pub const InitialHandshakeFlight = struct {
             retransmission,
         );
         var handshake_options = self.handshake_options;
+        const handshake_flight: quic.initial_exchange.SendInitialFlightOptions = .{
+            .initial = handshake_options,
+            .max_datagram_size = self.endpoint.limits.max_datagram_size,
+        };
+        // Stride the retransmission range by the complete flight so a later
+        // attempt cannot reuse a packet number from an earlier attempt.
+        const handshake_packets = try quic.initial_exchange
+            .handshakeCryptoFlightPacketCount(handshake_flight);
         handshake_options.packet_number = try retryPacketNumber(
             self.handshake_options.packet_number,
-            1,
+            handshake_packets,
             retransmission,
         );
         const flight_bytes = try quic.initial_exchange
             .initialThenHandshakeCryptoWireLen(
             initial_options,
-            handshake_options,
+            .{
+                .initial = handshake_options,
+                .max_datagram_size = self.endpoint.limits.max_datagram_size,
+            },
         );
         try self.anti_amplification.reserve(flight_bytes);
         var committed_bytes: usize = 0;
@@ -573,22 +584,6 @@ pub const InitialHandshakeFlight = struct {
         errdefer if (reservation_active) {
             self.anti_amplification.release(flight_bytes - committed_bytes);
         };
-
-        // Prepare the Handshake packet before any Initial datagram becomes
-        // visible. After protection succeeds, both encryption-level PN ranges
-        // are retired even when the socket rejects a suffix.
-        var prepared_handshake = try quic.initial_exchange
-            .prepareHandshakeCrypto(
-            self.endpoint,
-            self.handshake_keys,
-            handshake_options,
-        );
-        defer prepared_handshake.deinit(self.endpoint.allocator);
-        self.next_handshake_packet_number = if (handshake_options.packet_number <
-            quic.protection.max_packet_number)
-            handshake_options.packet_number + 1
-        else
-            null;
 
         const initial_progress = try quic.initial_exchange
             .sendInitialCryptoFlightProgress(
@@ -606,25 +601,35 @@ pub const InitialHandshakeFlight = struct {
             return;
         }
 
-        const handshake_progress = quic.initial_exchange
-            .sendPreparedHandshakeCryptoProgress(
+        // The Handshake flight was validated by the wire-length calculation
+        // above, so a failure here is allocation or socket progress rather
+        // than an unsendable certificate flight.
+        const handshake_progress = try quic.initial_exchange
+            .sendHandshakeCryptoFlightProgress(
             self.endpoint,
             self.peer,
-            prepared_handshake,
+            self.handshake_keys,
+            .{
+                .initial = handshake_options,
+                .max_datagram_size = self.endpoint.limits.max_datagram_size,
+            },
         );
-        if (handshake_progress.sent_count != 0) {
-            committed_bytes = std.math.add(
-                usize,
-                committed_bytes,
-                handshake_progress.packet_len,
-            ) catch flight_bytes;
-        }
+        self.next_handshake_packet_number = if (handshake_progress.last_packet_number <
+            quic.protection.max_packet_number)
+            handshake_progress.last_packet_number + 1
+        else
+            null;
+        committed_bytes = std.math.add(
+            usize,
+            committed_bytes,
+            handshake_progress.sent_bytes,
+        ) catch flight_bytes;
         self.anti_amplification.release(flight_bytes - committed_bytes);
         reservation_active = false;
         _ = initial_progress.send_error;
         // The complete Initial flight is already visible. A socket-rejected
-        // Handshake packet is therefore a lost suffix, not a zero-progress
-        // send failure; wait for the PTO loop and retry both levels under fresh
+        // Handshake suffix is therefore packet loss, not a zero-progress send
+        // failure; wait for the PTO loop and retry both levels under fresh
         // packet numbers.
         _ = handshake_progress.send_error;
     }
@@ -645,21 +650,44 @@ pub const HandshakeFlight = struct {
     peer: net.IpAddress,
     keys: quic.protection.PacketProtectionKeys,
     options: quic.initial_exchange.SendInitialOptions,
+    /// First Handshake packet number not consumed by packet protection. A
+    /// fatal error after the flight can use it for CONNECTION_CLOSE without
+    /// reusing an AEAD nonce.
+    next_packet_number: ?u64 = null,
 
     pub fn send(context: *anyopaque, retransmission: u8) anyerror!void {
         const self: *HandshakeFlight = @ptrCast(@alignCast(context));
+        const flight_options: quic.initial_exchange.SendInitialFlightOptions = .{
+            .initial = self.options,
+            .max_datagram_size = self.endpoint.limits.max_datagram_size,
+        };
+        const packet_count = try quic.initial_exchange
+            .handshakeCryptoFlightPacketCount(flight_options);
         var options = self.options;
         options.packet_number = try retryPacketNumber(
             self.options.packet_number,
-            1,
+            packet_count,
             retransmission,
         );
-        try quic.initial_exchange.sendHandshakeCrypto(
+        const progress = try quic.initial_exchange
+            .sendHandshakeCryptoFlightProgress(
             self.endpoint,
             self.peer,
             self.keys,
-            options,
+            .{
+                .initial = options,
+                .max_datagram_size = self.endpoint.limits.max_datagram_size,
+            },
         );
+        self.next_packet_number = if (progress.last_packet_number <
+            quic.protection.max_packet_number)
+            progress.last_packet_number + 1
+        else
+            null;
+        // Protection already retired every packet number in the flight. A
+        // socket-rejected suffix is packet loss; the PTO loop retries under a
+        // fresh range.
+        _ = progress.send_error;
     }
 };
 

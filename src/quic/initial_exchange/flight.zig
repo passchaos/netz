@@ -297,6 +297,286 @@ pub fn sendProgress(
     };
 }
 
+/// Protect and submit a Handshake-level CRYPTO flight as MTU-bounded packets.
+///
+/// Certificate and CertificateVerify messages routinely exceed one safe UDP
+/// payload. Each packet carries one contiguous CRYPTO range and consumes a
+/// fresh packet number; socket progress is reported exactly like Initial
+/// flights so a caller can distinguish a lost suffix from a validation error.
+pub fn sendHandshakeProgress(
+    endpoint: *quic.runtime.Endpoint,
+    to: net.IpAddress,
+    keys: quic.protection.PacketProtectionKeys,
+    options: SendOptions,
+) Error!SendProgress {
+    try validateHandshakeFlightOptions(options);
+
+    var plan_stack: [stack_packet_capacity]PacketPlan = undefined;
+    var plan_heap: std.ArrayList(PacketPlan) = .empty;
+    defer plan_heap.deinit(endpoint.allocator);
+    const plans_use_stack = options.max_datagrams <= plan_stack.len;
+    var plan_count: usize = 0;
+    var sent: usize = 0;
+    var packet_number = options.initial.packet_number;
+    var storage_len: usize = 0;
+    var protected_bytes: usize = 0;
+    while (sent < options.initial.crypto_data.len) {
+        if (plan_count == options.max_datagrams) {
+            return error.CryptoBufferTooLarge;
+        }
+        if (packet_number > quic.protection.max_packet_number) {
+            return error.InvalidPacketNumber;
+        }
+        const chunk_len = try largestHandshakeChunk(options, sent);
+        if (chunk_len == 0) return error.DatagramTooLarge;
+        const crypto_offset = std.math.add(
+            u64,
+            options.initial.crypto_offset,
+            sent,
+        ) catch return error.InvalidCryptoRange;
+        const payload_len = try cryptoFrameWireLen(crypto_offset, chunk_len);
+        const packet_len = try handshakePacketWireLen(
+            options.initial,
+            crypto_offset,
+            chunk_len,
+        );
+        if (packet_len > options.max_datagram_size or
+            packet_len > endpoint.limits.max_datagram_size)
+        {
+            return error.DatagramTooLarge;
+        }
+        storage_len = std.math.add(
+            usize,
+            storage_len,
+            std.math.add(
+                usize,
+                payload_len,
+                packet_len,
+            ) catch return error.InvalidFrameLength,
+        ) catch return error.InvalidFrameLength;
+        protected_bytes = std.math.add(
+            usize,
+            protected_bytes,
+            packet_len,
+        ) catch return error.InvalidFrameLength;
+        const plan = PacketPlan{
+            .crypto_start = sent,
+            .crypto_len = chunk_len,
+            .packet_number = packet_number,
+            .crypto_offset = crypto_offset,
+            .payload_len = payload_len,
+            .packet_len = packet_len,
+        };
+        if (plans_use_stack) {
+            plan_stack[plan_count] = plan;
+        } else {
+            try plan_heap.append(endpoint.allocator, plan);
+        }
+        plan_count += 1;
+        sent += chunk_len;
+        if (sent < options.initial.crypto_data.len) packet_number += 1;
+    }
+
+    const plans: []const PacketPlan = if (plans_use_stack)
+        plan_stack[0..plan_count]
+    else
+        plan_heap.items;
+    const storage = try endpoint.allocator.alloc(u8, storage_len);
+    defer endpoint.allocator.free(storage);
+    var packet_stack: [stack_packet_capacity][]const u8 = undefined;
+    const packet_heap: ?[][]const u8 = if (plans.len > packet_stack.len)
+        try endpoint.allocator.alloc([]const u8, plans.len)
+    else
+        null;
+    defer if (packet_heap) |packets| endpoint.allocator.free(packets);
+    const packets: [][]const u8 = packet_heap orelse
+        packet_stack[0..plans.len];
+
+    var storage_offset: usize = 0;
+    for (plans, 0..) |plan, index| {
+        const item_storage_len = std.math.add(
+            usize,
+            plan.payload_len,
+            plan.packet_len,
+        ) catch return error.InvalidFrameLength;
+        const item_storage = storage[storage_offset..][0..item_storage_len];
+        const payload = item_storage[0..plan.payload_len];
+        const packet_storage = item_storage[plan.payload_len..];
+        var payload_list = std.ArrayList(u8).initBuffer(payload);
+        var no_extra_storage: [0]u8 = .{};
+        var no_extra_allocations = std.heap.FixedBufferAllocator.init(
+            &no_extra_storage,
+        );
+        try quic.crypto_stream.writeCryptoFrames(
+            &payload_list,
+            no_extra_allocations.allocator(),
+            plan.crypto_offset,
+            options.initial.crypto_data[plan.crypto_start..][0..plan.crypto_len],
+            plan.crypto_len,
+        );
+        const packet = try quic.protection.sealHandshakePacketInto(
+            packet_storage,
+            keys,
+            .{
+                .version = options.initial.version,
+                .destination_connection_id = options.initial.destination_connection_id,
+                .source_connection_id = options.initial.source_connection_id,
+                .packet_number = plan.packet_number,
+                .packet_number_len = options.initial.packet_number_len,
+                .fixed_bit = options.initial.fixed_bit,
+                .payload = payload_list.items,
+            },
+        );
+        std.debug.assert(packet.len == plan.packet_len);
+        packets[index] = packet;
+        storage_offset += item_storage_len;
+    }
+    std.debug.assert(storage_offset == storage.len);
+
+    const send_result = endpoint.sendManyBytesProgress(to, packets) catch |err| {
+        return .{
+            .sent_count = 0,
+            .protected_count = packets.len,
+            .sent_bytes = 0,
+            .protected_bytes = protected_bytes,
+            .last_packet_number = packet_number,
+            .send_error = err,
+        };
+    };
+    var sent_bytes: usize = 0;
+    for (packets[0..send_result.sent_count]) |packet| {
+        sent_bytes += packet.len;
+    }
+    return .{
+        .sent_count = send_result.sent_count,
+        .protected_count = packets.len,
+        .sent_bytes = sent_bytes,
+        .protected_bytes = protected_bytes,
+        .last_packet_number = packet_number,
+        .send_error = send_result.send_error,
+    };
+}
+
+/// Return the exact total wire bytes of a Handshake-level CRYPTO flight
+/// without allocating or protecting packets. Server anti-amplification uses
+/// this to reserve a complete flight before any datagram becomes visible.
+pub fn handshakeFlightWireLen(options: SendOptions) Error!usize {
+    try validateHandshakeFlightOptions(options);
+    var total: usize = 0;
+    var sent: usize = 0;
+    var packet_count: usize = 0;
+    var packet_number = options.initial.packet_number;
+    while (sent < options.initial.crypto_data.len) {
+        if (packet_count == options.max_datagrams) {
+            return error.CryptoBufferTooLarge;
+        }
+        if (packet_number > quic.protection.max_packet_number) {
+            return error.InvalidPacketNumber;
+        }
+        const chunk_len = try largestHandshakeChunk(options, sent);
+        if (chunk_len == 0) return error.DatagramTooLarge;
+        const crypto_offset = std.math.add(
+            u64,
+            options.initial.crypto_offset,
+            sent,
+        ) catch return error.InvalidCryptoRange;
+        const packet_len = try handshakePacketWireLen(
+            options.initial,
+            crypto_offset,
+            chunk_len,
+        );
+        if (packet_len > options.max_datagram_size) {
+            return error.DatagramTooLarge;
+        }
+        total = std.math.add(usize, total, packet_len) catch
+            return error.InvalidFrameLength;
+        sent += chunk_len;
+        packet_count += 1;
+        if (sent < options.initial.crypto_data.len) packet_number += 1;
+    }
+    return total;
+}
+
+/// Number of packets a Handshake-level CRYPTO flight consumes. Retransmission
+/// uses this as the packet-number stride so a fresh flight never overlaps a
+/// protected range from an earlier attempt.
+pub fn handshakeFlightPacketCount(options: SendOptions) Error!usize {
+    try validateHandshakeFlightOptions(options);
+    var sent: usize = 0;
+    var packet_count: usize = 0;
+    while (sent < options.initial.crypto_data.len) {
+        if (packet_count == options.max_datagrams) {
+            return error.CryptoBufferTooLarge;
+        }
+        const chunk_len = try largestHandshakeChunk(options, sent);
+        if (chunk_len == 0) return error.DatagramTooLarge;
+        sent += chunk_len;
+        packet_count += 1;
+    }
+    return packet_count;
+}
+
+fn validateHandshakeFlightOptions(options: SendOptions) Error!void {
+    if (options.initial.crypto_data.len == 0 or
+        options.max_datagram_size == 0 or
+        options.max_datagrams == 0 or
+        options.initial.max_crypto_frame_data_len == 0)
+    {
+        return error.InvalidCryptoRange;
+    }
+}
+
+pub fn largestHandshakeChunk(
+    options: SendOptions,
+    sent: usize,
+) Error!usize {
+    if (sent > options.initial.crypto_data.len) {
+        return error.InvalidCryptoRange;
+    }
+    const remaining = options.initial.crypto_data.len - sent;
+    const upper_bound = @min(
+        remaining,
+        options.initial.max_crypto_frame_data_len,
+    );
+    const frame_offset = std.math.add(
+        u64,
+        options.initial.crypto_offset,
+        sent,
+    ) catch return error.InvalidCryptoRange;
+    var low: usize = 0;
+    var high = upper_bound;
+    while (low < high) {
+        const candidate = low + (high - low + 1) / 2;
+        const packet_len = try handshakePacketWireLen(
+            options.initial,
+            frame_offset,
+            candidate,
+        );
+        if (packet_len <= options.max_datagram_size) {
+            low = candidate;
+        } else {
+            high = candidate - 1;
+        }
+    }
+    return low;
+}
+
+fn handshakePacketWireLen(
+    options: SendInitialOptions,
+    frame_offset: u64,
+    data_len: usize,
+) Error!usize {
+    const frame_len = try cryptoFrameWireLen(frame_offset, data_len);
+    return quic.protection.protectedLongPacketCapacity(
+        options.destination_connection_id.len,
+        options.source_connection_id.len,
+        0,
+        false,
+        options.packet_number_len,
+        frame_len,
+    );
+}
+
 /// Return the exact total wire bytes emitted by `send` without allocating or
 /// protecting packets. Handshake anti-amplification uses this to reserve a
 /// complete flight before any datagram becomes visible on the socket.

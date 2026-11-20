@@ -1,0 +1,8 @@
+{
+  "src/http/client/response_sink.zig": "cba412988c21f8b7c80cf057d4e338f193994ae25ba14d7ad21bfeb49a392159",
+  "src/quic/handshake.zig": "3de7cb9c5c7cfe5d4f0e37a3116ec97320ae73ff9cda82611a77db7df078525b",
+  "src/quic/handshake/default_limits_tests.zig": "e75d52e408859dac1a82f1b1a50ac53ce0b92cd2f26702d2d89156a06b213c39",
+  "src/quic/handshake/retransmit.zig": "038f11a49fabc1a8664e4d1b59cbfc4383a022254264d779868511876d57d3ad",
+  "src/quic/initial_exchange.zig": "fc16bbed584a592eb16a36969e31720162da2c74a54c9e1b2638f0993ec99b36",
+  "src/quic/initial_exchange/flight.zig": "e635bd23990eca89145edee76046bcf87103821260414b06c1470b51084a368b"
+}

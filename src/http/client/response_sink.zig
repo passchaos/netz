@@ -8,7 +8,9 @@ pub const ResponseHead = struct {
     headers: []const types.Header,
 };
 
-const discard_context: u8 = 0;
+/// Writable storage for the stateless discard sink. Callbacks never access it,
+/// but a non-const pointer avoids casting away constness in the public API.
+var discard_context: u8 = 0;
 
 pub const ResponseSink = struct {
     context: *anyopaque,
@@ -20,7 +22,7 @@ pub const ResponseSink = struct {
 
     /// Drain the response without retaining its body or trailer fields.
     pub fn discard() ResponseSink {
-        return .{ .context = @constCast(&discard_context) };
+        return .{ .context = &discard_context };
     }
 
     /// Forward body chunks into a borrowed Writer. The caller owns flushing

@@ -51,6 +51,9 @@ QUIC client/server handshakes retain up to 256 KiB of CRYPTO data per encryption
 level by default, matching the TCP/TLS handshake budget. Storage grows on demand;
 explicit `handshake.handshake.max_crypto_buffer` values retain their configured
 bound. The old 4-KiB default could reject ordinary server certificate flights.
+Handshake-level CRYPTO flights are also split into datagrams bounded by the
+endpoint's `max_datagram_size`, so certificate and mTLS flights do not require
+jumbo UDP packets. The peer reassembles client CRYPTO across datagrams.
 
 `connectUri*`, `request*`, Reader reads, body output and response reads preserve
 one absolute operation deadline. A custom Reader must cooperate with `std.Io`

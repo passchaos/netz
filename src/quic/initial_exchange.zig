@@ -170,24 +170,17 @@ pub fn sendInitialThenHandshakeCrypto(
     return sent;
 }
 
+pub const sendHandshakeCryptoFlightProgress = flight.sendHandshakeProgress;
+pub const handshakeCryptoFlightWireLen = flight.handshakeFlightWireLen;
+pub const handshakeCryptoFlightPacketCount = flight.handshakeFlightPacketCount;
+pub const largestHandshakeCryptoChunk = flight.largestHandshakeChunk;
+
 pub fn initialThenHandshakeCryptoWireLen(
     initial_options: SendInitialFlightOptions,
-    handshake_options: SendInitialOptions,
+    handshake_options: SendInitialFlightOptions,
 ) Error!usize {
     const initial_len = try flight.wireLen(initial_options);
-    const handshake_payload_len = try quic.crypto_stream.cryptoFramesWireLen(
-        handshake_options.crypto_offset,
-        handshake_options.crypto_data.len,
-        handshake_options.max_crypto_frame_data_len,
-    );
-    const handshake_len = try quic.protection.protectedLongPacketCapacity(
-        handshake_options.destination_connection_id.len,
-        handshake_options.source_connection_id.len,
-        0,
-        false,
-        handshake_options.packet_number_len,
-        handshake_payload_len,
-    );
+    const handshake_len = try flight.handshakeFlightWireLen(handshake_options);
     return std.math.add(usize, initial_len, handshake_len) catch
         return error.InvalidFrameLength;
 }

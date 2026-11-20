@@ -18,9 +18,9 @@ fn exercise(io: std.Io, comptime authenticate_client: bool) !void {
     var chain: [16][]const u8 = undefined;
     for (&chain) |*entry| entry.* = &certificate;
     try std.testing.expect(chain.len * certificate.len > 4096);
-    var server = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 8192 });
+    var server = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 1200 });
     defer server.deinit();
-    var client = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 8192 });
+    var client = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 1200 });
     defer client.deinit();
     const server_options: handshake.ServerOptions = .{
         .local_connection_id = &.{ 1, 2, 3, 4, 5, 6, 7, 8 },
@@ -76,6 +76,35 @@ test "QUIC default CRYPTO limit admits fragmented large certificate chains and c
         std.debug.print("large certificate zio mTLS: {s}\n", .{@errorName(err)});
         return err;
     };
+}
+
+test "QUIC Handshake CRYPTO flight packetizes contiguous MTU-bounded ranges" {
+    var payload: [5000]u8 = undefined;
+    for (&payload, 0..) |*byte, index| byte.* = @intCast(index % 251);
+    const options: quic.initial_exchange.SendInitialFlightOptions = .{
+        .initial = .{
+            .destination_connection_id = &.{ 1, 2, 3, 4, 5, 6, 7, 8 },
+            .source_connection_id = &.{ 9, 10, 11, 12 },
+            .packet_number = 7,
+            .crypto_data = &payload,
+        },
+        .max_datagram_size = 1200,
+    };
+    const count = try quic.initial_exchange
+        .handshakeCryptoFlightPacketCount(options);
+    try std.testing.expect(count > 1);
+    const wire = try quic.initial_exchange
+        .handshakeCryptoFlightWireLen(options);
+    try std.testing.expect(wire <= count * options.max_datagram_size);
+    var sent: usize = 0;
+    while (sent < payload.len) {
+        const chunk = try quic.initial_exchange
+            .largestHandshakeCryptoChunk(options, sent);
+        try std.testing.expect(chunk != 0);
+        try std.testing.expect(chunk <= options.initial.max_crypto_frame_data_len);
+        sent += chunk;
+    }
+    try std.testing.expectEqual(payload.len, sent);
 }
 
 test "QUIC default CRYPTO limit retains explicit smaller and final-span bounds" {

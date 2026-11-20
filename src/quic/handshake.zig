@@ -1945,6 +1945,9 @@ fn connectAttempt(
         &client_handshake_send,
         retransmit.HandshakeFlight.send,
     );
+    // A CONNECTION_CLOSE after this point must use a Handshake packet number
+    // beyond every protected packet in the client flight.
+    peer_failure.next_packet_number = client_handshake_send.next_packet_number;
 
     if (options.keylog) |keylog| {
         try keylog.writeApplicationSecrets(
@@ -3120,6 +3123,17 @@ pub fn receiveClientHandshakeCryptoFromDatagram(
     recovery: retransmit.Config,
     anti_amplification: *retransmit.AntiAmplificationBudget,
 ) Error!quic.initial_exchange.ReceivedHandshakeCrypto {
+    // A client Certificate flight can span several MTU-bounded packets. Keep
+    // one reassembler across datagrams instead of requiring the complete TLS
+    // flight in the first datagram.
+    var reassembler = quic.crypto_stream.Reassembler.init(
+        endpoint.allocator,
+        max_crypto_buffer,
+    );
+    defer reassembler.deinit();
+    var first_packet: ?quic.protection.OpenedHandshakePacket = null;
+    errdefer if (first_packet) |*packet| packet.deinit(endpoint.allocator);
+
     var next_from = first_from;
     var next_bytes = first_datagram;
     var next_ecn = first_ecn;
@@ -3128,25 +3142,90 @@ pub fn receiveClientHandshakeCryptoFromDatagram(
         datagram.deinit(endpoint.allocator);
     };
     const deadline = passiveHandshakeTimeout(endpoint.io, recovery);
+    var next_expected = expected_packet_number;
 
     while (true) {
         if (next_from.eql(&expected_from)) {
-            const opened = openClientHandshakeCryptoFromDatagram(
-                endpoint,
-                next_from,
-                next_bytes,
-                next_ecn,
-                keys,
-                expected_packet_number,
-                max_crypto_buffer,
-                allow_zero_fixed_bit,
-                require_client_certificate,
-                anti_amplification,
-            ) catch |err| switch (err) {
-                error.MissingCryptoFrame => null,
-                else => |other| return other,
-            };
-            if (opened) |result| return result;
+            var tail = next_bytes;
+            while (true) {
+                const packet = (nextHandshakePacketFromCoalescedTail(
+                    &tail,
+                    allow_zero_fixed_bit,
+                ) catch |err| {
+                    if (isDiscardableLongHeaderParseError(err)) break;
+                    return err;
+                }) orelse break;
+                var opened = quic.protection.openHandshakePacketWithFixedBitPolicy(
+                    endpoint.allocator,
+                    keys,
+                    packet,
+                    next_expected,
+                    allow_zero_fixed_bit,
+                ) catch |err| {
+                    if (quic.protection.isUnauthenticatedOpenError(err)) continue;
+                    return err;
+                };
+                var opened_owned = true;
+                errdefer if (opened_owned) opened.deinit(endpoint.allocator);
+                next_expected = opened.packet_number + 1;
+                quic.initial_exchange.insertCryptoPayload(
+                    endpoint.allocator,
+                    &reassembler,
+                    opened.payload,
+                    .handshake,
+                ) catch |err| switch (err) {
+                    error.MissingCryptoFrame => {
+                        // An authenticated ACK/PADDING-only Handshake packet
+                        // still proves return routability.
+                        anti_amplification.validate();
+                        opened.deinit(endpoint.allocator);
+                        opened_owned = false;
+                        continue;
+                    },
+                    else => |other| return other,
+                };
+                anti_amplification.validate();
+                if (first_packet == null) {
+                    first_packet = opened;
+                    opened_owned = false;
+                } else {
+                    opened.deinit(endpoint.allocator);
+                    opened_owned = false;
+                }
+                if (splitClientFlight(
+                    reassembler.available(),
+                    require_client_certificate,
+                )) |_| {
+                    const crypto_data = try endpoint.allocator.dupe(
+                        u8,
+                        reassembler.available(),
+                    );
+                    errdefer endpoint.allocator.free(crypto_data);
+                    const one_rtt_tail = try coalescedOneRttTail(
+                        next_bytes,
+                        allow_zero_fixed_bit,
+                    );
+                    const coalesced_one_rtt = if (one_rtt_tail.len == 0)
+                        null
+                    else
+                        try endpoint.allocator.dupe(u8, one_rtt_tail);
+                    errdefer if (coalesced_one_rtt) |retained| {
+                        endpoint.allocator.free(retained);
+                    };
+                    const result = quic.initial_exchange.ReceivedHandshakeCrypto{
+                        .from = next_from,
+                        .packet = first_packet.?,
+                        .crypto_data = crypto_data,
+                        .coalesced_one_rtt = coalesced_one_rtt,
+                        .coalesced_one_rtt_ecn = next_ecn,
+                    };
+                    first_packet = null;
+                    return result;
+                } else |err| switch (err) {
+                    error.InvalidHandshakeFlight => {},
+                    else => |other| return other,
+                }
+            }
         }
         if (owned_datagram) |*datagram| {
             datagram.deinit(endpoint.allocator);
