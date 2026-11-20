@@ -123,7 +123,7 @@ peer Close, and marks `close_sent` only after a successful write.
 | --- | --- | --- |
 | H3 fallback, direct H3, pooled H3, streaming deadlines | 119/119 | `h3-fallback-debug.log` |
 | WebSocket stream adapter close state | 10/10 | `websocket-close-debug.log` |
-| H3 runtime suite | Blocked by a pre-existing GRO-test hang, reproduced at base `28dd7d76` | `http3-gro-hang.txt` |
+| H3 runtime suite | Filtered bundle: 61/61 passed, 1 skipped, 1 pre-existing GRO hang (current and base `28dd7d76`) | `http3-gro-hang.txt` |
 
 The H3 fallback case uses a discovery Alt-Svc entry pointing at a closed UDP
 port, a 150-ms H3 connect budget and a single-pass PUT Reader. It now reaches
