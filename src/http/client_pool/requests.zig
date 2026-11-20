@@ -5,6 +5,7 @@ const std = @import("std");
 const client = @import("../client.zig");
 const redirect = @import("../client/redirect.zig");
 const header_mapping = @import("../client/header_mapping.zig");
+const reader_io = @import("../client/reader_io.zig");
 const deadline_policy = @import("../../internal/deadline.zig");
 const http_method = @import("../../internal/http_method.zig");
 const http1_runtime = @import("../../http1/runtime.zig");
@@ -297,7 +298,7 @@ fn requestHttp3ReaderBody(
 
     var buffer: [16 * 1024]u8 = undefined;
     while (true) {
-        const count = reader_body.reader.readSliceShort(&buffer) catch return error.RequestBodyReadFailed;
+        const count = try reader_io.readBefore(pool.io, reader_body.reader, &buffer, deadline);
         if (count == 0) break;
         handle.writeBodyBlocking(buffer[0..count], false, deadline) catch |err|
             switch (err) {
@@ -309,7 +310,7 @@ fn requestHttp3ReaderBody(
     }
     if (!collector.finished) {
         if (trailers.len != 0) {
-            try handle.writeTrailers(trailers);
+            if (deadline) |until| try handle.writeTrailersWithDeadline(trailers, until) else try handle.writeTrailers(trailers);
         } else {
             handle.writeBodyBlocking(&.{}, true, deadline) catch |err|
                 switch (err) {
@@ -322,126 +323,7 @@ fn requestHttp3ReaderBody(
     return collector.intoResponse(pool.allocator);
 }
 
-/// Clone decoded QPACK fields so they outlive the stream handle. Each field
-/// owns its name and value allocation, matching `Qpack.freeDecodedFields`.
-fn cloneH3Fields(
-    allocator: std.mem.Allocator,
-    fields: []const http3.Qpack.HeaderField,
-) std.mem.Allocator.Error![]http3.Qpack.HeaderField {
-    const owned = try allocator.alloc(http3.Qpack.HeaderField, fields.len);
-    var initialized: usize = 0;
-    errdefer {
-        for (owned[0..initialized]) |field| {
-            if (field.name_storage) |storage| allocator.free(storage);
-            if (field.value_storage) |storage| allocator.free(storage);
-        }
-        allocator.free(owned);
-    }
-    for (fields, owned) |source, *target| {
-        const name = try allocator.dupe(u8, source.name);
-        errdefer allocator.free(name);
-        const value = try allocator.dupe(u8, source.value);
-        target.* = .{
-            .name = name,
-            .value = value,
-            .never_indexed = source.never_indexed,
-            .name_storage = name,
-            .value_storage = value,
-        };
-        initialized += 1;
-    }
-    return owned;
-}
-
-const H3ResponseCollector = struct {
-    allocator: std.mem.Allocator,
-    status: u16 = 0,
-    headers: []http3.Qpack.HeaderField = &.{},
-    trailers: []http3.Qpack.HeaderField = &.{},
-    body: std.ArrayList(u8) = .empty,
-    body_allowed: bool = true,
-    consumed: usize = 0,
-    qpack_section_acknowledgments: usize = 0,
-    finished: bool = false,
-
-    fn sink(self: *H3ResponseCollector) http3_runtime.StreamCallbackSink {
-        return .{
-            .context = self,
-            .begin = begin,
-            .data = data,
-            .end = end,
-        };
-    }
-
-    fn begin(
-        context: *anyopaque,
-        head: http3.DecodedResponseHead,
-    ) !void {
-        const self: *H3ResponseCollector = @ptrCast(@alignCast(context));
-        if (self.status != 0) return error.UnexpectedFrame;
-        self.status = head.status;
-        self.body_allowed = head.body_allowed;
-        self.consumed = head.consumed;
-        self.qpack_section_acknowledgments =
-            head.qpack_section_acknowledgments;
-        self.headers = try cloneH3Fields(self.allocator, head.headers);
-    }
-
-    fn data(context: *anyopaque, bytes: []const u8) !void {
-        const self: *H3ResponseCollector = @ptrCast(@alignCast(context));
-        try self.body.appendSlice(self.allocator, bytes);
-    }
-
-    fn end(
-        context: *anyopaque,
-        trailers: []const http3.Qpack.HeaderField,
-    ) !void {
-        const self: *H3ResponseCollector = @ptrCast(@alignCast(context));
-        if (self.finished) return error.UnexpectedFrame;
-        self.trailers = try cloneH3Fields(self.allocator, trailers);
-        self.finished = true;
-    }
-
-    fn deinit(self: *H3ResponseCollector) void {
-        http3.Qpack.freeDecodedFields(self.allocator, self.headers);
-        http3.Qpack.freeDecodedFields(self.allocator, self.trailers);
-        self.body.deinit(self.allocator);
-        self.* = undefined;
-    }
-
-    fn intoResponse(
-        self: *H3ResponseCollector,
-        allocator: std.mem.Allocator,
-    ) !client.OwnedResponse {
-        if (!self.finished or self.status == 0) {
-            return error.UnexpectedFrame;
-        }
-        const body = try self.body.toOwnedSlice(allocator);
-        errdefer allocator.free(body);
-        const stream_bytes = try allocator.alloc(u8, 0);
-        errdefer allocator.free(stream_bytes);
-        const headers = self.headers;
-        self.headers = &.{};
-        const trailers = self.trailers;
-        self.trailers = &.{};
-        return .{
-            .allocator = allocator,
-            .value = .{ .http3 = .{
-                .stream_bytes = stream_bytes,
-                .response = .{
-                    .status = self.status,
-                    .headers = headers,
-                    .trailers = trailers,
-                    .body = body,
-                    .body_storage = body,
-                    .body_allowed = self.body_allowed,
-                    .consumed = self.consumed,
-                    .qpack_section_acknowledgments = self.qpack_section_acknowledgments,
-                },
-            } },
-        };
-    }
-};
+const H3ResponseCollector = @import("../client/h3_response.zig").Collector;
 
 fn observeAltSvc(
     state: anytype,

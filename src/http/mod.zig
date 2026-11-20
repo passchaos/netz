@@ -70,6 +70,7 @@ pub const PoolHttp3RememberedSettingsStats =
     client_pool.Http3RememberedSettingsStats;
 pub const Protocol = client.Protocol;
 pub const ProtocolPolicy = client.ProtocolPolicy;
+pub const Http3ConnectOptions = client.Http3ConnectOptions;
 pub const CleartextProtocol = client.CleartextProtocol;
 pub const AddressResolver = client.AddressResolver;
 pub const AddressConnectPolicy = client.AddressConnectPolicy;

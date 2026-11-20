@@ -1,0 +1,72 @@
+# Direct HTTP/3 through the unified client
+
+`netz.http.Client` and `netz.http.Connection` support explicit HTTP/3 using
+`protocol_policy = .http3_only`. This opens a QUIC/TLS 1.3 connection to an
+HTTPS URI. The default policy remains `prefer_http2`.
+
+```zig
+var client = try netz.http.Client.init(allocator, io, .{
+    .protocol_policy = .http3_only,
+});
+defer client.deinit();
+
+var response = try client.requestUriWithTimeout(
+    "https://example.com/resource", .{}, .fromSeconds(10),
+);
+defer response.deinit();
+std.debug.assert(response.protocol() == .http3);
+
+// Reuse one connection explicitly, including manual streaming requests.
+var connection = try client.connectUriWithTimeout(
+    "https://example.com", .fromSeconds(10),
+);
+defer connection.close();
+var handle = try connection.startRequest("/upload", .{
+    .method = "POST", .body_length = .unknown,
+});
+defer handle.deinit();
+try handle.writeBody("first part");
+try handle.finishBody();
+_ = try handle.readResponse(sink);
+```
+
+Complete requests accept the same `body`, overriding `body_source.slice` or
+`body_source.reader`, headers and trailers as H1/H2. Responses own their body
+and decoded fields, so they outlive a one-shot client's QUIC connection.
+Manual handles use the common `ResponseSink`, body/trailer operations,
+`UploadProgress` and deadline forms described in [streaming](http_streaming.md).
+The connection must outlive its handles, and one task drives it at a time.
+An abandoned unfinished handle cancels its request stream.
+
+`Client.Options.http3` configures the native QUIC limits and handshake. Empty
+connection IDs are securely generated per connection. A null local bind selects
+an ephemeral wildcard bind for each resolved address family; H3 defaults to
+bounded Happy Eyeballs and also supports an explicit local address. The URI
+hostname remains the TLS SNI/verification identity and HTTP authority.
+Common `Options.tls` verifier, client identity and trust settings are inherited
+when their native H3 counterparts are unset. System certificate verification
+is enabled by default.
+
+`connectUri*`, `request*`, Reader reads, body output and response reads preserve
+one absolute operation deadline. A custom Reader must cooperate with `std.Io`
+cancellation: the library joins the read task before releasing its borrowed
+source or buffer. Natural source failures become `RequestBodyReadFailed`;
+an operation deadline becomes `Timeout`.
+
+Explicit redirect helpers use the common method, downgrade and credential
+policies. Preserving redirects need a replayable Reader. Crossing an origin
+clears QUIC resumption inputs, and client identities remain restricted by
+default. Negotiation metadata reports `h3`, TLS 1.3 and the native resume flag.
+TCP session-ticket getters return null on an H3 connection; QUIC resumption
+uses the native H3 handshake inputs.
+
+The direct H3 policy requires HTTPS and an H3 ALPN list. TLS-1.2-only policy,
+HTTP/SOCKS proxy options, invalid connection budgets and raw early-data offers
+are rejected during initialization. Direct H3 does not perform Alt-Svc discovery
+or TCP fallback. For discovery, shared concurrent requests, SOCKS5 UDP routing
+and managed 0-RTT replay, use the existing
+[`Pool.Options.http3`](http_client_pool.md) configuration. `Pool.Options.client`
+configures its TCP backend and rejects `http3_only`.
+
+Focused loopback evidence is in
+[the direct H3 delivery record](evidence/http_direct_h3/2026-11-20/README.md).

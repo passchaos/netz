@@ -180,8 +180,13 @@ fn exercise1(comptime timed: bool) !void {
         try std.testing.expect(!progress.end_accepted);
         try handle.writeBodyWithDeadline("hello ", &progress, until);
         try std.testing.expectEqual(@as(usize, 6), progress.accepted_bytes);
-        try handle.writeBodyWithTimeout("world", &progress, .fromSeconds(10));
-        try std.testing.expectEqual(@as(usize, 5), progress.accepted_bytes);
+        var source = @import("reader_gate.zig").Gate{ .io = io, .bytes = "world", .prefix_len = 2 };
+        try std.testing.expectError(error.Timeout, handle.writeBodyFromReaderWithTimeout(&source.reader, &progress, .fromMilliseconds(30)));
+        try std.testing.expect(source.canceled and source.finished);
+        try std.testing.expectEqual(source.prefix_len, progress.accepted_bytes);
+        source.release.set(io);
+        try handle.writeBodyFromReaderWithDeadline(&source.reader, &progress, until);
+        try std.testing.expectEqual(source.bytes.len - source.prefix_len, progress.accepted_bytes);
         try handle.finishBodyWithDeadline(&progress, until);
         try std.testing.expect(progress.end_accepted);
         try std.testing.expectError(error.RequestBodyFinished, handle.writeBodyWithDeadline("later", &progress, until));
@@ -320,8 +325,13 @@ fn exercise2(comptime timed: bool) !void {
         try std.testing.expect(!progress.end_accepted);
         try handle.writeBodyWithDeadline("hello ", &progress, until);
         try std.testing.expectEqual(@as(usize, 6), progress.accepted_bytes);
-        try handle.writeBodyWithTimeout("world", &progress, .fromSeconds(10));
-        try std.testing.expectEqual(@as(usize, 5), progress.accepted_bytes);
+        var source = @import("reader_gate.zig").Gate{ .io = io, .bytes = "world", .prefix_len = 2 };
+        try std.testing.expectError(error.Timeout, handle.writeBodyFromReaderWithTimeout(&source.reader, &progress, .fromMilliseconds(30)));
+        try std.testing.expect(source.canceled and source.finished);
+        try std.testing.expectEqual(source.prefix_len, progress.accepted_bytes);
+        source.release.set(io);
+        try handle.writeBodyFromReaderWithDeadline(&source.reader, &progress, until);
+        try std.testing.expectEqual(source.bytes.len - source.prefix_len, progress.accepted_bytes);
         try handle.finishTrailersWithDeadline(&.{.{ .name = "x-upload", .value = "done", .never_indexed = true }}, &progress, until);
         try std.testing.expect(progress.end_accepted);
         try std.testing.expectError(error.RequestBodyFinished, handle.writeBodyWithDeadline("later", &progress, until));
@@ -549,7 +559,7 @@ test "unified HTTP streaming deadlines preserve H1 Continue after an expired bod
     try peer.await(io);
 }
 
-fn pooledTcpDeadlines(comptime h2: bool) !void {
+fn pooledTcpDeadlines(comptime h2: bool, comptime discard: bool) !void {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
     defer threaded.deinit();
@@ -565,6 +575,10 @@ fn pooledTcpDeadlines(comptime h2: bool) !void {
             var connection = try listener.acceptWithTimeout(.fromSeconds(5));
             defer connection.close();
             for (0..2) |index| {
+                if (discard and index == 1) {
+                    connection.close();
+                    connection = try listener.acceptWithTimeout(.fromSeconds(5));
+                }
                 const until = std.Io.Clock.Timestamp.fromNow(listener.io, .{ .clock = .awake, .raw = .fromSeconds(5) });
                 var request = if (h2) try connection.readRequestWithDeadline(until) else try connection.readRequestWithDeadline(.{}, until);
                 defer request.deinit(std.testing.allocator);
@@ -585,17 +599,23 @@ fn pooledTcpDeadlines(comptime h2: bool) !void {
     const until = std.Io.Clock.Timestamp.fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(5) });
     {
         var handle = try pool.startRequestWithDeadline(uri, .{ .method = "POST", .body_length = .{ .exact = 6 } }, until);
-        defer handle.deinit();
+        defer if (discard) handle.discard() else handle.deinit();
         var progress: http.UploadProgress = .{};
-        try handle.writeBodyWithDeadline("upload", &progress, until);
-        try std.testing.expectEqual(@as(usize, 6), progress.accepted_bytes);
+        var source = @import("reader_gate.zig").Gate{ .io = io, .bytes = "upload", .prefix_len = 2 };
+        try std.testing.expectError(error.Timeout, handle.writeBodyFromReaderWithTimeout(&source.reader, &progress, .fromMilliseconds(30)));
+        try std.testing.expect(source.canceled and source.finished);
+        try std.testing.expectEqual(source.prefix_len, progress.accepted_bytes);
+        source.release.set(io);
+        try handle.writeBodyFromReaderWithDeadline(&source.reader, &progress, until);
+        try std.testing.expectEqual(source.bytes.len - source.prefix_len, progress.accepted_bytes);
         try handle.finishBodyWithTimeout(&progress, .fromSeconds(5));
         try std.testing.expect(progress.end_accepted);
         var sink = DuplexSink{ .allocator = allocator };
         defer sink.deinit();
-        _ = try handle.readResponseWithDeadline(sink.sink(), until);
+        _ = try handle.readResponseWithTimeout(sink.sink(), .fromSeconds(5));
         try std.testing.expectEqualStrings("ok", sink.body.items);
     }
+    try std.testing.expectEqual(@as(usize, if (discard) 0 else 1), pool.connectionCount());
     var response = try pool.requestUriWithDeadline(uri, .{}, until);
     defer response.deinit();
     try std.testing.expectEqualStrings("ok", response.body());
@@ -605,6 +625,11 @@ fn pooledTcpDeadlines(comptime h2: bool) !void {
 }
 
 test "unified HTTP streaming deadlines return H1 H2 pool leases for same connection reuse" {
-    try pooledTcpDeadlines(false);
-    try pooledTcpDeadlines(true);
+    try pooledTcpDeadlines(false, false);
+    try pooledTcpDeadlines(true, false);
+}
+
+test "unified HTTP streaming deadlines discard completed H1 H2 pool leases" {
+    try pooledTcpDeadlines(false, true);
+    try pooledTcpDeadlines(true, true);
 }

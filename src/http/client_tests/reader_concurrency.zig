@@ -15,25 +15,29 @@ const GatedReader = struct {
     started: std.Io.Event = .unset,
     gate: std.Io.Event = .unset,
     canceled: bool = false,
+    prefix_len: usize = 0,
     offset: usize = 0,
 
     fn stream(reader: *std.Io.Reader, writer: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
         const self: *GatedReader = @fieldParentPtr("reader", reader);
         self.started.set(self.io);
-        self.gate.wait(self.io) catch {
-            self.canceled = true;
-            return error.ReadFailed;
-        };
         const body = "reader-body";
         if (self.offset == body.len) return error.EndOfStream;
-        const count = try writer.write(body[self.offset..][0..limit.minInt(body.len - self.offset)]);
+        const available = if (self.offset < self.prefix_len) self.prefix_len - self.offset else blk: {
+            self.gate.wait(self.io) catch {
+                self.canceled = true;
+                return error.ReadFailed;
+            };
+            break :blk body.len - self.offset;
+        };
+        const count = try writer.write(body[self.offset..][0..limit.minInt(available)]);
         self.offset += count;
         return count;
     }
 };
 
 fn exercise(io: std.Io, comptime cancel_reader: bool) !void {
-    var source = GatedReader{ .io = io };
+    var source = GatedReader{ .io = io, .prefix_len = if (cancel_reader) 0 else 3 };
     var shutdown: std.Io.Event = .unset;
     var server = try runtime.Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{});
     defer server.deinit();
@@ -41,6 +45,7 @@ fn exercise(io: std.Io, comptime cancel_reader: bool) !void {
         source: *GatedReader,
         shutdown: *std.Io.Event,
         head_received: std.Io.Event = .unset,
+        prefix_received: std.Io.Event = .unset,
         accepts: usize = 0,
     };
     var context = Context{ .source = &source, .shutdown = &shutdown };
@@ -54,7 +59,10 @@ fn exercise(io: std.Io, comptime cancel_reader: bool) !void {
                 while (request.nextBody(body[length..], deadline(io_value)) catch |err| {
                     if (cancel_reader) return;
                     return err;
-                }) |count| length += count;
+                }) |count| {
+                    length += count;
+                    if (length >= ctx.source.prefix_len) ctx.prefix_received.set(io_value);
+                }
                 if (cancel_reader) return error.TestUnexpectedResult;
                 try std.testing.expectEqualStrings("reader-body", body[0..length]);
                 try request.startResponse(.{ .status = 200 });
@@ -106,6 +114,7 @@ fn exercise(io: std.Io, comptime cancel_reader: bool) !void {
     } else |_| {};
     try source.started.waitTimeout(io, .{ .deadline = deadline(io) });
     try context.head_received.waitTimeout(io, .{ .deadline = deadline(io) });
+    if (!cancel_reader) try context.prefix_received.waitTimeout(io, .{ .deadline = deadline(io) });
     var probe = try pool.requestUriWithDeadline(probe_uri, .{}, deadline(io));
     defer probe.deinit();
     try std.testing.expectEqualStrings("probe-complete", probe.body());

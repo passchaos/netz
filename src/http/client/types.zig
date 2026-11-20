@@ -24,12 +24,32 @@ pub const Protocol = enum {
 pub const NegotiatedProtocol = enum {
     http1,
     http2,
+    http3,
 };
 
 pub const ProtocolPolicy = enum {
     prefer_http2,
     http1_only,
     http2_only,
+    /// Establish QUIC/TLS directly for HTTPS URIs using `Options.http3`.
+    http3_only,
+};
+
+pub const Http3ConnectOptions = struct {
+    /// Null selects an ephemeral wildcard bind in each resolved peer family.
+    local_address: ?std.Io.net.IpAddress = null,
+    limits: http3_runtime.Limits = .{},
+    /// QUIC address racing is separate from TCP's connection policy. The
+    /// owning wrapper applies this to the native URI connector.
+    address_connect_policy: AddressConnectPolicy = .{ .happy_eyeballs = .{} },
+    /// Empty connection IDs are securely generated for each connection.
+    /// URI identity/SNI remains bound to the requested origin.
+    handshake: http3_runtime.HandshakeClientOptions = .{
+        .handshake = .{
+            .original_destination_connection_id = &.{},
+            .local_connection_id = &.{},
+        },
+    },
 };
 
 pub const CleartextProtocol = enum {
@@ -190,6 +210,9 @@ pub const Options = struct {
     http1_limits: http1_runtime.Limits = .{},
     http2_limits: http2_runtime.Limits = .{},
     tls: http2_runtime.TlsConnectOptions = .{},
+    /// Direct, exclusive QUIC owner selected by `http3_only`. Pool H3 routing
+    /// has its own `Pool.Options.http3` configuration and dispatcher lifetime.
+    http3: Http3ConnectOptions = .{},
 };
 
 pub const ResponseValue = union(Protocol) {
@@ -520,6 +543,7 @@ pub fn verifiedTlsOptions(
             .prefer_http2 => &alpn_prefer_http2,
             .http1_only => &alpn_http1_only,
             .http2_only => &alpn_http2_only,
+            .http3_only => &.{},
         },
         .cipher_suites = tls.cipher_suites,
         .tls12_cipher_suites = tls.tls12_cipher_suites,
@@ -537,6 +561,7 @@ pub fn selectedProtocol(
     selected_alpn: ?[]const u8,
     options: Options,
 ) tls_stream.Error!NegotiatedProtocol {
+    if (options.protocol_policy == .http3_only) return error.InvalidAlpn;
     if (selected_alpn) |alpn| {
         if (std.mem.eql(u8, alpn, "h2")) {
             if (options.protocol_policy == .http1_only) return error.InvalidAlpn;

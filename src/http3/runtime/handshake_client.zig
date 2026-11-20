@@ -3464,6 +3464,20 @@ pub const HandshakeClient = struct {
         }
     }
 
+    pub const RequestHeadOptions = struct {
+        body_length: ?usize = null,
+        trailers_pending: bool = false,
+    };
+
+    pub fn startRequestWithOptions(self: *HandshakeClient, request_options: http3.Request, options: RequestHeadOptions) Error!u62 {
+        return self.startRequestUntilReportingOwner(request_options, options.body_length, null, null, options.trailers_pending) catch |err| return @errorCast(err);
+    }
+
+    pub fn startRequestWithOptionsAndDeadline(self: *HandshakeClient, request_options: http3.Request, options: RequestHeadOptions, deadline: std.Io.Clock.Timestamp) ReceiveTimeoutError!u62 {
+        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
+        return self.startRequestUntilReportingOwner(request_options, options.body_length, deadline, null, options.trailers_pending);
+    }
+
     pub fn startRequest(
         self: *HandshakeClient,
         request_options: http3.Request,
@@ -3520,7 +3534,7 @@ pub const HandshakeClient = struct {
         body_length: ?usize,
         deadline: ?std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!u62 {
-        return self.startRequestUntilReportingOwner(request_options, body_length, deadline, null);
+        return self.startRequestUntilReportingOwner(request_options, body_length, deadline, null, false);
     }
 
     /// Begin a request whose caller owns any allocated stream even when
@@ -3533,7 +3547,7 @@ pub const HandshakeClient = struct {
         owner: *?u62,
     ) Error!u62 {
         owner.* = null;
-        return self.startRequestUntilReportingOwner(request_options, body_length, null, owner) catch |err| switch (err) {
+        return self.startRequestUntilReportingOwner(request_options, body_length, null, owner, false) catch |err| switch (err) {
             error.Timeout, error.ConcurrencyUnavailable => unreachable,
             else => return @errorCast(err),
         };
@@ -3548,7 +3562,7 @@ pub const HandshakeClient = struct {
     ) ReceiveTimeoutError!u62 {
         owner.* = null;
         _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
-        return self.startRequestUntilReportingOwner(request_options, body_length, deadline, owner);
+        return self.startRequestUntilReportingOwner(request_options, body_length, deadline, owner, false);
     }
 
     fn startRequestUntilReportingOwner(
@@ -3557,6 +3571,7 @@ pub const HandshakeClient = struct {
         body_length: ?usize,
         deadline: ?std.Io.Clock.Timestamp,
         owner: ?*?u62,
+        trailers_pending: bool,
     ) ReceiveTimeoutError!u62 {
         if (self.callback_reader_active) return error.ConcurrentRead;
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
@@ -3680,7 +3695,7 @@ pub const HandshakeClient = struct {
                     stream_id,
                     streaming.expected_length,
                     streaming.body_allowed,
-                    false,
+                    trailers_pending,
                     self.options,
                     &self.qpack_encode,
                     &self.qpack_encoder_send,
@@ -3708,7 +3723,7 @@ pub const HandshakeClient = struct {
                     stream_id,
                     streaming.expected_length,
                     streaming.body_allowed,
-                    false,
+                    trailers_pending,
                     self.options,
                     &self.qpack_encode,
                     &self.qpack_encoder_send,
@@ -3737,7 +3752,7 @@ pub const HandshakeClient = struct {
                 stream_id,
                 streaming.expected_length,
                 streaming.body_allowed,
-                false,
+                trailers_pending,
                 self.options,
                 &self.qpack_encode,
                 &self.qpack_encoder_send,
@@ -3905,10 +3920,16 @@ pub const HandshakeClient = struct {
         data: []const u8,
         fin: bool,
     ) Error!void {
+        var progress: BodyWriteProgress = .{};
+        return self.sendRequestBodyPacedTracked(stream_id, data, fin, &progress);
+    }
+
+    /// Report the accepted application prefix even on caller cancellation.
+    pub fn sendRequestBodyPacedTracked(self: *HandshakeClient, stream_id: u62, data: []const u8, fin: bool, progress: *BodyWriteProgress) Error!void {
+        progress.* = .{};
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
         if (self.callback_reader_active) return error.ConcurrentRead;
-        var progress: BodyWriteProgress = .{};
-        _ = paced_body.write(&self.established.connection, &self.outbound_bodies, self.options, self, stream_id, data, fin, null, &progress, paced_request_hooks) catch |err| switch (err) {
+        _ = paced_body.write(&self.established.connection, &self.outbound_bodies, self.options, self, stream_id, data, fin, null, progress, paced_request_hooks) catch |err| switch (err) {
             error.Timeout, error.ConcurrencyUnavailable => unreachable,
             else => return @errorCast(err),
         };

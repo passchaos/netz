@@ -1,0 +1,117 @@
+[traex-zig-guard 2026-11-20 23:34:40] started Zig tree root=33964 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=1800s
+test-http
++- run test 100 pass, 1 fail (101 total)
+error: 'http.client_tests.pooled_h3_fields.test.unified HTTP streaming deadlines accept oversized pooled H3 uploads on both endpoints' failed:
+       pooled H3 Reader resume: Timeout, accepted=65536, source=81923
+       /Users/bytedance/project-z/netz/src/http3/runtime/shared_handshake_client_pool/stream_command.zig:215:33: 0x104e7ee9f in checkRequestOpenLocked (test)
+                   if (self.err) |err| return err;
+                                       ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/shared_handshake_client_pool/stream_command.zig:181:17: 0x104e7fa73 in writeBodyBlockingTracked (test)
+                       try self.checkRequestOpenLocked();
+                       ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/shared_handshake_client_pool/dispatcher.zig:120:17: 0x104e7ffe3 in writeBodyBlockingTracked (test)
+                       return self.stream.writeBodyBlockingTracked(data, fin, accepted, deadline);
+                       ^
+       /Users/bytedance/project-z/netz/src/http/client_pool/http3.zig:109:9: 0x104e80137 in writeBodyBlockingTracked (test)
+               return switch (self.*) {
+               ^
+       /Users/bytedance/project-z/netz/src/http/client_pool/stream_handle.zig:73:17: 0x104e8043b in writeBodyBefore (test)
+                       try h3.handle.writeBodyBlockingTracked(bytes, false, &progress.accepted_bytes, deadline);
+                       ^
+       /Users/bytedance/project-z/netz/src/http/client/reader_upload.zig:42:13: 0x104e81337 in run__anon_42609 (test)
+                   try result;
+                   ^
+       /Users/bytedance/project-z/netz/src/http/client_pool/stream_handle.zig:104:17: 0x104e815cf in writeBodyFromReaderBefore (test)
+                       return self.reader_upload.run(h3.allocator, self.uploadIo(), reader, self, writeBodyBefore, progress, deadline);
+                       ^
+       /Users/bytedance/project-z/netz/src/http/client_pool/stream_handle.zig:91:9: 0x104e81727 in writeBodyFromReaderWithDeadline (test)
+               return self.writeBodyFromReaderBefore(reader, progress, deadline);
+               ^
+       /Users/bytedance/project-z/netz/src/http/client_tests/pooled_h3_fields.zig:210:21: 0x104e8db27 in exerciseWithDeadlines__anon_36530 (test)
+                           return err;
+                           ^
+       /Users/bytedance/project-z/netz/src/http/client_tests/pooled_h3_fields.zig:249:5: 0x104e94acb in test.unified HTTP streaming deadlines accept oversized pooled H3 uploads on both endpoints (test)
+           try exerciseWithDeadlines(true, true);
+           ^
+failed command: ./.zig-cache/o/b401bd34af6668c44167b9669b976d03/test --cache-dir=./.zig-cache --seed=0xde6f6e8d --listen=-
+
+Build Summary: 8/10 steps succeeded (1 failed); 100/101 tests passed (1 failed)
+test-http transitive failure
++- run test 100 pass, 1 fail (101 total)
+   +- compile test Debug native success 44s MaxRSS:3G
+      +- WriteFile macho_0_p256_field_arm64.S cached
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 252ms MaxRSS:31M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 253ms MaxRSS:31M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options success
+      +- options cached
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/0f9d151e42f629c275713a528b5d3e50/build /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/zig /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib /Users/bytedance/project-z/netz .zig-cache /Users/bytedance/.cache/zig --seed 0xde6f6e8d -Z359ad21d26a35310 test-http -Dtest-filter=streaming deadlines accept oversized -Dtest-filter=unified HTTP pooled H2 blocked Reader -Dtest-filter=unified HTTP pooled H2 cancels a blocked Reader --summary all
+[traex-zig-guard 2026-11-20 23:35:35] finished Zig tree root=33964 peak=3553MiB result=0

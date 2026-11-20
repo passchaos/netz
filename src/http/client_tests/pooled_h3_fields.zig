@@ -199,7 +199,15 @@ fn exerciseWithDeadlines(comptime shared_endpoint: bool, comptime timed: bool) !
             if (index == 0) {
                 try handle.writeBodyWithDeadline(upload, &progress, deadline(io));
                 try std.testing.expectEqual(upload.len, progress.accepted_bytes);
-            } else try handle.writeBody(upload);
+            } else {
+                var source = @import("reader_gate.zig").Gate{ .io = io, .bytes = upload, .prefix_len = 3 };
+                try std.testing.expectError(error.Timeout, handle.writeBodyFromReaderWithTimeout(&source.reader, &progress, .fromMilliseconds(30)));
+                try std.testing.expect(source.canceled and source.finished);
+                try std.testing.expectEqual(source.prefix_len, progress.accepted_bytes);
+                source.release.set(io);
+                try handle.writeBodyFromReaderWithDeadline(&source.reader, &progress, deadline(io));
+                try std.testing.expectEqual(upload.len - source.prefix_len, progress.accepted_bytes);
+            }
             try handle.finishTrailersWithDeadline(&trailers, &progress, deadline(io));
             try std.testing.expect(progress.end_accepted);
             try std.testing.expectError(error.RequestBodyFinished, handle.writeBodyWithDeadline("later", &progress, deadline(io)));

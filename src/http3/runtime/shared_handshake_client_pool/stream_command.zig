@@ -51,6 +51,8 @@ pub fn Stream(comptime Pool: type) type {
         write_ready: std.Io.Event = .unset,
         /// Set by the caller to interrupt the worker's receive wait.
         activity: std.Io.Event = .unset,
+        /// Shared-endpoint dispatchers wait on one owner event for all streams.
+        worker_activity: ?*std.Io.Event = null,
         stream_id: ?u62 = null,
         head: ?http3.DecodedResponseHead = null,
         head_delivered: bool = false,
@@ -232,7 +234,7 @@ pub fn Stream(comptime Pool: type) type {
             self.pending_write_bytes += copy.len;
             self.accepted_body_bytes = total;
             if (fin) self.request_closed = true;
-            self.activity.set(self.io);
+            self.wakeWorker();
         }
 
         pub fn writeTrailers(self: *Self, trailers: []const http3.Qpack.HeaderField) !void {
@@ -281,7 +283,7 @@ pub fn Stream(comptime Pool: type) type {
             try self.checkRequestOpenLocked();
             self.queued_trailers = .{ .storage = storage, .fields = fields };
             self.request_closed = true;
-            self.activity.set(self.io);
+            self.wakeWorker();
         }
 
         /// Deliver response events to `sink` until the stream finishes.
@@ -415,7 +417,7 @@ pub fn Stream(comptime Pool: type) type {
             self.user_ready.set(self.io);
             self.write_ready.set(self.io);
             self.mutex.unlock(self.io);
-            self.activity.set(self.io);
+            self.wakeWorker();
         }
 
         pub fn isCancelled(self: *Self) bool {
@@ -428,6 +430,11 @@ pub fn Stream(comptime Pool: type) type {
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
             return self.finished;
+        }
+
+        fn wakeWorker(self: *Self) void {
+            self.activity.set(self.io);
+            if (self.worker_activity) |wake| wake.set(self.io);
         }
 
         // ---- worker side -------------------------------------------------

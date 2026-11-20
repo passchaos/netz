@@ -118,6 +118,9 @@ pub const Pool = struct {
         io: std.Io,
         options: Options,
     ) Error!Pool {
+        // This field configures the TCP backend. Pooled H3 remains owned by
+        // the explicit H3 route/dispatcher configured below.
+        if (options.client.protocol_policy == .http3_only) return error.InvalidPoolOptions;
         if (options.max_idle_per_origin > options.max_idle_connections) {
             return error.InvalidPoolOptions;
         }

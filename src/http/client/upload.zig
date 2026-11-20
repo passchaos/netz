@@ -26,12 +26,14 @@ pub fn io(self: *const Handle) std.Io {
 }
 
 pub fn writeBody(self: *Handle, bytes: []const u8) !void {
+    try self.reader_upload.ensureDrained();
     return writeBodyBefore(self, bytes, null, null);
 }
 
 pub fn writeBodyWithDeadline(self: *Handle, bytes: []const u8, progress: *Progress, deadline: std.Io.Clock.Timestamp) !void {
     progress.* = .{};
     _ = try deadline_policy.usableAwake(io(self), deadline);
+    try self.reader_upload.ensureDrained();
     return writeBodyBefore(self, bytes, progress, deadline);
 }
 
@@ -90,7 +92,7 @@ fn writeBodyBefore(self: *Handle, bytes: []const u8, progress: ?*Progress, deadl
             const result = if (deadline) |absolute|
                 h3.client.sendRequestBodyPacedWithDeadline(h3.stream_id, bytes, false, &accepted, absolute)
             else
-                h3.client.sendRequestBodyPaced(h3.stream_id, bytes, false);
+                h3.client.sendRequestBodyPacedTracked(h3.stream_id, bytes, false, &accepted);
             result catch |err| switch (err) {
                 error.RequestCancelled, error.RequestRejected => {
                     if (try stashHttp3Head(self, h3)) {
@@ -105,17 +107,26 @@ fn writeBodyBefore(self: *Handle, bytes: []const u8, progress: ?*Progress, deadl
     }
 }
 
-/// Pump `reader` into the request body until EOF.
-pub fn writeBodyFromReader(
-    self: *Handle,
-    reader: *std.Io.Reader,
-) !void {
-    var buffer: [16 * 1024]u8 = undefined;
-    while (true) {
-        const count = try reader.readSliceShort(&buffer);
-        if (count == 0) break;
-        try self.writeBody(buffer[0..count]);
-    }
+/// Pump a single-pass Reader; the source must cooperate with cancellation.
+pub fn writeBodyFromReader(self: *Handle, reader: *std.Io.Reader) !void {
+    var progress: Progress = .{};
+    return writeBodyFromReaderBefore(self, reader, &progress, null);
+}
+
+pub fn writeBodyFromReaderWithDeadline(self: *Handle, reader: *std.Io.Reader, progress: *Progress, deadline: std.Io.Clock.Timestamp) !void {
+    progress.* = .{};
+    _ = try deadline_policy.usableAwake(io(self), deadline);
+    return writeBodyFromReaderBefore(self, reader, progress, deadline);
+}
+
+pub fn writeBodyFromReaderWithTimeout(self: *Handle, reader: *std.Io.Reader, progress: *Progress, timeout: std.Io.Duration) !void {
+    progress.* = .{};
+    return writeBodyFromReaderWithDeadline(self, reader, progress, (try deadline_policy.fromTimeout(io(self), timeout)).?);
+}
+
+fn writeBodyFromReaderBefore(self: *Handle, reader: *std.Io.Reader, progress: *Progress, deadline: ?std.Io.Clock.Timestamp) !void {
+    try ensureOpen(self);
+    return self.reader_upload.run(self.allocator, io(self), reader, self, writeBodyBefore, progress, deadline);
 }
 
 pub fn finishBody(self: *Handle) !void {
@@ -135,6 +146,7 @@ pub fn finishBodyWithTimeout(self: *Handle, progress: *Progress, timeout: std.Io
 
 fn finishBodyBefore(self: *Handle, progress: ?*Progress, deadline: ?std.Io.Clock.Timestamp) !void {
     try ensureOpen(self);
+    try self.reader_upload.ensureDrained();
     switch (self.state) {
         .http1 => |*writer| if (deadline) |absolute| try writer.finishWithDeadline(absolute) else try writer.finish(),
         .http2 => |*writer| {
@@ -193,6 +205,7 @@ pub fn finishTrailersWithTimeout(self: *Handle, trailers: []const Header, progre
 
 fn finishTrailersBefore(self: *Handle, trailers: []const Header, progress: ?*Progress, deadline: ?std.Io.Clock.Timestamp) !void {
     try ensureOpen(self);
+    try self.reader_upload.ensureDrained();
     switch (self.state) {
         .http1 => |*writer| {
             const mapped = try mapToHttp1(self.allocator, trailers);

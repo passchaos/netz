@@ -13,37 +13,25 @@ const http2_runtime = @import("../../http2/runtime.zig");
 const http3_runtime = @import("../../http3/runtime.zig");
 const types = @import("../client/types.zig");
 const upload = @import("upload.zig");
+const reader_upload = @import("reader_upload.zig");
 const Fifo = @import("../../internal/fifo.zig").Fifo;
 
 pub const Header = types.Header;
 pub const UploadProgress = upload.Progress;
 
-pub const ResponseHead = struct {
-    protocol: types.Protocol,
-    status: u16,
-    headers: []const Header,
-};
-
-pub const ResponseSink = struct {
-    context: *anyopaque,
-    begin: *const fn (context: *anyopaque, head: ResponseHead) anyerror!void,
-    data: *const fn (context: *anyopaque, bytes: []const u8) anyerror!void,
-    end: *const fn (context: *anyopaque, trailers: []const Header) anyerror!void,
-    /// Optional 1xx observer. Head slices are valid only during the callback.
-    informational: ?*const fn (
-        context: *anyopaque,
-        head: ResponseHead,
-    ) void = null,
-};
+pub const ResponseHead = @import("response_sink.zig").ResponseHead;
+pub const ResponseSink = @import("response_sink.zig").ResponseSink;
 
 pub const Handle = struct {
     allocator: std.mem.Allocator,
     protocol: types.Protocol,
     state: State,
+    reader_upload: reader_upload.Pump = .{},
     h1_continue_pending: bool = false,
     h1_buffered_response: ?http1_runtime.OwnedResponse = null,
     h3_pending_event: ?http3_runtime.StreamingEvent = null,
     h3_pending_interims: Fifo(http3_runtime.StreamingEvent) = .{},
+    h3_response_metadata: ?struct { body_allowed: bool, consumed: usize, qpack_section_acknowledgments: usize } = null,
     response_available: bool = false,
     body_finished: bool = false,
     response_complete: bool = false,
@@ -94,6 +82,7 @@ pub const Handle = struct {
         return .{
             .allocator = allocator,
             .protocol = .http3,
+            .body_finished = client.outbound_bodies.find(stream_id) == null,
             .state = .{ .http3 = .{
                 .client = client,
                 .stream_id = stream_id,
@@ -102,6 +91,7 @@ pub const Handle = struct {
     }
 
     pub fn deinit(self: *Handle) void {
+        self.reader_upload.deinit(self.allocator);
         switch (self.state) {
             .http1 => |*writer| writer.deinit(),
             .http2 => |*writer| writer.deinit(),
@@ -140,6 +130,8 @@ pub const Handle = struct {
     pub const writeBodyWithDeadline = upload.writeBodyWithDeadline;
     pub const writeBodyWithTimeout = upload.writeBodyWithTimeout;
     pub const writeBodyFromReader = upload.writeBodyFromReader;
+    pub const writeBodyFromReaderWithDeadline = upload.writeBodyFromReaderWithDeadline;
+    pub const writeBodyFromReaderWithTimeout = upload.writeBodyFromReaderWithTimeout;
     pub const finishBody = upload.finishBody;
     pub const finishBodyWithDeadline = upload.finishBodyWithDeadline;
     pub const finishBodyWithTimeout = upload.finishBodyWithTimeout;
@@ -147,8 +139,8 @@ pub const Handle = struct {
     pub const finishTrailersWithDeadline = upload.finishTrailersWithDeadline;
     pub const finishTrailersWithTimeout = upload.finishTrailersWithTimeout;
 
-    /// Stream the final response into `sink`. `head.headers` and trailer
-    /// slices are valid only for the duration of the corresponding callback.
+    /// Stream the final response into `sink`. Final head fields remain valid
+    /// until handle deinit; data, interim and trailer views are callback-scoped.
     pub fn readResponse(self: *Handle, sink: ResponseSink) !ResponseHead {
         return self.readResponseBefore(sink, null);
     }
@@ -160,6 +152,10 @@ pub const Handle = struct {
         deadline: std.Io.Clock.Timestamp,
     ) !ResponseHead {
         return self.readResponseBefore(sink, deadline);
+    }
+
+    pub fn readResponseWithTimeout(self: *Handle, sink: ResponseSink, timeout: std.Io.Duration) !ResponseHead {
+        return self.readResponseWithDeadline(sink, (try @import("../../internal/deadline.zig").fromTimeout(upload.io(self), timeout)).?);
     }
 
     fn readResponseBefore(
@@ -363,6 +359,7 @@ pub const Handle = struct {
     ) !void {
         const mapped = try mapHeaders3(self.allocator, response.headers);
         defer self.allocator.free(mapped);
+        self.h3_response_metadata = .{ .body_allowed = response.body_allowed, .consumed = response.consumed, .qpack_section_acknowledgments = response.qpack_section_acknowledgments };
         try self.beginResponse(.http3, response.status, mapped);
         try sink.begin(sink.context, self.response_head.?);
     }

@@ -54,17 +54,18 @@ flowchart TD
     quic --> result
 ```
 
-`http.Client` opens H1/H2 connections and implements one-shot URI requests;
-`http.Connection` keeps the negotiated H1/H2 transport for explicit reuse.
+`http.Client` opens H1/H2 connections, or explicit H3 with `http3_only`, and
+implements one-shot URI requests; `http.Connection` retains the transport for reuse.
 `http.Pool` adds authority-keyed reuse, shared ordinary H2 requests and the
-optional H3 route. Standalone `Client`/`Connection` does not select H3.
+optional H3 route. Direct H3 uses an exclusive QUIC owner and the same request
+and duplex methods; see [direct H3](http_direct_h3.md).
 
 | Capability | Behavior and boundary |
 | --- | --- |
 | Protocol selection | HTTPS defaults to preferring H2, offering H2/H1 in one authenticated handshake; cleartext defaults to H1 and needs explicit H2 prior knowledge. The low-level H2 runtime also supports h2c Upgrade. |
 | Endpoint resolution | Hostnames, IPv4 and bracketed IPv6; configurable resolver, sequential address fallback or bounded Happy Eyeballs. TCP identity remains bound to the origin URI rather than the chosen socket address. |
 | Complete requests | Common method/header/body/trailer options and owned responses. Repeated headers and trailers remain individually accessible through iterators, including separate Set-Cookie fields. Pooled H3 callbacks preserve interim ordering and never-indexed fields without an extra trailer-count ceiling. |
-| Request body sources | `body_source.slice` or `body_source.reader` is documented to override `body`. Standalone H1/H2 and H3 pool uploads have implementations; ordinary shared H2 Pool calls now honor that precedence with bounded Reader production. |
+| Request body sources | `body_source.slice` or `body_source.reader` overrides `body` across standalone and pooled H1/H2/H3. Reader production is bounded, and complete-request deadlines include cooperative source reads. |
 | Duplex requests | `Connection.startRequest`, `Pool.startRequest`, `http.startHttp3Request`; incremental body writes, trailers, final response callbacks and optional informational callbacks. The connection/pool must outlive its handle. Completed reads return the retained final head without replaying callbacks. |
 | Ordinary H2 concurrency | One owner per active origin drives HPACK, frames, uploads and independent stream deadlines. Later requests can join while earlier responses wait. Queue and stream admission are bounded. |
 | Manual leases | `Pool.acquireUri` returns an exclusive H1/H2 lease. It does not expose an H3 lease or share its frame reader with ordinary Pool requests. |
@@ -132,7 +133,7 @@ convenience decoders do not mean the connection runtimes lack dynamic tables.
 
 | Default | Value / implication |
 | --- | --- |
-| Unified selection | `prefer_http2`, cleartext H1, allowed authenticated no-ALPN H1 fallback; H3 options are null. |
+| Unified selection | `prefer_http2`, cleartext H1, allowed authenticated no-ALPN H1 fallback. Client H3 requires `http3_only`; Pool H3 configuration defaults to null. |
 | Unified TCP pool | 64 total TCP connections, 32 idle globally, 8 idle per origin, 90-second idle expiry. |
 | Combined TCP/H3 cap | `max_total_connections = 0`: backend caps are independent until an explicit combined cap is configured. Optional H3 backend defaults to 32 connections. |
 | Ordinary shared H2 requests | 256 retained requests, 64 local streams per connection, 16-KiB upload quantum; peer SETTINGS can impose a lower stream limit. |
@@ -151,8 +152,12 @@ convenience decoders do not mean the connection runtimes lack dynamic tables.
 | F2 | Resolved | H1 streaming trailer names now use stack storage through 16 fields and exact overflow allocation above that capacity. | Reader-backed and duplex uploads exercise 16/17/40 trailers over one persistent H1 connection. `DuplexHeader` now aliases the common `http.Header`, including H2/H3 never-indexed metadata. The original static finding was at the audit baseline. The focused trailer/duplex bundle passed 93/93 tests on 2026-11-20, including support tests. |
 | F3 | Resolved | Stale TCP retry, H3 fallback and body-preserving redirects require a replayable source. Reader rewind is explicit, and source read failures are distinct from transport failure. | Real tests cover consumed single-pass refusal, complete stale replay, failed rewind without redial, source failure without retry, 307 redirects and H3 upload rejection followed by exact TCP replay. [Body API](http_bodies.md). |
 | F4 | Resolved | Concurrent H2/H3 streams expose independent informational writes and deadline forms. H3 compound responses support continued DATA, final trailers and empty-content status rules. | Native/development gates cover ordered 100/103, body/trailer composition, HEAD/204/304, whole-list preflight, wide headers, and literal failure/retry offsets. [Delivery evidence](evidence/http_informational_composition/2026-11-20/README.md). |
-| F5 | P2 documentation | weft integration request 8 remained open after empty H2 body completion and `bodyFinished()` were delivered; the docs index described content digests as authentication. | EOF regression passed in this review; current [createSlot](../src/http2/runtime/concurrent.zig) seeds completed state. Integration status and index wording corrected with this review. Historical evidence READMEs retain their original scope. |
-| F6 | P2 structure/evidence | Several runtime/owner files remain large, and feature descriptions are spread through a 4,000+ line parity log. | Keep this overview as an entry point; extract cohesive owner responsibilities without changing single-reader ownership. Add a current feature/evidence index rather than interpreting old counts as current certification. |
+| F5 | Resolved | weft integration request 8 and the content-digest index wording now match their implemented scope. | EOF regression passed in this review; current [createSlot](../src/http2/runtime/concurrent.zig) seeds completed state. Historical evidence READMEs retain their original scope. |
+| F6 | Resolved for this review | Cohesive request/response writers, response sequencing, direct H3 ownership, H3 response collection, Reader pumping and response sinks now have separate owning modules. This overview indexes current contracts and delivery evidence. | The existing single-reader owners remain intact. Native owner size is an ongoing maintenance constraint in [architecture](architecture.md), rather than an uncompleted feature in this review. |
+| F7 | Resolved | Timed TCP reads preserve socket registration, cancellation joins and accepted late bytes/EOF. | [Socket ownership evidence](evidence/http_socket_read_ownership/2026-11-20/README.md) covers native zio and wrapped I/O vtables with subsequent same-connection reuse. |
+| F8 | Resolved | H1 native and unified/pool upload operations compose setup, body, finish and trailer deadlines, with explicit acceptance progress. Oversized pooled H3 contributions use bounded queues and packet-aware fragments. | [Native H1 evidence](evidence/http1_streaming_deadlines/2026-11-20/README.md), [unified upload evidence](evidence/http_streaming_upload_deadlines/2026-11-20/README.md). |
+| F9 | Resolved | `Client`/`Connection` expose explicit H3 with common requests, streaming, negotiation metadata and redirect policy. Reader deadlines include cooperative source waits and retain interrupted upload suffixes. | [Direct H3 and Reader delivery](evidence/http_direct_h3/2026-11-20/README.md); [public H3 guide](http_direct_h3.md). |
+| F10 | Resolved | Common response sinks compose with `std.Io.Writer`, support discard and optional callbacks; direct and pool handles offer response timeout forms. Explicit `Pool.StreamHandle.discard()` now closes its TCP lease. | [Streaming contracts](http_streaming.md) cover callback lifetimes, writer flushing, error propagation and release behavior. |
 
 The existing macOS/zio packed-head cancellation hang is also repaired. Timed
 TCP reads used a file operation that replaced, then deleted, the same fd's
@@ -175,7 +180,11 @@ Unified/pool upload deadline forms and acceptance progress are delivered as well
 Pooled H3 now accepts oversized contributions through a bounded queue and
 packet-aware fragments, preserving interruption prefixes and one message end.
 Reader-source deadline composition and explicit H3 Client/Connection entrypoints
-remain the next API work.
+are delivered. Direct H3 reuses the native handshake owner, preserves common
+request sources and callback metadata, and handles exact-zero uploads with
+trailers. Both I/O backends exercise IPv4/IPv6 and blocked Reader cancellation
+followed by continued upload. [Direct H3](http_direct_h3.md) describes its
+configuration, ownership and Pool boundary.
 
 The fixed HTTP proxy has explicit product limits: no TLS connection to the
 proxy itself, authentication challenge exchange, PAC or automatic proxy

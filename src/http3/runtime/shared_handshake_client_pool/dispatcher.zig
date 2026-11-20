@@ -419,6 +419,7 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
                 const stream = try allocator.create(StreamType);
                 errdefer allocator.destroy(stream);
                 stream.* = StreamType.init(state.pool, allocator, state.io);
+                stream.worker_activity = &state.activity;
                 stream.expected_body_length = body_length orelse try http3.contentLength(request_value.headers);
                 errdefer stream.deinit();
                 const handle = try allocator.create(StreamHandle);

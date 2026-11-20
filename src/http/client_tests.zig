@@ -11,6 +11,7 @@ const vort = @import("vort");
 
 test {
     _ = @import("client_tests/duplex.zig");
+    _ = @import("client_tests/direct_h3.zig");
     _ = @import("client_tests/trailers.zig");
     _ = @import("client_tests/body_sources.zig");
     _ = @import("client_tests/reader_concurrency.zig");

@@ -7,9 +7,11 @@ const http3 = @import("../../http3/mod.zig");
 const http3_runtime = @import("../../http3/runtime.zig");
 const header_mapping = @import("../client/header_mapping.zig");
 const deadline_policy = @import("../../internal/deadline.zig");
+const reader_upload = @import("../client/reader_upload.zig");
 
 pub const StreamHandle = struct {
     kind: Kind,
+    reader_upload: reader_upload.Pump = .{},
 
     const Kind = union(enum) {
         tcp: Tcp,
@@ -48,20 +50,24 @@ pub const StreamHandle = struct {
     }
 
     pub fn writeBody(self: *StreamHandle, bytes: []const u8) !void {
-        switch (self.kind) {
-            .tcp => |*tcp| try tcp.handle.writeBody(bytes),
-            .http3 => |*h3| {
-                if (h3.body_finished) return error.RequestBodyFinished;
-                try h3.handle.writeBodyBlocking(bytes, false, null);
-            },
-        }
+        try self.reader_upload.ensureDrained();
+        var progress: client.UploadProgress = .{};
+        return self.writeBodyBefore(bytes, &progress, null);
     }
 
     pub fn writeBodyWithDeadline(self: *StreamHandle, bytes: []const u8, progress: *client.UploadProgress, deadline: std.Io.Clock.Timestamp) !void {
         progress.* = .{};
         _ = try deadline_policy.usableAwake(self.uploadIo(), deadline);
+        try self.reader_upload.ensureDrained();
+        return self.writeBodyBefore(bytes, progress, deadline);
+    }
+
+    fn writeBodyBefore(self: *StreamHandle, bytes: []const u8, progress: *client.UploadProgress, deadline: ?std.Io.Clock.Timestamp) !void {
         switch (self.kind) {
-            .tcp => |*tcp| try tcp.handle.writeBodyWithDeadline(bytes, progress, deadline),
+            .tcp => |*tcp| if (deadline) |until| try tcp.handle.writeBodyWithDeadline(bytes, progress, until) else {
+                try tcp.handle.writeBody(bytes);
+                progress.accepted_bytes = bytes.len;
+            },
             .http3 => |*h3| {
                 if (h3.body_finished) return error.RequestBodyFinished;
                 try h3.handle.writeBodyBlockingTracked(bytes, false, &progress.accepted_bytes, deadline);
@@ -75,15 +81,33 @@ pub const StreamHandle = struct {
     }
 
     pub fn writeBodyFromReader(self: *StreamHandle, reader: *std.Io.Reader) !void {
-        var buffer: [16 * 1024]u8 = undefined;
-        while (true) {
-            const count = try reader.readSliceShort(&buffer);
-            if (count == 0) break;
-            try self.writeBody(buffer[0..count]);
+        var progress: client.UploadProgress = .{};
+        return self.writeBodyFromReaderBefore(reader, &progress, null);
+    }
+
+    pub fn writeBodyFromReaderWithDeadline(self: *StreamHandle, reader: *std.Io.Reader, progress: *client.UploadProgress, deadline: std.Io.Clock.Timestamp) !void {
+        progress.* = .{};
+        _ = try deadline_policy.usableAwake(self.uploadIo(), deadline);
+        return self.writeBodyFromReaderBefore(reader, progress, deadline);
+    }
+
+    pub fn writeBodyFromReaderWithTimeout(self: *StreamHandle, reader: *std.Io.Reader, progress: *client.UploadProgress, timeout: std.Io.Duration) !void {
+        progress.* = .{};
+        return self.writeBodyFromReaderWithDeadline(reader, progress, (try deadline_policy.fromTimeout(self.uploadIo(), timeout)).?);
+    }
+
+    fn writeBodyFromReaderBefore(self: *StreamHandle, reader: *std.Io.Reader, progress: *client.UploadProgress, deadline: ?std.Io.Clock.Timestamp) !void {
+        switch (self.kind) {
+            .tcp => |*tcp| if (deadline) |until| return tcp.handle.writeBodyFromReaderWithDeadline(reader, progress, until) else return tcp.handle.writeBodyFromReader(reader),
+            .http3 => |*h3| {
+                if (h3.body_finished) return error.RequestBodyFinished;
+                return self.reader_upload.run(h3.allocator, self.uploadIo(), reader, self, writeBodyBefore, progress, deadline);
+            },
         }
     }
 
     pub fn finishBody(self: *StreamHandle) !void {
+        try self.reader_upload.ensureDrained();
         switch (self.kind) {
             .tcp => |*tcp| try tcp.handle.finishBody(),
             .http3 => |*h3| {
@@ -97,6 +121,7 @@ pub const StreamHandle = struct {
     pub fn finishBodyWithDeadline(self: *StreamHandle, progress: *client.UploadProgress, deadline: std.Io.Clock.Timestamp) !void {
         progress.* = .{};
         _ = try deadline_policy.usableAwake(self.uploadIo(), deadline);
+        try self.reader_upload.ensureDrained();
         switch (self.kind) {
             .tcp => |*tcp| try tcp.handle.finishBodyWithDeadline(progress, deadline),
             .http3 => |*h3| {
@@ -130,6 +155,7 @@ pub const StreamHandle = struct {
     }
 
     fn finishTrailersBefore(self: *StreamHandle, trailers: []const client.DuplexHeader, progress: *client.UploadProgress, deadline: ?std.Io.Clock.Timestamp) !void {
+        try self.reader_upload.ensureDrained();
         switch (self.kind) {
             .tcp => |*tcp| {
                 if (deadline) |absolute| try tcp.handle.finishTrailersWithDeadline(trailers, progress, absolute) else {
@@ -173,6 +199,10 @@ pub const StreamHandle = struct {
         }
     }
 
+    pub fn readResponseWithTimeout(self: *StreamHandle, sink: client.ResponseSink, timeout: std.Io.Duration) !client.ResponseHead {
+        return self.readResponseWithDeadline(sink, (try deadline_policy.fromTimeout(self.uploadIo(), timeout)).?);
+    }
+
     pub fn protocol(self: *const StreamHandle) client.Protocol {
         return switch (self.kind) {
             .tcp => |tcp| tcp.lease.protocol(),
@@ -180,19 +210,26 @@ pub const StreamHandle = struct {
         };
     }
 
-    /// Close the connection instead of returning it to the idle pool.
+    /// Close a TCP lease instead of returning it to the idle pool. H3 releases
+    /// the dispatcher command and cancels an unfinished request stream.
     pub fn discard(self: *StreamHandle) void {
-        self.deinit();
+        self.deinitReturning(false);
     }
 
     pub fn deinit(self: *StreamHandle) void {
+        self.deinitReturning(true);
+    }
+
+    fn deinitReturning(self: *StreamHandle, return_tcp: bool) void {
         switch (self.kind) {
             .tcp => |*tcp| {
+                self.reader_upload.deinit(tcp.allocator);
                 tcp.handle.deinit();
-                tcp.lease.release();
+                if (return_tcp) tcp.lease.release() else tcp.lease.discard();
                 tcp.allocator.destroy(tcp.lease);
             },
             .http3 => |*h3| {
+                self.reader_upload.deinit(h3.allocator);
                 h3.handle.deinit();
                 if (h3.head) |*head| head.deinit(h3.allocator);
             },

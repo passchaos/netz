@@ -90,6 +90,14 @@ used for ordinary fields, trailer declarations, finishing trailers and response
 callbacks; `DuplexHeader` remains an alias. See [streaming](http_streaming.md)
 for the connection/pool ownership and callback lifetime contracts.
 
+Manual `writeBodyFromReaderWithDeadline`/`WithTimeout` calls cover both source
+waits and output. They retain an unaccepted suffix inside the handle, so a later
+call with the same Reader can continue a usable writer without losing source
+bytes. Ordinary complete-request calls end their attempt on failure; automatic
+replay still requires the explicit rewind declaration above. Response bodies
+can stream directly into `ResponseSink.toWriter(&writer)` or be drained through
+`ResponseSink.discard()`.
+
 The fixed HTTP/1 forward-proxy path currently rejects Reader and duplex
 uploads. The supported native direct/pool paths and replay declaration do not
 bypass proxy routing or change that separate transport boundary.

@@ -98,8 +98,8 @@ pub const Reader = struct {
 
     fn run(self: *Reader) void {
         while (true) {
-            const count = self.source.readSliceShort(self.buffer) catch |err| {
-                self.publish(.{ .failure = err });
+            const count = @import("../../client/reader_io.zig").readBefore(self.io, self.source, self.buffer, null) catch {
+                self.publish(.{ .failure = error.ReadFailed });
                 return;
             };
             if (count == 0) {

@@ -58,6 +58,7 @@ pub const Manager = struct {
     ) !?tls_stream.Tls12SessionTicket {
         const now = realNowSeconds(self.io);
         return switch (self.options.protocol_policy) {
+            .http3_only => null,
             .http2_only => self.tls12.cloneForAlpnBefore(host, port, "h2", now, deadline),
             .http1_only => (try self.tls12.cloneForAlpnBefore(
                 host,
@@ -104,6 +105,7 @@ pub const Manager = struct {
     ) !?tls_stream.Tls13SessionTicket {
         const now = realNowMilliseconds(self.io);
         return switch (self.options.protocol_policy) {
+            .http3_only => null,
             .http2_only => self.tls13.cloneForAlpnBefore(host, port, "h2", now, deadline),
             .http1_only => (try self.tls13.cloneForAlpnBefore(
                 host,

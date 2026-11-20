@@ -237,6 +237,22 @@ ceiling.
 - optional `informational(head)` for every 1xx head, including `100 Continue`
   and `103 Early Hints`, before `begin`.
 
+The begin/data/end callbacks default to ignoring their input, so a custom sink
+only needs to supply the callbacks it uses. `ResponseSink.discard()` drains a
+response without retaining its body. `ResponseSink.toWriter(&writer)` forwards
+body chunks to any `std.Io.Writer`; the caller owns flushing and can customize
+the head/trailer/1xx callbacks on the returned sink. Writer failures propagate
+through the response read. For example:
+
+```zig
+var output: std.Io.Writer.Allocating = .init(allocator);
+defer output.deinit();
+const head = try handle.readResponseWithTimeout(
+    netz.http.ResponseSink.toWriter(&output.writer), .fromSeconds(10),
+);
+try consume(head.status, output.written());
+```
+
 `readResponseWithDeadline` bounds head and body waits with one absolute awake
 clock deadline on every protocol. `body_length` declares the manual write
 length: `.unknown` selects HTTP/1 chunked framing (HTTP/2 omits Content-Length)
@@ -269,8 +285,25 @@ Reader uploads wait for this queue's capacity.
 Request setup has explicit deadline/timeout forms on `Connection` and `Pool`,
 and standalone H3 has `startHttp3RequestWithDeadline`/`WithTimeout`. Setup bounds
 connection admission and head output; subsequent body/read operations use
-explicit deadlines. Reader-source I/O deadline composition remains separate
-from these network-write bounds.
+explicit deadlines. `writeBodyFromReaderWithDeadline` and `WithTimeout` bound
+both cooperative source reads and network writes with one operation deadline;
+`UploadProgress.accepted_bytes` is cumulative across that call's chunks.
+These methods pump bytes without finishing the body. Complete request methods
+also apply their deadline to Reader reads and final trailers. Cancellation joins
+source I/O before returning; a custom Reader must cooperate with `std.Io`
+cancellation. Natural read failures surface as `RequestBodyReadFailed`.
+
+Reader pumping retains one reusable 16-KiB contribution per handle. It returns
+available source bytes without waiting to fill the contribution. If output
+accepts only a prefix before a timeout or cancellation, the handle retains the
+suffix. Call the Reader method again with the same Reader to drain it before
+reading more source bytes. While a suffix is pending, a different Reader returns
+`RequestBodySourceChanged`; direct body writes or body/trailer completion with
+a pending suffix return `RequestBodyPending`. The source cursor can therefore
+be ahead of `accepted_bytes`: callers must not rewind or manually resend a
+retained contribution. Deinitializing the handle releases it. Continuation
+still requires a usable native writer; H1 transport failures retain their
+terminal policy.
 
 Timed and ordinary TCP reads use the same socket I/O surface. Canceling a
 timed wait joins its read before releasing the receive buffer; bytes or EOF
@@ -281,11 +314,14 @@ when H2 siblings mix deadline and no-deadline requests.
 
 Surfaces:
 
-- `http.Connection.startRequest` for an owned HTTP/1 or HTTP/2 connection.
+- `http.Connection.startRequest` for an owned HTTP/1, HTTP/2 or explicit
+  HTTP/3 connection. H3 uses `Client.Options.protocol_policy = .http3_only`;
+  see [direct H3 configuration](http_direct_h3.md).
 - `http.Pool.startRequest` for a pooled HTTP/1 or HTTP/2 lease, or for the
   HTTP/3 dispatcher when a live Alt-Svc route selects H3. The returned
   `Pool.StreamHandle` returns a completed TCP exchange to the idle pool and
-  cancels an abandoned H3 stream.
+  cancels an abandoned H3 stream. Explicit `discard()` closes a TCP lease;
+  on H3 it releases the command and cancels an unfinished stream.
 - `http.startHttp3Request(allocator, &handshake_client, request, body_length)`
   for an exclusive HTTP/3 `HandshakeClient`. Abandoning an unfinished H3 handle
   cancels its stream so the QUIC connection stays reusable.

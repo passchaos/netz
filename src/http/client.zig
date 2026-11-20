@@ -1,4 +1,4 @@
-//! Unified HTTP/1.1 and HTTP/2 URI client.
+//! Unified HTTP/1.1, HTTP/2 and explicit HTTP/3 URI client.
 //!
 //! HTTPS performs one vail TLS handshake offering the configured ALPN list,
 //! then transfers that exact authenticated connection into the selected HTTP
@@ -10,6 +10,8 @@ const http1 = @import("../http1/mod.zig");
 const http1_runtime = @import("../http1/runtime.zig");
 const http2 = @import("../http2/mod.zig");
 const http2_runtime = @import("../http2/runtime.zig");
+const http3_runtime = @import("../http3/runtime.zig");
+const http3_connection = @import("client/http3_connection.zig");
 const deadline_policy = @import("../internal/deadline.zig");
 const tcp_connect = @import("../internal/tcp_connect.zig");
 const address_resolver = @import("../internal/address_resolver.zig");
@@ -21,8 +23,9 @@ const types = @import("client/types.zig");
 const header_mapping = @import("client/header_mapping.zig");
 const redirect = @import("client/redirect.zig");
 const duplex = @import("client/duplex.zig");
+const reader_io = @import("client/reader_io.zig");
 
-pub const Error = http1_runtime.Error || http2_runtime.Error ||
+pub const Error = http1_runtime.Error || http2_runtime.Error || http3_runtime.Error || std.Io.Timeout.Error || std.Io.ConcurrentError ||
     proxy_socks5.Error || uri_redirect.Error || error{
     InvalidAddressConnectPolicy,
     InvalidClientOptions,
@@ -34,6 +37,7 @@ pub const ResponseTimeoutError = Error || std.Io.Timeout.Error ||
     std.Io.ConcurrentError;
 pub const Protocol = types.Protocol;
 pub const ProtocolPolicy = types.ProtocolPolicy;
+pub const Http3ConnectOptions = types.Http3ConnectOptions;
 pub const CleartextProtocol = types.CleartextProtocol;
 pub const AddressResolver = types.AddressResolver;
 pub const AddressConnectPolicy = types.AddressConnectPolicy;
@@ -72,6 +76,7 @@ const ConnectionProtocol = types.NegotiatedProtocol;
 const ConnectionValue = union(ConnectionProtocol) {
     http1: http1_runtime.Client,
     http2: http2_runtime.Connection,
+    http3: *http3_connection.Owner,
 };
 
 pub const Connection = struct {
@@ -89,6 +94,7 @@ pub const Connection = struct {
         switch (self.value) {
             .http1 => |*client| client.close(),
             .http2 => |*connection| connection.close(),
+            .http3 => |owner| owner.deinit(),
         }
         self.* = undefined;
     }
@@ -97,6 +103,7 @@ pub const Connection = struct {
         switch (self.value) {
             .http1 => |*value| value.closeWithoutCloseNotify(),
             .http2 => |*value| value.closeWithoutCloseNotify(),
+            .http3 => |owner| owner.deinit(),
         }
         self.* = undefined;
     }
@@ -106,6 +113,11 @@ pub const Connection = struct {
         return switch (self.value) {
             .http1 => |*value| value.closeWithDeadline(deadline),
             .http2 => |*value| value.closeWithDeadline(deadline),
+            .http3 => |owner| blk: {
+                defer owner.deinit();
+                _ = try deadline_policy.usableAwake(owner.client.connectionIo(), deadline);
+                break :blk {};
+            },
         };
     }
 
@@ -113,6 +125,7 @@ pub const Connection = struct {
         return switch (self.value) {
             .http1 => .http1,
             .http2 => .http2,
+            .http3 => .http3,
         };
     }
 
@@ -120,6 +133,7 @@ pub const Connection = struct {
         return switch (self.value) {
             .http1 => |*client| client.isReusableForPool(),
             .http2 => |*connection| connection.isReusable(),
+            .http3 => |owner| owner.client.isReusable(),
         };
     }
 
@@ -127,6 +141,7 @@ pub const Connection = struct {
         return switch (self.value) {
             .http1 => |*client| client.negotiatedAlpn(),
             .http2 => |*connection| connection.negotiatedAlpn(),
+            .http3 => |owner| owner.client.negotiatedAlpn(),
         };
     }
 
@@ -136,6 +151,7 @@ pub const Connection = struct {
         return switch (self.value) {
             .http1 => |*client| client.negotiatedTlsProtocol(),
             .http2 => |*connection| connection.negotiatedTlsProtocol(),
+            .http3 => .tls13,
         };
     }
 
@@ -143,6 +159,7 @@ pub const Connection = struct {
         return switch (self.value) {
             .http1 => |*client| client.wasTlsSessionResumed(),
             .http2 => |*connection| connection.wasTlsSessionResumed(),
+            .http3 => |owner| owner.client.established.resumed,
         };
     }
 
@@ -152,6 +169,7 @@ pub const Connection = struct {
         return switch (self.value) {
             .http1 => |*client| client.takeTls12SessionTicket(),
             .http2 => |*connection| connection.takeTls12SessionTicket(),
+            .http3 => null,
         };
     }
 
@@ -161,6 +179,7 @@ pub const Connection = struct {
         return switch (self.value) {
             .http1 => |*client| client.takeTls13SessionTicket(),
             .http2 => |*connection| connection.takeTls13SessionTicket(),
+            .http3 => null,
         };
     }
 
@@ -170,7 +189,6 @@ pub const Connection = struct {
         options: RequestOptions,
     ) Error!OwnedResponse {
         return self.requestBefore(target, options, null) catch |err| switch (err) {
-            error.Timeout, error.ConcurrencyUnavailable => unreachable,
             else => |other| return @errorCast(other),
         };
     }
@@ -226,6 +244,7 @@ pub const Connection = struct {
     fn startRequestBefore(self: *Connection, target: []const u8, options: RequestOptions, deadline: ?std.Io.Clock.Timestamp) Error!RequestHandle {
         if (self.forward_proxy != null) return error.StreamingBodyUnsupported;
         switch (self.value) {
+            .http3 => |owner| return owner.start(target, options, requestBodyLength(options), deadline) catch |err| return @errorCast(err),
             .http1 => |*client| {
                 var header_stack: [max_stack_headers]http1.Header = undefined;
                 var trailer_stack: [max_stack_trailers]http1.Header = undefined;
@@ -294,6 +313,7 @@ pub const Connection = struct {
             .reader => options.body,
         } else options.body;
         switch (self.value) {
+            .http3 => |owner| return owner.request(target, options, deadline) catch |err| return @errorCast(err),
             .http1 => |*client| {
                 var header_stack: [max_stack_headers]http1.Header = undefined;
                 var trailer_stack: [max_stack_trailers]http1.Header = undefined;
@@ -436,6 +456,7 @@ pub const Connection = struct {
         return switch (self.value) {
             .http1 => |client| client.io,
             .http2 => |connection| connection.io,
+            .http3 => |owner| owner.client.connectionIo(),
         };
     }
 };
@@ -455,17 +476,19 @@ fn streamHttp1Body(
     var trailer_names: [max_stack_trailers][]const u8 = undefined;
     var names = try header_mapping.names(allocator, trailers, &trailer_names);
     defer names.deinit(allocator);
-    var writer = try client.startRequest(.{
+    const request_options: http1_runtime.StreamingRequestOptions = .{
         .method = method,
         .target = target,
         .headers = headers,
         .body_length = body.length,
         .trailer_names = names.items,
-    });
+    };
+    var writer = if (deadline) |until| try client.startRequestWithDeadline(request_options, until) else try client.startRequest(request_options);
     defer writer.deinit();
 
     if (writer.expects_continue) {
-        switch (try writer.waitForContinue()) {
+        const continued = if (deadline) |until| try writer.waitForContinueWithDeadline(until) else try writer.waitForContinue();
+        switch (continued) {
             .proceed => {},
             .final_response => |response| {
                 return .{
@@ -481,15 +504,15 @@ fn streamHttp1Body(
         if (deadline) |absolute| {
             _ = try deadline_policy.usableAwake(client.io, absolute);
         }
-        const read = body.reader.readSliceShort(&buffer) catch return error.RequestBodyReadFailed;
+        const read = try reader_io.readBefore(client.io, body.reader, &buffer, deadline);
         if (read == 0) break;
-        try writer.write(buffer[0..read]);
+        if (deadline) |until| try writer.writeWithDeadline(buffer[0..read], until) else try writer.write(buffer[0..read]);
     }
 
     if (trailers.len != 0) {
-        try writer.finishTrailers(trailers);
+        if (deadline) |until| try writer.finishTrailersWithDeadline(trailers, until) else try writer.finishTrailers(trailers);
     } else {
-        try writer.finish();
+        if (deadline) |until| try writer.finishWithDeadline(until) else try writer.finish();
     }
 
     const response = if (deadline) |absolute|
@@ -526,7 +549,7 @@ fn streamHttp2Body(
 
     var buffer: [streaming_chunk_size]u8 = undefined;
     while (true) {
-        const read = body.reader.readSliceShort(&buffer) catch return error.RequestBodyReadFailed;
+        const read = try reader_io.readBefore(connection.io, body.reader, &buffer, deadline);
         if (read == 0) break;
         if (deadline) |absolute| {
             writer.writeWithDeadline(buffer[0..read], absolute) catch |err| switch (err) {
@@ -604,6 +627,14 @@ pub const Client = struct {
         io: std.Io,
         options: Options,
     ) Error!Client {
+        if (options.protocol_policy == .http3_only and (options.http_proxy != null or options.socks5_proxy != null or !options.tls.protocol_policy.offersTls13())) return error.InvalidClientOptions;
+        if (options.protocol_policy == .http3_only) {
+            const handshake = options.http3.handshake;
+            if (handshake.handshake.alpn_protocols.len != 1 or !std.mem.eql(u8, handshake.handshake.alpn_protocols[0], "h3") or handshake.handshake.early_data != null) return error.InvalidClientOptions;
+            if (handshake.connect_timeout) |duration| if (duration.nanoseconds <= 0) return error.InvalidClientOptions;
+            if (handshake.address_attempt_timeout) |duration| if (duration.nanoseconds <= 0) return error.InvalidClientOptions;
+            try tcp_connect.validateAddressConnectPolicy(options.http3.address_connect_policy);
+        }
         if (options.connect_timeout) |timeout| {
             if (timeout.nanoseconds <= 0) return error.InvalidClientOptions;
         }
@@ -651,7 +682,6 @@ pub const Client = struct {
         uri_text: []const u8,
     ) Error!Connection {
         return self.connectUriBefore(uri_text, null) catch |err| switch (err) {
-            error.Timeout, error.ConcurrencyUnavailable => unreachable,
             else => |other| return @errorCast(other),
         };
     }
@@ -708,6 +738,10 @@ pub const Client = struct {
                 self.io,
                 self.options.connect_timeout,
             );
+        if (self.options.protocol_policy == .http3_only) {
+            if (!secure) return error.UnsupportedScheme;
+            return .{ .allocator = self.allocator, .value = .{ .http3 = try http3_connection.Owner.connect(self.allocator, self.io, uri, self.options, connect_deadline) } };
+        }
         if (self.options.http_proxy) |proxy| {
             if (secure) {
                 return self.connectTunnelProxyBefore(
@@ -809,6 +843,7 @@ pub const Client = struct {
         // return path from this point.
         tls_owned = false;
         return switch (protocol) {
+            .http3 => unreachable,
             .http1 => .{
                 .allocator = self.allocator,
                 .value = .{ .http1 = try http1_runtime.Client.adoptNegotiatedTls(
@@ -1064,7 +1099,6 @@ pub const Client = struct {
         request: RequestOptions,
     ) Error!OwnedResponse {
         return self.requestUriBefore(uri_text, request, null) catch |err| switch (err) {
-            error.Timeout, error.ConcurrencyUnavailable => unreachable,
             else => |other| return @errorCast(other),
         };
     }
@@ -1234,8 +1268,13 @@ pub const Client = struct {
             if (crossed_origin) {
                 hop_client.options.tls.tls12_ticket_resumption = null;
                 hop_client.options.tls.tls13_ticket_resumption = null;
+                hop_client.options.http3.handshake.handshake.resumption_session = null;
+                hop_client.options.http3.handshake.handshake.resumption_server_id = null;
+                hop_client.options.http3.handshake.handshake.auto_resumption = null;
+                hop_client.options.http3.handshake.handshake.early_data = null;
                 if (!policy.allow_cross_origin_client_identity) {
                     hop_client.options.tls.client_identity = null;
+                    hop_client.options.http3.handshake.handshake.client_identity = null;
                 }
             }
             return hop_client.requestUriBefore(
@@ -1246,7 +1285,7 @@ pub const Client = struct {
         }
 
         pub fn clientIdentityConfigured(client: *const Client) bool {
-            return client.options.tls.client_identity != null;
+            return client.options.tls.client_identity != null or client.options.http3.handshake.handshake.client_identity != null;
         }
     };
 };

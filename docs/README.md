@@ -11,6 +11,7 @@ performance record.
 | --- | --- |
 | [architecture.md](architecture.md) | Layered design, performance invariants P1-P10, memory/concurrency doctrine, change acceptance checklist, known structural gaps. |
 | [http-overview.md](http-overview.md) | HTTP/1.1, HTTP/2 and HTTP/3 functionality, unified APIs, defaults, ownership boundaries and verified integration findings. |
+| [http_direct_h3.md](http_direct_h3.md) | Explicit H3 through Client/Connection, shared request APIs, TLS configuration and the Pool routing boundary. |
 | [http_bodies.md](http_bodies.md) | Common request body sources, bounded shared H2 Reader uploads and explicit replay across retries, fallback and redirects. |
 | [architecture/optimization-backlog.md](architecture/optimization-backlog.md) | November 19 project review: reproduced relay/rate defects, prioritized optimization work, structural findings, and validation requirements. |
 | [trust_roots.md](trust_roots.md) | System versus compiled-in Mozilla trust roots, precedence, protocol surfaces, and store reuse. |
