@@ -263,7 +263,7 @@ pub const Connection = struct {
                     return error.ConnectionClosed;
                 },
                 .text, .binary, .continuation => {
-                    if (try self.assembler.feed(frame)) |message| {
+                    if (try self.assembler.feedOwned(&frame)) |message| {
                         return .{
                             .opcode = message.opcode,
                             .payload = message.payload,

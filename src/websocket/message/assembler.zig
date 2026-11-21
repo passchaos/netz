@@ -65,7 +65,14 @@ pub const Assembler = struct {
     }
 
     pub fn feed(self: *Assembler, frame: Frame) !?Message {
-        return self.feedInternal(frame, null);
+        return self.feedInternal(frame, null, null);
+    }
+
+    /// Assemble an owned frame, transferring its payload allocation when the
+    /// frame completes the message by itself. The frame payload is cleared on
+    /// success so the caller's `Frame.deinit` becomes a no-op for it.
+    pub fn feedOwned(self: *Assembler, frame: *Frame) !?Message {
+        return self.feedInternal(frame.*, null, frame);
     }
 
     /// Assemble a frame whose uncompressed text bytes were already checked by
@@ -77,13 +84,46 @@ pub const Assembler = struct {
         frame: anytype,
         text_utf8: Utf8Validator,
     ) !?Message {
-        return self.feedInternal(frame, text_utf8);
+        return self.feedInternal(frame, text_utf8, null);
+    }
+
+    fn validateFastPayload(
+        self: *Assembler,
+        payload: []const u8,
+        validated_text_utf8: ?Utf8Validator,
+    ) !void {
+        if (payload.len > self.max_message_bytes) {
+            return error.PayloadTooLarge;
+        }
+        if (self.opcode == .text and !self.compressed) {
+            if (validated_text_utf8) |validator| {
+                self.text_utf8 = validator;
+            } else {
+                try self.text_utf8.feed(payload);
+            }
+            try self.text_utf8.finish();
+        }
+    }
+
+    fn finishFast(self: *Assembler, payload: []u8) Message {
+        const opcode = self.opcode.?;
+        const compressed = self.compressed;
+        self.opcode = null;
+        self.compressed = false;
+        self.text_utf8.reset();
+        return .{
+            .opcode = opcode,
+            .payload = payload,
+            .compressed = compressed,
+            .utf8_validated = opcode == .text and !compressed,
+        };
     }
 
     fn feedInternal(
         self: *Assembler,
         frame: anytype,
         validated_text_utf8: ?Utf8Validator,
+        steal_from: ?*Frame,
     ) !?Message {
         if (frame.header.opcode.isControl()) return null;
         const checkpoint = Checkpoint.capture(self);
@@ -99,32 +139,25 @@ pub const Assembler = struct {
         } else if (frame.header.rsv1) {
             return error.UnexpectedRsv;
         }
-        if (frame.header.fin and self.buffer.items.len == 0 and
-            self.buffer.capacity < frame.payload.len)
-        {
-            if (frame.payload.len > self.max_message_bytes) {
-                return error.PayloadTooLarge;
+        if (frame.header.fin and self.buffer.items.len == 0) {
+            if (steal_from) |owned| {
+                try self.validateFastPayload(
+                    frame.payload,
+                    validated_text_utf8,
+                );
+                const payload = owned.payload;
+                owned.payload = &.{};
+                return self.finishFast(payload);
             }
-            if (self.opcode == .text and !self.compressed) {
-                if (validated_text_utf8) |validator| {
-                    self.text_utf8 = validator;
-                } else {
-                    try self.text_utf8.feed(frame.payload);
-                }
-                try self.text_utf8.finish();
+            if (self.buffer.capacity < frame.payload.len) {
+                try self.validateFastPayload(
+                    frame.payload,
+                    validated_text_utf8,
+                );
+                return self.finishFast(
+                    try self.allocator.dupe(u8, frame.payload),
+                );
             }
-            const payload = try self.allocator.dupe(u8, frame.payload);
-            const opcode = self.opcode.?;
-            const compressed = self.compressed;
-            self.opcode = null;
-            self.compressed = false;
-            self.text_utf8.reset();
-            return .{
-                .opcode = opcode,
-                .payload = payload,
-                .compressed = compressed,
-                .utf8_validated = opcode == .text and !compressed,
-            };
         }
         // A fragmented message can be split into many individually-valid
         // frames.  Bound the aggregate payload, not only the current frame, so
@@ -192,4 +225,69 @@ test "WebSocket message assembler allocation failures preserve the accepted UTF8
         }
     }
     try std.testing.expect(succeeded);
+}
+
+test "WebSocket message assembler transfers an owned single-frame payload" {
+    const allocator = std.testing.allocator;
+    var assembler = Assembler.initLimited(allocator, 128);
+    defer assembler.deinit();
+    const payload = try allocator.dupe(u8, "owned payload");
+    var frame = Frame{
+        .header = .{
+            .fin = true,
+            .opcode = .binary,
+            .masked = false,
+            .mask_key = null,
+            .header_len = 2,
+            .payload_len = payload.len,
+        },
+        .payload = payload,
+        .consumed = 2 + payload.len,
+    };
+    const message = (try assembler.feedOwned(&frame)).?;
+    defer allocator.free(message.payload);
+    try std.testing.expectEqual(Opcode.binary, message.opcode);
+    try std.testing.expectEqualStrings("owned payload", message.payload);
+    try std.testing.expectEqual(payload.ptr, message.payload.ptr);
+    try std.testing.expectEqual(@as(usize, 0), frame.payload.len);
+    frame.deinit(allocator);
+}
+
+test "WebSocket message assembler transfers a finishing continuation payload" {
+    const allocator = std.testing.allocator;
+    var assembler = Assembler.initLimited(allocator, 128);
+    defer assembler.deinit();
+    var empty = Frame{
+        .header = .{
+            .fin = false,
+            .opcode = .text,
+            .masked = false,
+            .mask_key = null,
+            .header_len = 2,
+            .payload_len = 0,
+        },
+        .payload = &.{},
+        .consumed = 2,
+    };
+    try std.testing.expect((try assembler.feedOwned(&empty)) == null);
+    const tail = try allocator.dupe(u8, "tail");
+    var frame = Frame{
+        .header = .{
+            .fin = true,
+            .opcode = .continuation,
+            .masked = false,
+            .mask_key = null,
+            .header_len = 2,
+            .payload_len = tail.len,
+        },
+        .payload = tail,
+        .consumed = 2 + tail.len,
+    };
+    const message = (try assembler.feedOwned(&frame)).?;
+    defer allocator.free(message.payload);
+    try std.testing.expectEqual(Opcode.text, message.opcode);
+    try std.testing.expectEqualStrings("tail", message.payload);
+    try std.testing.expectEqual(tail.ptr, message.payload.ptr);
+    try std.testing.expectEqual(@as(usize, 0), frame.payload.len);
+    frame.deinit(allocator);
 }

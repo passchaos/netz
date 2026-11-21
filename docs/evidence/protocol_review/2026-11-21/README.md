@@ -1270,3 +1270,26 @@ build lines were captured, so no per-test summary is claimed.
 | Full HTTP/1 suite | 475/475 | `http1-connect-udp-timeout.log` |
 | Public package surface tests | 26/26 | `test-package-connect-udp-timeout.log` |
 | Guided parser fuzz (2000 iterations) | exit 0 | `fuzz-parsers-guided.log` |
+
+
+## Fifty-seventh pass: zero-copy single-frame message assembly
+
+`MessageAssembler` duplicated every frame payload into its buffer, and the
+byte-stream adapter then duplicated the assembled payload once more for
+single-frame messages. Add `feedOwned`: when an owned frame completes the
+message by itself (including a finishing continuation after an empty first
+fragment), the assembler transfers the frame's payload allocation instead of
+copying it and clears `frame.payload` so the caller's `Frame.deinit` is a
+no-op. `stream_connection.receiveMessageBefore` now uses the owned path;
+multi-frame assembly and the borrowed runtime frame path are unchanged.
+
+The assembler's inline tests were also registered from the WebSocket test
+root; previously a production import alone left them out of filtered builds
+and tripped the focused-suite guard, the same pruning behavior fixed for the
+QUIC retransmission tests. New tests cover the single-frame transfer and a
+finishing-continuation transfer.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full WebSocket suite | 509/510 (1 skipped) | `websocket-owned-message.log` |
+| Public package surface tests | 26/26 | `test-package-owned-message.log` |

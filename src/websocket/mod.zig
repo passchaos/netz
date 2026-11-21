@@ -2008,5 +2008,6 @@ pub const stream_connection = @import("stream_connection.zig");
 
 test {
     _ = @import("tests.zig");
+    _ = @import("message/assembler.zig");
     _ = stream_connection;
 }
