@@ -1,0 +1,4 @@
+{
+  "src/http2/client_pool.zig": "fd42b3be3dd455c4635088e99da61c4fd7553d51bc412bb4821ef5952ed70e3d",
+  "src/http2/runtime/client_pool_tests.zig": "0d12459c35047fe0bfd4d9e86ff4837ed4f90053b1f663b2a8f30e0deba6bea5"
+}

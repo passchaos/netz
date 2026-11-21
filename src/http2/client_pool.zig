@@ -258,6 +258,18 @@ pub const Pool = struct {
         return self.acquireParsedUriUntil(uri, deadline);
     }
 
+    pub fn acquireParsedUriWithTimeout(
+        self: *Pool,
+        uri: std.Uri,
+        timeout: std.Io.Duration,
+    ) AcquireTimeoutError!Lease {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.acquireParsedUriWithDeadline(
+            uri,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     fn acquireParsedUriUntil(
         self: *Pool,
         uri: std.Uri,

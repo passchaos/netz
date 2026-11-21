@@ -279,6 +279,21 @@ test "HTTP/2 client connect timeout is available through direct and pool APIs" {
     try std.testing.expectEqual(@as(usize, 0), pool.connectionCount());
 }
 
+test "HTTP/2 pool parsed URI timeout rejects before dialing" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var pool = try pool_mod.Pool.init(allocator, io, .{});
+    defer pool.deinit();
+    const uri = try std.Uri.parse("http://localhost:1/parsed-timeout");
+    try std.testing.expectError(
+        error.Timeout,
+        pool.acquireParsedUriWithTimeout(uri, .zero),
+    );
+    try std.testing.expectEqual(@as(usize, 0), pool.connectionCount());
+}
+
 test "HTTP/2 client pool retries stale reused idempotent connection once" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

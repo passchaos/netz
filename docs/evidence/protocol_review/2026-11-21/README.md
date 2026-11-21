@@ -663,3 +663,17 @@ ACK-aware sender possible:
 | Full WebTransport suite | 756/758, 2 skipped | `webtransport-after-ack-prefix.log` |
 | Full HTTP suite | 305/305 | `http-after-ack-prefix.log` |
 | Full WebSocket suite | 504/505, 1 host-sensitive skip | `ws-after-ack-prefix.log` |
+
+
+## Twenty-third pass: parsed-URI pool timeout parity
+
+`http2.client_pool` exposed `acquireUri{,WithTimeout,WithDeadline}` and
+`acquireParsedUri{,WithDeadline}` but no relative-timeout form for an
+already-parsed URI. `acquireParsedUriWithTimeout` completes the matrix; a
+non-positive budget returns `Timeout` before dialing, matching the other pool
+timeout forms. The focused test asserts the rejection and that no connection is
+created.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Parsed-URI pool timeout rejection | 37/37 | `http2-pool-parsed-timeout.log` |
