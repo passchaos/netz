@@ -47,8 +47,10 @@ aliases for the version-specific streaming owners, not another transport.
   `error.DeadlineUnsupported`. Runtime connections expose deadline forms
   directly.
 - Close paths: H1/H2 send close-notify/GOAWAY; direct H3 `Connection.close()`
-  sends CONNECTION_CLOSE(NO_ERROR). `closeWithoutCloseNotify` and
-  `closeWithDeadline` retire locally without another socket write.
+  sends CONNECTION_CLOSE(NO_ERROR). `closeWithDeadline`/`closeWithTimeout`
+  bound that shutdown output with one awake-clock budget and still release the
+  transport when the budget expires. `closeWithoutCloseNotify` retires locally
+  without another socket write.
 
 ## Bounded resources
 

@@ -450,3 +450,40 @@ flakes rather than product failures.
 | Large certificate, client probe, PTO | 40/40 | `quic-after-accounting-focused.log` |
 | Full QUIC suite | 1106/1130, 23 skipped, 1 rotating flake | `quic-full-final2.log` |
 | Dispatcher and receive-cancel flakes in isolation | 33/33 and 32/32 | `quic-dispatcher-isolated.log`, `quic-receive-cancel-isolated.log` |
+
+
+## Sixteenth pass: host-independent blocked-output deadlines
+
+The full `test-http2` suite exposed that the saturation fixtures could not
+bound a small control-frame write on this macOS host:
+
+- A blocking descriptor ignores `MSG_DONTWAIT` once the peer window closes, so
+  the fill loop itself slept in `sendto` and the suite hung.
+- Filling through `O_NONBLOCK` and restoring blocking mode avoids the hang,
+  but the kernel still accepts small frames past `EAGAIN`: a 17-byte PING, and
+  even a 17-byte send behind a blocked 4 MiB filler, both succeed. The
+  "blocked small write" premise is therefore host-dependent.
+
+Changes:
+
+- `internal/testing/tcp_saturation.zig` fills with `O_NONBLOCK`, restores the
+  caller's descriptor flags, caps the fill, and reports
+  `error.BufferNotSaturated` so a host without backpressure skips instead of
+  hanging.
+- The PING probe test stalls the transport's `netWrite` and asserts the
+  deadline cancels the concurrent write (`Timeout`, terminal lease).
+- `BlockedOutput.initStalled` gives the GOAWAY, PING-ACK and WebTransport
+  SETTINGS write-timeout tests the same deterministic stalled output while
+  keeping real socket reads.
+- `closeWithTimeout` was added to `http.Connection`, `http1.Client` and
+  `http2.Connection`, matching the existing `WithDeadline`/`WithTimeout`
+  convention used by requests, WebSocket and WebTransport close paths. An
+  expired budget still retires the transport.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full HTTP/2 suite | 982/982 | `http2-full-after-stall-fix.log` |
+| Refactored stalled-output state tests | 35/35 | `http2-stalled-output-tests.log` |
+| HTTP/1 handoff backpressure gate | 36/36 | `http1-handoff-saturation.log` |
+| Full HTTP suite after `closeWithTimeout` | 304/304 | `http-full-after-close-timeout.log` |
+| Saturation helper unit test | 2/2 | `tcp-saturation-unit.log` |

@@ -115,11 +115,10 @@ test "HTTP/2 WebTransport settings failed output leaves acknowledged and submitt
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var fixture = try @import("../testing/blocked_output.zig").BlockedOutput.init(io, .client);
+    var fixture = try @import("../testing/blocked_output.zig").BlockedOutput.initStalled(io, .client);
     defer fixture.deinit();
     fixture.connection.limits.enable_connect_protocol = true;
     fixture.connection.limits.webtransport = initial;
-    try fixture.saturate();
     try std.testing.expectError(error.Timeout, fixture.connection.updateWebTransportSettingsWithTimeout(updated, .fromMilliseconds(10)));
     try std.testing.expectEqualDeep(
         initial,

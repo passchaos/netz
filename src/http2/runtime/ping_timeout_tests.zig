@@ -3127,51 +3127,52 @@ test "HTTP/2 PING deadline validates before writing" {
     if (shared.err) |err| return err;
 }
 
-test "HTTP/2 PING deadline bounds a blocked probe write" {
+test "HTTP/2 PING deadline bounds a stalled probe write" {
     if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
-    if (comptime @import("builtin").os.tag == .windows) return;
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
         .async_limit = .unlimited,
     });
     defer threaded.deinit();
-    const io = threaded.io();
+    const delegate = threaded.io();
     var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
-        io,
+        delegate,
         .{ .reuse_address = true },
     );
-    defer listener.deinit(io);
+    defer listener.deinit(delegate);
     const sender = try listener.socket.address.connect(
-        io,
+        delegate,
         .{ .mode = .stream },
     );
-    const peer = try listener.accept(io);
-    defer peer.close(io);
+    const peer = try listener.accept(delegate);
+    defer peer.close(delegate);
 
-    const send_buffer: c_int = 4096;
-    try std.posix.setsockopt(
-        sender.socket.handle,
-        std.posix.SOL.SOCKET,
-        std.posix.SO.SNDBUF,
-        std.mem.asBytes(&send_buffer),
-    );
-    const filler = [_]u8{0xa5} ** 4096;
-    while (true) {
-        const rc = std.posix.system.sendto(
-            sender.socket.handle,
-            filler[0..].ptr,
-            filler.len,
-            std.posix.MSG.DONTWAIT | std.posix.MSG.NOSIGNAL,
-            null,
-            0,
-        );
-        switch (std.posix.errno(rc)) {
-            .SUCCESS => {},
-            .INTR => continue,
-            .AGAIN => break,
-            else => |err| return std.posix.unexpectedErrno(err),
+    // A real full send queue cannot force a 17-byte PING frame to sleep: hosts
+    // differ in how much slack they accept past EAGAIN. Stall the transport
+    // instead so the deadline contract is exercised deterministically.
+    const StalledWrite = struct {
+        var active: *@This() = undefined;
+        delegate: std.Io,
+        begun: std.Io.Event = .unset,
+
+        fn write(
+            _: ?*anyopaque,
+            _: net.Socket.Handle,
+            _: []const u8,
+            _: []const []const u8,
+            _: usize,
+        ) net.Stream.Writer.Error!usize {
+            const self = active;
+            self.begun.set(self.delegate);
+            std.Io.sleep(self.delegate, .fromSeconds(30), .awake) catch |err| return err;
+            return error.Canceled;
         }
-    }
+    };
+    var stalled = StalledWrite{ .delegate = delegate };
+    StalledWrite.active = &stalled;
+    var vtable = delegate.vtable.*;
+    vtable.netWrite = StalledWrite.write;
+    const io = std.Io{ .userdata = delegate.userdata, .vtable = &vtable };
 
     var connection = runtime.Connection{
         .io = io,

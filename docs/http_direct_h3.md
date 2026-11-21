@@ -73,9 +73,10 @@ h3.setApplicationDatagramSize(1400);
 ```
 
 `Connection.close()` sends a best-effort QUIC CONNECTION_CLOSE with
-`NO_ERROR`, matching the H1/H2 close-notify contract. `closeWithDeadline`
-validates the deadline first and then sends the same best-effort close;
-`closeWithoutCloseNotify` retires the local QUIC owner without a close frame.
+`NO_ERROR`, matching the H1/H2 close-notify contract. `closeWithDeadline` and
+`closeWithTimeout` validate the budget first and then send the same best-effort
+close; an expired budget still retires the owner. `closeWithoutCloseNotify`
+retires the local QUIC owner without a close frame.
 
 `connectUri*`, `request*`, Reader reads, body output and response reads preserve
 one absolute operation deadline. A custom Reader must cooperate with `std.Io`

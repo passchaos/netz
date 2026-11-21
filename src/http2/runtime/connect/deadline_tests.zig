@@ -6,6 +6,7 @@ const runtime = @import("../../runtime.zig");
 const websocket = @import("../../../websocket/runtime.zig");
 const wire = @import("../frame/wire.zig");
 const frame_io = @import("../frame/io.zig");
+const tcp_saturation = @import("../../../internal/testing/tcp_saturation.zig");
 
 const allocator = std.testing.allocator;
 const large_value = "x" ** (256 * 1024);
@@ -99,14 +100,10 @@ test "HTTP/2 CONNECT response deadline bounds blocked credit refund" {
             // without reading more peer bytes. This blocks cleanup output.
             const filler = "z" ** 4096;
             for (0..3) |round| {
-                while (true) {
-                    const rc = std.posix.system.sendto(self.sender.socket.handle, filler.ptr, filler.len, std.posix.MSG.DONTWAIT | std.posix.MSG.NOSIGNAL, null, 0);
-                    switch (std.posix.errno(rc)) {
-                        .SUCCESS, .INTR => continue,
-                        .AGAIN => break,
-                        else => |err| return std.posix.unexpectedErrno(err),
-                    }
-                }
+                tcp_saturation.saturateSendBuffer(self.sender, filler) catch |err| switch (err) {
+                    error.BufferNotSaturated => return error.SkipZigTest,
+                    else => return err,
+                };
                 if (round != 2) try std.Io.sleep(self.io, .fromMilliseconds(20), .awake);
             }
         }

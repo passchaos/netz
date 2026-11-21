@@ -4,6 +4,7 @@ const std = @import("std");
 const http2 = @import("../mod.zig");
 const net = std.Io.net;
 const runtime = @import("../runtime.zig");
+const BlockedOutput = @import("testing/blocked_output.zig").BlockedOutput;
 
 const Client = runtime.Client;
 const ClientDuplexStream = runtime.ClientDuplexStream;
@@ -598,57 +599,16 @@ test "HTTP/2 graceful shutdown write failure is terminal" {
 
 test "HTTP/2 graceful shutdown deadline bounds a blocked GOAWAY write" {
     if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
-    if (comptime @import("builtin").os.tag == .windows) return;
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
         .async_limit = .unlimited,
     });
     defer threaded.deinit();
     const io = threaded.io();
-    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
-        io,
-        .{ .reuse_address = true },
-    );
-    defer listener.deinit(io);
-    const sender = try listener.socket.address.connect(
-        io,
-        .{ .mode = .stream },
-    );
-    const peer = try listener.accept(io);
-    defer peer.close(io);
+    var fixture = try BlockedOutput.initStalled(io, .server);
+    defer fixture.deinit();
+    const connection = &fixture.connection;
 
-    const send_buffer: c_int = 4096;
-    try std.posix.setsockopt(
-        sender.socket.handle,
-        std.posix.SOL.SOCKET,
-        std.posix.SO.SNDBUF,
-        std.mem.asBytes(&send_buffer),
-    );
-    const filler = [_]u8{0xa5} ** 4096;
-    while (true) {
-        const rc = std.posix.system.sendto(
-            sender.socket.handle,
-            filler[0..].ptr,
-            filler.len,
-            std.posix.MSG.DONTWAIT | std.posix.MSG.NOSIGNAL,
-            null,
-            0,
-        );
-        switch (std.posix.errno(rc)) {
-            .SUCCESS => {},
-            .INTR => continue,
-            .AGAIN => break,
-            else => |err| return std.posix.unexpectedErrno(err),
-        }
-    }
-
-    var connection = Connection{
-        .io = io,
-        .allocator = allocator,
-        .stream = sender,
-        .role = .server,
-    };
-    defer connection.close();
     try std.testing.expectError(
         error.Timeout,
         connection.gracefulShutdownWithTimeout(.fromMilliseconds(20)),
@@ -664,59 +624,17 @@ test "HTTP/2 graceful shutdown deadline bounds a blocked GOAWAY write" {
 
 test "HTTP/2 graceful shutdown fails closed when PING ACK write times out" {
     if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
-    if (comptime @import("builtin").os.tag == .windows) return;
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
         .async_limit = .unlimited,
     });
     defer threaded.deinit();
     const io = threaded.io();
-    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
-        io,
-        .{ .reuse_address = true },
-    );
-    defer listener.deinit(io);
-    const sender = try listener.socket.address.connect(
-        io,
-        .{ .mode = .stream },
-    );
-    const peer = try listener.accept(io);
-    defer peer.close(io);
-
-    const send_buffer: c_int = 4096;
-    try std.posix.setsockopt(
-        sender.socket.handle,
-        std.posix.SOL.SOCKET,
-        std.posix.SO.SNDBUF,
-        std.mem.asBytes(&send_buffer),
-    );
-    const filler = [_]u8{0xa5} ** 4096;
-    while (true) {
-        const rc = std.posix.system.sendto(
-            sender.socket.handle,
-            filler[0..].ptr,
-            filler.len,
-            std.posix.MSG.DONTWAIT | std.posix.MSG.NOSIGNAL,
-            null,
-            0,
-        );
-        switch (std.posix.errno(rc)) {
-            .SUCCESS => {},
-            .INTR => continue,
-            .AGAIN => break,
-            else => |err| return std.posix.unexpectedErrno(err),
-        }
-    }
-
-    var connection = Connection{
-        .io = io,
-        .allocator = allocator,
-        .stream = sender,
-        .role = .server,
-        .local_goaway_last_stream_id = std.math.maxInt(u31),
-        .graceful_shutdown_phase = .synchronizing,
-    };
-    defer connection.close();
+    var fixture = try BlockedOutput.initStalled(io, .server);
+    defer fixture.deinit();
+    const connection = &fixture.connection;
+    connection.local_goaway_last_stream_id = std.math.maxInt(u31);
+    connection.graceful_shutdown_phase = .synchronizing;
     var ping_storage: [http2.PingPayload.encoded_len]u8 = undefined;
     const peer_ping = http2.PingPayload.writeInto(
         &ping_storage,

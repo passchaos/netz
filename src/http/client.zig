@@ -134,6 +134,17 @@ pub const Connection = struct {
         };
     }
 
+    /// Convenience form of `closeWithDeadline` using an awake-clock budget.
+    /// An expired budget still retires the transport, matching the deadline
+    /// form's no-output cleanup contract.
+    pub fn closeWithTimeout(self: *Connection, timeout: std.Io.Duration) Error!void {
+        if (timeout.nanoseconds <= 0) {
+            self.closeWithoutCloseNotify();
+            return error.Timeout;
+        }
+        return self.closeWithDeadline(.fromNow(connectionIo(self), .{ .raw = timeout, .clock = .awake }));
+    }
+
     pub fn protocol(self: Connection) Protocol {
         return switch (self.value) {
             .http1 => .http1,

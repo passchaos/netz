@@ -950,6 +950,17 @@ pub const Client = struct {
         }
     }
 
+    /// Convenience form of `closeWithDeadline` using an awake-clock budget.
+    /// An expired budget still retires the transport, matching the deadline
+    /// form's no-output cleanup contract.
+    pub fn closeWithTimeout(self: *Client, timeout: std.Io.Duration) Error!void {
+        if (timeout.nanoseconds <= 0) {
+            self.closeWithoutCloseNotify();
+            return error.Timeout;
+        }
+        return self.closeWithDeadline(.fromNow(self.io, .{ .raw = timeout, .clock = .awake }));
+    }
+
     pub fn peerCertificates(
         self: *const Client,
     ) ?[]const []const u8 {

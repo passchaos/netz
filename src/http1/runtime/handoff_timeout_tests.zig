@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const runtime = @import("../runtime.zig");
 const stream_io = @import("../../internal/stream_io.zig");
+const tcp_saturation = @import("../../internal/testing/tcp_saturation.zig");
 
 const net = std.Io.net;
 
@@ -137,22 +138,10 @@ test "HTTP/1 bounded CONNECT write fails closed under backpressure" {
         std.mem.asBytes(&send_buffer),
     );
     const filler = [_]u8{0xa5} ** 4096;
-    while (true) {
-        const rc = std.posix.system.sendto(
-            client.stream.socket.handle,
-            filler[0..].ptr,
-            filler.len,
-            std.posix.MSG.DONTWAIT | std.posix.MSG.NOSIGNAL,
-            null,
-            0,
-        );
-        switch (std.posix.errno(rc)) {
-            .SUCCESS => {},
-            .INTR => continue,
-            .AGAIN => break,
-            else => |err| return std.posix.unexpectedErrno(err),
-        }
-    }
+    tcp_saturation.saturateSendBuffer(client.stream, &filler) catch |err| switch (err) {
+        error.BufferNotSaturated => return error.SkipZigTest,
+        else => return err,
+    };
 
     try std.testing.expectError(
         error.Timeout,

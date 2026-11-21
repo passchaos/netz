@@ -592,6 +592,17 @@ pub const Connection = struct {
         };
     }
 
+    /// Convenience form of `closeWithDeadline` using an awake-clock budget.
+    /// An expired budget still retires the transport, matching the deadline
+    /// form's no-output cleanup contract.
+    pub fn closeWithTimeout(self: *Connection, timeout: std.Io.Duration) Error!void {
+        if (timeout.nanoseconds <= 0) {
+            self.closeWithoutCloseNotify();
+            return error.Timeout;
+        }
+        return self.closeWithDeadline(.fromNow(self.io, .{ .raw = timeout, .clock = .awake }));
+    }
+
     /// Whether an exclusive client lease can safely return this connection to
     /// an idle pool. GOAWAY, live streams, queued application frames, or push
     /// mode make reuse ambiguous, so the pool closes those connections rather

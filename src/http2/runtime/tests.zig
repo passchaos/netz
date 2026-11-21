@@ -198,6 +198,7 @@ test {
     _ = @import("response_writer_tests.zig");
     _ = @import("request_writer_tests.zig");
     _ = @import("ping_timeout_tests.zig");
+    _ = @import("close_timeout_tests.zig");
     _ = @import("refusal_tests.zig");
     _ = @import("connect_udp_tests.zig");
     _ = @import("connect_udp_relay_tests.zig");

@@ -2,6 +2,7 @@ const std = @import("std");
 const test_socket = @import("test_socket.zig");
 const builtin = @import("builtin");
 const stream_io = @import("stream_io.zig");
+const tcp_saturation = @import("testing/tcp_saturation.zig");
 
 const Observer = struct {
     var active: *Observer = undefined;
@@ -165,21 +166,10 @@ test "wide stream write waits for writability after EAGAIN" {
     // Fill both kernel queues so the next raw sendmsg observes EAGAIN.
     const filler = "z" ** 4096;
     for (0..3) |round| {
-        while (true) {
-            const rc = std.posix.system.sendto(
-                sender.socket.handle,
-                filler.ptr,
-                filler.len,
-                std.posix.MSG.DONTWAIT | std.posix.MSG.NOSIGNAL,
-                null,
-                0,
-            );
-            switch (std.posix.errno(rc)) {
-                .SUCCESS, .INTR => continue,
-                .AGAIN => break,
-                else => |err| return std.posix.unexpectedErrno(err),
-            }
-        }
+        tcp_saturation.saturateSendBuffer(sender, filler) catch |err| switch (err) {
+            error.BufferNotSaturated => return error.SkipZigTest,
+            else => return err,
+        };
         if (round != 2) {
             try std.Io.sleep(io, .fromMilliseconds(20), .awake);
         }
