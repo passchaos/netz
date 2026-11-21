@@ -1168,3 +1168,16 @@ two-phase GOAWAY, and finished 9/9 steps with 3/3 tests passing.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | HTTP/3 live connection fuzz replay | 9/9 steps, 3/3 tests | `fuzz-http3-connection-replay.log` |
+
+
+## Fiftieth pass: WebTransport endpoint fuzz replay
+
+`zig build fuzz-webtransport-endpoint` replayed its bounded corpus against
+two authenticated WebTransport sessions sharing one production UDP endpoint,
+varying cross-session DATAGRAM, paired-DATAGRAM, bidirectional-stream, DRAIN
+and CLOSE ordering while checking exact handle routing and payload isolation.
+The run finished 9/9 steps with 3/3 tests passing.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| WebTransport endpoint fuzz replay | 9/9 steps, 3/3 tests | `fuzz-webtransport-endpoint-replay.log` |
