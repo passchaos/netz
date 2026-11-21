@@ -73,7 +73,7 @@ left out of this batch.
 | ID | Area | Finding | Suggested direction |
 | --- | --- | --- | --- |
 | P1 | Resolved in the second pass | After an H3 *connection* failure the body was never read, yet fallback for an idempotent method still called `bodySource().prepareReplay()`, rejecting a single-pass Reader. | The attempt now records whether the request started; setup failures fall back without replay, started requests keep method/replay gating. |
-| P2 | Partially resolved | Client `receiveServerHandshakeCrypto` now emits PTO probes while it waits, so a partial external Handshake flight no longer stalls the budget. The server still reserves its complete flight; server-side prefix sending remains a future optimization, now unblocked by the client probes. | Keep the client probe; consider server prefixes with an ACK-aware cursor. |
+| P2 | Partially resolved | Client `receiveServerHandshakeCrypto` now emits PTO probes while it waits. Server prefix sending was retried and still deadlocked: periodic prefixes keep delivering datagrams, which reset the client PTO counter, so probes stop and the budget never grows. | Add a probe timer independent of received datagrams, then re-enable server prefixes. |
 | P3 | Resolved in the sixth pass | The legacy/stateless adapters returned `WebTransportNotNegotiated` for caller configuration they cannot support (`initial_flow_limits`). | They now return `UnsupportedWebTransportOption`; genuine peer capability failures keep `WebTransportNotNegotiated`. |
 | P4 | HTTP H3 options | `Client.Options.http3.handshake.handshake.alpn_protocols` nests two `handshake` levels because the facade wraps the native handshake options. | Add flat accessors or a `quic` sub-struct while keeping the existing fields as deprecated aliases. |
 | P6 | Resolved | `drains GRO response batch one packet at a time` hung on platforms without GRO because its skip path joined a server thread still blocked in `receiveRequest`. | The skip path now closes the connection first; the test skips cleanly and the full H3 suite completes. |
@@ -366,3 +366,14 @@ failures.
 | --- | --- | --- |
 | Bounded-send test on this host | 37/38, 1 skipped | `ws-bounded-send-skip.log` |
 | Full WebSocket suite | 503/504, 1 skipped | `websocket-suite-final.log` |
+
+
+## Rejected again: server prefixes with receive-driven PTO
+
+After adding client PTO probes, server prefix sending was retried. The 16- and
+40-entry 1200-byte certificate regressions still timed out. Each prefix attempt
+delivers a datagram, which resets `receiveServerHandshakeCrypto`'s PTO counter;
+the client therefore never reaches the timeout that emits a probe, and the
+server budget stays at its initial value. Supporting both requires a probe
+timer that advances independently of received datagrams (or ACK-driven budget
+accounting). The working tree was restored; the client-probe tests pass 37/37.
