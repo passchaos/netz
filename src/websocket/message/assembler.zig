@@ -291,3 +291,32 @@ test "WebSocket message assembler transfers a finishing continuation payload" {
     try std.testing.expectEqual(@as(usize, 0), frame.payload.len);
     frame.deinit(allocator);
 }
+
+test "WebSocket message assembler feedOwned needs no allocation for a complete frame" {
+    const allocator = std.testing.allocator;
+    const payload = try allocator.dupe(u8, "no-copy");
+    var frame = Frame{
+        .header = .{
+            .fin = true,
+            .opcode = .binary,
+            .masked = false,
+            .mask_key = null,
+            .header_len = 2,
+            .payload_len = payload.len,
+        },
+        .payload = payload,
+        .consumed = 2 + payload.len,
+    };
+    // The first allocation already fails; transferring the frame payload must
+    // not allocate.
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    var assembler = Assembler.initLimited(failing.allocator(), 128);
+    defer assembler.deinit();
+    const message = (try assembler.feedOwned(&frame)).?;
+    defer allocator.free(message.payload);
+    try std.testing.expect(!failing.has_induced_failure);
+    try std.testing.expectEqualStrings("no-copy", message.payload);
+    try std.testing.expectEqual(payload.ptr, message.payload.ptr);
+    try std.testing.expectEqual(@as(usize, 0), frame.payload.len);
+    frame.deinit(allocator);
+}

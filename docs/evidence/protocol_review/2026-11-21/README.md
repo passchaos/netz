@@ -1350,3 +1350,19 @@ pass.
 | Filtered `test-lib` IPv4 source bind | 254/255 (1 skipped) | live run |
 | Filtered `test-lib` resolved bound | 222/223 (1 skipped) | live run |
 | Filtered `test-lib` TCP no-delay | 225/225 | live run |
+
+
+## Sixtieth pass: zero-allocation guarantee for owned assembly
+
+The fifty-seventh pass added `MessageAssembler.feedOwned` to transfer a
+complete frame's payload, but only pointer identity was asserted. A new test
+runs the transfer against a `std.testing.FailingAllocator` whose first
+allocation fails and requires the call to succeed with
+`has_induced_failure == false`, proving the single-frame path performs no
+allocator traffic at all. The transferred payload still points at the frame's
+original allocation and the frame payload is cleared.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full WebSocket suite | 510/511 (1 skipped) | `websocket-owned-no-alloc.log` |
+| Public package surface tests | 26/26 | `test-package-owned-no-alloc.log` |
