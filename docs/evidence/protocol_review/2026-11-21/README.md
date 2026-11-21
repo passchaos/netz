@@ -1194,3 +1194,16 @@ finished 9/9 steps with 3/3 tests passing.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | HTTP/2 live connection fuzz replay | 9/9 steps, 3/3 tests | `fuzz-http2-connection-replay.log` |
+
+
+## Fifty-second pass: HTTP/1 live connection fuzz replay
+
+`zig build fuzz-http1-connection` replayed its bounded corpus through a
+production loopback TCP client and server, covering persistent reuse,
+complete and streaming fixed/chunked bodies, trailers, HEAD suppression, and
+request- or response-selected connection retirement. The run finished 9/9
+steps with 3/3 tests passing.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| HTTP/1 live connection fuzz replay | 9/9 steps, 3/3 tests | `fuzz-http1-connection-replay.log` |
