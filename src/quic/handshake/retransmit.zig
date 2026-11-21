@@ -607,20 +607,15 @@ pub const InitialHandshakeFlight = struct {
     handshake_complete: bool = false,
     peer_expected_packet_number: u64 = 0,
     /// Set while parsing one peer datagram: it carried a CRYPTO frame, so the
-    /// receive path must start at `peer_crypto_packet_number`.
+    /// receive path must restart at that packet number.
     peer_datagram_has_crypto: bool = false,
     peer_datagram_has_close: bool = false,
-    peer_crypto_packet_number: u64 = 0,
     /// Cumulative CRYPTO start/end for each server Handshake packet number.
     /// The slot is a ring keyed by `(packet_number - base) % max_flight_packets`;
     /// a retransmitted range overwrites its superseded slot.
     packet_crypto_start: [max_flight_packets]usize = @splat(0),
     packet_crypto_end: [max_flight_packets]usize = @splat(0),
     packet_acked: [max_flight_packets]bool = @splat(false),
-
-    pub fn handshakeComplete(self: *const InitialHandshakeFlight) bool {
-        return self.handshake_complete;
-    }
 
     pub fn send(context: *anyopaque, retransmission: u8) anyerror!void {
         const self: *InitialHandshakeFlight = @ptrCast(@alignCast(context));
@@ -824,7 +819,7 @@ pub const InitialHandshakeFlight = struct {
             }
             var packet = opened orelse continue;
             defer packet.deinit(self.endpoint.allocator);
-            self.applyPeerFrames(packet.payload, packet.packet_number);
+            self.applyPeerFrames(packet.payload);
             if (self.peer_datagram_has_crypto) {
                 // The receive path restarts at the CRYPTO-bearing packet; an
                 // earlier ACK in the same datagram is skipped as
@@ -843,7 +838,6 @@ pub const InitialHandshakeFlight = struct {
     fn applyPeerFrames(
         self: *InitialHandshakeFlight,
         payload: []const u8,
-        packet_number: u64,
     ) void {
         var position: usize = 0;
         var ack_ranges: [8]quic.AckRange = undefined;
@@ -866,7 +860,6 @@ pub const InitialHandshakeFlight = struct {
                 }
             } else if (parsed.frame == .crypto) {
                 self.peer_datagram_has_crypto = true;
-                self.peer_crypto_packet_number = packet_number;
             } else if (parsed.frame == .connection_close or
                 parsed.frame == .application_close)
             {

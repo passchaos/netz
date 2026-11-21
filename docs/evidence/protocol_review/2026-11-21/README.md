@@ -736,3 +736,10 @@ assert the zero-budget rejection for all four on both protocols.
 | HTTP/2 concurrent timeout matrix | 34/34 | `http2-concurrent-timeout-matrix.log` |
 | HTTP/3 concurrent timeout matrix | 65/65 | `http3-concurrent-timeout-matrix.log` |
 | Full library and public-package compile | 9/9 steps | `test-compile-final.log` |
+| Public package surface tests | 26/26 | `test-package-final.log` |
+| QUIC prefix/close cleanup regression | 36/36 | `quic-cleanup.log` |
+
+The ACK-aware flight also dropped an unused packet-number field and the
+redundant `handshakeComplete()` getter after the accept gate moved to the
+CRYPTO/close datagram flags; the focused regression confirms no behavior
+change.
