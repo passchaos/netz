@@ -448,7 +448,13 @@ test "server partial Initial flight defers Handshake and accounts sent prefix" {
         context.anti_amplification.bytes_sent <
             try quic.initial_exchange.initialThenHandshakeCryptoWireLen(
                 context.initial_options,
-                context.handshake_options,
+                .{
+                    .initial = context.handshake_options,
+                    .max_datagram_size = quic.initial_exchange
+                        .handshakeDatagramSize(
+                        context.endpoint.limits.max_datagram_size,
+                    ),
+                },
             ),
     );
 

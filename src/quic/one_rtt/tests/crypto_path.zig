@@ -2831,6 +2831,20 @@ test "QUIC server port migration allows user dynamic scopes but rejects system s
     );
 }
 
+fn bindPathTestEndpoint(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    address: std.Io.net.IpAddress,
+    limits: quic.runtime.Limits,
+) !quic.runtime.Endpoint {
+    return quic.runtime.Endpoint.bind(allocator, io, address, limits) catch |err| switch (err) {
+        // macOS and some CI hosts do not configure the 127.0.0.0/8 alias used
+        // for a distinct migration path.
+        error.AddressUnavailable => return error.SkipZigTest,
+        else => return err,
+    };
+}
+
 test "QUIC 1-RTT spin bit keeps independent candidate path state" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -2850,7 +2864,7 @@ test "QUIC 1-RTT spin bit keeps independent candidate path state" {
         .{ .max_datagram_size = 4096 },
     );
     defer original_peer.deinit();
-    var candidate_peer = try quic.runtime.Endpoint.bind(
+    var candidate_peer = try bindPathTestEndpoint(
         allocator,
         io,
         .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 2 }, .port = 0 } },
@@ -5086,7 +5100,7 @@ test "QUIC candidate amplification credit transfers when path becomes active" {
         .{ .max_datagram_size = 4096 },
     );
     defer original_endpoint.deinit();
-    var candidate_endpoint = try quic.runtime.Endpoint.bind(
+    var candidate_endpoint = try bindPathTestEndpoint(
         allocator,
         io,
         .{ .ip4 = .{
@@ -5183,7 +5197,7 @@ test "QUIC late PATH_RESPONSE validates only its challenge path epoch" {
         .{ .max_datagram_size = 4096 },
     );
     defer endpoint.deinit();
-    var peer_b = try quic.runtime.Endpoint.bind(
+    var peer_b = try bindPathTestEndpoint(
         allocator,
         io,
         .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 2 }, .port = 0 } },
@@ -5380,7 +5394,7 @@ test "QUIC failed consecutive migration restores most recently validated path" {
         .{ .max_datagram_size = 4096 },
     );
     defer endpoint.deinit();
-    var peer_b = try quic.runtime.Endpoint.bind(
+    var peer_b = try bindPathTestEndpoint(
         allocator,
         io,
         .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 2 }, .port = 0 } },

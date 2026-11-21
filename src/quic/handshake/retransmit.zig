@@ -580,6 +580,20 @@ pub const InitialHandshakeFlight = struct {
             handshake_packets,
             retransmission,
         );
+        // Reserve the complete planned Handshake range for a later
+        // CONNECTION_CLOSE before any Initial datagram becomes visible. A
+        // partial Initial flight may return before the Handshake send, and an
+        // error during Handshake protection must not leave a close able to
+        // reuse a protected nonce.
+        const next_handshake = std.math.add(
+            u64,
+            handshake_options.packet_number,
+            handshake_packets,
+        ) catch null;
+        self.next_handshake_packet_number = if (next_handshake) |value|
+            if (value <= quic.protection.max_packet_number) value else null
+        else
+            null;
         const flight_bytes = try quic.initial_exchange
             .initialThenHandshakeCryptoWireLen(
             initial_options,
@@ -628,11 +642,6 @@ pub const InitialHandshakeFlight = struct {
                 ),
             },
         );
-        self.next_handshake_packet_number = if (handshake_progress.last_packet_number <
-            quic.protection.max_packet_number)
-            handshake_progress.last_packet_number + 1
-        else
-            null;
         committed_bytes = std.math.add(
             usize,
             committed_bytes,

@@ -1405,12 +1405,17 @@ fn testDistinctPreferredEndpoint(
         .{ .max_datagram_size = 4096 },
     );
     defer server_endpoint.deinit();
-    var preferred_endpoint = try quic.runtime.Endpoint.bind(
+    var preferred_endpoint = quic.runtime.Endpoint.bind(
         allocator,
         io,
         preferred_bind,
         .{ .max_datagram_size = 4096 },
-    );
+    ) catch |err| switch (err) {
+        // Some hosts do not configure the 127.0.0.0/8 alias used for a
+        // distinct preferred endpoint.
+        error.AddressUnavailable => return error.SkipZigTest,
+        else => return err,
+    };
     defer preferred_endpoint.deinit();
     const server_key = try tls_testing.serverKeyPair();
     const server_public = server_key.public_key.toUncompressedSec1();

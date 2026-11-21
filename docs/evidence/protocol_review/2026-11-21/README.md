@@ -422,3 +422,31 @@ budget, and the client's probe datagrams did not increase
 `anti_amplification.bytes_received`. The server loop does retry; it simply has
 no budget. The next investigation is whether the probes are routed to the
 pending handshake inbox or whether `observeReceived` is skipped for them.
+
+
+## Fifteenth pass: server flight accounting and full QUIC gate
+
+Running the complete `test-quic` suite exposed two test-gate problems and one
+server-side accounting defect:
+
+- `retransmit_tests` still passed a raw `SendInitialOptions` to
+  `initialThenHandshakeCryptoWireLen`, whose second parameter became
+  `SendFlightOptions` when Handshake CRYPTO flights were packetized. The test
+  now wraps the options and the full suite compiles.
+- `InitialHandshakeFlight` assigned `next_handshake_packet_number` only after a
+  successful Handshake send. A partial Initial flight or a protection error
+  left it null, so a later CONNECTION_CLOSE was skipped. The number is now
+  reserved as `base + planned_packets` before any Initial datagram is visible.
+- Migration-path tests bind `127.0.0.2`; hosts without that loopback alias now
+  skip on `AddressUnavailable`.
+
+The full suite completes: 1106/1130 passed, 23 skipped, and one rotating
+load-sensitive UDP test failure. The dispatcher batch-suffix and receive
+cancellation tests each pass in isolation; both are recorded as host-load
+flakes rather than product failures.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Large certificate, client probe, PTO | 40/40 | `quic-after-accounting-focused.log` |
+| Full QUIC suite | 1106/1130, 23 skipped, 1 rotating flake | `quic-full-final2.log` |
+| Dispatcher and receive-cancel flakes in isolation | 33/33 and 32/32 | `quic-dispatcher-isolated.log`, `quic-receive-cancel-isolated.log` |

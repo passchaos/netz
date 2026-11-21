@@ -90,6 +90,10 @@ Raising the HTTP body limit for H3 requires
 | Pool Alt-Svc fallback | A setup failure can use TCP without rewinding; a started request keeps method/replay gating. |
 | QUIC anti-amplification | The server still reserves the complete flight; client PTO probes run on a timer, independent of received partial-flight datagrams. |
 
+The full QUIC suite includes real-UDP timing tests that can rotate under heavy
+host load; each observed failure passes in isolation. Migration-path tests skip
+when the host does not configure a `127.0.0.0/8` alias.
+
 See [HTTP overview](http-overview.md), [HTTP streaming](http_streaming.md),
 [direct H3](http_direct_h3.md), [WebSocket adapter](websocket_stream_adapter.md),
 [WebTransport parity](webtransport_parity.md) and
