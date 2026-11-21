@@ -796,3 +796,131 @@ test "handshake caller deadline bounds active retransmission budget" {
     try std.testing.expect(elapsed.nanoseconds < 500 * std.time.ns_per_ms);
     try std.testing.expect(context.calls >= 1);
 }
+
+test "server prefix sender resumes at the unacknowledged CRYPTO offset" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var receiver = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 1200 },
+    );
+    defer receiver.deinit();
+    var sender = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 1200 },
+    );
+    defer sender.deinit();
+
+    const initial_keys = quic.protection
+        .deriveInitialSecrets("ack-suffix").server;
+    const server_handshake_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x31} ** quic.protection.secret_len,
+    );
+    const client_handshake_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x32} ** quic.protection.secret_len,
+    );
+
+    var payload: [3000]u8 = undefined;
+    for (&payload, 0..) |*byte, index| byte.* = @intCast(index % 251);
+
+    var context = target.InitialHandshakeFlight{
+        .endpoint = &sender,
+        .peer = receiver.address(),
+        .initial_keys = initial_keys,
+        .initial_options = .{
+            .initial = .{
+                .destination_connection_id = "ack-suffix",
+                .source_connection_id = "server",
+                .packet_number = 0,
+                .crypto_data = "initial",
+            },
+            .max_datagram_size = 1200,
+        },
+        .handshake_keys = server_handshake_keys,
+        .handshake_options = .{
+            .destination_connection_id = "client",
+            .source_connection_id = "server",
+            .packet_number = 0,
+            .crypto_data = &payload,
+            .max_crypto_frame_data_len = 1000,
+        },
+        .peer_handshake_keys = client_handshake_keys,
+    };
+    try target.InitialHandshakeFlight.send(&context, 0);
+    const total_packets = try quic.initial_exchange
+        .handshakeCryptoFlightPacketCount(.{
+        .initial = context.handshake_options,
+        .max_datagram_size = 1200,
+    });
+    try std.testing.expect(total_packets > 1);
+    try std.testing.expectEqual(
+        @as(?u64, @intCast(total_packets)),
+        context.handshake_next_packet_number,
+    );
+
+    for (0..1 + total_packets) |_| {
+        var datagram = try receiver.receiveBytes();
+        datagram.deinit(allocator);
+    }
+
+    var ack_storage: [64]u8 = undefined;
+    var ack_list: std.ArrayList(u8) = .{
+        .items = ack_storage[0..0],
+        .capacity = ack_storage.len,
+    };
+    var fixed = std.heap.FixedBufferAllocator.init(&.{});
+    try (quic.Frame{ .ack = .{
+        .largest_acknowledged = 0,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    } }).write(&ack_list, fixed.allocator());
+    const ack_packet = try quic.protection.sealHandshakePacket(
+        allocator,
+        client_handshake_keys,
+        .{
+            .destination_connection_id = "server",
+            .source_connection_id = "client",
+            .packet_number = 0,
+            .payload = ack_list.items,
+        },
+    );
+    defer allocator.free(ack_packet);
+    _ = target.InitialHandshakeFlight.observeReceived(
+        &context,
+        receiver.address(),
+        ack_packet,
+    );
+    const acked = context.handshake_acked_crypto;
+    try std.testing.expect(acked > 0);
+    try std.testing.expect(acked < payload.len);
+
+    try target.InitialHandshakeFlight.send(&context, 1);
+    var initial_datagram = try receiver.receiveBytes();
+    initial_datagram.deinit(allocator);
+    var resumed = try receiver.receiveBytes();
+    defer resumed.deinit(allocator);
+    var packet = try quic.protection.openHandshakePacket(
+        allocator,
+        server_handshake_keys,
+        resumed.bytes,
+        @intCast(total_packets),
+    );
+    defer packet.deinit(allocator);
+    try std.testing.expectEqual(
+        @as(u64, @intCast(total_packets)),
+        packet.packet_number,
+    );
+    var parsed = try quic.parseFrameOwned(allocator, packet.payload);
+    defer parsed.deinitOwned(allocator);
+    try std.testing.expect(parsed.frame == .crypto);
+    try std.testing.expectEqual(
+        @as(u64, @intCast(acked)),
+        parsed.frame.crypto.offset,
+    );
+}

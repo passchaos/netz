@@ -656,6 +656,7 @@ ACK-aware sender possible:
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | 40-entry certificate, mTLS, close reservation, prepared verifier | 40/40 | `quic-ack-aware-prefix.log` |
+| Deterministic ACK suffix-resume unit test | 36/36 | `quic-suffix-unit.log` |
 | QUIC handshake, CRYPTO, PTO, certificate, prepared bundle | 66/66 | `quic-handshake-after-prefix.log` |
 | Full QUIC suite | 1107/1130, 23 skipped, no failures | `quic-full-after-prefix.log` |
 | Full HTTP/3 suite | 927/931, 4 skipped | `http3-after-ack-prefix.log` |
