@@ -1,0 +1,4 @@
+{
+  "src/http/client.zig": "386fe19e9c1681abfc0dae5542d86f8d938d357ac4ccbbb56b192265fea65542",
+  "src/http/client_tests/direct_h3.zig": "939fe76f235389b6e0d1745b25ed4efb50c72ac6ed1d868ca0003b832076ba85"
+}

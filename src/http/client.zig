@@ -125,6 +125,10 @@ pub const Connection = struct {
             .http3 => |owner| blk: {
                 defer owner.deinit();
                 _ = try deadline_policy.usableAwake(owner.client.connectionIo(), deadline);
+                // Match `close()`: deliver a best-effort CONNECTION_CLOSE after
+                // validating the deadline. The deadline bounds the call, not
+                // the socket write, which is a single UDP datagram.
+                owner.client.established.connection.closeApplication(0, "") catch {};
                 break :blk {};
             },
         };

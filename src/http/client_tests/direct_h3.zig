@@ -266,7 +266,7 @@ test "unified HTTP direct H3 URI requests redirects Reader replay and credential
     try redirectAndOneShot(true);
 }
 
-test "unified HTTP direct H3 close sends CONNECTION_CLOSE" {
+fn closeObservation(comptime use_deadline: bool) !void {
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
     defer threaded.deinit();
     const io = threaded.io();
@@ -310,7 +310,19 @@ test "unified HTTP direct H3 close sends CONNECTION_CLOSE" {
     var response = try connection.requestWithDeadline("/close", .{}, deadline(io));
     defer response.deinit();
     try std.testing.expectEqualStrings("ok", response.body());
-    connection.close();
+    if (use_deadline) {
+        try connection.closeWithDeadline(deadline(io));
+    } else {
+        connection.close();
+    }
     release.set(io);
     try peer.await(io);
+}
+
+test "unified HTTP direct H3 close sends CONNECTION_CLOSE" {
+    try closeObservation(false);
+}
+
+test "unified HTTP direct H3 deadline close sends CONNECTION_CLOSE" {
+    try closeObservation(true);
 }

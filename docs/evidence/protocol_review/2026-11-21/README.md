@@ -377,3 +377,16 @@ the client therefore never reaches the timeout that emits a probe, and the
 server budget stays at its initial value. Supporting both requires a probe
 timer that advances independently of received datagrams (or ACK-driven budget
 accounting). The working tree was restored; the client-probe tests pass 37/37.
+
+
+## Thirteenth pass: deadline close parity for direct H3
+
+`Connection.closeWithDeadline` validated the deadline and then deinitialized
+the QUIC owner without sending CONNECTION_CLOSE, unlike `close()`. It now sends
+the same best-effort `NO_ERROR` close after validation. The direct H3 close
+test is parameterized over both forms and asserts that the server session
+observes `error.ConnectionClosed`.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Direct H3 normal and deadline close | 97/97 | `h3-deadline-close.log` |
