@@ -1235,6 +1235,7 @@ assert the peer observes EOF, and the package surface pins both declarations.
 | --- | --- | --- |
 | Full WebTransport suite | 758/760 (2 skipped) | `webtransport-h2-init-timeout.log` |
 | Public package surface tests | 26/26 | `test-package-h2-init-timeout.log` |
+| Full library and package compile | 9/9 steps | live `zig build test-compile` |
 
 
 ## Fifty-fifth pass: HTTP/1 TLS connection fuzz replay
