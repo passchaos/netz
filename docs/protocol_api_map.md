@@ -46,10 +46,12 @@ aliases for the version-specific streaming owners, not another transport.
   deadline. A canceled source read joins before borrowed storage is released.
 - HTTP/3 handshake selection uses `http3.preference_timeout` for the H3 probe
   under `prefer_http3`; TCP fallback keeps the original request deadline.
-- `websocket.stream_connection` exposes deadline forms when its transport
-  supplies `read_deadline_fn`/`write_deadline_fn`; otherwise they return
-  `error.DeadlineUnsupported`. Runtime connections expose deadline forms
-  directly.
+- `websocket.stream_connection` exposes deadline and relative-timeout forms
+  when its transport supplies `read_deadline_fn`/`write_deadline_fn`;
+  otherwise they return `error.DeadlineUnsupported`. Its
+  `closeWithDeadline`/`closeWithTimeout` are resumable: a rejected or failed
+  Close write leaves the connection open for the unbounded `close`.
+  Runtime connections expose deadline forms directly.
 - Close paths: H1/H2 send close-notify/GOAWAY; direct H3 `Connection.close()`
   sends CONNECTION_CLOSE(NO_ERROR). `closeWithDeadline`/`closeWithTimeout`
   bound that shutdown output with one awake-clock budget and still release the

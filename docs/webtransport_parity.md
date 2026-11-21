@@ -1196,6 +1196,13 @@ Shared-endpoint `writeStream`, `writeStreams`, `sendStream`, and
 `finishStream`, `resetStream`, and `stopStream` instead make one socket-free
 attempt and return flow-control, congestion, or pacing backpressure to the sole
 `EndpointServer.receive*` owner.
+The public low-level stream modules mirror the same contract:
+`runtime.handshake_stream` pairs `WithTimeout` with `WithDeadline` for
+`send`/`sendSlices`, `write`/`writeSlices`, `finish`, and `receive`;
+`runtime.incremental_stream` does so for `read`/`readId`, `stop`,
+`reset`/`resetReliably`, and the fair batch `write`. Each timeout form
+validates a non-positive budget before any transport work, then converts once
+to the absolute-deadline path.
 The endpoint `drain` method applies the same single-packet rule to its Capsule
 and commits the HTTP/3 body offset and local draining state only after the
 packet reaches the socket.
