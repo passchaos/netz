@@ -22,6 +22,11 @@ pub const ReceiveError = Error || error{
 
 pub const min_initial_udp_datagram_size: usize = 1200;
 
+/// Handshake flights must fit the minimum QUIC path MTU until PMTUD confirms
+/// a larger path. Emitting a larger datagram relies on IP fragmentation,
+/// which RFC 9000 forbids QUIC endpoints from depending on.
+pub const max_handshake_udp_datagram_size: usize = 1200;
+
 pub const SendInitialOptions = struct {
     version: u32 = quic.Version.version_1.wireValue(),
     destination_connection_id: []const u8,

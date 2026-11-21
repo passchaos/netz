@@ -51,9 +51,12 @@ QUIC client/server handshakes retain up to 256 KiB of CRYPTO data per encryption
 level by default, matching the TCP/TLS handshake budget. Storage grows on demand;
 explicit `handshake.handshake.max_crypto_buffer` values retain their configured
 bound. The old 4-KiB default could reject ordinary server certificate flights.
-Handshake-level CRYPTO flights are also split into datagrams bounded by the
-endpoint's `max_datagram_size`, so certificate and mTLS flights do not require
-jumbo UDP packets. The peer reassembles client CRYPTO across datagrams.
+Handshake-level CRYPTO flights are also split into datagrams capped at the
+1200-byte QUIC minimum path MTU, so certificate and mTLS flights never depend
+on IP fragmentation. The peer reassembles client CRYPTO across datagrams.
+Application data still uses the endpoint's configured datagram limit; the H3
+default is 4096 bytes and PMTUD is opt-in, so a path that only supports 1200
+bytes should set `http3.limits.quic.max_datagram_size` accordingly.
 
 `Connection.close()` sends a best-effort QUIC CONNECTION_CLOSE with
 `NO_ERROR`, matching the H1/H2 close-notify contract. `closeWithoutCloseNotify`

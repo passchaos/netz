@@ -162,3 +162,31 @@ Two smaller correctness gaps closed after the second pass.
 The close test has the server session wait for the next request after the
 response and assert `error.ConnectionClosed`, proving the facade delivered the
 close frame rather than dropping the connection locally.
+
+
+## Fourth pass: handshake datagrams must not rely on IP fragmentation
+
+The H3 endpoint default is a 4096-byte datagram limit, chosen for receive
+batching. Handshake flights previously used that same value as their send
+packet size, so a certificate flight could leave as a 4-KiB UDP datagram before
+PMTUD had confirmed the path. RFC 9000 requires QUIC handshakes to fit the
+minimum path MTU; relying on IP fragmentation is not interoperable.
+
+Client Initial, retransmitted Initial, client final Handshake, and server
+Initial+Handshake flights are now capped at 1200 bytes via
+`quic.initial_exchange.handshakeDatagramSize`. The existing CRYPTO
+packetization splits larger flights; the endpoint receive capacity is
+unchanged.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| QUIC handshake, PTO, certificate, prepared verifier, CRYPTO limits | 65/65 | `quic-handshake-mtu-debug.log` |
+| Direct H3, protocol policy, Reader replay/fallback, pooled H3 | 115/115 | `http-handshake-mtu-debug.log` |
+
+### Open: application data still uses the endpoint datagram limit
+
+The same 4096-byte default applies to 1-RTT application packets, and PMTUD is
+disabled by default (`one_rtt.Config.enable_pmtud = false`). A deployment on a
+1200-byte path should set `http3.limits.quic.max_datagram_size` explicitly, or
+enable PMTUD and let it raise the path limit. Splitting the receive capacity
+from the send path-MTU field is the longer-term interface fix.

@@ -11,6 +11,15 @@ pub const Error = quic.runtime.Error || quic.protection.Error || quic.crypto_str
 
 pub const min_initial_udp_datagram_size =
     flight.min_initial_udp_datagram_size;
+pub const max_handshake_udp_datagram_size =
+    flight.max_handshake_udp_datagram_size;
+
+/// Cap every handshake datagram to the minimum QUIC path MTU. The endpoint's
+/// receive capacity may be larger, but handshake output must not depend on IP
+/// fragmentation before PMTUD has confirmed the path.
+pub fn handshakeDatagramSize(endpoint_max: usize) usize {
+    return @min(endpoint_max, max_handshake_udp_datagram_size);
+}
 pub const SendInitialOptions = flight.SendInitialOptions;
 pub const SendInitialFlightOptions = flight.SendOptions;
 pub const SentInitialFlight = flight.Sent;

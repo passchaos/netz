@@ -1370,7 +1370,7 @@ fn connectAttempt(
                         .min_datagram_size = quic.initial_exchange
                             .min_initial_udp_datagram_size,
                     },
-                    .max_datagram_size = endpoint.limits.max_datagram_size,
+                    .max_datagram_size = quic.initial_exchange.handshakeDatagramSize(endpoint.limits.max_datagram_size),
                 },
                 .zero_rtt_keys = keys.packet,
                 .zero_rtt_options = .{
@@ -1436,7 +1436,7 @@ fn connectAttempt(
                         .min_datagram_size = quic.initial_exchange
                             .min_initial_udp_datagram_size,
                     },
-                    .max_datagram_size = endpoint.limits.max_datagram_size,
+                    .max_datagram_size = quic.initial_exchange.handshakeDatagramSize(endpoint.limits.max_datagram_size),
                 },
             };
             server_datagram =
@@ -2829,7 +2829,7 @@ fn acceptInternal(
                 .max_crypto_frame_data_len = options.max_crypto_frame_data_len,
                 .min_datagram_size = quic.initial_exchange.min_initial_udp_datagram_size,
             },
-            .max_datagram_size = endpoint.limits.max_datagram_size,
+            .max_datagram_size = quic.initial_exchange.handshakeDatagramSize(endpoint.limits.max_datagram_size),
         },
         .handshake_keys = handshake.server_quic,
         .handshake_options = .{

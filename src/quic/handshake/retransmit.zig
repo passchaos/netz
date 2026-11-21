@@ -559,7 +559,9 @@ pub const InitialHandshakeFlight = struct {
         var handshake_options = self.handshake_options;
         const handshake_flight: quic.initial_exchange.SendInitialFlightOptions = .{
             .initial = handshake_options,
-            .max_datagram_size = self.endpoint.limits.max_datagram_size,
+            .max_datagram_size = quic.initial_exchange.handshakeDatagramSize(
+                self.endpoint.limits.max_datagram_size,
+            ),
         };
         // Stride the retransmission range by the complete flight so a later
         // attempt cannot reuse a packet number from an earlier attempt.
@@ -575,7 +577,9 @@ pub const InitialHandshakeFlight = struct {
             initial_options,
             .{
                 .initial = handshake_options,
-                .max_datagram_size = self.endpoint.limits.max_datagram_size,
+                .max_datagram_size = quic.initial_exchange.handshakeDatagramSize(
+                    self.endpoint.limits.max_datagram_size,
+                ),
             },
         );
         try self.anti_amplification.reserve(flight_bytes);
@@ -611,7 +615,9 @@ pub const InitialHandshakeFlight = struct {
             self.handshake_keys,
             .{
                 .initial = handshake_options,
-                .max_datagram_size = self.endpoint.limits.max_datagram_size,
+                .max_datagram_size = quic.initial_exchange.handshakeDatagramSize(
+                    self.endpoint.limits.max_datagram_size,
+                ),
             },
         );
         self.next_handshake_packet_number = if (handshake_progress.last_packet_number <
@@ -659,7 +665,9 @@ pub const HandshakeFlight = struct {
         const self: *HandshakeFlight = @ptrCast(@alignCast(context));
         const flight_options: quic.initial_exchange.SendInitialFlightOptions = .{
             .initial = self.options,
-            .max_datagram_size = self.endpoint.limits.max_datagram_size,
+            .max_datagram_size = quic.initial_exchange.handshakeDatagramSize(
+                self.endpoint.limits.max_datagram_size,
+            ),
         };
         const packet_count = try quic.initial_exchange
             .handshakeCryptoFlightPacketCount(flight_options);
@@ -676,7 +684,9 @@ pub const HandshakeFlight = struct {
             self.keys,
             .{
                 .initial = options,
-                .max_datagram_size = self.endpoint.limits.max_datagram_size,
+                .max_datagram_size = quic.initial_exchange.handshakeDatagramSize(
+                    self.endpoint.limits.max_datagram_size,
+                ),
             },
         );
         self.next_packet_number = if (progress.last_packet_number <
