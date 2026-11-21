@@ -9640,6 +9640,18 @@ test "public modules are reachable" {
         "writeWithTimeout",
     ));
     try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.session_control.Control,
+        "pollWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.session_control.Control,
+        "rejectPostTerminalDataWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.session_control.Control,
+        "rejectInvalidCapsuleWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.http3.runtime.HandshakeAdmission,
         "deadline",
     ));

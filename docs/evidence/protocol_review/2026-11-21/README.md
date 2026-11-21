@@ -902,3 +902,21 @@ form clears counts and leaves the stream prefix and offsets untouched.
 | --- | --- | --- |
 | Full WebTransport suite | 755/757 (2 skipped) | `webtransport-batch-timeout.log` |
 | Public package surface tests | 26/26 | `test-package-batch-timeout.log` |
+
+
+## Thirty-sixth pass: WebTransport session-control timeout forms
+
+`webtransport.runtime.session_control.Control` exposed `poll`,
+`rejectPostTerminalData`, and `rejectInvalidCapsule` with absolute-deadline
+counterparts only. Add `pollWithTimeout`, `rejectPostTerminalDataWithTimeout`,
+and `rejectInvalidCapsuleWithTimeout`; each converts through
+`deadline_policy.fromTimeout`, so a non-positive duration returns `Timeout`
+before pending events are consumed, rejection state is recorded, or
+RESET_STREAM/STOP_SENDING is written. The buffered-close credit test now
+asserts zero-budget poll rejection, and the public package surface test pins
+all three declarations.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full WebTransport suite | 755/757 (2 skipped) | `webtransport-session-control-timeouts.log` |
+| Public package surface tests | 26/26 | `test-package-session-control-timeouts.log` |

@@ -100,6 +100,10 @@ test "WebTransport buffered CLOSE capsule commits without waiting for credit pac
     connection.pacer = quic.pacing.Pacer.initWithRateLimit(true, 4096, 1, 1);
     quic.one_rtt.testing.setPacingBudgetAt(&connection, 0, @intCast(std.Io.Clock.awake.now(base).nanoseconds));
     Trap.sleeps = 0;
+    try std.testing.expectError(
+        error.Timeout,
+        control.pollWithTimeout(&connection, .fromNanoseconds(0)),
+    );
     const event = (try control.pollWithDeadline(&connection, .fromNow(base, .{ .clock = .awake, .raw = .fromMilliseconds(10) }))) orelse return error.TestUnexpectedResult;
     try std.testing.expect(event == .closed);
     try std.testing.expectEqual(@as(u32, 42), event.closed.code);

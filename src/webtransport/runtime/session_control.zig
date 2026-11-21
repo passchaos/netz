@@ -399,6 +399,19 @@ pub const Control = struct {
         return self.pollInternal(connection, true);
     }
 
+    /// Relative-timeout counterpart to `pollWithDeadline`. A non-positive
+    /// duration returns `Timeout` before consuming pending or buffered input.
+    pub fn pollWithTimeout(
+        self: *Control,
+        connection: *quic.one_rtt.Connection,
+        timeout: std.Io.Duration,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!?Event {
+        return self.pollWithDeadline(
+            connection,
+            (try deadline_policy.fromTimeout(connection.endpoint.io, timeout)).?,
+        );
+    }
+
     /// Wait only for pacing that can advance within this absolute deadline.
     /// Congestion remains visible as a null poll so the HTTP/3 owner can route
     /// incoming ACK and protocol traffic before retrying the parser.
@@ -536,6 +549,20 @@ pub const Control = struct {
         return true;
     }
 
+    /// Relative-timeout counterpart to `rejectPostTerminalDataWithDeadline`.
+    /// A non-positive duration returns `Timeout` before recording rejection
+    /// state or writing RESET_STREAM/STOP_SENDING.
+    pub fn rejectPostTerminalDataWithTimeout(
+        self: *Control,
+        connection: *quic.one_rtt.Connection,
+        timeout: std.Io.Duration,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!bool {
+        return self.rejectPostTerminalDataWithDeadline(
+            connection,
+            (try deadline_policy.fromTimeout(connection.endpoint.io, timeout)).?,
+        );
+    }
+
     pub fn rejectPostTerminalDataWithDeadline(
         self: *Control,
         connection: *quic.one_rtt.Connection,
@@ -601,6 +628,20 @@ pub const Control = struct {
         );
         self.commitCapsuleErrorRejection();
         return true;
+    }
+
+    /// Relative-timeout counterpart to `rejectInvalidCapsuleWithDeadline`.
+    /// A non-positive duration returns `Timeout` before recording rejection
+    /// state or writing RESET_STREAM/STOP_SENDING.
+    pub fn rejectInvalidCapsuleWithTimeout(
+        self: *Control,
+        connection: *quic.one_rtt.Connection,
+        timeout: std.Io.Duration,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!bool {
+        return self.rejectInvalidCapsuleWithDeadline(
+            connection,
+            (try deadline_policy.fromTimeout(connection.endpoint.io, timeout)).?,
+        );
     }
 
     pub fn rejectInvalidCapsuleWithDeadline(
