@@ -73,7 +73,7 @@ left out of this batch.
 | ID | Area | Finding | Suggested direction |
 | --- | --- | --- | --- |
 | P1 | Resolved in the second pass | After an H3 *connection* failure the body was never read, yet fallback for an idempotent method still called `bodySource().prepareReplay()`, rejecting a single-pass Reader. | The attempt now records whether the request started; setup failures fall back without replay, started requests keep method/replay gating. |
-| P2 | QUIC anti-amplification | `InitialHandshakeFlight` reserves the complete Initial+Handshake flight before sending. Large chains therefore depend on PTO-driven budget growth from client retransmissions; correctness holds, but the first valid send can be delayed. | Send the prefix that fits, retain an ACK-aware CRYPTO cursor, and continue as the budget grows. |
+| P2 | QUIC anti-amplification | `InitialHandshakeFlight` reserves the complete Initial+Handshake flight before sending. A server-only prefix experiment deadlocked: once the client receives the server Initial it stops probing while it waits for the complete Handshake flight, so the server budget never grows. | Implement client PTO retransmission during `receiveServerHandshakeCrypto` first, then send server prefixes as the budget grows. |
 | P3 | Resolved in the sixth pass | The legacy/stateless adapters returned `WebTransportNotNegotiated` for caller configuration they cannot support (`initial_flow_limits`). | They now return `UnsupportedWebTransportOption`; genuine peer capability failures keep `WebTransportNotNegotiated`. |
 | P4 | HTTP H3 options | `Client.Options.http3.handshake.handshake.alpn_protocols` nests two `handshake` levels because the facade wraps the native handshake options. | Add flat accessors or a `quic` sub-struct while keeping the existing fields as deprecated aliases. |
 | P6 | HTTP/3 GRO test | `drains GRO response batch one packet at a time` hangs at `28dd7d76` and current main: the server blocks in `receiveRequest` after two client requests, while the client joins. | Determine whether the second aggregate request is consumed by the first receive or lost in the GRO batch, then add a bounded receive deadline to the fixture. |
@@ -253,3 +253,18 @@ inside a bounded receive use the same deadline.
 | --- | --- | --- |
 | WebSocket stream adapter deadline and close cases | 15/15 | `websocket-deadline-debug.log` |
 | Full WebSocket suite | 503/504; only the pre-existing P8 host-sensitive failure | `websocket-suite-deadlines.log` |
+
+
+## Rejected experiment: server-only handshake prefixes
+
+A prefix-only change to `InitialHandshakeFlight` was implemented and then
+reverted. It computed the largest CRYPTO prefix fitting the current
+anti-amplification budget and sent that prefix on every PTO. The 1200-byte
+16-certificate regression timed out (`HandshakeTimeout`): after the client
+receives the server Initial it enters `receiveServerHandshakeCrypto` and stops
+sending, so the server's received-byte budget does not grow and the remaining
+certificate prefix is never admitted. The fix must add client-side PTO
+retransmission/probing while waiting for the server flight; server prefix
+sending alone is not sufficient. The working tree was restored to the audited
+revision, and the large-certificate test continues to pass with the complete
+reservation.
