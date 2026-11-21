@@ -980,3 +980,22 @@ surface test pins both declarations.
 | --- | --- | --- |
 | Full HTTP/3 suite | 927/931 (4 skipped) | `http3-more-connect-timeouts.log` |
 | Public package surface tests | 26/26 | `test-package-more-connect-timeouts.log` |
+
+
+## Fortieth pass: WebSocket adapter bounded close
+
+`websocket.stream_connection.Connection.close()` was terminal and unbounded:
+it swallowed every Close-write failure and closed the transport regardless.
+Add `closeWithDeadline`/`closeWithTimeout` with resumable semantics matching
+the pool close contract: validate the awake-clock budget first, send the
+Close frame under it, and only then mark the connection closed and close the
+transport. A zero budget, an expired deadline, a missing deadline-capable
+transport, or a failed Close write leaves the connection open so the caller
+can retry with a larger budget or fall back to the unbounded `close()`. New
+tests cover the rejected budget, the successful bounded Close, and the
+`DeadlineUnsupported` transport path followed by an unbounded close.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full WebSocket suite | 506/507 (1 skipped) | `websocket-bounded-close.log` |
+| Public package surface tests | 26/26 | `test-package-bounded-close.log` |

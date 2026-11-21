@@ -322,3 +322,55 @@ test "WebSocket stream adapter timeout forms validate before I/O and reach the t
     try std.testing.expectEqual(@as(usize, 1), peer.deadline_writes);
     try std.testing.expect(peer.output.items.len != 0);
 }
+
+test "WebSocket stream adapter bounded close validates before I/O and stays retryable" {
+    var peer = Peer{ .input = &.{} };
+    defer peer.deinit();
+    var connection = stream_connection.Connection.init(
+        allocator,
+        std.testing.io,
+        peer.deadlineTransport(),
+        .{ .role = .server },
+    );
+    defer connection.deinit();
+
+    try std.testing.expectError(
+        error.Timeout,
+        connection.closeWithTimeout(.fromNanoseconds(0)),
+    );
+    try std.testing.expect(!connection.closed);
+    try std.testing.expect(!connection.close_sent);
+    try std.testing.expectEqual(@as(usize, 0), peer.deadline_writes);
+
+    try connection.closeWithTimeout(.fromSeconds(1));
+    try std.testing.expect(connection.closed);
+    try std.testing.expect(connection.close_sent);
+    try std.testing.expectEqual(@as(usize, 1), peer.deadline_writes);
+    try std.testing.expect(peer.output.items.len != 0);
+}
+
+test "WebSocket stream adapter bounded close reports transport deadline support" {
+    var peer = Peer{ .input = &.{} };
+    defer peer.deinit();
+    var connection = stream_connection.Connection.init(
+        allocator,
+        std.testing.io,
+        peer.transport(),
+        .{ .role = .server },
+    );
+    defer connection.deinit();
+
+    try std.testing.expectError(
+        error.DeadlineUnsupported,
+        connection.closeWithDeadline(.fromNow(std.testing.io, .{
+            .clock = .awake,
+            .raw = .fromSeconds(1),
+        })),
+    );
+    try std.testing.expect(!connection.closed);
+    try std.testing.expect(!connection.close_sent);
+    // The unbounded close remains available after the rejected budget.
+    connection.close();
+    try std.testing.expect(connection.closed);
+    try std.testing.expectEqual(@as(usize, 1), peer.writes);
+}

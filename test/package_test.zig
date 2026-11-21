@@ -2770,6 +2770,14 @@ test "public modules are reachable" {
         "sendCloseWithTimeout",
     ));
     try std.testing.expect(@hasDecl(
+        netz.websocket.stream_connection.Connection,
+        "closeWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.stream_connection.Connection,
+        "closeWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.websocket.runtime,
         "PendingH2Upgrade",
     ));

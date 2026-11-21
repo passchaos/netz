@@ -142,6 +142,36 @@ pub const Connection = struct {
         self.transport.closeTransport();
     }
 
+    /// Best-effort Close under one absolute awake-clock deadline. On success
+    /// the transport is closed. An expired budget or a failed Close write
+    /// leaves the connection open so the caller can retry with a larger
+    /// budget or fall back to the unbounded `close`.
+    pub fn closeWithDeadline(
+        self: *Connection,
+        deadline: std.Io.Clock.Timestamp,
+    ) !void {
+        if (self.closed) return;
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        if (!self.close_sent) {
+            try self.sendCloseWithDeadline(.normal_closure, "", deadline);
+        }
+        self.closed = true;
+        self.transport.closeTransport();
+    }
+
+    /// Relative-timeout counterpart to `closeWithDeadline`. A non-positive
+    /// duration returns `Timeout` without changing connection state.
+    pub fn closeWithTimeout(
+        self: *Connection,
+        timeout: std.Io.Duration,
+    ) !void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.closeWithDeadline(.fromNow(self.io, .{
+            .raw = timeout,
+            .clock = .awake,
+        }));
+    }
+
     pub fn receiveMessage(self: *Connection) !Message {
         return self.receiveMessageBefore(null);
     }
