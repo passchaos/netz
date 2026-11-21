@@ -999,3 +999,21 @@ tests cover the rejected budget, the successful bounded Close, and the
 | --- | --- | --- |
 | Full WebSocket suite | 506/507 (1 skipped) | `websocket-bounded-close.log` |
 | Public package surface tests | 26/26 | `test-package-bounded-close.log` |
+
+
+## Forty-first pass: QUIC server visitor receive timeout
+
+`quic.endpoint_server.Server` exposed `receiveVisitingWithDeadline` without a
+relative-budget counterpart, unlike `receive`/`receiveWithTimeout` on the same
+type. Add `receiveVisitingWithTimeout`; a non-positive duration returns
+`Timeout` before any receive attempt, otherwise it converts once to the
+existing absolute-deadline path. The visitor test now asserts the zero-budget
+rejection before delivering the packet that the deadline form rejects from
+the callback. The API map also records the two receive spellings:
+`*WithTimeout` takes `std.Io.Duration`, while `*Timeout` takes
+`std.Io.Timeout` (which can express `none` or an absolute deadline).
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full QUIC suite | 1108/1131 (23 skipped) | `quic-server-visiting-timeout.log` |
+| Public package surface tests | 26/26 | `test-package-visiting-timeout.log` |

@@ -38,6 +38,10 @@ aliases for the version-specific streaming owners, not another transport.
 - Public `WithDeadline` forms take an absolute awake-clock timestamp;
   `WithTimeout` converts once at the boundary. Nested operations keep the
   earlier deadline rather than renewing it.
+- QUIC receive loops use two spellings: `*WithTimeout` takes a relative
+  `std.Io.Duration` and rejects a non-positive budget with `error.Timeout`;
+  `*Timeout` (no `With`) takes `std.Io.Timeout`, which can also express
+  `none` or an absolute deadline for supervisor loops.
 - Reader-backed HTTP uploads compose source reads and network writes under one
   deadline. A canceled source read joins before borrowed storage is released.
 - HTTP/3 handshake selection uses `http3.preference_timeout` for the H3 probe

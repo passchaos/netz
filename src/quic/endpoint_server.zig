@@ -956,6 +956,29 @@ pub const Server = struct {
         };
     }
 
+    /// Relative-timeout counterpart to `receiveVisitingWithDeadline`. A
+    /// non-positive duration returns `Timeout` before any receive attempt.
+    pub fn receiveVisitingWithTimeout(
+        self: *Server,
+        supported_versions: []const u32,
+        storage: []u8,
+        timeout: std.Io.Duration,
+        context: anytype,
+        comptime visitor: anytype,
+    ) (Error || callbackErrorSet(visitor))!VisitEvent {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveVisitingWithDeadline(
+            supported_versions,
+            storage,
+            .fromNow(self.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+            context,
+            visitor,
+        );
+    }
+
     pub fn receiveVisitingWithDeadline(
         self: *Server,
         supported_versions: []const u32,
