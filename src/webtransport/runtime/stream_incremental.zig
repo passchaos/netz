@@ -196,9 +196,11 @@ fn serviceReceiveWithDeadline(
 
 const stream_reset = @import("stream/reset.zig");
 pub const reset = stream_reset.reset;
+pub const resetWithTimeout = stream_reset.resetWithTimeout;
 pub const resetWithDeadline = stream_reset.resetWithDeadline;
 pub const resetOnce = stream_reset.resetOnce;
 pub const resetReliably = stream_reset.resetReliably;
+pub const resetReliablyWithTimeout = stream_reset.resetReliablyWithTimeout;
 pub const resetReliablyWithDeadline = stream_reset.resetReliablyWithDeadline;
 pub const resetReliablyOnce = stream_reset.resetReliablyOnce;
 

@@ -15,6 +15,8 @@ const readWithDeadline = stream_incremental_root.readWithDeadline;
 const readWithTimeout = stream_incremental_root.readWithTimeout;
 const reset = stream_incremental_root.reset;
 const resetReliably = stream_incremental_root.resetReliably;
+const resetReliablyWithTimeout = stream_incremental_root.resetReliablyWithTimeout;
+const resetWithTimeout = stream_incremental_root.resetWithTimeout;
 const stop = stream_incremental_root.stop;
 const stopWithTimeout = stream_incremental_root.stopWithTimeout;
 
@@ -422,6 +424,21 @@ test "WebTransport incremental read consumes one UDP GRO stream batch" {
     try std.testing.expectError(
         error.Timeout,
         stopWithTimeout(&connection, &registry, 4, 0, .fromNanoseconds(0)),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        resetWithTimeout(&connection, &registry, 4, 0, .fromNanoseconds(0)),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        resetReliablyWithTimeout(
+            &connection,
+            &registry,
+            4,
+            0,
+            0,
+            .fromNanoseconds(0),
+        ),
     );
 }
 

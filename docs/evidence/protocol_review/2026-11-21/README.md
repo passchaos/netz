@@ -868,3 +868,20 @@ package surface test pins all six declarations.
 | --- | --- | --- |
 | Full WebTransport suite | 755/757 (2 skipped) | `webtransport-handshake-stream-timeouts.log` |
 | Public package surface tests | 26/26 | `test-package-handshake-stream-timeouts.log` |
+
+
+## Thirty-fourth pass: WebTransport reset timeout forms
+
+The incremental stream surface re-exported `reset` and `resetReliably` with
+absolute-deadline counterparts only. Add `resetWithTimeout` and
+`resetReliablyWithTimeout` (plus the internal `resetWithCodeAndTimeout`);
+each converts through `deadline_policy.fromTimeout`, so a non-positive
+duration returns `Timeout` before registry lookup, association-prefix
+binding, or any RESET_STREAM/RESET_STREAM_AT write. The GRO incremental-read
+test now asserts zero-budget rejection for both reset forms, and the public
+package surface test pins the new declarations.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full WebTransport suite | 755/757 (2 skipped) | `webtransport-reset-timeouts.log` |
+| Public package surface tests | 26/26 | `test-package-reset-timeouts.log` |

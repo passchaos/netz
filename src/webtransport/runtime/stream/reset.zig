@@ -40,6 +40,24 @@ pub fn resetWithCode(
     try association.requestAfterSendTerminal(connection, stream);
 }
 
+/// Relative-timeout counterpart to `reset`. A non-positive duration returns
+/// `Timeout` before registry lookup or any RESET_STREAM write.
+pub fn resetWithTimeout(
+    connection: *quic.one_rtt.Connection,
+    registry: *webtransport.StreamRegistry,
+    stream_id: u62,
+    application_error_code: u32,
+    timeout: std.Io.Duration,
+) TimeoutError!void {
+    return resetWithDeadline(
+        connection,
+        registry,
+        stream_id,
+        application_error_code,
+        (try deadline_policy.fromTimeout(connection.endpoint.io, timeout)).?,
+    );
+}
+
 /// Abort the local send direction under one absolute awake-clock deadline.
 /// The registry is committed only after RESET_STREAM reaches the socket.
 pub fn resetWithDeadline(
@@ -50,6 +68,24 @@ pub fn resetWithDeadline(
     deadline: std.Io.Clock.Timestamp,
 ) TimeoutError!void {
     return resetWithCodeAndDeadline(connection, registry, stream_id, webtransport.applicationErrorCodeToHttp3(application_error_code), deadline);
+}
+
+/// Relative-timeout counterpart to `resetWithCode`. A non-positive duration
+/// returns `Timeout` before registry lookup or any RESET_STREAM write.
+pub fn resetWithCodeAndTimeout(
+    connection: *quic.one_rtt.Connection,
+    registry: *webtransport.StreamRegistry,
+    stream_id: u62,
+    http3_code: u64,
+    timeout: std.Io.Duration,
+) TimeoutError!void {
+    return resetWithCodeAndDeadline(
+        connection,
+        registry,
+        stream_id,
+        http3_code,
+        (try deadline_policy.fromTimeout(connection.endpoint.io, timeout)).?,
+    );
 }
 
 pub fn resetWithCodeAndDeadline(
@@ -135,6 +171,26 @@ pub fn resetReliably(
     prefix.observeReset(connection, prepared.stream);
     prepared.stream.send_reset = .fromHttp3(http3_code);
     try association.requestAfterSendTerminal(connection, prepared.stream);
+}
+
+/// Relative-timeout counterpart to `resetReliably`. A non-positive duration
+/// returns `Timeout` before any reliable-prefix or RESET_STREAM_AT work.
+pub fn resetReliablyWithTimeout(
+    connection: *quic.one_rtt.Connection,
+    registry: *webtransport.StreamRegistry,
+    stream_id: u62,
+    application_error_code: u32,
+    reliable_size: u64,
+    timeout: std.Io.Duration,
+) TimeoutError!void {
+    return resetReliablyWithDeadline(
+        connection,
+        registry,
+        stream_id,
+        application_error_code,
+        reliable_size,
+        (try deadline_policy.fromTimeout(connection.endpoint.io, timeout)).?,
+    );
 }
 
 /// Deadline-bounded reliable reset. Registry state changes only after the
