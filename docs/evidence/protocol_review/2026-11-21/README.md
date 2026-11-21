@@ -65,10 +65,11 @@ zig build test-http \
 `@constCast`. The storage is now writable even though the stateless callbacks
 never access it, removing a latent UB footgun from a public constructor.
 
-## Open findings
+## Findings ledger
 
-These are source-level findings, not reproduced defects, and are intentionally
-left out of this batch.
+These are source-level findings from the opening audit. Every entry is now
+resolved; the pass that closed each one is recorded in the row and in the
+sections below.
 
 | ID | Area | Finding | Suggested direction |
 | --- | --- | --- | --- |
@@ -659,3 +660,5 @@ ACK-aware sender possible:
 | Full QUIC suite | 1107/1130, 23 skipped, no failures | `quic-full-after-prefix.log` |
 | Full HTTP/3 suite | 927/931, 4 skipped | `http3-after-ack-prefix.log` |
 | Full WebTransport suite | 756/758, 2 skipped | `webtransport-after-ack-prefix.log` |
+| Full HTTP suite | 305/305 | `http-after-ack-prefix.log` |
+| Full WebSocket suite | 504/505, 1 host-sensitive skip | `ws-after-ack-prefix.log` |
