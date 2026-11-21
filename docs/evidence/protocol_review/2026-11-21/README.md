@@ -73,7 +73,7 @@ left out of this batch.
 | ID | Area | Finding | Suggested direction |
 | --- | --- | --- | --- |
 | P1 | Resolved in the second pass | After an H3 *connection* failure the body was never read, yet fallback for an idempotent method still called `bodySource().prepareReplay()`, rejecting a single-pass Reader. | The attempt now records whether the request started; setup failures fall back without replay, started requests keep method/replay gating. |
-| P2 | Open (performance) | Client `receiveServerHandshakeCrypto` emits PTO probes on a timer, and `sendAndReceiveMatchingFromObserved` observes every same-peer datagram before classification, so the budget accounting path is sound. A previous server-prefix sender still ran once with `available=7200` and never advanced. | The prefix sender must track the already-sent Handshake CRYPTO offset and packet-number range across PTO retries, and must reserve only the prefix it sends. Validate with the 40-entry 1200-byte certificate and mTLS regressions before changing the default. |
+| P2 | Open (performance) | A third prefix attempt (budget plan, contiguous packet numbers, flight-complete accept gate, observer-driven retry reset) still timed out the 40-entry case. Diagnostics show the allowance oscillating `7200 -> 652 -> 7852 -> 7283 -> 7788` while the prefix stayed at 4-5 of 12754 bytes: every attempt resends from offset zero, so duplicate CRYPTO consumes the budget as fast as client probes grow it. | Track delivered Handshake CRYPTO (for example from client ACK largest-acknowledged) and send only the unacknowledged suffix, so duplicate retransmission cannot starve prefix growth. Validate with the 40-entry 1200-byte certificate and mTLS regressions before changing the default. |
 | P3 | Resolved in the sixth pass | The legacy/stateless adapters returned `WebTransportNotNegotiated` for caller configuration they cannot support (`initial_flow_limits`). | They now return `UnsupportedWebTransportOption`; genuine peer capability failures keep `WebTransportNotNegotiated`. |
 | P4 | Resolved in the eighth pass | `Client.Options.http3.handshake.handshake.alpn_protocols` nests two `handshake` levels because the facade wraps the native handshake options. | `nativeHandshake()`/`sessionOptions()` return mutable pointers to the native blocks, so call sites no longer spell the nested path; the stored layout is unchanged. |
 | P6 | Resolved | `drains GRO response batch one packet at a time` hung on platforms without GRO because its skip path joined a server thread still blocked in `receiveRequest`. | The skip path now closes the connection first; the test skips cleanly and the full H3 suite completes. |
@@ -573,3 +573,32 @@ review item and records the narrowed prefix-sender requirement.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | HTTP/1 close timeout retirement | 17/17 | `http1-close-timeout.log` |
+
+
+## Rejected: budget-aware server prefixes (third attempt)
+
+A prefix sender was implemented and reverted. It planned the largest Handshake
+prefix fitting the current anti-amplification allowance, advanced packet
+numbers contiguously for the peer's expected-number check, gated client
+Handshake acceptance on a complete-flight attempt, and reset the retry budget
+when same-path probes grew the allowance. The 16-entry certificate and mTLS
+regressions passed, but the 40-entry case timed out.
+
+Instrumentation showed the allowance oscillating while the prefix stayed small:
+
+```text
+srv send rt=0 avail=7200 init=2400 pkts=4 crypto=4096/12754
+obs bytes=1200 rt-reset
+srv send rt=1 avail=652 init=2400 pkts=0 crypto=0/12754
+obs bytes=1200 rt-reset
+srv send rt=1 avail=7852 init=2400 pkts=5 crypto=5120/12754
+obs bytes=1200 rt-reset
+srv send rt=2 avail=7283 init=2400 pkts=4 crypto=4096/12754
+```
+
+Each attempt resends CRYPTO from offset zero for loss recovery, so duplicate
+data consumes the allowance as fast as the client's probes grow it. A viable
+prefix sender must know which Handshake CRYPTO was delivered (for example from
+the client's ACK largest-acknowledged) and send only the unacknowledged
+suffix; otherwise the prefix cannot grow. The working tree was restored to the
+audited complete-flight sender, and the 40-entry regression passes again.
