@@ -937,3 +937,24 @@ rejection through the new name.
 | --- | --- | --- |
 | Full HTTP/2 suite | 984/984 | `http2-concurrent-body-deadline.log` |
 | Full HTTP/3 suite | 926/930 (4 skipped) | `http3-concurrent-body-deadline.log` |
+
+
+## Thirty-eighth pass: H3 endpoint and Alt-Svc timeout forms
+
+`HandshakeClient` exposed `connectAdoptingEndpoint`,
+`connectOwningEndpoint`, `connectUriAltSvc`, and
+`connectUriAltSvcWithEarlyRequest` with absolute-deadline counterparts only,
+while every other connect entry point pairs `WithDeadline` with
+`WithTimeout`. Add the four timeout forms; each rejects a non-positive
+duration before touching the endpoint, resolver, or handshake, and delegates
+to the deadline form so the existing `connect_timeout` cap still applies.
+
+The shared-endpoint handshake-progress test also allowed only 3 or 4
+completed requests, but both deadline-bound requests (timed and
+resolution-timed) independently race their abandonment flags, so 5 is a
+legitimate outcome; the range is now 3..5 with the reasoning recorded.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full HTTP/3 suite | 927/931 (4 skipped) | `http3-connect-timeouts.log` |
+| Public package surface tests | 26/26 | `test-package-connect-timeouts.log` |

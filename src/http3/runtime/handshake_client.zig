@@ -871,6 +871,26 @@ pub const HandshakeClient = struct {
         );
     }
 
+    pub fn connectAdoptingEndpointWithTimeout(
+        allocator: std.mem.Allocator,
+        endpoint_value: *quic.runtime.Endpoint,
+        server: net.IpAddress,
+        options: HandshakeClientOptions,
+        timeout: std.Io.Duration,
+    ) Error!HandshakeClient {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectAdoptingEndpointWithDeadline(
+            allocator,
+            endpoint_value,
+            server,
+            options,
+            .fromNow(endpoint_value.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
     fn connectAdoptingEndpointBefore(
         allocator: std.mem.Allocator,
         endpoint_value: *quic.runtime.Endpoint,
@@ -920,6 +940,24 @@ pub const HandshakeClient = struct {
                 deadline,
                 options.connect_timeout,
             ),
+        );
+    }
+
+    pub fn connectOwningEndpointWithTimeout(
+        endpoint: *quic.runtime.Endpoint,
+        server: net.IpAddress,
+        options: HandshakeClientOptions,
+        timeout: std.Io.Duration,
+    ) Error!HandshakeClient {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectOwningEndpointWithDeadline(
+            endpoint,
+            server,
+            options,
+            .fromNow(endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
         );
     }
 
@@ -2345,6 +2383,29 @@ pub const HandshakeClient = struct {
         );
     }
 
+    pub fn connectUriAltSvcWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        uri: std.Uri,
+        target: http3.AltSvcTarget,
+        limits: Limits,
+        options: HandshakeClientOptions,
+        timeout: std.Io.Duration,
+    ) Error!HandshakeClient {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectUriAltSvcWithDeadline(
+            allocator,
+            io,
+            local_address,
+            uri,
+            target,
+            limits,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     pub fn connectUriAltSvcWithEarlyRequest(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -2401,6 +2462,35 @@ pub const HandshakeClient = struct {
                 deadline,
                 options.connect_timeout,
             ),
+        );
+    }
+
+    pub fn connectUriAltSvcWithEarlyRequestWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        uri: std.Uri,
+        target: http3.AltSvcTarget,
+        limits: Limits,
+        options: HandshakeClientOptions,
+        early_request: *const PreparedEarlyRequest,
+        cache: *quic.resumption.Cache,
+        lease: *quic.resumption.EarlyDataLease,
+        timeout: std.Io.Duration,
+    ) Error!EarlyHandshakeClient {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectUriAltSvcWithEarlyRequestWithDeadline(
+            allocator,
+            io,
+            local_address,
+            uri,
+            target,
+            limits,
+            options,
+            early_request,
+            cache,
+            lease,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
         );
     }
 

@@ -1064,6 +1064,22 @@ test "public modules are reachable" {
         netz.http3.runtime.HandshakeClient,
         "connectUriAltSvcWithEarlyRequest",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "connectUriAltSvcWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "connectUriAltSvcWithEarlyRequestWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "connectAdoptingEndpointWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "connectOwningEndpointWithTimeout",
+    ));
     try std.testing.expect(@hasDecl(netz.http, "CookieJar"));
     try std.testing.expect(@hasDecl(netz.http, "CookieMaximumBytes"));
     try std.testing.expect(@hasDecl(

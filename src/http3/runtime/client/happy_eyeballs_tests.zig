@@ -525,3 +525,35 @@ test "HTTP3 Happy Eyeballs offers zero RTT only on the first attempt" {
     joined = true;
     if (worker.err) |err| return err;
 }
+
+test "HTTP3 Alt-Svc timeout forms reject non-positive budgets before routing" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const uri = try std.Uri.parse("https://origin.timeout.test/");
+    const target: http3.AltSvcTarget = .{
+        .alpn = "h3",
+        .connect_host = "route.timeout.test",
+        .port = 443,
+        .origin_host = "origin.timeout.test",
+    };
+    const options: runtime.HandshakeClientOptions = .{
+        .handshake = .{
+            .original_destination_connection_id = &.{1},
+            .local_connection_id = &.{2},
+        },
+    };
+    try std.testing.expectError(
+        error.Timeout,
+        runtime.HandshakeClient.connectUriAltSvcWithTimeout(
+            std.testing.allocator,
+            io,
+            .{ .ip4 = .loopback(0) },
+            uri,
+            target,
+            .{},
+            options,
+            .fromNanoseconds(0),
+        ),
+    );
+}

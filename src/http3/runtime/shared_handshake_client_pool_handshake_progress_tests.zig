@@ -452,8 +452,13 @@ test "HTTP/3 shared endpoint pending handshake does not block established respon
     // A deadline completion racing the producer's abandoned flag may be
     // counted or omitted; both paths publish the same Timeout and reclaim the
     // pending resolver before waking the producer.
+    // The healthy, sibling, and stalled requests always complete. Each of the
+    // two deadline-bound requests (timed and resolution-timed) independently
+    // races its abandonment flag, so the counter can be 3, 4, or 5; all paths
+    // publish the same Timeout and reclaim the pending resolver before waking
+    // the producer.
     try std.testing.expect(
-        stats.completed_requests == 3 or stats.completed_requests == 4,
+        stats.completed_requests >= 3 and stats.completed_requests <= 5,
     );
     try std.testing.expectEqual(@as(usize, 1), pool.connectionCount());
     try std.testing.expectEqual(@as(usize, 1), pool.routeCount());
