@@ -42,9 +42,10 @@ aliases for the version-specific streaming owners, not another transport.
   deadline. A canceled source read joins before borrowed storage is released.
 - HTTP/3 handshake selection uses `http3.preference_timeout` for the H3 probe
   under `prefer_http3`; TCP fallback keeps the original request deadline.
-- `websocket.stream_connection` has no built-in deadline forms. Its transport
-  callbacks must implement caller-owned cancellation; runtime connections
-  expose the deadline forms.
+- `websocket.stream_connection` exposes deadline forms when its transport
+  supplies `read_deadline_fn`/`write_deadline_fn`; otherwise they return
+  `error.DeadlineUnsupported`. Runtime connections expose deadline forms
+  directly.
 - Close paths: H1/H2 send close-notify/GOAWAY; direct H3 `Connection.close()`
   sends CONNECTION_CLOSE(NO_ERROR). `closeWithoutCloseNotify` and
   `closeWithDeadline` retire locally without another socket write.
@@ -85,7 +86,7 @@ Raising the HTTP body limit for H3 requires
 | Item | Current state |
 | --- | --- |
 | H3 options nesting | `http3.handshake.handshake` wraps the native QUIC/TLS options; documented, flat accessors are future work. |
-| WebSocket byte-stream deadlines | Not provided; use the runtime connections when bounded framing reads are required. |
+| WebSocket byte-stream deadlines | Optional transport callbacks enable bounded receive/send/close; without them the deadline forms report `DeadlineUnsupported`. |
 | Pool Alt-Svc fallback | A setup failure can use TCP without rewinding; a started request keeps method/replay gating. |
 | QUIC anti-amplification | The complete server flight is reserved before sending; large chains rely on PTO-driven budget growth. |
 | H3 GRO test | One response-batch test hangs at the audited baseline; recorded separately. |

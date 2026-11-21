@@ -1,0 +1,4 @@
+{
+  "src/websocket/stream_connection.zig": "313893866cbf8a6d1bb1c21ec85381e50b6a3ff8d85fa23b2b4922641e8517b7",
+  "src/websocket/stream_connection_tests.zig": "d996c74ba5ac4fdcd8a8ff5f31b2d83807bb92d66631193d2062a7be6d6bdc66"
+}

@@ -5,11 +5,14 @@ const stream_connection = @import("stream_connection.zig");
 const allocator = std.testing.allocator;
 
 const Peer = struct {
+    io: std.Io = std.testing.io,
     input: []const u8,
     offset: usize = 0,
     output: std.ArrayList(u8) = .empty,
     fail_next_write: bool = false,
     writes: usize = 0,
+    deadline_reads: usize = 0,
+    deadline_writes: usize = 0,
 
     fn read(context: ?*anyopaque, buffer: []u8) anyerror!usize {
         const self: *Peer = @ptrCast(@alignCast(context.?));
@@ -18,6 +21,32 @@ const Peer = struct {
         @memcpy(buffer[0..count], self.input[self.offset..][0..count]);
         self.offset += count;
         return count;
+    }
+
+    fn readDeadline(
+        context: ?*anyopaque,
+        buffer: []u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) anyerror!usize {
+        const self: *Peer = @ptrCast(@alignCast(context.?));
+        self.deadline_reads += 1;
+        if (deadline.durationFromNow(self.io).raw.nanoseconds <= 0) {
+            return error.Timeout;
+        }
+        return read(context, buffer);
+    }
+
+    fn writeDeadline(
+        context: ?*anyopaque,
+        bytes: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) anyerror!void {
+        const self: *Peer = @ptrCast(@alignCast(context.?));
+        self.deadline_writes += 1;
+        if (deadline.durationFromNow(self.io).raw.nanoseconds <= 0) {
+            return error.Timeout;
+        }
+        return write(context, bytes);
     }
 
     fn write(context: ?*anyopaque, bytes: []const u8) anyerror!void {
@@ -36,6 +65,16 @@ const Peer = struct {
 
     fn transport(self: *Peer) stream_connection.Transport {
         return .{ .context = self, .read_fn = read, .write_fn = write };
+    }
+
+    fn deadlineTransport(self: *Peer) stream_connection.Transport {
+        return .{
+            .context = self,
+            .read_fn = read,
+            .read_deadline_fn = readDeadline,
+            .write_fn = write,
+            .write_deadline_fn = writeDeadline,
+        };
     }
 };
 
@@ -189,4 +228,62 @@ test "WebSocket stream adapter rejects an oversized close reason" {
     );
     try std.testing.expect(!connection.close_sent);
     try std.testing.expectEqual(@as(usize, 0), peer.writes);
+}
+
+test "WebSocket stream adapter deadline forms require transport support" {
+    var peer = Peer{ .input = &.{} };
+    defer peer.deinit();
+    var connection = stream_connection.Connection.init(
+        allocator,
+        std.testing.io,
+        peer.transport(),
+        .{ .role = .server },
+    );
+    defer connection.deinit();
+    const future = std.Io.Clock.Timestamp.fromNow(
+        std.testing.io,
+        .{ .clock = .awake, .raw = .fromSeconds(1) },
+    );
+    try std.testing.expectError(
+        error.DeadlineUnsupported,
+        connection.receiveMessageWithDeadline(future),
+    );
+    try std.testing.expectError(
+        error.DeadlineUnsupported,
+        connection.sendTextWithDeadline("late", future),
+    );
+}
+
+test "WebSocket stream adapter deadline forms validate before I/O and reach the transport" {
+    var frames: std.ArrayList(u8) = .empty;
+    defer frames.deinit(allocator);
+    try encodePeerFrame(&frames, .text, "deadline");
+    var peer = Peer{ .input = frames.items };
+    defer peer.deinit();
+    var connection = stream_connection.Connection.init(
+        allocator,
+        std.testing.io,
+        peer.deadlineTransport(),
+        .{ .role = .server },
+    );
+    defer connection.deinit();
+
+    try std.testing.expectError(
+        error.Timeout,
+        connection.receiveMessageWithDeadline(.{ .clock = .awake, .raw = .zero }),
+    );
+    try std.testing.expectEqual(@as(usize, 0), peer.deadline_reads);
+
+    const future = std.Io.Clock.Timestamp.fromNow(
+        std.testing.io,
+        .{ .clock = .awake, .raw = .fromSeconds(1) },
+    );
+    var message = try connection.receiveMessageWithDeadline(future);
+    defer message.deinit(allocator);
+    try std.testing.expectEqualStrings("deadline", message.payload);
+    try std.testing.expect(peer.deadline_reads > 0);
+
+    try connection.sendTextWithDeadline("reply", future);
+    try std.testing.expectEqual(@as(usize, 1), peer.deadline_writes);
+    try std.testing.expect(peer.output.items.len != 0);
 }

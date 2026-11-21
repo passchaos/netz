@@ -236,3 +236,20 @@ genuinely unavailable peer capability still returns
 | --- | --- | --- |
 | Explicit flow limits and required-flow-control construction cases | 117/117 | `webtransport-options-debug.log` |
 | Full WebTransport suite | 756/758 passed, 2 skipped | `webtransport-suite.log` |
+
+
+## Seventh pass: WebSocket byte-stream deadlines
+
+`websocket.stream_connection` gained optional absolute-deadline transport
+callbacks. When `read_deadline_fn`/`write_deadline_fn` are present,
+`receiveMessageWithDeadline`, `sendFrameWithDeadline`, the typed
+`send*WithDeadline` forms and `sendCloseWithDeadline` bound both lock
+acquisition and the transport operation with one awake-clock deadline.
+Without the matching callback they return `error.DeadlineUnsupported`; the
+ordinary blocking forms are unchanged. The automatic Pong and Close replies
+inside a bounded receive use the same deadline.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| WebSocket stream adapter deadline and close cases | 15/15 | `websocket-deadline-debug.log` |
+| Full WebSocket suite | 503/504; only the pre-existing P8 host-sensitive failure | `websocket-suite-deadlines.log` |

@@ -7,6 +7,8 @@
 const std = @import("std");
 const websocket = @import("mod.zig");
 const assembler = @import("message/assembler.zig");
+const deadline_policy = @import("../internal/deadline.zig");
+const MutexGuard = @import("../internal/mutex_guard.zig").Guard;
 
 test {
     _ = @import("stream_connection_tests.zig");
@@ -17,15 +19,49 @@ pub const Role = enum { client, server };
 pub const Transport = struct {
     context: ?*anyopaque = null,
     read_fn: *const fn (?*anyopaque, []u8) anyerror!usize,
+    /// Optional deadline-aware read. The `WithDeadline` receive APIs require
+    /// this callback and return `error.DeadlineUnsupported` when it is absent.
+    read_deadline_fn: ?*const fn (
+        ?*anyopaque,
+        []u8,
+        std.Io.Clock.Timestamp,
+    ) anyerror!usize = null,
     write_fn: *const fn (?*anyopaque, []const u8) anyerror!void,
+    /// Optional deadline-aware write. The `WithDeadline` send APIs require
+    /// this callback and return `error.DeadlineUnsupported` when it is absent.
+    write_deadline_fn: ?*const fn (
+        ?*anyopaque,
+        []const u8,
+        std.Io.Clock.Timestamp,
+    ) anyerror!void = null,
     close_fn: ?*const fn (?*anyopaque) void = null,
 
     fn read(self: Transport, buffer: []u8) anyerror!usize {
         return self.read_fn(self.context, buffer);
     }
 
+    fn readBefore(
+        self: Transport,
+        buffer: []u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) anyerror!usize {
+        const read_deadline_fn = self.read_deadline_fn orelse
+            return error.DeadlineUnsupported;
+        return read_deadline_fn(self.context, buffer, deadline);
+    }
+
     fn write(self: Transport, bytes: []const u8) anyerror!void {
         return self.write_fn(self.context, bytes);
+    }
+
+    fn writeBefore(
+        self: Transport,
+        bytes: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) anyerror!void {
+        const write_deadline_fn = self.write_deadline_fn orelse
+            return error.DeadlineUnsupported;
+        return write_deadline_fn(self.context, bytes, deadline);
     }
 
     fn closeTransport(self: Transport) void {
@@ -105,9 +141,28 @@ pub const Connection = struct {
     }
 
     pub fn receiveMessage(self: *Connection) !Message {
+        return self.receiveMessageBefore(null);
+    }
+
+    /// Bound the complete receive, including an automatic Pong reply, by one
+    /// absolute awake-clock deadline. Requires `Transport.read_deadline_fn`;
+    /// without it the call returns `error.DeadlineUnsupported`.
+    pub fn receiveMessageWithDeadline(
+        self: *Connection,
+        deadline: std.Io.Clock.Timestamp,
+    ) !Message {
+        return self.receiveMessageBefore(
+            try deadline_policy.usableAwake(self.io, deadline),
+        );
+    }
+
+    fn receiveMessageBefore(
+        self: *Connection,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) !Message {
         if (self.close_received) return error.ConnectionClosed;
         while (true) {
-            var frame = self.readFrame() catch |err| {
+            var frame = self.readFrameBefore(deadline) catch |err| {
                 // A malformed Close/control frame is a protocol error. Send
                 // 1002 and make the failure terminal instead of re-reading
                 // the same buffered bytes on the next call.
@@ -116,7 +171,7 @@ pub const Connection = struct {
                     error.InvalidUtf8,
                     error.InvalidControlFrame,
                     => {
-                        self.sendClose(.protocol_error, "") catch {};
+                        self.sendCloseBefore(.protocol_error, "", deadline) catch {};
                         self.close_received = true;
                     },
                     else => {},
@@ -126,7 +181,7 @@ pub const Connection = struct {
             defer frame.deinit(self.allocator);
             switch (frame.header.opcode) {
                 .ping => {
-                    try self.sendPong(frame.payload);
+                    try self.sendFrameBefore(.pong, frame.payload, deadline);
                     continue;
                 },
                 .pong => continue,
@@ -136,7 +191,7 @@ pub const Connection = struct {
                     ) catch |err| {
                         // An invalid Close payload is a protocol error. Reply
                         // with 1002 before surfacing the parse failure.
-                        self.sendClose(.protocol_error, "") catch {};
+                        self.sendCloseBefore(.protocol_error, "", deadline) catch {};
                         self.close_received = true;
                         return err;
                     };
@@ -156,9 +211,9 @@ pub const Connection = struct {
                         // RFC 6455 5.5.1: echo the received status code when
                         // the peer supplied one.
                         if (parsed) |frame_close| {
-                            self.sendClose(frame_close.code, "") catch {};
+                            self.sendCloseBefore(frame_close.code, "", deadline) catch {};
                         } else {
-                            self.sendClose(.normal_closure, "") catch {};
+                            self.sendCloseBefore(.normal_closure, "", deadline) catch {};
                         }
                     }
                     self.close_received = true;
@@ -181,16 +236,63 @@ pub const Connection = struct {
         try self.sendFrame(.text, text);
     }
 
+    pub fn sendTextWithDeadline(
+        self: *Connection,
+        text: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) !void {
+        return self.sendFrameWithDeadline(.text, text, deadline);
+    }
+
     pub fn sendBinary(self: *Connection, data: []const u8) !void {
         try self.sendFrame(.binary, data);
+    }
+
+    pub fn sendBinaryWithDeadline(
+        self: *Connection,
+        data: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) !void {
+        return self.sendFrameWithDeadline(.binary, data, deadline);
     }
 
     pub fn sendPing(self: *Connection, payload: []const u8) !void {
         try self.sendFrame(.ping, payload);
     }
 
+    pub fn sendPingWithDeadline(
+        self: *Connection,
+        payload: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) !void {
+        return self.sendFrameWithDeadline(.ping, payload, deadline);
+    }
+
     pub fn sendPong(self: *Connection, payload: []const u8) !void {
         try self.sendFrame(.pong, payload);
+    }
+
+    pub fn sendPongWithDeadline(
+        self: *Connection,
+        payload: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) !void {
+        return self.sendFrameWithDeadline(.pong, payload, deadline);
+    }
+
+    /// Bound lock acquisition and the transport write by one absolute
+    /// deadline. Requires `Transport.write_deadline_fn`.
+    pub fn sendFrameWithDeadline(
+        self: *Connection,
+        opcode: websocket.Opcode,
+        payload: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) !void {
+        return self.sendFrameBefore(
+            opcode,
+            payload,
+            try deadline_policy.usableAwake(self.io, deadline),
+        );
     }
 
     /// Peer Close metadata. The reason slice is valid until deinit or the next
@@ -208,6 +310,28 @@ pub const Connection = struct {
         code: websocket.CloseCode,
         reason: []const u8,
     ) !void {
+        return self.sendCloseBefore(code, reason, null);
+    }
+
+    pub fn sendCloseWithDeadline(
+        self: *Connection,
+        code: websocket.CloseCode,
+        reason: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) !void {
+        return self.sendCloseBefore(
+            code,
+            reason,
+            try deadline_policy.usableAwake(self.io, deadline),
+        );
+    }
+
+    fn sendCloseBefore(
+        self: *Connection,
+        code: websocket.CloseCode,
+        reason: []const u8,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) !void {
         if (self.close_sent) return;
         if (reason.len > 123) return error.InvalidControlFrame;
         var payload: [125]u8 = undefined;
@@ -220,7 +344,7 @@ pub const Connection = struct {
         }
         // Mark the close only after the frame is written so a failed write
         // remains retryable.
-        try self.sendFrame(.close, payload[0..length]);
+        try self.sendFrameBefore(.close, payload[0..length], deadline);
         self.close_sent = true;
     }
 
@@ -229,14 +353,35 @@ pub const Connection = struct {
         opcode: websocket.Opcode,
         payload: []const u8,
     ) !void {
+        return self.sendFrameBefore(opcode, payload, null);
+    }
+
+    fn sendFrameBefore(
+        self: *Connection,
+        opcode: websocket.Opcode,
+        payload: []const u8,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) !void {
         if (self.closed) return error.ConnectionClosed;
         // After either side starts the closing handshake only the Close frame
         // itself may be written.
         if (opcode != .close and (self.close_sent or self.close_received)) {
             return error.ConnectionClosed;
         }
-        self.write_mutex.lockUncancelable(self.io);
-        defer self.write_mutex.unlock(self.io);
+        var guard = if (deadline) |absolute|
+            try MutexGuard.initBefore(
+                &self.write_mutex,
+                self.io,
+                absolute,
+            )
+        else blk: {
+            self.write_mutex.lockUncancelable(self.io);
+            break :blk MutexGuard{
+                .mutex = &self.write_mutex,
+                .io = self.io,
+            };
+        };
+        defer guard.unlock();
         self.write_buffer.clearRetainingCapacity();
         var mask_key: ?[4]u8 = null;
         if (self.options.role == .client) {
@@ -251,17 +396,28 @@ pub const Connection = struct {
             payload,
             .{ .fin = true, .mask_key = mask_key },
         );
-        try self.transport.write(self.write_buffer.items);
+        if (deadline) |absolute| {
+            try self.transport.writeBefore(self.write_buffer.items, absolute);
+        } else {
+            try self.transport.write(self.write_buffer.items);
+        }
     }
 
     fn readFrame(self: *Connection) !websocket.Frame {
+        return self.readFrameBefore(null);
+    }
+
+    fn readFrameBefore(
+        self: *Connection,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) !websocket.Frame {
         while (true) {
-            try self.ensure(2);
+            try self.ensureBefore(2, deadline);
             const header = websocket.FrameHeader.parse(
                 self.buffer.items[self.start..],
             ) catch |err| switch (err) {
                 error.BufferTooShort => {
-                    try self.ensure(websocket.max_frame_header_len);
+                    try self.ensureBefore(websocket.max_frame_header_len, deadline);
                     continue;
                 },
                 else => return err,
@@ -270,7 +426,7 @@ pub const Connection = struct {
             if (wire_len > self.options.max_frame_bytes) {
                 return error.PayloadTooLarge;
             }
-            try self.ensure(wire_len);
+            try self.ensureBefore(wire_len, deadline);
             const bytes = self.buffer.items[self.start..][0..wire_len];
             const frame = try websocket.parseFrameWithHeader(
                 self.allocator,
@@ -293,7 +449,11 @@ pub const Connection = struct {
         }
     }
 
-    fn ensure(self: *Connection, wanted: usize) !void {
+    fn ensureBefore(
+        self: *Connection,
+        wanted: usize,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) !void {
         while (self.buffer.items.len - self.start < wanted) {
             if (self.start != 0) {
                 const remaining = self.buffer.items.len - self.start;
@@ -306,7 +466,10 @@ pub const Connection = struct {
                 self.start = 0;
             }
             var chunk: [16 * 1024]u8 = undefined;
-            const count = try self.transport.read(&chunk);
+            const count = if (deadline) |absolute|
+                try self.transport.readBefore(&chunk, absolute)
+            else
+                try self.transport.read(&chunk);
             if (count == 0) return error.EndOfStream;
             try self.buffer.appendSlice(self.allocator, chunk[0..count]);
             const limit = std.math.add(

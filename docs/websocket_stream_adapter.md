@@ -30,9 +30,19 @@ try connection.sendClose(.normal_closure, "done");
 
 `read_fn` returns `0` at EOF and fills at most `buffer.len` bytes. `write_fn`
 must write the complete slice or return an error. `close_fn` is optional and
-runs once from `deinit`/`close`. The adapter performs blocking I/O through the
-caller's `std.Io`; it has no deadline forms. A caller that needs bounded reads
-must supply a transport whose callbacks honor its own cancellation or deadline.
+runs once from `deinit`/`close`.
+
+`read_deadline_fn` and `write_deadline_fn` are optional absolute-deadline
+callbacks. When supplied, `receiveMessageWithDeadline`,
+`sendFrameWithDeadline`, the typed `send*WithDeadline` forms and
+`sendCloseWithDeadline` bound lock acquisition and the transport operation with
+one awake-clock deadline. Without the matching callback those calls return
+`error.DeadlineUnsupported`; the ordinary blocking forms remain available.
+
+```zig
+var message = try connection.receiveMessageWithDeadline(until);
+try connection.sendCloseWithDeadline(.normal_closure, "done", until);
+```
 
 Client-role connections mask outgoing frames and require unmasked peer frames;
 server-role connections do the reverse. `max_frame_bytes` bounds one wire frame

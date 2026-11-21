@@ -1,0 +1,185 @@
+[traex-zig-guard 2026-11-21 14:41:41] waiting for the global TRAE Zig build slot
+[traex-zig-guard 2026-11-21 14:41:56] started Zig tree root=95954 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=1800s
+test-websocket
++- run test 503 pass, 1 fail (504 total)
+error: 'websocket.runtime.close_timeout_tests.test.HTTP1 context takeover commits only after bounded send completes' failed:
+       expected error.Timeout, found void
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/Io/Threaded.zig:13102:30: 0x1031dbfef in netWritePosix (test)
+                           .PIPE => return error.SocketUnconnected,
+                                    ^
+       /Users/bytedance/project-z/netz/src/internal/stream_io.zig:80:25: 0x1033af5fb in writeAllSlices (test)
+               var remaining = try io.vtable.netWrite(
+                               ^
+       /Users/bytedance/project-z/netz/src/internal/stream_io.zig:42:5: 0x1033aea9f in writeAllParts (test)
+           return writeAllSlices(io, stream, &.{ header, payload });
+           ^
+       /Users/bytedance/project-z/netz/src/websocket/runtime.zig:370:9: 0x1033ac67b in writeAllParts (test)
+               return switch (self) {
+               ^
+       /Users/bytedance/project-z/netz/src/websocket/runtime.zig:3565:13: 0x1034e9563 in writeMaskedPayload (test)
+                   try transport.writeAllParts(header, scratch[0..count]);
+                   ^
+       /Users/bytedance/project-z/netz/src/websocket/runtime/connection.zig:2371:13: 0x1034e8967 in writeFrameLockedExtended (test)
+                   try writeMaskedPayload(
+                   ^
+       /Users/bytedance/project-z/netz/src/websocket/runtime/connection.zig:2343:9: 0x1034e82a7 in writeFrameLocked (test)
+               try self.writeFrameLockedExtended(opcode, payload, fin, .{});
+               ^
+       /Users/bytedance/project-z/netz/src/websocket/runtime/connection.zig:1396:13: 0x1034e8177 in sendMessage (test)
+                   return err;
+                   ^
+       /Users/bytedance/project-z/netz/src/websocket/runtime/connection.zig:295:9: 0x1034e7b17 in sendText (test)
+               try self.sendMessage(.text, text);
+               ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/Io/Threaded.zig:13102:30: 0x1031dbfef in netWritePosix (test)
+                           .PIPE => return error.SocketUnconnected,
+                                    ^
+       /Users/bytedance/project-z/netz/src/internal/stream_io.zig:80:25: 0x1033af5fb in writeAllSlices (test)
+               var remaining = try io.vtable.netWrite(
+                               ^
+       /Users/bytedance/project-z/netz/src/internal/stream_io.zig:42:5: 0x1033aea9f in writeAllParts (test)
+           return writeAllSlices(io, stream, &.{ header, payload });
+           ^
+       /Users/bytedance/project-z/netz/src/websocket/runtime.zig:370:9: 0x1033ac67b in writeAllParts (test)
+               return switch (self) {
+               ^
+       /Users/bytedance/project-z/netz/src/websocket/runtime.zig:3565:13: 0x1034e9563 in writeMaskedPayload (test)
+                   try transport.writeAllParts(header, scratch[0..count]);
+                   ^
+       /Users/bytedance/project-z/netz/src/websocket/runtime/connection.zig:2371:13: 0x1034e8967 in writeFrameLockedExtended (test)
+                   try writeMaskedPayload(
+                   ^
+       /Users/bytedance/project-z/netz/src/websocket/runtime/connection.zig:2343:9: 0x1034e82a7 in writeFrameLocked (test)
+               try self.writeFrameLockedExtended(opcode, payload, fin, .{});
+               ^
+       /Users/bytedance/project-z/netz/src/websocket/runtime/connection.zig:1276:13: 0x1043370a3 in sendFrameValidatedLocked (test)
+                   return err;
+                   ^
+       /Users/bytedance/project-z/netz/src/websocket/runtime/connection.zig:1262:9: 0x10433655f in sendFrame (test)
+               try self.sendFrameValidatedLocked(opcode, payload);
+               ^
+       /Users/bytedance/project-z/netz/src/websocket/runtime/connection.zig:679:9: 0x1047081ef in sendPing (test)
+               try self.sendFrame(.ping, payload);
+               ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/Io/Threaded.zig:13102:30: 0x1031dbfef in netWritePosix (test)
+                           .PIPE => return error.SocketUnconnected,
+                                    ^
+       /Users/bytedance/project-z/netz/src/internal/stream_io.zig:80:25: 0x1033af5fb in writeAllSlices (test)
+               var remaining = try io.vtable.netWrite(
+                               ^
+       /Users/bytedance/project-z/netz/src/internal/stream_io.zig:42:5: 0x1033aea9f in writeAllParts (test)
+           return writeAllSlices(io, stream, &.{ header, payload });
+           ^
+       /Users/bytedance/project-z/netz/src/websocket/runtime.zig:370:9: 0x1033ac67b in writeAllParts (test)
+               return switch (self) {
+               ^
+       /Users/bytedance/project-z/netz/src/websocket/runtime/connection.zig:556:13: 0x10471473b in sendBinaryInPlace (test)
+                   return err;
+                   ^
+       /Users/bytedance/project-z/netz/src/http2/runtime/duplex/streams.zig:2059:48: 0x10463b61b in ensureWritable (test)
+               if (self.send_finished.load(.acquire)) return error.ConnectionClosed;
+                                                      ^
+       /Users/bytedance/project-z/netz/src/http2/runtime/duplex/streams.zig:1899:9: 0x1045ec0db in beginWriteSequence (test)
+               try self.ensureWritable();
+               ^
+       /Users/bytedance/project-z/netz/src/websocket/runtime.zig:3655:18: 0x1045eb927 in writeMaskedTunnelPayloadSlices (test)
+           var writer = try tunnel.beginWriteSequence();
+                        ^
+       /Users/bytedance/project-z/netz/src/websocket/runtime/h2_connection.zig:2367:9: 0x1045eb767 in writeFrameLockedExtended (test)
+               try writeMaskedTunnelPayloadSlices(
+               ^
+       /Users/bytedance/project-z/netz/src/websocket/runtime/h2_connection.zig:2304:9: 0x1045eaf93 in writeFrameLocked (test)
+               try self.writeFrameLockedExtended(opcode, payload, fin, .{});
+               ^
+       /Users/bytedance/project-z/netz/src/websocket/runtime/h2_connection.zig:1687:13: 0x10468518b in sendMessage (test)
+                   return err;
+                   ^
+       /Users/bytedance/project-z/netz/src/websocket/runtime/h2_connection.zig:231:9: 0x104684a1f in sendText (test)
+               try self.sendMessage(.text, text);
+               ^
+       /Users/bytedance/project-z/netz/src/http2/runtime/duplex/streams.zig:2059:48: 0x10463b61b in ensureWritable (test)
+               if (self.send_finished.load(.acquire)) return error.ConnectionClosed;
+                                                      ^
+       (14 additional stack frames skipped due to buffer size limitations...)
+failed command: ./.zig-cache/o/704fd0b15aa53947c366b7f01faa175b/test --cache-dir=./.zig-cache --seed=0xf445934f --listen=-
+
+Build Summary: 8/10 steps succeeded (1 failed); 503/504 tests passed (1 failed)
+test-websocket transitive failure
++- run test 503 pass, 1 fail (504 total)
+   +- compile test Debug native success 38s MaxRSS:4G
+      +- WriteFile macho_0_p256_field_arm64.S cached
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 205ms MaxRSS:31M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 205ms MaxRSS:31M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options cached
+      +- options cached
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/0f9d151e42f629c275713a528b5d3e50/build /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/zig /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib /Users/bytedance/project-z/netz .zig-cache /Users/bytedance/.cache/zig --seed 0xf445934f -Z70ae3776b98372c6 test-websocket --summary all
+[traex-zig-guard 2026-11-21 14:43:53] finished Zig tree root=95954 peak=4160MiB result=0
