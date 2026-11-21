@@ -47,6 +47,25 @@ pub fn acceptOwnedStreamWithDeadline(
     return @import("connect/owned_accept.zig").accept(server, stream, deadline, @TypeOf(server.*).acceptStreamMaybeBefore);
 }
 
+/// Relative-timeout counterpart to `acceptOwnedStreamWithDeadline`. A
+/// non-positive duration closes the transferred stream and returns `Timeout`
+/// without invoking the handshake.
+pub fn acceptOwnedStreamWithTimeout(
+    server: anytype,
+    stream: net.Stream,
+    timeout: std.Io.Duration,
+) Error!Connection {
+    if (timeout.nanoseconds <= 0) {
+        stream.close(server.io);
+        return error.Timeout;
+    }
+    return acceptOwnedStreamWithDeadline(
+        server,
+        stream,
+        .fromNow(server.io, .{ .raw = timeout, .clock = .awake }),
+    );
+}
+
 pub const Server = struct {
     io: std.Io,
     listener: net.Server,

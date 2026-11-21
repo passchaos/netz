@@ -1624,6 +1624,14 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.http2.runtime,
+        "acceptOwnedStreamWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime,
+        "acceptOwnedStreamWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime,
         "ConnectIpSession",
     ));
     try std.testing.expect(@hasDecl(

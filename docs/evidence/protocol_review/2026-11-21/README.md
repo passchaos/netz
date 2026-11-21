@@ -1133,3 +1133,25 @@ HTTP/3, HPACK, QPACK, WebSocket, WebTransport, and MQTT seeds.
 | Full WebSocket suite | 507/508 (1 skipped) | `websocket-direct-read-buffer.log` |
 | Parser fuzz corpus replay | 9/9 steps, 2/2 tests | `fuzz-parsers-replay.log` |
 | Public package surface tests | 26/26 | `test-package-direct-read-buffer.log` |
+
+
+## Forty-eighth pass: HTTP/2 owned stream accept timeout
+
+`http2.runtime.acceptOwnedStreamWithDeadline` had no relative-budget
+counterpart. Add `acceptOwnedStreamWithTimeout`; a non-positive duration
+honors the transfer-on-entry contract by closing the accepted stream and
+returning `Timeout` without invoking the handshake, otherwise it converts
+once to the deadline path. A new listener-backed test asserts the peer
+observes EOF, the handshake callback is never entered, and the public package
+surface pins both spellings.
+
+The bounded stateful fuzz corpus also replayed clean: `zig build fuzz-stateful`
+passed 9/9 steps and 2/2 tests across HTTP/1 pipelines, HTTP/2 flow control
+and HPACK, HTTP/3 control streams and QPACK, WebSocket fragmented assembly,
+WebTransport session/stream lifecycles, and MQTT Session/QoS persistence.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full HTTP/2 suite | 985/985 | `http2-owned-accept-timeout.log` |
+| Public package surface tests | 26/26 | `test-package-owned-accept-timeout.log` |
+| Stateful fuzz corpus replay | 9/9 steps, 2/2 tests | `fuzz-stateful-replay.log` |

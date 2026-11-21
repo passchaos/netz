@@ -217,3 +217,54 @@ test {
     _ = @import("push/receive_error_tests.zig");
     _ = @import("push/receive_store_tests.zig");
 }
+
+test "HTTP/2 owned stream timeout closes the transport before the handshake" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{},
+    );
+    defer listener.deinit(io);
+    const peer = try listener.socket.address.connect(
+        io,
+        .{ .mode = .stream },
+    );
+    defer peer.close(io);
+    const stream = try listener.accept(io);
+    const FakeServer = struct {
+        io: std.Io,
+        calls: usize = 0,
+
+        pub fn acceptStreamMaybeBefore(
+            self: *@This(),
+            _: net.Stream,
+            _: ?std.Io.Clock.Timestamp,
+        ) Error!Connection {
+            self.calls += 1;
+            return error.InvalidFrame;
+        }
+    };
+    var server = FakeServer{ .io = io };
+    try std.testing.expectError(
+        error.Timeout,
+        runtime.acceptOwnedStreamWithTimeout(
+            &server,
+            stream,
+            .fromNanoseconds(0),
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), server.calls);
+    var buffer: [1]u8 = undefined;
+    const n = try @import("../../internal/stream_io.zig").readSomeWithDeadline(
+        io,
+        peer,
+        &buffer,
+        .fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(1) }),
+    );
+    try std.testing.expectEqual(@as(usize, 0), n);
+}

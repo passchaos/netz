@@ -733,6 +733,7 @@ pub const KeepAlive = struct {
 /// cancellation. Listener managers can start the budget after TCP acceptance
 /// and carry it through TLS, HTTP/2 bootstrap and their own owner admission.
 pub const acceptOwnedStreamWithDeadline = server_runtime.acceptOwnedStreamWithDeadline;
+pub const acceptOwnedStreamWithTimeout = server_runtime.acceptOwnedStreamWithTimeout;
 pub const Server = server_runtime.Server;
 pub const UnixServer = server_runtime.UnixServer;
 pub const adoptPriorKnowledgeStream = server_runtime.adoptPriorKnowledgeStream;
