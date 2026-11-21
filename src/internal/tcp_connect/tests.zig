@@ -461,12 +461,16 @@ test "TCP bound connect uses the requested IPv4 source" {
         .bytes = .{ 127, 0, 0, 2 },
         .port = 0,
     } };
-    var stream = try ipBound(
+    var stream = ipBound(
         io,
         listener.socket.address,
         local,
         .fromSeconds(1),
-    );
+    ) catch |err| switch (err) {
+        // macOS and some CI hosts do not configure the 127.0.0.0/8 alias.
+        error.AddressUnavailable => return error.SkipZigTest,
+        else => |other| return other,
+    };
     defer stream.close(io);
     const accepted = try listener.accept(io);
     defer accepted.close(io);
@@ -503,7 +507,7 @@ test "TCP resolved bound connect falls back under one deadline" {
         .bytes = .{ 127, 0, 0, 2 },
         .port = 0,
     } };
-    var stream = try resolvedBoundWithPolicyAndDeadline(
+    var stream = resolvedBoundWithPolicyAndDeadline(
         std.testing.allocator,
         io,
         &.{ unavailable_address, listener.socket.address },
@@ -512,7 +516,11 @@ test "TCP resolved bound connect falls back under one deadline" {
         .{ .happy_eyeballs = .{
             .attempt_delay = .fromSeconds(5),
         } },
-    );
+    ) catch |err| switch (err) {
+        // macOS and some CI hosts do not configure the 127.0.0.0/8 alias.
+        error.AddressUnavailable => return error.SkipZigTest,
+        else => |other| return other,
+    };
     defer stream.close(io);
     const accepted = try listener.accept(io);
     defer accepted.close(io);

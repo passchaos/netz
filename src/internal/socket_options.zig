@@ -176,7 +176,9 @@ test "TCP no-delay is enabled on a live stream" {
     );
     try std.testing.expectEqual(std.posix.E.SUCCESS, std.posix.errno(result));
     try std.testing.expectEqual(@as(std.posix.socklen_t, @sizeOf(c_int)), enabled_len);
-    try std.testing.expectEqual(@as(c_int, 1), enabled);
+    // Some Darwin kernels normalize the enabled value (observed 4 on macOS
+    // 26); only zero means Nagle remains active.
+    try std.testing.expect(enabled != 0);
 }
 
 test "TCP user timeout preserves explicit zero and milliseconds" {

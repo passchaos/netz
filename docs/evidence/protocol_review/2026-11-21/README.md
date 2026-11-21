@@ -1322,3 +1322,31 @@ passed in isolation and in two subsequent full WebTransport runs
 | Full HTTP/2 suite (three consecutive runs) | 985/985 each | live runs |
 | Full WebTransport suite (two runs after the flake) | 758/760 (2 skipped) each | live runs |
 | Full-library loaded run | 7078 pass, 41 skip, 12 fail, 1 crash | `test-lib-load-run.log` |
+
+
+## Fifty-ninth pass: host-portable shared socket tests
+
+The loaded full-library run left three shared-infrastructure test failures
+that also reproduced in filtered `test-lib` runs. They were test assumptions,
+not production defects:
+
+- The two `internal.tcp_connect` IPv4 source-bind tests require a
+  `127.0.0.2` loopback alias that macOS does not configure. They now skip on
+  `error.AddressUnavailable`, matching the existing QUIC migration-test
+  convention.
+- The `internal.socket_options` TCP_NODELAY test expected `getsockopt` to
+  return exactly 1. A direct C probe on macOS 26.6 shows the kernel normalizes
+  the enabled value to 4 (set 0 reads back 0), so the test now asserts only
+  that the value is non-zero.
+
+Filtered `test-lib` runs after the fixes: IPv4 source 254/255 (1 skipped),
+resolved bound 222/223 (1 skipped), and no-delay 225/225. The remaining
+full-library failures are the out-of-scope MQTT config-include tests and the
+`mqtt.broker.runtime_policy` SIGILL already recorded in the fifty-eighth
+pass.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Filtered `test-lib` IPv4 source bind | 254/255 (1 skipped) | live run |
+| Filtered `test-lib` resolved bound | 222/223 (1 skipped) | live run |
+| Filtered `test-lib` TCP no-delay | 225/225 | live run |
