@@ -151,3 +151,34 @@ test "WebTransport HTTP2 EndpointServer initialization allocation sweep reclaims
     };
     try std.testing.checkAllAllocationFailures(allocator, Harness.run, .{});
 }
+
+test "WebTransport HTTP2 EndpointServer initWithTimeout closes the transport on a zero budget" {
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const base = threaded.io();
+    var fixture = try Fixture.init(base);
+    defer {
+        fixture.peer.close(base);
+        fixture.listener.deinit(base);
+    }
+    fixture.connection.role = .server;
+    try std.testing.expectError(
+        error.Timeout,
+        endpoint.EndpointServer.initWithTimeout(
+            allocator,
+            fixture.connection,
+            .{ .max_sessions = 2, .max_pending_sessions = 2 },
+            .fromNanoseconds(0),
+        ),
+    );
+    var byte: [1]u8 = undefined;
+    const count = try stream_io.readSomeWithDeadline(
+        base,
+        fixture.peer,
+        &byte,
+        .fromNow(base, .{ .clock = .awake, .raw = .fromSeconds(1) }),
+    );
+    try std.testing.expectEqual(@as(usize, 0), count);
+}

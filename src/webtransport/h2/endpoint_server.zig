@@ -302,6 +302,26 @@ pub const EndpointServer = struct {
         return initUntil(allocator, connection_value, options, deadline);
     }
 
+    /// Relative-timeout counterpart to `initWithDeadline`. A non-positive
+    /// duration closes the transferred connection without TLS shutdown output
+    /// and returns `Timeout`.
+    pub fn initWithTimeout(allocator: std.mem.Allocator, connection_value: http2.runtime.Connection, options: Options, timeout: std.Io.Duration) Error!EndpointServer {
+        if (timeout.nanoseconds <= 0) {
+            var connection = connection_value;
+            connection.closeWithoutCloseNotify();
+            return error.Timeout;
+        }
+        return initWithDeadline(
+            allocator,
+            connection_value,
+            options,
+            .fromNow(connection_value.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
     fn initUntil(allocator: std.mem.Allocator, connection_value: http2.runtime.Connection, options: Options, deadline: ?std.Io.Clock.Timestamp) Error!EndpointServer {
         return @import("endpoint_server/init.zig").create(EndpointServer, State, PendingSlot, SessionSlot, State.Worker.run, allocator, connection_value, options, deadline);
     }

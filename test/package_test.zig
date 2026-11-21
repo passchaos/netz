@@ -294,6 +294,7 @@ test "public WebTransport HTTP2 Session exposes typed Init and bounded operation
         "connectTlsAddressWithTimeout",
         "connectTlsHostViaProxyWithTimeout",
         "connectTlsHostViaSocks5WithTimeout",
+        "initWithTimeout",
         "sendDatagramWithTimeout",
         "receiveWithTimeout",
         "openStreamWithTimeout",
@@ -328,6 +329,7 @@ test "public WebTransport HTTP2 Session exposes typed Init and bounded operation
     inline for (&.{
         "receiveRequestWithTimeout",
         "acceptTlsConnectionWithTimeout",
+        "initWithTimeout",
         "sendDatagramWithTimeout",
         "receiveWithTimeout",
         "openStreamWithTimeout",

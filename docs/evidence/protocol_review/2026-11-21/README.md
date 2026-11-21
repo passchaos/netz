@@ -1219,3 +1219,31 @@ operations. The run finished 9/9 steps with 3/3 tests passing.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | HTTP/2 TLS connection fuzz replay | 9/9 steps, 3/3 tests | `fuzz-http2-tls-connection-replay.log` |
+
+
+## Fifty-fourth pass: WebTransport H2 endpoint init timeout
+
+The HTTP/2 WebTransport `EndpointClient` and `EndpointServer` constructors
+from an already negotiated connection exposed `initWithDeadline` without a
+relative-budget counterpart. Add `initWithTimeout`; a non-positive duration
+honors the transfer-on-entry contract by closing the unpublished transport
+without TLS shutdown output and returning `Timeout`, otherwise it converts
+once through the connection's awake-clock io. A new server-side test asserts
+the peer observes EOF and the package surface pins both declarations.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full WebTransport suite | 757/759 (2 skipped) | `webtransport-h2-init-timeout.log` |
+| Public package surface tests | 26/26 | `test-package-h2-init-timeout.log` |
+
+
+## Fifty-fifth pass: HTTP/1 TLS connection fuzz replay
+
+`zig build fuzz-http1-tls-connection` replayed its bounded corpus over
+authenticated TLS 1.3, verified `http/1.1` ALPN and negotiated cipher
+metadata, and mutated bidirectional traffic-key updates across persistent and
+rotated connections. The run finished 9/9 steps with 3/3 tests passing.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| HTTP/1 TLS connection fuzz replay | 9/9 steps, 3/3 tests | `fuzz-http1-tls-connection-replay.log` |
