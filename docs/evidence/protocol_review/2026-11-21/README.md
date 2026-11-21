@@ -559,6 +559,10 @@ The remaining deadline-only names are intentional: H3 connect/request
 primitives already take a relative `connect_timeout` through options,
 WebSocket `ensureBuffered*` are internal prefetch steps behind typed receive
 APIs, and WebTransport `pollWithDeadline` never blocks on transport I/O.
+The thirty-eighth pass later added explicit `WithTimeout` forms to the H3
+connect entry points for parity with the other connect APIs; the
+option-based `connect_timeout` remains the default when no explicit budget is
+supplied, and an explicit budget is still capped by it.
 
 
 ## Twentieth pass: HTTP/1 close timeout coverage
