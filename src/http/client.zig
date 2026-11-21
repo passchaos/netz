@@ -1319,3 +1319,7 @@ fn uriTargetAlloc(
     }
     return allocator.dupe(u8, effective_path);
 }
+
+test {
+    _ = types;
+}

@@ -268,3 +268,21 @@ retransmission/probing while waiting for the server flight; server prefix
 sending alone is not sufficient. The working tree was restored to the audited
 revision, and the large-certificate test continues to pass with the complete
 reservation.
+
+
+## Eighth pass: H3 flat accessors and a test-discovery gap
+
+`Http3ConnectOptions` gained `nativeHandshake()` and `sessionOptions()`, which
+return mutable pointers to the native QUIC/TLS handshake and HTTP/3 session
+option blocks. This removes the need to spell `handshake.handshake` or
+`handshake.session` at call sites without changing the stored layout.
+
+While adding the regression, `-Dtest-filter="unified HTTP ALPN policy"` failed
+the focused-suite guard: `client/types.zig` was imported by `client.zig` but
+its test block was not referenced from a test block, so the ALPN policy and H3
+option tests were never part of `test-http`. Adding `_ = types;` to the client
+test block includes them.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| H3 flat accessors plus the previously unregistered ALPN policy test | 85/85 | `h3-flat-accessors.log` |

@@ -7,6 +7,7 @@ const http2 = @import("../../http2/mod.zig");
 const http2_runtime = @import("../../http2/runtime.zig");
 const http3 = @import("../../http3/mod.zig");
 const http3_runtime = @import("../../http3/runtime.zig");
+const quic = @import("../../quic/mod.zig");
 const content_digest = @import("../digest.zig");
 const content_coding = @import("../content_coding.zig");
 const tls_stream = @import("../../tls/mod.zig").stream;
@@ -61,6 +62,22 @@ pub const Http3ConnectOptions = struct {
             .local_connection_id = &.{},
         },
     },
+
+    /// Native QUIC/TLS handshake options (ALPN, connection IDs, trust,
+    /// resumption). Flat accessor for the `handshake.handshake` field.
+    pub fn nativeHandshake(
+        self: *Http3ConnectOptions,
+    ) *quic.handshake.ClientOptions {
+        return &self.handshake.handshake;
+    }
+
+    /// HTTP/3 session and 1-RTT limits (body budget, stream buffers,
+    /// informational responses). Flat accessor for `handshake.session`.
+    pub fn sessionOptions(
+        self: *Http3ConnectOptions,
+    ) *http3_runtime.HandshakeSessionOptions {
+        return &self.handshake.session;
+    }
 };
 
 pub const CleartextProtocol = enum {
@@ -628,5 +645,24 @@ test "unified HTTP ALPN policy selects only permitted protocols" {
     try std.testing.expectError(
         error.InvalidAlpn,
         selectedProtocol("unexpected", .{}),
+    );
+}
+
+test "H3 connect options expose flat handshake and session accessors" {
+    var options: Http3ConnectOptions = .{};
+    options.nativeHandshake().alpn_protocols = &.{"h3"};
+    options.nativeHandshake().server_name = "example.test";
+    options.sessionOptions().max_body_bytes = 32 * 1024 * 1024;
+    try std.testing.expectEqualStrings(
+        "h3",
+        options.handshake.handshake.alpn_protocols[0],
+    );
+    try std.testing.expectEqualStrings(
+        "example.test",
+        options.handshake.handshake.server_name.?,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 32 * 1024 * 1024),
+        options.handshake.session.max_body_bytes,
     );
 }

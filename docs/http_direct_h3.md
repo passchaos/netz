@@ -40,7 +40,15 @@ The connection must outlive its handles, and one task drives it at a time.
 An abandoned unfinished handle cancels its request stream.
 
 `Client.Options.http3` configures the native QUIC limits and handshake. Empty
-connection IDs are securely generated per connection. A null local bind selects
+connection IDs are securely generated per connection. The two nested owners
+also have flat accessors:
+
+```zig
+var h3: netz.http.Http3ConnectOptions = .{};
+h3.nativeHandshake().server_name = "example.com"; // handshake.handshake
+h3.sessionOptions().max_body_bytes = 64 * 1024 * 1024; // handshake.session
+```
+ A null local bind selects
 an ephemeral wildcard bind for each resolved address family; H3 defaults to
 bounded Happy Eyeballs and also supports an explicit local address. The URI
 hostname remains the TLS SNI/verification identity and HTTP authority.
