@@ -98,6 +98,29 @@ pub fn write(
     };
 }
 
+/// Relative-timeout counterpart to `write`. A non-positive duration returns
+/// `Timeout` with `counts` cleared before any staging or transport work.
+pub fn writeWithTimeout(
+    connection: *quic.one_rtt.Connection,
+    registry: *webtransport.StreamRegistry,
+    session_id: webtransport.SessionId,
+    writes: []const Write,
+    counts: []usize,
+    timeout: std.Io.Duration,
+) TimeoutError!Result {
+    if (counts.len < writes.len) return error.BufferTooShort;
+    @memset(counts[0..writes.len], 0);
+    return writeWithProgress(
+        connection,
+        registry,
+        session_id,
+        writes,
+        counts,
+        (try deadline_policy.fromTimeout(connection.endpoint.io, timeout)).?,
+        null,
+    );
+}
+
 /// Write one fair packet-sized slice per sendable stream while retaining one
 /// absolute awake-clock deadline across flow-control, congestion, and pacing
 /// waits. `counts` is cleared before deadline validation and always describes

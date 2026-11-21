@@ -885,3 +885,20 @@ package surface test pins the new declarations.
 | --- | --- | --- |
 | Full WebTransport suite | 755/757 (2 skipped) | `webtransport-reset-timeouts.log` |
 | Public package surface tests | 26/26 | `test-package-reset-timeouts.log` |
+
+
+## Thirty-fifth pass: WebTransport batch write timeout
+
+`webtransport.runtime.stream_batch.write` had only an absolute-deadline
+bounded form, unlike the rest of the stream write surface. Add
+`writeWithTimeout`; it mirrors `writeWithDeadline`'s order exactly: reject a
+short `counts` buffer, clear the committed counts, then convert the relative
+budget through `deadline_policy.fromTimeout`, so a non-positive duration
+returns `Timeout` before staging or transport work and never reports stale
+committed bytes. The wrong-clock batch test now also asserts the timeout
+form clears counts and leaves the stream prefix and offsets untouched.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full WebTransport suite | 755/757 (2 skipped) | `webtransport-batch-timeout.log` |
+| Public package surface tests | 26/26 | `test-package-batch-timeout.log` |

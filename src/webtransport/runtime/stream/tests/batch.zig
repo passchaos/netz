@@ -320,6 +320,22 @@ test "WebTransport batch deadline rejects wrong clock and clears counts" {
     try std.testing.expect(!stream.prefix_sent);
     try std.testing.expectEqual(@as(u64, 0), stream.send_offset);
     try std.testing.expectEqual(@as(u64, 0), stream.bytes_sent);
+
+    counts[0] = 99;
+    try std.testing.expectError(
+        error.Timeout,
+        batch.writeWithTimeout(
+            &connection,
+            &registry,
+            .init(0),
+            &writes,
+            &counts,
+            .fromNanoseconds(0),
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), counts[0]);
+    try std.testing.expect(!stream.prefix_sent);
+    try std.testing.expectEqual(@as(u64, 0), stream.send_offset);
 }
 
 test "WebTransport batch deadline resumes prefix-only flow control" {
