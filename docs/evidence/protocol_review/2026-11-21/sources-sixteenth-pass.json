@@ -11,5 +11,6 @@
   "src/http1/runtime/handoff_timeout_tests.zig": "b8df9d297276e7149b07071262424c860155488f5432eaf15dd78bf3f94d6eb0",
   "src/internal/stream_io_deadline_tests.zig": "acdae924e08c9f9857d23c90c706303b7ff3cb624b070842f6207faaca22687c",
   "src/http/client.zig": "ec5804dbf7b54a903929c7b876bd1bae9d66b06ae25960ac3fd371cff825331a",
+  "src/http/client_tests/direct_h3.zig": "796c3a8d8c92312dd5d709b7f9d3f46bd98c876c9fdeb6b847f63f6f9d27b60e",
   "src/http2/runtime/connect/deadline_tests.zig": "23f636a21b655bb011343d02e70622bf5b3ada1a9b113873f6ebcfe7af1dff2b"
 }

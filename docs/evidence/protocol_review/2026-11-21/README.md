@@ -486,4 +486,6 @@ Changes:
 | Refactored stalled-output state tests | 35/35 | `http2-stalled-output-tests.log` |
 | HTTP/1 handoff backpressure gate | 36/36 | `http1-handoff-saturation.log` |
 | Full HTTP suite after `closeWithTimeout` | 304/304 | `http-full-after-close-timeout.log` |
+| Direct H3 close/deadline/timeout CONNECTION_CLOSE | 106/106 | `http-h3-close-timeout.log` |
+| Internal saturation and wide-write tests | 224/224 | `lib-saturation.log` |
 | Saturation helper unit test | 2/2 | `tcp-saturation-unit.log` |
