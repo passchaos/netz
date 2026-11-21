@@ -64,9 +64,13 @@ Handshake-level CRYPTO flights are also split into datagrams capped at the
 on IP fragmentation. The peer reassembles client CRYPTO across datagrams.
 Application data uses the 1-RTT `max_datagram_size`, which defaults to the
 1200-byte QUIC minimum; the endpoint's larger limit is a socket/receive cap, not
-the send packet size. Raising the application packet size requires
-`handshake.handshake.initial_one_rtt_config.max_datagram_size`, and PMTUD is
-opt-in. The endpoint limit must be at least as large as that send size.
+the send packet size. Use `setApplicationDatagramSize` to raise both together;
+`Client.init` rejects a send size above the socket cap. PMTUD remains opt-in.
+
+```zig
+var h3: netz.http.Http3ConnectOptions = .{};
+h3.setApplicationDatagramSize(1400);
+```
 
 `Connection.close()` sends a best-effort QUIC CONNECTION_CLOSE with
 `NO_ERROR`, matching the H1/H2 close-notify contract. `closeWithoutCloseNotify`

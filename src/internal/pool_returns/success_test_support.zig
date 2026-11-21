@@ -71,6 +71,9 @@ fn returnedTlsConnection(comptime Pool: type, pool: *Pool) *tls.ClientConnection
         return switch (node.value.connection_value.value) {
             .http1 => |*value| value.tls_vail_conn.?,
             .http2 => |*value| value.transport.?.tls_client,
+            // Direct H3 uses the native QUIC/TLS owner and never returns a
+            // TCP tls.ClientConnection to this helper.
+            .http3 => unreachable,
         };
     } else if (@hasField(@TypeOf(node.value.slot), "client")) {
         return node.value.slot.client.tls_vail_conn.?;

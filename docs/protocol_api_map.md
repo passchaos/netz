@@ -56,7 +56,7 @@ aliases for the version-specific streaming owners, not another transport.
 | --- | --- |
 | QUIC CRYPTO reassembly | 256 KiB per encryption level, grown on demand |
 | QUIC handshake datagram | 1200 bytes (minimum path MTU) |
-| QUIC 1-RTT send datagram | 1200 bytes (`one_rtt.Config`); PMTUD opt-in |
+| QUIC 1-RTT send datagram | 1200 bytes (`one_rtt.Config`); `setApplicationDatagramSize` raises the socket cap too; PMTUD opt-in |
 | QUIC endpoint datagram | 65,535 bytes generic; H3 facade 4096 (socket/receive cap) |
 | HTTP body | 16 MiB per request/response in the unified facade |
 | HTTP head | 64 KiB H1; protocol-specific H2/H3 limits |

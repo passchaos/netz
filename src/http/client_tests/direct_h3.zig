@@ -178,6 +178,10 @@ test "unified HTTP direct H3 rejects unsupported proxy cleartext and expired set
     h3_pool.deinit();
     try std.testing.expectError(error.InvalidClientOptions, http.Client.init(allocator, io, .{ .protocol_policy = .http3_only, .http3 = .{ .handshake = .{ .connect_timeout = .zero, .handshake = .{ .original_destination_connection_id = &.{}, .local_connection_id = &.{} } } } }));
     try std.testing.expectError(error.InvalidClientOptions, http.Client.init(allocator, io, .{ .protocol_policy = .http3_only, .http3 = .{ .handshake = .{ .handshake = .{ .original_destination_connection_id = &.{}, .local_connection_id = &.{}, .alpn_protocols = &.{"h2"} } } } }));
+    var oversized: http.ClientOptions = .{ .protocol_policy = .http3_only };
+    oversized.http3.handshake.handshake.initial_one_rtt_config.max_datagram_size =
+        oversized.http3.limits.quic.max_datagram_size + 1;
+    try std.testing.expectError(error.InvalidClientOptions, http.Client.init(allocator, io, oversized));
     var client = try http.Client.init(allocator, io, .{ .protocol_policy = .http3_only });
     defer client.deinit();
     try std.testing.expectError(error.UnsupportedScheme, client.connectUriWithDeadline("http://127.0.0.1:1/", deadline(io)));

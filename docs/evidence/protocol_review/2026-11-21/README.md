@@ -329,3 +329,22 @@ race-tolerant assertion; the isolated test still passes.
 | --- | --- | --- |
 | GRO test in isolation | 61/63 passed, 2 skipped | `http3-gro-fixed.log` |
 | Full HTTP/3 suite | 927/931 passed, 4 skipped | `http3-full-after-fixes.log` |
+
+
+## Eleventh pass: application MTU helper and full HTTP gate
+
+`Http3ConnectOptions` gained `applicationDatagramSize()` and
+`setApplicationDatagramSize()`. The setter updates the 1-RTT send size and
+raises the endpoint socket cap to match, so a valid packet cannot be rejected by
+`DatagramTooLarge`. `Client.init` now rejects a 1-RTT send size larger than the
+socket cap at configuration time.
+
+Running the complete `test-http` gate exposed a compile regression from adding
+`ConnectionValue.http3`: the `pool_returns` test support switched exhaustively
+over `.http1`/`.http2` and had no `.http3` arm. It now treats H3 as unreachable
+for the TCP TLS helper, and the full suite compiles.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| H3 application MTU helper and direct H3 | 104/104 | `h3-mtu-validation.log` |
+| Full HTTP suite | 303/303 | `http-full-suite.log` |

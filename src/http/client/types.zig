@@ -78,6 +78,26 @@ pub const Http3ConnectOptions = struct {
     ) *http3_runtime.HandshakeSessionOptions {
         return &self.handshake.session;
     }
+
+    /// 1-RTT application packet size. The endpoint limit is a socket/receive
+    /// cap, so it must be at least this large.
+    pub fn applicationDatagramSize(self: *const Http3ConnectOptions) usize {
+        return self.handshake.handshake
+            .initial_one_rtt_config.max_datagram_size;
+    }
+
+    /// Set the 1-RTT application packet size and raise the endpoint socket cap
+    /// to match. Lowering the application size does not lower the cap.
+    pub fn setApplicationDatagramSize(
+        self: *Http3ConnectOptions,
+        size: usize,
+    ) void {
+        self.handshake.handshake
+            .initial_one_rtt_config.max_datagram_size = size;
+        if (self.limits.quic.max_datagram_size < size) {
+            self.limits.quic.max_datagram_size = size;
+        }
+    }
 };
 
 pub const CleartextProtocol = enum {
@@ -664,5 +684,25 @@ test "H3 connect options expose flat handshake and session accessors" {
     try std.testing.expectEqual(
         @as(usize, 32 * 1024 * 1024),
         options.handshake.session.max_body_bytes,
+    );
+}
+
+test "H3 application datagram size keeps the socket cap at least as large" {
+    var options: Http3ConnectOptions = .{};
+    const default_cap = options.limits.quic.max_datagram_size;
+    options.setApplicationDatagramSize(1400);
+    try std.testing.expectEqual(@as(usize, 1400), options.applicationDatagramSize());
+    try std.testing.expectEqual(default_cap, options.limits.quic.max_datagram_size);
+    options.setApplicationDatagramSize(default_cap + 512);
+    try std.testing.expectEqual(
+        default_cap + 512,
+        options.limits.quic.max_datagram_size,
+    );
+    options.setApplicationDatagramSize(1200);
+    try std.testing.expectEqual(@as(usize, 1200), options.applicationDatagramSize());
+    // Lowering the application size does not discard the larger socket cap.
+    try std.testing.expectEqual(
+        default_cap + 512,
+        options.limits.quic.max_datagram_size,
     );
 }

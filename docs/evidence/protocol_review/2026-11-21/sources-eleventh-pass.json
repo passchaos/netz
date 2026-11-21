@@ -1,0 +1,6 @@
+{
+  "src/http/client.zig": "c8c4467deb9111a0cab53e8c650e4c4be1a1c535193462eafe8bd57163cbad14",
+  "src/http/client/types.zig": "a820fa3fb0a10d1a52685b961c5832218504d1a4ebf8312729f36fa153e06a24",
+  "src/http/client_tests/direct_h3.zig": "608ebbeb46b7ea07f5c6635b4368e48f920bd3d3de242a81b74ed0a6db015a67",
+  "src/internal/pool_returns/success_test_support.zig": "89f984792e6832b8119f0384bdf1df7f9a3bd711ea7669d1d7137fc7d8bb474f"
+}

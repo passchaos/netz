@@ -640,6 +640,10 @@ pub const Client = struct {
         if (options.protocol_policy.attemptsHttp3()) {
             const handshake = options.http3.handshake;
             if (handshake.handshake.alpn_protocols.len != 1 or !std.mem.eql(u8, handshake.handshake.alpn_protocols[0], "h3") or handshake.handshake.early_data != null) return error.InvalidClientOptions;
+            // The 1-RTT packetizer may only emit what the endpoint socket can
+            // accept; catch a larger send size before any connection attempt.
+            if (handshake.handshake.initial_one_rtt_config.max_datagram_size >
+                options.http3.limits.quic.max_datagram_size) return error.InvalidClientOptions;
             if (handshake.connect_timeout) |duration| if (duration.nanoseconds <= 0) return error.InvalidClientOptions;
             if (handshake.address_attempt_timeout) |duration| if (duration.nanoseconds <= 0) return error.InvalidClientOptions;
             if (options.http3.preference_timeout.nanoseconds <= 0) return error.InvalidClientOptions;
