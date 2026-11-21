@@ -1507,6 +1507,27 @@ pub const Connection = struct {
         return self.sendCompleteRequestUntil(options, null);
     }
 
+    pub fn sendCompleteRequestWithDeadline(
+        self: *Connection,
+        options: RequestOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!PendingResponse {
+        const absolute = try deadline_policy.usableAwake(self.io, deadline);
+        return self.sendCompleteRequestUntil(options, absolute);
+    }
+
+    pub fn sendCompleteRequestWithTimeout(
+        self: *Connection,
+        options: RequestOptions,
+        timeout: std.Io.Duration,
+    ) Error!PendingResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendCompleteRequestWithDeadline(
+            options,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     fn sendCompleteRequestUntil(self: *Connection, options: RequestOptions, deadline: ?std.Io.Clock.Timestamp) Error!PendingResponse {
         const requested_stream_id = self.next_client_stream_id;
         return complete_request.send(self, options, deadline, .{

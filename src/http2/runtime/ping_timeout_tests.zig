@@ -857,6 +857,10 @@ test "HTTP/2 request readers reject invalid budgets before transport I/O" {
         error.Timeout,
         connection.readOwnedServerDuplexFrameWithTimeout(1, .zero),
     );
+    try std.testing.expectError(
+        error.Timeout,
+        connection.sendCompleteRequestWithTimeout(.{}, .zero),
+    );
 }
 
 test "HTTP/2 streaming request batch timeout preserves pre-admission frame" {

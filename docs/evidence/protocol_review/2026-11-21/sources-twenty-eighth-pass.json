@@ -1,0 +1,4 @@
+{
+  "src/http2/runtime/connection.zig": "f2b9e8659778995a0d8f4e94247d2f1bbf9e43a535fd08962dbcc99d69dda36f",
+  "src/http2/runtime/ping_timeout_tests.zig": "f57ba79bc15d33fc665c3466175dc1d1d02836f21851f38f6ca4dd292e918587"
+}

@@ -757,3 +757,17 @@ non-positive budget is rejected before touching the promise.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | Bounded push cancellation | 34/34 | `http2-cancel-push-timeout.log` |
+
+
+## Twenty-eighth pass: bounded complete-request submission
+
+`Connection.sendCompleteRequest` exposed the head/body submission primitive
+with no deadline or timeout form, unlike the surrounding request APIs. Add
+`sendCompleteRequestWithDeadline` and `sendCompleteRequestWithTimeout`; both
+validate the budget before touching the transport, and the timeout form rejects
+a non-positive duration before validating request options. The invalid-budget
+suite asserts the zero-budget path returns `Timeout` before any transport I/O.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Complete-request submission budget | 33/33 | `http2-send-request-timeout.log` |
