@@ -62,6 +62,9 @@ pub const Connection = struct {
     close_sent: bool = false,
     close_received: bool = false,
     closed: bool = false,
+    peer_close_code: ?websocket.CloseCode = null,
+    peer_close_reason: [123]u8 = undefined,
+    peer_close_reason_len: usize = 0,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -104,7 +107,22 @@ pub const Connection = struct {
     pub fn receiveMessage(self: *Connection) !Message {
         if (self.close_received) return error.ConnectionClosed;
         while (true) {
-            var frame = try self.readFrame();
+            var frame = self.readFrame() catch |err| {
+                // A malformed Close/control frame is a protocol error. Send
+                // 1002 and make the failure terminal instead of re-reading
+                // the same buffered bytes on the next call.
+                switch (err) {
+                    error.InvalidCloseCode,
+                    error.InvalidUtf8,
+                    error.InvalidControlFrame,
+                    => {
+                        self.sendClose(.protocol_error, "") catch {};
+                        self.close_received = true;
+                    },
+                    else => {},
+                }
+                return err;
+            };
             defer frame.deinit(self.allocator);
             switch (frame.header.opcode) {
                 .ping => {
@@ -113,8 +131,35 @@ pub const Connection = struct {
                 },
                 .pong => continue,
                 .close => {
+                    const parsed = websocket.parseClosePayload(
+                        frame.payload,
+                    ) catch |err| {
+                        // An invalid Close payload is a protocol error. Reply
+                        // with 1002 before surfacing the parse failure.
+                        self.sendClose(.protocol_error, "") catch {};
+                        self.close_received = true;
+                        return err;
+                    };
+                    if (parsed) |frame_close| {
+                        self.peer_close_code = frame_close.code;
+                        const copy = @min(
+                            frame_close.reason.len,
+                            self.peer_close_reason.len,
+                        );
+                        @memcpy(
+                            self.peer_close_reason[0..copy],
+                            frame_close.reason[0..copy],
+                        );
+                        self.peer_close_reason_len = copy;
+                    }
                     if (!self.close_sent) {
-                        self.sendClose(.normal_closure, "") catch {};
+                        // RFC 6455 5.5.1: echo the received status code when
+                        // the peer supplied one.
+                        if (parsed) |frame_close| {
+                            self.sendClose(frame_close.code, "") catch {};
+                        } else {
+                            self.sendClose(.normal_closure, "") catch {};
+                        }
                     }
                     self.close_received = true;
                     return error.ConnectionClosed;
@@ -148,20 +193,30 @@ pub const Connection = struct {
         try self.sendFrame(.pong, payload);
     }
 
+    /// Peer Close metadata. The reason slice is valid until deinit or the next
+    /// received Close. Returns null when no valid Close frame was received.
+    pub fn peerClose(self: *const Connection) ?websocket.CloseFrame {
+        const code = self.peer_close_code orelse return null;
+        return .{
+            .code = code,
+            .reason = self.peer_close_reason[0..self.peer_close_reason_len],
+        };
+    }
+
     pub fn sendClose(
         self: *Connection,
         code: websocket.CloseCode,
         reason: []const u8,
     ) !void {
         if (self.close_sent) return;
+        if (reason.len > 123) return error.InvalidControlFrame;
         var payload: [125]u8 = undefined;
         var length: usize = 0;
         if (@intFromEnum(code) != 0) {
             std.mem.writeInt(u16, payload[0..2], @intCast(@intFromEnum(code)), .big);
             length = 2;
-            const copy = @min(reason.len, payload.len - 2);
-            @memcpy(payload[2..][0..copy], reason[0..copy]);
-            length += copy;
+            @memcpy(payload[2..][0..reason.len], reason);
+            length += reason.len;
         }
         // Mark the close only after the frame is written so a failed write
         // remains retryable.

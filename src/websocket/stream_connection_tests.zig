@@ -103,3 +103,90 @@ test "WebSocket stream adapter retries a failed Close write" {
     try std.testing.expectEqual(writes, peer.writes);
     try std.testing.expectError(error.ConnectionClosed, connection.sendBinary("late"));
 }
+
+test "WebSocket stream adapter reports and echoes peer close metadata" {
+    var frames: std.ArrayList(u8) = .empty;
+    defer frames.deinit(allocator);
+    var payload_storage: [125]u8 = undefined;
+    const close_payload = try websocket.writeClosePayloadInto(
+        &payload_storage,
+        .{ .code = .going_away, .reason = "going away" },
+    );
+    try encodePeerFrame(&frames, .close, close_payload);
+
+    var peer = Peer{ .input = frames.items };
+    defer peer.deinit();
+    var connection = stream_connection.Connection.init(
+        allocator,
+        std.testing.io,
+        peer.transport(),
+        .{ .role = .server },
+    );
+    defer connection.deinit();
+
+    try std.testing.expectError(error.ConnectionClosed, connection.receiveMessage());
+    const peer_close = connection.peerClose().?;
+    try std.testing.expectEqual(websocket.CloseCode.going_away, peer_close.code);
+    try std.testing.expectEqualStrings("going away", peer_close.reason);
+
+    var reply = try websocket.parseFrame(allocator, peer.output.items);
+    defer reply.deinit(allocator);
+    try std.testing.expectEqual(websocket.Opcode.close, reply.header.opcode);
+    const echoed = (try websocket.parseClosePayload(reply.payload)).?;
+    try std.testing.expectEqual(websocket.CloseCode.going_away, echoed.code);
+}
+
+test "WebSocket stream adapter rejects invalid close codes and replies 1002" {
+    var frames: std.ArrayList(u8) = .empty;
+    defer frames.deinit(allocator);
+    // 1005 (no status) is reserved and must not appear on the wire. The
+    // normal writer validates outgoing payloads, so build the malformed
+    // masked client frame directly.
+    const invalid_payload = [_]u8{ 0x03, 0xED };
+    const mask = [_]u8{ 1, 2, 3, 4 };
+    try frames.append(allocator, 0x88); // FIN + Close
+    try frames.append(allocator, 0x80 | @as(u8, @intCast(invalid_payload.len)));
+    try frames.appendSlice(allocator, &mask);
+    for (invalid_payload, 0..) |byte, index| {
+        try frames.append(allocator, byte ^ mask[index % mask.len]);
+    }
+
+    var peer = Peer{ .input = frames.items };
+    defer peer.deinit();
+    var connection = stream_connection.Connection.init(
+        allocator,
+        std.testing.io,
+        peer.transport(),
+        .{ .role = .server },
+    );
+    defer connection.deinit();
+
+    try std.testing.expectError(error.InvalidCloseCode, connection.receiveMessage());
+    try std.testing.expect(connection.peerClose() == null);
+    // The malformed frame is terminal: the adapter replies 1002 and does not
+    // re-read the same buffered bytes.
+    try std.testing.expectError(error.ConnectionClosed, connection.receiveMessage());
+    var reply = try websocket.parseFrame(allocator, peer.output.items);
+    defer reply.deinit(allocator);
+    const echoed = (try websocket.parseClosePayload(reply.payload)).?;
+    try std.testing.expectEqual(websocket.CloseCode.protocol_error, echoed.code);
+}
+
+test "WebSocket stream adapter rejects an oversized close reason" {
+    var peer = Peer{ .input = &.{} };
+    defer peer.deinit();
+    var connection = stream_connection.Connection.init(
+        allocator,
+        std.testing.io,
+        peer.transport(),
+        .{ .role = .server },
+    );
+    defer connection.deinit();
+    const reason = [_]u8{'x'} ** 124;
+    try std.testing.expectError(
+        error.InvalidControlFrame,
+        connection.sendClose(.normal_closure, &reason),
+    );
+    try std.testing.expect(!connection.close_sent);
+    try std.testing.expectEqual(@as(usize, 0), peer.writes);
+}

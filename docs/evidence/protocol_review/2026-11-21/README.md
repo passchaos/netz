@@ -190,3 +190,28 @@ disabled by default (`one_rtt.Config.enable_pmtud = false`). A deployment on a
 1200-byte path should set `http3.limits.quic.max_datagram_size` explicitly, or
 enable PMTUD and let it raise the path limit. Splitting the receive capacity
 from the send path-MTU field is the longer-term interface fix.
+
+
+## Fifth pass: WebSocket byte-stream close metadata
+
+The generic `websocket.stream_connection` adapter now parses incoming Close
+payloads instead of discarding them:
+
+- `peerClose()` exposes the retained status code and reason.
+- The reply echoes the peer's status code, as RFC 6455 5.5.1 recommends.
+- An oversized close reason returns `InvalidControlFrame` instead of being
+  silently truncated.
+- A malformed Close/control frame sends Close 1002, marks the adapter terminal
+  and returns the parser error; the next call no longer re-reads the same
+  buffered bytes.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| WebSocket stream adapter close/state cases | 13/13 | `websocket-stream-close.log` |
+| Full WebSocket suite | 501/502; one pre-existing host-sensitive failure at HEAD | `websocket-suite.log` |
+
+The full-suite failure is
+`HTTP1 context takeover commits only after bounded send completes`: the test
+expects a 1-second timeout from a 512-KiB write with `SO_SNDBUF=4096`, but this
+host completes the write. It reproduces with the working tree stashed at
+`32c48e52`, so it is recorded as P8 rather than attributed to this change.

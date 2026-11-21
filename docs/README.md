@@ -53,6 +53,7 @@ performance record.
 | Document | Topic |
 | --- | --- |
 | [http_streaming.md](http_streaming.md) | Server streaming ownership plus the client duplex `RequestHandle` for HTTP/1, HTTP/2, and HTTP/3. |
+| [websocket_stream_adapter.md](websocket_stream_adapter.md) | RFC 6455 framing over a caller-supplied byte stream, including close-state and peer-close metadata contracts. |
 | [http3_complete_requests.md](http3_complete_requests.md) | Complete-request HTTP/3 path. |
 | [http3_complete_responses.md](http3_complete_responses.md) | Complete-response HTTP/3 path. |
 | [http3_multipath.md](http3_multipath.md) | Application-level multipath over independent QUIC connections, the cross-host probe, and the multi-NIC test recipe. |
