@@ -61,8 +61,9 @@ issues: the server sends an ACK-only Initial packet 0 followed by a
 CRYPTO-offset-0 packet 1, and it gates the rest of the Handshake flight on an
 ACK for the first CRYPTO packet. The filter now records the accepted packet
 number so `openInitialCryptoFlightFrom` starts at packet 1, and the handshake
-client acknowledges the first Handshake CRYPTO packet with client Handshake
-keys before reserving the next packet number for its Finished flight. quic.tech
+client acknowledges every authenticated Handshake packet that contributes
+CRYPTO data with client Handshake keys, reserving a fresh packet number for
+each ACK and for its Finished flight. quic.tech
 now completes the handshake and returns HTTP/3 200 with a 462-byte body. See
 `docs/evidence/http3_public/2026-11-01.json`.
 

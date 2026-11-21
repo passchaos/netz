@@ -602,3 +602,29 @@ prefix sender must know which Handshake CRYPTO was delivered (for example from
 the client's ACK largest-acknowledged) and send only the unacknowledged
 suffix; otherwise the prefix cannot grow. The working tree was restored to the
 audited complete-flight sender, and the 40-entry regression passes again.
+
+
+## Twenty-first pass: continuous Handshake CRYPTO ACKs
+
+The client previously acknowledged only the first Handshake CRYPTO packet,
+which unblocked servers that gate the rest of the flight but gave no delivery
+signal for later packets. `receiveServerHandshakeCrypto` now acknowledges every
+authenticated Handshake packet that contributes CRYPTO data, using a fresh
+client Handshake packet number per ACK. CRYPTO-less ACK/PADDING packets still
+do not consume ACK numbers, preserving the bounded behavior and the
+"skips many CRYPTO-less Handshake packets" invariant.
+
+This is the client-side prerequisite for ACK-aware server prefix growth: a
+server can map acknowledged packet numbers to the CRYPTO ranges it delivered
+instead of resending from offset zero.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Large-certificate and 40-entry probe flight | 35/35 | `quic-continuous-acks.log` |
+| QUIC handshake, CRYPTO, PTO, certificate, prepared bundle | 66/66 | `quic-handshake-after-acks.log` |
+| Full QUIC suite | 1106/1130, 23 skipped, 1 host-load UDP ECN flake | `quic-full-after-acks.log` |
+| UDP ECN batch test in isolation | 32/32 | `quic-ecn-isolated.log` |
+
+The ECN failure is the same rotating load-sensitive endpoint batching class
+recorded for the fifteenth pass; it passes in isolation and does not touch the
+handshake path.

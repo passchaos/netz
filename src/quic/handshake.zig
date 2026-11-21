@@ -3737,37 +3737,20 @@ pub fn receiveServerHandshakeCrypto(
                 std.Io.Clock.awake.now(endpoint.io).toMilliseconds(),
             )) + recovery.timeoutMillis(0);
         }
+        // ACK every authenticated Handshake packet. The first ACK unblocks
+        // servers that gate the rest of the flight on it; later ACKs let a
+        // server distinguish delivered CRYPTO from loss without retransmitting
+        // the whole flight. Packet numbers stay reserved for the client
+        // Finished flight through the shared counter.
+        try sendClientHandshakeAck(
+            endpoint,
+            from,
+            client_handshake_keys,
+            packet,
+            next_client_packet_number,
+        );
         if (first_packet == null) {
             first_packet = packet;
-            // Some servers gate the rest of the Handshake flight on an ACK
-            // for the first CRYPTO packet. Acknowledge it before waiting for
-            // the continuation, and reserve the next packet number for the
-            // client Finished flight.
-            var ack_storage: [64]u8 = undefined;
-            var ack_list: std.ArrayList(u8) = .{
-                .items = ack_storage[0..0],
-                .capacity = ack_storage.len,
-            };
-            var fixed = std.heap.FixedBufferAllocator.init(&.{});
-            try (quic.Frame{ .ack = .{
-                .largest_acknowledged = packet.packet_number,
-                .ack_delay = 0,
-                .first_ack_range = 0,
-            } }).write(&ack_list, fixed.allocator());
-            var ack_packet_storage: [1280]u8 = undefined;
-            const ack_packet = try quic.protection.sealHandshakePacketInto(
-                &ack_packet_storage,
-                client_handshake_keys,
-                .{
-                    .version = packet.version,
-                    .destination_connection_id = packet.source_connection_id,
-                    .source_connection_id = packet.destination_connection_id,
-                    .packet_number = next_client_packet_number.*,
-                    .payload = ack_list.items,
-                },
-            );
-            next_client_packet_number.* += 1;
-            try endpoint.sendBytes(from, ack_packet);
         } else {
             packet.deinit(endpoint.allocator);
         }
@@ -3801,6 +3784,43 @@ pub fn receiveServerHandshakeCrypto(
             else => |other| return other,
         }
     }
+}
+
+/// Acknowledge one authenticated server Handshake packet with a fresh client
+/// packet number. The counter is shared with the client Finished flight, so
+/// every ACK permanently advances the client's Handshake packet-number range.
+fn sendClientHandshakeAck(
+    endpoint: *quic.runtime.Endpoint,
+    from: net.IpAddress,
+    keys: quic.protection.PacketProtectionKeys,
+    packet: anytype,
+    next_packet_number: *u64,
+) Error!void {
+    var ack_storage: [64]u8 = undefined;
+    var ack_list: std.ArrayList(u8) = .{
+        .items = ack_storage[0..0],
+        .capacity = ack_storage.len,
+    };
+    var fixed = std.heap.FixedBufferAllocator.init(&.{});
+    try (quic.Frame{ .ack = .{
+        .largest_acknowledged = packet.packet_number,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    } }).write(&ack_list, fixed.allocator());
+    var ack_packet_storage: [1280]u8 = undefined;
+    const ack_packet = try quic.protection.sealHandshakePacketInto(
+        &ack_packet_storage,
+        keys,
+        .{
+            .version = packet.version,
+            .destination_connection_id = packet.source_connection_id,
+            .source_connection_id = packet.destination_connection_id,
+            .packet_number = next_packet_number.*,
+            .payload = ack_list.items,
+        },
+    );
+    next_packet_number.* += 1;
+    try endpoint.sendBytes(from, ack_packet);
 }
 
 pub fn nextHandshakePacketFromCoalescedTail(
