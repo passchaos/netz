@@ -102,6 +102,20 @@ The full QUIC suite includes real-UDP timing tests that can rotate under heavy
 host load; each observed failure passes in isolation. Migration-path tests skip
 when the host does not configure a `127.0.0.0/8` alias.
 
+## Verification entry points
+
+- Protocol suites: `zig build test-http`, `test-http1`, `test-http2`,
+  `test-http3`, `test-quic`, `test-websocket`, `test-webtransport`; the public
+  package surface is `test-package`, and `test-compile` compiles both test
+  roots without running them.
+- Bounded fuzz corpus replays: `zig build fuzz-parsers`, `fuzz-stateful`,
+  `fuzz-http1-connection`, `fuzz-http1-tls-connection`,
+  `fuzz-http2-connection`, `fuzz-http2-tls-connection`,
+  `fuzz-http3-connection`, and `fuzz-webtransport-endpoint`. Add `--fuzz=N`
+  for coverage-guided runs.
+- The pass-by-pass review ledger and archived logs live in
+  `docs/evidence/protocol_review/`.
+
 See [HTTP overview](http-overview.md), [HTTP streaming](http_streaming.md),
 [direct H3](http_direct_h3.md), [WebSocket adapter](websocket_stream_adapter.md),
 [WebTransport parity](webtransport_parity.md) and

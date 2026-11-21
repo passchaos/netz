@@ -34,15 +34,22 @@ runs once from `deinit`/`close`.
 
 `read_deadline_fn` and `write_deadline_fn` are optional absolute-deadline
 callbacks. When supplied, `receiveMessageWithDeadline`,
-`sendFrameWithDeadline`, the typed `send*WithDeadline` forms and
-`sendCloseWithDeadline` bound lock acquisition and the transport operation with
-one awake-clock deadline. Without the matching callback those calls return
-`error.DeadlineUnsupported`; the ordinary blocking forms remain available.
+`sendFrameWithDeadline`, the typed `send*WithDeadline` forms,
+`sendCloseWithDeadline`, and `closeWithDeadline` bound lock acquisition and the
+transport operation with one awake-clock deadline. Every `WithDeadline` form
+has a `WithTimeout` counterpart that converts one relative budget at the
+boundary and rejects a non-positive duration before any transport I/O. Without
+the matching callback those calls return `error.DeadlineUnsupported`; the
+ordinary blocking forms remain available.
 
 ```zig
 var message = try connection.receiveMessageWithDeadline(until);
 try connection.sendCloseWithDeadline(.normal_closure, "done", until);
 ```
+
+`closeWithDeadline`/`closeWithTimeout` are resumable: a rejected budget or a
+failed Close write leaves the connection open so the caller can retry with a
+larger budget or fall back to the unbounded `close`.
 
 Client-role connections mask outgoing frames and require unmasked peer frames;
 server-role connections do the reverse. `max_frame_bytes` bounds one wire frame
