@@ -318,7 +318,7 @@ pub const ClientSession = struct {
         deadline: ?std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!ConnectAttempt {
         if (options.limits.require_session_flow_control) return error.SessionFlowControlRequired;
-        if (options.limits.initial_flow_limits != null) return error.WebTransportNotNegotiated;
+        if (options.limits.initial_flow_limits != null) return error.UnsupportedWebTransportOption;
         try connect_headers.validate(options.headers, .request);
         var offer = try application_protocol.Request.init(allocator, options.limits.application_protocols, options.headers);
         defer offer.deinit(allocator);

@@ -74,7 +74,7 @@ left out of this batch.
 | --- | --- | --- | --- |
 | P1 | Resolved in the second pass | After an H3 *connection* failure the body was never read, yet fallback for an idempotent method still called `bodySource().prepareReplay()`, rejecting a single-pass Reader. | The attempt now records whether the request started; setup failures fall back without replay, started requests keep method/replay gating. |
 | P2 | QUIC anti-amplification | `InitialHandshakeFlight` reserves the complete Initial+Handshake flight before sending. Large chains therefore depend on PTO-driven budget growth from client retransmissions; correctness holds, but the first valid send can be delayed. | Send the prefix that fits, retain an ACK-aware CRYPTO cursor, and continue as the budget grows. |
-| P3 | WebTransport options | The legacy Protected adapter returns `WebTransportNotNegotiated` for caller configuration it cannot support (`initial_flow_limits`). That reads as a peer negotiation failure rather than an unsupported option. | Add a distinct configuration error and update the option docs. |
+| P3 | Resolved in the sixth pass | The legacy/stateless adapters returned `WebTransportNotNegotiated` for caller configuration they cannot support (`initial_flow_limits`). | They now return `UnsupportedWebTransportOption`; genuine peer capability failures keep `WebTransportNotNegotiated`. |
 | P4 | HTTP H3 options | `Client.Options.http3.handshake.handshake.alpn_protocols` nests two `handshake` levels because the facade wraps the native handshake options. | Add flat accessors or a `quic` sub-struct while keeping the existing fields as deprecated aliases. |
 | P6 | HTTP/3 GRO test | `drains GRO response batch one packet at a time` hangs at `28dd7d76` and current main: the server blocks in `receiveRequest` after two client requests, while the client joins. | Determine whether the second aggregate request is consumed by the first receive or lost in the GRO batch, then add a bounded receive deadline to the fixture. |
 | P5 | WebSocket byte-stream adapter | `websocket.stream_connection.Connection.close()` has no deadline form and `receiveMessage()` has no absolute-deadline variant; the adapter is documented as caller-driven byte-stream framing. | Add deadline variants if H2/H3 extended-CONNECT embedders need bounded framing reads. |
@@ -183,13 +183,19 @@ unchanged.
 | QUIC handshake, PTO, certificate, prepared verifier, CRYPTO limits | 65/65 | `quic-handshake-mtu-debug.log` |
 | Direct H3, protocol policy, Reader replay/fallback, pooled H3 | 115/115 | `http-handshake-mtu-debug.log` |
 
-### Open: application data still uses the endpoint datagram limit
+### Correction: 1-RTT already defaults to 1200
 
-The same 4096-byte default applies to 1-RTT application packets, and PMTUD is
-disabled by default (`one_rtt.Config.enable_pmtud = false`). A deployment on a
-1200-byte path should set `http3.limits.quic.max_datagram_size` explicitly, or
-enable PMTUD and let it raise the path limit. Splitting the receive capacity
-from the send path-MTU field is the longer-term interface fix.
+A follow-up inspection of `quic.one_rtt.Config` and `quic.handshake` showed that
+1-RTT packets already default to `max_datagram_size = 1200`
+(`congestion.default_max_datagram_size`). The H3 endpoint's 4096-byte limit is
+a socket/receive capacity, not the 1-RTT send size; only handshake flights were
+incorrectly using it. The handshake cap above is therefore the complete
+interop fix for the default configuration.
+
+The remaining interface wart is that raising the application send size requires
+`handshake.handshake.initial_one_rtt_config.max_datagram_size`, while
+`limits.quic.max_datagram_size` is only a socket cap. The two knobs are now
+documented; unifying their names is a future API cleanup (P7, revised).
 
 
 ## Fifth pass: WebSocket byte-stream close metadata
@@ -215,3 +221,18 @@ The full-suite failure is
 expects a 1-second timeout from a 512-KiB write with `SO_SNDBUF=4096`, but this
 host completes the write. It reproduces with the working tree stashed at
 `32c48e52`, so it is recorded as P8 rather than attributed to this change.
+
+
+## Sixth pass: WebTransport option errors
+
+The legacy/stateless WebTransport adapters reject explicit Session flow-limit
+configuration because they cannot account for it. They previously returned
+`WebTransportNotNegotiated`, which reads as a peer negotiation outcome. The
+three construction sites now return `UnsupportedWebTransportOption`, while a
+genuinely unavailable peer capability still returns
+`WebTransportNotNegotiated`.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Explicit flow limits and required-flow-control construction cases | 117/117 | `webtransport-options-debug.log` |
+| Full WebTransport suite | Queued behind the shared build slot; filtered gate 117/117 passed | `webtransport-suite.log` |

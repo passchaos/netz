@@ -8,7 +8,7 @@ const Error = webtransport.runtime.Error;
 pub fn protected(config: http3.runtime.ProtectedConfig, limits: Limits) Error!http3.runtime.ProtectedConfig {
     // This legacy adapter lacks stateful Session flow-control accounting.
     if (limits.require_session_flow_control) return error.SessionFlowControlRequired;
-    if (limits.initial_flow_limits != null) return error.WebTransportNotNegotiated;
+    if (limits.initial_flow_limits != null) return error.UnsupportedWebTransportOption;
     var out = config;
     out.local_settings = webtransport.defaultSettings(out.local_settings);
     if (!out.local_settings.webTransportVersions().legacy) return error.WebTransportNotNegotiated;

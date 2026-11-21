@@ -61,7 +61,7 @@ pub const Server = struct {
 
     pub fn bind(allocator: std.mem.Allocator, io: std.Io, bind_address: net.IpAddress, limits: Limits) Error!Server {
         if (limits.require_session_flow_control) return error.SessionFlowControlRequired;
-        if (limits.initial_flow_limits != null) return error.WebTransportNotNegotiated;
+        if (limits.initial_flow_limits != null) return error.UnsupportedWebTransportOption;
         try application_protocol.validateValues(limits.application_protocols.values);
         return .{
             .h3 = try .bind(allocator, io, bind_address, limits.http3),

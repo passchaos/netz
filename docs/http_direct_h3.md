@@ -54,9 +54,11 @@ bound. The old 4-KiB default could reject ordinary server certificate flights.
 Handshake-level CRYPTO flights are also split into datagrams capped at the
 1200-byte QUIC minimum path MTU, so certificate and mTLS flights never depend
 on IP fragmentation. The peer reassembles client CRYPTO across datagrams.
-Application data still uses the endpoint's configured datagram limit; the H3
-default is 4096 bytes and PMTUD is opt-in, so a path that only supports 1200
-bytes should set `http3.limits.quic.max_datagram_size` accordingly.
+Application data uses the 1-RTT `max_datagram_size`, which defaults to the
+1200-byte QUIC minimum; the endpoint's larger limit is a socket/receive cap, not
+the send packet size. Raising the application packet size requires
+`handshake.handshake.initial_one_rtt_config.max_datagram_size`, and PMTUD is
+opt-in. The endpoint limit must be at least as large as that send size.
 
 `Connection.close()` sends a best-effort QUIC CONNECTION_CLOSE with
 `NO_ERROR`, matching the H1/H2 close-notify contract. `closeWithoutCloseNotify`

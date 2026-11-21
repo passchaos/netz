@@ -20,6 +20,8 @@ pub const Error = wire.Error || error{
     UnknownStream,
     StreamLimitExceeded,
     WebTransportNotNegotiated,
+    /// The selected legacy/stateless adapter cannot honor this caller option.
+    UnsupportedWebTransportOption,
     DatagramsNotNegotiated,
     ReliableResetNotNegotiated,
     SessionFlowControlRequired,

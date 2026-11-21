@@ -36,8 +36,8 @@ test "WebTransport explicit initial quotas cannot rewrite an established transpo
 test "WebTransport explicit initial quotas reject stateless adapters before allocation" {
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
     const limits: webtransport.runtime.Limits = .{ .initial_flow_limits = .{ .data = 0, .bidi = 1, .uni = 0 } };
-    try std.testing.expectError(error.WebTransportNotNegotiated, webtransport.runtime.Server.bind(failing.allocator(), undefined, .{ .ip4 = .loopback(0) }, limits));
-    try std.testing.expectError(error.WebTransportNotNegotiated, webtransport.runtime.ProtectedServer.bind(failing.allocator(), undefined, .{ .ip4 = .loopback(0) }, limits, undefined));
+    try std.testing.expectError(error.UnsupportedWebTransportOption, webtransport.runtime.Server.bind(failing.allocator(), undefined, .{ .ip4 = .loopback(0) }, limits));
+    try std.testing.expectError(error.UnsupportedWebTransportOption, webtransport.runtime.ProtectedServer.bind(failing.allocator(), undefined, .{ .ip4 = .loopback(0) }, limits, undefined));
     try std.testing.expect(!failing.has_induced_failure);
 }
 
