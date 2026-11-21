@@ -60,7 +60,14 @@ test "HTTP/3 concurrent informational development sends retain ordered offsets" 
             try stream.writeInformationalResponseWithDeadline(103, &.{}, deadline(ctx.io));
             try stream.startResponseWithBodyAndInformational(.{ .status = 200 }, null, "alpha", false, &.{.{ .status = 102 }});
             try stream.writeData("beta", false);
-            try stream.finishWithTrailers(&.{.{ .name = "x-finished", .value = "done" }});
+            try std.testing.expectError(
+                error.Timeout,
+                stream.finishWithTrailersWithTimeout(&.{}, .zero),
+            );
+            try stream.finishWithTrailersWithTimeout(
+                &.{.{ .name = "x-finished", .value = "done" }},
+                .fromSeconds(1),
+            );
         }
     };
     const Worker = struct {

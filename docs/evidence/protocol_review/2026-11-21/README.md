@@ -677,3 +677,20 @@ created.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | Parsed-URI pool timeout rejection | 37/37 | `http2-pool-parsed-timeout.log` |
+
+
+## Twenty-fourth pass: bounded concurrent trailer finish
+
+The concurrent HTTP/2 and HTTP/3 `Stream` API exposed unbounded
+`finishWithTrailers` but no deadline or relative-timeout form, so a handler
+could not bound the final trailer submission. Both backends now provide
+`finishWithTrailersWithDeadline` and `finishWithTrailersWithTimeout`; the
+timeout form rejects a non-positive budget before queueing the command, and a
+positive budget bounds the handler's wait for owner completion. The concurrent
+informational tests cover the zero-budget rejection and a successful bounded
+trailer finish on both protocols.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| HTTP/2 concurrent bounded trailer finish | 34/34 | `http2-concurrent-trailer-timeout.log` |
+| HTTP/3 concurrent bounded trailer finish | 65/65 | `http3-concurrent-trailer-timeout.log` |

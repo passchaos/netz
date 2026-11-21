@@ -349,6 +349,27 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                 return self.engine.submit(&command, null);
             }
 
+            pub fn finishWithTrailersWithDeadline(
+                self: Stream,
+                fields: []const http3.Qpack.HeaderField,
+                deadline: std.Io.Clock.Timestamp,
+            ) anyerror!void {
+                var command = Command{ .slot = self.slot, .kind = .{ .finish_trailers = fields } };
+                return self.engine.submit(&command, deadline);
+            }
+
+            pub fn finishWithTrailersWithTimeout(
+                self: Stream,
+                fields: []const http3.Qpack.HeaderField,
+                timeout: std.Io.Duration,
+            ) anyerror!void {
+                if (timeout.nanoseconds <= 0) return error.Timeout;
+                return self.finishWithTrailersWithDeadline(
+                    fields,
+                    .fromNow(self.engine.io, .{ .raw = timeout, .clock = .awake }),
+                );
+            }
+
             /// Cancel this stream. The peer observes `code` as the HTTP/3
             /// application error code.
             pub fn reset(self: Stream, code: u64) anyerror!void {

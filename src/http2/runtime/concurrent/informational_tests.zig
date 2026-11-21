@@ -24,7 +24,14 @@ test "HTTP/2 concurrent informational responses compose with bodies and trailers
             try std.testing.expectError(error.UnexpectedFrame, stream.writeInformationalResponse(103, &.{}));
             try stream.writeData("alpha", false);
             try stream.writeData("beta", false);
-            try stream.finishWithTrailers(&.{.{ .name = "x-finished", .value = "done" }});
+            try std.testing.expectError(
+                error.Timeout,
+                stream.finishWithTrailersWithTimeout(&.{}, .zero),
+            );
+            try stream.finishWithTrailersWithTimeout(
+                &.{.{ .name = "x-finished", .value = "done" }},
+                .fromSeconds(1),
+            );
         }
     };
     const Worker = struct {

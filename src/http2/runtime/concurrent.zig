@@ -272,6 +272,27 @@ pub fn Engine(
                 return self.engine.submit(&command, null);
             }
 
+            pub fn finishWithTrailersWithDeadline(
+                self: Stream,
+                fields: []const http2.Hpack.HeaderField,
+                deadline: std.Io.Clock.Timestamp,
+            ) anyerror!void {
+                var command = Command{ .slot = self.slot, .kind = .{ .finish_trailers = fields } };
+                return self.engine.submit(&command, deadline);
+            }
+
+            pub fn finishWithTrailersWithTimeout(
+                self: Stream,
+                fields: []const http2.Hpack.HeaderField,
+                timeout: std.Io.Duration,
+            ) anyerror!void {
+                if (timeout.nanoseconds <= 0) return error.Timeout;
+                return self.finishWithTrailersWithDeadline(
+                    fields,
+                    .fromNow(self.engine.io, .{ .raw = timeout, .clock = .awake }),
+                );
+            }
+
             pub fn reset(self: Stream, code: http2.ErrorCode) anyerror!void {
                 var command = Command{ .slot = self.slot, .kind = .{ .cancel = code } };
                 return self.engine.submit(&command, null);
