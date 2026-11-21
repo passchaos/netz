@@ -462,7 +462,11 @@ test "HTTP/2 client cancels a reserved promised push" {
         runtime.testing.findHeader(promise.headers, ":path").?,
     );
     const promised_stream_id = promise.promised_stream_id;
-    try client.cancelPush(&promise);
+    try std.testing.expectError(
+        error.Timeout,
+        client.cancelPushWithTimeout(&promise, .zero),
+    );
+    try client.cancelPushWithTimeout(&promise, .fromSeconds(1));
 
     thread.join();
     if (shared.err) |err| return err;

@@ -743,3 +743,17 @@ The ACK-aware flight also dropped an unused packet-number field and the
 redundant `handshakeComplete()` getter after the accept gate moved to the
 CRYPTO/close datagram flags; the focused regression confirms no behavior
 change.
+
+
+## Twenty-seventh pass: bounded push cancellation
+
+`Connection.cancelPush` emitted RST_STREAM(CANCEL) with an unbounded write, so
+a client canceling a reserved push during backpressure could block
+indefinitely. It now has `cancelPushWithDeadline` and `cancelPushWithTimeout`;
+the prepared-reset write helper accepts the deadline directly, preserving the
+existing preparation/credit order and the promise ownership on failure. A
+non-positive budget is rejected before touching the promise.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Bounded push cancellation | 34/34 | `http2-cancel-push-timeout.log` |

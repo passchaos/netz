@@ -5365,6 +5365,35 @@ pub const Connection = struct {
         self: *Connection,
         promise: *PromisedRequest,
     ) Error!void {
+        return self.cancelPushUntil(promise, null);
+    }
+
+    pub fn cancelPushWithDeadline(
+        self: *Connection,
+        promise: *PromisedRequest,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!void {
+        const absolute = try deadline_policy.usableAwake(self.io, deadline);
+        return self.cancelPushUntil(promise, absolute);
+    }
+
+    pub fn cancelPushWithTimeout(
+        self: *Connection,
+        promise: *PromisedRequest,
+        timeout: std.Io.Duration,
+    ) Error!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.cancelPushWithDeadline(
+            promise,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    fn cancelPushUntil(
+        self: *Connection,
+        promise: *PromisedRequest,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!void {
         if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
         if (self.callback_reader_active) return error.UnexpectedFrame;
         if (self.role != .client) return error.UnexpectedFrame;
@@ -5382,7 +5411,11 @@ pub const Connection = struct {
         try self.prepareLocallyResetStreams(1);
         try PushLifecycle.returnHeldCredit(self, promised_stream_id, 0, null);
         if (self.terminal_write_failed) return error.ConnectionClosed;
-        self.writeResetStreamFramePrepared(promised_stream_id, .cancel) catch |err| {
+        self.writeResetStreamFramePreparedUntil(
+            promised_stream_id,
+            .cancel,
+            deadline,
+        ) catch |err| {
             self.terminal_write_failed = true;
             return err;
         };
@@ -12088,6 +12121,19 @@ pub const Connection = struct {
         stream_id: u31,
         error_code: http2.ErrorCode,
     ) Error!void {
+        return self.writeResetStreamFramePreparedUntil(
+            stream_id,
+            error_code,
+            null,
+        );
+    }
+
+    fn writeResetStreamFramePreparedUntil(
+        self: *Connection,
+        stream_id: u31,
+        error_code: http2.ErrorCode,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!void {
         if (self.terminal_write_failed) return error.ConnectionClosed;
         var storage: [http2.ResetStreamPayload.encoded_len]u8 = undefined;
         const encoded = try http2.ResetStreamPayload.writeInto(
@@ -12095,10 +12141,22 @@ pub const Connection = struct {
             stream_id,
             error_code,
         );
-        self.transportForIo().writeAll(encoded) catch |err| {
-            self.aggregate_timeout_unusable = true;
-            return err;
-        };
+        if (deadline) |absolute| {
+            var committed: usize = 0;
+            self.transportForIo().writeAllWithDeadline(
+                encoded,
+                &committed,
+                absolute,
+            ) catch |err| {
+                self.aggregate_timeout_unusable = true;
+                return err;
+            };
+        } else {
+            self.transportForIo().writeAll(encoded) catch |err| {
+                self.aggregate_timeout_unusable = true;
+                return err;
+            };
+        }
         self.rememberLocallyResetStreamAssumeCapacity(stream_id);
         self.notePeerResetAdmission(stream_id);
     }
