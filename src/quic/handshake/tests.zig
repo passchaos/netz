@@ -5015,17 +5015,22 @@ test "QUIC client probes while a server Handshake flight is incomplete" {
     defer allocator.free(packet);
 
     const Source = struct {
+        io: std.Io,
         packet: []const u8,
         from: std.Io.net.IpAddress,
         calls: usize = 0,
 
         fn receive(
             context: *anyopaque,
-            _: std.Io.Timeout,
+            wait: std.Io.Timeout,
         ) quic.runtime.ReceiveTimeoutError!quic.runtime.OwnedBytes {
             const self: *@This() = @ptrCast(@alignCast(context));
             self.calls += 1;
-            if (self.calls < 3) return error.Timeout;
+            if (self.calls < 3) {
+                // Honor the requested wait so the PTO timer can fire.
+                wait.sleep(self.io) catch {};
+                return error.Timeout;
+            }
             return .{
                 .from = self.from,
                 .bytes = try allocator.dupe(u8, self.packet),
@@ -5033,9 +5038,11 @@ test "QUIC client probes while a server Handshake flight is incomplete" {
         }
 
         fn timeout(
-            _: *anyopaque,
-            _: std.Io.Timeout,
+            context: *anyopaque,
+            wait: std.Io.Timeout,
         ) quic.runtime.ReceiveTimeoutError!quic.runtime.OwnedBytes {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            wait.sleep(self.io) catch {};
             return error.Timeout;
         }
     };
@@ -5047,7 +5054,7 @@ test "QUIC client probes while a server Handshake flight is incomplete" {
         }
     };
 
-    var source = Source{ .packet = packet, .from = endpoint.address() };
+    var source = Source{ .io = io, .packet = packet, .from = endpoint.address() };
     var probe = Probe{};
     var next_client_packet_number: u64 = 0;
     var received = try receiveServerHandshakeCrypto(
@@ -5070,7 +5077,7 @@ test "QUIC client probes while a server Handshake flight is incomplete" {
     try std.testing.expect(probe.calls >= 2);
     try std.testing.expectEqualStrings(&tls_flight, received.crypto_data);
 
-    var idle = Source{ .packet = packet, .from = endpoint.address() };
+    var idle = Source{ .io = io, .packet = packet, .from = endpoint.address() };
     try std.testing.expectError(
         error.HandshakeTimeout,
         receiveServerHandshakeCrypto(

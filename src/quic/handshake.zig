@@ -3613,11 +3613,33 @@ pub fn receiveServerHandshakeCrypto(
     var next_expected = expected_packet_number;
     const hard_deadline = retransmit.activeDeadline(recovery, endpoint.io);
     var retransmission: u8 = 0;
+    var next_probe_ms: u64 = @as(u64, @intCast(
+        std.Io.Clock.awake.now(endpoint.io).toMilliseconds(),
+    )) + recovery.timeoutMillis(0);
     var pending_tail = coalesced_tail;
     var pending_tail_storage: ?[]u8 = null;
     defer if (pending_tail_storage) |storage| endpoint.allocator.free(storage);
 
     while (true) {
+        // Probe on a timer independent of received datagrams. A server that
+        // sends partial certificate prefixes would otherwise keep resetting a
+        // receive-driven PTO and never let its amplification budget grow.
+        const now_ms: u64 = @intCast(
+            std.Io.Clock.awake.now(endpoint.io).toMilliseconds(),
+        );
+        if (now_ms >= next_probe_ms) {
+            if (retransmit.retryBudgetExhausted(
+                recovery,
+                endpoint.io,
+                retransmission,
+                hard_deadline,
+            )) return error.HandshakeTimeout;
+            if (probe) |value| {
+                value.send_fn(value.context, retransmission) catch {};
+            }
+            retransmission +|= 1;
+            next_probe_ms = now_ms + recovery.timeoutMillis(retransmission);
+        }
         const pending_packet = nextHandshakePacketFromCoalescedTail(
             &pending_tail,
             allow_zero_fixed_bit,
@@ -3629,36 +3651,30 @@ pub fn receiveServerHandshakeCrypto(
         var owned_datagram: ?quic.runtime.OwnedBytes = null;
         defer if (owned_datagram) |*datagram| datagram.deinit(endpoint.allocator);
         const bytes = if (pending_packet) |packet| packet else blk: {
-            owned_datagram = while (true) {
-                const attempt = retransmit.attemptDeadline(
-                    recovery,
+            var wait_ms: i64 = if (next_probe_ms > now_ms)
+                @intCast(next_probe_ms - now_ms)
+            else
+                0;
+            if (hard_deadline) |deadline| {
+                const remaining_ns = deadline.durationFromNow(
                     endpoint.io,
-                    retransmission,
-                    hard_deadline,
+                ).raw.nanoseconds;
+                if (remaining_ns <= 0) return error.HandshakeTimeout;
+                const remaining_ms: i64 = @intCast(
+                    @divTrunc(remaining_ns, std.time.ns_per_ms),
                 );
-                const received = source.receiveTimeout(attempt) catch |err|
-                    switch (err) {
-                        error.Timeout => {
-                            if (retransmit.retryBudgetExhausted(
-                                recovery,
-                                endpoint.io,
-                                retransmission,
-                                hard_deadline,
-                            )) return error.HandshakeTimeout;
-                            // Probe the server so its anti-amplification
-                            // budget can grow while it assembles a large
-                            // certificate flight.
-                            if (probe) |value| {
-                                value.send_fn(value.context, retransmission) catch {};
-                            }
-                            retransmission +|= 1;
-                            continue;
-                        },
-                        error.ConcurrencyUnavailable => return error.HandshakeReceiveFailed,
-                        else => |other| return @errorCast(other),
-                    };
-                retransmission = 0;
-                break received;
+                wait_ms = @min(wait_ms, remaining_ms);
+            }
+            owned_datagram = source.receiveTimeout(.{
+                .duration = .{
+                    .raw = std.Io.Duration.fromMilliseconds(wait_ms),
+                    .clock = .awake,
+                },
+            }) catch |err| switch (err) {
+                // The top of the loop decides whether to probe or time out.
+                error.Timeout => continue,
+                error.ConcurrencyUnavailable => return error.HandshakeReceiveFailed,
+                else => |other| return @errorCast(other),
             };
             if (!owned_datagram.?.from.eql(&from)) continue;
             response_from = owned_datagram.?.from;
@@ -3697,6 +3713,7 @@ pub fn receiveServerHandshakeCrypto(
         };
         errdefer packet.deinit(endpoint.allocator);
         next_expected = packet.packet_number + 1;
+        const contiguous_before = reassembler.contiguous_end;
         quic.initial_exchange.insertCryptoPayload(
             endpoint.allocator,
             &reassembler,
@@ -3713,6 +3730,13 @@ pub fn receiveServerHandshakeCrypto(
             },
             else => |other| return other,
         };
+        if (reassembler.contiguous_end != contiguous_before) {
+            // New TLS bytes are progress; restart the probe schedule.
+            retransmission = 0;
+            next_probe_ms = @as(u64, @intCast(
+                std.Io.Clock.awake.now(endpoint.io).toMilliseconds(),
+            )) + recovery.timeoutMillis(0);
+        }
         if (first_packet == null) {
             first_packet = packet;
             // Some servers gate the rest of the Handshake flight on an ACK

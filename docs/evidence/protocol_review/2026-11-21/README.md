@@ -73,7 +73,7 @@ left out of this batch.
 | ID | Area | Finding | Suggested direction |
 | --- | --- | --- | --- |
 | P1 | Resolved in the second pass | After an H3 *connection* failure the body was never read, yet fallback for an idempotent method still called `bodySource().prepareReplay()`, rejecting a single-pass Reader. | The attempt now records whether the request started; setup failures fall back without replay, started requests keep method/replay gating. |
-| P2 | Partially resolved | Client `receiveServerHandshakeCrypto` now emits PTO probes while it waits. Server prefix sending was retried and still deadlocked: periodic prefixes keep delivering datagrams, which reset the client PTO counter, so probes stop and the budget never grows. | Add a probe timer independent of received datagrams, then re-enable server prefixes. |
+| P2 | Partially resolved | Client `receiveServerHandshakeCrypto` now emits PTO probes on a timer, independent of received datagrams, and restarts the schedule only when contiguous CRYPTO bytes advance. Server prefix sending still needs separate investigation. | Keep the timer probe; debug why a server prefix attempt only sends once in the 40-entry regression. |
 | P3 | Resolved in the sixth pass | The legacy/stateless adapters returned `WebTransportNotNegotiated` for caller configuration they cannot support (`initial_flow_limits`). | They now return `UnsupportedWebTransportOption`; genuine peer capability failures keep `WebTransportNotNegotiated`. |
 | P4 | HTTP H3 options | `Client.Options.http3.handshake.handshake.alpn_protocols` nests two `handshake` levels because the facade wraps the native handshake options. | Add flat accessors or a `quic` sub-struct while keeping the existing fields as deprecated aliases. |
 | P6 | Resolved | `drains GRO response batch one packet at a time` hung on platforms without GRO because its skip path joined a server thread still blocked in `receiveRequest`. | The skip path now closes the connection first; the test skips cleanly and the full H3 suite completes. |
@@ -390,3 +390,24 @@ observes `error.ConnectionClosed`.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | Direct H3 normal and deadline close | 97/97 | `h3-deadline-close.log` |
+
+
+## Fourteenth pass: timer-driven client probes
+
+The client probe schedule was previously driven by `receiveTimeout` errors:
+any received datagram reset the PTO counter, so a server sending partial
+certificate prefixes could suppress the probes indefinitely. The wait now uses
+an absolute `next_probe_ms` timer:
+
+- the receive wait is capped by the next probe time and the hard deadline;
+- the top of the loop probes when the timer expires, regardless of traffic;
+- the schedule restarts only when `reassembler.contiguous_end` advances.
+
+The scripted probe test now honors the requested wait so the timer fires
+deterministically. Probe, CRYPTO-limit and PTO regressions pass 40/40.
+
+Server prefix sending was re-applied on top of the timer and still failed the
+40-entry regression: the server's `InitialHandshakeFlight.send` ran once with
+`available=7200`, `initial=2400`, `prefix=4551`, then never ran again even
+though the client emitted probes. That is a separate server-loop issue; the
+prefix change was reverted and is recorded as remaining P2 work.

@@ -1,0 +1,4 @@
+{
+  "src/quic/handshake.zig": "e0a3fd30ec5e0fd4bc2150a36f7aae8004909089d76333bcde16b0bc64f1c8a2",
+  "src/quic/handshake/tests.zig": "908238aeac3116574c06fb0abb6a2d74ddb9fded37854432c2e81a7aaf908738"
+}
