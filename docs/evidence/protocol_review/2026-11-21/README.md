@@ -833,3 +833,21 @@ transport, then exercises the bounded receive and send paths.
 | --- | --- | --- |
 | Full WebSocket suite | 504/505 (1 skipped) | `websocket-stream-timeouts.log` |
 | Public package surface tests | 26/26 | `test-package-stream-timeouts.log` |
+
+
+## Thirty-second pass: incremental WebTransport timeout forms
+
+`webtransport.runtime.incremental_stream` exposed `read`, `readId`, and
+`stop` with absolute-deadline counterparts only, so callers holding a
+relative budget had to construct an awake-clock timestamp themselves. Add
+`readWithTimeout`, `readIdWithTimeout`, and `stopWithTimeout`; each converts
+through `deadline_policy.fromTimeout`, rejecting a non-positive duration with
+`Timeout` before any socket wait, registry lookup, or STOP_SENDING write.
+The existing GRO incremental-read test now also asserts zero-budget rejection
+for the read and stop timeout forms, and the public package surface test pins
+all three declarations.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full WebTransport suite | 755/757 (2 skipped) | `webtransport-stream-timeouts.log` |
+| Public package surface tests | 26/26 | `test-package-webtransport-timeouts.log` |

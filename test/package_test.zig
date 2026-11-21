@@ -9600,6 +9600,18 @@ test "public modules are reachable" {
         "HandshakeFailure",
     ));
     try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.incremental_stream,
+        "readWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.incremental_stream,
+        "readIdWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.incremental_stream,
+        "stopWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.http3.runtime.HandshakeAdmission,
         "deadline",
     ));

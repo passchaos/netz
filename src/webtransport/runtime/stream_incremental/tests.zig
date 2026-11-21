@@ -12,9 +12,11 @@ const read = stream_incremental_root.read;
 const readId = stream_incremental_root.readId;
 const readIdWithDeadline = stream_incremental_root.readIdWithDeadline;
 const readWithDeadline = stream_incremental_root.readWithDeadline;
+const readWithTimeout = stream_incremental_root.readWithTimeout;
 const reset = stream_incremental_root.reset;
 const resetReliably = stream_incremental_root.resetReliably;
 const stop = stream_incremental_root.stop;
+const stopWithTimeout = stream_incremental_root.stopWithTimeout;
 
 test "WebTransport shared endpoint leaves sibling Session stream for owner" {
     const allocator = std.testing.allocator;
@@ -367,6 +369,16 @@ test "WebTransport incremental read consumes one UDP GRO stream batch" {
             }),
         ),
     );
+    try std.testing.expectError(
+        error.Timeout,
+        readWithTimeout(
+            &connection,
+            &registry,
+            session_id,
+            &out,
+            .fromNanoseconds(0),
+        ),
+    );
     try quic.one_rtt.sendFramesBatch(
         &sender,
         receiver.address(),
@@ -406,6 +418,10 @@ test "WebTransport incremental read consumes one UDP GRO stream batch" {
     try std.testing.expectEqual(
         @as(u64, 2),
         connection.stats().packets_received,
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        stopWithTimeout(&connection, &registry, 4, 0, .fromNanoseconds(0)),
     );
 }
 

@@ -61,6 +61,26 @@ pub fn read(
     };
 }
 
+/// Relative-timeout counterpart to `read`. A non-positive duration returns
+/// `Timeout` before any socket wait or stream bookkeeping.
+pub fn readWithTimeout(
+    connection: *quic.one_rtt.Connection,
+    registry: *webtransport.StreamRegistry,
+    session_id: webtransport.SessionId,
+    out: []u8,
+    timeout: std.Io.Duration,
+) (Error || quic.runtime.ReceiveTimeoutError)!Read {
+    return readWithProgress(
+        connection,
+        registry,
+        session_id,
+        null,
+        out,
+        (try deadline_policy.fromTimeout(connection.endpoint.io, timeout)).?,
+        null,
+    );
+}
+
 /// Deadline-bounded counterpart to `read`. One absolute deadline spans all
 /// unrelated/control packets and any earlier QUIC transport timers.
 pub fn readWithDeadline(
@@ -87,6 +107,27 @@ pub fn readId(
         error.Timeout, error.ConcurrencyUnavailable => unreachable,
         else => return @errorCast(err),
     };
+}
+
+/// Relative-timeout counterpart to `readId`. A non-positive duration returns
+/// `Timeout` before any socket wait or stream bookkeeping.
+pub fn readIdWithTimeout(
+    connection: *quic.one_rtt.Connection,
+    registry: *webtransport.StreamRegistry,
+    session_id: webtransport.SessionId,
+    stream_id: u62,
+    out: []u8,
+    timeout: std.Io.Duration,
+) (Error || quic.runtime.ReceiveTimeoutError)!Read {
+    return readWithProgress(
+        connection,
+        registry,
+        session_id,
+        stream_id,
+        out,
+        (try deadline_policy.fromTimeout(connection.endpoint.io, timeout)).?,
+        null,
+    );
 }
 
 /// Deadline-bounded targeted stream read. One absolute deadline spans sibling
@@ -180,6 +221,24 @@ pub fn stop(
     try connection.sendStopSending(stream_id, http3_code);
     stream.stop_sent = .fromHttp3(http3_code);
     _ = try connection.discardStoppedReceived(stream_id);
+}
+
+/// Relative-timeout counterpart to `stop`. A non-positive duration returns
+/// `Timeout` before registry lookup or any STOP_SENDING write.
+pub fn stopWithTimeout(
+    connection: *quic.one_rtt.Connection,
+    registry: *webtransport.StreamRegistry,
+    stream_id: u62,
+    application_error_code: u32,
+    timeout: std.Io.Duration,
+) TimeoutError!void {
+    return stopWithDeadline(
+        connection,
+        registry,
+        stream_id,
+        application_error_code,
+        (try deadline_policy.fromTimeout(connection.endpoint.io, timeout)).?,
+    );
 }
 
 /// Cancel the peer send direction under one absolute awake-clock deadline.
