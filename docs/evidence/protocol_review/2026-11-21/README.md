@@ -1366,3 +1366,16 @@ original allocation and the frame payload is cleared.
 | --- | --- | --- |
 | Full WebSocket suite | 510/511 (1 skipped) | `websocket-owned-no-alloc.log` |
 | Public package surface tests | 26/26 | `test-package-owned-no-alloc.log` |
+
+
+## Sixty-first pass: guided stateful fuzz
+
+`zig build fuzz-stateful --fuzz=500` ran 500 coverage-guided mutations of the
+stateful operation sequences (HTTP/1 pipelines, HTTP/2 flow control and HPACK,
+HTTP/3 control streams and QPACK, WebSocket fragmented assembly, WebTransport
+session/stream lifecycles, and MQTT Session/QoS persistence). The run finished
+9/9 steps with 2/2 tests passing and no panic or leak report.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Guided stateful fuzz (500 iterations) | 9/9 steps, 2/2 tests | `fuzz-stateful-guided.log` |
