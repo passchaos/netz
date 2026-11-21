@@ -1110,3 +1110,25 @@ number, and the package surface pins both declarations.
 | --- | --- | --- |
 | Full WebTransport suite | 756/758 (2 skipped) | `webtransport-handshake-receive-timeouts.log` |
 | Public package surface tests | 26/26 | `test-package-handshake-receive-timeouts.log` |
+
+
+## Forty-seventh pass: WebSocket direct read buffering
+
+`stream_connection.ensureBefore` read every transport chunk into a 16 KiB
+stack buffer and then copied it into the frame buffer, costing one extra copy
+per read. It now reads directly into the ArrayList's spare capacity after
+reserving the chunk. The 16 KiB amortization is retained for small frame
+headers, while each reservation is capped at 64 KiB so a peer that advertises
+a large frame cannot force a whole-frame allocation before sending its
+payload; the frame-size limit is enforced before the read. A new adapter test
+round-trips a 40 KiB binary frame through multiple reads and the compaction
+path.
+
+The bounded parser fuzz corpus also replayed clean: `zig build fuzz-parsers`
+passed 9/9 steps and 2/2 tests, covering the cross-protocol HTTP/1, HTTP/2,
+HTTP/3, HPACK, QPACK, WebSocket, WebTransport, and MQTT seeds.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full WebSocket suite | 507/508 (1 skipped) | `websocket-direct-read-buffer.log` |
+| Parser fuzz corpus replay | 9/9 steps, 2/2 tests | `fuzz-parsers-replay.log` |

@@ -374,3 +374,28 @@ test "WebSocket stream adapter bounded close reports transport deadline support"
     try std.testing.expect(connection.closed);
     try std.testing.expectEqual(@as(usize, 1), peer.writes);
 }
+
+test "WebSocket stream adapter buffers frames larger than one read chunk" {
+    const payload_len = 40 * 1024;
+    const payload = try allocator.alloc(u8, payload_len);
+    defer allocator.free(payload);
+    for (payload, 0..) |*byte, index| byte.* = @truncate(index);
+    var frames: std.ArrayList(u8) = .empty;
+    defer frames.deinit(allocator);
+    try encodePeerFrame(&frames, .binary, payload);
+
+    var peer = Peer{ .input = frames.items };
+    defer peer.deinit();
+    var connection = stream_connection.Connection.init(
+        allocator,
+        std.testing.io,
+        peer.transport(),
+        .{ .role = .server },
+    );
+    defer connection.deinit();
+
+    var message = try connection.receiveMessage();
+    defer message.deinit(allocator);
+    try std.testing.expectEqual(websocket.Opcode.binary, message.opcode);
+    try std.testing.expectEqualSlices(u8, payload, message.payload);
+}

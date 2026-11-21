@@ -558,6 +558,11 @@ pub const Connection = struct {
         wanted: usize,
         deadline: ?std.Io.Clock.Timestamp,
     ) !void {
+        const limit = std.math.add(
+            usize,
+            self.options.max_frame_bytes,
+            websocket.max_frame_header_len,
+        ) catch return error.PayloadTooLarge;
         while (self.buffer.items.len - self.start < wanted) {
             if (self.start != 0) {
                 const remaining = self.buffer.items.len - self.start;
@@ -569,18 +574,24 @@ pub const Connection = struct {
                 self.buffer.items.len = remaining;
                 self.start = 0;
             }
-            var chunk: [16 * 1024]u8 = undefined;
+            // Read straight into spare capacity instead of copying through a
+            // stack chunk. Keep 16 KiB amortization for small headers while
+            // bounding each reservation so a peer cannot force a whole-frame
+            // allocation before sending the payload.
+            const missing = wanted - self.buffer.items.len;
+            const read_len = @min(
+                @max(missing, 16 * 1024),
+                @min(limit - self.buffer.items.len, 64 * 1024),
+            );
+            if (read_len == 0) return error.PayloadTooLarge;
+            try self.buffer.ensureUnusedCapacity(self.allocator, read_len);
+            const spare = self.buffer.unusedCapacitySlice();
             const count = if (deadline) |absolute|
-                try self.transport.readBefore(&chunk, absolute)
+                try self.transport.readBefore(spare[0..read_len], absolute)
             else
-                try self.transport.read(&chunk);
+                try self.transport.read(spare[0..read_len]);
             if (count == 0) return error.EndOfStream;
-            try self.buffer.appendSlice(self.allocator, chunk[0..count]);
-            const limit = std.math.add(
-                usize,
-                self.options.max_frame_bytes,
-                websocket.max_frame_header_len,
-            ) catch return error.PayloadTooLarge;
+            self.buffer.items.len += count;
             if (self.buffer.items.len > limit) return error.PayloadTooLarge;
         }
     }
