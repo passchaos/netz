@@ -73,7 +73,7 @@ left out of this batch.
 | ID | Area | Finding | Suggested direction |
 | --- | --- | --- | --- |
 | P1 | Resolved in the second pass | After an H3 *connection* failure the body was never read, yet fallback for an idempotent method still called `bodySource().prepareReplay()`, rejecting a single-pass Reader. | The attempt now records whether the request started; setup failures fall back without replay, started requests keep method/replay gating. |
-| P2 | Partially resolved | Client `receiveServerHandshakeCrypto` emits PTO probes on a timer. With server prefixes enabled, the first attempt sends the Initial plus a 4551-byte prefix and consumes the 7200-byte budget; later attempts return before sending because `remaining()` is zero, so client probes are not growing the server budget. | Determine why the probe datagrams are not observed by the server (routing or observe hook), then re-enable prefixes. |
+| P2 | Open (performance) | Client `receiveServerHandshakeCrypto` emits PTO probes on a timer, and `sendAndReceiveMatchingFromObserved` observes every same-peer datagram before classification, so the budget accounting path is sound. A previous server-prefix sender still ran once with `available=7200` and never advanced. | The prefix sender must track the already-sent Handshake CRYPTO offset and packet-number range across PTO retries, and must reserve only the prefix it sends. Validate with the 40-entry 1200-byte certificate and mTLS regressions before changing the default. |
 | P3 | Resolved in the sixth pass | The legacy/stateless adapters returned `WebTransportNotNegotiated` for caller configuration they cannot support (`initial_flow_limits`). | They now return `UnsupportedWebTransportOption`; genuine peer capability failures keep `WebTransportNotNegotiated`. |
 | P4 | Resolved in the eighth pass | `Client.Options.http3.handshake.handshake.alpn_protocols` nests two `handshake` levels because the facade wraps the native handshake options. | `nativeHandshake()`/`sessionOptions()` return mutable pointers to the native blocks, so call sites no longer spell the nested path; the stored layout is unchanged. |
 | P6 | Resolved | `drains GRO response batch one packet at a time` hung on platforms without GRO because its skip path joined a server thread still blocked in `receiveRequest`. | The skip path now closes the connection first; the test skips cleanly and the full H3 suite completes. |
@@ -558,3 +558,18 @@ The remaining deadline-only names are intentional: H3 connect/request
 primitives already take a relative `connect_timeout` through options,
 WebSocket `ensureBuffered*` are internal prefetch steps behind typed receive
 APIs, and WebTransport `pollWithDeadline` never blocks on transport I/O.
+
+
+## Twentieth pass: HTTP/1 close timeout coverage
+
+`http1.Client.closeWithTimeout` was added with the close-budget parity batch
+but only the unified H3 timeout close had direct coverage. The cleartext path
+now has both cases: an expired budget returns `Timeout`, retires the client and
+lets the peer observe EOF; a positive budget closes the lease cleanly. P7 was
+also marked resolved because the H3 facade accessors already expose one
+application send size and keep the socket cap in sync. P2 is now the only open
+review item and records the narrowed prefix-sender requirement.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| HTTP/1 close timeout retirement | 17/17 | `http1-close-timeout.log` |

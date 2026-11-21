@@ -58,6 +58,7 @@ test {
     _ = @import("uri_and_serve_tests.zig");
     _ = @import("message_batch_tests.zig");
     _ = @import("close_and_drain_tests.zig");
+    _ = @import("close_timeout_tests.zig");
     _ = @import("keep_alive_and_pipeline_tests.zig");
     _ = @import("writer_framing_and_reader_tests.zig");
     _ = @import("writer_deadline_tests.zig");
