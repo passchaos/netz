@@ -735,3 +735,4 @@ assert the zero-budget rejection for all four on both protocols.
 | --- | --- | --- |
 | HTTP/2 concurrent timeout matrix | 34/34 | `http2-concurrent-timeout-matrix.log` |
 | HTTP/3 concurrent timeout matrix | 65/65 | `http3-concurrent-timeout-matrix.log` |
+| Full library and public-package compile | 9/9 steps | `test-compile-final.log` |
