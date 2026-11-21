@@ -1379,3 +1379,29 @@ session/stream lifecycles, and MQTT Session/QoS persistence). The run finished
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | Guided stateful fuzz (500 iterations) | 9/9 steps, 2/2 tests | `fuzz-stateful-guided.log` |
+
+
+## Sixty-second pass: full-library rerun after socket fixes
+
+The full-library suite was rerun after the host-portable socket-test fixes.
+The three fixed tests no longer appear; the run reported 7080 pass, 43 skip,
+8 fail and 2 crash out of 7133, compared with 7078/41/12/1 before. The
+remaining failures rotate with host load and are not deterministic:
+
+- In-scope/adjacent flakes: QUIC UDP batch receive cancellation and the
+  WebTransport retained-cursor CLOSE test both pass in their dedicated suites;
+  `internal.tcp_connect` Happy Eyeballs hit a Zig `Threaded` `EISCONN`
+  programmer-bug panic under load and passed in an isolated filtered run
+  (223/223).
+- Out of scope: two gRPC channel tests, one gRPC shared-cancellation test, one
+  SOCKS5 UDP association test, two MQTT config-include tests, and the MQTT
+  runtime-policy SIGILL.
+
+Dedicated gates remain green: HTTP/2 985/985 three times, WebTransport
+758/760 twice. The rotating failure set is host-load evidence, not a
+regression in the reviewed protocols.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full-library rerun | 7080 pass, 43 skip, 8 fail, 2 crash | `test-lib-after-socket-fixes.log` |
+| Isolated Happy Eyeballs test | 223/223 | live run |

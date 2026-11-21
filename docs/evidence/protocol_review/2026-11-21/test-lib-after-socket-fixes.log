@@ -1,0 +1,516 @@
+[traex-zig-guard 2026-11-22 06:46:26] waiting for the global TRAE Zig build slot
+[traex-zig-guard 2026-11-22 06:57:17] started Zig tree root=45952 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=1800s
+test-lib
++- run test 7080 pass, 43 skip, 8 fail, 2 crash (7133 total)
+error: 'internal.tcp_connect.tests.test.TCP Happy Eyeballs staggers attempts and closes a successful loser' terminated with signal ABRT with stderr:
+       thread 226053362 panic: programmer bug caused syscall error: ISCONN
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/Io/Threaded.zig:14055:34: 0x1012bfd4f in errnoBug (test)
+           if (is_debug) std.debug.panic("programmer bug caused syscall error: {t}", .{err});
+                                        ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/Io/Threaded.zig:1440:33: 0x1012c9e87 in errnoBug (test)
+               return Threaded.errnoBug(err);
+                                       ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/Io/Threaded.zig:11938:49: 0x101306497 in posixConnect (test)
+               .ISCONN => |err| return syscall.errnoBug(err),
+                                                       ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/Io/Threaded.zig:12085:21: 0x101306ce7 in netConnectIpPosix (test)
+           try posixConnect(socket_fd, &storage.any, addr_len);
+                           ^
+       /Users/bytedance/project-z/netz/src/internal/tcp_connect/tests.zig:283:57: 0x1017d1faf in netConnectIp (test)
+                       return self.delegate.vtable.netConnectIp(
+                                                               ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/Io/net.zig:340:55: 0x1017a054b in connect (test)
+               return .{ .socket = try io.vtable.netConnectIp(io.userdata, address, options) };
+                                                             ^
+       /Users/bytedance/project-z/netz/src/internal/tcp_connect.zig:632:27: 0x1017cfdd3 in connectIp (test)
+           return address.connect(io, .{ .mode = .stream });
+                                 ^
+       /Users/bytedance/project-z/netz/src/internal/tcp_connect.zig:641:21: 0x1017d045f in connectResolvedIp (test)
+           return connectIp(io, address);
+                           ^
+       /Users/bytedance/project-z/netz/src/internal/tcp_connect/happy_eyeballs.zig:45:31: 0x1017d025b in connect (test)
+                   return connect_one(
+                                     ^
+       /Users/bytedance/project-z/netz/src/internal/connection_race.zig:46:38: 0x1017d012b in run (test)
+                   self.result = connect_one(
+                                            ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/Io.zig:1454:66: 0x1017cfe8f in start (test)
+                           const result = @call(.auto, function, context.args);
+                                                                        ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/Io/Threaded.zig:552:22: 0x101300d53 in start (test)
+                   task.func(task.contextPointer());
+                            ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/Io/Threaded.zig:1797:29: 0x1012ffc0b in worker (test)
+                   runnable.startFn(runnable, &thread, t);
+                                   ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/Thread.zig:422:13: 0x1012ff843 in callFn__anon_21709 (test)
+                   @call(.auto, f, args);
+                   ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/Thread.zig:752:30: 0x1012ff6df in entryFn (test)
+                       return callFn(f, args_ptr.*);
+                                    ^
+       ???:?:?: 0x1881cbc57 in __pthread_cond_wait (/usr/lib/system/libsystem_pthread.dylib)
+       ???:?:?: 0x1881c6c1b in _pthread_cond_broadcast (/usr/lib/system/libsystem_pthread.dylib)
+error: 'quic.runtime.receive_cancel_tests.test.QUIC UDP batch preserves received prefix and rearms cancellation' failed:
+       expected 2, found 1
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:118:17: 0x104ad9c7b in expectEqualInner__anon_38920 (test)
+                       return error.TestExpectedEqual;
+                       ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:83:5: 0x106ac334f in expectEqual (test)
+           return expectEqualInner(T, expected, actual);
+           ^
+       /Users/bytedance/project-z/netz/src/quic/runtime/receive_cancel_tests.zig:53:5: 0x106ac341f in test.QUIC UDP batch preserves received prefix and rearms cancellation (test)
+           try std.testing.expectEqual(@as(usize, 2), count);
+           ^
+error: 'grpc.channel.shared.tests.test.gRPC shared caller cancellation joins retirement and preserves channel reuse' failed:
+       /Users/bytedance/project-z/netz/src/http1/mod.zig:959:5: 0x106e78cb3 in rejectCompleteHeaderLine (test)
+           return error.MalformedHeader;
+           ^
+       /Users/bytedance/project-z/netz/src/http1/mod.zig:888:17: 0x106e78353 in parseStrictHeadLines (test)
+                       return rejectCompleteHeaderLine(bytes, pos + 1);
+                       ^
+       /Users/bytedance/project-z/netz/src/http1/mod.zig:768:9: 0x106e76873 in parseHeadLines (test)
+               return parseStrictHeadLines(
+               ^
+       /Users/bytedance/project-z/netz/src/http1/mod.zig:659:20: 0x106e73577 in parseResponseHead (test)
+           const parsed = try parseHeadLines(
+                          ^
+       /Users/bytedance/project-z/netz/src/http1/runtime/message/head.zig:50:22: 0x106e730fb in inspect (test)
+               fromResponse(try http1.parseResponseHead(bytes, headers, options, .{ .request_method = request_method }));
+                            ^
+       /Users/bytedance/project-z/netz/src/http1/runtime.zig:3018:18: 0x106e646bb in readMessageBytesBufferedWithContext (test)
+           const plan = try message_head.inspect(allocator, inbuf.items, options, request_method, auto_continue);
+                        ^
+       /Users/bytedance/project-z/netz/src/http1/runtime/message/response_sequence.zig:74:19: 0x106e63a5f in readOneResponseFromTransportBufferedForRequest (test)
+           const bytes = try readMessageBytesBufferedWithContext(
+                         ^
+       /Users/bytedance/project-z/netz/src/http1/runtime.zig:2964:24: 0x106e62e1b in readResponseFromTransportBufferedForRequestObserved (test)
+               var response = try readOneResponseFromTransportBufferedForRequest(
+                              ^
+       /Users/bytedance/project-z/netz/src/http1/runtime/client.zig:1318:13: 0x106fed27b in requestWithParseOptionsAndInformational (test)
+                   return err;
+                   ^
+       /Users/bytedance/project-z/netz/src/http1/runtime/client.zig:1251:9: 0x1070b1a7b in requestWithParseOptionsAndInformationalAndDeadline (test)
+               return self.requestWithParseOptionsAndInformational(
+               ^
+       /Users/bytedance/project-z/netz/src/http1/runtime/client.zig:1232:9: 0x1070b17a7 in requestWithInformationalAndDeadline (test)
+               return self.requestWithParseOptionsAndInformationalAndDeadline(
+               ^
+       /Users/bytedance/project-z/netz/src/http1/runtime/client.zig:1217:9: 0x1070b16e3 in requestWithDeadline (test)
+               return self.requestWithInformationalAndDeadline(
+               ^
+       /Users/bytedance/project-z/netz/src/http1/runtime/client.zig:1206:9: 0x1070b13e3 in requestWithTimeout (test)
+               return self.requestWithDeadline(
+               ^
+       /Users/bytedance/project-z/netz/src/http1/mod.zig:959:5: 0x106e78cb3 in rejectCompleteHeaderLine (test)
+           return error.MalformedHeader;
+           ^
+       /Users/bytedance/project-z/netz/src/http1/mod.zig:888:17: 0x106e78353 in parseStrictHeadLines (test)
+                       return rejectCompleteHeaderLine(bytes, pos + 1);
+                       ^
+       /Users/bytedance/project-z/netz/src/http1/mod.zig:768:9: 0x106e76873 in parseHeadLines (test)
+               return parseStrictHeadLines(
+               ^
+       /Users/bytedance/project-z/netz/src/http1/mod.zig:659:20: 0x106e73577 in parseResponseHead (test)
+           const parsed = try parseHeadLines(
+                          ^
+       /Users/bytedance/project-z/netz/src/http1/runtime/message/head.zig:50:22: 0x106e730fb in inspect (test)
+               fromResponse(try http1.parseResponseHead(bytes, headers, options, .{ .request_method = request_method }));
+                            ^
+       /Users/bytedance/project-z/netz/src/http1/runtime.zig:3018:18: 0x106e646bb in readMessageBytesBufferedWithContext (test)
+           const plan = try message_head.inspect(allocator, inbuf.items, options, request_method, auto_continue);
+                        ^
+       /Users/bytedance/project-z/netz/src/http1/runtime/message/response_sequence.zig:74:19: 0x106e63a5f in readOneResponseFromTransportBufferedForRequest (test)
+           const bytes = try readMessageBytesBufferedWithContext(
+                         ^
+       /Users/bytedance/project-z/netz/src/http1/runtime.zig:2964:24: 0x106e62e1b in readResponseFromTransportBufferedForRequestObserved (test)
+               var response = try readOneResponseFromTransportBufferedForRequest(
+                              ^
+       /Users/bytedance/project-z/netz/src/http1/runtime/client.zig:1318:13: 0x106fed27b in requestWithParseOptionsAndInformational (test)
+                   return err;
+                   ^
+       /Users/bytedance/project-z/netz/src/http1/runtime/client.zig:1251:9: 0x1070b1a7b in requestWithParseOptionsAndInformationalAndDeadline (test)
+               return self.requestWithParseOptionsAndInformational(
+               ^
+       /Users/bytedance/project-z/netz/src/http1/runtime/client.zig:1232:9: 0x1070b17a7 in requestWithInformationalAndDeadline (test)
+               return self.requestWithParseOptionsAndInformationalAndDeadline(
+               ^
+       /Users/bytedance/project-z/netz/src/http1/runtime/client.zig:1217:9: 0x1070b16e3 in requestWithDeadline (test)
+               return self.requestWithInformationalAndDeadline(
+               ^
+       /Users/bytedance/project-z/netz/src/http1/runtime/client.zig:1206:9: 0x1070b13e3 in requestWithTimeout (test)
+               return self.requestWithDeadline(
+               ^
+       /Users/bytedance/project-z/netz/src/http1/mod.zig:959:5: 0x106e78cb3 in rejectCompleteHeaderLine (test)
+           return error.MalformedHeader;
+           ^
+       /Users/bytedance/project-z/netz/src/http1/mod.zig:873:13: 0x106e77fff in parseStrictHeadLines (test)
+                   return rejectCompleteHeaderLine(bytes, pos + 1);
+                   ^
+       /Users/bytedance/project-z/netz/src/http1/mod.zig:768:9: 0x106e76873 in parseHeadLines (test)
+               return parseStrictHeadLines(
+               ^
+       /Users/bytedance/project-z/netz/src/http1/mod.zig:659:20: 0x106e73577 in parseResponseHead (test)
+           const parsed = try parseHeadLines(
+                          ^
+       /Users/bytedance/project-z/netz/src/http1/runtime/message/head.zig:50:22: 0x106e730fb in inspect (test)
+               fromResponse(try http1.parseResponseHead(bytes, headers, options, .{ .request_method = request_method }));
+                            ^
+       /Users/bytedance/project-z/netz/src/http1/runtime.zig:3018:18: 0x106e646bb in readMessageBytesBufferedWithContext (test)
+           const plan = try message_head.inspect(allocator, inbuf.items, options, request_method, auto_continue);
+                        ^
+       (451 additional stack frames skipped due to buffer size limitations...)
+error: 'webtransport.runtime.stream.wait.lifecycle_tests.test.WebTransport stream send wait observes CLOSE in the retained HTTP3 cursor suffix' failed:
+       /Users/bytedance/project-z/netz/src/grpc/call.zig:1442:13: 0x107a2be13 in validateCustomMetadata (test)
+                   return error.InvalidMetadata;
+                   ^
+       /Users/bytedance/project-z/netz/src/grpc/web.zig:163:5: 0x1083ff913 in buildTrailerBlock (test)
+           try call.validateCustomMetadata(options.trailing_metadata);
+           ^
+       /Users/bytedance/project-z/netz/src/grpc/web.zig:178:45: 0x1083ffd33 in buildTrailerBlock (test)
+                   if (byte < 0x20 or byte > 0x7e) return error.InvalidMetadata;
+                                                   ^
+       /Users/bytedance/project-z/netz/src/grpc/web.zig:174:17: 0x1083ffc23 in buildTrailerBlock (test)
+                       return error.InvalidMetadata;
+                       ^
+       /Users/bytedance/project-z/netz/src/grpc/web.zig:174:17: 0x1083ffc23 in buildTrailerBlock (test)
+                       return error.InvalidMetadata;
+                       ^
+       /Users/bytedance/project-z/netz/src/grpc/web.zig:178:45: 0x1083ffd33 in buildTrailerBlock (test)
+                   if (byte < 0x20 or byte > 0x7e) return error.InvalidMetadata;
+                                                   ^
+       /Users/bytedance/project-z/netz/src/webtransport/runtime/session_control.zig:282:13: 0x104c3cc77 in ensureOpen (test)
+                   return error.InvalidSessionState;
+                   ^
+       /Users/bytedance/project-z/netz/src/webtransport/runtime/application.zig:11:5: 0x104cd0c73 in ensureOpen__anon_133273 (test)
+           try control.ensureOpen();
+           ^
+       /Users/bytedance/project-z/netz/src/webtransport/runtime/handshake_client_session.zig:79:9: 0x104cd09a3 in ensureApplicationSendOpen (test)
+               try application.ensureOpen(&self.control, &self.h3, &self.streams);
+               ^
+       /Users/bytedance/project-z/netz/src/webtransport/runtime/handshake_client_session.zig:1539:9: 0x104cf8447 in openLocalStream (test)
+               try self.ensureApplicationSendOpen();
+               ^
+       /Users/bytedance/project-z/netz/src/webtransport/runtime/handshake_client_session.zig:1466:9: 0x104d0051b in openBidirectionalStream (test)
+               return self.openLocalStream(.bidirectional, null);
+               ^
+       /Users/bytedance/project-z/netz/src/webtransport/runtime/session_control.zig:282:13: 0x104c3cc77 in ensureOpen (test)
+                   return error.InvalidSessionState;
+                   ^
+       /Users/bytedance/project-z/netz/src/webtransport/runtime/application.zig:11:5: 0x104cd0c73 in ensureOpen__anon_133273 (test)
+           try control.ensureOpen();
+           ^
+       /Users/bytedance/project-z/netz/src/webtransport/runtime/handshake_client_session.zig:79:9: 0x104cd09a3 in ensureApplicationSendOpen (test)
+               try application.ensureOpen(&self.control, &self.h3, &self.streams);
+               ^
+       /Users/bytedance/project-z/netz/src/webtransport/runtime/handshake_client_session.zig:1539:9: 0x104cf8447 in openLocalStream (test)
+               try self.ensureApplicationSendOpen();
+               ^
+       /Users/bytedance/project-z/netz/src/webtransport/runtime/handshake_client_session.zig:1491:9: 0x104ebe9d3 in openBidirectionalStreamWithDeadline (test)
+               return self.openLocalStream(.bidirectional, deadline);
+               ^
+       /Users/bytedance/project-z/netz/src/webtransport/runtime/handshake_client_session.zig:1474:9: 0x104ebe80f in openBidirectionalStreamWithTimeout (test)
+               return self.openBidirectionalStreamWithDeadline(.fromNow(
+               ^
+       /Users/bytedance/project-z/netz/src/webtransport/runtime/session_control.zig:282:13: 0x104c3cc77 in ensureOpen (test)
+                   return error.InvalidSessionState;
+                   ^
+       /Users/bytedance/project-z/netz/src/webtransport/runtime/application.zig:11:5: 0x104cd0c73 in ensureOpen__anon_133273 (test)
+           try control.ensureOpen();
+           ^
+       /Users/bytedance/project-z/netz/src/webtransport/runtime/handshake_client_session.zig:79:9: 0x104cd09a3 in ensureApplicationSendOpen (test)
+               try application.ensureOpen(&self.control, &self.h3, &self.streams);
+               ^
+       /Users/bytedance/project-z/netz/src/webtransport/runtime/handshake_client_session.zig:1539:9: 0x104cf8447 in openLocalStream (test)
+               try self.ensureApplicationSendOpen();
+               ^
+       /Users/bytedance/project-z/netz/src/webtransport/runtime/handshake_client_session.zig:1500:9: 0x104cf7793 in openUnidirectionalStream (test)
+               return self.openLocalStream(.unidirectional, null);
+               ^
+       /Users/bytedance/project-z/netz/src/webtransport/runtime/session_control.zig:282:13: 0x104c3cc77 in ensureOpen (test)
+                   return error.InvalidSessionState;
+                   ^
+       /Users/bytedance/project-z/netz/src/webtransport/runtime/application.zig:11:5: 0x104cd0c73 in ensureOpen__anon_133273 (test)
+           try control.ensureOpen();
+           ^
+       /Users/bytedance/project-z/netz/src/webtransport/runtime/handshake_client_session.zig:79:9: 0x104cd09a3 in ensureApplicationSendOpen (test)
+               try application.ensureOpen(&self.control, &self.h3, &self.streams);
+               ^
+       /Users/bytedance/project-z/netz/src/webtransport/runtime/handshake_client_session.zig:1539:9: 0x104cf8447 in openLocalStream (test)
+               try self.ensureApplicationSendOpen();
+               ^
+       /Users/bytedance/project-z/netz/src/webtransport/runtime/handshake_client_session.zig:1525:9: 0x104ef2afb in openUnidirectionalStreamWithDeadline (test)
+               return self.openLocalStream(.unidirectional, deadline);
+               ^
+       /Users/bytedance/project-z/netz/src/webtransport/runtime/handshake_client_session.zig:1508:9: 0x104ef23d3 in openUnidirectionalStreamWithTimeout (test)
+               return self.openUnidirectionalStreamWithDeadline(.fromNow(
+               ^
+       /Users/bytedance/project-z/netz/src/webtransport/runtime/session_control.zig:282:13: 0x104c3cc77 in ensureOpen (test)
+                   return error.InvalidSessionState;
+                   ^
+       /Users/bytedance/project-z/netz/src/webtransport/runtime/application.zig:11:5: 0x104cfdfb3 in ensureOpen__anon_135820 (test)
+           try control.ensureOpen();
+           ^
+       /Users/bytedance/project-z/netz/src/webtransport/runtime/accepted_handshake_session.zig:65:9: 0x104cfe263 in ensureApplicationSendOpen (test)
+               try application.ensureOpen(&self.control, &self.h3, &self.streams);
+               ^
+       /Users/bytedance/project-z/netz/src/webtransport/runtime/accepted_handshake_session.zig:734:9: 0x104cf7533 in openLocalStream (test)
+               try self.ensureApplicationSendOpen();
+               ^
+       (20 additional stack frames skipped due to buffer size limitations...)
+error: 'mqtt.broker.runtime_policy.test.delivery policy snapshot never exposes a mixed generation' terminated with signal ILL
+error: 'mqtt.broker_config.tests.test.MQTT broker config loads include directories in Mosquitto order' failed:
+       expected 6, found 4
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:118:17: 0x1009e1c7b in expectEqualInner__anon_38920 (test)
+                       return error.TestExpectedEqual;
+                       ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:83:5: 0x1057fbf97 in expectEqual (test)
+           return expectEqualInner(T, expected, actual);
+           ^
+       /Users/bytedance/project-z/netz/src/mqtt/broker_config/tests.zig:1787:5: 0x1057fc05f in test.MQTT broker config loads include directories in Mosquitto order (test)
+           try std.testing.expectEqual(@as(usize, 6), config.listeners.len);
+           ^
+error: 'mqtt.broker_config_include.test.include directory expansion follows Mosquitto order and file scopes' failed:
+       expected 7, found 5
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:118:17: 0x1009e1c7b in expectEqualInner__anon_38920 (test)
+                       return error.TestExpectedEqual;
+                       ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:83:5: 0x1057c83cb in expectEqual (test)
+           return expectEqualInner(T, expected, actual);
+           ^
+       /Users/bytedance/project-z/netz/src/mqtt/broker_config_include.zig:347:5: 0x1057c8497 in test.include directory expansion follows Mosquitto order and file scopes (test)
+           try std.testing.expectEqual(@as(usize, 7), document.sources.len);
+           ^
+error: 'grpc.channel_tests.test.gRPC hostname refresh preserves unchanged connections and authority' failed:
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/Io/Threaded.zig:11899:38: 0x1009a3f5b in posixBind (test)
+                           .ADDRNOTAVAIL => return error.AddressUnavailable,
+                                            ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/Io/Threaded.zig:11694:5: 0x1009a62df in netListenIpPosix (test)
+           try posixBind(socket_fd, &storage.any, addr_len);
+           ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/Io/net.zig:248:23: 0x100e3c81b in listen (test)
+                   .socket = try io.vtable.netListenIp(io.userdata, address, options),
+                             ^
+       /Users/bytedance/project-z/netz/src/http2/runtime/server.zig:81:25: 0x102c6dc17 in listen (test)
+                   .listener = try bind_address.listen(io, .{ .reuse_address = true }),
+                               ^
+       /Users/bytedance/project-z/netz/src/grpc/channel_tests.zig:866:20: 0x105abb9cf in test.gRPC hostname refresh preserves unchanged connections and authority (test)
+           var server_b = try http2.runtime.Server.listen(
+                          ^
+error: 'grpc.channel_tests.test.gRPC wait-for-ready re-resolves after every endpoint fails' failed:
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/Io/Threaded.zig:11899:38: 0x1009a3f5b in posixBind (test)
+                           .ADDRNOTAVAIL => return error.AddressUnavailable,
+                                            ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/Io/Threaded.zig:11694:5: 0x1009a62df in netListenIpPosix (test)
+           try posixBind(socket_fd, &storage.any, addr_len);
+           ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/Io/net.zig:248:23: 0x100e3c81b in listen (test)
+                   .socket = try io.vtable.netListenIp(io.userdata, address, options),
+                             ^
+       /Users/bytedance/project-z/netz/src/http2/runtime/server.zig:81:25: 0x102c6dc17 in listen (test)
+                   .listener = try bind_address.listen(io, .{ .reuse_address = true }),
+                               ^
+       /Users/bytedance/project-z/netz/src/grpc/channel_tests.zig:1160:18: 0x105ab7577 in test.gRPC wait-for-ready re-resolves after every endpoint fails (test)
+           var server = try http2.runtime.Server.listen(
+                        ^
+error: 'proxy.socks5.udp_association_tests.test.SOCKS5 UDP association relays domains and owns control lifetime' failed:
+       automatic LRS peer source-limit/sotw/source-b: failed error=Canceled phase=accepting initial=0 reports=0 events=0 last=none closing=false counts=.{ .issued = 0, .successful = 0, .failed = 0, .dropped = 0 }
+       automatic LRS peer source-limit/delta/source-b: failed error=Canceled phase=accepting initial=0 reports=0 events=0 last=none closing=false counts=.{ .issued = 0, .successful = 0, .failed = 0, .dropped = 0 }
+       federated native mode=sotw phase=initial step=0 authority=A url=type.googleapis.com/envoy.config.listener.v3.Listener nonce=l1
+       federated native mode=sotw phase=initial step=1 authority=B url=type.googleapis.com/envoy.config.route.v3.RouteConfiguration nonce=r1
+       federated native mode=sotw phase=initial step=2 authority=A url=type.googleapis.com/envoy.config.cluster.v3.Cluster nonce=ca1
+       federated native mode=sotw phase=initial step=3 authority=B url=type.googleapis.com/envoy.config.cluster.v3.Cluster nonce=cb1
+       federated native mode=sotw phase=initial step=4 authority=B url=type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment nonce=eb1
+       federated native mode=sotw phase=initial step=5 authority=A url=type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment nonce=ea1
+       federated native mode=sotw phase=remove-a step=0 authority=A url=type.googleapis.com/envoy.config.cluster.v3.Cluster nonce=ca-empty
+       federated native mode=sotw phase=replacement step=0 authority=B url=type.googleapis.com/envoy.config.route.v3.RouteConfiguration nonce=r2
+       federated native mode=sotw phase=replacement step=1 authority=B url=type.googleapis.com/envoy.config.cluster.v3.Cluster nonce=cb2
+       federated native mode=sotw phase=finish-b2 step=0 authority=B url=type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment nonce=eb2
+       federated native mode=delta phase=initial step=0 authority=A url=type.googleapis.com/envoy.config.listener.v3.Listener nonce=l1
+       federated native mode=delta phase=initial step=1 authority=B url=type.googleapis.com/envoy.config.route.v3.RouteConfiguration nonce=r1
+       federated native mode=delta phase=initial step=2 authority=B url=type.googleapis.com/envoy.config.cluster.v3.Cluster nonce=cb1
+       federated native mode=delta phase=initial step=3 authority=A url=type.googleapis.com/envoy.config.cluster.v3.Cluster nonce=ca1
+       federated native mode=delta phase=initial step=4 authority=A url=type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment nonce=ea1
+       federated native mode=delta phase=initial step=5 authority=B url=type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment nonce=eb1
+       federated native mode=delta phase=remove-a step=0 authority=A url=type.googleapis.com/envoy.config.cluster.v3.Cluster nonce=ca-empty
+       federated native mode=delta phase=replacement step=0 authority=B url=type.googleapis.com/envoy.config.route.v3.RouteConfiguration nonce=r2
+       federated native mode=delta phase=replacement step=1 authority=B url=type.googleapis.com/envoy.config.cluster.v3.Cluster nonce=cb2
+       federated native mode=delta phase=finish-b2 step=0 authority=B url=type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment nonce=eb2
+       /Users/bytedance/project-z/netz/src/internal/wire.zig:28:35: 0x100aac097 in readByte (test)
+               if (self.remaining() < 1) return error.BufferTooShort;
+                                         ^
+       /Users/bytedance/project-z/netz/src/http2/mod.zig:2552:23: 0x102a9efdb in scanRawString (test)
+               const first = try cursor.readByte();
+                             ^
+       /Users/bytedance/project-z/netz/src/http2/mod.zig:2647:48: 0x10445db83 in decodeString (test)
+               return decodeRawStringAlloc(allocator, try scanRawString(cursor));
+                                                      ^
+       /Users/bytedance/project-z/netz/src/http2/hpack/decode_fields.zig:61:31: 0x10445e8d7 in decode (test)
+                       const value = try Context.string(allocator, &cursor);
+                                     ^
+       /Users/bytedance/project-z/netz/src/http2/mod.zig:1886:9: 0x10445ec3f in decodeBlockWithDynamicTable (test)
+               return FieldDecoder.decode(allocator, block, dynamic_table, max_dynamic_table_size);
+               ^
+       /Users/bytedance/project-z/netz/src/http2/mod.zig:1402:13: 0x10445ecfb in decodeBlock (test)
+                   return decodeBlockWithDynamicTable(allocator, block, &self.dynamic_table, self.max_dynamic_table_size);
+                   ^
+       /Users/bytedance/project-z/netz/src/internal/wire.zig:28:35: 0x100aac097 in readByte (test)
+               if (self.remaining() < 1) return error.BufferTooShort;
+                                         ^
+       /Users/bytedance/project-z/netz/src/http2/mod.zig:2552:23: 0x102a9efdb in scanRawString (test)
+               const first = try cursor.readByte();
+                             ^
+       /Users/bytedance/project-z/netz/src/http2/mod.zig:2647:48: 0x10445db83 in decodeString (test)
+               return decodeRawStringAlloc(allocator, try scanRawString(cursor));
+                                                      ^
+       /Users/bytedance/project-z/netz/src/http2/hpack/decode_fields.zig:61:31: 0x10445e8d7 in decode (test)
+                       const value = try Context.string(allocator, &cursor);
+                                     ^
+       /Users/bytedance/project-z/netz/src/http2/mod.zig:1886:9: 0x10445ec3f in decodeBlockWithDynamicTable (test)
+               return FieldDecoder.decode(allocator, block, dynamic_table, max_dynamic_table_size);
+               ^
+       /Users/bytedance/project-z/netz/src/http2/mod.zig:1804:9: 0x1061351cf in decodeLiteralBlock (test)
+               return decodeBlockWithDynamicTable(allocator, block, &dynamic_table, default_dynamic_table_size);
+               ^
+       /Users/bytedance/project-z/netz/src/internal/wire.zig:28:35: 0x100aac097 in readByte (test)
+               if (self.remaining() < 1) return error.BufferTooShort;
+                                         ^
+       /Users/bytedance/project-z/netz/src/http2/mod.zig:2552:23: 0x102a9efdb in scanRawString (test)
+               const first = try cursor.readByte();
+                             ^
+       /Users/bytedance/project-z/netz/src/http2/mod.zig:2647:48: 0x10445db83 in decodeString (test)
+               return decodeRawStringAlloc(allocator, try scanRawString(cursor));
+                                                      ^
+       /Users/bytedance/project-z/netz/src/http2/hpack/decode_fields.zig:56:21: 0x10445e6f7 in decode (test)
+                           try Context.string(allocator, &cursor)
+                           ^
+       /Users/bytedance/project-z/netz/src/http2/mod.zig:1886:9: 0x10445ec3f in decodeBlockWithDynamicTable (test)
+               return FieldDecoder.decode(allocator, block, dynamic_table, max_dynamic_table_size);
+               ^
+       /Users/bytedance/project-z/netz/src/http2/mod.zig:1402:13: 0x10445ecfb in decodeBlock (test)
+                   return decodeBlockWithDynamicTable(allocator, block, &self.dynamic_table, self.max_dynamic_table_size);
+                   ^
+       /Users/bytedance/project-z/netz/src/internal/wire.zig:40:37: 0x100aac3ab in readSlice (test)
+               if (self.remaining() < len) return error.BufferTooShort;
+                                           ^
+       /Users/bytedance/project-z/netz/src/http2/mod.zig:2555:26: 0x102a9f177 in scanRawString (test)
+               return .{ .raw = try cursor.readSlice(len), .huffman = huffman };
+                                ^
+       /Users/bytedance/project-z/netz/src/http2/mod.zig:2647:48: 0x10445db83 in decodeString (test)
+               return decodeRawStringAlloc(allocator, try scanRawString(cursor));
+                                                      ^
+       /Users/bytedance/project-z/netz/src/http2/hpack/decode_fields.zig:56:21: 0x10445e6f7 in decode (test)
+                           try Context.string(allocator, &cursor)
+                           ^
+       /Users/bytedance/project-z/netz/src/http2/mod.zig:1886:9: 0x10445ec3f in decodeBlockWithDynamicTable (test)
+               return FieldDecoder.decode(allocator, block, dynamic_table, max_dynamic_table_size);
+               ^
+       /Users/bytedance/project-z/netz/src/http2/mod.zig:1402:13: 0x10445ecfb in decodeBlock (test)
+                   return decodeBlockWithDynamicTable(allocator, block, &self.dynamic_table, self.max_dynamic_table_size);
+                   ^
+       /Users/bytedance/project-z/netz/src/internal/wire.zig:40:37: 0x100aac3ab in readSlice (test)
+               if (self.remaining() < len) return error.BufferTooShort;
+                                           ^
+       /Users/bytedance/project-z/netz/src/http2/mod.zig:2555:26: 0x102a9f177 in scanRawString (test)
+               return .{ .raw = try cursor.readSlice(len), .huffman = huffman };
+                                ^
+       /Users/bytedance/project-z/netz/src/http2/mod.zig:2647:48: 0x10445db83 in decodeString (test)
+               return decodeRawStringAlloc(allocator, try scanRawString(cursor));
+                                                      ^
+       /Users/bytedance/project-z/netz/src/http2/hpack/decode_fields.zig:56:21: 0x10445e6f7 in decode (test)
+                           try Context.string(allocator, &cursor)
+                           ^
+       /Users/bytedance/project-z/netz/src/http2/mod.zig:1886:9: 0x10445ec3f in decodeBlockWithDynamicTable (test)
+               return FieldDecoder.decode(allocator, block, dynamic_table, max_dynamic_table_size);
+               ^
+       /Users/bytedance/project-z/netz/src/http2/mod.zig:1402:13: 0x10445ecfb in decodeBlock (test)
+                   return decodeBlockWithDynamicTable(allocator, block, &self.dynamic_table, self.max_dynamic_table_size);
+                   ^
+       /Users/bytedance/project-z/netz/src/internal/wire.zig:40:37: 0x100aac3ab in readSlice (test)
+               if (self.remaining() < len) return error.BufferTooShort;
+                                           ^
+       /Users/bytedance/project-z/netz/src/http2/mod.zig:2555:26: 0x102a9f177 in scanRawString (test)
+               return .{ .raw = try cursor.readSlice(len), .huffman = huffman };
+                                ^
+       (852 additional stack frames skipped due to buffer size limitations...)
+failed command: ./.zig-cache/o/5bfd8927392646ad63398d9a3c98aa3e/test --cache-dir=./.zig-cache --seed=0x3fcbf7f2 --listen=-
+
+Build Summary: 7/9 steps succeeded (1 failed); 7080/7133 tests passed (43 skipped, 8 failed, 2 crashed)
+test-lib transitive failure
++- run test 7080 pass, 43 skip, 8 fail, 2 crash (7133 total)
+   +- compile test Debug native success 1m MaxRSS:12G
+      +- WriteFile macho_0_p256_field_arm64.S cached
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 219ms MaxRSS:31M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 219ms MaxRSS:31M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options cached
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/0f9d151e42f629c275713a528b5d3e50/build /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/zig /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib /Users/bytedance/project-z/netz .zig-cache /Users/bytedance/.cache/zig --seed 0x3fcbf7f2 -Zb9d252fd6d4d0007 test-lib --summary all
+[traex-zig-guard 2026-11-22 07:05:54] finished Zig tree root=45952 peak=11030MiB result=0
