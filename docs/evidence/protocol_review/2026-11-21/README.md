@@ -73,7 +73,7 @@ left out of this batch.
 | ID | Area | Finding | Suggested direction |
 | --- | --- | --- | --- |
 | P1 | Resolved in the second pass | After an H3 *connection* failure the body was never read, yet fallback for an idempotent method still called `bodySource().prepareReplay()`, rejecting a single-pass Reader. | The attempt now records whether the request started; setup failures fall back without replay, started requests keep method/replay gating. |
-| P2 | Partially resolved | Client `receiveServerHandshakeCrypto` emits PTO probes on a timer, independent of received datagrams. A server prefix attempt sends once (`available=7200`, `prefix=4551`) and then its 20-ms wait produces no further retry before the client deadline; the server-side PTO/ACK accounting needs work. | Keep the timer probe; add server-side retry/ACK accounting before re-enabling prefixes. |
+| P2 | Partially resolved | Client `receiveServerHandshakeCrypto` emits PTO probes on a timer. With server prefixes enabled, the first attempt sends the Initial plus a 4551-byte prefix and consumes the 7200-byte budget; later attempts return before sending because `remaining()` is zero, so client probes are not growing the server budget. | Determine why the probe datagrams are not observed by the server (routing or observe hook), then re-enable prefixes. |
 | P3 | Resolved in the sixth pass | The legacy/stateless adapters returned `WebTransportNotNegotiated` for caller configuration they cannot support (`initial_flow_limits`). | They now return `UnsupportedWebTransportOption`; genuine peer capability failures keep `WebTransportNotNegotiated`. |
 | P4 | HTTP H3 options | `Client.Options.http3.handshake.handshake.alpn_protocols` nests two `handshake` levels because the facade wraps the native handshake options. | Add flat accessors or a `quic` sub-struct while keeping the existing fields as deprecated aliases. |
 | P6 | Resolved | `drains GRO response batch one packet at a time` hung on platforms without GRO because its skip path joined a server thread still blocked in `receiveRequest`. | The skip path now closes the connection first; the test skips cleanly and the full H3 suite completes. |
@@ -411,3 +411,14 @@ Server prefix sending was re-applied on top of the timer and still failed the
 `available=7200`, `initial=2400`, `prefix=4551`, then never ran again even
 though the client emitted probes. That is a separate server-loop issue; the
 prefix change was reverted and is recorded as remaining P2 work.
+
+
+### Prefix follow-up: budget exhaustion, not a missing retry
+
+A diagnostic in `InitialHandshakeFlight.send` showed exactly one send
+(`available=7200`, `prefix=4551`). The second attempt does not print because
+`initial_bytes > available`: the first prefix consumed the complete 7200-byte
+budget, and the client's probe datagrams did not increase
+`anti_amplification.bytes_received`. The server loop does retry; it simply has
+no budget. The next investigation is whether the probes are routed to the
+pending handshake inbox or whether `observeReceived` is skipped for them.
