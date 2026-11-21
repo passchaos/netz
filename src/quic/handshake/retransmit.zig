@@ -160,8 +160,8 @@ pub const AcceptFn = *const fn (datagram: []const u8) bool;
 pub const ObserveDatagramFn = *const fn (
     context: *anyopaque,
     from: net.IpAddress,
-    bytes: usize,
-) void;
+    datagram: []const u8,
+) bool;
 pub const AcceptContextFn = *const fn (
     context: *anyopaque,
     datagram: []const u8,
@@ -242,6 +242,37 @@ pub fn sendAndReceiveMatchingFromObserved(
     accept_fn: AcceptFn,
     observe_fn: ?ObserveDatagramFn,
 ) Error!quic.runtime.OwnedBytes {
+    var accept = accept_fn;
+    return sendAndReceiveMatchingFromObservedContext(
+        endpoint,
+        source,
+        config,
+        context,
+        send_fn,
+        @ptrCast(&accept),
+        plainAccept,
+        observe_fn,
+    );
+}
+
+fn plainAccept(context: *anyopaque, datagram: []const u8) bool {
+    const accept: *const AcceptFn = @ptrCast(@alignCast(context));
+    return accept.*(datagram);
+}
+
+/// Context-aware observed send/receive loop. The accept classifier can consult
+/// the send context, so a server sending Handshake prefixes does not stop on
+/// an ACK-only client packet before the complete flight has been delivered.
+pub fn sendAndReceiveMatchingFromObservedContext(
+    endpoint: *quic.runtime.Endpoint,
+    source: quic.runtime.DatagramSource,
+    config: Config,
+    context: *anyopaque,
+    send_fn: SendFn,
+    accept_context: *anyopaque,
+    accept_fn: AcceptContextFn,
+    observe_fn: ?ObserveDatagramFn,
+) Error!quic.runtime.OwnedBytes {
     try config.validate();
     var retransmission: u8 = 0;
     var transmitted: u8 = 0;
@@ -286,9 +317,15 @@ pub fn sendAndReceiveMatchingFromObserved(
                     else => |other| return @errorCast(other),
                 };
             if (observe_fn) |observe| {
-                observe(context, datagram.from, datagram.bytes.len);
+                // Same-path bytes grow the anti-amplification allowance, so
+                // they are progress: a server sending prefixes must not burn
+                // its retry budget while the peer's probes keep enabling more
+                // output. The hard deadline still bounds the handshake.
+                if (observe(context, datagram.from, datagram.bytes)) {
+                    retransmission = 0;
+                }
             }
-            if (accept_fn(datagram.bytes)) return datagram;
+            if (accept_fn(accept_context, datagram.bytes)) return datagram;
             datagram.deinit(endpoint.allocator);
             if (hardDeadlineExpired(endpoint.io, hard_deadline)) {
                 return error.HandshakeTimeout;
@@ -541,6 +578,10 @@ pub const InitialFlight = struct {
     }
 };
 
+/// Packet-number window tracked for ACK-aware Handshake prefix growth. Matches
+/// the default `SendOptions.max_datagrams` bound.
+pub const max_flight_packets: usize = 64;
+
 pub const InitialHandshakeFlight = struct {
     endpoint: *quic.runtime.Endpoint,
     peer: net.IpAddress,
@@ -548,12 +589,38 @@ pub const InitialHandshakeFlight = struct {
     initial_options: quic.initial_exchange.SendInitialFlightOptions,
     handshake_keys: quic.protection.PacketProtectionKeys,
     handshake_options: quic.initial_exchange.SendInitialOptions,
+    /// Client Handshake keys for parsing ACK frames. The server sets these so
+    /// delivered CRYPTO ranges are not retransmitted.
+    peer_handshake_keys: ?quic.protection.PacketProtectionKeys = null,
     anti_amplification: AntiAmplificationBudget = .{ .validated = true },
     /// First Handshake packet number not consumed by packet protection. A
     /// fatal receive error can use it for CONNECTION_CLOSE without reusing an
     /// AEAD nonce, including after a zero-progress socket failure.
     next_handshake_packet_number: ?u64 = null,
     last_retransmission: u8 = 0,
+    /// Next server Handshake packet number. Prefix attempts advance it
+    /// contiguously so the peer's expected-number check keeps matching.
+    handshake_next_packet_number: ?u64 = null,
+    /// Contiguous Handshake CRYPTO bytes acknowledged by the client.
+    handshake_acked_crypto: usize = 0,
+    /// True once the client acknowledged the complete Handshake flight.
+    handshake_complete: bool = false,
+    peer_expected_packet_number: u64 = 0,
+    /// Set while parsing one peer datagram: it carried a CRYPTO frame, so the
+    /// receive path must start at `peer_crypto_packet_number`.
+    peer_datagram_has_crypto: bool = false,
+    peer_datagram_has_close: bool = false,
+    peer_crypto_packet_number: u64 = 0,
+    /// Cumulative CRYPTO start/end for each server Handshake packet number.
+    /// The slot is a ring keyed by `(packet_number - base) % max_flight_packets`;
+    /// a retransmitted range overwrites its superseded slot.
+    packet_crypto_start: [max_flight_packets]usize = @splat(0),
+    packet_crypto_end: [max_flight_packets]usize = @splat(0),
+    packet_acked: [max_flight_packets]bool = @splat(false),
+
+    pub fn handshakeComplete(self: *const InitialHandshakeFlight) bool {
+        return self.handshake_complete;
+    }
 
     pub fn send(context: *anyopaque, retransmission: u8) anyerror!void {
         const self: *InitialHandshakeFlight = @ptrCast(@alignCast(context));
@@ -564,51 +631,78 @@ pub const InitialHandshakeFlight = struct {
             self.initial_options.max_datagrams,
             retransmission,
         );
-        var handshake_options = self.handshake_options;
+        const handshake_mtu = quic.initial_exchange.handshakeDatagramSize(
+            self.endpoint.limits.max_datagram_size,
+        );
         const handshake_flight: quic.initial_exchange.SendInitialFlightOptions = .{
-            .initial = handshake_options,
-            .max_datagram_size = quic.initial_exchange.handshakeDatagramSize(
-                self.endpoint.limits.max_datagram_size,
-            ),
+            .initial = self.handshake_options,
+            .max_datagram_size = handshake_mtu,
         };
-        // Stride the retransmission range by the complete flight so a later
-        // attempt cannot reuse a packet number from an earlier attempt.
-        const handshake_packets = try quic.initial_exchange
+        const total_packets = try quic.initial_exchange
             .handshakeCryptoFlightPacketCount(handshake_flight);
-        handshake_options.packet_number = try retryPacketNumber(
-            self.handshake_options.packet_number,
-            handshake_packets,
-            retransmission,
-        );
-        // Reserve the complete planned Handshake range for a later
-        // CONNECTION_CLOSE before any Initial datagram becomes visible. A
-        // partial Initial flight may return before the Handshake send, and an
-        // error during Handshake protection must not leave a close able to
-        // reuse a protected nonce.
-        const next_handshake = std.math.add(
+        if (total_packets > max_flight_packets) {
+            return error.CryptoBufferTooLarge;
+        }
+        const full = self.handshake_options.crypto_data;
+        const initial_wire = try quic.initial_exchange
+            .initialCryptoFlightWireLen(initial_options);
+        if (self.handshake_acked_crypto >= full.len) {
+            self.handshake_complete = true;
+            // Everything is delivered; retransmit only the Initial so a lost
+            // server Initial cannot stall the peer.
+            const initial_progress = try quic.initial_exchange
+                .sendInitialCryptoFlightProgress(
+                self.endpoint,
+                self.peer,
+                self.initial_keys,
+                initial_options,
+            );
+            _ = initial_progress.send_error;
+            return;
+        }
+
+        const start = self.handshake_acked_crypto;
+        const start_packet_number = self.handshake_next_packet_number orelse
+            self.handshake_options.packet_number;
+        var suffix_flight = handshake_flight;
+        suffix_flight.initial.crypto_data = full[start..];
+        suffix_flight.initial.crypto_offset = std.math.add(
             u64,
-            handshake_options.packet_number,
-            handshake_packets,
-        ) catch null;
-        self.next_handshake_packet_number = if (next_handshake) |value|
-            if (value <= quic.protection.max_packet_number) value else null
-        else
-            null;
-        const flight_bytes = try quic.initial_exchange
-            .initialThenHandshakeCryptoWireLen(
-            initial_options,
-            .{
-                .initial = handshake_options,
-                .max_datagram_size = quic.initial_exchange.handshakeDatagramSize(
-                    self.endpoint.limits.max_datagram_size,
-                ),
-            },
+            self.handshake_options.crypto_offset,
+            start,
+        ) catch return error.InvalidCryptoRange;
+        suffix_flight.initial.packet_number = start_packet_number;
+        const available = self.anti_amplification.remaining() orelse
+            std.math.maxInt(usize);
+        const plan = try quic.initial_exchange.handshakePrefixPlan(
+            suffix_flight,
+            available -| initial_wire,
+            handshake_flight.max_datagrams,
         );
-        try self.anti_amplification.reserve(flight_bytes);
+        const reserved = std.math.add(
+            usize,
+            initial_wire,
+            plan.wire_len,
+        ) catch return error.InvalidFrameLength;
+        // Reserve the planned Handshake range before any Initial datagram
+        // becomes visible. A partial Initial send defers the Handshake output
+        // but a fatal close may still need a protected packet number.
+        if (plan.packet_count != 0) {
+            const next_handshake = std.math.add(
+                u64,
+                start_packet_number,
+                plan.packet_count,
+            ) catch null;
+            self.next_handshake_packet_number = if (next_handshake) |value|
+                if (value <= quic.protection.max_packet_number) value else null
+            else
+                null;
+        }
+        try self.anti_amplification.reserve(reserved);
         var committed_bytes: usize = 0;
         var reservation_active = true;
         errdefer if (reservation_active) {
-            self.anti_amplification.release(flight_bytes - committed_bytes);
+            self.anti_amplification.release(reserved - committed_bytes);
         };
 
         const initial_progress = try quic.initial_exchange
@@ -620,51 +714,209 @@ pub const InitialHandshakeFlight = struct {
         );
         committed_bytes = initial_progress.sent_bytes;
         if (initial_progress.sent_count < initial_progress.protected_count) {
-            self.anti_amplification.release(
-                flight_bytes - committed_bytes,
-            );
+            self.anti_amplification.release(reserved - committed_bytes);
             reservation_active = false;
             return;
         }
 
-        // The Handshake flight was validated by the wire-length calculation
-        // above, so a failure here is allocation or socket progress rather
-        // than an unsendable certificate flight.
-        const handshake_progress = try quic.initial_exchange
-            .sendHandshakeCryptoFlightProgress(
-            self.endpoint,
-            self.peer,
-            self.handshake_keys,
-            .{
-                .initial = handshake_options,
-                .max_datagram_size = quic.initial_exchange.handshakeDatagramSize(
-                    self.endpoint.limits.max_datagram_size,
-                ),
-            },
-        );
-        committed_bytes = std.math.add(
-            usize,
-            committed_bytes,
-            handshake_progress.sent_bytes,
-        ) catch flight_bytes;
-        self.anti_amplification.release(flight_bytes - committed_bytes);
+        if (plan.packet_count != 0) {
+            // Record the CRYPTO range before protection so an ACK that races
+            // the send can already be mapped. Slots are a ring because
+            // retransmissions advance the packet number past the flight size.
+            var chunk_sent: usize = 0;
+            var cumulative = start;
+            for (0..plan.packet_count) |index| {
+                const chunk = try quic.initial_exchange
+                    .largestHandshakeCryptoChunk(suffix_flight, chunk_sent);
+                const crypto_start = cumulative;
+                cumulative += chunk;
+                chunk_sent += chunk;
+                const packet_number = start_packet_number + index;
+                if (packet_number >= self.handshake_options.packet_number) {
+                    const slot = (packet_number -
+                        self.handshake_options.packet_number) %
+                        max_flight_packets;
+                    self.packet_crypto_start[slot] = crypto_start;
+                    self.packet_crypto_end[slot] = cumulative;
+                    self.packet_acked[slot] = false;
+                }
+            }
+            const next_handshake = std.math.add(
+                u64,
+                start_packet_number,
+                plan.packet_count,
+            ) catch null;
+            self.handshake_next_packet_number = next_handshake;
+            var prefix_options = suffix_flight;
+            prefix_options.initial.crypto_data =
+                full[start..][0..plan.crypto_len];
+            prefix_options.max_datagrams = plan.packet_count;
+            const handshake_progress = try quic.initial_exchange
+                .sendHandshakeCryptoFlightProgress(
+                self.endpoint,
+                self.peer,
+                self.handshake_keys,
+                prefix_options,
+            );
+            committed_bytes = std.math.add(
+                usize,
+                committed_bytes,
+                handshake_progress.sent_bytes,
+            ) catch reserved;
+            _ = handshake_progress.send_error;
+        }
+        self.anti_amplification.release(reserved - committed_bytes);
         reservation_active = false;
         _ = initial_progress.send_error;
-        // The complete Initial flight is already visible. A socket-rejected
-        // Handshake suffix is therefore packet loss, not a zero-progress send
-        // failure; wait for the PTO loop and retry both levels under fresh
-        // packet numbers.
-        _ = handshake_progress.send_error;
     }
 
     pub fn observeReceived(
         context: *anyopaque,
         from: net.IpAddress,
-        bytes: usize,
-    ) void {
+        datagram: []const u8,
+    ) bool {
         const self: *InitialHandshakeFlight = @ptrCast(@alignCast(context));
-        if (!from.eql(&self.peer)) return;
-        self.anti_amplification.recordReceived(bytes);
+        if (!from.eql(&self.peer)) return false;
+        var grew = false;
+        if (!self.anti_amplification.validated) {
+            self.anti_amplification.recordReceived(datagram.len);
+            grew = true;
+        }
+        if (self.peer_handshake_keys) |keys| {
+            self.peer_datagram_has_crypto = false;
+            self.peer_datagram_has_close = false;
+            self.observePeerHandshakeAcks(keys, datagram);
+        }
+        return grew;
+    }
+
+    /// Parse authenticated client Handshake packets and apply ACK ranges to
+    /// the packet-number -> CRYPTO map. A small expected-number window
+    /// tolerates a lost ACK without stalling later acknowledgements.
+    fn observePeerHandshakeAcks(
+        self: *InitialHandshakeFlight,
+        keys: quic.protection.PacketProtectionKeys,
+        datagram: []const u8,
+    ) void {
+        var tail = datagram;
+        while (tail.len != 0 and (tail[0] & 0x80) != 0) {
+            const info = quic.protection
+                .peekProtectedLongPacketInfoWithFixedBitPolicy(
+                tail,
+                true,
+            ) catch return;
+            if (info.len == 0 or info.len > tail.len) return;
+            const packet_bytes = tail[0..info.len];
+            tail = tail[info.len..];
+            if (info.packet_type != .handshake) continue;
+            var opened: ?quic.protection.OpenedHandshakePacket = null;
+            var candidate = self.peer_expected_packet_number;
+            const window_end = self.peer_expected_packet_number + 16;
+            while (candidate <= window_end) : (candidate += 1) {
+                opened = quic.protection.openHandshakePacketWithFixedBitPolicy(
+                    self.endpoint.allocator,
+                    keys,
+                    packet_bytes,
+                    candidate,
+                    true,
+                ) catch continue;
+                break;
+            }
+            var packet = opened orelse continue;
+            defer packet.deinit(self.endpoint.allocator);
+            self.applyPeerFrames(packet.payload, packet.packet_number);
+            if (self.peer_datagram_has_crypto) {
+                // The receive path restarts at the CRYPTO-bearing packet; an
+                // earlier ACK in the same datagram is skipped as
+                // unauthenticated for that expected number.
+                self.peer_expected_packet_number = packet.packet_number;
+                break;
+            }
+            if (self.peer_datagram_has_close) {
+                self.peer_expected_packet_number = packet.packet_number;
+                break;
+            }
+            self.peer_expected_packet_number = packet.packet_number + 1;
+        }
+    }
+
+    fn applyPeerFrames(
+        self: *InitialHandshakeFlight,
+        payload: []const u8,
+        packet_number: u64,
+    ) void {
+        var position: usize = 0;
+        var ack_ranges: [8]quic.AckRange = undefined;
+        while (position < payload.len) {
+            const parsed = quic.parseFrameInto(
+                payload[position..],
+                &ack_ranges,
+            ) catch return;
+            if (parsed.consumed == 0) return;
+            if (parsed.frame == .ack) {
+                const ack = parsed.frame.ack;
+                var smallest = ack.largest_acknowledged -| ack.first_ack_range;
+                self.markAcked(smallest, ack.largest_acknowledged);
+                for (ack.ranges) |range| {
+                    const next_largest = smallest -| (range.gap + 2);
+                    const next_smallest = next_largest -|
+                        range.ack_range_length;
+                    self.markAcked(next_smallest, next_largest);
+                    smallest = next_smallest;
+                }
+            } else if (parsed.frame == .crypto) {
+                self.peer_datagram_has_crypto = true;
+                self.peer_crypto_packet_number = packet_number;
+            } else if (parsed.frame == .connection_close or
+                parsed.frame == .application_close)
+            {
+                self.peer_datagram_has_close = true;
+            }
+            position += parsed.consumed;
+        }
+    }
+
+    fn markAcked(
+        self: *InitialHandshakeFlight,
+        smallest: u64,
+        largest: u64,
+    ) void {
+        const base = self.handshake_options.packet_number;
+        var packet_number = smallest;
+        while (packet_number <= largest) : (packet_number += 1) {
+            if (packet_number >= base) {
+                const slot: usize = @intCast(
+                    (packet_number - base) % max_flight_packets,
+                );
+                self.packet_acked[slot] = true;
+            }
+            if (packet_number == std.math.maxInt(u64)) break;
+        }
+        self.advanceAckedCrypto();
+    }
+
+    /// Advance the contiguous delivered prefix. A packet only extends it when
+    /// its range starts at the current prefix end, so a lost middle packet is
+    /// retransmitted instead of being skipped by a later ACK.
+    fn advanceAckedCrypto(self: *InitialHandshakeFlight) void {
+        var progressed = true;
+        while (progressed) {
+            progressed = false;
+            for (0..max_flight_packets) |slot| {
+                if (!self.packet_acked[slot]) continue;
+                if (self.packet_crypto_end[slot] <=
+                    self.handshake_acked_crypto) continue;
+                if (self.packet_crypto_start[slot] !=
+                    self.handshake_acked_crypto) continue;
+                self.handshake_acked_crypto = self.packet_crypto_end[slot];
+                progressed = true;
+            }
+        }
+        if (self.handshake_acked_crypto >=
+            self.handshake_options.crypto_data.len)
+        {
+            self.handshake_complete = true;
+        }
     }
 };
 

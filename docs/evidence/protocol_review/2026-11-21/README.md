@@ -73,7 +73,7 @@ left out of this batch.
 | ID | Area | Finding | Suggested direction |
 | --- | --- | --- | --- |
 | P1 | Resolved in the second pass | After an H3 *connection* failure the body was never read, yet fallback for an idempotent method still called `bodySource().prepareReplay()`, rejecting a single-pass Reader. | The attempt now records whether the request started; setup failures fall back without replay, started requests keep method/replay gating. |
-| P2 | Open (performance) | A third prefix attempt (budget plan, contiguous packet numbers, flight-complete accept gate, observer-driven retry reset) still timed out the 40-entry case. Diagnostics show the allowance oscillating `7200 -> 652 -> 7852 -> 7283 -> 7788` while the prefix stayed at 4-5 of 12754 bytes: every attempt resends from offset zero, so duplicate CRYPTO consumes the budget as fast as client probes grow it. | Track delivered Handshake CRYPTO (for example from client ACK largest-acknowledged) and send only the unacknowledged suffix, so duplicate retransmission cannot starve prefix growth. Validate with the 40-entry 1200-byte certificate and mTLS regressions before changing the default. |
+| P2 | Resolved in the twenty-second pass | Server Handshake flights previously required the complete certificate flight to fit the anti-amplification allowance. | The sender now plans the largest prefix of the unacknowledged CRYPTO suffix, advances packet numbers contiguously, and maps client ACKs to delivered ranges. The 40-entry 1200-byte certificate and mTLS regressions pass; see the twenty-second pass below. |
 | P3 | Resolved in the sixth pass | The legacy/stateless adapters returned `WebTransportNotNegotiated` for caller configuration they cannot support (`initial_flow_limits`). | They now return `UnsupportedWebTransportOption`; genuine peer capability failures keep `WebTransportNotNegotiated`. |
 | P4 | Resolved in the eighth pass | `Client.Options.http3.handshake.handshake.alpn_protocols` nests two `handshake` levels because the facade wraps the native handshake options. | `nativeHandshake()`/`sessionOptions()` return mutable pointers to the native blocks, so call sites no longer spell the nested path; the stored layout is unchanged. |
 | P6 | Resolved | `drains GRO response batch one packet at a time` hung on platforms without GRO because its skip path joined a server thread still blocked in `receiveRequest`. | The skip path now closes the connection first; the test skips cleanly and the full H3 suite completes. |
@@ -628,3 +628,32 @@ instead of resending from offset zero.
 The ECN failure is the same rotating load-sensitive endpoint batching class
 recorded for the fifteenth pass; it passes in isolation and does not touch the
 handshake path.
+
+
+## Twenty-second pass: ACK-aware server Handshake prefixes
+
+The rejected third prefix attempt failed because it resent CRYPTO from offset
+zero. The client-side continuous ACKs from the twenty-first pass now make an
+ACK-aware sender possible:
+
+- `InitialHandshakeFlight` plans the largest prefix of the **unacknowledged**
+  CRYPTO suffix that fits the current anti-amplification allowance.
+- Server Handshake packet numbers advance contiguously across attempts, so the
+  client's expected-number check keeps matching.
+- `observeReceived` decrypts client Handshake packets with the client keys,
+  records ACK ranges, and maps packet numbers to CRYPTO ranges. The delivered
+  prefix only advances when a range starts at the current prefix end, so a lost
+  middle packet is retransmitted instead of skipped by a later ACK.
+- A CRYPTO-bearing client Certificate/Finished or a validated
+  `CONNECTION_CLOSE` is accepted as the handshake response; ACK-only packets no
+  longer stop the sender. The close path rewinds the expected packet number so
+  the receive loop opens the same datagram.
+- Same-path observed bytes reset the retry budget; the hard deadline still
+  bounds the handshake. The tracked flight is bounded to 64 packets, matching
+  the existing `max_datagrams` limit.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| 40-entry certificate, mTLS, close reservation, prepared verifier | 40/40 | `quic-ack-aware-prefix.log` |
+| QUIC handshake, CRYPTO, PTO, certificate, prepared bundle | 66/66 | `quic-handshake-after-prefix.log` |
+| Full QUIC suite | 1107/1130, 23 skipped, no failures | `quic-full-after-prefix.log` |

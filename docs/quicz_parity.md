@@ -1635,6 +1635,17 @@ packet-number/MTU range and reserves all storage before its first in-place AEAD
 operation. Batch sends retain both protected and socket-sent counts: zero or
 partial socket progress leaves PN gaps and PTO retransmits under a fresh range,
 while server anti-amplification accounting keeps only the submitted prefix.
+Server Handshake flights now grow under the anti-amplification allowance
+instead of requiring the complete certificate flight to fit at once. Each
+attempt plans the largest prefix of the *unacknowledged* CRYPTO suffix that
+fits the current allowance, advances server Handshake packet numbers
+contiguously for the peer's expected-number check, and retransmits only the
+gap when the client's ACKs show a loss. The client acknowledges every
+authenticated CRYPTO-bearing Handshake packet, so a large certificate flight
+starts leaving before the full 3x budget is available and acknowledged CRYPTO
+is never resent. A CRYPTO-bearing client Certificate/Finished or a validated
+`CONNECTION_CLOSE` is accepted as the handshake response; ACK-only packets no
+longer stop the prefix sender.
 Peer TLS validation failures now emit transport `CONNECTION_CLOSE` with the
 RFC 9001 `0x100 + AlertDescription` code at the available Initial or Handshake
 encryption level. Both roles use `0x178` for failed ALPN; cipher/key-share

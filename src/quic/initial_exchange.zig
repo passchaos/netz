@@ -27,6 +27,9 @@ pub const InitialFlightSendProgress = flight.SendProgress;
 pub const ReceiveInitialFlightOptions = flight.ReceiveOptions;
 pub const ReceivedInitialFlight = flight.Received;
 pub const insertCryptoPayload = flight.insertCryptoPayload;
+pub const PrefixPlan = flight.PrefixPlan;
+pub const handshakePrefixPlan = flight.handshakePrefixPlan;
+pub const initialCryptoFlightWireLen = flight.wireLen;
 
 pub const ReceivedInitialCrypto = struct {
     from: net.IpAddress,

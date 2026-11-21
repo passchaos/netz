@@ -521,6 +521,64 @@ pub fn handshakeFlightPacketCount(options: SendOptions) Error!usize {
     return packet_count;
 }
 
+pub const PrefixPlan = struct {
+    /// CRYPTO bytes covered by the planned packets, starting at offset zero of
+    /// the supplied `crypto_data` slice.
+    crypto_len: usize = 0,
+    packet_count: usize = 0,
+    /// Exact protected wire bytes for all planned packets.
+    wire_len: usize = 0,
+};
+
+/// Plan the largest Handshake CRYPTO prefix whose packets fit `wire_budget`
+/// and `max_packets`. A zero plan means even the first packet exceeds the
+/// current budget, so the server must wait for more received bytes before it
+/// can grow its anti-amplification allowance.
+pub fn handshakePrefixPlan(
+    options: SendOptions,
+    wire_budget: usize,
+    max_packets: usize,
+) Error!PrefixPlan {
+    try validateHandshakeFlightOptions(options);
+    var plan: PrefixPlan = .{};
+    var sent: usize = 0;
+    var packet_number = options.initial.packet_number;
+    while (sent < options.initial.crypto_data.len and
+        plan.packet_count < max_packets)
+    {
+        if (packet_number > quic.protection.max_packet_number) {
+            return error.InvalidPacketNumber;
+        }
+        const chunk_len = try largestHandshakeChunk(options, sent);
+        if (chunk_len == 0) return error.DatagramTooLarge;
+        const crypto_offset = std.math.add(
+            u64,
+            options.initial.crypto_offset,
+            sent,
+        ) catch return error.InvalidCryptoRange;
+        const packet_len = try handshakePacketWireLen(
+            options.initial,
+            crypto_offset,
+            chunk_len,
+        );
+        if (packet_len > options.max_datagram_size) {
+            return error.DatagramTooLarge;
+        }
+        const next_wire = std.math.add(
+            usize,
+            plan.wire_len,
+            packet_len,
+        ) catch return error.InvalidFrameLength;
+        if (next_wire > wire_budget) break;
+        plan.wire_len = next_wire;
+        plan.crypto_len += chunk_len;
+        plan.packet_count += 1;
+        sent += chunk_len;
+        packet_number += 1;
+    }
+    return plan;
+}
+
 fn validateHandshakeFlightOptions(options: SendOptions) Error!void {
     if (options.initial.crypto_data.len == 0 or
         options.max_datagram_size == 0 or

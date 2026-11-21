@@ -203,7 +203,9 @@ test "server handshake flight records an unused close packet number" {
         },
     };
     try target.InitialHandshakeFlight.send(&context, 2);
-    try std.testing.expectEqual(@as(?u64, 23), context.next_handshake_packet_number);
+    // Handshake packet numbers are contiguous across prefix attempts; the
+    // retransmission index no longer strides the Handshake range.
+    try std.testing.expectEqual(@as(?u64, 21), context.next_handshake_packet_number);
 }
 
 test "server handshake flight has no close packet number past QUIC maximum" {
@@ -459,7 +461,9 @@ test "server partial Initial flight defers Handshake and accounts sent prefix" {
     );
 
     try target.InitialHandshakeFlight.send(&context, 1);
-    try std.testing.expectEqual(@as(?u64, 32), context.next_handshake_packet_number);
+    // The deferred Handshake packet number is reused contiguously because the
+    // partial Initial attempt protected no Handshake packet.
+    try std.testing.expectEqual(@as(?u64, 31), context.next_handshake_packet_number);
 
     var first = try receiver.receiveBytes();
     defer first.deinit(allocator);
@@ -506,10 +510,10 @@ test "server partial Initial flight defers Handshake and accounts sent prefix" {
         allocator,
         handshake_keys,
         handshake.bytes,
-        31,
+        30,
     );
     defer handshake_packet.deinit(allocator);
-    try std.testing.expectEqual(@as(u64, 31), handshake_packet.packet_number);
+    try std.testing.expectEqual(@as(u64, 30), handshake_packet.packet_number);
 }
 
 test "server Handshake socket failure retries after visible Initial flight" {

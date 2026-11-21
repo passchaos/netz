@@ -2865,15 +2865,17 @@ fn acceptInternal(
             .max_crypto_frame_data_len = options.max_crypto_frame_data_len,
         },
         .anti_amplification = anti_amplification,
+        .peer_handshake_keys = handshake.client_quic,
     };
     var client_handshake_datagram = try retransmit
-        .sendAndReceiveMatchingFromObserved(
+        .sendAndReceiveMatchingFromObservedContext(
         endpoint,
         source,
         options.handshake_recovery,
         &send_context,
         retransmit.InitialHandshakeFlight.send,
-        containsHandshakePacket,
+        &send_context,
+        acceptClientHandshakeAfterServerFlight,
         retransmit.InitialHandshakeFlight.observeReceived,
     );
     var client_handshake_datagram_owned = true;
@@ -2894,7 +2896,7 @@ fn acceptInternal(
         client_handshake_datagram.bytes,
         client_handshake_datagram.ecn,
         handshake.client_quic,
-        0,
+        send_context.peer_expected_packet_number,
         options.max_crypto_buffer,
         local_transport_parameters.grease_quic_bit,
         options.client_auth != null,
@@ -3025,6 +3027,20 @@ pub fn containsHandshakePacket(datagram: []const u8) bool {
         &tail,
         true,
     ) catch return false) != null;
+}
+
+/// An ACK-only client Handshake packet must not stop the server's prefix
+/// sender. Accept a CRYPTO-bearing datagram (TLS 1.3 client Certificate or
+/// Finished proves the server flight arrived) or a CONNECTION_CLOSE.
+fn acceptClientHandshakeAfterServerFlight(
+    context: *anyopaque,
+    datagram: []const u8,
+) bool {
+    const flight: *retransmit.InitialHandshakeFlight =
+        @ptrCast(@alignCast(context));
+    return (flight.peer_datagram_has_crypto or
+        flight.peer_datagram_has_close) and
+        containsHandshakePacket(datagram);
 }
 
 pub fn openClientHandshakeCryptoFromDatagram(
