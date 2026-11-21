@@ -797,7 +797,7 @@ test "handshake caller deadline bounds active retransmission budget" {
     try std.testing.expect(context.calls >= 1);
 }
 
-test "server prefix sender resumes at the unacknowledged CRYPTO offset" {
+test "QUIC server prefix sender resumes at the unacknowledged CRYPTO offset" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -921,6 +921,145 @@ test "server prefix sender resumes at the unacknowledged CRYPTO offset" {
     try std.testing.expect(parsed.frame == .crypto);
     try std.testing.expectEqual(
         @as(u64, @intCast(acked)),
+        parsed.frame.crypto.offset,
+    );
+}
+
+test "QUIC server prefix sender retransmits a missing middle CRYPTO range" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var receiver = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 1200 },
+    );
+    defer receiver.deinit();
+    var sender = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 1200 },
+    );
+    defer sender.deinit();
+
+    const initial_keys = quic.protection
+        .deriveInitialSecrets("ack-gap").server;
+    const server_handshake_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x41} ** quic.protection.secret_len,
+    );
+    const client_handshake_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x42} ** quic.protection.secret_len,
+    );
+
+    var payload: [3000]u8 = undefined;
+    for (&payload, 0..) |*byte, index| byte.* = @intCast(index % 251);
+
+    var context = target.InitialHandshakeFlight{
+        .endpoint = &sender,
+        .peer = receiver.address(),
+        .initial_keys = initial_keys,
+        .initial_options = .{
+            .initial = .{
+                .destination_connection_id = "ack-gap",
+                .source_connection_id = "server",
+                .packet_number = 0,
+                .crypto_data = "initial",
+            },
+            .max_datagram_size = 1200,
+        },
+        .handshake_keys = server_handshake_keys,
+        .handshake_options = .{
+            .destination_connection_id = "client",
+            .source_connection_id = "server",
+            .packet_number = 0,
+            .crypto_data = &payload,
+            .max_crypto_frame_data_len = 1000,
+        },
+        .peer_handshake_keys = client_handshake_keys,
+    };
+    try target.InitialHandshakeFlight.send(&context, 0);
+    const total_packets = try quic.initial_exchange
+        .handshakeCryptoFlightPacketCount(.{
+        .initial = context.handshake_options,
+        .max_datagram_size = 1200,
+    });
+    try std.testing.expectEqual(@as(usize, 3), total_packets);
+    for (0..1 + total_packets) |_| {
+        var datagram = try receiver.receiveBytes();
+        datagram.deinit(allocator);
+    }
+
+    const Ack = struct {
+        fn send(
+            allocator_: std.mem.Allocator,
+            keys: quic.protection.PacketProtectionKeys,
+            packet_number: u64,
+            largest: u64,
+        ) ![]u8 {
+            var storage: [64]u8 = undefined;
+            var list: std.ArrayList(u8) = .{
+                .items = storage[0..0],
+                .capacity = storage.len,
+            };
+            var fixed = std.heap.FixedBufferAllocator.init(&.{});
+            try (quic.Frame{ .ack = .{
+                .largest_acknowledged = largest,
+                .ack_delay = 0,
+                .first_ack_range = 0,
+            } }).write(&list, fixed.allocator());
+            return quic.protection.sealHandshakePacket(
+                allocator_,
+                keys,
+                .{
+                    .destination_connection_id = "server",
+                    .source_connection_id = "client",
+                    .packet_number = packet_number,
+                    .payload = list.items,
+                },
+            );
+        }
+    };
+
+    const ack0 = try Ack.send(allocator, client_handshake_keys, 0, 0);
+    defer allocator.free(ack0);
+    _ = target.InitialHandshakeFlight.observeReceived(
+        &context,
+        receiver.address(),
+        ack0,
+    );
+    const first_end = context.handshake_acked_crypto;
+    try std.testing.expect(first_end > 0);
+
+    const ack2 = try Ack.send(allocator, client_handshake_keys, 1, 2);
+    defer allocator.free(ack2);
+    _ = target.InitialHandshakeFlight.observeReceived(
+        &context,
+        receiver.address(),
+        ack2,
+    );
+    // The acknowledged third packet must not skip the missing middle range.
+    try std.testing.expectEqual(first_end, context.handshake_acked_crypto);
+
+    try target.InitialHandshakeFlight.send(&context, 1);
+    var initial_datagram = try receiver.receiveBytes();
+    initial_datagram.deinit(allocator);
+    var resumed = try receiver.receiveBytes();
+    defer resumed.deinit(allocator);
+    var packet = try quic.protection.openHandshakePacket(
+        allocator,
+        server_handshake_keys,
+        resumed.bytes,
+        @intCast(total_packets),
+    );
+    defer packet.deinit(allocator);
+    var parsed = try quic.parseFrameOwned(allocator, packet.payload);
+    defer parsed.deinitOwned(allocator);
+    try std.testing.expect(parsed.frame == .crypto);
+    try std.testing.expectEqual(
+        @as(u64, @intCast(first_end)),
         parsed.frame.crypto.offset,
     );
 }
