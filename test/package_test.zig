@@ -1081,6 +1081,10 @@ test "public modules are reachable" {
         "requestUriAltSvcWithTimeout",
     ));
     try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClientPool,
+        "requestUriAltSvcForRedirectWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.http3.runtime.HandshakeClient,
         "requestUriAltSvcWithDeadline",
     ));

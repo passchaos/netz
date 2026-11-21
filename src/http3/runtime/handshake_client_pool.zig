@@ -1693,6 +1693,28 @@ pub fn Pool(comptime Runtime: type) type {
             );
         }
 
+        /// Relative-timeout counterpart to
+        /// `requestUriAltSvcForRedirectWithDeadline`. A non-positive duration
+        /// returns `Timeout` before acquisition or routing.
+        pub fn requestUriAltSvcForRedirectWithTimeout(
+            self: *Self,
+            uri_text: []const u8,
+            target: http3.AltSvcTarget,
+            request_options: Runtime.UriRequestOptions,
+            redirect: RedirectConnectContext,
+            timeout: std.Io.Duration,
+        ) (Runtime.ReceiveTimeoutError || Error ||
+            std.Io.ConcurrentError)!Runtime.OwnedHandshakeResponse {
+            if (timeout.nanoseconds <= 0) return error.Timeout;
+            return self.requestUriAltSvcForRedirectWithDeadline(
+                uri_text,
+                target,
+                request_options,
+                redirect,
+                .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+            );
+        }
+
         /// Unified-pool hook: when the shared budget is full, reclaim one idle
         /// connection from another transport before entering the FIFO wait.
         pub fn requestUriAltSvcReclaiming(

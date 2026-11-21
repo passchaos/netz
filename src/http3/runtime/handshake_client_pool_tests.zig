@@ -514,6 +514,25 @@ test "HTTP/3 pool requires redirect-aware Alt-Svc isolation hook" {
     );
     defer pool.deinit();
     try std.testing.expectError(
+        error.Timeout,
+        pool.requestUriAltSvcForRedirectWithTimeout(
+            "https://localhost/redirected",
+            .{
+                .alpn = "h3",
+                .connect_host = "127.0.0.1",
+                .origin_host = "localhost",
+                .port = 443,
+            },
+            .{},
+            .{
+                .cross_origin = true,
+                .forward_client_identity = false,
+            },
+            .fromNanoseconds(0),
+        ),
+    );
+    try std.testing.expect(!context.redirect_alt_called);
+    try std.testing.expectError(
         error.ConnectionRefused,
         pool.requestUriAltSvcForRedirect(
             "https://localhost/redirected",

@@ -1077,3 +1077,19 @@ rejection for the new request forms alongside the connect form.
 | --- | --- | --- |
 | Full HTTP/3 suite | 927/931 (4 skipped) | `http3-altsvc-request-timeouts.log` |
 | Public package surface tests | 26/26 | `test-package-altsvc-request-timeouts.log` |
+
+
+## Forty-fifth pass: pool Alt-Svc redirect timeout
+
+`HandshakeClientPool.requestUriAltSvcForRedirect` had a deadline form but no
+relative-budget counterpart, unlike the neighbouring `requestUriAltSvc` pair.
+Add `requestUriAltSvcForRedirectWithTimeout`; a non-positive duration returns
+`Timeout` before acquisition or routing, otherwise it converts once to the
+existing deadline path. The redirect-routing test now asserts the zero-budget
+rejection without invoking the connector, then keeps the existing
+cross-origin redirect assertion.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full HTTP/3 suite | 927/931 (4 skipped) | `http3-pool-redirect-timeout.log` |
+| Public package surface tests | 26/26 | `test-package-pool-redirect-timeout.log` |
