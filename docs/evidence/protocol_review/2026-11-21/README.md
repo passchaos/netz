@@ -962,3 +962,21 @@ legitimate outcome; the range is now 3..5 with the reasoning recorded.
 | --- | --- | --- |
 | Full HTTP/3 suite | 927/931 (4 skipped) | `http3-connect-timeouts.log` |
 | Public package surface tests | 26/26 | `test-package-connect-timeouts.log` |
+
+
+## Thirty-ninth pass: remaining H3 connect timeout forms
+
+Two public connect entry points still lacked a relative-budget spelling:
+`HandshakeClient.connectFromWithEarlyRequest` and
+`http3.socks5_runtime.connectHost`. Add
+`connectFromWithEarlyRequestWithTimeout` and `connectHostWithTimeout`; both
+reject a non-positive duration before touching the endpoint, SOCKS
+association, cache, or lease, then delegate to the deadline form so the
+option-based `connect_timeout` cap still applies. A new SOCKS5 test asserts
+the zero-budget rejection before UDP ASSOCIATE, and the public package
+surface test pins both declarations.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full HTTP/3 suite | 927/931 (4 skipped) | `http3-more-connect-timeouts.log` |
+| Public package surface tests | 26/26 | `test-package-more-connect-timeouts.log` |

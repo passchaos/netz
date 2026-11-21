@@ -1057,6 +1057,29 @@ pub const HandshakeClient = struct {
         );
     }
 
+    pub fn connectFromWithEarlyRequestWithTimeout(
+        endpoint: *quic.runtime.Endpoint,
+        source: quic.runtime.DatagramSource,
+        server: net.IpAddress,
+        options: HandshakeClientOptions,
+        early_request: *const PreparedEarlyRequest,
+        cache: *quic.resumption.Cache,
+        lease: *quic.resumption.EarlyDataLease,
+        timeout: std.Io.Duration,
+    ) Error!EarlyHandshakeClient {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectFromWithEarlyRequestWithDeadline(
+            endpoint,
+            source,
+            server,
+            options,
+            early_request,
+            cache,
+            lease,
+            .fromNow(endpoint.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     fn connectFromWithEarlyRequestBefore(
         endpoint: *quic.runtime.Endpoint,
         source: quic.runtime.DatagramSource,

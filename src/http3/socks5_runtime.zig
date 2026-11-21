@@ -65,6 +65,31 @@ pub fn connectHostWithDeadline(
     );
 }
 
+pub fn connectHostWithTimeout(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    local_address: net.IpAddress,
+    proxy: Proxy,
+    target_host: []const u8,
+    target_port: u16,
+    limits: runtime.Limits,
+    options: runtime.HandshakeClientOptions,
+    timeout: std.Io.Duration,
+) runtime.Error!runtime.HandshakeClient {
+    if (timeout.nanoseconds <= 0) return error.Timeout;
+    return connectHostWithDeadline(
+        allocator,
+        io,
+        local_address,
+        proxy,
+        target_host,
+        target_port,
+        limits,
+        options,
+        .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+    );
+}
+
 fn connectHostBefore(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -145,4 +170,28 @@ fn connectHostBefore(
 
 test {
     _ = Proxy;
+}
+
+test "HTTP3 SOCKS5 connect timeout rejects non-positive budgets before association" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    try std.testing.expectError(
+        error.Timeout,
+        connectHostWithTimeout(
+            std.testing.allocator,
+            threaded.io(),
+            .{ .ip4 = .loopback(0) },
+            .{ .host = "proxy.invalid" },
+            "origin.test",
+            443,
+            .{},
+            .{
+                .handshake = .{
+                    .original_destination_connection_id = &.{1},
+                    .local_connection_id = &.{2},
+                },
+            },
+            .fromNanoseconds(0),
+        ),
+    );
 }
