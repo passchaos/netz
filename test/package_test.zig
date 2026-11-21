@@ -9612,6 +9612,22 @@ test "public modules are reachable" {
         "stopWithTimeout",
     ));
     try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.handshake_stream,
+        "sendWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.handshake_stream,
+        "writeWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.handshake_stream,
+        "finishWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.handshake_stream,
+        "receiveWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.http3.runtime.HandshakeAdmission,
         "deadline",
     ));

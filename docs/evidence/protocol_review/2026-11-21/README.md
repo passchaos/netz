@@ -851,3 +851,20 @@ all three declarations.
 | --- | --- | --- |
 | Full WebTransport suite | 755/757 (2 skipped) | `webtransport-stream-timeouts.log` |
 | Public package surface tests | 26/26 | `test-package-webtransport-timeouts.log` |
+
+
+## Thirty-third pass: handshake WebTransport stream timeout forms
+
+The public `webtransport.runtime.handshake_stream` helpers exposed `send`,
+`sendSlices`, `write`, `writeSlices`, `finish`, and `receive` with
+absolute-deadline counterparts only. Add the six `WithTimeout` forms; each
+converts through `deadline_policy.fromTimeout`, so a non-positive duration
+returns `Timeout` before any packet, FIN, or receive work, and the committed
+prefix/FIN retry contracts of the deadline forms are preserved. These are
+conversion-only wrappers over the already-tested progress paths; the public
+package surface test pins all six declarations.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full WebTransport suite | 755/757 (2 skipped) | `webtransport-handshake-stream-timeouts.log` |
+| Public package surface tests | 26/26 | `test-package-handshake-stream-timeouts.log` |

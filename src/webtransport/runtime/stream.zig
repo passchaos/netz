@@ -195,6 +195,32 @@ pub fn send(
     };
 }
 
+/// Relative-timeout counterpart to `send`. A non-positive duration returns
+/// `Timeout` with `committed_out` cleared before any transport work.
+pub fn sendWithTimeout(
+    connection: *quic.one_rtt.Connection,
+    registry: *webtransport.StreamRegistry,
+    session_id: webtransport.SessionId,
+    stream_id: u62,
+    payload: []const u8,
+    fin: bool,
+    committed_out: *usize,
+    timeout: std.Io.Duration,
+) TimeoutError!void {
+    committed_out.* = 0;
+    return sendWithProgress(
+        connection,
+        registry,
+        session_id,
+        stream_id,
+        payload,
+        fin,
+        committed_out,
+        (try deadline_policy.fromTimeout(connection.endpoint.io, timeout)).?,
+        null,
+    );
+}
+
 /// Send the complete payload and optional FIN under one absolute awake-clock
 /// deadline. `committed` reports the exact application prefix submitted even
 /// when the operation returns an error, so a caller can resume without
@@ -249,6 +275,32 @@ pub fn sendSlices(
         error.Timeout, error.ConcurrencyUnavailable => unreachable,
         else => |other| return @errorCast(other),
     };
+}
+
+/// Relative-timeout counterpart to `sendSlices`. A non-positive duration
+/// returns `Timeout` with `committed_out` cleared before any transport work.
+pub fn sendSlicesWithTimeout(
+    connection: *quic.one_rtt.Connection,
+    registry: *webtransport.StreamRegistry,
+    session_id: webtransport.SessionId,
+    stream_id: u62,
+    parts: []const []const u8,
+    fin: bool,
+    committed_out: *usize,
+    timeout: std.Io.Duration,
+) TimeoutError!void {
+    committed_out.* = 0;
+    return sendSlicesWithProgress(
+        connection,
+        registry,
+        session_id,
+        stream_id,
+        parts,
+        fin,
+        committed_out,
+        (try deadline_policy.fromTimeout(connection.endpoint.io, timeout)).?,
+        null,
+    );
 }
 
 /// Deadline-bounded scatter/gather send. `committed_out` counts only
@@ -695,6 +747,27 @@ pub fn write(
     };
 }
 
+/// Relative-timeout counterpart to `write`. A non-positive duration returns
+/// `Timeout` before any packet is committed.
+pub fn writeWithTimeout(
+    connection: *quic.one_rtt.Connection,
+    registry: *webtransport.StreamRegistry,
+    session_id: webtransport.SessionId,
+    stream_id: u62,
+    payload: []const u8,
+    timeout: std.Io.Duration,
+) TimeoutError!usize {
+    return writeWithProgress(
+        connection,
+        registry,
+        session_id,
+        stream_id,
+        payload,
+        (try deadline_policy.fromTimeout(connection.endpoint.io, timeout)).?,
+        null,
+    );
+}
+
 /// Submit at most one packet-sized application prefix under one absolute
 /// awake-clock deadline. The returned count is the exact committed prefix; a
 /// timeout never commits unreported application bytes.
@@ -740,6 +813,27 @@ pub fn writeSlices(
         error.Timeout, error.ConcurrencyUnavailable => unreachable,
         else => |other| return @errorCast(other),
     };
+}
+
+/// Relative-timeout counterpart to `writeSlices`. A non-positive duration
+/// returns `Timeout` before any packet is committed.
+pub fn writeSlicesWithTimeout(
+    connection: *quic.one_rtt.Connection,
+    registry: *webtransport.StreamRegistry,
+    session_id: webtransport.SessionId,
+    stream_id: u62,
+    parts: []const []const u8,
+    timeout: std.Io.Duration,
+) TimeoutError!usize {
+    return writeSlicesWithProgress(
+        connection,
+        registry,
+        session_id,
+        stream_id,
+        parts,
+        (try deadline_policy.fromTimeout(connection.endpoint.io, timeout)).?,
+        null,
+    );
 }
 
 pub fn writeSlicesWithDeadline(
@@ -1146,6 +1240,25 @@ pub fn finish(
     };
 }
 
+/// Relative-timeout counterpart to `finish`. A non-positive duration returns
+/// `Timeout` while leaving `local_fin` clear.
+pub fn finishWithTimeout(
+    connection: *quic.one_rtt.Connection,
+    registry: *webtransport.StreamRegistry,
+    session_id: webtransport.SessionId,
+    stream_id: u62,
+    timeout: std.Io.Duration,
+) TimeoutError!void {
+    return finishWithProgress(
+        connection,
+        registry,
+        session_id,
+        stream_id,
+        (try deadline_policy.fromTimeout(connection.endpoint.io, timeout)).?,
+        null,
+    );
+}
+
 /// Submit an empty FIN under one absolute awake-clock deadline. A timeout
 /// leaves `local_fin` clear, so the same operation can be retried safely.
 pub fn finishWithDeadline(
@@ -1456,6 +1569,25 @@ pub fn receive(
         error.Timeout, error.ConcurrencyUnavailable => unreachable,
         else => |other| return @errorCast(other),
     };
+}
+
+/// Relative-timeout counterpart to `receive`. A non-positive duration returns
+/// `Timeout` before any socket wait.
+pub fn receiveWithTimeout(
+    connection: *quic.one_rtt.Connection,
+    registry: *webtransport.StreamRegistry,
+    session_id: webtransport.SessionId,
+    max_stream_bytes: usize,
+    timeout: std.Io.Duration,
+) (Error || quic.runtime.ReceiveTimeoutError)!OwnedHandshakeStream {
+    return receiveWithProgress(
+        connection,
+        registry,
+        session_id,
+        max_stream_bytes,
+        (try deadline_policy.fromTimeout(connection.endpoint.io, timeout)).?,
+        null,
+    );
 }
 
 pub fn receiveWithDeadline(
