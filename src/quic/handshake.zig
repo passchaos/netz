@@ -1334,6 +1334,12 @@ fn connectAttempt(
     var sent_early_data_packet_len: usize = 0;
     var server_datagram: quic.runtime.OwnedBytes = undefined;
     var accepted_initial_packet_number: ?u64 = null;
+    // Retain the sent Initial flight so a passive wait for a large server
+    // Handshake flight can probe and grow the server's anti-amplification
+    // budget. These live across the Retry loop and are read after it accepts a
+    // server Initial.
+    var probe_initial: ?retransmit.InitialFlight = null;
+    var probe_early: ?EarlyDataFlight = null;
 
     while (true) {
         var response_filter = retry.InitialResponseFilter{
@@ -1403,6 +1409,7 @@ fn connectAttempt(
                     }
                     return err;
                 };
+            probe_early = send_context;
             next_initial_packet_number = send_context.next_initial_packet_number;
             protected_early_data_packet_count =
                 send_context.protected_packet_count;
@@ -1449,6 +1456,7 @@ fn connectAttempt(
                     &response_filter,
                     retry.InitialResponseFilter.accept,
                 );
+            probe_initial = send_context;
             next_initial_packet_number = send_context.next_packet_number;
         }
 
@@ -1696,6 +1704,18 @@ fn connectAttempt(
         local_transport_parameters.grease_quic_bit,
         !resumed and server_auth != null,
         options.handshake_recovery,
+        if (probe_initial) |*value|
+            retransmit.Probe{
+                .context = value,
+                .send_fn = retransmit.InitialFlight.send,
+            }
+        else if (probe_early) |*value|
+            retransmit.Probe{
+                .context = value,
+                .send_fn = EarlyDataFlight.send,
+            }
+        else
+            null,
     ) catch |err| {
         if (err == error.InvalidReservedBits) {
             sendHandshakeProtocolViolation(
@@ -3582,6 +3602,7 @@ pub fn receiveServerHandshakeCrypto(
     allow_zero_fixed_bit: bool,
     require_certificate: bool,
     recovery: retransmit.Config,
+    probe: ?retransmit.Probe,
 ) Error!quic.initial_exchange.ReceivedHandshakeCrypto {
     var reassembler = quic.crypto_stream.Reassembler.init(endpoint.allocator, max_crypto_buffer);
     defer reassembler.deinit();
@@ -3590,7 +3611,8 @@ pub fn receiveServerHandshakeCrypto(
     var response_from = from;
     var response_ecn = coalesced_ecn;
     var next_expected = expected_packet_number;
-    const passive_deadline = passiveHandshakeTimeout(endpoint.io, recovery);
+    const hard_deadline = retransmit.activeDeadline(recovery, endpoint.io);
+    var retransmission: u8 = 0;
     var pending_tail = coalesced_tail;
     var pending_tail_storage: ?[]u8 = null;
     defer if (pending_tail_storage) |storage| endpoint.allocator.free(storage);
@@ -3607,12 +3629,37 @@ pub fn receiveServerHandshakeCrypto(
         var owned_datagram: ?quic.runtime.OwnedBytes = null;
         defer if (owned_datagram) |*datagram| datagram.deinit(endpoint.allocator);
         const bytes = if (pending_packet) |packet| packet else blk: {
-            owned_datagram = source.receiveTimeout(passive_deadline) catch |err|
-                switch (err) {
-                    error.Timeout => return error.HandshakeTimeout,
-                    error.ConcurrencyUnavailable => return error.HandshakeReceiveFailed,
-                    else => |other| return @errorCast(other),
-                };
+            owned_datagram = while (true) {
+                const attempt = retransmit.attemptDeadline(
+                    recovery,
+                    endpoint.io,
+                    retransmission,
+                    hard_deadline,
+                );
+                const received = source.receiveTimeout(attempt) catch |err|
+                    switch (err) {
+                        error.Timeout => {
+                            if (retransmit.retryBudgetExhausted(
+                                recovery,
+                                endpoint.io,
+                                retransmission,
+                                hard_deadline,
+                            )) return error.HandshakeTimeout;
+                            // Probe the server so its anti-amplification
+                            // budget can grow while it assembles a large
+                            // certificate flight.
+                            if (probe) |value| {
+                                value.send_fn(value.context, retransmission) catch {};
+                            }
+                            retransmission +|= 1;
+                            continue;
+                        },
+                        error.ConcurrencyUnavailable => return error.HandshakeReceiveFailed,
+                        else => |other| return @errorCast(other),
+                    };
+                retransmission = 0;
+                break received;
+            };
             if (!owned_datagram.?.from.eql(&from)) continue;
             response_from = owned_datagram.?.from;
             response_ecn = owned_datagram.?.ecn;

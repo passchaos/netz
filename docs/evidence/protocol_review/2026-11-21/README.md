@@ -73,7 +73,7 @@ left out of this batch.
 | ID | Area | Finding | Suggested direction |
 | --- | --- | --- | --- |
 | P1 | Resolved in the second pass | After an H3 *connection* failure the body was never read, yet fallback for an idempotent method still called `bodySource().prepareReplay()`, rejecting a single-pass Reader. | The attempt now records whether the request started; setup failures fall back without replay, started requests keep method/replay gating. |
-| P2 | QUIC anti-amplification | `InitialHandshakeFlight` reserves the complete Initial+Handshake flight before sending. A server-only prefix experiment deadlocked: once the client receives the server Initial it stops probing while it waits for the complete Handshake flight, so the server budget never grows. | Implement client PTO retransmission during `receiveServerHandshakeCrypto` first, then send server prefixes as the budget grows. |
+| P2 | Partially resolved | Client `receiveServerHandshakeCrypto` now emits PTO probes while it waits, so a partial external Handshake flight no longer stalls the budget. The server still reserves its complete flight; server-side prefix sending remains a future optimization, now unblocked by the client probes. | Keep the client probe; consider server prefixes with an ACK-aware cursor. |
 | P3 | Resolved in the sixth pass | The legacy/stateless adapters returned `WebTransportNotNegotiated` for caller configuration they cannot support (`initial_flow_limits`). | They now return `UnsupportedWebTransportOption`; genuine peer capability failures keep `WebTransportNotNegotiated`. |
 | P4 | HTTP H3 options | `Client.Options.http3.handshake.handshake.alpn_protocols` nests two `handshake` levels because the facade wraps the native handshake options. | Add flat accessors or a `quic` sub-struct while keeping the existing fields as deprecated aliases. |
 | P6 | HTTP/3 GRO test | `drains GRO response batch one packet at a time` hangs at `28dd7d76` and current main: the server blocks in `receiveRequest` after two client requests, while the client joins. | Determine whether the second aggregate request is consumed by the first receive or lost in the GRO batch, then add a bounded receive deadline to the fixture. |
@@ -286,3 +286,25 @@ test block includes them.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | H3 flat accessors plus the previously unregistered ALPN policy test | 85/85 | `h3-flat-accessors.log` |
+
+
+## Ninth pass: client PTO probing while awaiting a Handshake flight
+
+`receiveServerHandshakeCrypto` previously waited with one passive deadline and
+sent nothing after the first Handshake ACK. A server that sends a partial
+certificate flight subject to anti-amplification therefore had no way to grow
+its received-byte budget. The wait loop now uses per-PTO attempts: on timeout it
+invokes an optional `retransmit.Probe`, which the client wires to its sent
+Initial (or 0-RTT) flight, then retries until `max_retries` or the hard
+deadline. Any received datagram resets the PTO counter.
+
+The deterministic unit test uses a scripted source that times out twice before
+returning a complete Handshake packet. With the probe, the source is polled
+three times and two probes are emitted; without a probe, the same always-timeout
+source returns `HandshakeTimeout`. A 40-entry certificate regression also runs
+at 1200-byte datagrams with the default retry count.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Probe unit case plus handshake/certificate/PTO/CRYPTO regressions | 66/66 | `quic-probe-regression.log` |
+| Direct H3, protocol policy, H3 fallback | 111/111 | `http-after-probe.log` |

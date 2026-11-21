@@ -148,6 +148,14 @@ pub const SendFn = *const fn (
     context: *anyopaque,
     retransmission: u8,
 ) anyerror!void;
+
+/// Optional probe emitted while a blocking receive waits for more peer CRYPTO.
+/// The client uses this to retransmit its Initial flight so a server's
+/// anti-amplification budget can grow while it assembles the Handshake flight.
+pub const Probe = struct {
+    context: *anyopaque,
+    send_fn: SendFn,
+};
 pub const AcceptFn = *const fn (datagram: []const u8) bool;
 pub const ObserveDatagramFn = *const fn (
     context: *anyopaque,
@@ -442,7 +450,7 @@ pub fn sendWithoutResponse(
     send_fn(context, 0) catch return error.HandshakeSendFailed;
 }
 
-fn activeDeadline(config: Config, io: std.Io) ?std.Io.Clock.Timestamp {
+pub fn activeDeadline(config: Config, io: std.Io) ?std.Io.Clock.Timestamp {
     const configured = if (config.max_duration_ms == 0) null else std.Io.Clock.Timestamp.fromNow(
         io,
         Config.clockDurationFromMillis(config.max_duration_ms),
@@ -455,7 +463,7 @@ fn activeDeadline(config: Config, io: std.Io) ?std.Io.Clock.Timestamp {
         local;
 }
 
-fn attemptDeadline(
+pub fn attemptDeadline(
     config: Config,
     io: std.Io,
     retransmission: u8,
@@ -474,7 +482,7 @@ fn attemptDeadline(
     }
 }
 
-fn retryBudgetExhausted(
+pub fn retryBudgetExhausted(
     config: Config,
     io: std.Io,
     retransmission: u8,

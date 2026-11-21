@@ -88,7 +88,7 @@ Raising the HTTP body limit for H3 requires
 | H3 options nesting | `http3.handshake.handshake` still stores the native QUIC/TLS options, but `nativeHandshake()`/`sessionOptions()` provide flat mutable access. |
 | WebSocket byte-stream deadlines | Optional transport callbacks enable bounded receive/send/close; without them the deadline forms report `DeadlineUnsupported`. |
 | Pool Alt-Svc fallback | A setup failure can use TCP without rewinding; a started request keeps method/replay gating. |
-| QUIC anti-amplification | The complete server flight is reserved before sending; large chains rely on PTO-driven budget growth. |
+| QUIC anti-amplification | The server still reserves the complete flight; client Initial PTO probes now continue while a partial external Handshake flight is awaited. |
 | H3 GRO test | One response-batch test hangs at the audited baseline; recorded separately. |
 
 See [HTTP overview](http-overview.md), [HTTP streaming](http_streaming.md),

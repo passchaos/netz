@@ -4043,6 +4043,7 @@ test "QUIC handshake receive skips many CRYPTO-less Handshake packets" {
         false,
         false,
         .{},
+        null,
     );
     defer received.deinit(allocator);
     try std.testing.expectEqual(@as(u64, 1), next_client_packet_number);
@@ -4964,5 +4965,129 @@ test "QUIC server emits a caller-prepared RFC 8879 compressed Certificate" {
     try std.testing.expectEqual(
         quic.tls.certificate_compression.Algorithm.zlib,
         established.certificate_compression.?,
+    );
+}
+
+test "QUIC client probes while a server Handshake flight is incomplete" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 1200 },
+    );
+    defer endpoint.deinit();
+
+    const dcid = [_]u8{ 0x90, 0x91, 0x92, 0x93 };
+    const scid = [_]u8{ 0x94, 0x95, 0x96, 0x97 };
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x54} ** quic.protection.secret_len,
+    );
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x55} ** quic.protection.secret_len,
+    );
+    const tls_flight = [_]u8{
+        0x08, 0x00, 0x00, 0x00, // EncryptedExtensions
+        0x14, 0x00, 0x00, 0x00, // Finished
+    };
+    var crypto_payload: std.ArrayList(u8) = .empty;
+    defer crypto_payload.deinit(allocator);
+    try quic.crypto_stream.writeCryptoFrames(
+        &crypto_payload,
+        allocator,
+        0,
+        &tls_flight,
+        tls_flight.len,
+    );
+    const packet = try quic.protection.sealHandshakePacket(
+        allocator,
+        keys,
+        .{
+            .destination_connection_id = &dcid,
+            .source_connection_id = &scid,
+            .packet_number = 0,
+            .payload = crypto_payload.items,
+        },
+    );
+    defer allocator.free(packet);
+
+    const Source = struct {
+        packet: []const u8,
+        from: std.Io.net.IpAddress,
+        calls: usize = 0,
+
+        fn receive(
+            context: *anyopaque,
+            _: std.Io.Timeout,
+        ) quic.runtime.ReceiveTimeoutError!quic.runtime.OwnedBytes {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            if (self.calls < 3) return error.Timeout;
+            return .{
+                .from = self.from,
+                .bytes = try allocator.dupe(u8, self.packet),
+            };
+        }
+
+        fn timeout(
+            _: *anyopaque,
+            _: std.Io.Timeout,
+        ) quic.runtime.ReceiveTimeoutError!quic.runtime.OwnedBytes {
+            return error.Timeout;
+        }
+    };
+    const Probe = struct {
+        calls: usize = 0,
+        fn send(context: *anyopaque, _: u8) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+        }
+    };
+
+    var source = Source{ .packet = packet, .from = endpoint.address() };
+    var probe = Probe{};
+    var next_client_packet_number: u64 = 0;
+    var received = try receiveServerHandshakeCrypto(
+        &endpoint,
+        .{ .context = &source, .receive_timeout_fn = Source.receive },
+        endpoint.address(),
+        &.{},
+        .not_ect,
+        keys,
+        client_keys,
+        &next_client_packet_number,
+        0,
+        1024,
+        false,
+        false,
+        .{ .initial_pto_ms = 1, .max_pto_ms = 2, .max_retries = 5 },
+        .{ .context = &probe, .send_fn = Probe.send },
+    );
+    defer received.deinit(allocator);
+    try std.testing.expect(probe.calls >= 2);
+    try std.testing.expectEqualStrings(&tls_flight, received.crypto_data);
+
+    var idle = Source{ .packet = packet, .from = endpoint.address() };
+    try std.testing.expectError(
+        error.HandshakeTimeout,
+        receiveServerHandshakeCrypto(
+            &endpoint,
+            .{ .context = &idle, .receive_timeout_fn = Source.timeout },
+            endpoint.address(),
+            &.{},
+            .not_ect,
+            keys,
+            client_keys,
+            &next_client_packet_number,
+            0,
+            1024,
+            false,
+            false,
+            .{ .initial_pto_ms = 1, .max_pto_ms = 2, .max_retries = 1 },
+            null,
+        ),
     );
 }

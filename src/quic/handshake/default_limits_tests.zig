@@ -10,12 +10,12 @@ fn deadline(io: std.Io) std.Io.Clock.Timestamp {
     return .fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(5) });
 }
 
-fn exercise(io: std.Io, comptime authenticate_client: bool) !void {
+fn exercise(io: std.Io, comptime authenticate_client: bool, comptime chain_len: usize, comptime max_retries: ?u8) !void {
     var certificate: [tls_testing.certificate_der_len]u8 = undefined;
     try std.base64.standard.Decoder.decode(&certificate, tls_testing.certificate_base64);
     const key = try tls_testing.serverKeyPair();
     const pin = key.public_key.toUncompressedSec1();
-    var chain: [16][]const u8 = undefined;
+    var chain: [chain_len][]const u8 = undefined;
     for (&chain) |*entry| entry.* = &certificate;
     try std.testing.expect(chain.len * certificate.len > 4096);
     var server = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 1200 });
@@ -24,7 +24,11 @@ fn exercise(io: std.Io, comptime authenticate_client: bool) !void {
     defer client.deinit();
     const server_options: handshake.ServerOptions = .{
         .local_connection_id = &.{ 1, 2, 3, 4, 5, 6, 7, 8 },
-        .handshake_recovery = .{ .initial_pto_ms = 20, .max_pto_ms = 80, .max_retries = 5 },
+        .handshake_recovery = .{
+            .initial_pto_ms = 20,
+            .max_pto_ms = 80,
+            .max_retries = max_retries orelse 3,
+        },
         .identity = .{ .certificate_chain = &chain, .signer = .{ .ecdsa_p256_sha256 = .{ .key_pair = key } } },
         .client_auth = if (authenticate_client) .{ .verifier = .{ .pinned_ecdsa_p256_public_key = pin } } else null,
     };
@@ -34,7 +38,7 @@ fn exercise(io: std.Io, comptime authenticate_client: bool) !void {
             defer established.deinit();
             if (authenticate_client) {
                 const received = established.peerCertificates().?;
-                try std.testing.expectEqual(@as(usize, 16), received.len);
+                try std.testing.expectEqual(chain_len, received.len);
                 for (received) |entry| try std.testing.expectEqualSlices(u8, options.identity.?.certificate_chain[0], entry);
             }
         }
@@ -45,7 +49,11 @@ fn exercise(io: std.Io, comptime authenticate_client: bool) !void {
         .original_destination_connection_id = &.{ 11, 12, 13, 14, 15, 16, 17, 18 },
         .local_connection_id = &.{ 21, 22, 23, 24, 25, 26, 27, 28 },
         .server_name = "localhost",
-        .handshake_recovery = .{ .initial_pto_ms = 20, .max_pto_ms = 80, .max_retries = 5 },
+        .handshake_recovery = .{
+            .initial_pto_ms = 20,
+            .max_pto_ms = 80,
+            .max_retries = max_retries orelse 3,
+        },
         .server_auth = .{ .pinned_ecdsa_p256_public_key = pin },
         .certificate_compression_algorithms = &.{},
         .client_identity = if (authenticate_client) .{ .certificate_chain = &chain, .signer = .{ .ecdsa_p256_sha256 = .{ .key_pair = key } } } else null,
@@ -58,21 +66,21 @@ fn exercise(io: std.Io, comptime authenticate_client: bool) !void {
 test "QUIC default CRYPTO limit admits fragmented large certificate chains and client authentication" {
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
     defer threaded.deinit();
-    exercise(threaded.io(), false) catch |err| {
+    exercise(threaded.io(), false, 16, 5) catch |err| {
         std.debug.print("large certificate threaded server auth: {s}\n", .{@errorName(err)});
         return err;
     };
-    exercise(threaded.io(), true) catch |err| {
+    exercise(threaded.io(), true, 16, 5) catch |err| {
         std.debug.print("large certificate threaded mTLS: {s}\n", .{@errorName(err)});
         return err;
     };
     var backend = try backends.Backend.initZio(allocator);
     defer backend.deinit();
-    exercise(backend.io(), false) catch |err| {
+    exercise(backend.io(), false, 16, 5) catch |err| {
         std.debug.print("large certificate zio server auth: {s}\n", .{@errorName(err)});
         return err;
     };
-    exercise(backend.io(), true) catch |err| {
+    exercise(backend.io(), true, 16, 5) catch |err| {
         std.debug.print("large certificate zio mTLS: {s}\n", .{@errorName(err)});
         return err;
     };
@@ -117,4 +125,21 @@ test "QUIC default CRYPTO limit retains explicit smaller and final-span bounds" 
     try standard.insert(.{ .offset = 4096, .data = "x" });
     try std.testing.expectError(error.CryptoBufferTooLarge, standard.insert(.{ .offset = handshake.default_max_crypto_buffer, .data = "x" }));
     try std.testing.expectEqual(@as(usize, 4097), standard.buffer.items.len);
+}
+
+test "QUIC client probes while the server assembles a flight beyond the initial amplification budget" {
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    // 40 entries exceed the budget admitted by the client Initial alone. The
+    // client's PTO probes must grow the server budget before max_retries.
+    exercise(threaded.io(), false, 40, null) catch |err| {
+        std.debug.print("large flight threaded: {s}\n", .{@errorName(err)});
+        return err;
+    };
+    var backend = try backends.Backend.initZio(allocator);
+    defer backend.deinit();
+    exercise(backend.io(), false, 40, null) catch |err| {
+        std.debug.print("large flight zio: {s}\n", .{@errorName(err)});
+        return err;
+    };
 }
