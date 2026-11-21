@@ -203,6 +203,15 @@ pub fn Engine(
                 return self.engine.submit(&command, deadline);
             }
 
+            pub fn writeInformationalResponseWithTimeout(self: Stream, status: u16, headers: []const http2.Hpack.HeaderField, timeout: std.Io.Duration) anyerror!void {
+                if (timeout.nanoseconds <= 0) return error.Timeout;
+                return self.writeInformationalResponseWithDeadline(
+                    status,
+                    headers,
+                    .fromNow(self.engine.io, .{ .raw = timeout, .clock = .awake }),
+                );
+            }
+
             pub fn startResponseWithDeadline(
                 self: Stream,
                 options: ResponseOptions,
@@ -210,6 +219,18 @@ pub fn Engine(
             ) anyerror!void {
                 var command = Command{ .slot = self.slot, .kind = .{ .start_response = options } };
                 return self.engine.submit(&command, deadline);
+            }
+
+            pub fn startResponseWithTimeout(
+                self: Stream,
+                options: ResponseOptions,
+                timeout: std.Io.Duration,
+            ) anyerror!void {
+                if (timeout.nanoseconds <= 0) return error.Timeout;
+                return self.startResponseWithDeadline(
+                    options,
+                    .fromNow(self.engine.io, .{ .raw = timeout, .clock = .awake }),
+                );
             }
 
             /// Submit the response head and its first DATA contribution as one
@@ -243,6 +264,22 @@ pub fn Engine(
                 return self.engine.submit(&command, deadline);
             }
 
+            pub fn startResponseWithBodyWithTimeout(
+                self: Stream,
+                options: ResponseOptions,
+                data: []const u8,
+                fin: bool,
+                timeout: std.Io.Duration,
+            ) anyerror!void {
+                if (timeout.nanoseconds <= 0) return error.Timeout;
+                return self.startResponseWithBodyAndDeadline(
+                    options,
+                    data,
+                    fin,
+                    .fromNow(self.engine.io, .{ .raw = timeout, .clock = .awake }),
+                );
+            }
+
             pub fn writeData(self: Stream, data: []const u8, fin: bool) anyerror!void {
                 return self.writeDataWithDeadline(data, fin, null);
             }
@@ -258,6 +295,20 @@ pub fn Engine(
                     .fin = fin,
                 } } };
                 return self.engine.submit(&command, deadline);
+            }
+
+            pub fn writeDataWithTimeout(
+                self: Stream,
+                data: []const u8,
+                fin: bool,
+                timeout: std.Io.Duration,
+            ) anyerror!void {
+                if (timeout.nanoseconds <= 0) return error.Timeout;
+                return self.writeDataWithDeadline(
+                    data,
+                    fin,
+                    .fromNow(self.engine.io, .{ .raw = timeout, .clock = .awake }),
+                );
             }
 
             pub fn finish(self: Stream) anyerror!void {

@@ -245,6 +245,15 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                 return self.engine.submit(&command, deadline);
             }
 
+            pub fn writeInformationalResponseWithTimeout(self: Stream, status: u16, headers: []const http3.Qpack.HeaderField, timeout: std.Io.Duration) anyerror!void {
+                if (timeout.nanoseconds <= 0) return error.Timeout;
+                return self.writeInformationalResponseWithDeadline(
+                    status,
+                    headers,
+                    .fromNow(self.engine.io, .{ .raw = timeout, .clock = .awake }),
+                );
+            }
+
             pub fn startResponseWithDeadline(
                 self: Stream,
                 response: http3.Response,
@@ -256,6 +265,20 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                     .body_length = body_length,
                 } } };
                 return self.engine.submit(&command, deadline);
+            }
+
+            pub fn startResponseWithTimeout(
+                self: Stream,
+                response: http3.Response,
+                body_length: ?usize,
+                timeout: std.Io.Duration,
+            ) anyerror!void {
+                if (timeout.nanoseconds <= 0) return error.Timeout;
+                return self.startResponseWithDeadline(
+                    response,
+                    body_length,
+                    .fromNow(self.engine.io, .{ .raw = timeout, .clock = .awake }),
+                );
             }
 
             /// Submit the response head and its first DATA contribution as one
@@ -292,6 +315,24 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                     .fin = fin,
                 } } };
                 return self.engine.submit(&command, deadline);
+            }
+
+            pub fn startResponseWithBodyWithTimeout(
+                self: Stream,
+                response: http3.Response,
+                body_length: ?usize,
+                data: []const u8,
+                fin: bool,
+                timeout: std.Io.Duration,
+            ) anyerror!void {
+                if (timeout.nanoseconds <= 0) return error.Timeout;
+                return self.startResponseWithBodyAndDeadline(
+                    response,
+                    body_length,
+                    data,
+                    fin,
+                    .fromNow(self.engine.io, .{ .raw = timeout, .clock = .awake }),
+                );
             }
 
             /// Submit interim heads, the final head and the first body part.
@@ -375,6 +416,20 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                     .fin = fin,
                 } } };
                 return self.engine.submit(&command, deadline);
+            }
+
+            pub fn writeDataWithTimeout(
+                self: Stream,
+                data: []const u8,
+                fin: bool,
+                timeout: std.Io.Duration,
+            ) anyerror!void {
+                if (timeout.nanoseconds <= 0) return error.Timeout;
+                return self.writeDataWithDeadline(
+                    data,
+                    fin,
+                    .fromNow(self.engine.io, .{ .raw = timeout, .clock = .awake }),
+                );
             }
 
             /// Finish the response with an empty DATA FIN.

@@ -714,3 +714,24 @@ operations and a successful bounded combined response start.
 | --- | --- | --- |
 | HTTP/2 concurrent reset timeout | 34/34 | `http2-concurrent-reset-timeout.log` |
 | HTTP/3 concurrent reset and informational timeout | 65/65 | `http3-concurrent-reset-timeout.log` |
+
+
+## Twenty-sixth pass: concurrent timeout matrix completion
+
+The concurrent response-start and DATA writers had absolute-deadline forms but
+no relative-timeout counterparts, leaving a partial timeout surface next to the
+new trailer/reset forms. HTTP/2 and HTTP/3 now expose:
+
+- `startResponseWithTimeout`
+- `startResponseWithBodyWithTimeout`
+- `writeInformationalResponseWithTimeout`
+- `writeDataWithTimeout`
+
+Each rejects a non-positive budget before queueing the owner command and
+otherwise converts once to the existing deadline path. The informational suites
+assert the zero-budget rejection for all four on both protocols.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| HTTP/2 concurrent timeout matrix | 34/34 | `http2-concurrent-timeout-matrix.log` |
+| HTTP/3 concurrent timeout matrix | 65/65 | `http3-concurrent-timeout-matrix.log` |
