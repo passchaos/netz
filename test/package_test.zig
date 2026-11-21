@@ -2734,6 +2734,18 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.websocket.runtime.Server, "serveConcurrent"));
     try std.testing.expect(@hasDecl(netz.websocket.runtime.Server, "serveUntil"));
     try std.testing.expect(@hasDecl(
+        netz.websocket.stream_connection.Connection,
+        "receiveMessageWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.stream_connection.Connection,
+        "sendFrameWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.stream_connection.Connection,
+        "sendCloseWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.websocket.runtime,
         "PendingH2Upgrade",
     ));

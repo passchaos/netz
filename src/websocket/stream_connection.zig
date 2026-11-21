@@ -19,16 +19,18 @@ pub const Role = enum { client, server };
 pub const Transport = struct {
     context: ?*anyopaque = null,
     read_fn: *const fn (?*anyopaque, []u8) anyerror!usize,
-    /// Optional deadline-aware read. The `WithDeadline` receive APIs require
-    /// this callback and return `error.DeadlineUnsupported` when it is absent.
+    /// Optional deadline-aware read. The `WithDeadline`/`WithTimeout` receive
+    /// APIs require this callback and return `error.DeadlineUnsupported` when
+    /// it is absent.
     read_deadline_fn: ?*const fn (
         ?*anyopaque,
         []u8,
         std.Io.Clock.Timestamp,
     ) anyerror!usize = null,
     write_fn: *const fn (?*anyopaque, []const u8) anyerror!void,
-    /// Optional deadline-aware write. The `WithDeadline` send APIs require
-    /// this callback and return `error.DeadlineUnsupported` when it is absent.
+    /// Optional deadline-aware write. The `WithDeadline`/`WithTimeout` send
+    /// APIs require this callback and return `error.DeadlineUnsupported` when
+    /// it is absent.
     write_deadline_fn: ?*const fn (
         ?*anyopaque,
         []const u8,
@@ -144,6 +146,17 @@ pub const Connection = struct {
         return self.receiveMessageBefore(null);
     }
 
+    /// Bound the complete receive by one relative timeout. A non-positive
+    /// duration returns `error.Timeout` before any transport I/O.
+    pub fn receiveMessageWithTimeout(
+        self: *Connection,
+        timeout: std.Io.Duration,
+    ) !Message {
+        return self.receiveMessageBefore(
+            try deadline_policy.fromTimeout(self.io, timeout),
+        );
+    }
+
     /// Bound the complete receive, including an automatic Pong reply, by one
     /// absolute awake-clock deadline. Requires `Transport.read_deadline_fn`;
     /// without it the call returns `error.DeadlineUnsupported`.
@@ -236,6 +249,14 @@ pub const Connection = struct {
         try self.sendFrame(.text, text);
     }
 
+    pub fn sendTextWithTimeout(
+        self: *Connection,
+        text: []const u8,
+        timeout: std.Io.Duration,
+    ) !void {
+        return self.sendFrameWithTimeout(.text, text, timeout);
+    }
+
     pub fn sendTextWithDeadline(
         self: *Connection,
         text: []const u8,
@@ -246,6 +267,14 @@ pub const Connection = struct {
 
     pub fn sendBinary(self: *Connection, data: []const u8) !void {
         try self.sendFrame(.binary, data);
+    }
+
+    pub fn sendBinaryWithTimeout(
+        self: *Connection,
+        data: []const u8,
+        timeout: std.Io.Duration,
+    ) !void {
+        return self.sendFrameWithTimeout(.binary, data, timeout);
     }
 
     pub fn sendBinaryWithDeadline(
@@ -260,6 +289,14 @@ pub const Connection = struct {
         try self.sendFrame(.ping, payload);
     }
 
+    pub fn sendPingWithTimeout(
+        self: *Connection,
+        payload: []const u8,
+        timeout: std.Io.Duration,
+    ) !void {
+        return self.sendFrameWithTimeout(.ping, payload, timeout);
+    }
+
     pub fn sendPingWithDeadline(
         self: *Connection,
         payload: []const u8,
@@ -272,12 +309,36 @@ pub const Connection = struct {
         try self.sendFrame(.pong, payload);
     }
 
+    pub fn sendPongWithTimeout(
+        self: *Connection,
+        payload: []const u8,
+        timeout: std.Io.Duration,
+    ) !void {
+        return self.sendFrameWithTimeout(.pong, payload, timeout);
+    }
+
     pub fn sendPongWithDeadline(
         self: *Connection,
         payload: []const u8,
         deadline: std.Io.Clock.Timestamp,
     ) !void {
         return self.sendFrameWithDeadline(.pong, payload, deadline);
+    }
+
+    /// Bound lock acquisition and the transport write by one relative
+    /// timeout. A non-positive duration returns `error.Timeout` before any
+    /// transport I/O. Requires `Transport.write_deadline_fn`.
+    pub fn sendFrameWithTimeout(
+        self: *Connection,
+        opcode: websocket.Opcode,
+        payload: []const u8,
+        timeout: std.Io.Duration,
+    ) !void {
+        return self.sendFrameBefore(
+            opcode,
+            payload,
+            try deadline_policy.fromTimeout(self.io, timeout),
+        );
     }
 
     /// Bound lock acquisition and the transport write by one absolute
@@ -311,6 +372,19 @@ pub const Connection = struct {
         reason: []const u8,
     ) !void {
         return self.sendCloseBefore(code, reason, null);
+    }
+
+    pub fn sendCloseWithTimeout(
+        self: *Connection,
+        code: websocket.CloseCode,
+        reason: []const u8,
+        timeout: std.Io.Duration,
+    ) !void {
+        return self.sendCloseBefore(
+            code,
+            reason,
+            try deadline_policy.fromTimeout(self.io, timeout),
+        );
     }
 
     pub fn sendCloseWithDeadline(

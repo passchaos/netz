@@ -287,3 +287,38 @@ test "WebSocket stream adapter deadline forms validate before I/O and reach the 
     try std.testing.expectEqual(@as(usize, 1), peer.deadline_writes);
     try std.testing.expect(peer.output.items.len != 0);
 }
+
+test "WebSocket stream adapter timeout forms validate before I/O and reach the transport" {
+    var frames: std.ArrayList(u8) = .empty;
+    defer frames.deinit(allocator);
+    try encodePeerFrame(&frames, .text, "timeout");
+    var peer = Peer{ .input = frames.items };
+    defer peer.deinit();
+    var connection = stream_connection.Connection.init(
+        allocator,
+        std.testing.io,
+        peer.deadlineTransport(),
+        .{ .role = .server },
+    );
+    defer connection.deinit();
+
+    try std.testing.expectError(
+        error.Timeout,
+        connection.receiveMessageWithTimeout(.fromMilliseconds(0)),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        connection.sendTextWithTimeout("late", .fromMilliseconds(0)),
+    );
+    try std.testing.expectEqual(@as(usize, 0), peer.deadline_reads);
+    try std.testing.expectEqual(@as(usize, 0), peer.deadline_writes);
+
+    var message = try connection.receiveMessageWithTimeout(.fromSeconds(1));
+    defer message.deinit(allocator);
+    try std.testing.expectEqualStrings("timeout", message.payload);
+    try std.testing.expect(peer.deadline_reads > 0);
+
+    try connection.sendTextWithTimeout("reply", .fromSeconds(1));
+    try std.testing.expectEqual(@as(usize, 1), peer.deadline_writes);
+    try std.testing.expect(peer.output.items.len != 0);
+}

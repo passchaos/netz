@@ -813,3 +813,23 @@ public package surface test pins the new declaration.
 | --- | --- | --- |
 | Full HTTP suite | 305/305 | `http-full-pool-timeout.log` |
 | Public package surface tests | 26/26 | `test-package-pool-timeout.log` |
+
+
+## Thirty-first pass: WebSocket byte-stream timeout forms
+
+`websocket.stream_connection.Connection` is the public RFC 6455 framing
+adapter used by HTTP/2 extended CONNECT and HTTP/3 CONNECT byte streams. Its
+receive and send operations exposed only absolute-deadline forms, forcing
+callers that hold a relative budget to construct an awake-clock timestamp
+themselves. Add `WithTimeout` counterparts for `receiveMessage`, `sendText`,
+`sendBinary`, `sendPing`, `sendPong`, `sendFrame`, and `sendClose`; each
+routes through the shared `deadline_policy.fromTimeout` helper, so a
+non-positive duration returns `Timeout` before lock acquisition or transport
+I/O, and the existing deadline/`DeadlineUnsupported` contracts are unchanged.
+The new focused test asserts zero-budget rejection without touching the
+transport, then exercises the bounded receive and send paths.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full WebSocket suite | 504/505 (1 skipped) | `websocket-stream-timeouts.log` |
+| Public package surface tests | 26/26 | `test-package-stream-timeouts.log` |
