@@ -2578,7 +2578,8 @@ null option disables keepalive. Non-positive intervals or timeouts are rejected
 before any endpoint worker starts.
 
 The shared endpoint owner does not call HTTP/2's blocking keepalive helper.
-Instead, `Connection.beginPingProbeWithDeadline` transactionally writes one
+Instead, `Connection.beginPingProbeWithDeadline` (or its
+`beginPingProbeWithTimeout` convenience form) transactionally writes one
 tracked PING and returns immediately. The existing single frame pump continues
 to route response, health and flow-control frames while exact opaque-payload ACK
 matching advances the probe state. RPC, stream-operation, health and queue

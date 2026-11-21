@@ -1,0 +1,7 @@
+{
+  "src/http2/runtime/connection.zig": "d0343970ad2e1945467c90879af99655eb7c28d2a51e4da23c5ccbbd125c516d",
+  "src/http2/runtime/ping_probe_tests.zig": "6c33dbf7810fff65e770c9793d66165a9c174ef20ecefc8969e423f5e624cbb6",
+  "src/http2/runtime/ping_timeout_tests.zig": "06d59a8916d6c4e6b0253bf15887eb70cee8f6a303c657b27356851d0916663c",
+  "src/http3/runtime/handshake_client.zig": "4a024db0f5624ff0c258a60397a39f1d6c6aec070ebc784909a106aaa7eb7243",
+  "src/http3/runtime/client/owned_head_tests.zig": "63bb81eac2ab03655fbd389843d40b50892a6894f4ae688a96dc5737990ad0a5"
+}

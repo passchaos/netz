@@ -8310,6 +8310,17 @@ pub const Connection = struct {
         }
     }
 
+    pub fn readOwnedFrameWithTimeout(
+        self: *Connection,
+        timeout: std.Io.Duration,
+    ) Error!OwnedFrame {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.readOwnedFrameWithDeadline(.fromNow(
+            self.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
     pub fn readOwnedFrameForDuplexWithDeadline(
         self: *Connection,
         deadline: ?std.Io.Clock.Timestamp,
@@ -8328,12 +8339,35 @@ pub const Connection = struct {
         }
     }
 
+    pub fn readOwnedFrameForDuplexWithTimeout(
+        self: *Connection,
+        timeout: std.Io.Duration,
+    ) Error!RetainedFrame {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.readOwnedFrameForDuplexWithDeadline(.fromNow(
+            self.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
     pub fn readOwnedClientDuplexFrameWithDeadline(
         self: *Connection,
         stream_id: u31,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!RetainedFrame {
         return client_duplex_owner.read(self, stream_id, deadline, client_duplex_hooks);
+    }
+
+    pub fn readOwnedClientDuplexFrameWithTimeout(
+        self: *Connection,
+        stream_id: u31,
+        timeout: std.Io.Duration,
+    ) Error!RetainedFrame {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.readOwnedClientDuplexFrameWithDeadline(
+            stream_id,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
     }
 
     pub fn readOwnedServerDuplexFrameWithDeadline(
@@ -8343,6 +8377,18 @@ pub const Connection = struct {
     ) Error!RetainedFrame {
         if (try self.pollOwnedServerDuplexFrame(stream_id)) |frame| return frame;
         return self.readOwnedFrameForDuplexWithDeadline(deadline);
+    }
+
+    pub fn readOwnedServerDuplexFrameWithTimeout(
+        self: *Connection,
+        stream_id: u31,
+        timeout: std.Io.Duration,
+    ) Error!RetainedFrame {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.readOwnedServerDuplexFrameWithDeadline(
+            stream_id,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
     }
 
     pub fn pollOwnedServerDuplexFrame(
@@ -11037,6 +11083,20 @@ pub const Connection = struct {
         }
         try self.writeControlFrameUntil(.ping, 0, &data, absolute);
         self.ping_probe_payload = data;
+    }
+
+    /// Convenience form of `beginPingProbeWithDeadline` using an awake-clock
+    /// budget. A non-positive budget is rejected before any frame is written.
+    pub fn beginPingProbeWithTimeout(
+        self: *Connection,
+        data: [8]u8,
+        timeout: std.Io.Duration,
+    ) Error!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.beginPingProbeWithDeadline(
+            data,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
     }
 
     pub fn pingProbePending(self: *const Connection) bool {

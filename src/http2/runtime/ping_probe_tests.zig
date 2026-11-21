@@ -19,7 +19,12 @@ test "HTTP/2 background PING probe preserves application pumping and matches the
 
     const payload = [8]u8{ 'N', 'Z', 'G', 'K', 0, 0, 0, 1 };
     const stale = [8]u8{ 'N', 'Z', 'G', 'K', 0, 0, 0, 0 };
-    try fixture.connection.beginPingProbeWithDeadline(payload, deadline(fixture.io));
+    try std.testing.expectError(
+        error.Timeout,
+        fixture.connection.beginPingProbeWithTimeout(stale, .zero),
+    );
+    try std.testing.expect(!fixture.connection.pingProbePending());
+    try fixture.connection.beginPingProbeWithTimeout(payload, .fromSeconds(2));
     try std.testing.expect(fixture.connection.pingProbePending());
     try std.testing.expectError(
         error.WriteInProgress,

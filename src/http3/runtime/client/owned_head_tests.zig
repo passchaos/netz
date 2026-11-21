@@ -19,6 +19,12 @@ test "HTTP/3 owned request head preflight leaves unallocated streams unowned" {
         .path = "/expired",
     }, 0, &owner, .{ .clock = .awake, .raw = .zero }));
     try std.testing.expect(owner == null);
+    try std.testing.expectError(error.Timeout, h3.startRequestOwnedWithTimeout(.{
+        .method = "GET",
+        .authority = "localhost",
+        .path = "/expired",
+    }, 0, &owner, .zero));
+    try std.testing.expect(owner == null);
     try std.testing.expectError(error.InvalidHeader, h3.startRequestOwned(.{
         .method = "GET",
         .authority = "localhost",

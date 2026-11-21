@@ -527,3 +527,29 @@ still closes the resource.
 | --- | --- | --- |
 | Expired-budget adoption rejection | 32/32 | `http2-adopt-timeout.log` |
 | Full HTTP/2 suite | 983/983 | `http2-full-after-adopt.log` |
+
+
+## Nineteenth pass: remaining read, probe and H3 request timeout forms
+
+The last deadline-only public entry points gained their `WithTimeout` pairs:
+
+- HTTP/2 `readOwnedFrameWithTimeout`,
+  `readOwnedFrameForDuplexWithTimeout`,
+  `readOwnedClientDuplexFrameWithTimeout`,
+  `readOwnedServerDuplexFrameWithTimeout` and
+  `beginPingProbeWithTimeout`. Each rejects a non-positive budget before any
+  socket read or PING write and otherwise converts once to the existing
+  absolute-deadline path.
+- HTTP/3 `startRequestOwnedWithTimeout`. A non-positive budget clears `owner`
+  before returning Timeout, matching the deadline form's unowned preflight.
+
+The invalid-budget test now asserts all four HTTP/2 read forms return Timeout
+before transport I/O; the background PING probe test covers both the rejected
+and accepted timeout forms; the H3 owned-head test covers the zero-budget
+request form.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| HTTP/2 read/probe timeout forms | 35/35 | `http2-probe-read-timeouts.log` |
+| Full HTTP/2 suite | 983/983 | `http2-full-after-read-timeouts.log` |
+| HTTP/3 owned request head timeout | 103/103 | `http3-owned-head-timeout.log` |

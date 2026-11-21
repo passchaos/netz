@@ -3565,6 +3565,25 @@ pub const HandshakeClient = struct {
         return self.startRequestUntilReportingOwner(request_options, body_length, deadline, owner, false);
     }
 
+    /// Convenience form of `startRequestOwnedWithDeadline` using an awake-clock
+    /// budget. A non-positive budget clears `owner` before returning Timeout.
+    pub fn startRequestOwnedWithTimeout(
+        self: *HandshakeClient,
+        request_options: http3.Request,
+        body_length: ?usize,
+        owner: *?u62,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!u62 {
+        owner.* = null;
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.startRequestOwnedWithDeadline(
+            request_options,
+            body_length,
+            owner,
+            .fromNow(self.connectionIo(), .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     fn startRequestUntilReportingOwner(
         self: *HandshakeClient,
         request_options: http3.Request,
