@@ -421,6 +421,11 @@ Concurrency contract:
   carry the representation `Content-Length` with a non-zero `body_length`; the
   owner marks the response finished and `finish()` is a no-op, so no DATA frame
   is emitted.
+- Every response-start, informational, DATA, trailer-finish and reset form has
+  an absolute-deadline and a relative-timeout variant (`*WithDeadline`,
+  `*WithTimeout`). The deadline bounds the handler's wait for the owner to
+  commit the command; a non-positive timeout is rejected before the command is
+  queued. The unbounded forms keep the owner's normal flow-control waiting.
 - A handler that returns without finishing its response has that stream reset
   (`INTERNAL_ERROR`/`cancel`) instead of leaking it. A peer reset/cancel is
   delivered to `nextBody` as `error.StreamReset` and does not poison siblings.
