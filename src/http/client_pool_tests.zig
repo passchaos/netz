@@ -19,6 +19,32 @@ test "unified HTTP pool exposes bounded lifecycle counters" {
     try std.testing.expectEqual(@as(usize, 0), pool.waitingCount());
 }
 
+test "unified HTTP pool rejects non-positive acquisition budgets before routing" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var pool = try http.Pool.init(
+        std.testing.allocator,
+        threaded.io(),
+        .{},
+    );
+    defer pool.deinit();
+    const uri = "https://example.com/";
+    try std.testing.expectError(
+        error.Timeout,
+        pool.acquireUriWithTimeout(uri, .fromMilliseconds(0)),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        pool.acquireUriWithTimeoutAndOriginIsolation(
+            uri,
+            .fromMilliseconds(0),
+            true,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), pool.waitingCount());
+    try std.testing.expectEqual(@as(usize, 0), pool.connectionCount());
+}
+
 test "unified HTTP pool configures HTTP3 through SOCKS5 without bypass" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();

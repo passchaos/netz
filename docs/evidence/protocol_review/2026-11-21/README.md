@@ -794,3 +794,22 @@ load-sensitive UDP batching flake; the isolated run passes 59/60 (1 skipped).
 | --- | --- | --- |
 | Filtered retransmission registration | 33/33 | `quic-retransmit-filtered.log` |
 | Isolated ECN batching regression | 59/60 (1 skipped) | `quic-ecn-isolated.log` |
+
+
+## Thirtieth pass: pool timeout with origin isolation
+
+`Pool.acquireUriWithDeadlineAndOriginIsolation` was the only acquisition
+variant without a timeout counterpart: callers that needed the internal
+redirect origin-isolation hook had to build an awake-clock deadline
+themselves, while every other acquisition form offered both deadline and
+timeout. Add `acquireUriWithTimeoutAndOriginIsolation`, matching the existing
+non-positive-budget rejection order: the timeout check runs before origin-key
+parsing or any pool/transport work. The new focused test asserts both
+`acquireUriWithTimeout` and the origin-isolation form return `Timeout` at a
+zero budget without registering a waiter or opening a connection, and the
+public package surface test pins the new declaration.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full HTTP suite | 305/305 | `http-full-pool-timeout.log` |
+| Public package surface tests | 26/26 | `test-package-pool-timeout.log` |

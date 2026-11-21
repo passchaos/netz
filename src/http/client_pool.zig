@@ -314,6 +314,20 @@ pub const Pool = struct {
         }
     }
 
+    pub fn acquireUriWithTimeoutAndOriginIsolation(
+        self: *Pool,
+        uri_text: []const u8,
+        timeout: std.Io.Duration,
+        isolate_origin_state: bool,
+    ) OperationError!Lease {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.acquireUriWithDeadlineAndOriginIsolation(
+            uri_text,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+            isolate_origin_state,
+        );
+    }
+
     pub const requestUri = request_ops.requestUri;
     pub const requestUriWithTimeout = request_ops.requestUriWithTimeout;
     pub const requestUriWithDeadline = request_ops.requestUriWithDeadline;

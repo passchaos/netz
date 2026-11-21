@@ -1037,6 +1037,10 @@ test "public modules are reachable" {
         "http3RememberedSettingsStats",
     ));
     try std.testing.expect(@hasDecl(
+        netz.http.Pool,
+        "acquireUriWithTimeoutAndOriginIsolation",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.http3.runtime.HandshakeClient,
         "peerSettings",
     ));
