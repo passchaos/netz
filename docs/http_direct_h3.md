@@ -55,6 +55,12 @@ Handshake-level CRYPTO flights are also split into datagrams bounded by the
 endpoint's `max_datagram_size`, so certificate and mTLS flights do not require
 jumbo UDP packets. The peer reassembles client CRYPTO across datagrams.
 
+`Connection.close()` sends a best-effort QUIC CONNECTION_CLOSE with
+`NO_ERROR`, matching the H1/H2 close-notify contract. `closeWithoutCloseNotify`
+and `closeWithDeadline` retire the local QUIC owner without another socket
+write; the deadline form validates the deadline before teardown so cleanup
+cannot extend it.
+
 `connectUri*`, `request*`, Reader reads, body output and response reads preserve
 one absolute operation deadline. A custom Reader must cooperate with `std.Io`
 cancellation: the library joins the read task before releasing its borrowed

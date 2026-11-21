@@ -95,7 +95,15 @@ pub const Connection = struct {
         switch (self.value) {
             .http1 => |*client| client.close(),
             .http2 => |*connection| connection.close(),
-            .http3 => |owner| owner.deinit(),
+            .http3 => |owner| {
+                // Match the H1/H2 close-notify contract with a best-effort
+                // QUIC CONNECTION_CLOSE carrying NO_ERROR.
+                owner.client.established.connection.closeApplication(
+                    0,
+                    "",
+                ) catch {};
+                owner.deinit();
+            },
         }
         self.* = undefined;
     }

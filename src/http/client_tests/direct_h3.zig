@@ -261,3 +261,52 @@ test "unified HTTP direct H3 URI requests redirects Reader replay and credential
     try redirectAndOneShot(false);
     try redirectAndOneShot(true);
 }
+
+test "unified HTTP direct H3 close sends CONNECTION_CLOSE" {
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var certificate: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(&certificate, tls_testing.certificate_base64);
+    const key = try tls_testing.serverKeyPair();
+    const pin = key.public_key.toUncompressedSec1();
+    const limits: h3.Limits = .{ .quic = .{ .max_datagram_size = 4096 } };
+    var server = try h3.HandshakeServer.bind(allocator, io, .{ .ip4 = .loopback(0) }, limits, .{
+        .handshake = .{ .local_connection_id = &.{ 31, 32, 33, 34, 35, 36, 37, 38 }, .identity = .{
+            .certificate_chain = &.{&certificate},
+            .signer = .{ .ecdsa_p256_sha256 = .{ .key_pair = key } },
+        } },
+    });
+    defer server.deinit();
+    var release: std.Io.Event = .unset;
+    const Peer = struct {
+        fn run(listener: *h3.HandshakeServer, task_io: std.Io, done: *std.Io.Event) !void {
+            var session = try listener.acceptWithTimeout(.fromSeconds(5));
+            defer session.deinit();
+            var request = try session.receiveRequestWithDeadline(deadline(task_io));
+            defer request.deinit(allocator);
+            try session.sendResponse(request.stream_id, .{ .status = 200, .body = "ok" });
+            // The facade's close() must deliver CONNECTION_CLOSE, not just
+            // drop the local QUIC owner.
+            try std.testing.expectError(
+                error.ConnectionClosed,
+                session.receiveRequestWithDeadline(deadline(task_io)),
+            );
+            try done.wait(task_io);
+        }
+    };
+    var peer = try io.concurrent(Peer.run, .{ &server, io, &release });
+    defer _ = peer.cancel(io) catch {};
+    defer release.set(io);
+    const uri = try std.fmt.allocPrint(allocator, "https://127.0.0.1:{d}/close", .{server.address().getPort()});
+    defer allocator.free(uri);
+    var client = try http.Client.init(allocator, io, .{ .protocol_policy = .http3_only, .tls = .{ .server_verifier = .{ .pinned_ecdsa_p256_public_key = pin } }, .http3 = .{ .limits = limits } });
+    defer client.deinit();
+    var connection = try client.connectUriWithDeadline(uri, deadline(io));
+    var response = try connection.requestWithDeadline("/close", .{}, deadline(io));
+    defer response.deinit();
+    try std.testing.expectEqualStrings("ok", response.body());
+    connection.close();
+    release.set(io);
+    try peer.await(io);
+}

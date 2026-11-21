@@ -1940,11 +1940,18 @@ fn connectAttempt(
             .max_crypto_frame_data_len = options.max_crypto_frame_data_len,
         },
     };
-    try retransmit.sendWithoutResponse(
+    retransmit.sendWithoutResponse(
         options.handshake_recovery,
         &client_handshake_send,
         retransmit.HandshakeFlight.send,
-    );
+    ) catch |err| {
+        // Protection may have retired a packet-number range before the socket
+        // failed. Preserve the first unused number so a close cannot reuse a
+        // protected nonce.
+        peer_failure.next_packet_number =
+            client_handshake_send.next_packet_number;
+        return err;
+    };
     // A CONNECTION_CLOSE after this point must use a Handshake packet number
     // beyond every protected packet in the client flight.
     peer_failure.next_packet_number = client_handshake_send.next_packet_number;

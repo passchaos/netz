@@ -136,3 +136,29 @@ blocks: the client joins its server thread while the server waits in
 `receiveRequest` for a request that never arrives. A clean worktree at
 `28dd7d76` reproduces the identical stack, so it is unrelated to this batch and
 is recorded as an open finding (P6) rather than hidden as a pass.
+
+
+## Third pass: H3 close parity and final-flight send failures
+
+Two smaller correctness gaps closed after the second pass.
+
+- `http.Connection.close()` for H3 only deinitialized the QUIC owner, so the
+  peer learned about the end through an idle timeout instead of
+  CONNECTION_CLOSE. It now sends a best-effort `CONNECTION_CLOSE` with
+  `NO_ERROR` before teardown. `closeWithoutCloseNotify` and
+  `closeWithDeadline` remain local, deadline-safe teardown.
+- The client's final Handshake CRYPTO flight has no PTO retransmission. Its
+  sender previously ignored `send_error` and partial socket progress, so a
+  failed or truncated Finished flight could look like a successful handshake.
+  It now returns the socket error (or `HandshakeSendFailed`) and preserves the
+  first unused Handshake packet number so the error-path CONNECTION_CLOSE
+  cannot reuse a protected AEAD nonce.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Direct H3 including peer-observed CONNECTION_CLOSE, plus protocol policy | 109/109 | `h3-close-debug.log` |
+| QUIC handshake, PTO, certificate, prepared verifier, CRYPTO limits | 64/64 | `quic-close-debug.log` |
+
+The close test has the server session wait for the next request after the
+response and assert `error.ConnectionClosed`, proving the facade delivered the
+close frame rather than dropping the connection locally.

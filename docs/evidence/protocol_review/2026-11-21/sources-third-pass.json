@@ -1,0 +1,6 @@
+{
+  "src/http/client.zig": "601c123485427c7db016288a44b5bffc5e56897b6dedcf79e1aebea4c7d729ee",
+  "src/http/client_tests/direct_h3.zig": "f88715584b7f3b5b368a83fdb7d5765f04ff6f8cf980d1a97c897216d16778e4",
+  "src/quic/handshake.zig": "c9d5e9eb56968d3f0180998669a087f4553bb2f65192563bd9e0a65a653fdf66",
+  "src/quic/handshake/retransmit.zig": "d309466237034d42d504e3600591c1abe71f3b68b2ec01b045cf50088e936440"
+}

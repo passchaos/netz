@@ -684,10 +684,14 @@ pub const HandshakeFlight = struct {
             progress.last_packet_number + 1
         else
             null;
-        // Protection already retired every packet number in the flight. A
-        // socket-rejected suffix is packet loss; the PTO loop retries under a
-        // fresh range.
-        _ = progress.send_error;
+        // This final client flight has no PTO retransmission. A socket error
+        // or partially sent batch means the server never receives the complete
+        // Finished/Certificate flight, so reporting success would leave the
+        // caller with a half-open connection.
+        if (progress.send_error) |err| return err;
+        if (progress.sent_count != progress.protected_count) {
+            return error.HandshakeSendFailed;
+        }
     }
 };
 
