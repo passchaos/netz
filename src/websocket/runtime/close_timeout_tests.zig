@@ -3575,3 +3575,62 @@ test "WebSocket RFC 8441 message deadline resumes one masked frame" {
     joined = true;
     if (shared.err) |err| return err;
 }
+
+test "WebSocket generic message timeout validates and commits one bounded frame" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    const streams = try testNetworkStreams(io);
+    defer streams[1].close(io);
+
+    var connection = runtime.testing.initDirectConnection(
+        allocator,
+        io,
+        streams[0],
+        .client,
+        .{},
+    );
+    defer connection.close();
+
+    var progress: runtime.MessageWriteProgress = .{};
+    try std.testing.expectError(
+        error.InvalidFrame,
+        connection.sendMessageWithTimeout(
+            .ping,
+            "control",
+            &progress,
+            .fromMilliseconds(50),
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), progress.committed_bytes);
+    try std.testing.expectError(
+        error.Timeout,
+        connection.sendMessageWithTimeout(.binary, "expired", &progress, .zero),
+    );
+    try std.testing.expectEqual(@as(usize, 0), progress.committed_bytes);
+
+    try connection.sendMessageWithTimeout(
+        .binary,
+        "generic",
+        &progress,
+        .fromMilliseconds(500),
+    );
+    try std.testing.expect(progress.frame_committed);
+    const expected_len = 2 + 4 + "generic".len;
+    try std.testing.expectEqual(@as(usize, expected_len), progress.total_bytes);
+
+    // The peer observes exactly one masked binary frame with the payload.
+    var frame_bytes: [64]u8 = undefined;
+    var reader_buffer: [64]u8 = undefined;
+    var reader = streams[1].reader(io, &reader_buffer);
+    try reader.interface.readSliceAll(frame_bytes[0..expected_len]);
+    var parsed = try websocket.parseFrameOptions(
+        allocator,
+        frame_bytes[0..expected_len],
+        .{ .expect_mask = .masked },
+    );
+    defer parsed.deinit(allocator);
+    try std.testing.expectEqual(websocket.Opcode.binary, parsed.header.opcode);
+    try std.testing.expectEqualStrings("generic", parsed.payload);
+}

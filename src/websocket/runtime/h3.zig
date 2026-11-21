@@ -713,6 +713,46 @@ pub fn Connection(comptime role: common.Role) type {
             );
         }
 
+        /// Send one text or binary message under an absolute transport
+        /// deadline. `sendTextWithDeadline` and `sendBinaryWithDeadline` are
+        /// the typed convenience forms; this variant keeps the opcode-driven
+        /// shape while bounding lock admission and QUIC stream output with one
+        /// deadline.
+        pub fn sendMessageWithDeadline(
+            self: *Self,
+            opcode: websocket.Opcode,
+            payload: []const u8,
+            progress: *MessageWriteProgress,
+            deadline: std.Io.Clock.Timestamp,
+        ) Error!void {
+            progress.* = .{};
+            _ = try deadline_policy.usableAwake(self.io(), deadline);
+            try common.validateOutgoingMessage(self.limits, opcode, payload);
+            return self.sendMessageWithDeadlineLocked(
+                opcode,
+                payload,
+                progress,
+                deadline,
+            );
+        }
+
+        pub fn sendMessageWithTimeout(
+            self: *Self,
+            opcode: websocket.Opcode,
+            payload: []const u8,
+            progress: *MessageWriteProgress,
+            timeout: std.Io.Duration,
+        ) Error!void {
+            progress.* = .{};
+            if (timeout.nanoseconds <= 0) return error.Timeout;
+            return self.sendMessageWithDeadline(
+                opcode,
+                payload,
+                progress,
+                .fromNow(self.io(), .{ .raw = timeout, .clock = .awake }),
+            );
+        }
+
         /// Mask a mutable client payload in place and send it without the
         /// bounded copy used by immutable client sends. The payload remains
         /// masked after return, matching websocket.zig's mutable send contract.

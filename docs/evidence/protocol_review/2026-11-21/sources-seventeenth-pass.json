@@ -1,0 +1,7 @@
+{
+  "src/websocket/runtime/connection.zig": "d1ddea0697a08a4dd8a8ca79d112da6ae079ee2b883d8a435aae3a1daf6ce2f5",
+  "src/websocket/runtime/h2_connection.zig": "681f1f3036ba4126e2a0e2bfb1ca968a99cc4e5224d11172dc82e50c4e207237",
+  "src/websocket/runtime/h3.zig": "a168bfabfdf9114d1ebbb27118426bd9bc466c628dddd1d80a0b2e522bd0cbf9",
+  "src/websocket/runtime/mutex_deadline_tests.zig": "3e33b6a7ed156d6e5b9bb9b8a358084e8edbd11471477e9e0cc8a7412cc9034e",
+  "src/websocket/runtime/close_timeout_tests.zig": "e4b7e77199598661b864d3d1a365a75b2cbe0e93e710105451dc62dbcb5f4b5a"
+}

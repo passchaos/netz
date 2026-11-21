@@ -1212,7 +1212,11 @@ Applications that intentionally send Pong outside the automatic receive path
 also have `sendPongWithTimeout` and `sendPongWithDeadline` on HTTP/1, RFC 8441,
 and RFC 9220. They report the same complete-frame `MessageWriteProgress`, keep
 one client mask across retries, reject a different payload while partial, and
-resume only the unsent transport-visible suffix.
+resume only the unsent transport-visible suffix. Opcode-driven sends that
+already use `sendMessage` have matching `sendMessageWithTimeout` and
+`sendMessageWithDeadline` forms on all three transports; they validate
+text/binary opcodes before touching the send mutex and report the same
+`MessageWriteProgress`.
 The same transports expose send-only `sendPingWith*`, `sendCloseWith*`, and
 nullable `sendCloseFrameWith*` forms for event loops that own peer-response
 polling. Unlike `pingWith*` and `closeWith*`, these methods stop once the local

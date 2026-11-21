@@ -368,6 +368,45 @@ pub const Connection = struct {
         );
     }
 
+    /// Send one text or binary message under an absolute transport deadline.
+    /// `sendTextWithDeadline` and `sendBinaryWithDeadline` are the typed
+    /// convenience forms; this variant keeps the opcode-driven `sendMessage`
+    /// shape while bounding lock admission and output with one deadline.
+    pub fn sendMessageWithDeadline(
+        self: *Connection,
+        opcode: websocket.Opcode,
+        payload: []const u8,
+        progress: *MessageWriteProgress,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!void {
+        progress.* = .{};
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        try common.validateOutgoingMessage(self.limits, opcode, payload);
+        return self.sendMessageWithDeadlineLocked(
+            opcode,
+            payload,
+            progress,
+            deadline,
+        );
+    }
+
+    pub fn sendMessageWithTimeout(
+        self: *Connection,
+        opcode: websocket.Opcode,
+        payload: []const u8,
+        progress: *MessageWriteProgress,
+        timeout: std.Io.Duration,
+    ) Error!void {
+        progress.* = .{};
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendMessageWithDeadline(
+            opcode,
+            payload,
+            progress,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     /// Compatibility wrapper for the two-slice binary-message form.
     pub fn sendBinaryParts(
         self: *Connection,

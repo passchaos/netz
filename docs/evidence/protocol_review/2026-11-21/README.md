@@ -491,3 +491,24 @@ Changes:
 | Direct H3 close/deadline/timeout CONNECTION_CLOSE | 106/106 | `http-h3-close-timeout.log` |
 | Internal saturation and wide-write tests | 224/224 | `lib-saturation.log` |
 | Saturation helper unit test | 2/2 | `tcp-saturation-unit.log` |
+
+
+## Seventeenth pass: generic opcode-driven bounded sends
+
+`sendMessage(opcode, payload)` had no matching `WithTimeout`/`WithDeadline`
+forms even though the typed `sendText*`/`sendBinary*` pairs and the
+opcode-driven `sendMessageWithDeadlineLocked` already existed. HTTP/1,
+RFC 8441 and RFC 9220 connections now expose:
+
+- `sendMessageWithDeadline(opcode, payload, progress, deadline)`;
+- `sendMessageWithTimeout(opcode, payload, progress, timeout)`.
+
+Both validate text/binary opcodes before acquiring the send mutex, report the
+same complete-frame `MessageWriteProgress`, and keep the existing partial-frame
+retry identity. The bounded-mutex admission test now covers the generic form on
+all three transports and both roles.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Generic bounded send plus mutex admission | 96/96 | `ws-generic-send.log` |
+| Full WebSocket suite | 504/505, 1 host-sensitive skip | `ws-full-after-generic.log` |

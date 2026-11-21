@@ -6,7 +6,7 @@ const http2 = @import("../../http2/mod.zig");
 const http3 = @import("../../http3/mod.zig");
 const quic = @import("../../quic/mod.zig");
 const allocator = std.testing.allocator;
-const Operation = enum { binary, text, slices, inplace, fragments, ping, pong, close, ping_wait, close_wait, retained_close_wait };
+const Operation = enum { binary, text, generic, slices, inplace, fragments, ping, pong, close, ping_wait, close_wait, retained_close_wait };
 
 test {
     _ = @import("../../internal/timed_mutex_tests.zig");
@@ -43,6 +43,7 @@ fn exercise(connection: anytype, io: std.Io, role: runtime.Role, operation: Oper
             switch (self.operation) {
                 .binary => try self.connection.sendBinaryWithDeadline("data", &self.progress, deadline),
                 .text => try self.connection.sendTextWithDeadline("text", &self.progress, deadline),
+                .generic => try self.connection.sendMessageWithDeadline(.binary, "data", &self.progress, deadline),
                 .slices => try self.connection.sendBinarySlicesWithDeadline(&.{ "one", "two" }, &self.progress, deadline),
                 .inplace => try self.connection.sendBinaryInPlaceWithDeadline(&self.mutable, &self.progress, deadline),
                 .fragments => try self.connection.sendFragmentedWithDeadline(.binary, &.{ "one", "two" }, &self.progress, deadline),
