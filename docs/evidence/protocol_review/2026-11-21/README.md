@@ -1132,3 +1132,4 @@ HTTP/3, HPACK, QPACK, WebSocket, WebTransport, and MQTT seeds.
 | --- | --- | --- |
 | Full WebSocket suite | 507/508 (1 skipped) | `websocket-direct-read-buffer.log` |
 | Parser fuzz corpus replay | 9/9 steps, 2/2 tests | `fuzz-parsers-replay.log` |
+| Public package surface tests | 26/26 | `test-package-direct-read-buffer.log` |
