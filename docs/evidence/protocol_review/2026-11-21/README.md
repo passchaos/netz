@@ -1017,3 +1017,21 @@ the callback. The API map also records the two receive spellings:
 | --- | --- | --- |
 | Full QUIC suite | 1108/1131 (23 skipped) | `quic-server-visiting-timeout.log` |
 | Public package surface tests | 26/26 | `test-package-visiting-timeout.log` |
+
+
+## Forty-second pass: QUIC connection timeout forms
+
+Four `quic.one_rtt.Connection` operations exposed only absolute-deadline
+forms: `trySendDatagram`, `trySendDatagramOnce`, `waitForPacingAvailability`,
+and `flushPendingAck`. Add `trySendDatagramWithTimeout`,
+`trySendDatagramOnceWithTimeout`, `waitForPacingAvailabilityWithTimeout`, and
+`flushPendingAckWithTimeout`; each converts once through
+`deadline_policy.fromTimeout`, so a non-positive duration returns `Timeout`
+before DATAGRAM validation, pacing inspection, ACK flush, or socket
+submission. The existing datagram, pacing, and delayed-ACK tests now assert
+the zero-budget rejection before the successful deadline path.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full QUIC suite | 1108/1131 (23 skipped) | `quic-connection-timeout-forms.log` |
+| Public package surface tests | 26/26 | `test-package-connection-timeouts.log` |

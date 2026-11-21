@@ -8470,6 +8470,22 @@ test "public modules are reachable" {
         netz.quic.one_rtt.Connection,
         "servicePacketServicingTimersDeadline",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.one_rtt.Connection,
+        "trySendDatagramWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.one_rtt.Connection,
+        "trySendDatagramOnceWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.one_rtt.Connection,
+        "waitForPacingAvailabilityWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.one_rtt.Connection,
+        "flushPendingAckWithTimeout",
+    ));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt, "ReceivedPacketBatch"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.ReceivedPacketBatch, "takeNext"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.ReceivedPacketBatch, "remaining"));

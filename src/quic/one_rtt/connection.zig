@@ -2773,6 +2773,20 @@ pub const Connection = struct {
     /// Congestion exhaustion is returned to the caller without reading UDP so
     /// protocol adapters can drive their own packet router under the same
     /// deadline.
+    /// Relative-timeout counterpart to `trySendDatagramWithDeadline`. A
+    /// non-positive duration returns `Timeout` before DATAGRAM validation or
+    /// any socket submission.
+    pub fn trySendDatagramWithTimeout(
+        self: *Connection,
+        data: []const u8,
+        timeout: std.Io.Duration,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!void {
+        return self.trySendDatagramWithDeadline(
+            data,
+            (try deadline_policy.fromTimeout(self.endpoint.io, timeout)).?,
+        );
+    }
+
     pub fn trySendDatagramWithDeadline(
         self: *Connection,
         data: []const u8,
@@ -2824,6 +2838,19 @@ pub const Connection = struct {
             self.ack_eliciting_since_last_ack != 0 or
                 self.immediate_ack_requested,
             sent_time_ns,
+        );
+    }
+
+    /// Relative-timeout counterpart to `trySendDatagramOnceWithDeadline`. A
+    /// non-positive duration returns `Timeout` before any send attempt.
+    pub fn trySendDatagramOnceWithTimeout(
+        self: *Connection,
+        data: []const u8,
+        timeout: std.Io.Duration,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!void {
+        return self.trySendDatagramOnceWithDeadline(
+            data,
+            (try deadline_policy.fromTimeout(self.endpoint.io, timeout)).?,
         );
     }
 
@@ -3978,6 +4005,18 @@ pub const Connection = struct {
     /// integrating `pacingDeadlineAt` into their own scheduler.
     pub fn waitForPacingAvailability(self: *Connection) Error!void {
         try self.waitForPacing(self.monotonicNowNs());
+    }
+
+    /// Relative-timeout counterpart to
+    /// `waitForPacingAvailabilityWithDeadline`. A non-positive duration
+    /// returns `Timeout` without inspecting the pacing timer.
+    pub fn waitForPacingAvailabilityWithTimeout(
+        self: *Connection,
+        timeout: std.Io.Duration,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!void {
+        return self.waitForPacingAvailabilityWithDeadline(
+            (try deadline_policy.fromTimeout(self.endpoint.io, timeout)).?,
+        );
     }
 
     /// Wait for the currently exposed pacing wake-up without exceeding a
@@ -6428,6 +6467,17 @@ pub const Connection = struct {
         const start = self.ack_delay_start_ns orelse now_ns;
         try self.sendAckForDelayNs(now_ns -| start);
         return true;
+    }
+
+    /// Relative-timeout counterpart to `flushPendingAckWithDeadline`. A
+    /// non-positive duration returns `Timeout` without flushing the ACK.
+    pub fn flushPendingAckWithTimeout(
+        self: *Connection,
+        timeout: std.Io.Duration,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!bool {
+        return self.flushPendingAckWithDeadline(
+            (try deadline_policy.fromTimeout(self.endpoint.io, timeout)).?,
+        );
     }
 
     /// Flush a pending cumulative ACK before an absolute awake-clock deadline.

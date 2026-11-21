@@ -1294,6 +1294,14 @@ test "QUIC bounded DATAGRAM send waits for ACK congestion credit" {
     );
     try std.testing.expectError(
         error.Timeout,
+        client.trySendDatagramWithTimeout("zero-budget", .fromNanoseconds(0)),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        client.trySendDatagramOnceWithTimeout("zero-once", .fromNanoseconds(0)),
+    );
+    try std.testing.expectError(
+        error.Timeout,
         client.sendDatagramWithTimeout("blocked", .fromMilliseconds(10)),
     );
     const after_timeout = client.stats();
@@ -4981,6 +4989,10 @@ test "QUIC one-shot STREAM sends never wait for blocked notifications" {
             .clock = .real,
             .raw = .fromNanoseconds(std.time.ns_per_s),
         }),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        connection.waitForPacingAvailabilityWithTimeout(.fromNanoseconds(0)),
     );
     try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
     try std.testing.expectEqual(before.packets_sent, connection.stats().packets_sent);
@@ -8860,6 +8872,10 @@ test "QUIC 1-RTT local ACK policy initializes cadence and rejects excessive dela
             .clock = .awake,
             .raw = .zero,
         }),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        connection.flushPendingAckWithTimeout(.fromNanoseconds(0)),
     );
     try std.testing.expectEqual(first_deadline, connection.ackDelayDeadline().?);
     try std.testing.expectError(
