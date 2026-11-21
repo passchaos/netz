@@ -920,3 +920,20 @@ all three declarations.
 | --- | --- | --- |
 | Full WebTransport suite | 755/757 (2 skipped) | `webtransport-session-control-timeouts.log` |
 | Public package surface tests | 26/26 | `test-package-session-control-timeouts.log` |
+
+
+## Thirty-seventh pass: concurrent body deadline spelling
+
+The HTTP/2 and HTTP/3 concurrent `Stream` types exposed
+`startResponseWithBodyWithTimeout` next to
+`startResponseWithBodyAndDeadline`, while every sibling bounded operation
+uses the `WithDeadline`/`WithTimeout` pair. Add the canonical
+`startResponseWithBodyWithDeadline` on both types and mark the `AndDeadline`
+spelling as a compatibility alias that forwards to the same owner-command
+submission. The informational-response tests now assert zero-budget
+rejection through the new name.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full HTTP/2 suite | 984/984 | `http2-concurrent-body-deadline.log` |
+| Full HTTP/3 suite | 926/930 (4 skipped) | `http3-concurrent-body-deadline.log` |

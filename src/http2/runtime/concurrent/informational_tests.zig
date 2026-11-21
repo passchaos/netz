@@ -21,6 +21,7 @@ test "HTTP/2 concurrent informational responses compose with bodies and trailers
             try std.testing.expectError(error.Timeout, stream.writeInformationalResponseWithTimeout(102, &.{}, .zero));
             try std.testing.expectError(error.Timeout, stream.startResponseWithTimeout(.{ .status = 200 }, .zero));
             try std.testing.expectError(error.Timeout, stream.startResponseWithBodyWithTimeout(.{ .status = 200 }, "x", false, .zero));
+            try std.testing.expectError(error.Timeout, stream.startResponseWithBodyWithDeadline(.{ .status = 200 }, "x", false, .{ .raw = .zero, .clock = .awake }));
             try std.testing.expectError(error.Timeout, stream.writeDataWithTimeout("x", false, .zero));
             try stream.writeInformationalResponse(100, &.{});
             try stream.writeInformationalResponseWithDeadline(103, &.{.{ .name = "link", .value = "</style.css>" }}, deadline(ctx.io));

@@ -300,6 +300,27 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                 return self.engine.submit(&command, null);
             }
 
+            /// Deadline-bounded spelling consistent with
+            /// `startResponseWithBodyWithTimeout`.
+            pub fn startResponseWithBodyWithDeadline(
+                self: Stream,
+                response: http3.Response,
+                body_length: ?usize,
+                data: []const u8,
+                fin: bool,
+                deadline: std.Io.Clock.Timestamp,
+            ) anyerror!void {
+                return self.startResponseWithBodyAndDeadline(
+                    response,
+                    body_length,
+                    data,
+                    fin,
+                    deadline,
+                );
+            }
+
+            /// Compatibility spelling; prefer
+            /// `startResponseWithBodyWithDeadline`.
             pub fn startResponseWithBodyAndDeadline(
                 self: Stream,
                 response: http3.Response,

@@ -60,6 +60,7 @@ test "HTTP/3 concurrent informational development sends retain ordered offsets" 
             try std.testing.expectError(error.Timeout, stream.writeInformationalResponseWithTimeout(102, &.{}, .zero));
             try std.testing.expectError(error.Timeout, stream.startResponseWithTimeout(.{ .status = 200 }, null, .zero));
             try std.testing.expectError(error.Timeout, stream.startResponseWithBodyWithTimeout(.{ .status = 200 }, null, "x", false, .zero));
+            try std.testing.expectError(error.Timeout, stream.startResponseWithBodyWithDeadline(.{ .status = 200 }, null, "x", false, .{ .raw = .zero, .clock = .awake }));
             try std.testing.expectError(error.Timeout, stream.writeDataWithTimeout("x", false, .zero));
             try stream.writeInformationalResponseWithDeadline(103, &.{}, deadline(ctx.io));
             try std.testing.expectError(
