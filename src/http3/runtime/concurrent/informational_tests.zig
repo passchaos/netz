@@ -58,8 +58,30 @@ test "HTTP/3 concurrent informational development sends retain ordered offsets" 
         fn run(ctx: *Context, stream: *runtime.Server.ConcurrentStream) !void {
             try std.testing.expectError(error.Timeout, stream.writeInformationalResponseWithDeadline(102, &.{}, .{ .raw = .zero, .clock = .awake }));
             try stream.writeInformationalResponseWithDeadline(103, &.{}, deadline(ctx.io));
-            try stream.startResponseWithBodyAndInformational(.{ .status = 200 }, null, "alpha", false, &.{.{ .status = 102 }});
+            try std.testing.expectError(
+                error.Timeout,
+                stream.startResponseWithBodyAndInformationalWithTimeout(
+                    .{ .status = 200 },
+                    null,
+                    "alpha",
+                    false,
+                    &.{.{ .status = 102 }},
+                    .zero,
+                ),
+            );
+            try stream.startResponseWithBodyAndInformationalWithTimeout(
+                .{ .status = 200 },
+                null,
+                "alpha",
+                false,
+                &.{.{ .status = 102 }},
+                .fromSeconds(1),
+            );
             try stream.writeData("beta", false);
+            try std.testing.expectError(
+                error.Timeout,
+                stream.resetWithTimeout(0, .zero),
+            );
             try std.testing.expectError(
                 error.Timeout,
                 stream.finishWithTrailersWithTimeout(&.{}, .zero),

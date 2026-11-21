@@ -315,6 +315,48 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                 return self.engine.submit(&command, null);
             }
 
+            pub fn startResponseWithBodyAndInformationalWithDeadline(
+                self: Stream,
+                response: http3.Response,
+                body_length: ?usize,
+                data: []const u8,
+                fin: bool,
+                informational: []const http3.InformationalResponse,
+                deadline: std.Io.Clock.Timestamp,
+            ) anyerror!void {
+                var command = Command{ .slot = self.slot, .kind = .{ .start_response_with_body = .{
+                    .response = response,
+                    .body_length = body_length,
+                    .data = data,
+                    .fin = fin,
+                    .informational = informational,
+                } } };
+                return self.engine.submit(&command, deadline);
+            }
+
+            pub fn startResponseWithBodyAndInformationalWithTimeout(
+                self: Stream,
+                response: http3.Response,
+                body_length: ?usize,
+                data: []const u8,
+                fin: bool,
+                informational: []const http3.InformationalResponse,
+                timeout: std.Io.Duration,
+            ) anyerror!void {
+                if (timeout.nanoseconds <= 0) return error.Timeout;
+                return self.startResponseWithBodyAndInformationalWithDeadline(
+                    response,
+                    body_length,
+                    data,
+                    fin,
+                    informational,
+                    .fromNow(
+                        self.engine.io,
+                        .{ .raw = timeout, .clock = .awake },
+                    ),
+                );
+            }
+
             /// Write one response DATA contribution. `data` must stay valid
             /// until this call returns. The call blocks until the owner has
             /// committed it (or returns a timeout/transport error).
@@ -375,6 +417,27 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
             pub fn reset(self: Stream, code: u64) anyerror!void {
                 var command = Command{ .slot = self.slot, .kind = .{ .cancel = code } };
                 return self.engine.submit(&command, null);
+            }
+
+            pub fn resetWithDeadline(
+                self: Stream,
+                code: u64,
+                deadline: std.Io.Clock.Timestamp,
+            ) anyerror!void {
+                var command = Command{ .slot = self.slot, .kind = .{ .cancel = code } };
+                return self.engine.submit(&command, deadline);
+            }
+
+            pub fn resetWithTimeout(
+                self: Stream,
+                code: u64,
+                timeout: std.Io.Duration,
+            ) anyerror!void {
+                if (timeout.nanoseconds <= 0) return error.Timeout;
+                return self.resetWithDeadline(
+                    code,
+                    .fromNow(self.engine.io, .{ .raw = timeout, .clock = .awake }),
+                );
             }
         };
 

@@ -694,3 +694,23 @@ trailer finish on both protocols.
 | --- | --- | --- |
 | HTTP/2 concurrent bounded trailer finish | 34/34 | `http2-concurrent-trailer-timeout.log` |
 | HTTP/3 concurrent bounded trailer finish | 65/65 | `http3-concurrent-trailer-timeout.log` |
+
+
+## Twenty-fifth pass: concurrent reset and combined informational budgets
+
+Two remaining concurrent response operations had no bounded form:
+
+- `reset` on HTTP/2 and HTTP/3 now has `resetWithDeadline` and
+  `resetWithTimeout`; a non-positive budget is rejected before queueing the
+  cancel command.
+- HTTP/3 `startResponseWithBodyAndInformational` now has deadline and timeout
+  forms, so the combined informational + head + first-body fast path can be
+  bounded like the other response-start variants.
+
+The concurrent informational suites cover the zero-budget rejection for both
+operations and a successful bounded combined response start.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| HTTP/2 concurrent reset timeout | 34/34 | `http2-concurrent-reset-timeout.log` |
+| HTTP/3 concurrent reset and informational timeout | 65/65 | `http3-concurrent-reset-timeout.log` |

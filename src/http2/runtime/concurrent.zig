@@ -297,6 +297,27 @@ pub fn Engine(
                 var command = Command{ .slot = self.slot, .kind = .{ .cancel = code } };
                 return self.engine.submit(&command, null);
             }
+
+            pub fn resetWithDeadline(
+                self: Stream,
+                code: http2.ErrorCode,
+                deadline: std.Io.Clock.Timestamp,
+            ) anyerror!void {
+                var command = Command{ .slot = self.slot, .kind = .{ .cancel = code } };
+                return self.engine.submit(&command, deadline);
+            }
+
+            pub fn resetWithTimeout(
+                self: Stream,
+                code: http2.ErrorCode,
+                timeout: std.Io.Duration,
+            ) anyerror!void {
+                if (timeout.nanoseconds <= 0) return error.Timeout;
+                return self.resetWithDeadline(
+                    code,
+                    .fromNow(self.engine.io, .{ .raw = timeout, .clock = .awake }),
+                );
+            }
         };
 
         connection: *Connection,

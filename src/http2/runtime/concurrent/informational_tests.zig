@@ -26,6 +26,10 @@ test "HTTP/2 concurrent informational responses compose with bodies and trailers
             try stream.writeData("beta", false);
             try std.testing.expectError(
                 error.Timeout,
+                stream.resetWithTimeout(.cancel, .zero),
+            );
+            try std.testing.expectError(
+                error.Timeout,
                 stream.finishWithTrailersWithTimeout(&.{}, .zero),
             );
             try stream.finishWithTrailersWithTimeout(
