@@ -772,3 +772,25 @@ suite asserts the zero-budget path returns `Timeout` before any transport I/O.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | Complete-request submission budget | 33/33 | `http2-send-request-timeout.log` |
+
+
+## Twenty-ninth pass: retransmit test registration
+
+The handshake retransmission tests lived behind `retransmit.zig`'s own
+anonymous `test { _ = @import("retransmit_tests.zig"); }` block. Because
+`retransmit.zig` is pulled in by production code rather than by a test-block
+import, filtered `zig build test-quic -Dtest-filter=...` runs pruned the
+file's named tests and tripped the focused-scope guard. The import now lives
+in `handshake.zig`'s top-level test block, where the other handshake test
+files are registered. The full QUIC count drops from 1132 to 1131 because the
+removed anonymous aggregator block was itself one test entry; all 14 named
+retransmission tests remain registered.
+
+The full-suite run after the move reported one failure,
+`QUIC UDP endpoint batch preserves independent ECN control messages`, a known
+load-sensitive UDP batching flake; the isolated run passes 59/60 (1 skipped).
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Filtered retransmission registration | 33/33 | `quic-retransmit-filtered.log` |
+| Isolated ECN batching regression | 59/60 (1 skipped) | `quic-ecn-isolated.log` |

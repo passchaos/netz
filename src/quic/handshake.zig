@@ -4511,6 +4511,7 @@ test {
     _ = @import("handshake/certificate_ownership_tests.zig");
     _ = @import("handshake/failure_tests.zig");
     _ = @import("handshake/tests.zig");
+    _ = @import("handshake/retransmit_tests.zig");
     _ = @import("handshake/key_exchange_tests.zig");
     _ = @import("handshake/prepared_verifier_tests.zig");
 }

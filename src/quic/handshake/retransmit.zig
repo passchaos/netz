@@ -988,7 +988,3 @@ fn retryPacketNumber(
     }
     return packet_number;
 }
-
-test {
-    _ = @import("retransmit_tests.zig");
-}
