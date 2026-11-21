@@ -1155,3 +1155,16 @@ WebTransport session/stream lifecycles, and MQTT Session/QoS persistence.
 | Full HTTP/2 suite | 985/985 | `http2-owned-accept-timeout.log` |
 | Public package surface tests | 26/26 | `test-package-owned-accept-timeout.log` |
 | Stateful fuzz corpus replay | 9/9 steps, 2/2 tests | `fuzz-stateful-replay.log` |
+
+
+## Forty-ninth pass: HTTP/3 live connection fuzz replay
+
+`zig build fuzz-http3-connection` replayed its bounded corpus against
+production authenticated QUIC/TLS HTTP/3 client and server sessions. The run
+covers complete and streaming requests, request/response trailers, reversed
+multiplexed responses, cancellation, HEAD body suppression, and terminal
+two-phase GOAWAY, and finished 9/9 steps with 3/3 tests passing.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| HTTP/3 live connection fuzz replay | 9/9 steps, 3/3 tests | `fuzz-http3-connection-replay.log` |
