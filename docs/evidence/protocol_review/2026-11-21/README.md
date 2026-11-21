@@ -235,4 +235,4 @@ genuinely unavailable peer capability still returns
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | Explicit flow limits and required-flow-control construction cases | 117/117 | `webtransport-options-debug.log` |
-| Full WebTransport suite | Queued behind the shared build slot; filtered gate 117/117 passed | `webtransport-suite.log` |
+| Full WebTransport suite | 756/758 passed, 2 skipped | `webtransport-suite.log` |
