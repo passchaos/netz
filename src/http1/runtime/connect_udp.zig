@@ -7,6 +7,7 @@
 //! in place of a per-stream reset.
 
 const std = @import("std");
+const deadline_policy = @import("../../internal/deadline.zig");
 
 pub const ResetCode = enum {
     protocol_error,
@@ -136,6 +137,24 @@ pub fn TunnelAdapter(comptime Tunnel: type) type {
             );
         }
 
+        /// Relative-timeout counterpart to `writeSlicesWithDeadline`. A
+        /// non-positive duration clears `progress` and returns `Timeout`
+        /// before any slice is submitted.
+        pub fn writeSlicesWithTimeout(
+            self: *Self,
+            slices: []const []const u8,
+            end_stream: bool,
+            progress: *WriteProgress,
+            timeout: std.Io.Duration,
+        ) !void {
+            std.debug.assert(!end_stream);
+            try self.inner.writeSlicesWithTimeout(
+                slices,
+                progress,
+                timeout,
+            );
+        }
+
         pub fn closeWrite(self: *Self) !void {
             try self.inner.closeWrite();
         }
@@ -149,6 +168,17 @@ pub fn TunnelAdapter(comptime Tunnel: type) type {
             deadline: std.Io.Clock.Timestamp,
         ) !OwnedData {
             return self.readUntil(deadline);
+        }
+
+        /// Relative-timeout counterpart to `readWithDeadline`. A non-positive
+        /// duration returns `Timeout` before any transport read.
+        pub fn readWithTimeout(
+            self: *Self,
+            timeout: std.Io.Duration,
+        ) !OwnedData {
+            return self.readUntil(
+                (try deadline_policy.fromTimeout(self.inner.io, timeout)).?,
+            );
         }
 
         pub fn reset(self: *Self, _: ResetCode) !void {

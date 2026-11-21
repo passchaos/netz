@@ -1493,6 +1493,14 @@ test "public modules are reachable" {
         netz.http1.runtime.Tunnel,
         "writeSlicesWithTimeout",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.ConnectUdpTunnel,
+        "writeSlicesWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.ConnectUdpTunnel,
+        "readWithTimeout",
+    ));
     try std.testing.expect(@hasDecl(netz.http1.runtime.Tunnel, "abort"));
     try std.testing.expect(@hasDecl(netz.http1, "client_pool"));
     try std.testing.expect(@hasDecl(netz.http1.client_pool, "Pool"));

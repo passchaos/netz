@@ -675,3 +675,36 @@ test "HTTP/1 runtime hands off generic Upgrade with buffered bytes" {
     thread.join();
     if (shared.err) |err| return err;
 }
+
+test "CONNECT-UDP tunnel adapter timeout rejects non-positive budgets" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var inbuf: std.ArrayList(u8) = .empty;
+    defer inbuf.deinit(std.testing.allocator);
+    const tunnel = Tunnel{
+        .io = threaded.io(),
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .inbuf = &inbuf,
+    };
+    var adapter = runtime.ConnectUdpTunnel.init(
+        std.testing.allocator,
+        tunnel,
+    );
+    defer adapter.deinit();
+    var progress: TunnelWriteProgress = .{ .committed_bytes = 99 };
+    try std.testing.expectError(
+        error.Timeout,
+        adapter.writeSlicesWithTimeout(
+            &.{"must-not-write"},
+            false,
+            &progress,
+            .fromNanoseconds(0),
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), progress.committed_bytes);
+    try std.testing.expectError(
+        error.Timeout,
+        adapter.readWithTimeout(.fromNanoseconds(0)),
+    );
+}

@@ -1248,3 +1248,25 @@ rotated connections. The run finished 9/9 steps with 3/3 tests passing.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | HTTP/1 TLS connection fuzz replay | 9/9 steps, 3/3 tests | `fuzz-http1-tls-connection-replay.log` |
+
+
+## Fifty-sixth pass: CONNECT-UDP adapter timeout forms
+
+The public `http1.runtime.ConnectUdpTunnel` adapter (RFC 9298 over the HTTP/1
+Upgrade tunnel) exposed `writeSlicesWithDeadline` and `readWithDeadline`
+without relative-budget counterparts. Add `writeSlicesWithTimeout` (delegating
+to `Tunnel.writeSlicesWithTimeout`, which clears the committed-byte progress
+before validation) and `readWithTimeout` (converting once through the inner
+tunnel io). A non-positive duration returns `Timeout` before any transport
+read or slice submission. A tunnel test asserts the cleared progress and the
+zero-budget rejection, and the package surface pins both declarations.
+
+A bounded coverage-guided parser run, `zig build fuzz-parsers --fuzz=2000`,
+also exited successfully (`result=0` in the guard record); only the trailing
+build lines were captured, so no per-test summary is claimed.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full HTTP/1 suite | 475/475 | `http1-connect-udp-timeout.log` |
+| Public package surface tests | 26/26 | `test-package-connect-udp-timeout.log` |
+| Guided parser fuzz (2000 iterations) | exit 0 | `fuzz-parsers-guided.log` |
