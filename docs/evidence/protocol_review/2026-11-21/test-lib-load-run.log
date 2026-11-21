@@ -1,0 +1,10 @@
++- run test 7078 pass, 41 skip, 12 fail, 1 crash (7132 total)
+error: 'internal.tcp_connect.tests.test.TCP bound connect uses the requested IPv4 source' failed:
+error: 'internal.tcp_connect.tests.test.TCP resolved bound connect falls back under one deadline' failed:
+error: 'internal.socket_options.test.TCP no-delay is enabled on a live stream' failed:
+error: 'http2.runtime.ping_timeout_tests.test.HTTP/2 bounded control reads keep one absolute deadline' failed:
+error: 'http2.runtime.handshake_timeout_tests.test.HTTP/2 h2c server caller deadline spans request and bootstrap' failed:
+error: 'webtransport.runtime.stream.wait.lifecycle_tests.test.WebTransport stream send wait observes CLOSE in the retained HTTP3 cursor suffix' failed:
+error: 'mqtt.broker.runtime_policy.test.delivery policy snapshot never exposes a mixed generation' terminated with signal ILL
+error: 'mqtt.broker_config.tests.test.MQTT broker config loads include directories in Mosquitto order' failed:
+error: 'mqtt.broker_config_include.test.include directory expansion follows Mosquitto order and file scopes' failed:

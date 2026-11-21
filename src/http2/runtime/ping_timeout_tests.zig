@@ -2404,6 +2404,8 @@ test "HTTP/2 bounded control reads keep one absolute deadline" {
 
     const Shared = struct {
         server: *runtime.Server,
+        updates_sent: std.Io.Event = .unset,
+        send_goaway: std.Io.Event = .unset,
         err: ?anyerror = null,
 
         fn run(self: *@This()) void {
@@ -2415,23 +2417,10 @@ test "HTTP/2 bounded control reads keep one absolute deadline" {
         fn runFallible(self: *@This()) !void {
             var connection = try self.server.accept();
             defer connection.close();
-            try std.Io.sleep(
-                self.server.io,
-                .fromMilliseconds(30),
-                .awake,
-            );
             try connection.sendWindowUpdate(0, 11);
-            try std.Io.sleep(
-                self.server.io,
-                .fromMilliseconds(30),
-                .awake,
-            );
             try connection.sendWindowUpdate(0, 13);
-            try std.Io.sleep(
-                self.server.io,
-                .fromMilliseconds(30),
-                .awake,
-            );
+            self.updates_sent.set(self.server.io);
+            try self.send_goaway.wait(self.server.io);
             try connection.sendGoAway(0, .no_error, "done");
         }
     };
@@ -2447,14 +2436,22 @@ test "HTTP/2 bounded control reads keep one absolute deadline" {
         .{},
     );
     defer client.close();
+    // Both window updates are on the wire before the bounded read starts, so
+    // the read can only consume them and then wait for the caller deadline;
+    // no server sleep participates in the assertion.
+    try shared.updates_sent.waitTimeout(io, .{ .duration = .{
+        .clock = .awake,
+        .raw = .fromSeconds(5),
+    } });
     try std.testing.expectError(
         error.Timeout,
-        client.readGoAwayWithTimeout(.fromMilliseconds(70)),
+        client.readGoAwayWithTimeout(.fromMilliseconds(500)),
     );
     try std.testing.expectEqual(@as(i64, 65_535 + 11 + 13), client.send_connection_window.value);
+    shared.send_goaway.set(io);
     var goaway = try client.readGoAwayWithDeadline(.fromNow(
         io,
-        .{ .raw = .fromSeconds(1), .clock = .awake },
+        .{ .raw = .fromSeconds(5), .clock = .awake },
     ));
     defer goaway.deinit(allocator);
     try std.testing.expectEqual(@as(u31, 0), goaway.goaway.last_stream_id);

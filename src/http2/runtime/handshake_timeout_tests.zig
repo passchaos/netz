@@ -878,7 +878,7 @@ test "HTTP/2 h2c server caller deadline spans request and bootstrap" {
         allocator,
         io,
         .{ .ip4 = .loopback(0) },
-        .{ .handshake_timeout = .fromSeconds(1) },
+        .{ .handshake_timeout = .fromSeconds(10) },
     );
     defer server.deinit();
 
@@ -888,7 +888,7 @@ test "HTTP/2 h2c server caller deadline spans request and bootstrap" {
 
         fn run(self: *@This()) void {
             var upgrade = self.server.acceptUpgradeWithTimeout(
-                .fromMilliseconds(50),
+                .fromMilliseconds(2_000),
             ) catch |err| {
                 self.err = err;
                 return;
@@ -904,8 +904,8 @@ test "HTTP/2 h2c server caller deadline spans request and bootstrap" {
 
     // Consume part of the caller-owned budget in the HTTP/1 phase. The server
     // must carry only the remainder into the binary bootstrap rather than
-    // granting the configured one-second phase timeout after sending 101.
-    try std.Io.sleep(io, .fromMilliseconds(25), .awake);
+    // granting the configured ten-second phase timeout after sending 101.
+    try std.Io.sleep(io, .fromMilliseconds(300), .awake);
     try writeH2cUpgradeRequest(io, client);
     var response: [71]u8 = undefined;
     try readExact(io, client, &response);

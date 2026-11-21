@@ -1293,3 +1293,32 @@ finishing-continuation transfer.
 | --- | --- | --- |
 | Full WebSocket suite | 509/510 (1 skipped) | `websocket-owned-message.log` |
 | Public package surface tests | 26/26 | `test-package-owned-message.log` |
+
+
+## Fifty-eighth pass: HTTP/2 timing-test hardening
+
+A full-library run under a heavily loaded host surfaced two timing-sensitive
+HTTP/2 tests that passed in isolation but failed in the full suite:
+`bounded control reads keep one absolute deadline` relied on 30 ms server
+sleeps inside a 70 ms client budget, and
+`h2c server caller deadline spans request and bootstrap` used a 50 ms accept
+budget with a 25 ms client delay. The control-read test is now deterministic:
+the server sends both WINDOW_UPDATEs, signals an event, and waits for the
+client to time out before sending GOAWAY, so no server sleep participates in
+the assertion. The h2c test keeps the same remainder-carried-into-bootstrap
+shape with 2 s accept, 300 ms consumed, and a 10 s phase timeout. Three
+consecutive full HTTP/2 runs passed 985/985 under the same host load.
+
+The same full-library run also exposed out-of-scope and environmental
+failures, recorded here for a future cleanup: `internal.tcp_connect` and
+`internal.socket_options` socket tests, two MQTT config-include tests, and an
+`mqtt.broker.runtime_policy` SIGILL. The in-scope WebTransport failure in that
+run (`stream send wait observes CLOSE in the retained HTTP3 cursor suffix`)
+passed in isolation and in two subsequent full WebTransport runs
+(758/760, 2 skipped), confirming a load-sensitive flake.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full HTTP/2 suite (three consecutive runs) | 985/985 each | live runs |
+| Full WebTransport suite (two runs after the flake) | 758/760 (2 skipped) each | live runs |
+| Full-library loaded run | 7078 pass, 41 skip, 12 fail, 1 crash | `test-lib-load-run.log` |
