@@ -672,12 +672,72 @@ test "HTTP/1 aggregate 100 Continue partial write is terminal" {
         base_io: std.Io,
         calls: usize = 0,
 
+        fn base(context: ?*anyopaque) std.Io {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            return self.base_io;
+        }
+
         fn now(
             context: ?*anyopaque,
             clock: std.Io.Clock,
         ) std.Io.Timestamp {
-            const self: *@This() = @ptrCast(@alignCast(context.?));
-            return self.base_io.vtable.now(self.base_io.userdata, clock);
+            const backend = base(context);
+            return backend.vtable.now(backend.userdata, clock);
+        }
+
+        /// The wrapped `userdata` is this writer, not the Threaded backend.
+        /// Forward every vtable entry the portable deadline read uses so the
+        /// backend still receives its own userdata.
+        fn sleep(
+            context: ?*anyopaque,
+            timeout: std.Io.Timeout,
+        ) std.Io.Cancelable!void {
+            const backend = base(context);
+            return backend.vtable.sleep(backend.userdata, timeout);
+        }
+
+        fn netRead(
+            context: ?*anyopaque,
+            handle: net.Socket.Handle,
+            data: [][]u8,
+        ) net.Stream.Reader.Error!usize {
+            const backend = base(context);
+            return backend.vtable.netRead(backend.userdata, handle, data);
+        }
+
+        fn groupConcurrent(
+            context: ?*anyopaque,
+            group: *std.Io.Group,
+            task_context: []const u8,
+            alignment: std.mem.Alignment,
+            start: *const fn (task: *const anyopaque) void,
+        ) std.Io.ConcurrentError!void {
+            const backend = base(context);
+            return backend.vtable.groupConcurrent(
+                backend.userdata,
+                group,
+                task_context,
+                alignment,
+                start,
+            );
+        }
+
+        fn groupAwait(
+            context: ?*anyopaque,
+            group: *std.Io.Group,
+            token: *anyopaque,
+        ) std.Io.Cancelable!void {
+            const backend = base(context);
+            return backend.vtable.groupAwait(backend.userdata, group, token);
+        }
+
+        fn groupCancel(
+            context: ?*anyopaque,
+            group: *std.Io.Group,
+            token: *anyopaque,
+        ) void {
+            const backend = base(context);
+            backend.vtable.groupCancel(backend.userdata, group, token);
         }
 
         fn write(
@@ -718,6 +778,11 @@ test "HTTP/1 aggregate 100 Continue partial write is terminal" {
             var writer = FailingWriter{ .base_io = self.io };
             var vtable = self.io.vtable.*;
             vtable.netWrite = FailingWriter.write;
+            vtable.netRead = FailingWriter.netRead;
+            vtable.sleep = FailingWriter.sleep;
+            vtable.groupConcurrent = FailingWriter.groupConcurrent;
+            vtable.groupAwait = FailingWriter.groupAwait;
+            vtable.groupCancel = FailingWriter.groupCancel;
             vtable.now = FailingWriter.now;
             const deadline = std.Io.Clock.Timestamp.fromNow(self.io, .{
                 .raw = .fromSeconds(5),

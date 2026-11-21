@@ -1268,6 +1268,24 @@ pub const Tunnel = struct {
         }
     }
 
+    /// Relative-timeout counterpart to `writeSlicesWithDeadline`. A
+    /// non-positive duration returns `Timeout` with `progress` cleared and no
+    /// bytes submitted to the transport.
+    pub fn writeSlicesWithTimeout(
+        self: *Tunnel,
+        slices: []const []const u8,
+        progress: *TunnelWriteProgress,
+        timeout: std.Io.Duration,
+    ) Error!void {
+        progress.* = .{};
+        if (self.write_closed) return error.ConnectionClosed;
+        return self.writeSlicesWithDeadline(
+            slices,
+            progress,
+            (try deadline_policy.fromTimeout(self.io, timeout)).?,
+        );
+    }
+
     /// Finish the tunnel's write half while preserving buffered and future
     /// reads. TLS transports send close_notify before shutting down the
     /// underlying socket write direction. The transition is fail-closed: once

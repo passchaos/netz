@@ -13,6 +13,7 @@ const IdleSocketState = runtime.IdleSocketState;
 const InformationalResponseHead = runtime.InformationalResponseHead;
 const RequestOptions = runtime.RequestOptions;
 const ResponseOptions = runtime.ResponseOptions;
+const TunnelWriteProgress = runtime.TunnelWriteProgress;
 const Server = runtime.Server;
 const StapledOcspPolicy = runtime.StapledOcspPolicy;
 const TlsServer = runtime.TlsServer;
@@ -398,6 +399,29 @@ test "HTTP/1 tunnel write-half close failure is terminal" {
         partial_tunnel.writeSlices(&.{ "must", "not", "write" }),
     );
     try std.testing.expectEqual(@as(usize, 2), partial.calls);
+
+    var zero_budget: FailingIo = .{};
+    var zero_budget_vtable = threaded.io().vtable.*;
+    zero_budget_vtable.netWrite = FailingIo.write;
+    var zero_budget_inbuf: std.ArrayList(u8) = .empty;
+    defer zero_budget_inbuf.deinit(std.testing.allocator);
+    var zero_budget_tunnel = Tunnel{
+        .io = .{ .userdata = &zero_budget, .vtable = &zero_budget_vtable },
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .inbuf = &zero_budget_inbuf,
+    };
+    var zero_budget_progress: TunnelWriteProgress = .{ .committed_bytes = 99 };
+    try std.testing.expectError(
+        error.Timeout,
+        zero_budget_tunnel.writeSlicesWithTimeout(
+            &.{ "must", "not", "write" },
+            &zero_budget_progress,
+            .fromNanoseconds(0),
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), zero_budget.write_calls);
+    try std.testing.expectEqual(@as(usize, 0), zero_budget_progress.committed_bytes);
 
     var failing: FailingIo = .{};
     var vtable = threaded.io().vtable.*;

@@ -1035,3 +1035,27 @@ the zero-budget rejection before the successful deadline path.
 | --- | --- | --- |
 | Full QUIC suite | 1108/1131 (23 skipped) | `quic-connection-timeout-forms.log` |
 | Public package surface tests | 26/26 | `test-package-connection-timeouts.log` |
+
+
+## Forty-third pass: HTTP/1 tunnel write timeout and timed-read harness
+
+`http1.runtime.Tunnel` exposed `writeSlicesWithDeadline` without a
+relative-budget counterpart. Add `writeSlicesWithTimeout`; it clears the
+progress record, rejects a closed write half, then converts once through
+`deadline_policy.fromTimeout`, so a non-positive duration returns `Timeout`
+before any slice reaches the transport. The tunnel test asserts the
+zero-budget rejection leaves `committed_bytes` and the transport untouched.
+
+The full HTTP/1 suite also exposed a pre-existing crash in the aggregate
+100-Continue partial-write test. That test replaces `Connection.io.userdata`
+with a fake writer while copying the Threaded vtable, so the portable
+deadline read's `std.Io.Select` called Threaded group functions with the
+wrong userdata and segfaulted during task allocation. The fake vtable now
+forwards `netRead`, `sleep`, `groupConcurrent`, `groupAwait`, and
+`groupCancel` to the base io with the backend's own userdata; the test passes
+and the full suite is green.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full HTTP/1 suite | 474/474 | `http1-tunnel-timeout.log` |
+| Public package surface tests | 26/26 | `test-package-tunnel-timeout.log` |
