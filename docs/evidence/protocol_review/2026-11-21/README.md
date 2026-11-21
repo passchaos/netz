@@ -1059,3 +1059,21 @@ and the full suite is green.
 | --- | --- | --- |
 | Full HTTP/1 suite | 474/474 | `http1-tunnel-timeout.log` |
 | Public package surface tests | 26/26 | `test-package-tunnel-timeout.log` |
+
+
+## Forty-fourth pass: Alt-Svc request timeout forms
+
+`HandshakeClient.requestUriAltSvc` and `requestUriAltSvcHeader` issued a full
+Alt-Svc request with no caller deadline, while the plain `requestUri` family
+offers both bounded forms. Refactor both through a `Before` helper and add
+`requestUriAltSvcWithDeadline`/`WithTimeout` plus the header counterparts. One
+absolute budget spans target selection, the Alt-Svc connection, and the
+request; the connect phase is still capped by `options.connect_timeout` and
+cannot renew the budget. A non-positive timeout returns `Timeout` before
+header parsing or routing. The Alt-Svc timeout test asserts zero-budget
+rejection for the new request forms alongside the connect form.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full HTTP/3 suite | 927/931 (4 skipped) | `http3-altsvc-request-timeouts.log` |
+| Public package surface tests | 26/26 | `test-package-altsvc-request-timeouts.log` |

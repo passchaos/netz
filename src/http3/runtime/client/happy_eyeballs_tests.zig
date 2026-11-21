@@ -556,4 +556,46 @@ test "HTTP3 Alt-Svc timeout forms reject non-positive budgets before routing" {
             .fromNanoseconds(0),
         ),
     );
+    try std.testing.expectError(
+        error.Timeout,
+        runtime.HandshakeClient.requestUriAltSvcWithTimeout(
+            std.testing.allocator,
+            io,
+            .{ .ip4 = .loopback(0) },
+            uri,
+            target,
+            .{},
+            .{},
+            options,
+            .fromNanoseconds(0),
+        ),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        runtime.HandshakeClient.requestUriAltSvcWithDeadline(
+            std.testing.allocator,
+            io,
+            .{ .ip4 = .loopback(0) },
+            uri,
+            target,
+            .{},
+            .{},
+            options,
+            .{ .clock = .awake, .raw = .zero },
+        ),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        runtime.HandshakeClient.requestUriAltSvcHeaderWithTimeout(
+            std.testing.allocator,
+            io,
+            .{ .ip4 = .loopback(0) },
+            uri,
+            &[_]http3.Qpack.HeaderField{},
+            .{},
+            .{},
+            options,
+            .fromNanoseconds(0),
+        ),
+    );
 }

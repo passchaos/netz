@@ -2320,6 +2320,84 @@ pub const HandshakeClient = struct {
         limits: Limits,
         options: HandshakeClientOptions,
     ) Error!OwnedHandshakeResponse {
+        return requestUriAltSvcBefore(
+            allocator,
+            io,
+            local_address,
+            uri,
+            target,
+            request_options,
+            limits,
+            options,
+            null,
+        );
+    }
+
+    /// Bound both the alternative-service connection and its request by one
+    /// absolute awake-clock deadline; the connect phase cannot renew it.
+    pub fn requestUriAltSvcWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        uri: std.Uri,
+        target: http3.AltSvcTarget,
+        request_options: UriRequestOptions,
+        limits: Limits,
+        options: HandshakeClientOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!OwnedHandshakeResponse {
+        _ = try deadline_policy.usableAwake(io, deadline);
+        return requestUriAltSvcBefore(
+            allocator,
+            io,
+            local_address,
+            uri,
+            target,
+            request_options,
+            limits,
+            options,
+            deadline,
+        );
+    }
+
+    /// Relative-timeout counterpart to `requestUriAltSvcWithDeadline`. A
+    /// non-positive duration returns `Timeout` before validation or routing.
+    pub fn requestUriAltSvcWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        uri: std.Uri,
+        target: http3.AltSvcTarget,
+        request_options: UriRequestOptions,
+        limits: Limits,
+        options: HandshakeClientOptions,
+        timeout: std.Io.Duration,
+    ) Error!OwnedHandshakeResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return requestUriAltSvcWithDeadline(
+            allocator,
+            io,
+            local_address,
+            uri,
+            target,
+            request_options,
+            limits,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    fn requestUriAltSvcBefore(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        uri: std.Uri,
+        target: http3.AltSvcTarget,
+        request_options: UriRequestOptions,
+        limits: Limits,
+        options: HandshakeClientOptions,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!OwnedHandshakeResponse {
         if (!http3.isHttp3Alpn(target.alpn) or
             target.connect_host.len == 0 or target.port == 0)
         {
@@ -2333,18 +2411,30 @@ pub const HandshakeClient = struct {
         )) return error.InvalidHeader;
         const path = try uriRequestTargetAlloc(allocator, uri);
         defer allocator.free(path);
-        var client = try connectUriAltSvc(
-            allocator,
-            io,
-            local_address,
-            uri,
-            target,
-            limits,
-            options,
-        );
+        var client = if (deadline) |absolute|
+            try connectUriAltSvcWithDeadline(
+                allocator,
+                io,
+                local_address,
+                uri,
+                target,
+                limits,
+                options,
+                absolute,
+            )
+        else
+            try connectUriAltSvc(
+                allocator,
+                io,
+                local_address,
+                uri,
+                target,
+                limits,
+                options,
+            );
         defer client.deinit();
 
-        return try client.request(.{
+        const message: http3.Request = .{
             .method = request_options.method,
             .path = path,
             .scheme = "https",
@@ -2352,7 +2442,11 @@ pub const HandshakeClient = struct {
             .headers = request_options.headers,
             .body = request_options.body,
             .trailers = request_options.trailers,
-        });
+        };
+        return if (deadline) |absolute|
+            client.requestWithDeadline(message, absolute)
+        else
+            client.request(message);
     }
 
     /// Establish HTTP/3 to an alternative service while authenticating and
@@ -2620,6 +2714,85 @@ pub const HandshakeClient = struct {
         limits: Limits,
         options: HandshakeClientOptions,
     ) Error!OwnedHandshakeResponse {
+        return requestUriAltSvcHeaderBefore(
+            allocator,
+            io,
+            local_address,
+            uri,
+            headers,
+            request_options,
+            limits,
+            options,
+            null,
+        );
+    }
+
+    /// Deadline-bounded counterpart to `requestUriAltSvcHeader`. The same
+    /// absolute budget spans target selection, connection, and the request.
+    pub fn requestUriAltSvcHeaderWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        uri: std.Uri,
+        headers: anytype,
+        request_options: UriRequestOptions,
+        limits: Limits,
+        options: HandshakeClientOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!OwnedHandshakeResponse {
+        _ = try deadline_policy.usableAwake(io, deadline);
+        return requestUriAltSvcHeaderBefore(
+            allocator,
+            io,
+            local_address,
+            uri,
+            headers,
+            request_options,
+            limits,
+            options,
+            deadline,
+        );
+    }
+
+    /// Relative-timeout counterpart to
+    /// `requestUriAltSvcHeaderWithDeadline`. A non-positive duration returns
+    /// `Timeout` before header parsing or routing.
+    pub fn requestUriAltSvcHeaderWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        uri: std.Uri,
+        headers: anytype,
+        request_options: UriRequestOptions,
+        limits: Limits,
+        options: HandshakeClientOptions,
+        timeout: std.Io.Duration,
+    ) Error!OwnedHandshakeResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return requestUriAltSvcHeaderWithDeadline(
+            allocator,
+            io,
+            local_address,
+            uri,
+            headers,
+            request_options,
+            limits,
+            options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    fn requestUriAltSvcHeaderBefore(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        uri: std.Uri,
+        headers: anytype,
+        request_options: UriRequestOptions,
+        limits: Limits,
+        options: HandshakeClientOptions,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!OwnedHandshakeResponse {
         var origin = try uriEndpoint(allocator, uri);
         defer origin.deinit();
         const target = (try http3.firstHttp3AltSvcTarget(
@@ -2627,16 +2800,29 @@ pub const HandshakeClient = struct {
             headers,
             origin.port,
         )) orelse return error.InvalidHeader;
-        return try requestUriAltSvc(
-            allocator,
-            io,
-            local_address,
-            uri,
-            target,
-            request_options,
-            limits,
-            options,
-        );
+        return if (deadline) |absolute|
+            requestUriAltSvcWithDeadline(
+                allocator,
+                io,
+                local_address,
+                uri,
+                target,
+                request_options,
+                limits,
+                options,
+                absolute,
+            )
+        else
+            requestUriAltSvc(
+                allocator,
+                io,
+                local_address,
+                uri,
+                target,
+                request_options,
+                limits,
+                options,
+            );
     }
 
     pub fn deinit(self: *HandshakeClient) void {

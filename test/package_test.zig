@@ -1077,6 +1077,22 @@ test "public modules are reachable" {
         "connectFromWithEarlyRequestWithTimeout",
     ));
     try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "requestUriAltSvcWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "requestUriAltSvcWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "requestUriAltSvcHeaderWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "requestUriAltSvcHeaderWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.http3.socks5_runtime,
         "connectHostWithTimeout",
     ));
