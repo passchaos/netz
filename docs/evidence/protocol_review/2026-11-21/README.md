@@ -1228,12 +1228,12 @@ from an already negotiated connection exposed `initWithDeadline` without a
 relative-budget counterpart. Add `initWithTimeout`; a non-positive duration
 honors the transfer-on-entry contract by closing the unpublished transport
 without TLS shutdown output and returning `Timeout`, otherwise it converts
-once through the connection's awake-clock io. A new server-side test asserts
-the peer observes EOF and the package surface pins both declarations.
+once through the connection's awake-clock io. Client- and server-side tests
+assert the peer observes EOF, and the package surface pins both declarations.
 
 | Gate | Result | Artifact |
 | --- | --- | --- |
-| Full WebTransport suite | 757/759 (2 skipped) | `webtransport-h2-init-timeout.log` |
+| Full WebTransport suite | 758/760 (2 skipped) | `webtransport-h2-init-timeout.log` |
 | Public package surface tests | 26/26 | `test-package-h2-init-timeout.log` |
 
 

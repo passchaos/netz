@@ -61,3 +61,33 @@ test "WebTransport HTTP2 EndpointClient command preparation uses the original de
     try std.testing.expectEqual(refs, client.state.refs.load(.acquire));
     try std.testing.expect(client.state.head == null and client.state.tail == null and client.state.queued == 0);
 }
+
+test "WebTransport HTTP2 EndpointClient initWithTimeout closes the transport on a zero budget" {
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var fixture = try Fixture.init(io);
+    defer {
+        fixture.peer.close(io);
+        fixture.listener.deinit(io);
+    }
+    try std.testing.expectError(
+        error.Timeout,
+        endpoint.EndpointClient.initWithTimeout(
+            allocator,
+            fixture.connection,
+            .{},
+            .fromNanoseconds(0),
+        ),
+    );
+    var byte: [1]u8 = undefined;
+    const count = try @import("../../../internal/stream_io.zig").readSomeWithDeadline(
+        io,
+        fixture.peer,
+        &byte,
+        .fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(1) }),
+    );
+    try std.testing.expectEqual(@as(usize, 0), count);
+}
