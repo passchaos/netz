@@ -1181,3 +1181,16 @@ The run finished 9/9 steps with 3/3 tests passing.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | WebTransport endpoint fuzz replay | 9/9 steps, 3/3 tests | `fuzz-webtransport-endpoint-replay.log` |
+
+
+## Fifty-first pass: HTTP/2 live connection fuzz replay
+
+`zig build fuzz-http2-connection` replayed its bounded corpus through a
+production h2c connection covering ordinary and streaming request/response
+bodies, request trailers, reversed two-stream response batches, PING,
+RST_STREAM cancellation, GOAWAY and fresh connection rotation. The run
+finished 9/9 steps with 3/3 tests passing.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| HTTP/2 live connection fuzz replay | 9/9 steps, 3/3 tests | `fuzz-http2-connection-replay.log` |
