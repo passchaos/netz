@@ -1207,3 +1207,15 @@ steps with 3/3 tests passing.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | HTTP/1 live connection fuzz replay | 9/9 steps, 3/3 tests | `fuzz-http1-connection-replay.log` |
+
+
+## Fifty-third pass: HTTP/2 TLS connection fuzz replay
+
+`zig build fuzz-http2-tls-connection` replayed its bounded corpus over
+authenticated TLS 1.3 with mandatory `h2` ALPN, negotiated cipher metadata,
+and input-selected bidirectional traffic-key updates between HTTP/2
+operations. The run finished 9/9 steps with 3/3 tests passing.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| HTTP/2 TLS connection fuzz replay | 9/9 steps, 3/3 tests | `fuzz-http2-tls-connection-replay.log` |
