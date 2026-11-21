@@ -553,3 +553,8 @@ request form.
 | HTTP/2 read/probe timeout forms | 35/35 | `http2-probe-read-timeouts.log` |
 | Full HTTP/2 suite | 983/983 | `http2-full-after-read-timeouts.log` |
 | HTTP/3 owned request head timeout | 103/103 | `http3-owned-head-timeout.log` |
+
+The remaining deadline-only names are intentional: H3 connect/request
+primitives already take a relative `connect_timeout` through options,
+WebSocket `ensureBuffered*` are internal prefetch steps behind typed receive
+APIs, and WebTransport `pollWithDeadline` never blocks on transport I/O.
