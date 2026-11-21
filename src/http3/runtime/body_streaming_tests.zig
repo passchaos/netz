@@ -199,8 +199,11 @@ test "HTTP/3 handshake client drains GRO response batch one packet at a time" {
     );
     defer client.deinit();
     if (!client.endpoint.groReceiveEnabled()) {
+        // The server thread is already blocked in receiveRequest. Close the
+        // connection so it can observe a terminal state and exit before the
+        // join; otherwise the skip path itself deadlocks.
+        client.established.connection.closeApplication(0, "") catch {};
         thread.join();
-        if (shared.err) |err| return err;
         return error.SkipZigTest;
     }
 

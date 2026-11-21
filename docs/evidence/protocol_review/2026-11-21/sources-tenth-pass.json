@@ -1,0 +1,4 @@
+{
+  "src/http3/runtime/body_streaming_tests.zig": "afb32d6cae71ace49e8ae34ec65ba554759c0ef5f4fe805d5e46db68f200a7fb",
+  "src/http3/runtime/shared_handshake_client_pool_concurrent_handshake_tests.zig": "19e82eebe4746f5a7d10a1f5374cdf50096e5ca686315e3b5d196a148a1df57c"
+}
