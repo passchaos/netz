@@ -102,6 +102,26 @@ pub const Client = struct {
         return connection;
     }
 
+    /// A non-positive relative timeout is rejected before ownership transfer.
+    pub fn adoptPriorKnowledgeStreamWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        authority: []const u8,
+        limits: Limits,
+        timeout: std.Io.Duration,
+    ) Error!Connection {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return adoptPriorKnowledgeStreamWithDeadline(
+            allocator,
+            io,
+            stream,
+            authority,
+            limits,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     /// Perform origin-authenticated TLS and HTTP/2 bootstrap on a
     /// caller-connected TCP stream. Ownership transfers at entry; `tls_host`
     /// remains the certificate/SNI identity while `authority` is copied for
@@ -248,6 +268,26 @@ pub const Client = struct {
             authority,
             limits,
             deadline,
+        );
+    }
+
+    /// A non-positive relative timeout is rejected before ownership transfer.
+    pub fn adoptNegotiatedTlsWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        tls_connection: *tls_stream.ClientConnection,
+        authority: []const u8,
+        limits: Limits,
+        timeout: std.Io.Duration,
+    ) Error!Connection {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return adoptNegotiatedTlsWithDeadline(
+            allocator,
+            io,
+            tls_connection,
+            authority,
+            limits,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
         );
     }
 

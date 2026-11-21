@@ -2847,7 +2847,10 @@ identity.
 The lower-level HTTP/2 surface now exposes this TCP route independently of the
 unified client. `http2.socks5_runtime.Client` performs SOCKS5 CONNECT with
 proxy-side destination DNS, then transfers the raw tunnel into
-`runtime.Client.adoptTlsStream{,WithTimeout,WithDeadline}`. The SOCKS error set
+`runtime.Client.adoptTlsStream{,WithTimeout,WithDeadline}`. The same
+three-form family covers `adoptPriorKnowledgeStream*` and
+`adoptNegotiatedTls*`; a non-positive relative timeout is rejected before
+ownership transfer, matching `adoptTlsStreamWithTimeout`. The SOCKS error set
 stays in the composition module instead of widening core Connection state. Host
 validation and origin-authority allocation happen before proxy I/O; the exact
 awake deadline then spans proxy connection/authentication/CONNECT, TLS

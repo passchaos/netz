@@ -1,0 +1,4 @@
+{
+  "src/http2/runtime/client.zig": "f59e2490d66817d1433a0d86dc517d4c7c56be214aeb3e2ab6529bf6407cf999",
+  "src/http2/runtime/handshake_timeout_tests.zig": "1bdb87799ea05643d291647b641f8fd45adb3767a9cbf2a7c55b366c8988c032"
+}

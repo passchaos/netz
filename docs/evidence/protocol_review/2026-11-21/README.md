@@ -512,3 +512,18 @@ all three transports and both roles.
 | --- | --- | --- |
 | Generic bounded send plus mutex admission | 96/96 | `ws-generic-send.log` |
 | Full WebSocket suite | 504/505, 1 host-sensitive skip | `ws-full-after-generic.log` |
+
+
+## Eighteenth pass: adoption timeout parity
+
+`adoptTlsStream` already had `WithTimeout`/`WithDeadline` forms, but
+`adoptPriorKnowledgeStream` and `adoptNegotiatedTls` only had the unbounded and
+absolute-deadline forms. Both families now expose `WithTimeout`, with the same
+pre-transfer rule as `adoptTlsStreamWithTimeout`: a non-positive relative
+budget returns `error.Timeout` before stream/TLS ownership moves, so the caller
+still closes the resource.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Expired-budget adoption rejection | 32/32 | `http2-adopt-timeout.log` |
+| Full HTTP/2 suite | 983/983 | `http2-full-after-adopt.log` |

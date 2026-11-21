@@ -1526,3 +1526,37 @@ test "HTTP/2 TLS client bounds bootstrap after transport handshake" {
     thread.join();
     if (shared.err) |err| return err;
 }
+
+test "HTTP/2 prior-knowledge adoption rejects an expired timeout before ownership transfer" {
+    if (comptime @import("builtin").os.tag == .windows) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+    const client = try listener.socket.address.connect(
+        io,
+        .{ .mode = .stream },
+    );
+    const peer = try listener.accept(io);
+    defer peer.close(io);
+
+    try std.testing.expectError(
+        error.Timeout,
+        runtime.Client.adoptPriorKnowledgeStreamWithTimeout(
+            allocator,
+            io,
+            client,
+            "localhost",
+            .{},
+            .zero,
+        ),
+    );
+    // The expired budget is rejected before ownership transfer, so the caller
+    // still owns the stream. A second close here would trap if that changed.
+    client.close(io);
+}
