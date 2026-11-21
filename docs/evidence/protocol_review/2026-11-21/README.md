@@ -1093,3 +1093,20 @@ cross-origin redirect assertion.
 | --- | --- | --- |
 | Full HTTP/3 suite | 927/931 (4 skipped) | `http3-pool-redirect-timeout.log` |
 | Public package surface tests | 26/26 | `test-package-pool-redirect-timeout.log` |
+
+
+## Forty-sixth pass: WebTransport server handshake receive timeouts
+
+Two public WebTransport receive helpers exposed only absolute-deadline
+forms: `receiveStatefulSessionRequest` and
+`receiveProtectedDatagramFromEndpoint`. Add the relative-timeout
+counterparts; both reject a non-positive duration before settings exchange,
+request parsing, rejection policy, socket reads, or packet opening, then
+delegate to the existing deadline path. A new test asserts the protected
+datagram helper rejects a zero budget without advancing the expected packet
+number, and the package surface pins both declarations.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full WebTransport suite | 756/758 (2 skipped) | `webtransport-handshake-receive-timeouts.log` |
+| Public package surface tests | 26/26 | `test-package-handshake-receive-timeouts.log` |

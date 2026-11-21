@@ -2934,6 +2934,25 @@ pub fn receiveStatefulSessionRequestWithDeadline(
     );
 }
 
+/// Relative-timeout counterpart to
+/// `receiveStatefulSessionRequestWithDeadline`. A non-positive duration
+/// returns `Timeout` before settings, request, or rejection work.
+pub fn receiveStatefulSessionRequestWithTimeout(
+    session: *http3.runtime.HandshakeServerSession,
+    limits: Limits,
+    timeout: std.Io.Duration,
+) ReceiveTimeoutError!PendingHandshakeSession {
+    if (timeout.nanoseconds <= 0) return error.Timeout;
+    return receiveStatefulSessionRequestWithDeadline(
+        session,
+        limits,
+        .fromNow(session.established.connection.endpoint.io, .{
+            .raw = timeout,
+            .clock = .awake,
+        }),
+    );
+}
+
 pub fn receiveStatefulSessionRequestBefore(
     session: *http3.runtime.HandshakeServerSession,
     limits: Limits,
@@ -3622,6 +3641,27 @@ pub fn receiveProtectedDatagramFromEndpoint(
         }
         packet.deinit(endpoint.allocator);
     }
+}
+
+/// Relative-timeout counterpart to
+/// `receiveProtectedDatagramFromEndpointWithDeadline`. A non-positive
+/// duration returns `Timeout` before any socket read or packet open.
+pub fn receiveProtectedDatagramFromEndpointWithTimeout(
+    endpoint: *quic.runtime.Endpoint,
+    keys: quic.protection.PacketProtectionKeys,
+    local_connection_id_len: usize,
+    expected_packet_number: *u64,
+    max_frames: usize,
+    timeout: std.Io.Duration,
+) ReceiveTimeoutError!OwnedProtectedDatagram {
+    return receiveProtectedDatagramFromEndpointWithDeadline(
+        endpoint,
+        keys,
+        local_connection_id_len,
+        expected_packet_number,
+        max_frames,
+        (try deadline_policy.fromTimeout(endpoint.io, timeout)).?,
+    );
 }
 
 pub fn receiveProtectedDatagramFromEndpointWithDeadline(

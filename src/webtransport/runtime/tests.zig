@@ -4184,3 +4184,31 @@ test {
     _ = @import("stream/reset/timer_tests.zig");
     _ = @import("stream/reset/backpressure_tests.zig");
 }
+
+test "WebTransport protected datagram timeout rejects non-positive budgets before receive" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        std.testing.allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x42} ** quic.protection.secret_len,
+    );
+    var packet_number: u64 = 0;
+    try std.testing.expectError(
+        error.Timeout,
+        runtime.receiveProtectedDatagramFromEndpointWithTimeout(
+            &endpoint,
+            keys,
+            8,
+            &packet_number,
+            8,
+            .fromNanoseconds(0),
+        ),
+    );
+    try std.testing.expectEqual(@as(u64, 0), packet_number);
+}

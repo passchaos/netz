@@ -9676,6 +9676,14 @@ test "public modules are reachable" {
         "HandshakeFailure",
     ));
     try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime,
+        "receiveStatefulSessionRequestWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime,
+        "receiveProtectedDatagramFromEndpointWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.incremental_stream,
         "readWithTimeout",
     ));
