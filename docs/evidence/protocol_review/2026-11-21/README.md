@@ -1467,3 +1467,19 @@ zero-budget rejections, and the package surface pins the declarations.
 | --- | --- | --- |
 | Full QUIC suite | 1108/1131 (23 skipped) | `quic-dispatcher-timeouts.log` |
 | Public package surface tests | 26/26 | `test-package-dispatcher-timeouts.log` |
+
+
+## Sixty-sixth pass: API-map accuracy after the review
+
+The cross-protocol API map still described the pre-review QUIC
+anti-amplification behavior ("the server still reserves the complete
+flight"), which the twenty-second pass replaced with the ACK-aware largest
+unacknowledged CRYPTO prefix. The row now states the prefix planner and ACK
+range advancement, with client PTO probes on an independent timer. The
+WebSocket byte-stream row also records the relative-timeout forms and the
+two-slice write path added by the recent passes. No code changed; the map
+now matches the implementation and the recorded evidence.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Documentation consistency | API map matches passes 22, 57, 60, 63 | `docs/protocol_api_map.md` |
