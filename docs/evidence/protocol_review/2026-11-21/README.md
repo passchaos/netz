@@ -1575,3 +1575,16 @@ MQTT Session/QoS persistence.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | Guided stateful fuzz (2,000 iterations) | 9/9 steps, 2/2 tests | `fuzz-stateful-guided-2k.log` |
+
+
+## Seventy-third pass: guided HTTP/1 connection fuzz
+
+`zig build fuzz-http1-connection --fuzz=300` ran 300 coverage-guided
+mutations through a production loopback TCP client and server, covering
+persistent reuse, complete and streaming fixed/chunked bodies, trailers, HEAD
+suppression, and request/response-selected retirement. The run finished 9/9
+steps with 3/3 tests passing and no panic.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Guided HTTP/1 connection fuzz (300 iterations) | 9/9 steps, 3/3 tests | `fuzz-http1-connection-guided.log` |
