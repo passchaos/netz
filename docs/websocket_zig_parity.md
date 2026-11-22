@@ -867,7 +867,11 @@ through bounded stack chunks while carrying one RFC 6455 mask offset across
 every slice. Empty slices are accepted, and the receiver still observes one
 FIN-terminated binary frame rather than WebSocket continuation frames. This
 lets MQTT-over-WebSocket encode packet prefixes and application payloads
-without a plaintext join. Runtime and codec tests cover the 125/126 and
+without a plaintext join. The same single-frame forms are available for text
+as `sendTextSlices`, `sendTextSlicesWithTimeout`, and
+`sendTextSlicesWithDeadline`; text slices are validated as one UTF-8 message,
+so a code point may span a slice boundary and invalid UTF-8 is rejected before
+any frame byte is written. Runtime and codec tests cover the 125/126 and
 65535/65536 frame-length transitions. When permessage-deflate is negotiated,
 the same API feeds all borrowed slices directly to the retained encoder.
 A fail-after-warmup runtime test verifies that repeated compressed multi-slice
@@ -1475,8 +1479,9 @@ and then flushes any final ACK under the same absolute budget. A deterministic l
 test drops the first client Close datagram and requires PTO retransmission, the
 exact echoed code/reason, and empty client/server recovery queues before either
 connection is destroyed.
-RFC 9220 binary scatter/gather sends now expose matching
-`sendBinarySlicesWithTimeout` and `sendBinarySlicesWithDeadline` entry points.
+RFC 9220 scatter/gather sends now expose matching binary
+(`sendBinarySlicesWithTimeout`, `sendBinarySlicesWithDeadline`) and text
+(`sendTextSlicesWithTimeout`, `sendTextSlicesWithDeadline`) entry points.
 They retain one frame header and client mask, track the exact socket-visible
 RFC 6455 byte prefix across HTTP/3 DATA chunks, and rebuild only a bounded
 16-KiB wire segment from the borrowed application slices on each retry. The

@@ -669,6 +669,116 @@ test "WebSocket binary slices preserve one frame across length boundaries" {
     if (shared.err) |err| return err;
 }
 
+test "WebSocket text slices preserve one UTF-8 frame across slice boundaries" {
+    const allocator = std.testing.allocator;
+    // "hello, " followed by U+4E16 U+754C, split inside both code points.
+    const parts = [_][]const u8{
+        "hel", "lo, ", "\xe4", "\xb8\x96\xe7", "\x95", "\x8c",
+    };
+    const expected = "hello, \xe4\xb8\x96\xe7\x95\x8c";
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .max_head_bytes = 4096,
+            .max_frame_bytes = 4096,
+            .max_message_bytes = 4096,
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        parts: []const []const u8,
+        expected: []const u8,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(shared: *@This()) !void {
+            var connection = try shared.server.accept(.{});
+            defer connection.close();
+            for (0..2) |_| {
+                var frame = try connection.receiveFrame();
+                defer frame.deinit(shared.server.http.allocator);
+                try std.testing.expectEqual(
+                    websocket.Opcode.text,
+                    frame.header.opcode,
+                );
+                try std.testing.expect(frame.header.fin);
+                try std.testing.expectEqualStrings(
+                    shared.expected,
+                    frame.payload,
+                );
+            }
+            try connection.sendTextSlices(shared.parts);
+            var progress: MessageWriteProgress = .{};
+            try connection.sendTextSlicesWithTimeout(
+                shared.parts,
+                &progress,
+                .fromSeconds(1),
+            );
+            try std.testing.expect(progress.frame_committed);
+        }
+    };
+    var shared = Shared{
+        .server = &server,
+        .parts = &parts,
+        .expected = expected,
+    };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .host = "127.0.0.1",
+        .target = "/text-slices",
+        .limits = .{
+            .max_head_bytes = 4096,
+            .max_frame_bytes = 4096,
+            .max_message_bytes = 4096,
+        },
+    });
+    defer client.close();
+    // Invalid UTF-8 and non-data opcodes are rejected before any frame bytes
+    // reach the transport.
+    try std.testing.expectError(
+        error.InvalidUtf8,
+        client.sendTextSlices(&.{ "\xe4", "x" }),
+    );
+    try std.testing.expectError(
+        error.InvalidFrame,
+        client.sendMessageSlices(.ping, &.{"x"}),
+    );
+    try client.sendTextSlices(&parts);
+    var progress: MessageWriteProgress = .{};
+    try client.sendTextSlicesWithTimeout(
+        &parts,
+        &progress,
+        .fromSeconds(1),
+    );
+    try std.testing.expect(progress.frame_committed);
+    for (0..2) |_| {
+        var response = try client.receiveFrame();
+        defer response.deinit(allocator);
+        try std.testing.expectEqual(websocket.Opcode.text, response.header.opcode);
+        try std.testing.expect(response.header.fin);
+        try std.testing.expectEqualStrings(expected, response.payload);
+    }
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "WebSocket runtime negotiates subprotocol" {
     const allocator = std.testing.allocator;
 

@@ -532,7 +532,16 @@ pub const H2Connection = struct {
         self.application_write_pending.store(false, .release);
     }
 
-    /// Compatibility wrapper for the two-slice RFC 8441 form.
+    /// Compatibility wrapper for the two-slice RFC 8441 text form.
+    pub fn sendTextParts(
+        self: *H2Connection,
+        first: []const u8,
+        second: []const u8,
+    ) Error!void {
+        return self.sendTextSlices(&.{ first, second });
+    }
+
+    /// Compatibility wrapper for the two-slice RFC 8441 binary form.
     pub fn sendBinaryParts(
         self: *H2Connection,
         first: []const u8,
@@ -541,22 +550,34 @@ pub const H2Connection = struct {
         return self.sendBinarySlices(&.{ first, second });
     }
 
-    /// Send borrowed slices as one RFC 6455 binary frame over HTTP/2. HTTP/2
-    /// DATA flow-control boundaries do not become WebSocket continuations.
-    pub fn sendBinarySlices(
+    /// Send borrowed slices as one RFC 6455 text frame over HTTP/2.
+    pub fn sendTextSlices(
         self: *H2Connection,
         parts: []const []const u8,
     ) Error!void {
-        if (!canSendOpcode(.binary, self.closeSent(), self.closeReceived())) {
+        return self.sendMessageSlices(.text, parts);
+    }
+
+    /// Send borrowed slices as one RFC 6455 text or binary frame over HTTP/2.
+    /// HTTP/2 DATA flow-control boundaries do not become WebSocket
+    /// continuations. Text slices are validated as one UTF-8 message.
+    pub fn sendMessageSlices(
+        self: *H2Connection,
+        opcode: websocket.Opcode,
+        parts: []const []const u8,
+    ) Error!void {
+        if (opcode != .text and opcode != .binary) return error.InvalidFrame;
+        if (!canSendOpcode(opcode, self.closeSent(), self.closeReceived())) {
             return error.ConnectionClosed;
         }
         const payload_len = try common.validateOutgoingMessageParts(
             self.limits,
+            opcode,
             parts,
         );
         self.send_mutex.lockUncancelable(self.tunnel.connection.io);
         defer self.unlockSendBefore(null);
-        try self.ensureCanSendOpcodeLocked(.binary);
+        try self.ensureCanSendOpcodeLocked(opcode);
 
         if (self.permessage_deflate and
             payload_len >= self.compression_threshold)
@@ -567,7 +588,7 @@ pub const H2Connection = struct {
             );
             if (compressed.len < payload_len) {
                 self.writeFrameLockedExtended(
-                    .binary,
+                    opcode,
                     compressed,
                     true,
                     .{ .rsv1 = true },
@@ -589,7 +610,7 @@ pub const H2Connection = struct {
         var header_storage: [websocket.max_frame_header_len]u8 = undefined;
         const header = try websocket.writeFrameHeaderForLengthInto(
             &header_storage,
-            .binary,
+            opcode,
             payload_len,
             .{ .mask_key = mask_key },
         );
@@ -619,21 +640,73 @@ pub const H2Connection = struct {
         }
     }
 
+    /// Send borrowed slices as one RFC 6455 binary frame over HTTP/2.
+    pub fn sendBinarySlices(
+        self: *H2Connection,
+        parts: []const []const u8,
+    ) Error!void {
+        return self.sendMessageSlices(.binary, parts);
+    }
+
+    pub fn sendTextSlicesWithTimeout(
+        self: *H2Connection,
+        parts: []const []const u8,
+        progress: *MessageWriteProgress,
+        timeout: std.Io.Duration,
+    ) Error!void {
+        return self.sendMessageSlicesWithTimeout(
+            .text,
+            parts,
+            progress,
+            timeout,
+        );
+    }
+
     pub fn sendBinarySlicesWithTimeout(
         self: *H2Connection,
         parts: []const []const u8,
         progress: *MessageWriteProgress,
         timeout: std.Io.Duration,
     ) Error!void {
+        return self.sendMessageSlicesWithTimeout(
+            .binary,
+            parts,
+            progress,
+            timeout,
+        );
+    }
+
+    pub fn sendMessageSlicesWithTimeout(
+        self: *H2Connection,
+        opcode: websocket.Opcode,
+        parts: []const []const u8,
+        progress: *MessageWriteProgress,
+        timeout: std.Io.Duration,
+    ) Error!void {
         progress.* = .{};
         if (timeout.nanoseconds <= 0) return error.Timeout;
-        return self.sendBinarySlicesWithDeadline(
+        return self.sendMessageSlicesWithDeadline(
+            opcode,
             parts,
             progress,
             .fromNow(self.tunnel.connection.io, .{
                 .raw = timeout,
                 .clock = .awake,
             }),
+        );
+    }
+
+    pub fn sendTextSlicesWithDeadline(
+        self: *H2Connection,
+        parts: []const []const u8,
+        progress: *MessageWriteProgress,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!void {
+        return self.sendMessageSlicesWithDeadline(
+            .text,
+            parts,
+            progress,
+            deadline,
         );
     }
 
@@ -646,6 +719,24 @@ pub const H2Connection = struct {
         progress: *MessageWriteProgress,
         deadline: std.Io.Clock.Timestamp,
     ) Error!void {
+        return self.sendMessageSlicesWithDeadline(
+            .binary,
+            parts,
+            progress,
+            deadline,
+        );
+    }
+
+    /// Send borrowed slices as one text or binary frame over RFC 8441 under
+    /// one absolute deadline. Retry with the same descriptor array until the
+    /// complete frame commits.
+    pub fn sendMessageSlicesWithDeadline(
+        self: *H2Connection,
+        opcode: websocket.Opcode,
+        parts: []const []const u8,
+        progress: *MessageWriteProgress,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!void {
         progress.* = .{};
         _ = try deadline_policy.usableAwake(
             self.tunnel.connection.io,
@@ -653,6 +744,7 @@ pub const H2Connection = struct {
         );
         const payload_len = try common.validateOutgoingMessageParts(
             self.limits,
+            opcode,
             parts,
         );
         try timed_mutex.lock(&self.send_mutex, self.tunnel.connection.io, deadline);
@@ -665,7 +757,7 @@ pub const H2Connection = struct {
             return error.WriteInProgress;
         }
         if (self.pending_write.messagePtr()) |pending| {
-            if (!pending.matchesParts(parts)) {
+            if (!pending.matchesParts(opcode, parts)) {
                 progress.* = .{
                     .committed_bytes = pending.committed,
                     .total_bytes = pending.totalLen(),
@@ -676,8 +768,8 @@ pub const H2Connection = struct {
             if (control_admission.pending(self)) {
                 return error.WriteInProgress;
             }
-            try self.ensureCanSendOpcodeLocked(.binary);
-            try self.beginPendingMessagePartsLocked(parts, payload_len);
+            try self.ensureCanSendOpcodeLocked(opcode);
+            try self.beginPendingMessagePartsLocked(opcode, parts, payload_len);
         }
         try self.resumePendingMessagePartsLocked(parts, progress, deadline);
     }
@@ -1503,12 +1595,13 @@ pub const H2Connection = struct {
 
     pub fn beginPendingMessagePartsLocked(
         self: *H2Connection,
+        opcode: websocket.Opcode,
         parts: []const []const u8,
         payload_len: usize,
     ) Error!void {
         std.debug.assert(self.pending_write.isNone());
         var pending = PendingH2Message{
-            .opcode = .binary,
+            .opcode = opcode,
             .source = .slices,
             .original_ptr = @intFromPtr(parts.ptr),
             .original_len = parts.len,
@@ -1536,7 +1629,7 @@ pub const H2Connection = struct {
         }
         const header = try websocket.writeFrameHeaderForLengthInto(
             &pending.header,
-            .binary,
+            opcode,
             encoded_len,
             .{
                 .mask_key = pending.mask_key,

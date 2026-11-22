@@ -274,13 +274,23 @@ pub fn validateOutgoingMessageLength(
     }
 }
 
-/// Validate borrowed slices that will be emitted as one binary frame.
+/// Validate borrowed slices that will be emitted as one text or binary frame.
+/// Text slices are validated as one logical UTF-8 message without joining
+/// them, so a code point may span a slice boundary.
 pub fn validateOutgoingMessageParts(
     limits: anytype,
+    opcode: websocket.Opcode,
     parts: []const []const u8,
 ) OutgoingValidationError!usize {
+    switch (opcode) {
+        .text, .binary => {},
+        else => return error.InvalidFrame,
+    }
     const payload_len = try outgoingPayloadLen(parts);
     try validateOutgoingMessageLength(limits, payload_len);
+    if (opcode == .text and !fragmentedTextIsValid(parts)) {
+        return error.InvalidUtf8;
+    }
     return payload_len;
 }
 
@@ -579,31 +589,33 @@ test "WebSocket outbound validation enforces frame and message limits" {
 
     try std.testing.expectEqual(
         @as(usize, 4),
-        try validateOutgoingMessageParts(limits, &.{ "ab", "cd" }),
+        try validateOutgoingMessageParts(limits, .binary, &.{ "ab", "cd" }),
     );
     try std.testing.expectEqual(
         @as(usize, 4),
         try validateOutgoingMessageParts(
             limits,
+            .binary,
             &.{ "a", "", "bc", "d" },
         ),
     );
     try std.testing.expectEqual(
         @as(usize, 0),
-        try validateOutgoingMessageParts(limits, &.{}),
+        try validateOutgoingMessageParts(limits, .binary, &.{}),
     );
     try std.testing.expectError(
         error.MessageTooLarge,
-        validateOutgoingMessageParts(limits, &.{ "abc", "de" }),
+        validateOutgoingMessageParts(limits, .binary, &.{ "abc", "de" }),
     );
     try std.testing.expectError(
         error.MessageTooLarge,
-        validateOutgoingMessageParts(limits, &.{ "ab", "", "cde" }),
+        validateOutgoingMessageParts(limits, .binary, &.{ "ab", "", "cde" }),
     );
     try std.testing.expectEqual(
         @as(usize, 125),
         try validateOutgoingMessageParts(
             .{ .max_frame_bytes = 65_536, .max_message_bytes = 65_536 },
+            .binary,
             &.{ "a" ** 41, "b" ** 42, "c" ** 42 },
         ),
     );
@@ -611,6 +623,7 @@ test "WebSocket outbound validation enforces frame and message limits" {
         @as(usize, 126),
         try validateOutgoingMessageParts(
             .{ .max_frame_bytes = 65_536, .max_message_bytes = 65_536 },
+            .binary,
             &.{ "a" ** 41, "b" ** 42, "c" ** 43 },
         ),
     );
@@ -618,6 +631,7 @@ test "WebSocket outbound validation enforces frame and message limits" {
         @as(usize, 65_535),
         try validateOutgoingMessageParts(
             .{ .max_frame_bytes = 65_536, .max_message_bytes = 65_536 },
+            .binary,
             &.{ "a" ** 32_767, "", "b" ** 32_768 },
         ),
     );
@@ -625,8 +639,28 @@ test "WebSocket outbound validation enforces frame and message limits" {
         @as(usize, 65_536),
         try validateOutgoingMessageParts(
             .{ .max_frame_bytes = 65_536, .max_message_bytes = 65_536 },
+            .binary,
             &.{ "a" ** 32_767, "b" ** 32_769 },
         ),
+    );
+
+    // Text slices are one logical message: a multi-byte code point may span
+    // slice boundaries, and invalid UTF-8 is rejected before any send.
+    try std.testing.expectEqual(
+        @as(usize, 4),
+        try validateOutgoingMessageParts(
+            limits,
+            .text,
+            &.{ "a", "\xe2\x82", "\xac" },
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidUtf8,
+        validateOutgoingMessageParts(limits, .text, &.{ "ab", "\xe2", "x" }),
+    );
+    try std.testing.expectError(
+        error.InvalidFrame,
+        validateOutgoingMessageParts(limits, .ping, &.{"x"}),
     );
 
     try std.testing.expectEqual(

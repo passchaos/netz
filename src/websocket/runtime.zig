@@ -132,10 +132,11 @@ pub const PendingH2Message = struct {
 
     pub fn matchesParts(
         self: *const PendingH2Message,
+        opcode: websocket.Opcode,
         parts: []const []const u8,
     ) bool {
         return self.source == .slices and
-            self.opcode == .binary and
+            self.opcode == opcode and
             self.original_len == parts.len and
             (parts.len == 0 or
                 self.original_ptr == @intFromPtr(parts.ptr));
@@ -204,10 +205,11 @@ pub const PendingMessage = struct {
 
     pub fn matchesParts(
         self: *const PendingMessage,
+        opcode: websocket.Opcode,
         parts: []const []const u8,
     ) bool {
         return self.source == .slices and
-            self.opcode == .binary and
+            self.opcode == opcode and
             self.original_len == parts.len and
             (parts.len == 0 or
                 self.original_ptr == @intFromPtr(parts.ptr));

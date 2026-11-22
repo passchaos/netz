@@ -407,6 +407,15 @@ pub const Connection = struct {
         );
     }
 
+    /// Compatibility wrapper for the two-slice text-message form.
+    pub fn sendTextParts(
+        self: *Connection,
+        first: []const u8,
+        second: []const u8,
+    ) Error!void {
+        return self.sendTextSlices(&.{ first, second });
+    }
+
     /// Compatibility wrapper for the two-slice binary-message form.
     pub fn sendBinaryParts(
         self: *Connection,
@@ -416,21 +425,34 @@ pub const Connection = struct {
         return self.sendBinarySlices(&.{ first, second });
     }
 
-    /// Send borrowed slices as one FIN-terminated binary message.
+    /// Send borrowed slices as one FIN-terminated text message.
+    pub fn sendTextSlices(
+        self: *Connection,
+        parts: []const []const u8,
+    ) Error!void {
+        return self.sendMessageSlices(.text, parts);
+    }
+
+    /// Send borrowed slices as one FIN-terminated text or binary message.
     ///
     /// The uncompressed server path uses scatter/gather without concatenating
     /// caller data. Clients mask through bounded stack storage while preserving
     /// one continuous four-byte mask phase across every slice. Negotiated
     /// compression consumes the same logical message without a plaintext join.
-    pub fn sendBinarySlices(
+    /// Text slices are validated as one UTF-8 message, so code points may span
+    /// slice boundaries.
+    pub fn sendMessageSlices(
         self: *Connection,
+        opcode: websocket.Opcode,
         parts: []const []const u8,
     ) Error!void {
-        if (!canSendOpcode(.binary, self.closeSent(), self.closeReceived())) {
+        if (opcode != .text and opcode != .binary) return error.InvalidFrame;
+        if (!canSendOpcode(opcode, self.closeSent(), self.closeReceived())) {
             return error.ConnectionClosed;
         }
         const payload_len = try common.validateOutgoingMessageParts(
             self.limits,
+            opcode,
             parts,
         );
         self.send_mutex.lockUncancelable(self.io);
@@ -438,7 +460,7 @@ pub const Connection = struct {
         if (!self.pending_write.isNone() or control_admission.pending(self)) {
             return error.WriteInProgress;
         }
-        if (!self.canSendOpcodeLocked(.binary)) return error.ConnectionClosed;
+        if (!self.canSendOpcodeLocked(opcode)) return error.ConnectionClosed;
 
         if (self.permessage_deflate and
             payload_len >= self.compression_threshold)
@@ -449,7 +471,7 @@ pub const Connection = struct {
             );
             if (compressed.len < payload_len) {
                 self.writeFrameLockedExtended(
-                    .binary,
+                    opcode,
                     compressed,
                     true,
                     .{ .rsv1 = true },
@@ -467,7 +489,7 @@ pub const Connection = struct {
         if (self.role == .server) {
             const header = try websocket.writeFrameHeaderForLengthInto(
                 &header_storage,
-                .binary,
+                opcode,
                 payload_len,
                 .{},
             );
@@ -482,7 +504,7 @@ pub const Connection = struct {
         try std.Io.randomSecure(self.io, &mask_key);
         const header = try websocket.writeFrameHeaderForLengthInto(
             &header_storage,
-            .binary,
+            opcode,
             payload_len,
             .{ .mask_key = mask_key },
         );
@@ -497,18 +519,70 @@ pub const Connection = struct {
         };
     }
 
+    /// Send borrowed slices as one FIN-terminated binary message.
+    pub fn sendBinarySlices(
+        self: *Connection,
+        parts: []const []const u8,
+    ) Error!void {
+        return self.sendMessageSlices(.binary, parts);
+    }
+
+    pub fn sendTextSlicesWithTimeout(
+        self: *Connection,
+        parts: []const []const u8,
+        progress: *MessageWriteProgress,
+        timeout: std.Io.Duration,
+    ) Error!void {
+        return self.sendMessageSlicesWithTimeout(
+            .text,
+            parts,
+            progress,
+            timeout,
+        );
+    }
+
     pub fn sendBinarySlicesWithTimeout(
         self: *Connection,
         parts: []const []const u8,
         progress: *MessageWriteProgress,
         timeout: std.Io.Duration,
     ) Error!void {
+        return self.sendMessageSlicesWithTimeout(
+            .binary,
+            parts,
+            progress,
+            timeout,
+        );
+    }
+
+    pub fn sendMessageSlicesWithTimeout(
+        self: *Connection,
+        opcode: websocket.Opcode,
+        parts: []const []const u8,
+        progress: *MessageWriteProgress,
+        timeout: std.Io.Duration,
+    ) Error!void {
         progress.* = .{};
         if (timeout.nanoseconds <= 0) return error.Timeout;
-        return self.sendBinarySlicesWithDeadline(
+        return self.sendMessageSlicesWithDeadline(
+            opcode,
             parts,
             progress,
             .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    pub fn sendTextSlicesWithDeadline(
+        self: *Connection,
+        parts: []const []const u8,
+        progress: *MessageWriteProgress,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!void {
+        return self.sendMessageSlicesWithDeadline(
+            .text,
+            parts,
+            progress,
+            deadline,
         );
     }
 
@@ -521,10 +595,29 @@ pub const Connection = struct {
         progress: *MessageWriteProgress,
         deadline: std.Io.Clock.Timestamp,
     ) Error!void {
+        return self.sendMessageSlicesWithDeadline(
+            .binary,
+            parts,
+            progress,
+            deadline,
+        );
+    }
+
+    /// Send borrowed slices as one text or binary frame under an absolute
+    /// deadline. Retry with the same descriptor array and stable payload bytes
+    /// until `frame_committed` is true.
+    pub fn sendMessageSlicesWithDeadline(
+        self: *Connection,
+        opcode: websocket.Opcode,
+        parts: []const []const u8,
+        progress: *MessageWriteProgress,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!void {
         progress.* = .{};
         _ = try deadline_policy.usableAwake(self.io, deadline);
         const payload_len = try common.validateOutgoingMessageParts(
             self.limits,
+            opcode,
             parts,
         );
         try timed_mutex.lock(&self.send_mutex, self.io, deadline);
@@ -534,7 +627,7 @@ pub const Connection = struct {
             return error.WriteInProgress;
         }
         if (self.pending_write.messagePtr()) |pending| {
-            if (!pending.matchesParts(parts)) {
+            if (!pending.matchesParts(opcode, parts)) {
                 progress.* = .{
                     .committed_bytes = pending.committed,
                     .total_bytes = pending.totalLen(),
@@ -545,10 +638,10 @@ pub const Connection = struct {
             if (control_admission.pending(self)) {
                 return error.WriteInProgress;
             }
-            if (!self.canSendOpcodeLocked(.binary)) {
+            if (!self.canSendOpcodeLocked(opcode)) {
                 return error.ConnectionClosed;
             }
-            try self.beginPendingMessagePartsLocked(parts, payload_len);
+            try self.beginPendingMessagePartsLocked(opcode, parts, payload_len);
         }
         try self.resumePendingMessagePartsLocked(parts, progress, deadline);
     }
@@ -1544,12 +1637,13 @@ pub const Connection = struct {
 
     pub fn beginPendingMessagePartsLocked(
         self: *Connection,
+        opcode: websocket.Opcode,
         parts: []const []const u8,
         payload_len: usize,
     ) Error!void {
         std.debug.assert(self.pending_write.isNone());
         var pending = PendingMessage{
-            .opcode = .binary,
+            .opcode = opcode,
             .source = .slices,
             .original_ptr = @intFromPtr(parts.ptr),
             .original_len = parts.len,
@@ -1577,7 +1671,7 @@ pub const Connection = struct {
         }
         const header = try websocket.writeFrameHeaderForLengthInto(
             &pending.header,
-            .binary,
+            opcode,
             encoded_len,
             .{
                 .mask_key = pending.mask_key,

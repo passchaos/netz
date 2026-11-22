@@ -65,10 +65,11 @@ const PendingMessage = struct {
 
     fn matchesParts(
         self: *const PendingMessage,
+        opcode: websocket.Opcode,
         parts: []const []const u8,
     ) bool {
         return self.source == .slices and
-            self.opcode == .binary and
+            self.opcode == opcode and
             self.original_len == parts.len and
             (parts.len == 0 or
                 self.original_ptr == @intFromPtr(parts.ptr));
@@ -931,6 +932,15 @@ pub fn Connection(comptime role: common.Role) type {
             );
         }
 
+        /// Compatibility wrapper for the two-slice text-message form.
+        pub fn sendTextParts(
+            self: *Self,
+            first: []const u8,
+            second: []const u8,
+        ) Error!void {
+            return self.sendTextSlices(&.{ first, second });
+        }
+
         /// Compatibility wrapper for the two-slice binary-message form.
         pub fn sendBinaryParts(
             self: *Self,
@@ -940,17 +950,29 @@ pub fn Connection(comptime role: common.Role) type {
             return self.sendBinarySlices(&.{ first, second });
         }
 
-        /// Send borrowed slices as one FIN-terminated RFC 6455 binary frame.
-        /// HTTP/3 DATA boundaries remain invisible to the WebSocket peer.
-        pub fn sendBinarySlices(
+        /// Send borrowed slices as one FIN-terminated RFC 6455 text frame.
+        pub fn sendTextSlices(
             self: *Self,
             parts: []const []const u8,
         ) Error!void {
+            return self.sendMessageSlices(.text, parts);
+        }
+
+        /// Send borrowed slices as one FIN-terminated RFC 6455 text or binary
+        /// frame. HTTP/3 DATA boundaries remain invisible to the WebSocket
+        /// peer. Text slices are validated as one UTF-8 message.
+        pub fn sendMessageSlices(
+            self: *Self,
+            opcode: websocket.Opcode,
+            parts: []const []const u8,
+        ) Error!void {
+            if (opcode != .text and opcode != .binary) return error.InvalidFrame;
             if (self.writeAborted() or self.closeSent() or self.closeReceived()) {
                 return error.ConnectionClosed;
             }
             const payload_len = try common.validateOutgoingMessageParts(
                 self.limits,
+                opcode,
                 parts,
             );
             self.send_mutex.lockUncancelable(self.io());
@@ -971,7 +993,7 @@ pub fn Connection(comptime role: common.Role) type {
                 );
                 if (compressed.len < payload_len) {
                     self.writeFrameExtended(
-                        .binary,
+                        opcode,
                         compressed,
                         true,
                         false,
@@ -985,10 +1007,32 @@ pub fn Connection(comptime role: common.Role) type {
                 }
                 self.discardCompressionPreviewLocked();
             }
-            self.writeBinarySlices(parts, payload_len) catch |err| {
+            self.writeMessageSlices(opcode, parts, payload_len) catch |err| {
                 self.abortAfterUnboundedMessageWriteLocked();
                 return err;
             };
+        }
+
+        /// Send borrowed slices as one RFC 6455 binary frame.
+        pub fn sendBinarySlices(
+            self: *Self,
+            parts: []const []const u8,
+        ) Error!void {
+            return self.sendMessageSlices(.binary, parts);
+        }
+
+        pub fn sendTextSlicesWithTimeout(
+            self: *Self,
+            parts: []const []const u8,
+            progress: *MessageWriteProgress,
+            timeout: std.Io.Duration,
+        ) Error!void {
+            return self.sendMessageSlicesWithTimeout(
+                .text,
+                parts,
+                progress,
+                timeout,
+            );
         }
 
         pub fn sendBinarySlicesWithTimeout(
@@ -997,15 +1041,45 @@ pub fn Connection(comptime role: common.Role) type {
             progress: *MessageWriteProgress,
             timeout: std.Io.Duration,
         ) Error!void {
+            return self.sendMessageSlicesWithTimeout(
+                .binary,
+                parts,
+                progress,
+                timeout,
+            );
+        }
+
+        pub fn sendMessageSlicesWithTimeout(
+            self: *Self,
+            opcode: websocket.Opcode,
+            parts: []const []const u8,
+            progress: *MessageWriteProgress,
+            timeout: std.Io.Duration,
+        ) Error!void {
             progress.* = .{};
             if (timeout.nanoseconds <= 0) return error.Timeout;
-            return self.sendBinarySlicesWithDeadline(
+            return self.sendMessageSlicesWithDeadline(
+                opcode,
                 parts,
                 progress,
                 .fromNow(self.io(), .{
                     .raw = timeout,
                     .clock = .awake,
                 }),
+            );
+        }
+
+        pub fn sendTextSlicesWithDeadline(
+            self: *Self,
+            parts: []const []const u8,
+            progress: *MessageWriteProgress,
+            deadline: std.Io.Clock.Timestamp,
+        ) Error!void {
+            return self.sendMessageSlicesWithDeadline(
+                .text,
+                parts,
+                progress,
+                deadline,
             );
         }
 
@@ -1018,10 +1092,29 @@ pub fn Connection(comptime role: common.Role) type {
             progress: *MessageWriteProgress,
             deadline: std.Io.Clock.Timestamp,
         ) Error!void {
+            return self.sendMessageSlicesWithDeadline(
+                .binary,
+                parts,
+                progress,
+                deadline,
+            );
+        }
+
+        /// Send borrowed slices as one text or binary frame under an absolute
+        /// deadline. Until the frame commits, retries must pass the same slice
+        /// descriptor array and keep every referenced payload byte stable.
+        pub fn sendMessageSlicesWithDeadline(
+            self: *Self,
+            opcode: websocket.Opcode,
+            parts: []const []const u8,
+            progress: *MessageWriteProgress,
+            deadline: std.Io.Clock.Timestamp,
+        ) Error!void {
             progress.* = .{};
             _ = try deadline_policy.usableAwake(self.io(), deadline);
             const payload_len = try common.validateOutgoingMessageParts(
                 self.limits,
+                opcode,
                 parts,
             );
             try timed_mutex.lock(&self.send_mutex, self.io(), deadline);
@@ -1031,7 +1124,7 @@ pub fn Connection(comptime role: common.Role) type {
                 return error.WriteInProgress;
             }
             if (self.pending_write.messagePtr()) |pending| {
-                if (!pending.matchesParts(parts)) {
+                if (!pending.matchesParts(opcode, parts)) {
                     progress.* = .{
                         .committed_bytes = pending.committed,
                         .total_bytes = pending.totalLen(),
@@ -1045,7 +1138,11 @@ pub fn Connection(comptime role: common.Role) type {
                 if (self.writeAborted() or self.closeSent() or self.closeReceived()) {
                     return error.ConnectionClosed;
                 }
-                try self.beginPendingMessagePartsLocked(parts, payload_len);
+                try self.beginPendingMessagePartsLocked(
+                    opcode,
+                    parts,
+                    payload_len,
+                );
             }
             try self.resumePendingMessagePartsLocked(
                 parts,
@@ -1462,12 +1559,13 @@ pub fn Connection(comptime role: common.Role) type {
 
         fn beginPendingMessagePartsLocked(
             self: *Self,
+            opcode: websocket.Opcode,
             parts: []const []const u8,
             payload_len: usize,
         ) Error!void {
             std.debug.assert(self.pending_write.isNone());
             var pending = PendingMessage{
-                .opcode = .binary,
+                .opcode = opcode,
                 .source = .slices,
                 .original_ptr = @intFromPtr(parts.ptr),
                 .original_len = parts.len,
@@ -1495,7 +1593,7 @@ pub fn Connection(comptime role: common.Role) type {
             }
             const header = try websocket.writeFrameHeaderForLengthInto(
                 &pending.header,
-                .binary,
+                opcode,
                 encoded_len,
                 .{
                     .mask_key = pending.mask_key,
@@ -3555,8 +3653,9 @@ pub fn Connection(comptime role: common.Role) type {
             }
         }
 
-        fn writeBinarySlices(
+        fn writeMessageSlices(
             self: *Self,
+            opcode: websocket.Opcode,
             parts: []const []const u8,
             payload_len: usize,
         ) Error!void {
@@ -3569,7 +3668,7 @@ pub fn Connection(comptime role: common.Role) type {
             var header_storage: [websocket.max_frame_header_len]u8 = undefined;
             const header = try websocket.writeFrameHeaderForLengthInto(
                 &header_storage,
-                .binary,
+                opcode,
                 payload_len,
                 .{ .mask_key = mask_key },
             );

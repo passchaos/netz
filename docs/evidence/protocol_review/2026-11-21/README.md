@@ -1763,3 +1763,26 @@ paths keep the blocking ACK behavior.
 | HTTP/3 (ReleaseSafe) | 927/931 (4 skipped) | `http3-ack-defer-rs.log` |
 | QUIC (ReleaseSafe) | 1108/1131 (23 skipped) | `quic-ack-defer-rs.log` |
 | Targeted send-wait test | 10/10 repeated runs, both batch shapes observed | live runs |
+
+
+## Eighty-fifth pass: WebSocket text scatter/gather parity
+
+The arbitrary-slice single-frame send API existed only for binary messages
+(`sendBinarySlices*`), so text callers holding borrowed slices had to join the
+payload or emit WebSocket continuation frames. TCP, RFC 8441 (HTTP/2), and
+RFC 9220 (HTTP/3) connections now expose `sendTextSlices`,
+`sendTextSlicesWithTimeout`, and `sendTextSlicesWithDeadline` alongside the
+opcode-generic `sendMessageSlices*` forms and two-slice `sendTextParts`
+wrappers.
+
+`validateOutgoingMessageParts` is now opcode-aware and validates text slices as
+one logical UTF-8 message, so a code point may span a slice boundary and
+invalid UTF-8 is rejected before any frame byte is written. Partial-write
+resumption also matches the pending opcode, so a binary message cannot be
+resumed as text with the same descriptor array.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| WebSocket (Debug) | 513/514 (1 skipped) | `websocket-text-slices-debug.log` |
+| WebSocket (ReleaseSafe) | 513/514 (1 skipped) | `websocket-text-slices-rs.log` |
+| New text-slices round-trip | client-masked and server-unmasked single frames | live run |
