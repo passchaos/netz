@@ -162,3 +162,33 @@ test "WebTransport automatic grant pacing wait retries after unrelated peer traf
         try std.testing.expect(!session.control.state.closed);
     }
 }
+
+test "WebTransport control progress timeout forms reject zero budgets before I/O" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    inline for (.{ support.Role.client, support.Role.server }) |role| {
+        var pair: Pair = undefined;
+        try pair.init(threaded.io());
+        defer pair.deinit();
+        const session = if (role == .client) &pair.client else &pair.server;
+        const local_close_before = session.control.local_close_sent;
+        try std.testing.expectError(
+            error.Timeout,
+            session.receiveControlProgressWithTimeout(.fromNanoseconds(0)),
+        );
+        try std.testing.expectError(
+            error.Timeout,
+            session.finishPolledSessionEventWithTimeout(
+                .{ .closed = .{ .code = 0, .reason = "" } },
+                .fromNanoseconds(0),
+            ),
+        );
+        // A rejected budget must not start the terminal handshake or consume
+        // the pending CLOSE event.
+        try std.testing.expectEqual(
+            local_close_before,
+            session.control.local_close_sent,
+        );
+        try std.testing.expect(!session.control.pending_closed);
+    }
+}

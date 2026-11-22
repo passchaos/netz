@@ -1901,6 +1901,21 @@ pub const AcceptedHandshakeSession = struct {
         }
     }
 
+    pub fn finishPolledSessionEventWithTimeout(
+        self: *AcceptedHandshakeSession,
+        event: SessionEvent,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.finishPolledSessionEventWithDeadline(
+            event,
+            .fromNow(
+                self.h3.established.connection.endpoint.io,
+                .{ .raw = timeout, .clock = .awake },
+            ),
+        );
+    }
+
     pub fn finishPolledSessionEventWithDeadline(
         self: *AcceptedHandshakeSession,
         event: SessionEvent,
@@ -1952,6 +1967,17 @@ pub const AcceptedHandshakeSession = struct {
             self.session_id,
             &self.request_rejection_pending,
         );
+    }
+
+    pub fn receiveControlProgressWithTimeout(
+        self: *AcceptedHandshakeSession,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveControlProgressWithDeadline(.fromNow(
+            self.h3.established.connection.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
     }
 
     pub fn receiveControlProgressWithDeadline(

@@ -1786,3 +1786,22 @@ resumed as text with the same descriptor array.
 | WebSocket (Debug) | 513/514 (1 skipped) | `websocket-text-slices-debug.log` |
 | WebSocket (ReleaseSafe) | 513/514 (1 skipped) | `websocket-text-slices-rs.log` |
 | New text-slices round-trips | TCP, RFC 8441, and RFC 9220 masked/unmasked single frames | live run |
+
+
+## Eighty-sixth pass: WebTransport control-progress timeout pairing
+
+`receiveControlProgressWithDeadline` and `finishPolledSessionEventWithDeadline`
+were the only public WebTransport session operations without a relative-timeout
+counterpart on either the client or the accepted server session, breaking the
+cross-protocol `WithTimeout`/`WithDeadline` pairing recorded in the API map.
+Both sessions now expose `receiveControlProgressWithTimeout` and
+`finishPolledSessionEventWithTimeout`. A non-positive budget returns `Timeout`
+before any socket read, terminal-data rejection, or close-notify side effect.
+
+The new zero-budget test drives both roles and asserts that the rejected budget
+leaves `local_close_sent` and `pending_closed` untouched.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| WebTransport (Debug) | 759/761 (2 skipped) | `webtransport-control-timeout-debug.log` |
+| WebTransport (ReleaseSafe) | 759/761 (2 skipped) | `webtransport-control-timeout-rs.log` |
