@@ -1717,3 +1717,20 @@ CONNECTION_CLOSE. The existing `close`, `closeWithDeadline`, and positive
 | --- | --- | --- |
 | Full HTTP suite | 307/307 | `http-h3-zero-close.log` |
 | Public package surface tests | 26/26 | `test-package-h3-zero-close.log` |
+
+
+## Eighty-third pass: evidence hash audit observation
+
+`zig build verify-evidence` completed successfully in report-only mode:
+290 evidence files, 10,832 recorded source hashes, 6,518 matched, 4,314
+stale, 0 unresolved/invalid/unreadable. The stale entries are pre-existing
+drift in older evidence sets (the sampled output is entirely
+`grpc_ordinary_health_gate/2026-11-02-*`), not protocol-review artifacts:
+the logs added by this review record command output rather than source
+hashes. Rewriting thousands of historical hashes would discard provenance
+and is outside this review's scope; the observation is recorded so a future
+strict-mode cleanup can start from a measured baseline.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Evidence hash audit (report-only) | 6,518 matched / 4,314 stale / 0 invalid | live `zig build verify-evidence` |
