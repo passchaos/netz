@@ -8,6 +8,11 @@ MQTT, gRPC, proxy, VPN, and mesh protocol families.
 Ongoing HTTP development targets the widely used HTTP/1.1, HTTP/2, and HTTP/3
 versions. HTTP/1.0 and HTTP/0.9 are not supported.
 
+If you are building an application, start with the
+[usage guide](docs/usage.md): it maps common tasks to the recommended HTTP,
+WebSocket, WebTransport and QUIC entry points and links a runnable example for
+each.
+
 The architecture and performance rules are defined in
 [docs/architecture.md](docs/architecture.md): performance beyond the reference
 implementations is the first acceptance requirement, with correctness, protocol
@@ -88,13 +93,38 @@ const accept = netz.websocket.acceptKey("dGhlIHNhbXBsZSBub25jZQ==");
 _ = accept;
 ```
 
-HTTP/1 can also run over a real TCP stream:
+Protocol APIs take an allocator and a `std.Io` runtime:
 
 ```zig
 var backend = try netz.runtime.Backend.init(allocator);
 defer backend.deinit();
 const io = backend.io();
+```
 
+The unified client selects HTTP/1.1, HTTP/2 or HTTP/3 from one policy:
+
+```zig
+var client = try netz.http.Client.init(allocator, io, .{});
+defer client.deinit();
+
+var response = try client.requestUriWithTimeout(
+    "https://example.com/",
+    .{ .method = "GET" },
+    .fromSeconds(10),
+);
+defer response.deinit();
+std.debug.print("{t} {d} {d} bytes\n", .{
+    response.protocol(),
+    response.status(),
+    response.body().len,
+});
+```
+
+`netz.http.Pool` retains negotiated connections for reuse, and
+`prefer_http3`/`http3_only` route HTTPS origins over QUIC. Version-specific
+runtimes remain available; HTTP/1 over a real TCP stream:
+
+```zig
 var response = try netz.http1.runtime.Client.requestUri(
     allocator,
     io,

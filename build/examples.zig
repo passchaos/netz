@@ -21,6 +21,12 @@ pub const specs = [_]Spec{
         .description = "Run the HTTP/1 local client/server example",
     },
     .{
+        .exe_name = "netz-http-unified-client",
+        .path = "examples/http/unified_client.zig",
+        .run_step = "run-http-unified-client",
+        .description = "Run the unified HTTP client and pool against a local HTTP/1 server",
+    },
+    .{
         .exe_name = "netz-http2-h2c",
         .path = "examples/http/http2_h2c.zig",
         .run_step = "run-http2-h2c",

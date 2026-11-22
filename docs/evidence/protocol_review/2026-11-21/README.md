@@ -1805,3 +1805,25 @@ leaves `local_close_sent` and `pending_closed` untouched.
 | --- | --- | --- |
 | WebTransport (Debug) | 759/761 (2 skipped) | `webtransport-control-timeout-debug.log` |
 | WebTransport (ReleaseSafe) | 759/761 (2 skipped) | `webtransport-control-timeout-rs.log` |
+
+
+## Eighty-seventh pass: application usage guide and unified client example
+
+Application-facing documentation previously started from version-specific
+runtimes, while the recommended entry point for real use is the unified
+`netz.http.Client`/`Pool` facade. `docs/usage.md` now maps common tasks to the
+recommended HTTP, WebSocket, WebTransport and QUIC APIs, records the
+`WithTimeout`/`WithDeadline`, close and error conventions, and points at a
+runnable example for each path.
+
+`examples/http/unified_client.zig` (new `run-http-unified-client` step) runs a
+local HTTP/1 server, performs one one-shot request with a relative deadline,
+then two pooled requests that reuse the negotiated connection. The README,
+documentation map and example index now lead with this entry point, and
+`docs/architecture.md` records the stream-adapter slice and HTTP/2
+WebTransport staging limits discovered during the audit.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Example compile matrix | 76/76 steps | live `zig build examples` |
+| Unified client example | one-shot + two pooled HTTP/1 requests, all 200 | live `zig build run-http-unified-client` |

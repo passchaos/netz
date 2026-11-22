@@ -29,6 +29,7 @@ zig build examples
 Run individual examples:
 
 ```sh
+zig build run-http-unified-client
 zig build run-http1-hello
 zig build run-http2-h2c
 zig build run-http-duplex

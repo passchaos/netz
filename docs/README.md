@@ -9,6 +9,7 @@ performance record.
 
 | Document | Purpose |
 | --- | --- |
+| [usage.md](usage.md) | Practical entry point: dependency setup, runtime init, recommended HTTP/WebSocket/WebTransport/QUIC APIs, deadlines, close and error conventions, runnable examples. |
 | [architecture.md](architecture.md) | Layered design, performance invariants P1-P10, memory/concurrency doctrine, change acceptance checklist, known structural gaps. |
 | [http-overview.md](http-overview.md) | HTTP/1.1, HTTP/2 and HTTP/3 functionality, unified APIs, defaults, ownership boundaries and verified integration findings. |
 | [protocol_api_map.md](protocol_api_map.md) | Cross-protocol QUIC/HTTP/WebSocket/WebTransport entry points, ownership, deadline, limit and error contracts. |
