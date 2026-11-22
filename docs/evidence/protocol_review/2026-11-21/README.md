@@ -1640,3 +1640,19 @@ operations. The run finished 9/9 steps with 3/3 tests passing and no panic.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | Guided HTTP/2 TLS connection fuzz (100 iterations) | 9/9 steps, 3/3 tests | `fuzz-http2-tls-connection-guided.log` |
+
+
+## Seventy-eighth pass: guided HTTP/1 TLS connection fuzz
+
+`zig build fuzz-http1-tls-connection --fuzz=100` ran 100 coverage-guided
+mutations over authenticated TLS 1.3 with `http/1.1` ALPN, verified cipher
+metadata, and bidirectional traffic-key updates across persistent and rotated
+connections. The run finished 9/9 steps with 3/3 tests passing and no panic.
+
+With this run the guided fuzz matrix is complete: parser, stateful, HTTP/1,
+HTTP/1+TLS, HTTP/2, HTTP/2+TLS, HTTP/3, and the WebTransport shared endpoint
+all pass after the multipart initial-boundary fix.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Guided HTTP/1 TLS connection fuzz (100 iterations) | 9/9 steps, 3/3 tests | `fuzz-http1-tls-connection-guided.log` |
