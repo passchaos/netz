@@ -1548,3 +1548,16 @@ guard it reproduced the fuzz panic.
 | Full HTTP suite | 306/306 | `http-multipart-underflow.log` |
 | Public package surface tests | 26/26 | `test-package-multipart-underflow.log` |
 | Guided parser fuzz (crash record) | underflow found, input saved | `fuzz-parsers-underflow-crash.log` |
+
+
+## Seventy-first pass: parser fuzz after the multipart fix
+
+`zig build fuzz-parsers --fuzz=20000` replayed the corpus plus 20,000
+coverage-guided mutations after the initial-boundary guard landed. The run
+finished 9/9 steps with 2/2 tests passing and no further panic, confirming
+the underflow fix and leaving the cross-protocol parser surface clean at this
+iteration count.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Guided parser fuzz (20,000 iterations) | 9/9 steps, 2/2 tests | `fuzz-parsers-guided-20k.log` |
