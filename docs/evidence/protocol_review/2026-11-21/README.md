@@ -1668,3 +1668,23 @@ iterations that found the initial-boundary underflow.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | Guided parser fuzz (50,000 iterations) | 9/9 steps, 2/2 tests | `fuzz-parsers-guided-50k.log` |
+
+
+## Eightieth pass: full protocol gate matrix
+
+All protocol-scoped suites and the public package surface were rerun
+sequentially after the review, the zero-copy changes, and the multipart fix.
+Every step passed:
+
+| Gate | Result |
+| --- | --- |
+| HTTP | 306/306 |
+| HTTP/1 | 475/475 |
+| HTTP/2 | 985/985 |
+| HTTP/3 | 927/931 (4 skipped) |
+| QUIC | 1108/1131 (23 skipped) |
+| WebSocket | 512/513 (1 skipped) |
+| WebTransport | 758/760 (2 skipped) |
+| Public package surface | 26/26 |
+
+Artifact: `gate-matrix-final.log`.
