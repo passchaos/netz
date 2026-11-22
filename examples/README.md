@@ -61,6 +61,7 @@ zig build run-websocket-wss-echo
 zig build run-mqtt-broker
 zig build run-grpc-h2c
 zig build run-webtransport-handshake-stream
+zig build run-webtransport-datagram-echo
 taskset -c 0 zig build bench-http1-pipeline -Doptimize=ReleaseFast
 taskset -c 0 zig build bench-http1-pipeline -Doptimize=ReleaseFast -- \
   --write-strategy=auto

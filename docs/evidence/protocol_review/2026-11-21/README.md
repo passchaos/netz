@@ -1944,3 +1944,16 @@ handshake.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | WSS echo | `WSS echo: hello over WSS` | live `zig build run-websocket-wss-echo` |
+
+
+## Ninety-fourth pass: WebTransport DATAGRAM echo
+
+The WebTransport example only covered streams. `run-webtransport-datagram-echo`
+now exercises both DATAGRAM receive forms on a real QUIC/TLS session: one
+owned `receiveDatagramWithTimeout` and one `receiveDatagramIntoWithTimeout`
+into caller storage, with the server echoing each unreliable payload.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| DATAGRAM owned | `DATAGRAM echo (owned): hello datagram` | live `zig build run-webtransport-datagram-echo` |
+| DATAGRAM into | `DATAGRAM echo (into): caller buffer` | live run |

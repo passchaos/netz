@@ -153,6 +153,12 @@ pub const specs = [_]Spec{
         .description = "Run the WSS echo example with a pinned server key",
     },
     .{
+        .exe_name = "netz-webtransport-datagram-echo",
+        .path = "examples/webtransport/datagram_echo.zig",
+        .run_step = "run-webtransport-datagram-echo",
+        .description = "Run the WebTransport DATAGRAM echo example",
+    },
+    .{
         .exe_name = "netz-bench-websocket-frame",
         .path = "examples/benchmarks/bench_websocket_frame.zig",
         .run_step = "bench-websocket-frame",
