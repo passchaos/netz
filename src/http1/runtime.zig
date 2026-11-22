@@ -2874,14 +2874,18 @@ fn readMessageBytesWithContext(
     // preserving the one-byte reads required before chunked length discovery.
     try bytes.ensureTotalCapacity(allocator, target_len);
     while (bytes.items.len < target_len) {
-        const read_buf = scratch[0..@min(scratch.len, target_len - bytes.items.len)];
+        // Capacity is reserved above, so read the fixed-length body straight
+        // into the owned buffer instead of copying through the stack scratch.
+        const missing = target_len - bytes.items.len;
+        const read_len = @min(scratch.len, missing);
+        const spare = bytes.unusedCapacitySlice();
         const n = try readTransportUntil(
             transport,
-            read_buf,
+            spare[0..read_len],
             body_deadline,
         );
         if (n == 0) return error.ConnectionClosed;
-        try bytes.appendSlice(allocator, scratch[0..n]);
+        bytes.items.len += n;
     }
     return bytes.toOwnedSlice(allocator);
 }

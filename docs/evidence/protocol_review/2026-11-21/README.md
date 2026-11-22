@@ -1512,3 +1512,18 @@ set changed between runs while the dedicated suites stayed green.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | Documentation consistency | triage guidance matches passes 58/62 | `docs/protocol_api_map.md` |
+
+
+## Sixty-ninth pass: direct fixed-length HTTP/1 body reads
+
+The non-buffered HTTP/1 message helper reserved the final owned body size and
+then copied each 4 KiB transport read through a stack scratch before
+appending. It now reads directly into the ArrayList's reserved spare capacity
+and advances the length by the returned count, removing one copy per read for
+fixed-length bodies. The one-byte head/chunk-discovery reads are unchanged
+because they must not cross into a pipelined message.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full HTTP/1 suite | 475/475 | `http1-direct-body-read.log` |
+| Public package surface tests | 26/26 | `test-package-direct-body-read.log` |
