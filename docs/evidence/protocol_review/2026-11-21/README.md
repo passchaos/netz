@@ -1561,3 +1561,17 @@ iteration count.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | Guided parser fuzz (20,000 iterations) | 9/9 steps, 2/2 tests | `fuzz-parsers-guided-20k.log` |
+
+
+## Seventy-second pass: guided stateful fuzz after the multipart fix
+
+`zig build fuzz-stateful --fuzz=2000` ran 2,000 coverage-guided mutations of
+the stateful operation sequences after the multipart guard landed. The run
+finished 9/9 steps with 2/2 tests passing and no panic, covering HTTP/1
+pipelines, HTTP/2 flow control and HPACK, HTTP/3 control streams and QPACK,
+WebSocket fragmented assembly, WebTransport session/stream lifecycles, and
+MQTT Session/QoS persistence.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Guided stateful fuzz (2,000 iterations) | 9/9 steps, 2/2 tests | `fuzz-stateful-guided-2k.log` |
