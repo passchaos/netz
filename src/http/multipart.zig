@@ -828,3 +828,38 @@ test "multipart writer emits filename* for non-ASCII filenames" {
         parsed.parts[0].filename.?,
     );
 }
+
+test "multipart parsers ignore a delimiter at offset one without underflow" {
+    const allocator = std.testing.allocator;
+    const boundary = "netz-offset-one";
+    const body = "X--" ++ boundary;
+    // The only delimiter starts at offset one, so it has no CRLF prefix. Both
+    // parsers must reject the body instead of computing `position - 2`.
+    try std.testing.expectError(
+        error.MissingInitialBoundary,
+        parseWithBoundary(allocator, body, boundary, .{}),
+    );
+
+    var reader = std.Io.Reader.fixed(body);
+    var context: u8 = 0;
+    const Noop = struct {
+        fn begin(_: *anyopaque, _: StreamPartHead) anyerror!void {}
+        fn data(_: *anyopaque, _: []const u8) anyerror!void {}
+        fn end(_: *anyopaque) anyerror!void {}
+    };
+    try std.testing.expectError(
+        error.MissingInitialBoundary,
+        parseStreamWithBoundary(
+            allocator,
+            &reader,
+            boundary,
+            .{},
+            .{
+                .context = &context,
+                .begin = Noop.begin,
+                .data = Noop.data,
+                .end = Noop.end,
+            },
+        ),
+    );
+}

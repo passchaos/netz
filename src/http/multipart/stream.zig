@@ -175,11 +175,11 @@ const StreamParser = struct {
                 delimiter,
             )) |position| {
                 const valid_prefix = position == 0 or
-                    std.mem.eql(
+                    (position >= 2 and std.mem.eql(
                         u8,
                         self.buffer.items[position - 2 .. position],
                         "\r\n",
-                    );
+                    ));
                 if (valid_prefix) {
                     if (position > self.options.max_preamble_bytes) {
                         return error.MissingInitialBoundary;

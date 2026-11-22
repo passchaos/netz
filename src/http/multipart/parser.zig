@@ -225,11 +225,11 @@ const Parser = struct {
             delimiter_slice,
         )) |position| {
             const valid_prefix = position == 0 or
-                std.mem.eql(
+                (position >= 2 and std.mem.eql(
                     u8,
                     self.body[position - 2 .. position],
                     "\r\n",
-                );
+                ));
             if (!valid_prefix) {
                 search_from = position + 1;
                 continue;

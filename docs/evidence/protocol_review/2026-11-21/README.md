@@ -1527,3 +1527,24 @@ because they must not cross into a pipelined message.
 | --- | --- | --- |
 | Full HTTP/1 suite | 475/475 | `http1-direct-body-read.log` |
 | Public package surface tests | 26/26 | `test-package-direct-body-read.log` |
+
+
+## Seventieth pass: multipart initial-boundary underflow
+
+A 10,000-iteration guided parser fuzz run found an integer underflow in both
+multipart initial-boundary searches. When the delimiter appears at buffer
+offset one, the CRLF-prefix check computed `position - 2` before verifying
+that the position is at least two, panicking instead of rejecting the body.
+Both `http.multipart.parser` and `http.multipart.stream_parser` now require
+`position >= 2` before slicing the prefix; an offset-one occurrence is
+treated as an invalid prefix and the search continues.
+
+The regression test feeds `"X--<boundary>"` to both the non-streaming and
+streaming parsers and requires `error.MissingInitialBoundary`; without the
+guard it reproduced the fuzz panic.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full HTTP suite | 306/306 | `http-multipart-underflow.log` |
+| Public package surface tests | 26/26 | `test-package-multipart-underflow.log` |
+| Guided parser fuzz (crash record) | underflow found, input saved | `fuzz-parsers-underflow-crash.log` |

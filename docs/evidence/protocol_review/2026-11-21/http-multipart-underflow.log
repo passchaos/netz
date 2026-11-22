@@ -1,0 +1,80 @@
+[traex-zig-guard 2026-11-22 09:17:32] waiting for the global TRAE Zig build slot
+[traex-zig-guard 2026-11-22 09:18:14] started Zig tree root=37705 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=1800s
+Build Summary: 10/10 steps succeeded; 306/306 tests passed
+test-http success
++- run test 306 pass (306 total) 10s MaxRSS:129M
+   +- compile test Debug native success 41s MaxRSS:4G
+      +- WriteFile macho_0_p256_field_arm64.S cached
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 250ms MaxRSS:31M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 250ms MaxRSS:31M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options cached
+      +- options cached
+
+[traex-zig-guard 2026-11-22 09:19:09] finished Zig tree root=37705 peak=4339MiB result=0

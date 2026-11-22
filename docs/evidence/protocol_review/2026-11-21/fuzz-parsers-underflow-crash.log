@@ -1,0 +1,149 @@
+[traex-zig-guard 2026-11-22 08:56:24] waiting for the global TRAE Zig build slot
+[traex-zig-guard 2026-11-22 09:07:57] started Zig tree root=27457 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=1800s
+fuzz-parsers
++- run test failure
+thread 229402723 panic: integer overflow
+/Users/bytedance/project-z/netz/src/http/multipart/stream.zig:180:52: 0x10119281f in findInitialBoundary (test)
+                        self.buffer.items[position - 2 .. position],
+                                                   ^
+/Users/bytedance/project-z/netz/src/http/multipart/stream.zig:155:57: 0x101194b6b in run (test)
+                .initial => try self.findInitialBoundary(),
+                                                        ^
+/Users/bytedance/project-z/netz/src/http/multipart/stream.zig:102:19: 0x101194df3 in parseStreamWithBoundary (test)
+    try stream.run();
+                  ^
+/Users/bytedance/project-z/netz/src/http/multipart/stream.zig:77:35: 0x101194f8b in parseStream (test)
+    return parseStreamWithBoundary(
+                                  ^
+/Users/bytedance/project-z/netz/test/parser_fuzz_test.zig:233:40: 0x10119529b in exerciseMultipart (test)
+    _ = netz.http.multipart.parseStream(
+                                       ^
+/Users/bytedance/project-z/netz/test/parser_fuzz_test.zig:216:26: 0x101195d97 in exerciseHttp (test)
+    try exerciseMultipart(bytes);
+                         ^
+/Users/bytedance/project-z/netz/test/parser_fuzz_test.zig:190:21: 0x101198b1b in exerciseAll (test)
+    try exerciseHttp(bytes);
+                    ^
+/Users/bytedance/project-z/netz/test/parser_fuzz_test.zig:186:20: 0x101289c0b in fuzzAllParsers (test)
+    try exerciseAll(bytes);
+                   ^
+/Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/compiler/test_runner.zig:560:20: 0x10128994b in test_one (test)
+            testOne(ctx, @constCast(&testing.Smith{ .in = null })) catch |err| switch (err) {
+                   ^
+/Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/fuzzer.zig:1354:32: 0x1012cbb5f in run (fuzzer)
+        const skip = f.test_one();
+                               ^
+/Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/fuzzer.zig:1524:24: 0x1012c90ff in batch (fuzzer)
+                f.cycle();
+                       ^
+/Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/compiler/test_runner.zig:592:35: 0x10128984b in fuzz__anon_120055 (test)
+        fuzz_abi.fuzzer_start_test();
+                                  ^
+/Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:1232:32: 0x101289733 in fuzz (test)
+    return @import("root").fuzz(context, testOne, options);
+                               ^
+/Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/compiler/test_runner.zig:437:60: 0x10117ad7f in runner_test_run (test)
+        builtin.test_functions[fuzz_runner.indexes[i]].func() catch |err| switch (err) {
+                                                           ^
+/Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/fuzzer.zig:2238:24: 0x1012d1747 in runTest (fuzzer)
+    abi.runner_test_run(i);
+                       ^
+/Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/compiler/test_runner.zig:243:37: 0x10115ace7 in mainServer (test)
+                fuzz_abi.fuzzer_main(n_tests, testing.random_seed, mode, amount_or_instance);
+                                    ^
+/Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/compiler/test_runner.zig:71:26: 0x10115b883 in main (test)
+        return mainServer(init) catch |err| panic("internal test runner failure: {t}", .{err});
+                         ^
+/Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/start.zig:699:88: 0x10115826b in callMain (test)
+    if (fn_info.params[0].type.? == std.process.Init.Minimal) return wrapMain(root.main(.{
+                                                                                       ^
+???:?:?: 0x187e004e3 in start (/usr/lib/dyld)
+error: test 'parser_fuzz_test.test.fuzz bounded cross-protocol parsers' terminated with signal ABRT; input saved to '.zig-cache/f/crash'
+failed command: ./.zig-cache/o/78ccac99f5efda86502bcd38b1249224/test --cache-dir=./.zig-cache --seed=0x7f546323 --listen=-
+
+======= FUZZING REPORT =======
+Step: run test
+Fuzz test: "parser_fuzz_test.test.fuzz bounded cross-protocol parsers" (e17bc47c4c69a43e)
+Runs: 2795 -> 14340
+Unique runs: 621 -> 1474
+Coverage: 4385/18688 -> 4661/18688 (24.94%)
+------------------------------
+Values are accumulated across multiple runs when preserving the cache.
+==============================
+Build Summary: 9/9 steps succeeded; 2/2 tests passed
+fuzz-parsers success
++- run test 2 pass (2 total) 18s MaxRSS:93M
+   +- compile test Debug native success 5s MaxRSS:666M
+      +- WriteFile macho_0_p256_field_arm64.S cached
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 230ms MaxRSS:31M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 231ms MaxRSS:31M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options cached
+
+[traex-zig-guard 2026-11-22 09:08:42] finished Zig tree root=27457 peak=585MiB result=0
