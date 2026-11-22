@@ -20,8 +20,10 @@ pub fn selectHttp3(allocator: std.mem.Allocator, io: std.Io, uri: std.Uri, optio
     {
         return null;
     }
-    // Preserve the configured proxy route and TLS version constraints.
-    if (options.http_proxy != null or options.socks5_proxy != null or !options.tls.protocol_policy.offersTls13()) return null;
+    // Preserve the configured route and TLS version constraints. A cleartext
+    // HTTP/1.1 CONNECT proxy cannot carry QUIC; SOCKS5 can, using UDP
+    // ASSOCIATE with proxy-side domain resolution.
+    if (options.http_proxy != null or !options.tls.protocol_policy.offersTls13()) return null;
     var budget = options.http3.preference_timeout;
     if (deadline) |until| {
         _ = try deadlines.usableAwake(io, until);
@@ -46,6 +48,8 @@ pub fn selectHttp3(allocator: std.mem.Allocator, io: std.Io, uri: std.Uri, optio
 
 /// Authentication, configuration, resource and caller-cancellation failures
 /// remain errors. Only connection/protocol unavailability advances selection.
+/// SOCKS5 replies that reject or cannot describe the UDP relay advance too:
+/// the same proxy can still carry the TCP fallback.
 pub fn unavailable(err: anyerror) bool {
     return switch (err) {
         error.Timeout,
@@ -63,6 +67,11 @@ pub fn unavailable(err: anyerror) bool {
         error.UnsupportedVersion,
         error.MissingAlpn,
         error.InvalidAlpn,
+        error.ProxyCommandUnsupported,
+        error.ProxyConnectionNotAllowed,
+        error.ProxyAddressTypeUnsupported,
+        error.ProxyInvalidRelayAddress,
+        error.ProxyProtocolViolation,
         => true,
         else => false,
     };

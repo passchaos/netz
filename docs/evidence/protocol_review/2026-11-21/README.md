@@ -2084,3 +2084,23 @@ lets the H3 route reuse that pin.
 | --- | --- | --- |
 | Pool Alt-Svc H3 | `first http2 200: tcp discovery`, `second http3 200: hello over Alt-Svc HTTP/3` | live `zig build run-http-pool-alt-svc-h3` |
 | prefer_http3 example | `prefer_http3 http3 200: hello from prefer_http3` | live `zig build run-http-h3-prefer` |
+
+
+## Hundred-and-second pass: direct HTTP/3 over SOCKS5 UDP ASSOCIATE
+
+The unified `netz.http.Client` skipped H3 whenever `socks5_proxy` was set; only
+the pool and the WebSocket/WebTransport facades could route QUIC through a
+SOCKS5 proxy. `prefer_http3` and `http3_only` now use `socks5_runtime.connectHost`
+with proxy-side domain resolution and TLS identity bound to the URI origin.
+A cleartext HTTP/1.1 CONNECT proxy still makes H3 ineligible and is rejected by
+`http3_only`. SOCKS5 replies that reject or cannot describe the UDP relay
+(`ProxyCommandUnsupported`, `ProxyConnectionNotAllowed`,
+`ProxyInvalidRelayAddress`, `ProxyProtocolViolation`, and related address-type
+errors) advance protocol selection, so `prefer_http3` falls back to TCP through
+the same proxy instead of failing the request.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Direct H3 through SOCKS5 | 200 over `http3`, body `socks-h3` | live `zig build test-http -Dtest-filter='SOCKS5 UDP ASSOCIATE'` |
+| UDP-denied proxy fallback | 200 over `http2`, body `tcp-fallback` | live `zig build test-http -Dtest-filter='SOCKS5 denies UDP'` |
+| Full HTTP suite (Debug) | 309/309 | live `zig build test-http` |

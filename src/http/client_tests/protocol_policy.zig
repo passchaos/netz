@@ -5,6 +5,7 @@ const h1 = @import("../../http1/runtime.zig");
 const h2 = @import("../../http2/runtime.zig");
 const h3 = @import("../../http3/runtime.zig");
 const tls_testing = @import("../../tls/testing.zig");
+const socks = @import("../../proxy/socks/server.zig");
 const backends = @import("../../runtime.zig");
 const selection = @import("../client/protocol_selection.zig");
 const allocator = std.testing.allocator;
@@ -182,6 +183,12 @@ test "unified HTTP protocol policy preserves certificate rejection configuration
     try std.testing.expect(!selection.unavailable(error.CertificateUntrusted));
     try std.testing.expect(!selection.unavailable(error.Canceled));
     try std.testing.expect(!selection.unavailable(error.OutOfMemory));
+    // A proxy that cannot relay UDP still supports the TCP fallback.
+    try std.testing.expect(selection.unavailable(error.ProxyCommandUnsupported));
+    try std.testing.expect(selection.unavailable(error.ProxyConnectionNotAllowed));
+    try std.testing.expect(selection.unavailable(error.ProxyInvalidRelayAddress));
+    // Proxy credentials and reachability are not protocol-selection signals.
+    try std.testing.expect(!selection.unavailable(error.ProxyAuthenticationFailed));
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
     defer threaded.deinit();
     const io = threaded.io();
@@ -263,6 +270,74 @@ test "unified HTTP protocol policy joins canceled feasibility without TCP fallba
     try canceledSelection(backend.io(), true);
 }
 
+test "unified HTTP prefer_http3 falls back to TCP when SOCKS5 denies UDP" {
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var credentials = try Credentials.init();
+    var server = try h2.TlsServer.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .identity = credentials.identity() },
+    );
+    defer server.deinit();
+    const Peer = struct {
+        fn run(listener: *h2.TlsServer) !void {
+            var connection = try listener.acceptWithTimeout(.fromSeconds(5));
+            defer connection.close();
+            var request = try connection.readRequestWithDeadline(
+                deadline(listener.io),
+            );
+            defer request.deinit(listener.allocator);
+            try connection.writeResponse(request.stream_id, .{
+                .body = "tcp-fallback",
+                .request_method = request.method,
+            });
+        }
+    };
+    var peer = try io.concurrent(Peer.run, .{&server});
+    defer _ = peer.cancel(io) catch {};
+
+    var proxy = try socks.Server.init(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .auth = .{ .allow_anonymous = true },
+            .acl = .{ .default_action = .allow },
+            .allow_udp = false,
+        },
+    );
+    defer proxy.deinit();
+    const Serve = struct {
+        fn run(proxy_server: *socks.Server) !void {
+            try proxy_server.serve();
+        }
+    };
+    var proxy_loop = try io.concurrent(Serve.run, .{&proxy});
+    defer _ = proxy_loop.cancel(io) catch {};
+
+    const uri = try std.fmt.allocPrint(
+        allocator,
+        "https://127.0.0.1:{d}/fallback",
+        .{server.address().getPort()},
+    );
+    defer allocator.free(uri);
+    var options = credentials.options(.prefer_http3);
+    options.socks5_proxy = .{
+        .host = "127.0.0.1",
+        .port = proxy.listener.socket.address.ip4.port,
+    };
+    var client = try http.Client.init(allocator, io, options);
+    defer client.deinit();
+    var response = try client.requestUriWithDeadline(uri, .{}, deadline(io));
+    defer response.deinit();
+    try std.testing.expectEqual(http.Protocol.http2, response.protocol());
+    try std.testing.expectEqualStrings("tcp-fallback", response.body());
+    try peer.await(io);
+}
+
 test "unified HTTP protocol policy skips ineligible H3 without starting I/O" {
     const secure = try std.Uri.parse("https://127.0.0.1/");
     const cleartext = try std.Uri.parse("http://127.0.0.1/");
@@ -271,12 +346,20 @@ test "unified HTTP protocol policy skips ineligible H3 without starting I/O" {
     options.http_proxy = .{ .uri = "http://127.0.0.1:8080" };
     try std.testing.expect((try selection.selectHttp3(allocator, std.Io.failing, secure, options, null)) == null);
     options.http_proxy = null;
-    options.socks5_proxy = .{ .host = "localhost" };
-    try std.testing.expect((try selection.selectHttp3(allocator, std.Io.failing, secure, options, null)) == null);
-    options.socks5_proxy = null;
     options.tls.protocol_policy = .tls12_only;
     try std.testing.expect((try selection.selectHttp3(allocator, std.Io.failing, secure, options, null)) == null);
+    options.tls.protocol_policy = .tls12_and_tls13;
+    // SOCKS5 keeps H3 eligible: the proxy carries UDP and resolves the origin
+    // domain, so only an HTTP CONNECT proxy or TLS 1.2-only policy skips H3.
+    options.socks5_proxy = .{ .host = "localhost" };
+    var socks_client = try http.Client.init(allocator, std.Io.failing, .{
+        .protocol_policy = .http3_only,
+        .socks5_proxy = .{ .host = "localhost" },
+    });
+    socks_client.deinit();
+    options.socks5_proxy = null;
     options.protocol_policy = .http3_only;
     try std.testing.expectError(error.UnsupportedScheme, selection.selectHttp3(allocator, std.Io.failing, cleartext, options, null));
+    options.tls.protocol_policy = .tls12_only;
     try std.testing.expectError(error.InvalidClientOptions, http.Client.init(allocator, std.Io.failing, options));
 }

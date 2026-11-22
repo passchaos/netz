@@ -50,9 +50,11 @@ family participate before a short feasibility window ends.
 Connection/protocol unavailability advances selection: for example a UDP
 timeout, refusal, unreachable path or unsupported QUIC version. Certificate
 verification, invalid configuration, allocation and caller-cancellation errors
-remain errors. Direct H3 is ineligible when a TCP HTTP/SOCKS proxy is configured
-or TLS 1.3 is disabled, so a preference policy uses the configured TCP route.
-The strict H3 policy rejects those incompatible options. A TCP
+remain errors. Direct H3 is ineligible when a cleartext HTTP/1.1 CONNECT proxy
+is configured or TLS 1.3 is disabled, so a preference policy uses the
+configured TCP route. SOCKS5 stays eligible: TCP uses CONNECT and H3 uses UDP
+ASSOCIATE with proxy-side domain resolution. The strict H3 policy rejects an
+HTTP CONNECT proxy and TLS 1.2-only policy. A TCP
 `tls.ca_bundle` has no QUIC representation: `prefer_http3` stays on TCP unless
 explicit H3 trust (`server_auth`, a native store, an environment, or a
 non-default root source) is configured, and `http3_only` rejects the

@@ -2,6 +2,7 @@
 const std = @import("std");
 const quic = @import("../../quic/mod.zig");
 const native = @import("../../http3/runtime.zig");
+const socks5_runtime = @import("../../http3/socks5_runtime.zig");
 const http1 = @import("../../http1/runtime.zig");
 const types = @import("types.zig");
 const mapping = @import("header_mapping.zig");
@@ -62,7 +63,38 @@ pub const Owner = struct {
             &system_store,
         );
         if (config.address_resolver == null) config.address_resolver = options.address_resolver;
-        self.client = if (deadline) |until|
+        self.client = if (options.socks5_proxy) |proxy| blk: {
+            // Keep the configured SOCKS5 route: the proxy resolves the origin
+            // domain and relays UDP; TLS identity stays bound to the URI host.
+            const socks5: socks5_runtime.Proxy = .{
+                .host = proxy.host,
+                .port = proxy.port,
+                .options = proxy.options,
+            };
+            break :blk if (deadline) |until|
+                try socks5_runtime.connectHostWithDeadline(
+                    allocator,
+                    io,
+                    local_address,
+                    socks5,
+                    self.hostname,
+                    endpoint.port,
+                    options.http3.limits,
+                    config,
+                    until,
+                )
+            else
+                try socks5_runtime.connectHost(
+                    allocator,
+                    io,
+                    local_address,
+                    socks5,
+                    self.hostname,
+                    endpoint.port,
+                    options.http3.limits,
+                    config,
+                );
+        } else if (deadline) |until|
             try native.HandshakeClient.connectUriWithDeadline(allocator, io, local_address, uri, options.http3.limits, config, until)
         else
             try native.HandshakeClient.connectUri(allocator, io, local_address, uri, options.http3.limits, config);

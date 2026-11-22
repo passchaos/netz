@@ -655,7 +655,7 @@ pub const Client = struct {
         io: std.Io,
         options: Options,
     ) Error!Client {
-        if (options.protocol_policy == .http3_only and (options.http_proxy != null or options.socks5_proxy != null or !options.tls.protocol_policy.offersTls13())) return error.InvalidClientOptions;
+        if (options.protocol_policy == .http3_only and (options.http_proxy != null or !options.tls.protocol_policy.offersTls13())) return error.InvalidClientOptions;
         if (options.protocol_policy.attemptsHttp3()) {
             const handshake = options.http3.handshake;
             if (handshake.handshake.alpn_protocols.len != 1 or !std.mem.eql(u8, handshake.handshake.alpn_protocols[0], "h3") or handshake.handshake.early_data != null) return error.InvalidClientOptions;

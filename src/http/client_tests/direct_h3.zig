@@ -2,6 +2,7 @@
 const std = @import("std");
 const http = @import("../mod.zig");
 const h3 = @import("../../http3/runtime.zig");
+const socks = @import("../../proxy/socks/server.zig");
 const tls_testing = @import("../../tls/testing.zig");
 const backend_mod = @import("../../runtime.zig");
 const allocator = std.testing.allocator;
@@ -168,12 +169,106 @@ test "unified HTTP protocol policy prefers H3 on both address families and I/O b
     try exercise(backend.io(), true, .prefer_http3);
 }
 
+test "unified HTTP direct H3 routes through SOCKS5 UDP ASSOCIATE" {
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var certificate: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate,
+        tls_testing.certificate_base64,
+    );
+    const key = try tls_testing.serverKeyPair();
+    const pin = key.public_key.toUncompressedSec1();
+    const limits: h3.Limits = .{ .quic = .{ .max_datagram_size = 4096 } };
+    var server = try h3.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        limits,
+        .{ .handshake = .{
+            .local_connection_id = &.{ 9, 8, 7, 6, 5, 4, 3, 2 },
+            .identity = .{
+                .certificate_chain = &.{&certificate},
+                .signer = .{ .ecdsa_p256_sha256 = .{ .key_pair = key } },
+            },
+        } },
+    );
+    defer server.deinit();
+
+    const Peer = struct {
+        fn run(
+            listener: *h3.HandshakeServer,
+            task_io: std.Io,
+        ) !void {
+            var session = try listener.acceptWithTimeout(.fromSeconds(5));
+            defer session.deinit();
+            var request = try session.receiveRequestWithDeadline(
+                deadline(task_io),
+            );
+            defer request.deinit(allocator);
+            try session.sendResponse(request.stream_id, .{
+                .status = 200,
+                .body = "socks-h3",
+            });
+        }
+    };
+    var peer = try io.concurrent(Peer.run, .{ &server, io });
+    defer _ = peer.cancel(io) catch {};
+
+    var proxy = try socks.Server.init(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .auth = .{ .allow_anonymous = true },
+            .acl = .{ .default_action = .allow },
+            .allow_udp = true,
+        },
+    );
+    defer proxy.deinit();
+    const Serve = struct {
+        fn run(proxy_server: *socks.Server) !void {
+            try proxy_server.serve();
+        }
+    };
+    var proxy_loop = try io.concurrent(Serve.run, .{&proxy});
+    defer _ = proxy_loop.cancel(io) catch {};
+
+    const uri = try std.fmt.allocPrint(
+        allocator,
+        "https://127.0.0.1:{d}/socks",
+        .{server.address().getPort()},
+    );
+    defer allocator.free(uri);
+    var client = try http.Client.init(allocator, io, .{
+        .protocol_policy = .http3_only,
+        .tls = .{ .server_verifier = .{
+            .pinned_ecdsa_p256_public_key = pin,
+        } },
+        .socks5_proxy = .{
+            .host = "127.0.0.1",
+            .port = proxy.listener.socket.address.ip4.port,
+        },
+        .http3 = .{ .limits = limits },
+    });
+    defer client.deinit();
+    var response = try client.requestUriWithDeadline(uri, .{}, deadline(io));
+    defer response.deinit();
+    try std.testing.expectEqual(http.Protocol.http3, response.protocol());
+    try std.testing.expectEqualStrings("socks-h3", response.body());
+    try peer.await(io);
+}
+
 test "unified HTTP direct H3 rejects unsupported proxy cleartext and expired setup" {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
     try std.testing.expectError(error.InvalidClientOptions, http.Client.init(allocator, io, .{ .protocol_policy = .http3_only, .http_proxy = .{ .uri = "http://127.0.0.1:1" } }));
-    try std.testing.expectError(error.InvalidClientOptions, http.Client.init(allocator, io, .{ .protocol_policy = .http3_only, .socks5_proxy = .{ .host = "localhost" } }));
+    // SOCKS5 UDP ASSOCIATE can carry H3, so the strict policy accepts it.
+    var socks_client = try http.Client.init(allocator, io, .{ .protocol_policy = .http3_only, .socks5_proxy = .{ .host = "localhost" } });
+    socks_client.deinit();
     var h3_pool = try http.Pool.init(allocator, io, .{ .client = .{ .protocol_policy = .http3_only } });
     h3_pool.deinit();
     try std.testing.expectError(error.InvalidClientOptions, http.Client.init(allocator, io, .{ .protocol_policy = .http3_only, .http3 = .{ .handshake = .{ .connect_timeout = .zero, .handshake = .{ .original_destination_connection_id = &.{}, .local_connection_id = &.{} } } } }));

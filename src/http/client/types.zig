@@ -245,7 +245,7 @@ pub const Options = struct {
     /// interleaves address families and races them with a bounded stagger.
     address_connect_policy: AddressConnectPolicy = .ordered,
     /// Route every origin through SOCKS5 with proxy-side destination DNS.
-    /// TCP protocols use CONNECT; an enabled HTTP/3 pool uses UDP ASSOCIATE.
+    /// TCP protocols use CONNECT; direct and pooled HTTP/3 use UDP ASSOCIATE.
     /// One Client or Pool has one fixed proxy route; each independent origin
     /// connection retains its own SOCKS control lifetime.
     socks5_proxy: ?Socks5Proxy = null,
