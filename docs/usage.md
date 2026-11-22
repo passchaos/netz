@@ -165,6 +165,7 @@ Common client recipes, each a runnable local example:
 | HTTPS through an HTTP CONNECT proxy (`curl -x`) | `zig build run-http-proxy-client` |
 | HTTP/2 over TLS (`curl --http2`) | `zig build run-http-h2-tls` |
 | `prefer_http3` selection (`curl --http3`) | `zig build run-http-h3-prefer` |
+| Pooled H2 origin upgraded to Alt-Svc H3 | `zig build run-http-pool-alt-svc-h3` |
 | Routed server with graceful shutdown | `zig build run-http-server-routes` |
 | Managed `serveUntil` loop with shutdown event | `zig build run-http-server-serve-until` |
 | Stream an upload from a Reader (`curl -T`) | `zig build run-http-upload-reader` |

@@ -93,6 +93,12 @@ pub const specs = [_]Spec{
         .description = "prefer_http3 selection against a local QUIC/TLS origin",
     },
     .{
+        .exe_name = "netz-http-pool-alt-svc-h3",
+        .path = "examples/http/pool_alt_svc_h3.zig",
+        .run_step = "run-http-pool-alt-svc-h3",
+        .description = "Upgrade a pooled origin from H2 to Alt-Svc HTTP/3",
+    },
+    .{
         .exe_name = "netz-http-server-routes",
         .path = "examples/http/server_routes.zig",
         .run_step = "run-http-server-routes",

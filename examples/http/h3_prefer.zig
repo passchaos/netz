@@ -92,22 +92,17 @@ pub fn main() !void {
     );
     defer allocator.free(uri);
 
-    const original_dcid = [_]u8{ 0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67 };
-    const client_cid = [_]u8{ 0x68, 0x69, 0x6a, 0x6b };
     var client = try netz.http.Client.init(allocator, io, .{
         .protocol_policy = .prefer_http3,
+        // H3 inherits the TCP TLS trust policy, including this pin.
+        .tls = .{ .server_verifier = .{
+            .pinned_ecdsa_p256_public_key = public_key,
+        } },
         .http3 = .{
             // The probe budget only bounds H3 feasibility before TCP
-            // fallback; keep it generous for loaded hosts.
+            // fallback; keep it generous for loaded hosts. Connection IDs are
+            // generated per connection.
             .preference_timeout = .fromSeconds(2),
-            .handshake = .{ .handshake = .{
-                .original_destination_connection_id = &original_dcid,
-                .local_connection_id = &client_cid,
-                .server_auth = .{
-                    .pinned_ecdsa_p256_public_key = public_key,
-                },
-                .max_crypto_buffer = 64 * 1024,
-            } },
             .limits = .{ .quic = .{
                 .max_datagram_size = 4096,
                 .max_frames_per_datagram = 16,

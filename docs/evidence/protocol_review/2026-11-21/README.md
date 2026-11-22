@@ -2069,3 +2069,18 @@ the same `nativeHandshake()`/`sessionOptions()` flat accessors as
 | Full HTTP suite (Debug) | 307/307 | live `zig build test-http` |
 | WebSocket H3 URI tests (empty IDs) | 81/81 matched | live `zig build test-websocket -Dtest-filter='HTTP3 URI'` |
 | WebTransport (Debug, filtered) | 93/93 matched | live `zig build test-webtransport -Dtest-filter='flow negotiation requires intent'` |
+
+
+## Hundred-and-first pass: pooled Alt-Svc H3 example
+
+The new `run-http-pool-alt-svc-h3` example starts an H2/TLS origin that
+advertises `alt-svc: h3=":port"` and an H3 server on that port. The pool uses
+`.http3 = .{}` (default limits, generated connection IDs, trust inherited from
+`client.tls`) and upgrades the second request to H3. `run-http-h3-prefer` now
+shows the same inheritance directly: it sets only `.tls.server_verifier` and
+lets the H3 route reuse that pin.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Pool Alt-Svc H3 | `first http2 200: tcp discovery`, `second http3 200: hello over Alt-Svc HTTP/3` | live `zig build run-http-pool-alt-svc-h3` |
+| prefer_http3 example | `prefer_http3 http3 200: hello from prefer_http3` | live `zig build run-http-h3-prefer` |
