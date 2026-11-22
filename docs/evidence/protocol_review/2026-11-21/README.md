@@ -1879,3 +1879,18 @@ not trust the test certificate.
 | --- | --- | --- |
 | Example compile matrix | `run-http-https-client` builds and runs | live `zig build run-http-https-client` |
 | HTTPS round-trip | `HTTPS http1 200: hello over verified TLS` | live run |
+
+
+## Ninetieth pass: CONNECT proxy example and latent server-init fixes
+
+Adding the `run-http-proxy-client` example (`curl -x` shape: local CONNECT
+proxy, local TLS origin, unified client with an HTTP proxy URI and a pinned
+origin key) exposed that both proxy server `init` functions had never been
+compiled: `const listener` was passed to the mutating `deinit` in `errdefer`,
+and `serve`/`Job.run` discarded `fetchAdd`/`fetchSub` results. The HTTP CONNECT
+and SOCKS5 servers now compile and run through their public API.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| HTTP CONNECT proxy example | `proxied HTTPS http1 200: hello through the CONNECT proxy` | live `zig build run-http-proxy-client` |
+| Proxy server init/serve tests | 19/19 | live `zig build test-proxy -Dtest-filter='proxy server init and deinit'` |

@@ -70,7 +70,7 @@ pub const Server = struct {
         address: net.IpAddress,
         config: Config,
     ) !Server {
-        const listener = try address.listen(io, .{ .reuse_address = true });
+        var listener = try address.listen(io, .{ .reuse_address = true });
         errdefer listener.deinit(io);
         var limiter = try limits.ConnectionLimiter.init(
             allocator,
@@ -119,9 +119,9 @@ pub const Server = struct {
                 .stream = stream,
                 .peer = peer,
             };
-            self.active_jobs.fetchAdd(1, .monotonic);
+            _ = self.active_jobs.fetchAdd(1, .monotonic);
             const thread = std.Thread.spawn(.{}, Job.run, .{job}) catch {
-                self.active_jobs.fetchSub(1, .release);
+                _ = self.active_jobs.fetchSub(1, .release);
                 self.allocator.destroy(job);
                 stream.close(self.io);
                 continue;
@@ -137,7 +137,7 @@ pub const Server = struct {
 
         fn run(self: *Job) void {
             const server = self.server;
-            defer server.active_jobs.fetchSub(1, .release);
+            defer _ = server.active_jobs.fetchSub(1, .release);
             defer server.allocator.destroy(self);
             defer self.stream.close(server.io);
             processConnection(
@@ -655,4 +655,21 @@ fn replyForError(err: anyerror) codec.Reply {
         => .host_unreachable,
         else => .general_failure,
     };
+}
+
+test "SOCKS5 proxy server init and deinit" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var server = try Server.init(
+        std.testing.allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+    try std.testing.expect(server.listener.socket.address.ip4.port != 0);
+    // Force the accept loop to analyze without blocking: a stopped server
+    // returns before its first accept.
+    server.requestStop();
+    try server.serve();
 }

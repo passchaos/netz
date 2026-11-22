@@ -69,6 +69,12 @@ pub const specs = [_]Spec{
         .description = "HTTPS with an explicit pinned server verifier",
     },
     .{
+        .exe_name = "netz-http-proxy-client",
+        .path = "examples/http/proxy_client.zig",
+        .run_step = "run-http-proxy-client",
+        .description = "HTTPS through a local HTTP/1.1 CONNECT proxy",
+    },
+    .{
         .exe_name = "netz-http2-h2c",
         .path = "examples/http/http2_h2c.zig",
         .run_step = "run-http2-h2c",
