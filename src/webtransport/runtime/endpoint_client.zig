@@ -52,8 +52,12 @@ pub const Options = struct {
     /// Native QUIC/TLS options. URI connects install platform roots when no
     /// trust material is configured; set `handshake.server_auth`, a native
     /// store, an environment, or a non-default root source to replace that
-    /// policy. Direct-address helpers keep the explicit-configuration contract.
-    h3: http3.runtime.HandshakeClientOptions,
+    /// policy. Empty connection IDs are generated per connection. Direct
+    /// address helpers keep the explicit-configuration contract.
+    h3: http3.runtime.HandshakeClientOptions = .{ .handshake = .{
+        .original_destination_connection_id = &.{},
+        .local_connection_id = &.{},
+    } },
     /// Local memory/admission bound independent of the server SETTINGS value.
     max_sessions: usize = 16,
     /// Connection-wide bounds for peer streams received before their CONNECT
@@ -613,6 +617,19 @@ pub const Client = struct {
         var h3_options = try resolvedH3Options(options.h3, options.initial_flow_limits, options.require_session_flow_control);
         if (h3_options.handshake.server_name == null) {
             h3_options.handshake.server_name = endpoint.tls_host;
+        }
+        // URI connects own the QUIC identity, so callers only need to supply
+        // IDs when they need reproducibility or resumption continuity.
+        var destination_id: [8]u8 = undefined;
+        var local_id: [8]u8 = undefined;
+        if (h3_options.handshake.original_destination_connection_id.len == 0) {
+            try io.randomSecure(&destination_id);
+            h3_options.handshake.original_destination_connection_id =
+                &destination_id;
+        }
+        if (h3_options.handshake.local_connection_id.len == 0) {
+            try io.randomSecure(&local_id);
+            h3_options.handshake.local_connection_id = &local_id;
         }
         // The HTTP/1, HTTP/2 and WebSocket URI clients verify servers with the
         // platform roots by default. Keep the URI WebTransport client

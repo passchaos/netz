@@ -137,7 +137,8 @@ The pool negotiates each origin once, retains the selected protocol, and
 bounds idle/leased/connecting sockets. `max_idle_per_origin` must not exceed
 `max_idle_connections`; the constructor rejects that combination with
 `error.InvalidPoolOptions`. An optional `Pool.Options.http3` enables the shared
-Alt-Svc dispatcher route.
+Alt-Svc dispatcher route; `.http3 = .{}` is valid and uses inherited trust,
+generated connection IDs, and the default H3 limits.
 
 Runnable: `zig build run-http-unified-client` (one-shot plus pooled reuse) and
 `zig build run-http-duplex` (incremental bodies and trailers).

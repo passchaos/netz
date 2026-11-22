@@ -629,9 +629,6 @@ test "WebSocket HTTP3 URI derives authority path query and SNI" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    const original_dcid =
-        [_]u8{ 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18 };
-    const client_cid = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
     const server_cid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
     const limits: http3.runtime.Limits = .{ .quic = .{
         .max_datagram_size = 4096,
@@ -797,8 +794,8 @@ test "WebSocket HTTP3 URI derives authority path query and SNI" {
             .h3_limits = limits,
             .h3 = .{
                 .handshake = .{
-                    .original_destination_connection_id = &original_dcid,
-                    .local_connection_id = &client_cid,
+                    .original_destination_connection_id = &.{},
+                    .local_connection_id = &.{},
                     .random = [_]u8{0x37} ** 32,
                     .x25519_secret_key = [_]u8{0x38} ** 32,
                     .server_auth = .{

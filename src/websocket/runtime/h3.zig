@@ -260,8 +260,12 @@ pub const UriConnectOptions = struct {
     /// Native QUIC/TLS options. URI connects install platform roots when no
     /// trust material is configured; set `handshake.server_auth`, a native
     /// store, an environment, or a non-default root source to replace that
-    /// policy. Direct session helpers keep the explicit-configuration contract.
-    h3: http3.runtime.HandshakeClientOptions,
+    /// policy. Empty connection IDs are generated per connection. Direct
+    /// session helpers keep the explicit-configuration contract.
+    h3: http3.runtime.HandshakeClientOptions = .{ .handshake = .{
+        .original_destination_connection_id = &.{},
+        .local_connection_id = &.{},
+    } },
     /// Route QUIC through SOCKS5 UDP ASSOCIATE while keeping URI DNS at the
     /// proxy and TLS identity bound to the HTTPS origin.
     socks5_proxy: ?http3.socks5_runtime.Proxy = null,
@@ -4726,6 +4730,19 @@ pub const Client = struct {
         h3_options.session.local_settings.enable_connect_protocol = true;
         if (h3_options.handshake.server_name == null) {
             h3_options.handshake.server_name = endpoint.tls_host;
+        }
+        // URI connects own the QUIC identity, so callers only need to supply
+        // IDs when they need reproducibility or resumption continuity.
+        var destination_id: [8]u8 = undefined;
+        var local_id: [8]u8 = undefined;
+        if (h3_options.handshake.original_destination_connection_id.len == 0) {
+            try io.randomSecure(&destination_id);
+            h3_options.handshake.original_destination_connection_id =
+                &destination_id;
+        }
+        if (h3_options.handshake.local_connection_id.len == 0) {
+            try io.randomSecure(&local_id);
+            h3_options.handshake.local_connection_id = &local_id;
         }
         // Verify WSS-over-H3 peers with platform roots by default, matching
         // WSS over TCP. The store lives for the synchronous handshake.

@@ -42,7 +42,13 @@ pub const Options = struct {
     /// preferred-address migration when `shared_endpoint` is enabled.
     migration_local_address: ?std.Io.net.IpAddress = null,
     limits: runtime.Limits = .{},
-    handshake: runtime.HandshakeClientOptions,
+    /// QUIC/TLS policy. Empty connection IDs are generated per connection;
+    /// trust fields left unset inherit `Pool.Options.client.tls`, then fall
+    /// back to platform roots.
+    handshake: runtime.HandshakeClientOptions = .{ .handshake = .{
+        .original_destination_connection_id = &.{},
+        .local_connection_id = &.{},
+    } },
     idle: http3.origin_pool.Config = .{},
     max_connections: usize = 32,
     /// Maximum origins retaining peer H3 SETTINGS for a future 0-RTT offer.
