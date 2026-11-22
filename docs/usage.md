@@ -148,6 +148,7 @@ Common client recipes, each a runnable local example:
 | HTTP/2 over TLS (`curl --http2`) | `zig build run-http-h2-tls` |
 | `prefer_http3` selection (`curl --http3`) | `zig build run-http-h3-prefer` |
 | Routed server with graceful shutdown | `zig build run-http-server-routes` |
+| Managed `serveUntil` loop with shutdown event | `zig build run-http-server-serve-until` |
 | Stream an upload from a Reader (`curl -T`) | `zig build run-http-upload-reader` |
 
 ## 5. HTTP server quick start
@@ -173,6 +174,12 @@ try connection.writeResponse(.{
     .request_method = request.request.method,
 });
 ```
+
+`Server.serveUntil` is the managed production loop: it bounds concurrent
+connections and requests per connection, applies accept/connection error
+policies, and stops when a `std.Io.Event` is set. The handler returns
+`ResponseOptions`; its body must outlive the handler call (use static or
+context-owned storage). See `zig build run-http-server-serve-until`.
 
 - HTTP/2 h2c: `zig build run-http2-h2c`.
 - HTTP/3 (real QUIC/TLS handshake): `zig build run-http3-handshake`.

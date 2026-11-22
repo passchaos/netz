@@ -93,6 +93,12 @@ pub const specs = [_]Spec{
         .description = "Route several HTTP/1.1 paths with a graceful shutdown route",
     },
     .{
+        .exe_name = "netz-http-server-serve-until",
+        .path = "examples/http/server_serve_until.zig",
+        .run_step = "run-http-server-serve-until",
+        .description = "Run the managed HTTP/1.1 serve loop with graceful shutdown",
+    },
+    .{
         .exe_name = "netz-http-upload-reader",
         .path = "examples/http/upload_reader.zig",
         .run_step = "run-http-upload-reader",

@@ -1998,3 +1998,18 @@ keep the explicit configuration contract documented in the API map.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | WebTransport (Debug) | 759/761 (2 skipped) | live `zig build test-webtransport` |
+
+
+## Ninety-seventh pass: managed serve loop example
+
+`Server.serveUntil` is the production accept loop (bounded connections and
+requests, error policies, shutdown event), but no example exercised it. The
+new `run-http-server-serve-until` example routes `/hello` and `/status`
+through the handler callback, serves two pooled requests, then sets the
+shutdown event and waits for the loop to finish. The handler returns
+`ResponseOptions` with static bodies because the loop writes the response
+after the callback returns.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Managed serve loop | `/hello` 200, `/status` 200, clean stop after 2 requests | live `zig build run-http-server-serve-until` |
