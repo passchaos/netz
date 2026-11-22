@@ -672,6 +672,7 @@ test "H3 connect options expose flat handshake and session accessors" {
     var options: Http3ConnectOptions = .{};
     options.nativeHandshake().alpn_protocols = &.{"h3"};
     options.nativeHandshake().server_name = "example.test";
+    options.nativeHandshake().max_crypto_buffer = 512 * 1024;
     options.sessionOptions().max_body_bytes = 32 * 1024 * 1024;
     try std.testing.expectEqualStrings(
         "h3",
@@ -680,6 +681,10 @@ test "H3 connect options expose flat handshake and session accessors" {
     try std.testing.expectEqualStrings(
         "example.test",
         options.handshake.handshake.server_name.?,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 512 * 1024),
+        options.handshake.handshake.max_crypto_buffer,
     );
     try std.testing.expectEqual(
         @as(usize, 32 * 1024 * 1024),

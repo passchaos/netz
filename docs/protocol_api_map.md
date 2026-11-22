@@ -62,7 +62,7 @@ aliases for the version-specific streaming owners, not another transport.
 
 | Resource | Default / owner |
 | --- | --- |
-| QUIC CRYPTO reassembly | 256 KiB per encryption level, grown on demand |
+| QUIC CRYPTO reassembly | 256 KiB per encryption level (`max_crypto_buffer`); storage grows with received data up to that limit |
 | QUIC handshake datagram | 1200 bytes (minimum path MTU) |
 | QUIC 1-RTT send datagram | 1200 bytes (`one_rtt.Config`); `setApplicationDatagramSize` raises the socket cap too; PMTUD opt-in |
 | QUIC endpoint datagram | 65,535 bytes generic; H3 facade 4096 (socket/receive cap) |
@@ -74,6 +74,12 @@ aliases for the version-specific streaming owners, not another transport.
 Raising the HTTP body limit for H3 requires
 `http3.handshake.session.max_body_bytes`; H1/H2 use
 `http1_limits.max_body_bytes`/`http2_limits.max_body_bytes`.
+
+Large certificate chains can exceed the 256 KiB handshake CRYPTO budget and
+surface `error.CryptoBufferTooLarge`. Raise `max_crypto_buffer` on the QUIC
+handshake client/server options (H3 clients:
+`options.nativeHandshake().max_crypto_buffer`); the limit does not grow
+automatically.
 
 ## Error taxonomy
 

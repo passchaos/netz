@@ -1483,3 +1483,19 @@ now matches the implementation and the recorded evidence.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | Documentation consistency | API map matches passes 22, 57, 60, 63 | `docs/protocol_api_map.md` |
+
+
+## Sixty-seventh pass: CRYPTO buffer limit documentation and accessor pin
+
+The API map described the QUIC CRYPTO reassembly limit as "grown on demand",
+which could suggest the 256 KiB default rises automatically. The row now
+states that storage grows with received data only up to `max_crypto_buffer`,
+and a new paragraph documents `error.CryptoBufferTooLarge` for large
+certificate chains plus the `nativeHandshake().max_crypto_buffer` override on
+H3 clients. The existing flat-accessor test now also mutates and verifies
+`max_crypto_buffer`, pinning the documented path.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full HTTP suite | 305/305 | `http-crypto-buffer-accessor.log` |
+| Public package surface tests | 26/26 | `test-package-crypto-buffer-accessor.log` |
