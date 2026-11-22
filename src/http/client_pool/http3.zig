@@ -80,6 +80,22 @@ pub const Options = struct {
     max_socks5_route_sources: usize = 64,
     alt_svc: alt_svc_cache.Config = .{},
     fallback: FallbackPolicy = .idempotent_methods,
+
+    /// Native QUIC/TLS handshake options. Flat accessor for the
+    /// `handshake.handshake` field, matching `Http3ConnectOptions`.
+    pub fn nativeHandshake(
+        self: *Options,
+    ) *quic.handshake.ClientOptions {
+        return &self.handshake.handshake;
+    }
+
+    /// HTTP/3 session and 1-RTT limits. Flat accessor for the
+    /// `handshake.session` field, matching `Http3ConnectOptions`.
+    pub fn sessionOptions(
+        self: *Options,
+    ) *runtime.HandshakeSessionOptions {
+        return &self.handshake.session;
+    }
 };
 
 pub const StreamHandle = union(enum) {
