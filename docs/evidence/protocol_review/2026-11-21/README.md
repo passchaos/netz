@@ -1913,3 +1913,20 @@ The HTTP example catalog now covers the remaining protocol-selection shapes:
 | --- | --- | --- |
 | HTTP/2 TLS | `H2 TLS http2 200: hello over HTTP/2 TLS` | live `zig build run-http-h2-tls` |
 | prefer_http3 | `prefer_http3 http3 200: hello from prefer_http3` | live `zig build run-http-h3-prefer` |
+
+
+## Ninety-second pass: routed server and streaming upload recipes
+
+Two more application shapes complete the HTTP catalog:
+
+- `run-http-server-routes`: one persistent HTTP/1.1 connection serves `/`,
+  `/health`, `/hello?name=`, `POST /echo`, a 404 path, and a `/quit` route
+  that finishes its response before closing the server loop.
+- `run-http-upload-reader`: the unified client sends a 45,056-byte body from a
+  `std.Io.Reader` source with an explicit length (fixed framing), and the
+  server reports the exact received size.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Routed server | `/` 200 home, `/health` 200 ok, `/hello?name=netz` 200, `/echo` 200, `/missing` 404, `/quit` 200 bye | live `zig build run-http-server-routes` |
+| Reader upload | `uploaded 45056 bytes -> 200: received 45056 bytes` | live `zig build run-http-upload-reader` |

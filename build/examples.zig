@@ -87,6 +87,18 @@ pub const specs = [_]Spec{
         .description = "prefer_http3 selection against a local QUIC/TLS origin",
     },
     .{
+        .exe_name = "netz-http-server-routes",
+        .path = "examples/http/server_routes.zig",
+        .run_step = "run-http-server-routes",
+        .description = "Route several HTTP/1.1 paths with a graceful shutdown route",
+    },
+    .{
+        .exe_name = "netz-http-upload-reader",
+        .path = "examples/http/upload_reader.zig",
+        .run_step = "run-http-upload-reader",
+        .description = "Stream a request body from a Reader",
+    },
+    .{
         .exe_name = "netz-http2-h2c",
         .path = "examples/http/http2_h2c.zig",
         .run_step = "run-http2-h2c",
