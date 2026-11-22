@@ -2028,3 +2028,44 @@ and names the per-protocol override.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | Large streamed response | `streamed 20971520 bytes (cap raised to 24 MiB) sha256=5141c925...` | live `zig build run-http-large-body-stream` |
+
+
+## Ninety-ninth pass: pooled H3 and WebSocket-over-H3 trust parity
+
+The direct H3 route verified peers with platform roots, but the pool's Alt-Svc
+H3 backend and WebSocket-over-H3 URI connects still used the low-level QUIC
+default, which disables certificate verification when no trust material is
+set. `quic.client_trust` now maps the unified TCP policy onto QUIC handshakes:
+explicit H3 trust wins, otherwise the handshake inherits `client.tls`
+(`server_verifier`, client identity, native store, environment, root source),
+then loads one platform store. The pool keeps that store for its lifetime;
+WebSocket and WebTransport URI connects keep it for the synchronous handshake.
+A TCP `tls.ca_bundle` has no QUIC representation, so pooled Alt-Svc H3 rejects
+it with `UnsupportedH3TrustConfiguration`, `http3_only` rejects it at init, and
+`prefer_http3` keeps the request on TCP.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full HTTP suite (Debug) | 307/307 | live `zig build test-http` |
+| QUIC trust unit tests | 38/38 matched | live `zig build test-quic -Dtest-filter=trust` |
+| WebSocket H3 URI tests | 81/81 matched | live `zig build test-websocket -Dtest-filter='HTTP3 URI'` |
+| WebSocket directional H3 URI | 77/77 matched | live `zig build test-websocket -Dtest-filter='directional takeover HTTP3 URI'` |
+| WebTransport (Debug, filtered) | 93/93 matched | live `zig build test-webtransport -Dtest-filter='flow negotiation requires intent'` |
+
+
+## Hundredth pass: URI facade connection IDs and pooled H3 defaults
+
+`Pool.Options.http3 = .{}` now enables the Alt-Svc backend: the handshake
+options default to empty IDs, which the pool connector generates per
+connection. WebSocket-over-H3 and WebTransport URI connects generate empty
+client IDs themselves, so `UriConnectOptions.h3` and
+`EndpointClient.Options.h3` can be omitted. Explicit IDs still control
+reproducibility and resumption continuity. `Pool.Options.http3` also exposes
+the same `nativeHandshake()`/`sessionOptions()` flat accessors as
+`Http3ConnectOptions`.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full HTTP suite (Debug) | 307/307 | live `zig build test-http` |
+| WebSocket H3 URI tests (empty IDs) | 81/81 matched | live `zig build test-websocket -Dtest-filter='HTTP3 URI'` |
+| WebTransport (Debug, filtered) | 93/93 matched | live `zig build test-webtransport -Dtest-filter='flow negotiation requires intent'` |
