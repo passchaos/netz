@@ -27,6 +27,42 @@ pub const specs = [_]Spec{
         .description = "Run the unified HTTP client and pool against a local HTTP/1 server",
     },
     .{
+        .exe_name = "netz-http-client-forms",
+        .path = "examples/http/client_forms.zig",
+        .run_step = "run-http-client-forms",
+        .description = "Build query strings, POST URL-encoded forms, and send HEAD requests",
+    },
+    .{
+        .exe_name = "netz-http-client-json",
+        .path = "examples/http/client_json.zig",
+        .run_step = "run-http-client-json",
+        .description = "Send and parse JSON request and response bodies",
+    },
+    .{
+        .exe_name = "netz-http-download",
+        .path = "examples/http/download.zig",
+        .run_step = "run-http-download",
+        .description = "Stream a chunked response body into a file",
+    },
+    .{
+        .exe_name = "netz-http-upload-multipart",
+        .path = "examples/http/upload_multipart.zig",
+        .run_step = "run-http-upload-multipart",
+        .description = "Stream a multipart form upload and parse it on the server",
+    },
+    .{
+        .exe_name = "netz-http-cookie-session",
+        .path = "examples/http/cookie_session.zig",
+        .run_step = "run-http-cookie-session",
+        .description = "Persist server cookies across pooled requests",
+    },
+    .{
+        .exe_name = "netz-http-redirects",
+        .path = "examples/http/redirects.zig",
+        .run_step = "run-http-redirects",
+        .description = "Follow relative redirects and report the final URI",
+    },
+    .{
         .exe_name = "netz-http2-h2c",
         .path = "examples/http/http2_h2c.zig",
         .run_step = "run-http2-h2c",

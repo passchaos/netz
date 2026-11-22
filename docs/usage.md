@@ -86,6 +86,9 @@ std.debug.print("{t} {d}: {s}\n", .{
   trailers without allocation; they borrow the owned response.
 - `body` is the simplest request body. For uploads larger than memory use
   `.body_source = .{ .reader = ... }` (see [http_bodies.md](http_bodies.md)).
+- Duplex handles stream one exchange: write the request body and call
+  `finishBody()` before `readResponse()`; reading before the body is finished
+  returns `error.InvalidWriterState`.
 - Redirects: `requestUriFollowingRedirects*`; the chain shares one deadline.
 - Errors: `error.Timeout` for expired or non-positive budgets, protocol errors
   for malformed peers, `error.ConnectionClosed` after a terminal close.
@@ -124,6 +127,17 @@ Alt-Svc dispatcher route.
 
 Runnable: `zig build run-http-unified-client` (one-shot plus pooled reuse) and
 `zig build run-http-duplex` (incremental bodies and trailers).
+
+Common client recipes, each a runnable local example:
+
+| Task | Example |
+| --- | --- |
+| Query strings, URL-encoded POST, HEAD | `zig build run-http-client-forms` |
+| JSON request and response bodies | `zig build run-http-client-json` |
+| Stream a chunked download into a file | `zig build run-http-download` |
+| Multipart upload (`curl -F`) | `zig build run-http-upload-multipart` |
+| Cookie persistence across pooled requests | `zig build run-http-cookie-session` |
+| Relative redirect chains (`curl -L`) | `zig build run-http-redirects` |
 
 ## 5. HTTP server quick start
 
@@ -197,24 +211,26 @@ Runnable: `zig build run-websocket-echo`.
 ## 7. WebTransport
 
 HTTP/3 WebTransport owns a CONNECT session; streams and DATAGRAMs borrow it.
-Connection IDs and key material below are generated per connection by the
-caller (8-byte DCID, 4-byte CIDs, 32-byte random/secret):
+The URI form derives SNI, authority and path from one HTTPS URL and verifies
+the server against the system trust store by default. Connection IDs are
+caller-generated per connection (8-byte original DCID, 4-byte local CID):
 
 ```zig
-var client = try netz.webtransport.runtime.HandshakeClientSession.connect(
-    allocator, io, .{ .ip4 = .loopback(0) }, server_address,
-    .{
-        .authority = "localhost",
-        .path = "/wt-stream",
-        .limits = .{ .http3 = .{ .quic = .{ .max_datagram_size = 4096 } } },
-        .h3 = .{ .handshake = .{
-            .original_destination_connection_id = &original_dcid,
-            .local_connection_id = &client_cid,
-            .server_name = "localhost",
-            .random = random,
-            .x25519_secret_key = secret,
-        } },
-    },
+var original_dcid: [8]u8 = undefined;
+var client_cid: [4]u8 = undefined;
+try std.Io.randomSecure(io, &original_dcid);
+try std.Io.randomSecure(io, &client_cid);
+
+var client = try netz.webtransport.runtime.HandshakeClientSession.connectUriWithTimeout(
+    allocator,
+    io,
+    .{ .ip4 = .unspecified(0) },
+    "https://example.com/wt",
+    .{ .h3 = .{ .handshake = .{
+        .original_destination_connection_id = &original_dcid,
+        .local_connection_id = &client_cid,
+    } } },
+    .fromSeconds(10),
 );
 defer client.deinit();
 
@@ -224,6 +240,10 @@ try client.sendStream(stream_id, "hello", true);
 var event = try client.receiveStream();
 defer event.deinit();
 ```
+
+Use `connect`/`connectWithTimeout` with explicit `authority`/`path` when the
+server address is already resolved (the address-based form shown in
+`examples/webtransport/webtransport_handshake_stream.zig`).
 
 - Server: `webtransport.runtime.HandshakeServer.bind` then `accept()`.
 - Streams: `openBidirectionalStream`/`openUnidirectionalStream`,

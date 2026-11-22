@@ -1827,3 +1827,39 @@ WebTransport staging limits discovered during the audit.
 | --- | --- | --- |
 | Example compile matrix | 76/76 steps | live `zig build examples` |
 | Unified client example | one-shot + two pooled HTTP/1 requests, all 200 | live `zig build run-http-unified-client` |
+
+
+## Eighty-eighth pass: HTTP example catalog toward hyper/reqwest/curl
+
+The HTTP example surface only covered transport smoke tests and low-level
+duplex/chunked paths. Five application-shaped examples now cover the common
+reference-project recipes, each self-contained against a loopback HTTP/1
+server:
+
+- `run-http-client-forms`: `netz.http.form` query encoding, URL-encoded POST,
+  and HEAD header inspection.
+- `run-http-client-json`: typed JSON request and response bodies.
+- `run-http-download`: chunked server response streamed through
+  `RequestHandle.readResponse` into a file.
+- `run-http-upload-multipart`: slice and reader parts written with
+  `multipart.write`, generated Content-Type, and server-side
+  `multipart.parse`.
+- `run-http-cookie-session`: `CookieSession` stores a `Set-Cookie` and the next
+  pooled request carries it automatically.
+- `run-http-redirects`: relative 302 resolution, one-deadline chain following,
+  and final URI/hop reporting.
+
+The catalog exposed one duplex contract worth documenting: a `RequestHandle`
+must finish its request body (`finishBody()`) before `readResponse()`;
+otherwise the runtime returns `error.InvalidWriterState`. `docs/usage.md` now
+records it.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Example compile matrix | 81/81 steps | live `zig build examples` |
+| forms | GET 200, POST 200, HEAD 200 with 32-byte Content-Length | live run |
+| JSON | `hello netz`, doubled=42 | live run |
+| download | 8192 bytes streamed, status 200 | live run |
+| multipart | 3 parts parsed with filename and reader body | live run |
+| cookie session | `/me` observed `session=abc123` without an explicit header | live run |
+| redirects | 1 hop, final URI `/new`, status 200 | live run |
