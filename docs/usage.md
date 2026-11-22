@@ -50,7 +50,8 @@ const io = backend.io();
 | Task | Recommended entry |
 | --- | --- |
 | One-shot HTTP request with protocol fallback | `netz.http.Client.requestUri*` |
-| Reuse connections across requests | `netz.http.Pool.requestUri*` |
+| Reuse connections across requests | `netz.http.Pool.requestUri*`; add `.http3 = .{}` for Alt-Svc HTTP/3 |
+| Prefer HTTP/3 with TCP fallback | `netz.http.Client` or `Pool.Options.client` with `.protocol_policy = .prefer_http3` |
 | Explicit direct HTTP/3 | `netz.http.Client` with `.http3_only`, or `http3.runtime.HandshakeClient` |
 | Incremental request/response bodies | `Client.connectUri` + `Connection.startRequest`, or `Pool.startRequest` |
 | HTTP server | `http1.runtime.Server`, `http2.runtime.Server`, `http3.runtime.HandshakeServer` (aliases: `netz.streaming.http1/http2/http3`) |
@@ -101,6 +102,12 @@ Protocol policy:
 | `.prefer_http3` | Tries authenticated QUIC/H3 first, then falls back to H2/H1 under `http3.preference_timeout`. |
 | `.http3_only` | Requires QUIC/TLS 1.3; no TCP fallback. |
 | `.http1_only` / `.http2_only` | Pin the wire version. Cleartext H2 requires prior knowledge. |
+
+HTTP/3 cannot be selected by a TCP TLS handshake: TCP ALPN negotiates `h2` or
+`http/1.1`, while H3 requires a QUIC connection whose own TLS handshake offers
+the `h3` ALPN. `.prefer_http3` therefore probes QUIC first and only falls back
+to the TCP ALPN list after H3 is infeasible or exceeds
+`http3.preference_timeout`.
 
 Server authentication is on by default for the unified client: H1/H2 use the
 platform roots, and the H3 route installs the same platform-root verifier when
@@ -320,6 +327,10 @@ zig build run-quic-close
   `netz.websocket.Error`, `netz.webtransport.Error`). Protocol violations are
   distinct from transport unavailability, so fallback policies never treat
   TLS verification or certificate failures as "try another protocol".
+- `error.CryptoBufferTooLarge` during a QUIC/H3 handshake means the peer's TLS
+  flight exceeded `max_crypto_buffer` (256 KiB default). Raise
+  `http3.handshake.handshake.max_crypto_buffer` (or the equivalent low-level
+  QUIC option); storage grows with received data up to that bound.
 
 ## 10. Limits and defaults
 

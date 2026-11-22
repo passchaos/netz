@@ -12,7 +12,10 @@ The default remains `prefer_http2`.
 | `http1_only` | Require H1 over TCP TLS. |
 
 H2/H1 feasibility uses the authenticated peer's ALPN choice; it does not open
-two TLS connections. Cleartext has no TLS ALPN: H3 is ineligible, and the
+two TLS connections. H3 is never negotiated by TCP ALPN: the TCP handshake
+offers `h2` and `http/1.1`, while H3 requires a QUIC connection whose own TLS
+handshake offers `h3`. `prefer_http3` therefore probes QUIC before starting the
+TCP ALPN handshake. Cleartext has no TLS ALPN: H3 is ineligible, and the
 existing `cleartext_protocol` selects H1 or explicit H2 prior knowledge.
 `http3_only` rejects cleartext URIs.
 
@@ -49,7 +52,11 @@ timeout, refusal, unreachable path or unsupported QUIC version. Certificate
 verification, invalid configuration, allocation and caller-cancellation errors
 remain errors. Direct H3 is ineligible when a TCP HTTP/SOCKS proxy is configured
 or TLS 1.3 is disabled, so a preference policy uses the configured TCP route.
-The strict H3 policy rejects those incompatible options.
+The strict H3 policy rejects those incompatible options. A TCP
+`tls.ca_bundle` has no QUIC representation: `prefer_http3` stays on TCP unless
+explicit H3 trust (`server_auth`, a native store, an environment, or a
+non-default root source) is configured, and `http3_only` rejects the
+configuration at `Client.init` with `error.UnsupportedH3TrustConfiguration`.
 
 Selection ends before sending an application request. This allows POST and
 single-pass Reader requests to select TCP safely after an H3 connection failure.
