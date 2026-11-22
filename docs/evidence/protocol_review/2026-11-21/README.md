@@ -1863,3 +1863,19 @@ records it.
 | multipart | 3 parts parsed with filename and reader body | live run |
 | cookie session | `/me` observed `session=abc123` without an explicit header | live run |
 | redirects | 1 hop, final URI `/new`, status 200 | live run |
+
+
+## Eighty-ninth pass: verified HTTPS client example
+
+The HTTP example catalog had no TLS path, leaving the most common production
+configuration (server authentication) without a runnable reference. The new
+`run-http-https-client` example starts the HTTP/1.1 TLS listener with the test
+ECDSA P-256 identity and connects through the unified client with an explicit
+`server_verifier` pin, mirroring `curl --cacert` / a pinned-key client. It
+documents that removing the verifier falls back to the platform roots, which do
+not trust the test certificate.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Example compile matrix | `run-http-https-client` builds and runs | live `zig build run-http-https-client` |
+| HTTPS round-trip | `HTTPS http1 200: hello over verified TLS` | live run |

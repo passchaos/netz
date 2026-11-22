@@ -63,6 +63,12 @@ pub const specs = [_]Spec{
         .description = "Follow relative redirects and report the final URI",
     },
     .{
+        .exe_name = "netz-http-https-client",
+        .path = "examples/http/https_client.zig",
+        .run_step = "run-http-https-client",
+        .description = "HTTPS with an explicit pinned server verifier",
+    },
+    .{
         .exe_name = "netz-http2-h2c",
         .path = "examples/http/http2_h2c.zig",
         .run_step = "run-http2-h2c",
