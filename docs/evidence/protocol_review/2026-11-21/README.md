@@ -1656,3 +1656,15 @@ all pass after the multipart initial-boundary fix.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | Guided HTTP/1 TLS connection fuzz (100 iterations) | 9/9 steps, 3/3 tests | `fuzz-http1-tls-connection-guided.log` |
+
+
+## Seventy-ninth pass: deep parser fuzz
+
+`zig build fuzz-parsers --fuzz=50000` ran 50,000 coverage-guided mutations
+after the multipart fix. The run finished 9/9 steps with 2/2 tests passing
+and no panic, extending the parser corpus coverage well beyond the 10,000
+iterations that found the initial-boundary underflow.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Guided parser fuzz (50,000 iterations) | 9/9 steps, 2/2 tests | `fuzz-parsers-guided-50k.log` |
