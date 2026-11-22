@@ -1982,3 +1982,19 @@ the test identity plus a pinned key so they exercise real verification.
 | WebTransport stream example | bidi=4, uni=14, server_uni=15 | live run |
 | WebTransport DATAGRAM example | owned + caller-buffer echoes | live run |
 | prefer_http3 example | `prefer_http3 http3 200` | live run |
+
+
+## Ninety-sixth pass: WebTransport URI trust parity
+
+`webtransport.runtime.EndpointClient` URI connects inherited the low-level
+QUIC default and skipped server authentication when no trust material was
+configured, while the HTTP and WebSocket URI clients verify with the platform
+roots. The URI connect path now installs a platform-root verifier when
+`server_auth`, `system_store`, `system_environ`, and a non-system
+`root_source` are all absent; the temporary store lives only for the
+synchronous handshake. Lower-level WebTransport session and address helpers
+keep the explicit configuration contract documented in the API map.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| WebTransport (Debug) | 759/761 (2 skipped) | live `zig build test-webtransport` |

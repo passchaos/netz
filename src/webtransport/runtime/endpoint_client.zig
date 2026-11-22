@@ -609,6 +609,28 @@ pub const Client = struct {
         if (h3_options.handshake.server_name == null) {
             h3_options.handshake.server_name = endpoint.tls_host;
         }
+        // The HTTP/1, HTTP/2 and WebSocket URI clients verify servers with the
+        // platform roots by default. Keep the URI WebTransport client
+        // consistent instead of silently skipping authentication when no
+        // explicit trust material is configured; the temporary store lives
+        // only for the synchronous handshake.
+        var system_store: ?quic.tls.trust.SystemStore = null;
+        defer if (system_store) |*store| store.deinit();
+        if (h3_options.handshake.server_auth == null and
+            h3_options.handshake.system_store == null and
+            h3_options.handshake.system_environ == null and
+            h3_options.handshake.root_source == .system)
+        {
+            system_store = quic.tls.trust.SystemStore.init(
+                allocator,
+                io,
+                std.Io.Timestamp.now(io, .real),
+            ) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.NativeTrustStoreUnavailable,
+            };
+            h3_options.handshake.system_store = &system_store.?;
+        }
         const h3_client = if (options.socks5_proxy) |proxy|
             if (deadline) |absolute|
                 try http3.socks5_runtime.connectHostWithDeadline(
