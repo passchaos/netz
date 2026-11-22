@@ -40,6 +40,8 @@ zig build run-http-cookie-session
 zig build run-http-redirects
 zig build run-http-https-client
 zig build run-http-proxy-client
+zig build run-http-h2-tls
+zig build run-http-h3-prefer
 zig build run-http1-hello
 zig build run-http2-h2c
 zig build run-http-duplex

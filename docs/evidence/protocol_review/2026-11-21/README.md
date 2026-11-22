@@ -1894,3 +1894,22 @@ and SOCKS5 servers now compile and run through their public API.
 | --- | --- | --- |
 | HTTP CONNECT proxy example | `proxied HTTPS http1 200: hello through the CONNECT proxy` | live `zig build run-http-proxy-client` |
 | Proxy server init/serve tests | 19/19 | live `zig build test-proxy -Dtest-filter='proxy server init and deinit'` |
+
+
+## Ninety-first pass: HTTP/2 TLS and prefer_http3 client recipes
+
+The HTTP example catalog now covers the remaining protocol-selection shapes:
+
+- `run-http-h2-tls`: the HTTP/2 TLS listener requires `h2` ALPN; the unified
+  client uses `.http2_only` with a pinned server key and reports
+  `H2 TLS http2 200: hello over HTTP/2 TLS`.
+- `run-http-h3-prefer`: a local QUIC/TLS origin with the test identity; the
+  unified client uses `.prefer_http3`, pins the origin key through
+  `http3.handshake.handshake.server_auth`, and reports
+  `prefer_http3 http3 200: hello from prefer_http3`. No TCP listener exists,
+  so a failed H3 probe has no fallback.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| HTTP/2 TLS | `H2 TLS http2 200: hello over HTTP/2 TLS` | live `zig build run-http-h2-tls` |
+| prefer_http3 | `prefer_http3 http3 200: hello from prefer_http3` | live `zig build run-http-h3-prefer` |

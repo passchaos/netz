@@ -75,6 +75,18 @@ pub const specs = [_]Spec{
         .description = "HTTPS through a local HTTP/1.1 CONNECT proxy",
     },
     .{
+        .exe_name = "netz-http-h2-tls",
+        .path = "examples/http/h2_tls.zig",
+        .run_step = "run-http-h2-tls",
+        .description = "HTTP/2 over TLS with the unified client",
+    },
+    .{
+        .exe_name = "netz-http-h3-prefer",
+        .path = "examples/http/h3_prefer.zig",
+        .run_step = "run-http-h3-prefer",
+        .description = "prefer_http3 selection against a local QUIC/TLS origin",
+    },
+    .{
         .exe_name = "netz-http2-h2c",
         .path = "examples/http/http2_h2c.zig",
         .run_step = "run-http2-h2c",

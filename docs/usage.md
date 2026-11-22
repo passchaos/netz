@@ -140,6 +140,8 @@ Common client recipes, each a runnable local example:
 | Relative redirect chains (`curl -L`) | `zig build run-http-redirects` |
 | HTTPS with a pinned server key (`curl --cacert`) | `zig build run-http-https-client` |
 | HTTPS through an HTTP CONNECT proxy (`curl -x`) | `zig build run-http-proxy-client` |
+| HTTP/2 over TLS (`curl --http2`) | `zig build run-http-h2-tls` |
+| `prefer_http3` selection (`curl --http3`) | `zig build run-http-h3-prefer` |
 
 ## 5. HTTP server quick start
 
