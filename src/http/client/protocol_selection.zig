@@ -3,6 +3,7 @@ const std = @import("std");
 const types = @import("types.zig");
 const Owner = @import("http3_connection.zig").Owner;
 const deadlines = @import("../../internal/deadline.zig");
+const client_trust = @import("../../quic/client_trust.zig");
 
 pub fn selectHttp3(allocator: std.mem.Allocator, io: std.Io, uri: std.Uri, options: types.Options, deadline: ?std.Io.Clock.Timestamp) !?*Owner {
     if (!options.protocol_policy.attemptsHttp3()) return null;
@@ -11,6 +12,14 @@ pub fn selectHttp3(allocator: std.mem.Allocator, io: std.Io, uri: std.Uri, optio
         return null;
     }
     if (options.protocol_policy == .http3_only) return try Owner.connect(allocator, io, uri, options, deadline);
+    // A TCP CA bundle has no QUIC representation. `http3_only` rejects this
+    // configuration at init; opportunistic H3 stays on TCP rather than running
+    // an unauthenticated QUIC handshake.
+    if (options.tls.ca_bundle != null and
+        !client_trust.hasExplicitTrust(&options.http3.handshake.handshake))
+    {
+        return null;
+    }
     // Preserve the configured proxy route and TLS version constraints.
     if (options.http_proxy != null or options.socks5_proxy != null or !options.tls.protocol_policy.offersTls13()) return null;
     var budget = options.http3.preference_timeout;

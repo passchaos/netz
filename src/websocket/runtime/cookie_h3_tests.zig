@@ -1,6 +1,7 @@
 const std = @import("std");
 const http3 = @import("../../http3/mod.zig");
 const http_cookies = @import("../../http/cookies/mod.zig");
+const tls_testing = @import("../../tls/mod.zig").testing;
 const h3 = @import("h3.zig");
 
 fn requiredCookie(
@@ -25,6 +26,13 @@ test "WebSocket HTTP3 URI CookieJar stores accepted response" {
         [_]u8{ 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68 };
     const client_cid = [_]u8{ 0x71, 0x72, 0x73, 0x74 };
     const server_cid = [_]u8{ 0x81, 0x82, 0x83, 0x84 };
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+    const key_pair = try tls_testing.serverKeyPair();
+    const public_key = key_pair.public_key.toUncompressedSec1();
     var server = try h3.Server.bind(
         allocator,
         io,
@@ -34,6 +42,10 @@ test "WebSocket HTTP3 URI CookieJar stores accepted response" {
             .local_connection_id = &server_cid,
             .random = [_]u8{0x85} ** 32,
             .x25519_secret_key = [_]u8{0x86} ** 32,
+            .identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{ .ecdsa_p256_sha256 = .{ .key_pair = key_pair } },
+            },
         } },
     );
     defer server.deinit();
@@ -118,6 +130,9 @@ test "WebSocket HTTP3 URI CookieJar stores accepted response" {
                 .local_connection_id = &client_cid,
                 .random = [_]u8{0x87} ** 32,
                 .x25519_secret_key = [_]u8{0x88} ** 32,
+                .server_auth = .{
+                    .pinned_ecdsa_p256_public_key = public_key,
+                },
             } },
         },
         .fromSeconds(3),

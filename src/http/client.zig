@@ -25,12 +25,16 @@ const header_mapping = @import("client/header_mapping.zig");
 const redirect = @import("client/redirect.zig");
 const duplex = @import("client/duplex.zig");
 const reader_io = @import("client/reader_io.zig");
+const client_trust = @import("../quic/client_trust.zig");
 
 pub const Error = http1_runtime.Error || http2_runtime.Error || http3_runtime.Error || std.Io.Timeout.Error || std.Io.ConcurrentError ||
     proxy_socks5.Error || uri_redirect.Error || error{
     InvalidAddressConnectPolicy,
     InvalidClientOptions,
     StreamingBodyUnsupported,
+    /// A TCP CA bundle was configured without explicit H3 trust; QUIC cannot
+    /// consume the TCP bundle representation.
+    UnsupportedH3TrustConfiguration,
     /// A request source failed, independently of the connection transport.
     RequestBodyReadFailed,
 };
@@ -655,6 +659,12 @@ pub const Client = struct {
         if (options.protocol_policy.attemptsHttp3()) {
             const handshake = options.http3.handshake;
             if (handshake.handshake.alpn_protocols.len != 1 or !std.mem.eql(u8, handshake.handshake.alpn_protocols[0], "h3") or handshake.handshake.early_data != null) return error.InvalidClientOptions;
+            if (options.protocol_policy == .http3_only and
+                options.tls.ca_bundle != null and
+                !client_trust.hasExplicitTrust(&handshake.handshake))
+            {
+                return error.UnsupportedH3TrustConfiguration;
+            }
             // The 1-RTT packetizer may only emit what the endpoint socket can
             // accept; catch a larger send size before any connection attempt.
             if (handshake.handshake.initial_one_rtt_config.max_datagram_size >

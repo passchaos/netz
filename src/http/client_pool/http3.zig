@@ -12,6 +12,7 @@ const proxy_socks5 = @import("../../proxy/socks5.zig");
 const quic = @import("../../quic/mod.zig");
 const runtime = @import("../../http3/runtime.zig");
 const client_types = @import("../client/types.zig");
+const client_trust = @import("../../quic/client_trust.zig");
 const remembered_settings = @import("http3_settings.zig");
 
 pub const FallbackPolicy = enum {
@@ -176,6 +177,10 @@ pub const State = struct {
     cache: alt_svc_cache.Cache,
     settings_mutex: std.Io.Mutex = .init,
     settings: remembered_settings.Cache,
+    /// Platform-root store installed when the unified client configured no
+    /// explicit H3 trust. Lives for the whole pool because H3 handshakes run
+    /// lazily on request paths.
+    system_store: ?quic.tls.trust.SystemStore = null,
     closed: std.atomic.Value(bool) = .init(false),
 
     const DriverState = struct {
@@ -210,6 +215,7 @@ pub const State = struct {
         io: std.Io,
         options: Options,
         shared_connection_budget: *connection_budget.Budget,
+        trust: client_trust.ClientTlsTrust,
     ) !*State {
         if (options.shared_endpoint and options.socks5_proxy != null and
             (options.max_socks5_shared_routes == 0 or
@@ -228,6 +234,15 @@ pub const State = struct {
         self.allocator = allocator;
         self.io = io;
         self.options = options;
+        self.system_store = null;
+        try client_trust.applyClientTrust(
+            allocator,
+            io,
+            &self.options.handshake.handshake,
+            trust,
+            &self.system_store,
+        );
+        errdefer if (self.system_store) |*store| store.deinit();
         self.settings_mutex = .init;
         self.shared_init_mutex = .init;
         self.closed = .init(false);
@@ -241,7 +256,7 @@ pub const State = struct {
         else
             null;
         self.connector = .{
-            .options = options.handshake,
+            .options = self.options.handshake,
             .transport = if (self.socks5_transport) |*transport|
                 transport.connector()
             else
@@ -280,7 +295,7 @@ pub const State = struct {
                 .local_address = options.local_address,
                 .migration_local_address = options.migration_local_address,
                 .limits = options.limits,
-                .client = options.handshake,
+                .client = self.options.handshake,
                 .resolver = options.address_resolver,
                 .idle = options.idle,
                 .max_connections = options.max_connections,
@@ -433,6 +448,7 @@ pub const State = struct {
         self.pool.deinit();
         self.cache.deinit();
         self.settings.deinit();
+        if (self.system_store) |*store| store.deinit();
         self.* = undefined;
         allocator.destroy(self);
     }

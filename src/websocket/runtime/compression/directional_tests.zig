@@ -2,6 +2,7 @@ const std = @import("std");
 const websocket = @import("../../mod.zig");
 const runtime = @import("../../runtime.zig");
 const http2 = @import("../../../http2/runtime.zig");
+const tls_testing = @import("../../../tls/mod.zig").testing;
 const support = @import("directional_support.zig");
 const allocator = std.testing.allocator;
 
@@ -104,7 +105,21 @@ test "WebSocket directional takeover HTTP3 URI uses selected histories from eith
     defer threaded.deinit();
     for ([_]bool{ false, true }) |server_policy| {
         for (support.modes) |mode| {
-            var server = try runtime.h3.Server.bind(allocator, threaded.io(), .{ .ip4 = .loopback(0) }, .{ .quic = .{ .max_datagram_size = 4096 } }, .{ .handshake = .{ .local_connection_id = "directional-server", .initial_one_rtt_config = .{ .enable_pacing = false } } });
+            var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+            try std.base64.standard.Decoder.decode(
+                &certificate_der,
+                tls_testing.certificate_base64,
+            );
+            const key_pair = try tls_testing.serverKeyPair();
+            const public_key = key_pair.public_key.toUncompressedSec1();
+            var server = try runtime.h3.Server.bind(allocator, threaded.io(), .{ .ip4 = .loopback(0) }, .{ .quic = .{ .max_datagram_size = 4096 } }, .{ .handshake = .{
+                .local_connection_id = "directional-server",
+                .initial_one_rtt_config = .{ .enable_pacing = false },
+                .identity = .{
+                    .certificate_chain = &.{&certificate_der},
+                    .signer = .{ .ecdsa_p256_sha256 = .{ .key_pair = key_pair } },
+                },
+            } });
             defer server.deinit();
             const Peer = struct {
                 server: *runtime.h3.Server,
@@ -134,7 +149,14 @@ test "WebSocket directional takeover HTTP3 URI uses selected histories from eith
                 .compression_threshold = 0,
                 .limits = .{ .max_frame_bytes = 4096, .max_message_bytes = 4096 },
                 .h3_limits = .{ .quic = .{ .max_datagram_size = 4096 } },
-                .h3 = .{ .handshake = .{ .original_destination_connection_id = "directional-origin", .local_connection_id = "directional-client", .initial_one_rtt_config = .{ .enable_pacing = false } } },
+                .h3 = .{ .handshake = .{
+                    .original_destination_connection_id = "directional-origin",
+                    .local_connection_id = "directional-client",
+                    .initial_one_rtt_config = .{ .enable_pacing = false },
+                    .server_auth = .{
+                        .pinned_ecdsa_p256_public_key = public_key,
+                    },
+                } },
             }, support.timeout);
             defer connection.deinit();
             try support.client(&connection, mode);

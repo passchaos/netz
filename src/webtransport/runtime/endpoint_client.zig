@@ -8,6 +8,7 @@ const std = @import("std");
 const webtransport = @import("../mod.zig");
 const http3 = @import("../../http3/mod.zig");
 const quic = @import("../../quic/mod.zig");
+const client_trust = @import("../../quic/client_trust.zig");
 const deadline_policy = @import("../../internal/deadline.zig");
 const round_robin = @import("../../internal/round_robin.zig");
 const connect_headers = @import("connect/headers.zig");
@@ -48,6 +49,10 @@ pub const Options = struct {
     initial_flow_limits: ?webtransport.flow_control.Limits = null,
     /// Require negotiated Session flow control before sending any CONNECT.
     require_session_flow_control: bool = false,
+    /// Native QUIC/TLS options. URI connects install platform roots when no
+    /// trust material is configured; set `handshake.server_auth`, a native
+    /// store, an environment, or a non-default root source to replace that
+    /// policy. Direct-address helpers keep the explicit-configuration contract.
     h3: http3.runtime.HandshakeClientOptions,
     /// Local memory/admission bound independent of the server SETTINGS value.
     max_sessions: usize = 16,
@@ -616,21 +621,12 @@ pub const Client = struct {
         // only for the synchronous handshake.
         var system_store: ?quic.tls.trust.SystemStore = null;
         defer if (system_store) |*store| store.deinit();
-        if (h3_options.handshake.server_auth == null and
-            h3_options.handshake.system_store == null and
-            h3_options.handshake.system_environ == null and
-            h3_options.handshake.root_source == .system)
-        {
-            system_store = quic.tls.trust.SystemStore.init(
-                allocator,
-                io,
-                std.Io.Timestamp.now(io, .real),
-            ) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                else => return error.NativeTrustStoreUnavailable,
-            };
-            h3_options.handshake.system_store = &system_store.?;
-        }
+        try client_trust.applyPlatformRootDefault(
+            allocator,
+            io,
+            &h3_options.handshake,
+            &system_store,
+        );
         const h3_client = if (options.socks5_proxy) |proxy|
             if (deadline) |absolute|
                 try http3.socks5_runtime.connectHostWithDeadline(

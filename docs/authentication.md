@@ -29,10 +29,13 @@ with browser WebSocket/WebTransport constructors; browser credential behavior
 must be handled at that integration boundary.
 
 TLS client verification can use configured trust stores, pinned keys or
-application verifiers. Native TCP TLS supports optional or required client
-certificates. The current QUIC/H3 `client_auth` path requires a client identity
-when CertificateRequest is sent; it does not implement anonymous optional-client
-completion. This requirement also applies to H3 WebSocket and WebTransport.
+application verifiers. URI-level HTTP (H1/H2/H3, direct and pooled), WSS and
+WebTransport clients verify with platform roots by default; low-level QUIC
+session helpers keep the explicit-configuration contract. Native TCP TLS
+supports optional or required client certificates. The current QUIC/H3
+`client_auth` path requires a client identity when CertificateRequest is sent;
+it does not implement anonymous optional-client completion. This requirement
+also applies to H3 WebSocket and WebTransport.
 
 Protocol nonce/accept-key checks, Origin checks and QUIC address-validation
 tokens have their own protocol roles. Application credentials and authorization

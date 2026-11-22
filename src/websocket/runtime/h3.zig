@@ -20,6 +20,7 @@ const frame_validation = @import("message/frame_validation.zig");
 const timed_mutex = @import("../../internal/timed_mutex.zig");
 const deadline_policy = @import("../../internal/deadline.zig");
 const http3 = @import("../../http3/mod.zig");
+const client_trust = @import("../../quic/client_trust.zig");
 const rejection_drain_timeout: std.Io.Duration = .fromSeconds(5);
 const max_payload_read_chunk: usize = 16 * 1024;
 const fragmented_write_scratch_len: usize = 16 * 1024;
@@ -256,6 +257,10 @@ pub const UriConnectOptions = struct {
     compression_threshold: usize = 32,
     limits: common.Limits = .{},
     h3_limits: http3.runtime.Limits = .{},
+    /// Native QUIC/TLS options. URI connects install platform roots when no
+    /// trust material is configured; set `handshake.server_auth`, a native
+    /// store, an environment, or a non-default root source to replace that
+    /// policy. Direct session helpers keep the explicit-configuration contract.
     h3: http3.runtime.HandshakeClientOptions,
     /// Route QUIC through SOCKS5 UDP ASSOCIATE while keeping URI DNS at the
     /// proxy and TLS identity bound to the HTTPS origin.
@@ -4722,6 +4727,16 @@ pub const Client = struct {
         if (h3_options.handshake.server_name == null) {
             h3_options.handshake.server_name = endpoint.tls_host;
         }
+        // Verify WSS-over-H3 peers with platform roots by default, matching
+        // WSS over TCP. The store lives for the synchronous handshake.
+        var system_store: ?client_trust.SystemStore = null;
+        defer if (system_store) |*store| store.deinit();
+        try client_trust.applyPlatformRootDefault(
+            allocator,
+            io,
+            &h3_options.handshake,
+            &system_store,
+        );
         var h3_client = if (options.socks5_proxy) |proxy|
             if (deadline) |absolute|
                 try http3.socks5_runtime.connectHostWithDeadline(

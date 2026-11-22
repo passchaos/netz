@@ -31,6 +31,7 @@ const timed_mutex = @import("../internal/timed_mutex.zig");
 const h3_support = @import("client_pool/http3.zig");
 const http3_runtime = @import("../http3/runtime.zig");
 const alt_svc_cache = @import("alt_svc_cache.zig");
+const client_trust = @import("../quic/client_trust.zig");
 const tls_stream = @import("../tls/mod.zig").stream;
 
 pub const Error = client.Error || http3_runtime.Error ||
@@ -42,6 +43,9 @@ pub const Error = client.Error || http3_runtime.Error ||
     ConnectionLimitReached,
     InvalidPoolOptions,
     H3StreamingUnsupported,
+    /// A TCP CA bundle was configured without explicit H3 trust; QUIC cannot
+    /// consume the TCP bundle representation.
+    UnsupportedH3TrustConfiguration,
 } || shared_tcp.Error;
 pub const OperationError = Error || std.Io.Timeout.Error ||
     std.Io.ConcurrentError;
@@ -67,7 +71,10 @@ pub const Options = struct {
     /// Maximum cached RFC 8446 TLS 1.3 tickets across origin/ALPN keys.
     max_tls13_session_tickets: usize = 32,
     /// Enable Alt-Svc-driven HTTP/3 with an explicit QUIC/TLS policy. Null
-    /// uses only the primary Client backend and its protocol policy.
+    /// uses only the primary Client backend and its protocol policy. Unset
+    /// trust fields in `http3.handshake.handshake` inherit `client.tls`, then
+    /// fall back to platform roots; `client.tls.ca_bundle` has no QUIC
+    /// representation and requires explicit H3 trust.
     http3: ?h3_support.Options = null,
 };
 
@@ -146,11 +153,20 @@ pub const Pool = struct {
                     options.client.address_resolver;
             }
             effective_http3.socks5_proxy = options.client.socks5_proxy;
+            const trust: client_trust.ClientTlsTrust = .{
+                .server_verifier = options.client.tls.server_verifier,
+                .client_identity = options.client.tls.client_identity,
+                .environ = options.client.tls.environ,
+                .system_store = options.client.tls.system_store,
+                .root_source = options.client.tls.root_source,
+                .ca_bundle_configured = options.client.tls.ca_bundle != null,
+            };
             break :blk try h3_support.State.create(
                 allocator,
                 io,
                 effective_http3,
                 shared_budget,
+                trust,
             );
         } else null;
         errdefer if (http3_state) |state| state.deinit();

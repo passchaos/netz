@@ -3,6 +3,7 @@ const websocket = @import("../mod.zig");
 const h3 = @import("h3.zig");
 const http3 = @import("../../http3/mod.zig");
 const quic = @import("../../quic/mod.zig");
+const tls_testing = @import("../../tls/mod.zig").testing;
 const large_header_value =
     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -636,6 +637,13 @@ test "WebSocket HTTP3 URI derives authority path query and SNI" {
         .max_datagram_size = 4096,
         .max_frames_per_datagram = 8,
     } };
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+    const key_pair = try tls_testing.serverKeyPair();
+    const public_key = key_pair.public_key.toUncompressedSec1();
     var server = try h3.Server.bind(
         allocator,
         io,
@@ -645,6 +653,10 @@ test "WebSocket HTTP3 URI derives authority path query and SNI" {
             .local_connection_id = &server_cid,
             .random = [_]u8{0x35} ** 32,
             .x25519_secret_key = [_]u8{0x36} ** 32,
+            .identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{ .ecdsa_p256_sha256 = .{ .key_pair = key_pair } },
+            },
         } },
     );
     defer server.deinit();
@@ -789,6 +801,9 @@ test "WebSocket HTTP3 URI derives authority path query and SNI" {
                     .local_connection_id = &client_cid,
                     .random = [_]u8{0x37} ** 32,
                     .x25519_secret_key = [_]u8{0x38} ** 32,
+                    .server_auth = .{
+                        .pinned_ecdsa_p256_public_key = public_key,
+                    },
                 },
                 .address_resolver = .{
                     .context = &resolver,

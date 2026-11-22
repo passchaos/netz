@@ -2798,6 +2798,7 @@ test {
     _ = tls_client_hello;
     _ = tls;
     _ = handshake;
+    _ = @import("client_trust.zig");
     _ = zero_rtt;
     _ = one_rtt;
     _ = packet_space;

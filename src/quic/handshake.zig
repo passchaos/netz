@@ -99,8 +99,9 @@ pub const ClientOptions = struct {
     /// present, otherwise `system_environ` builds a native store. A null
     /// policy with neither field and the default `.system` root source leaves
     /// certificate verification disabled: low-level callers must set one of
-    /// them for production peers. The unified `netz.http.Client` installs a
-    /// platform-root verifier for its H3 route by default.
+    /// them for production peers. URI-level facades (unified HTTP
+    /// `Client`/`Pool`, WebSocket over H3, WebTransport `EndpointClient`)
+    /// install a platform-root verifier by default.
     server_auth: ?quic.tls.auth.ClientVerifier = null,
     /// Optional process environment used to honor `SSL_CERT_FILE` and
     /// `SSL_CERT_DIR` when `server_auth` is null. Null leaves the native store

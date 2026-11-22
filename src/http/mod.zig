@@ -114,6 +114,7 @@ test {
     _ = alt_svc_cache;
     _ = cookies;
     _ = cookie_session;
+    _ = @import("../quic/client_trust.zig");
     _ = client;
     _ = client_pool;
     _ = @import("content_coding/tests.zig");

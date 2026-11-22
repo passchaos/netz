@@ -107,6 +107,15 @@ platform roots, and the H3 route installs the same platform-root verifier when
 no explicit trust material is configured. Set `.tls.server_verifier` to pin a
 key; `http3.handshake.handshake.server_auth` configures H3 directly.
 
+The pool's Alt-Svc H3 backend follows the same rule: unset
+`Pool.Options.http3.handshake.handshake` trust fields inherit
+`Pool.Options.client.tls`, then fall back to platform roots. A TCP
+`client.tls.ca_bundle` has no QUIC equivalent, so Alt-Svc H3 requires explicit
+H3 trust in that case and `Pool.init` returns
+`error.UnsupportedH3TrustConfiguration` instead of connecting unverified.
+`prefer_http3` on the direct client keeps the request on TCP in the same
+situation; `http3_only` fails at `Client.init`.
+
 Connection reuse:
 
 ```zig

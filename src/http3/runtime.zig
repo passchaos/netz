@@ -2549,6 +2549,10 @@ fn requestEventAlreadyReturned(
 }
 
 pub const HandshakeClientOptions = struct {
+    /// Native QUIC/TLS handshake options. URI-level facades (unified HTTP,
+    /// WebSocket over H3, WebTransport `EndpointClient`) install platform
+    /// roots when no trust material is set; direct-address and session
+    /// helpers require explicit configuration.
     handshake: quic.handshake.ClientOptions,
     session: HandshakeSessionOptions = .{},
     /// Absolute budget for the complete QUIC/TLS connection. URI entry points
