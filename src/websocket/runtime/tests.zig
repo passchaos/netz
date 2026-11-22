@@ -2602,6 +2602,24 @@ test "WebSocket over HTTP/2 application frames avoid retained send scratch" {
                 payload[19..],
             });
             try ws.sendBinarySlices(&trailing_empty_parts);
+            try ws.sendTextSlices(&.{ "srv ", "\xe4\xb8\x96", "\xe7\x95\x8c" });
+            var text_progress: MessageWriteProgress = .{};
+            try ws.sendTextSlicesWithTimeout(
+                &.{ "srv ", "\xe4\xb8\x96", "\xe7\x95\x8c" },
+                &text_progress,
+                .fromSeconds(5),
+            );
+            try std.testing.expect(text_progress.frame_committed);
+            for (0..2) |_| {
+                var text = try ws.receiveFrame();
+                defer text.deinit(server_ptr.allocator);
+                try std.testing.expectEqual(websocket.Opcode.text, text.header.opcode);
+                try std.testing.expect(text.header.fin);
+                try std.testing.expectEqualStrings(
+                    "cli \xe4\xb8\x96\xe7\x95\x8c",
+                    text.payload,
+                );
+            }
             var close = try ws.receiveFrameAuto();
             defer close.deinit(server_ptr.allocator);
             try std.testing.expectEqual(websocket.Opcode.close, close.header.opcode);
@@ -2653,6 +2671,24 @@ test "WebSocket over HTTP/2 application frames avoid retained send scratch" {
         trailing_empty_payload,
         trailing_empty.payload,
     );
+    for (0..2) |_| {
+        var text = try client.receiveFrame();
+        defer text.deinit(allocator);
+        try std.testing.expectEqual(websocket.Opcode.text, text.header.opcode);
+        try std.testing.expect(text.header.fin);
+        try std.testing.expectEqualStrings(
+            "srv \xe4\xb8\x96\xe7\x95\x8c",
+            text.payload,
+        );
+    }
+    try client.sendTextSlices(&.{ "cli ", "\xe4\xb8\x96", "\xe7\x95\x8c" });
+    var text_progress: MessageWriteProgress = .{};
+    try client.sendTextSlicesWithTimeout(
+        &.{ "cli ", "\xe4\xb8\x96", "\xe7\x95\x8c" },
+        &text_progress,
+        .fromSeconds(5),
+    );
+    try std.testing.expect(text_progress.frame_committed);
     try client.sendClose(.normal_closure, "done");
     var close = try client.receiveFrame();
     defer close.deinit(allocator);

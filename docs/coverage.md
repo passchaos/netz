@@ -1357,6 +1357,8 @@ Current protocol coverage includes:
   storage with reusable per-connection wire/history scratch across HTTP/1 and
   RFC 8441 HTTP/2, plus explicit mutable-buffer in-place client masking for applications
   that accept the same post-send mutation contract as websocket.zig,
+  arbitrary-slice text and binary single-frame sends with cross-slice UTF-8
+  validation and opcode-matched partial-write resumption,
   outbound text/close/control-frame validation plus codec-level invalid-frame write rejection,
   unique and null-member-tolerant subprotocol-offer validation with RFC-compliant optional server selection and opt-in required-selection policy, split-header subprotocol and extension negotiation with complete request/response RFC 6455 list and token/quoted-token grammar validation even when compression is disabled and RFC 7692-compliant decline-and-continue handling for well-formed unsupported offers, optional permessage-deflate negotiation with
   RFC 7692 client responses checked against the exact HTTP/1, RFC 8441, or RFC 9220 offer, including fail-closed `client_max_window_bits` authorization, its offered-value hint semantics, and the hard `server_max_window_bits` bound,
