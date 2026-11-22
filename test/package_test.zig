@@ -2819,6 +2819,14 @@ test "public modules are reachable" {
         netz.websocket.stream_connection.Connection,
         "closeWithDeadline",
     ));
+    try std.testing.expect(@hasField(
+        netz.websocket.stream_connection.Transport,
+        "write_parts_fn",
+    ));
+    try std.testing.expect(@hasField(
+        netz.websocket.stream_connection.Transport,
+        "write_parts_deadline_fn",
+    ));
     try std.testing.expect(@hasDecl(
         netz.websocket.runtime,
         "PendingH2Upgrade",

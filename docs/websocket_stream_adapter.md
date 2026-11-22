@@ -32,6 +32,14 @@ try connection.sendClose(.normal_closure, "done");
 must write the complete slice or return an error. `close_fn` is optional and
 runs once from `deinit`/`close`.
 
+`write_parts_fn` is an optional two-slice write. When supplied for a
+server-role connection, unmasked frames are sent as the encoded header plus
+the caller's payload slice without copying the payload into the adapter
+buffer; `write_parts_deadline_fn` is the bounded counterpart and is used only
+when both it and `write_parts_fn` are present. Both callbacks must write both
+ranges completely or return an error; empty payloads are valid. Client-role
+frames always take the masked copy path.
+
 `read_deadline_fn` and `write_deadline_fn` are optional absolute-deadline
 callbacks. When supplied, `receiveMessageWithDeadline`,
 `sendFrameWithDeadline`, the typed `send*WithDeadline` forms,

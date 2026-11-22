@@ -399,3 +399,144 @@ test "WebSocket stream adapter buffers frames larger than one read chunk" {
     try std.testing.expectEqual(websocket.Opcode.binary, message.opcode);
     try std.testing.expectEqualSlices(u8, payload, message.payload);
 }
+
+const PartsPeer = struct {
+    io: std.Io = std.testing.io,
+    output: std.ArrayList(u8) = .empty,
+    parts_calls: usize = 0,
+    deadline_parts_calls: usize = 0,
+    header_storage: [websocket.max_frame_header_len]u8 = undefined,
+    header_len: usize = 0,
+    last_payload: []const u8 = &.{},
+
+    fn read(_: ?*anyopaque, _: []u8) anyerror!usize {
+        return 0;
+    }
+
+    fn write(context: ?*anyopaque, bytes: []const u8) anyerror!void {
+        const self: *PartsPeer = @ptrCast(@alignCast(context.?));
+        try self.output.appendSlice(allocator, bytes);
+    }
+
+    fn append(
+        self: *PartsPeer,
+        header: []const u8,
+        payload: []const u8,
+    ) !void {
+        @memcpy(self.header_storage[0..header.len], header);
+        self.header_len = header.len;
+        self.last_payload = payload;
+        try self.output.appendSlice(allocator, header);
+        try self.output.appendSlice(allocator, payload);
+    }
+
+    fn writeParts(
+        context: ?*anyopaque,
+        header: []const u8,
+        payload: []const u8,
+    ) anyerror!void {
+        const self: *PartsPeer = @ptrCast(@alignCast(context.?));
+        self.parts_calls += 1;
+        try self.append(header, payload);
+    }
+
+    fn writePartsDeadline(
+        context: ?*anyopaque,
+        header: []const u8,
+        payload: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) anyerror!void {
+        const self: *PartsPeer = @ptrCast(@alignCast(context.?));
+        if (deadline.durationFromNow(self.io).raw.nanoseconds <= 0) {
+            return error.Timeout;
+        }
+        self.deadline_parts_calls += 1;
+        try self.append(header, payload);
+    }
+
+    fn deinit(self: *PartsPeer) void {
+        self.output.deinit(allocator);
+    }
+
+    fn lastHeader(self: *const PartsPeer) []const u8 {
+        return self.header_storage[0..self.header_len];
+    }
+
+    fn transport(self: *PartsPeer) stream_connection.Transport {
+        return .{
+            .context = self,
+            .read_fn = read,
+            .write_fn = write,
+            .write_parts_fn = writeParts,
+            .write_parts_deadline_fn = writePartsDeadline,
+        };
+    }
+};
+
+test "WebSocket stream adapter sends unmasked frames as header plus payload" {
+    var peer = PartsPeer{};
+    defer peer.deinit();
+    var connection = stream_connection.Connection.init(
+        allocator,
+        std.testing.io,
+        peer.transport(),
+        .{ .role = .server },
+    );
+    defer connection.deinit();
+
+    const payload = "borrowed payload";
+    try connection.sendBinary(payload);
+    try std.testing.expectEqual(@as(usize, 1), peer.parts_calls);
+    try std.testing.expectEqual(@as(usize, 0), peer.deadline_parts_calls);
+    try std.testing.expectEqual(payload.ptr, peer.last_payload.ptr);
+    const header = try websocket.FrameHeader.parse(peer.lastHeader());
+    try std.testing.expectEqual(websocket.Opcode.binary, header.opcode);
+    try std.testing.expectEqual(@as(u64, payload.len), header.payload_len);
+    try std.testing.expect(!header.masked);
+    try std.testing.expectEqual(
+        header.header_len + payload.len,
+        peer.output.items.len,
+    );
+    try std.testing.expectEqualStrings(
+        payload,
+        peer.output.items[header.header_len..],
+    );
+
+    const future = std.Io.Clock.Timestamp.fromNow(
+        std.testing.io,
+        .{ .clock = .awake, .raw = .fromSeconds(1) },
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        connection.sendTextWithDeadline("late", .{
+            .clock = .awake,
+            .raw = .zero,
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 0), peer.deadline_parts_calls);
+    try connection.sendTextWithDeadline("bounded", future);
+    try std.testing.expectEqual(@as(usize, 1), peer.deadline_parts_calls);
+    try std.testing.expectEqual(@as(usize, 1), peer.parts_calls);
+}
+
+test "WebSocket stream adapter masks client frames instead of borrowing payloads" {
+    var peer = PartsPeer{};
+    defer peer.deinit();
+    var connection = stream_connection.Connection.init(
+        allocator,
+        std.testing.io,
+        peer.transport(),
+        .{ .role = .client },
+    );
+    defer connection.deinit();
+
+    try connection.sendBinary("masked payload");
+    try std.testing.expectEqual(@as(usize, 0), peer.parts_calls);
+    try std.testing.expectEqual(@as(usize, 0), peer.deadline_parts_calls);
+    const header = try websocket.FrameHeader.parse(peer.output.items);
+    try std.testing.expect(header.masked);
+    try std.testing.expectEqual(
+        @as(u64, "masked payload".len),
+        header.payload_len,
+    );
+}

@@ -1405,3 +1405,27 @@ regression in the reviewed protocols.
 | --- | --- | --- |
 | Full-library rerun | 7080 pass, 43 skip, 8 fail, 2 crash | `test-lib-after-socket-fixes.log` |
 | Isolated Happy Eyeballs test | 223/223 | live run |
+
+
+## Sixty-third pass: two-slice writes for unmasked adapter frames
+
+`websocket.stream_connection` always encoded the complete frame into its
+write buffer, copying the payload even for unmasked server-role frames. The
+public `Transport` now accepts optional `write_parts_fn` and
+`write_parts_deadline_fn` callbacks. When the matching callback is present,
+server-role frames are written as the encoded header plus the caller's
+payload slice with no copy; bounded sends use the deadline callback only when
+both parts callbacks exist, otherwise the buffered deadline path is retained.
+Client-role frames still take the masked copy path because masking transforms
+the payload. Both callbacks must write both ranges completely or return an
+error.
+
+Tests cover the unmasked parts path (header parse, payload pointer identity,
+concatenated output), zero-budget rejection before the callback, the bounded
+success path, and the client masking fallback. The package surface pins both
+new fields, and the adapter document records the contract.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full WebSocket suite | 512/513 (1 skipped) | `websocket-parts-write.log` |
+| Public package surface tests | 26/26 | `test-package-parts-write.log` |

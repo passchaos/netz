@@ -28,6 +28,22 @@ pub const Transport = struct {
         std.Io.Clock.Timestamp,
     ) anyerror!usize = null,
     write_fn: *const fn (?*anyopaque, []const u8) anyerror!void,
+    /// Optional two-slice write used for unmasked frames. The callback must
+    /// write both ranges completely or return an error; partial output is not
+    /// resumable. Empty payloads are valid.
+    write_parts_fn: ?*const fn (
+        ?*anyopaque,
+        []const u8,
+        []const u8,
+    ) anyerror!void = null,
+    /// Optional deadline-aware two-slice write. Bounded sends use it only
+    /// when `write_parts_fn` is also present.
+    write_parts_deadline_fn: ?*const fn (
+        ?*anyopaque,
+        []const u8,
+        []const u8,
+        std.Io.Clock.Timestamp,
+    ) anyerror!void = null,
     /// Optional deadline-aware write. The `WithDeadline`/`WithTimeout` send
     /// APIs require this callback and return `error.DeadlineUnsupported` when
     /// it is absent.
@@ -64,6 +80,27 @@ pub const Transport = struct {
         const write_deadline_fn = self.write_deadline_fn orelse
             return error.DeadlineUnsupported;
         return write_deadline_fn(self.context, bytes, deadline);
+    }
+
+    fn writeParts(
+        self: Transport,
+        header: []const u8,
+        payload: []const u8,
+    ) anyerror!void {
+        const write_parts_fn = self.write_parts_fn orelse
+            return error.PartsUnsupported;
+        return write_parts_fn(self.context, header, payload);
+    }
+
+    fn writePartsBefore(
+        self: Transport,
+        header: []const u8,
+        payload: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) anyerror!void {
+        const write_parts_deadline_fn = self.write_parts_deadline_fn orelse
+            return error.DeadlineUnsupported;
+        return write_parts_deadline_fn(self.context, header, payload, deadline);
     }
 
     fn closeTransport(self: Transport) void {
@@ -486,6 +523,34 @@ pub const Connection = struct {
             };
         };
         defer guard.unlock();
+        // Unmasked frames can go out as a header plus the caller's payload
+        // when the transport supports two-slice writes; masked frames still
+        // need the transformed copy below.
+        if (self.options.role == .server) {
+            const parts_available = if (deadline != null)
+                self.transport.write_parts_deadline_fn != null
+            else
+                self.transport.write_parts_fn != null;
+            if (parts_available) {
+                var header_storage: [websocket.max_frame_header_len]u8 = undefined;
+                const header = try websocket.writeFrameHeaderInto(
+                    &header_storage,
+                    opcode,
+                    payload,
+                    .{ .fin = true },
+                );
+                if (deadline) |absolute| {
+                    try self.transport.writePartsBefore(
+                        header,
+                        payload,
+                        absolute,
+                    );
+                } else {
+                    try self.transport.writeParts(header, payload);
+                }
+                return;
+            }
+        }
         self.write_buffer.clearRetainingCapacity();
         var mask_key: ?[4]u8 = null;
         if (self.options.role == .client) {
