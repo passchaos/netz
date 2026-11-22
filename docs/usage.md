@@ -123,6 +123,12 @@ H3 trust in that case and `Pool.init` returns
 `prefer_http3` on the direct client keeps the request on TCP in the same
 situation; `http3_only` fails at `Client.init`.
 
+For a private CA that must cover both H1/H2 and H3, load a reusable native
+store with `netz.tls.trust.SystemStore.initWithPaths` and assign
+`.tls.system_store`; the H3 routes inherit it. `.tls.ca_bundle` only applies to
+TCP TLS. In minimal containers, `.tls.root_source = .bundled` selects the
+compiled-in Mozilla roots for both transports.
+
 Connection reuse:
 
 ```zig
