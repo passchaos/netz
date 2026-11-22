@@ -266,7 +266,7 @@ test "unified HTTP direct H3 URI requests redirects Reader replay and credential
     try redirectAndOneShot(true);
 }
 
-const CloseMode = enum { close, deadline, timeout };
+const CloseMode = enum { close, deadline, timeout, zero_timeout };
 
 fn closeObservation(comptime mode: CloseMode) !void {
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
@@ -293,11 +293,22 @@ fn closeObservation(comptime mode: CloseMode) !void {
             defer request.deinit(allocator);
             try session.sendResponse(request.stream_id, .{ .status = 200, .body = "ok" });
             // The facade's close() must deliver CONNECTION_CLOSE, not just
-            // drop the local QUIC owner.
-            try std.testing.expectError(
-                error.ConnectionClosed,
-                session.receiveRequestWithDeadline(deadline(task_io)),
-            );
+            // drop the local QUIC owner. A zero-budget close retires locally
+            // without output, so the peer observes no terminal frame.
+            if (mode == .zero_timeout) {
+                try std.testing.expectError(
+                    error.Timeout,
+                    session.receiveRequestWithDeadline(.fromNow(task_io, .{
+                        .clock = .awake,
+                        .raw = .fromMilliseconds(300),
+                    })),
+                );
+            } else {
+                try std.testing.expectError(
+                    error.ConnectionClosed,
+                    session.receiveRequestWithDeadline(deadline(task_io)),
+                );
+            }
             try done.wait(task_io);
         }
     };
@@ -316,6 +327,10 @@ fn closeObservation(comptime mode: CloseMode) !void {
         .close => connection.close(),
         .deadline => try connection.closeWithDeadline(deadline(io)),
         .timeout => try connection.closeWithTimeout(.fromSeconds(5)),
+        .zero_timeout => try std.testing.expectError(
+            error.Timeout,
+            connection.closeWithTimeout(.zero),
+        ),
     }
     release.set(io);
     try peer.await(io);
@@ -331,4 +346,8 @@ test "unified HTTP direct H3 deadline close sends CONNECTION_CLOSE" {
 
 test "unified HTTP direct H3 timeout close sends CONNECTION_CLOSE" {
     try closeObservation(.timeout);
+}
+
+test "unified HTTP direct H3 zero-budget close retires without CONNECTION_CLOSE" {
+    try closeObservation(.zero_timeout);
 }

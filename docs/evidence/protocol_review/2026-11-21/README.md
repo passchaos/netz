@@ -1701,3 +1701,19 @@ state in one place.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | Documentation consistency | counts match passes 70-79 | `docs/coverage.md` |
+
+
+## Eighty-second pass: zero-budget H3 close contract
+
+The unified `Connection.closeWithTimeout` documents that an expired budget
+retires the transport without close-notify output, but only positive budgets
+were covered. The direct-H3 close test now has a `zero_timeout` mode: the
+client asserts `error.Timeout` from `closeWithTimeout(.zero)`, and the peer
+must observe no terminal frame (its bounded receive times out) instead of a
+CONNECTION_CLOSE. The existing `close`, `closeWithDeadline`, and positive
+`closeWithTimeout` modes still require the peer to see `ConnectionClosed`.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full HTTP suite | 307/307 | `http-h3-zero-close.log` |
+| Public package surface tests | 26/26 | `test-package-h3-zero-close.log` |
