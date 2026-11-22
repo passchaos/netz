@@ -1601,3 +1601,16 @@ passing and no panic.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | Guided HTTP/2 connection fuzz (200 iterations) | 9/9 steps, 3/3 tests | `fuzz-http2-connection-guided.log` |
+
+
+## Seventy-fifth pass: guided HTTP/3 connection fuzz
+
+`zig build fuzz-http3-connection --fuzz=100` ran 100 coverage-guided
+mutations through authenticated QUIC/TLS HTTP/3 client and server sessions,
+covering complete and streaming requests, trailers, reversed multiplexed
+responses, cancellation, HEAD suppression, and two-phase GOAWAY. The run
+finished 9/9 steps with 3/3 tests passing and no panic.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Guided HTTP/3 connection fuzz (100 iterations) | 9/9 steps, 3/3 tests | `fuzz-http3-connection-guided.log` |
