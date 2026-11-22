@@ -1628,3 +1628,15 @@ passing and no panic.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | Guided WebTransport endpoint fuzz (50 iterations) | 9/9 steps, 3/3 tests | `fuzz-webtransport-endpoint-guided.log` |
+
+
+## Seventy-seventh pass: guided HTTP/2 TLS connection fuzz
+
+`zig build fuzz-http2-tls-connection --fuzz=100` ran 100 coverage-guided
+mutations over authenticated TLS 1.3 with mandatory `h2` ALPN, verified
+cipher metadata, and bidirectional traffic-key updates between HTTP/2
+operations. The run finished 9/9 steps with 3/3 tests passing and no panic.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Guided HTTP/2 TLS connection fuzz (100 iterations) | 9/9 steps, 3/3 tests | `fuzz-http2-tls-connection-guided.log` |
