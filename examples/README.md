@@ -35,6 +35,7 @@ zig build run-http-unified-client
 zig build run-http-client-forms
 zig build run-http-client-json
 zig build run-http-download
+zig build run-http-large-body-stream
 zig build run-http-upload-multipart
 zig build run-http-cookie-session
 zig build run-http-redirects

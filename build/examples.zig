@@ -45,6 +45,12 @@ pub const specs = [_]Spec{
         .description = "Stream a chunked response body into a file",
     },
     .{
+        .exe_name = "netz-http-large-body-stream",
+        .path = "examples/http/large_body_stream.zig",
+        .run_step = "run-http-large-body-stream",
+        .description = "Stream a 20 MiB response above the buffered body cap",
+    },
+    .{
         .exe_name = "netz-http-upload-multipart",
         .path = "examples/http/upload_multipart.zig",
         .run_step = "run-http-upload-multipart",

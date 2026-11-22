@@ -140,6 +140,7 @@ Common client recipes, each a runnable local example:
 | Query strings, URL-encoded POST, HEAD | `zig build run-http-client-forms` |
 | JSON request and response bodies | `zig build run-http-client-json` |
 | Stream a chunked download into a file | `zig build run-http-download` |
+| Stream 20 MiB after raising the body cap | `zig build run-http-large-body-stream` |
 | Multipart upload (`curl -F`) | `zig build run-http-upload-multipart` |
 | Cookie persistence across pooled requests | `zig build run-http-cookie-session` |
 | Relative redirect chains (`curl -L`) | `zig build run-http-redirects` |
@@ -317,7 +318,7 @@ The cross-protocol resource table lives in
 
 | Resource | Default |
 | --- | --- |
-| HTTP body (unified facade) | 16 MiB |
+| HTTP body (unified facade) | 16 MiB; applies to buffered and streamed bodies, raise `http1_limits`/`http2_limits.max_body_bytes` or `http3.handshake.session.max_body_bytes` |
 | HTTP/3 body override | `http3.handshake.session.max_body_bytes` |
 | QUIC CRYPTO reassembly | 256 KiB (`max_crypto_buffer`) |
 | QUIC 1-RTT datagram | 1200 bytes (`one_rtt.Config`), PMTUD opt-in |

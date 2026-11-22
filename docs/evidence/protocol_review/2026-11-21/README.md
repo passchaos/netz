@@ -2013,3 +2013,18 @@ after the callback returns.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | Managed serve loop | `/hello` 200, `/status` 200, clean stop after 2 requests | live `zig build run-http-server-serve-until` |
+
+
+## Ninety-eighth pass: large streamed response and the body cap
+
+`http1_limits.max_body_bytes` bounds the received body for buffered responses
+and for `RequestHandle` streaming alike: a 20 MiB streamed response with the
+default limits failed with `BodyTooLarge` from `body_reader.addBodyBytes`.
+The new `run-http-large-body-stream` example raises the cap to 24 MiB, streams
+20 MiB through a SHA-256 sink, and reports the digest without retaining the
+complete response. `docs/usage.md` now states that the cap covers both paths
+and names the per-protocol override.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Large streamed response | `streamed 20971520 bytes (cap raised to 24 MiB) sha256=5141c925...` | live `zig build run-http-large-body-stream` |
