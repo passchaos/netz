@@ -11,6 +11,14 @@ pub fn main() !void {
     const io = backend.io();
     std.debug.print("std.Io backend: {t}\n", .{backend.kind});
 
+    const key_pair = try netz.tls.testing.serverKeyPair();
+    const public_key = key_pair.public_key.toUncompressedSec1();
+    var certificate_der: [netz.tls.testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        netz.tls.testing.certificate_base64,
+    );
+
     const server_cid = [_]u8{ 0x50, 0x51, 0x52, 0x53 };
     var server = try netz.http3.runtime.HandshakeServer.bind(
         allocator,
@@ -20,6 +28,12 @@ pub fn main() !void {
         .{
             .handshake = .{
                 .local_connection_id = &server_cid,
+                .identity = .{
+                    .certificate_chain = &.{&certificate_der},
+                    .signer = .{ .ecdsa_p256_sha256 = .{
+                        .key_pair = key_pair,
+                    } },
+                },
                 .random = [_]u8{0x54} ** 32,
                 .x25519_secret_key = [_]u8{0x55} ** 32,
                 .max_crypto_buffer = 64 * 1024,
@@ -81,9 +95,8 @@ pub fn main() !void {
     const original_dcid = [_]u8{ 0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67 };
     const client_cid = [_]u8{ 0x68, 0x69, 0x6a, 0x6b };
 
-    // This local example keeps the verifier unset so the transport handshake
-    // stays self-contained. Public-network clients should install WebPKI
-    // verification, as `run-http3-fetch --verify` does.
+    // The local server uses the test identity; pin its key so the client
+    // performs real certificate verification without a public CA.
     var response = try netz.http3.runtime.HandshakeClient.requestUri(
         allocator,
         io,
@@ -100,6 +113,9 @@ pub fn main() !void {
                 .original_destination_connection_id = &original_dcid,
                 .local_connection_id = &client_cid,
                 .server_name = "localhost",
+                .server_auth = .{
+                    .pinned_ecdsa_p256_public_key = public_key,
+                },
                 .random = [_]u8{0x6c} ** 32,
                 .x25519_secret_key = [_]u8{0x6d} ** 32,
                 .max_crypto_buffer = 64 * 1024,

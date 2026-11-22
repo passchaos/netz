@@ -1,5 +1,6 @@
 //! Exclusive QUIC connection owner behind the unified HTTP Connection.
 const std = @import("std");
+const quic = @import("../../quic/mod.zig");
 const native = @import("../../http3/runtime.zig");
 const http1 = @import("../../http1/runtime.zig");
 const types = @import("types.zig");
@@ -45,6 +46,29 @@ pub const Owner = struct {
         if (config.handshake.system_environ == null) config.handshake.system_environ = options.tls.environ;
         if (config.handshake.system_store == null) config.handshake.system_store = options.tls.system_store;
         if (config.handshake.root_source == .system) config.handshake.root_source = options.tls.root_source;
+        // The TCP TLS side verifies against the platform roots by default.
+        // Keep the H3 route consistent instead of silently skipping server
+        // authentication when the caller configured no explicit trust
+        // material; the store only needs to live for this synchronous
+        // handshake.
+        var system_store: ?quic.tls.trust.SystemStore = null;
+        defer if (system_store) |*store| store.deinit();
+        if (config.handshake.server_auth == null and
+            config.handshake.system_store == null and
+            config.handshake.system_environ == null and
+            config.handshake.root_source == .system and
+            options.tls.ca_bundle == null)
+        {
+            system_store = quic.tls.trust.SystemStore.init(
+                allocator,
+                io,
+                std.Io.Timestamp.now(io, .real),
+            ) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.NativeTrustStoreUnavailable,
+            };
+            config.handshake.system_store = &system_store.?;
+        }
         if (config.address_resolver == null) config.address_resolver = options.address_resolver;
         self.client = if (deadline) |until|
             try native.HandshakeClient.connectUriWithDeadline(allocator, io, local_address, uri, options.http3.limits, config, until)

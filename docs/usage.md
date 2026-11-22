@@ -102,6 +102,11 @@ Protocol policy:
 | `.http3_only` | Requires QUIC/TLS 1.3; no TCP fallback. |
 | `.http1_only` / `.http2_only` | Pin the wire version. Cleartext H2 requires prior knowledge. |
 
+Server authentication is on by default for the unified client: H1/H2 use the
+platform roots, and the H3 route installs the same platform-root verifier when
+no explicit trust material is configured. Set `.tls.server_verifier` to pin a
+key; `http3.handshake.handshake.server_auth` configures H3 directly.
+
 Connection reuse:
 
 ```zig

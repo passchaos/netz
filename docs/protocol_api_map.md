@@ -58,6 +58,23 @@ aliases for the version-specific streaming owners, not another transport.
   transport when the budget expires. `closeWithoutCloseNotify` retires locally
   without another socket write.
 
+## TLS server authentication
+
+Trust configuration uses a different field spelling per transport, but the
+precedence is the same: explicit verifier, then CA material, then a reusable
+native store, then the selected root source.
+
+| Transport | Field | Default behavior |
+| --- | --- | --- |
+| Unified HTTP (H1/H2) | `Client.Options.tls.server_verifier` / `ca_bundle` / `environ` / `system_store` / `root_source` | Platform roots verify the server. |
+| Unified HTTP (H3) | Same `tls.*` fields, copied into `http3.handshake.handshake`; `server_auth` and `system_store` may also be set directly under `http3.handshake`. | `tls.server_verifier` is copied to H3; with no explicit trust material the client installs a platform-root verifier, matching H1/H2. |
+| WebSocket WSS | `ConnectOptions.vail_tls.server_verifier`, or `connectUriTls(..., TlsClientOptions.ca_bundle)` | Platform roots verify the server unless a verifier/CA bundle is supplied. |
+| WebTransport / direct QUIC | `HandshakeClientOptions.handshake.server_auth` (`pinned_ecdsa_p256_public_key`, `verify_trust`), `system_store`, `system_environ`, `root_source` | The low-level QUIC handshake verifies only when one of these is set. WebTransport session helpers use this path directly, so production callers must configure it; only the unified `netz.http.Client` H3 route installs platform roots automatically. |
+
+A pinned ECDSA P-256 key (`pinned_ecdsa_p256_public_key`) checks possession and
+the certificate public key without a CA chain; it does not replace hostname
+policy for general WebPKI deployments.
+
 ## Bounded resources
 
 | Resource | Default / owner |

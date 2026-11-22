@@ -1957,3 +1957,28 @@ into caller storage, with the server echoing each unreliable payload.
 | --- | --- | --- |
 | DATAGRAM owned | `DATAGRAM echo (owned): hello datagram` | live `zig build run-webtransport-datagram-echo` |
 | DATAGRAM into | `DATAGRAM echo (into): caller buffer` | live run |
+
+
+## Ninety-fifth pass: H3 trust parity with the TCP client
+
+The unified `netz.http.Client` verified H1/H2 servers with the platform roots
+but silently skipped H3 server authentication when the caller configured no
+explicit trust material: `quic.handshake.ClientOptions.server_auth` stayed
+null while the TCP TLS side built a platform verifier. `Owner.connect` now
+installs a platform-root verifier for the H3 route when no verifier, native
+store, environment, non-system root source, or CA bundle is configured; the
+temporary store lives only for the synchronous handshake.
+
+The low-level QUIC/WebTransport contract is unchanged and now documented
+explicitly: those callers must set `server_auth`, `system_store`, or
+`system_environ`. `docs/protocol_api_map.md` gains a TLS server-authentication
+table covering all four transports. The H3 and WebTransport examples now use
+the test identity plus a pinned key so they exercise real verification.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full HTTP suite (Debug) | 307/307 | live `zig build test-http` |
+| H3 handshake example | 200 with pinned verification | live run |
+| WebTransport stream example | bidi=4, uni=14, server_uni=15 | live run |
+| WebTransport DATAGRAM example | owned + caller-buffer echoes | live run |
+| prefer_http3 example | `prefer_http3 http3 200` | live run |

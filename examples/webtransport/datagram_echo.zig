@@ -15,6 +15,14 @@ pub fn main() !void {
     defer backend.deinit();
     const io = backend.io();
 
+    const key_pair = try netz.tls.testing.serverKeyPair();
+    const public_key = key_pair.public_key.toUncompressedSec1();
+    var certificate_der: [netz.tls.testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        netz.tls.testing.certificate_base64,
+    );
+
     const original_dcid = [_]u8{ 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88 };
     const client_cid = [_]u8{ 0x89, 0x8a, 0x8b, 0x8c };
     const server_cid = [_]u8{ 0x8d, 0x8e, 0x8f, 0x90 };
@@ -29,6 +37,12 @@ pub fn main() !void {
         } } },
         .{ .handshake = .{
             .local_connection_id = &server_cid,
+            .identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{ .ecdsa_p256_sha256 = .{
+                    .key_pair = key_pair,
+                } },
+            },
             .random = [_]u8{0x91} ** 32,
             .x25519_secret_key = [_]u8{0x92} ** 32,
         } },
@@ -79,6 +93,9 @@ pub fn main() !void {
                 .original_destination_connection_id = &original_dcid,
                 .local_connection_id = &client_cid,
                 .server_name = "localhost",
+                .server_auth = .{
+                    .pinned_ecdsa_p256_public_key = public_key,
+                },
                 .random = [_]u8{0x93} ** 32,
                 .x25519_secret_key = [_]u8{0x94} ** 32,
             } },

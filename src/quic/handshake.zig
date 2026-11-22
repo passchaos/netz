@@ -95,10 +95,16 @@ pub const ClientOptions = struct {
     resumption_server_id: ?[]const u8 = null,
     auto_resumption: ?quic.resumption.ticket.handshake.ClientAutoResume = null,
     early_data: ?quic.zero_rtt.handshake.ClientOffer = null,
+    /// Server authentication policy. When null, `system_store` is used if
+    /// present, otherwise `system_environ` builds a native store. A null
+    /// policy with neither field and the default `.system` root source leaves
+    /// certificate verification disabled: low-level callers must set one of
+    /// them for production peers. The unified `netz.http.Client` installs a
+    /// platform-root verifier for its H3 route by default.
     server_auth: ?quic.tls.auth.ClientVerifier = null,
     /// Optional process environment used to honor `SSL_CERT_FILE` and
-    /// `SSL_CERT_DIR` when `server_auth` is null. Null keeps the platform
-    /// store.
+    /// `SSL_CERT_DIR` when `server_auth` is null. Null leaves the native store
+    /// unloaded for the low-level handshake.
     system_environ: ?std.process.Environ = null,
     /// Optional caller-owned native trust store reused across handshakes. It
     /// takes precedence over `system_environ`; the caller must keep it alive
