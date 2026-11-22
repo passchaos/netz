@@ -57,6 +57,7 @@ zig build run-quic-handshake-echo
 zig build run-quic-datagram-echo
 zig build run-quic-close
 zig build run-websocket-echo
+zig build run-websocket-wss-echo
 zig build run-mqtt-broker
 zig build run-grpc-h2c
 zig build run-webtransport-handshake-stream

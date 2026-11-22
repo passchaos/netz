@@ -147,6 +147,12 @@ pub const specs = [_]Spec{
         .description = "Run the WebSocket local echo example",
     },
     .{
+        .exe_name = "netz-websocket-wss-echo",
+        .path = "examples/websocket/wss_echo.zig",
+        .run_step = "run-websocket-wss-echo",
+        .description = "Run the WSS echo example with a pinned server key",
+    },
+    .{
         .exe_name = "netz-bench-websocket-frame",
         .path = "examples/benchmarks/bench_websocket_frame.zig",
         .run_step = "bench-websocket-frame",

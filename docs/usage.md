@@ -212,7 +212,8 @@ try client.sendClose(.normal_closure, "bye");
   bounded forms require `read_deadline_fn`/`write_deadline_fn` and otherwise
   return `error.DeadlineUnsupported`.
 
-Runnable: `zig build run-websocket-echo`.
+Runnable: `zig build run-websocket-echo` (cleartext) and
+`zig build run-websocket-wss-echo` (WSS with a pinned server key).
 
 ## 7. WebTransport
 

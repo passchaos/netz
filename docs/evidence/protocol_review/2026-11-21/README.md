@@ -1930,3 +1930,17 @@ Two more application shapes complete the HTTP catalog:
 | --- | --- | --- |
 | Routed server | `/` 200 home, `/health` 200 ok, `/hello?name=netz` 200, `/echo` 200, `/missing` 404, `/quit` 200 bye | live `zig build run-http-server-routes` |
 | Reader upload | `uploaded 45056 bytes -> 200: received 45056 bytes` | live `zig build run-http-upload-reader` |
+
+
+## Ninety-third pass: WSS echo with a pinned server key
+
+The WebSocket examples only covered cleartext WS. `run-websocket-wss-echo`
+starts `websocket.runtime.TlsServer` with the test ECDSA P-256 identity and
+connects through `connectUri` with `vail_tls.server_verifier` pinned to that
+public key, mirroring a browser `wss://` client with an explicit trust
+override. The exchange sends text, receives the echo, and completes the Close
+handshake.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| WSS echo | `WSS echo: hello over WSS` | live `zig build run-websocket-wss-echo` |
