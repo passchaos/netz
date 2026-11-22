@@ -1614,3 +1614,17 @@ finished 9/9 steps with 3/3 tests passing and no panic.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | Guided HTTP/3 connection fuzz (100 iterations) | 9/9 steps, 3/3 tests | `fuzz-http3-connection-guided.log` |
+
+
+## Seventy-sixth pass: guided WebTransport endpoint fuzz
+
+`zig build fuzz-webtransport-endpoint --fuzz=50` ran 50 coverage-guided
+mutations across two authenticated WebTransport sessions sharing one
+production UDP endpoint, varying cross-session DATAGRAM, paired-DATAGRAM,
+bidirectional-stream, DRAIN and CLOSE ordering while checking exact handle
+routing and payload isolation. The run finished 9/9 steps with 3/3 tests
+passing and no panic.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Guided WebTransport endpoint fuzz (50 iterations) | 9/9 steps, 3/3 tests | `fuzz-webtransport-endpoint-guided.log` |
