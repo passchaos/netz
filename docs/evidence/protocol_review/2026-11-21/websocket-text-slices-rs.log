@@ -1,9 +1,9 @@
-[traex-zig-guard 2026-11-22 19:46:43] waiting for the global TRAE Zig build slot
-[traex-zig-guard 2026-11-22 19:58:09] started Zig tree root=32847 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=1800s
-Build Summary: 10/10 steps succeeded; 513/514 tests passed (1 skipped)
+[traex-zig-guard 2026-11-22 21:27:47] waiting for the global TRAE Zig build slot
+[traex-zig-guard 2026-11-22 21:30:27] started Zig tree root=8204 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=1800s
+Build Summary: 10/10 steps succeeded; 514/515 tests passed (1 skipped)
 test-websocket success
-+- run test 513 pass, 1 skip (514 total) 1m MaxRSS:194M
-   +- compile test ReleaseSafe native success 3m MaxRSS:6G
++- run test 514 pass, 1 skip (515 total) 1m MaxRSS:194M
+   +- compile test ReleaseSafe native success 2m MaxRSS:4G
       +- WriteFile macho_0_p256_field_arm64.S cached
       +- WriteFile macho_0_p256_field_arm64.S (reused)
       +- WriteFile macho_0_p256_field_arm64.S (reused)
@@ -69,12 +69,12 @@ test-websocket success
       +- WriteFile macho_0_p256_field_arm64.S (reused)
       +- WriteFile macho_0_p256_field_arm64.S (reused)
       +- WriteFile cached
-      +- compile obj vort-br-record-optimal ReleaseSafe native cached 454ms MaxRSS:31M
+      +- compile obj vort-br-record-optimal ReleaseSafe native cached 285ms MaxRSS:31M
       +- WriteFile cached
-      +- compile obj vort-zstd-huffman-x2 ReleaseSafe native cached 453ms MaxRSS:31M
+      +- compile obj vort-zstd-huffman-x2 ReleaseSafe native cached 285ms MaxRSS:31M
       +- compile obj vort-br-record-optimal ReleaseSafe native (reused)
       +- compile obj vort-zstd-huffman-x2 ReleaseSafe native (reused)
       +- options cached
       +- options cached
 
-[traex-zig-guard 2026-11-22 20:02:29] finished Zig tree root=32847 peak=6033MiB result=0
+[traex-zig-guard 2026-11-22 21:34:28] finished Zig tree root=8204 peak=6095MiB result=0

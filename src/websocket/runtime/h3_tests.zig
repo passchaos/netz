@@ -2841,6 +2841,134 @@ test "WebSocket over HTTP3 extended CONNECT exchanges frames" {
     if (shared.err) |err| return err;
 }
 
+test "WebSocket HTTP3 text slices roundtrip in both directions" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const original_dcid = [_]u8{ 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98 };
+    const client_cid = [_]u8{ 0x99, 0x9a, 0x9b, 0x9c };
+    const server_cid = [_]u8{ 0x9d, 0x9e, 0x9f, 0xa0 };
+    const text = "h3 \xe4\xb8\x96\xe7\x95\x8c";
+    const parts = [_][]const u8{ "h3 ", "\xe4\xb8", "\x96", "\xe7\x95\x8c" };
+    const response = "srv \xe4\xb8\x96\xe7\x95\x8c";
+    const response_parts = [_][]const u8{ "srv ", "\xe4\xb8\x96", "\xe7\x95\x8c" };
+    const limits: http3.runtime.Limits = .{ .quic = .{
+        .max_datagram_size = 4096,
+        .max_frames_per_datagram = 8,
+    } };
+    var server = try h3.Server.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        limits,
+        .{ .handshake = .{
+            .local_connection_id = &server_cid,
+            .random = [_]u8{0xa1} ** 32,
+            .x25519_secret_key = [_]u8{0xa2} ** 32,
+        }, .session = .{ .max_stream_frame_data = 5 } },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *h3.Server,
+        allocator: std.mem.Allocator,
+        text: []const u8,
+        response_parts: []const []const u8,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept(.{
+                .limits = .{ .max_frame_bytes = 64, .max_message_bytes = 64 },
+            });
+            defer connection.deinit();
+            for (0..2) |_| {
+                var message = try connection.receiveMessageWithTimeout(
+                    .fromSeconds(5),
+                );
+                defer message.deinit(self.allocator);
+                try std.testing.expectEqual(
+                    websocket.Opcode.text,
+                    message.opcode,
+                );
+                try std.testing.expectEqualStrings(self.text, message.payload);
+            }
+            try connection.sendTextSlices(self.response_parts);
+            var progress: h3.MessageWriteProgress = .{};
+            try connection.sendTextSlicesWithTimeout(
+                self.response_parts,
+                &progress,
+                .fromSeconds(5),
+            );
+            try std.testing.expect(progress.frame_committed);
+            var close = (try connection.receiveCloseFrameWithTimeout(
+                .fromSeconds(5),
+            )).?;
+            defer close.deinit(self.allocator);
+            try std.testing.expectEqual(
+                websocket.CloseCode.normal_closure,
+                close.code,
+            );
+        }
+    };
+    var shared = Shared{
+        .server = &server,
+        .allocator = allocator,
+        .text = text,
+        .response_parts = &response_parts,
+    };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try h3.Client.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        limits,
+        .{ .handshake = .{
+            .original_destination_connection_id = &original_dcid,
+            .local_connection_id = &client_cid,
+            .server_name = "localhost",
+            .random = [_]u8{0xa3} ** 32,
+            .x25519_secret_key = [_]u8{0xa4} ** 32,
+        }, .session = .{ .max_stream_frame_data = 5 } },
+        .{
+            .authority = "localhost",
+            .path = "/text-slices",
+            .limits = .{ .max_frame_bytes = 64, .max_message_bytes = 64 },
+        },
+    );
+    defer client.deinit();
+    try client.sendTextSlices(&parts);
+    var progress: h3.MessageWriteProgress = .{};
+    try client.sendTextSlicesWithTimeout(
+        &parts,
+        &progress,
+        .fromSeconds(5),
+    );
+    try std.testing.expect(progress.frame_committed);
+    for (0..2) |_| {
+        var message = try client.receiveMessageWithTimeout(.fromSeconds(5));
+        defer message.deinit(allocator);
+        try std.testing.expectEqual(websocket.Opcode.text, message.opcode);
+        try std.testing.expectEqualStrings(response, message.payload);
+    }
+    try client.sendClose(.normal_closure, "done");
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "WebSocket HTTP3 compression defaults to no context takeover" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

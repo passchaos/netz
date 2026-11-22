@@ -1785,4 +1785,4 @@ resumed as text with the same descriptor array.
 | --- | --- | --- |
 | WebSocket (Debug) | 513/514 (1 skipped) | `websocket-text-slices-debug.log` |
 | WebSocket (ReleaseSafe) | 513/514 (1 skipped) | `websocket-text-slices-rs.log` |
-| New text-slices round-trips | TCP and RFC 8441 masked/unmasked single frames | live run |
+| New text-slices round-trips | TCP, RFC 8441, and RFC 9220 masked/unmasked single frames | live run |
