@@ -129,6 +129,16 @@ store with `netz.tls.trust.SystemStore.initWithPaths` and assign
 TCP TLS. In minimal containers, `.tls.root_source = .bundled` selects the
 compiled-in Mozilla roots for both transports.
 
+Proxy routes (mutually exclusive):
+
+| Option | TCP | HTTP/3 | Notes |
+| --- | --- | --- | --- |
+| `.http_proxy` | HTTP/1.1 CONNECT | ineligible | Cleartext proxy; `http3_only` rejects it. |
+| `.socks5_proxy` | CONNECT | UDP ASSOCIATE | Proxy-side destination DNS; `http3_only` accepts it. |
+
+If a SOCKS5 proxy rejects or cannot describe the UDP relay, `prefer_http3`
+falls back to TCP through the same proxy instead of failing the request.
+
 Connection reuse:
 
 ```zig
