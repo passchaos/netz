@@ -1415,6 +1415,23 @@ pub const Dispatcher = struct {
         );
     }
 
+    /// Relative-timeout counterpart to `receiveWithDeadline`. A non-positive
+    /// duration returns `Timeout` before any socket wait.
+    pub fn receiveWithTimeout(
+        self: *Dispatcher,
+        supported_versions: []const u32,
+        timeout: std.Io.Duration,
+    ) ReceiveError!Event {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveWithDeadline(
+            supported_versions,
+            .fromNow(self.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
     /// Receive under one caller-owned awake-clock budget. Transport timers can
     /// wake the dispatcher earlier, but processing them never renews this
     /// absolute deadline. Rejecting other clocks also prevents incomparable
@@ -1467,6 +1484,29 @@ pub const Dispatcher = struct {
         );
     }
 
+    /// Relative-timeout counterpart to `receiveVisitingWithDeadline`. A
+    /// non-positive duration returns `Timeout` before any socket wait.
+    pub fn receiveVisitingWithTimeout(
+        self: *Dispatcher,
+        supported_versions: []const u32,
+        storage: []u8,
+        timeout: std.Io.Duration,
+        context: anytype,
+        comptime visitor: anytype,
+    ) (ReceiveError || callbackErrorSet(visitor))!VisitEvent {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveVisitingWithDeadline(
+            supported_versions,
+            storage,
+            .fromNow(self.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+            context,
+            visitor,
+        );
+    }
+
     pub fn receiveVisitingWithDeadline(
         self: *Dispatcher,
         supported_versions: []const u32,
@@ -1511,6 +1551,32 @@ pub const Dispatcher = struct {
             storage,
             output,
             timeout.toTimestamp(self.endpoint.io),
+            context,
+            visitor,
+        );
+    }
+
+    /// Relative-timeout counterpart to `receiveManyVisitingWithDeadline`. A
+    /// non-positive duration returns `Timeout` before buffer validation or any
+    /// socket wait.
+    pub fn receiveManyVisitingWithTimeout(
+        self: *Dispatcher,
+        supported_versions: []const u32,
+        storage: []u8,
+        output: []VisitEvent,
+        timeout: std.Io.Duration,
+        context: anytype,
+        comptime visitor: anytype,
+    ) (ReceiveError || callbackErrorSet(visitor))!usize {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveManyVisitingWithDeadline(
+            supported_versions,
+            storage,
+            output,
+            .fromNow(self.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
             context,
             visitor,
         );

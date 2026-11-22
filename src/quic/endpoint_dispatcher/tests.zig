@@ -3192,6 +3192,31 @@ test "QUIC endpoint dispatcher validates caller-owned deadlines" {
     );
     try std.testing.expectError(
         error.Timeout,
+        dispatcher.receiveWithTimeout(versions, .fromNanoseconds(0)),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        dispatcher.receiveVisitingWithTimeout(
+            versions,
+            &storage,
+            .fromNanoseconds(0),
+            {},
+            Visitor.visit,
+        ),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        dispatcher.receiveManyVisitingWithTimeout(
+            versions,
+            &storage,
+            &batch_events,
+            .fromNanoseconds(0),
+            {},
+            Visitor.visit,
+        ),
+    );
+    try std.testing.expectError(
+        error.Timeout,
         dispatcher.receiveVisitingWithDeadline(
             versions,
             &storage,

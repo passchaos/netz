@@ -1449,3 +1449,21 @@ recorded rerun passed 1108/1131 with 23 skipped.
 | --- | --- | --- |
 | Full QUIC suite (recorded rerun) | 1108/1131 (23 skipped) | `quic-many-visiting-timeout.log` |
 | Public package surface tests | 26/26 | `test-package-many-visiting-timeout.log` |
+
+
+## Sixty-fifth pass: dispatcher relative-timeout receive forms
+
+`quic.endpoint_dispatcher.Dispatcher` exposed the `std.Io.Timeout` union
+forms and absolute deadlines but not the canonical relative-budget forms that
+`endpoint_server.Server` now offers. Add `receiveWithTimeout`,
+`receiveVisitingWithTimeout`, and `receiveManyVisitingWithTimeout` taking
+`std.Io.Duration`; each rejects a non-positive budget before buffer
+validation or any socket wait, then converts once to the existing deadline
+path. The union `*Timeout` spellings remain for supervisor loops that need
+`none` or an absolute deadline. The dispatcher test now asserts all three
+zero-budget rejections, and the package surface pins the declarations.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full QUIC suite | 1108/1131 (23 skipped) | `quic-dispatcher-timeouts.log` |
+| Public package surface tests | 26/26 | `test-package-dispatcher-timeouts.log` |

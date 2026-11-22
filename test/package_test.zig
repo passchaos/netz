@@ -9503,6 +9503,18 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.quic.endpoint_dispatcher.Dispatcher,
+        "receiveWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.endpoint_dispatcher.Dispatcher,
+        "receiveVisitingWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.endpoint_dispatcher.Dispatcher,
+        "receiveManyVisitingWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.endpoint_dispatcher.Dispatcher,
         "serviceDueTimersAt",
     ));
     try std.testing.expect(@hasDecl(
