@@ -1688,3 +1688,16 @@ Every step passed:
 | Public package surface | 26/26 |
 
 Artifact: `gate-matrix-final.log`.
+
+
+## Eighty-first pass: coverage inventory reflects the fuzz matrix
+
+`docs/coverage.md` now records the latest guided replay counts (parser
+50,000, stateful 2,000, HTTP/1 300, HTTP/1+TLS 100, HTTP/2 200, HTTP/2+TLS
+100, HTTP/3 100, WebTransport endpoint 50) and points at the evidence ledger,
+so readers can see both the target inventory and the current verification
+state in one place.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Documentation consistency | counts match passes 70-79 | `docs/coverage.md` |

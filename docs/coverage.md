@@ -17,6 +17,11 @@ fuzz-stateful` drives bounded operation sequences through HTTP/1 pipelines,
 HTTP/2 flow control and HPACK, HTTP/3 control streams and QPACK, WebSocket
 fragmented-message assembly, WebTransport session/stream lifecycles, and MQTT
 Session/QoS persistence; add `--fuzz=N` for coverage-guided sequence discovery.
+
+Latest guided replays (2026-11-22): `fuzz-parsers` 50,000 iterations,
+`fuzz-stateful` 2,000, HTTP/1 300, HTTP/1+TLS 100, HTTP/2 200, HTTP/2+TLS 100,
+HTTP/3 100, and WebTransport endpoint 50; all passed. Per-run logs and the
+pass-by-pass ledger live under `docs/evidence/protocol_review/2026-11-21/`.
 `zig build fuzz-http1-connection` drives bounded request/response sequences
 through a production loopback TCP client and server. It covers persistent
 reuse, complete and streaming fixed/chunked bodies, trailers, HEAD suppression,
