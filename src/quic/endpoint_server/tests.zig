@@ -1856,6 +1856,18 @@ test "QUIC multi-endpoint visitor preserves transport state after callback error
         }
     };
     var storage: [4096]u8 = undefined;
+    var many_output: [1]quic.endpoint_server.VisitEvent = undefined;
+    try std.testing.expectError(
+        error.Timeout,
+        server.receiveManyVisitingWithTimeout(
+            &.{quic.Version.version_1.wireValue()},
+            &storage,
+            &many_output,
+            .fromNanoseconds(0),
+            {},
+            Visitor.visit,
+        ),
+    );
     try std.testing.expectError(
         error.Timeout,
         server.receiveVisitingWithTimeout(

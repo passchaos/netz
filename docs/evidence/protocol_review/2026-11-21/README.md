@@ -1429,3 +1429,23 @@ new fields, and the adapter document records the contract.
 | --- | --- | --- |
 | Full WebSocket suite | 512/513 (1 skipped) | `websocket-parts-write.log` |
 | Public package surface tests | 26/26 | `test-package-parts-write.log` |
+
+
+## Sixty-fourth pass: QUIC many-visitor receive timeout
+
+`quic.endpoint_server.Server` exposed `receiveVisitingWithTimeout` but its
+multi-datagram counterpart only had the `std.Io.Timeout` union and absolute
+deadline forms. Add `receiveManyVisitingWithTimeout` taking a relative
+`std.Io.Duration`; a non-positive duration returns `Timeout` before buffer
+validation or any receive attempt, matching the deadline form's ordering.
+The visitor test asserts the zero-budget rejection alongside the existing
+single-visitor checks, and the package surface pins the declaration.
+
+The first full QUIC run hit the known load-sensitive
+`receive_cancel_tests` UDP-batch flake; it passed in isolation and the
+recorded rerun passed 1108/1131 with 23 skipped.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full QUIC suite (recorded rerun) | 1108/1131 (23 skipped) | `quic-many-visiting-timeout.log` |
+| Public package surface tests | 26/26 | `test-package-many-visiting-timeout.log` |
