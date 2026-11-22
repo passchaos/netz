@@ -6642,10 +6642,19 @@ pub const HandshakeClient = struct {
         single_attempt: bool,
     ) Error!void {
         if (self.receive_packets.ack_pending) {
-            try self.established.connection.sendAck(0);
-            self.receive_packets.ack_pending = false;
+            // Deadline-bounded receive: defer the ACK instead of waiting for
+            // outbound pacing.
+            if (self.established.connection.trySendAck(0)) |_| {
+                self.receive_packets.ack_pending = false;
+            } else |err| switch (err) {
+                error.PacingLimited,
+                error.CongestionLimited,
+                error.FlowControlBlocked,
+                => {},
+                else => |other| return other,
+            }
         }
-        _ = self.established.connection.sendAckForPacketIfNeeded(
+        _ = self.established.connection.trySendAckForPacketIfNeeded(
             packet.packet.packet_number,
             packet.frames,
         ) catch {
@@ -8657,10 +8666,19 @@ pub const HandshakeClient = struct {
     ) Error!void {
         if (self.callback_reader_active) return error.ConcurrentRead;
         if (self.receive_packets.ack_pending) {
-            try self.established.connection.sendAck(0);
-            self.receive_packets.ack_pending = false;
+            // Deadline-bounded receive: defer the ACK instead of waiting for
+            // outbound pacing.
+            if (self.established.connection.trySendAck(0)) |_| {
+                self.receive_packets.ack_pending = false;
+            } else |err| switch (err) {
+                error.PacingLimited,
+                error.CongestionLimited,
+                error.FlowControlBlocked,
+                => {},
+                else => |other| return other,
+            }
         }
-        _ = self.established.connection.sendAckForPacketIfNeeded(
+        _ = self.established.connection.trySendAckForPacketIfNeeded(
             packet.packet_number,
             packet.frames,
         ) catch {

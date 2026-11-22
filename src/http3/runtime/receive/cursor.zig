@@ -83,6 +83,7 @@ pub const Connection = struct {
         datagram: quic.runtime.ReceivedBytesView,
         received_at_ns: u64,
         context: anytype,
+        comptime try_only: bool,
         comptime visitor: *const fn (
             @TypeOf(context),
             quic.one_rtt.ReceivedPacketView,
@@ -102,13 +103,23 @@ pub const Connection = struct {
                 _ = try adapter.connection.retransmitPacketThresholdLosses(
                     quic.one_rtt.max_batch_packets,
                 );
-                _ = adapter.connection.sendAckForPacketIfNeeded(
-                    packet.packet_number,
-                    packet.frames,
-                ) catch |err| {
-                    cancellation.preserveIgnored(adapter.connection.endpoint.io, err);
-                    adapter.cursor.ack_pending = true;
-                };
+                if (try_only) {
+                    _ = adapter.connection.trySendAckForPacketIfNeeded(
+                        packet.packet_number,
+                        packet.frames,
+                    ) catch |err| {
+                        cancellation.preserveIgnored(adapter.connection.endpoint.io, err);
+                        adapter.cursor.ack_pending = true;
+                    };
+                } else {
+                    _ = adapter.connection.sendAckForPacketIfNeeded(
+                        packet.packet_number,
+                        packet.frames,
+                    ) catch |err| {
+                        cancellation.preserveIgnored(adapter.connection.endpoint.io, err);
+                        adapter.cursor.ack_pending = true;
+                    };
+                }
                 try visitor(adapter.context, packet);
             }
         };
@@ -130,6 +141,7 @@ pub const Connection = struct {
         connection: *quic.one_rtt.Connection,
         deadline: ?std.Io.Clock.Timestamp,
         context: anytype,
+        comptime try_only: bool,
         comptime visitor: *const fn (
             @TypeOf(context),
             quic.one_rtt.ReceivedPacketView,
@@ -146,13 +158,23 @@ pub const Connection = struct {
                 adapter: *AdapterContext,
                 packet: quic.one_rtt.ReceivedPacketView,
             ) Error!void {
-                _ = adapter.connection.sendAckForPacketIfNeeded(
-                    packet.packet_number,
-                    packet.frames,
-                ) catch |err| {
-                    cancellation.preserveIgnored(adapter.connection.endpoint.io, err);
-                    adapter.cursor.ack_pending = true;
-                };
+                if (try_only) {
+                    _ = adapter.connection.trySendAckForPacketIfNeeded(
+                        packet.packet_number,
+                        packet.frames,
+                    ) catch |err| {
+                        cancellation.preserveIgnored(adapter.connection.endpoint.io, err);
+                        adapter.cursor.ack_pending = true;
+                    };
+                } else {
+                    _ = adapter.connection.sendAckForPacketIfNeeded(
+                        packet.packet_number,
+                        packet.frames,
+                    ) catch |err| {
+                        cancellation.preserveIgnored(adapter.connection.endpoint.io, err);
+                        adapter.cursor.ack_pending = true;
+                    };
+                }
                 try visitor(adapter.context, packet);
             }
         };
@@ -178,6 +200,7 @@ pub const Connection = struct {
         self: *Connection,
         connection: *quic.one_rtt.Connection,
         context: anytype,
+        comptime try_only: bool,
         comptime visitor: *const fn (
             @TypeOf(context),
             quic.one_rtt.ReceivedPacketView,
@@ -190,6 +213,7 @@ pub const Connection = struct {
                 datagram,
                 raw_batch.received_at_ns,
                 context,
+                try_only,
                 visitor,
             )) return true;
         }
@@ -254,6 +278,7 @@ pub const Connection = struct {
                     connection,
                     null,
                     context,
+                    false,
                     visitor,
                 ) catch |err| switch (err) {
                     error.Timeout, error.ConcurrencyUnavailable => unreachable,
@@ -264,6 +289,7 @@ pub const Connection = struct {
                 if (try self.visitRetainedRawDatagram(
                     connection,
                     context,
+                    false,
                     visitor,
                 )) return;
                 raw_batch.count = @intCast(try connection
@@ -308,8 +334,17 @@ pub const Connection = struct {
             deadline,
         );
         if (self.ack_pending) {
-            try connection.sendAck(0);
-            self.ack_pending = false;
+            // Outbound pacing must not block a deadline-bounded receive.
+            // Keep the ACK pending for the next turn or the delayed-ACK timer.
+            if (connection.trySendAck(0)) |_| {
+                self.ack_pending = false;
+            } else |err| switch (err) {
+                error.PacingLimited,
+                error.CongestionLimited,
+                error.FlowControlBlocked,
+                => {},
+                else => |other| return other,
+            }
         }
         if (self.batch) |*batch| {
             if (batch.takeNext()) |packet_value| {
@@ -326,6 +361,7 @@ pub const Connection = struct {
                     connection,
                     deadline,
                     context,
+                    true,
                     visitor,
                 );
             }
@@ -333,6 +369,7 @@ pub const Connection = struct {
                 if (try self.visitRetainedRawDatagram(
                     connection,
                     context,
+                    true,
                     visitor,
                 )) return;
                 try self.fillRawBatchWithDeadline(connection, deadline);
@@ -361,7 +398,7 @@ pub const Connection = struct {
             deadline,
         );
         errdefer batch.deinit();
-        _ = connection.sendAckForPacketsIfNeeded(
+        _ = connection.trySendAckForPacketsIfNeeded(
             batch.packets[batch.next_index..],
         ) catch |err| {
             cancellation.preserveIgnored(connection.endpoint.io, err);

@@ -1194,10 +1194,19 @@ pub const HandshakeServerSession = struct {
         packet: quic.one_rtt.ReceivedPacketView,
     ) Error!void {
         if (self.receive_packets.ack_pending) {
-            try self.established.connection.sendAck(0);
-            self.receive_packets.ack_pending = false;
+            // Deadline-bounded receive: defer the ACK instead of waiting for
+            // outbound pacing.
+            if (self.established.connection.trySendAck(0)) |_| {
+                self.receive_packets.ack_pending = false;
+            } else |err| switch (err) {
+                error.PacingLimited,
+                error.CongestionLimited,
+                error.FlowControlBlocked,
+                => {},
+                else => |other| return other,
+            }
         }
-        _ = self.established.connection.sendAckForPacketIfNeeded(
+        _ = self.established.connection.trySendAckForPacketIfNeeded(
             packet.packet_number,
             packet.frames,
         ) catch {
@@ -1661,10 +1670,19 @@ pub const HandshakeServerSession = struct {
             return error.UnexpectedStream;
         }
         if (self.receive_packets.ack_pending) {
-            try self.established.connection.sendAck(0);
-            self.receive_packets.ack_pending = false;
+            // Deadline-bounded receive: defer the ACK instead of waiting for
+            // outbound pacing.
+            if (self.established.connection.trySendAck(0)) |_| {
+                self.receive_packets.ack_pending = false;
+            } else |err| switch (err) {
+                error.PacingLimited,
+                error.CongestionLimited,
+                error.FlowControlBlocked,
+                => {},
+                else => |other| return other,
+            }
         }
-        _ = self.established.connection.sendAckForPacketIfNeeded(
+        _ = self.established.connection.trySendAckForPacketIfNeeded(
             packet.packet.packet_number,
             packet.frames,
         ) catch {

@@ -36,12 +36,21 @@ pub fn pace(connection: *quic.one_rtt.Connection, io: std.Io, rate: u64) void {
 }
 
 pub fn withinBudget(io: std.Io, comptime function: anytype, args: anytype) !void {
+    return withinBudgetFor(io, .fromSeconds(1), function, args);
+}
+
+pub fn withinBudgetFor(
+    io: std.Io,
+    budget: std.Io.Duration,
+    comptime function: anytype,
+    args: anytype,
+) !void {
     const Wake = union(enum) { done: anyerror!void, expired: std.Io.Cancelable!void };
     var storage: [2]Wake = undefined;
     var select: std.Io.Select(Wake) = .init(io, &storage);
     defer select.cancelDiscard();
     try select.concurrent(.done, function, args);
-    try select.concurrent(.expired, std.Io.sleep, .{ io, std.Io.Duration.fromSeconds(1), std.Io.Clock.awake });
+    try select.concurrent(.expired, std.Io.sleep, .{ io, budget, std.Io.Clock.awake });
     switch (try select.await()) {
         .done => |result| try result,
         .expired => |result| {

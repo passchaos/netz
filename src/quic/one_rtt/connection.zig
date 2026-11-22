@@ -6234,6 +6234,20 @@ pub const Connection = struct {
         self.ackDelaySent();
     }
 
+    /// Submit the cumulative ACK once without waiting for pacing or
+    /// congestion. A refused attempt leaves the ACK pending for the caller's
+    /// next receive turn or the delayed-ACK timer; deadline-bounded receive
+    /// paths use this so outbound pacing cannot block them indefinitely.
+    pub fn trySendAck(self: *Connection, ack_delay: u64) Error!void {
+        var stack_ranges: [quic.packet_space.ReceivedPacketTracker.stack_ack_range_capacity]quic.AckRange = undefined;
+        var heap_ranges: ?[]quic.AckRange = null;
+        defer if (heap_ranges) |ranges| self.endpoint.allocator.free(ranges);
+        const ack = try self.ackFrameForSend(ack_delay, &stack_ranges, &heap_ranges);
+        const frames = [_]quic.Frame{.{ .ack = ack }};
+        try self.trySend(&frames);
+        self.ackDelaySent();
+    }
+
     /// Send application frames together with the cumulative ACK currently
     /// pending for received packets.
     ///
@@ -6368,6 +6382,24 @@ pub const Connection = struct {
         self: *Connection,
         packets: []const ReceivedPacket,
     ) Error!bool {
+        return self.sendAckForPacketsIfNeededMode(packets, false);
+    }
+
+    /// Single-attempt counterpart to `sendAckForPacketsIfNeeded` for
+    /// deadline-bounded receive paths. Pacing, congestion, or flow-control
+    /// refusal leaves the ACK pending instead of blocking the caller.
+    pub fn trySendAckForPacketsIfNeeded(
+        self: *Connection,
+        packets: []const ReceivedPacket,
+    ) Error!bool {
+        return self.sendAckForPacketsIfNeededMode(packets, true);
+    }
+
+    fn sendAckForPacketsIfNeededMode(
+        self: *Connection,
+        packets: []const ReceivedPacket,
+        comptime try_only: bool,
+    ) Error!bool {
         var ack_eliciting_count: u64 = 0;
         var largest_packet_number = self.received.largestReceived();
         var reordered = false;
@@ -6390,9 +6422,10 @@ pub const Connection = struct {
             }
         }
         if (ack_eliciting_count == 0) return false;
-        return self.sendAckForObservedPacketMetadata(
+        return self.sendAckForObservedPacketMetadataMode(
             ack_eliciting_count,
             reordered,
+            try_only,
         );
     }
 
@@ -6422,6 +6455,37 @@ pub const Connection = struct {
         ack_eliciting_count: u64,
         reordered: bool,
     ) Error!bool {
+        return self.sendAckForObservedPacketMetadataMode(
+            ack_eliciting_count,
+            reordered,
+            false,
+        );
+    }
+
+    /// Single-attempt counterpart used by deadline-bounded receive paths.
+    /// Pacing, congestion, or flow-control refusal leaves the ACK pending
+    /// instead of blocking the caller.
+    pub fn trySendAckForPacketIfNeeded(
+        self: *Connection,
+        packet_number: u64,
+        frames: []const quic.Frame,
+    ) Error!bool {
+        if (!frame_traits.ackEliciting(frames)) return false;
+        const reordered = if (self.received.largestReceived()) |largest|
+            packet_number < largest and
+                self.ack_reordering_threshold != 0 and
+                largest - packet_number >= self.ack_reordering_threshold
+        else
+            false;
+        return self.sendAckForObservedPacketMetadataMode(1, reordered, true);
+    }
+
+    fn sendAckForObservedPacketMetadataMode(
+        self: *Connection,
+        ack_eliciting_count: u64,
+        reordered: bool,
+        comptime try_only: bool,
+    ) Error!bool {
         std.debug.assert(ack_eliciting_count != 0);
 
         const immediate_requested = self.immediate_ack_requested;
@@ -6442,7 +6506,11 @@ pub const Connection = struct {
             return false;
         }
 
-        try self.sendAck(0);
+        if (try_only) {
+            try self.trySendAck(0);
+        } else {
+            try self.sendAck(0);
+        }
         return true;
     }
 

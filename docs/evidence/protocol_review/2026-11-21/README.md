@@ -1734,3 +1734,32 @@ strict-mode cleanup can start from a measured baseline.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | Evidence hash audit (report-only) | 6,518 matched / 4,314 stale / 0 invalid | live `zig build verify-evidence` |
+
+
+## Eighty-fourth pass: deadline-bounded ACK deferral and the retained-cursor flake
+
+The `WebTransport stream send wait observes CLOSE in the retained HTTP3 cursor
+suffix` test failed intermittently in ReleaseSafe before its send wait ran.
+Stage instrumentation showed two legitimate receive-batch shapes after the
+DATAGRAM was queued: `next_index=1 count=2` when the CLOSE capsule shared the
+raw batch, and `next_index=1 count=1` when the deadline-bounded cursor took the
+single-datagram timer-blocked read and left the CLOSE in the socket. The old
+`next_index < count` assertion treated the second shape as a failure even
+though the send wait observed the CLOSE and returned `InvalidSessionState` in
+both shapes.
+
+The test now asserts the observable contract in either interleaving and is
+named for it. The receive audit also closed a real deadline-bound gap: every
+HTTP/3 ACK emission point on a bounded receive (packet visitor, single-packet
+visitor, GRO batch, and the pending-ACK retry) now uses the try-send QUIC
+counterparts, so pacing, congestion, or flow-control backpressure defers the
+ACK instead of blocking the receive past its deadline. Unbounded `visit`
+paths keep the blocking ACK behavior.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| WebTransport (ReleaseSafe) | 758/760 (2 skipped) | `webtransport-pacing-close-flake-rs.log` |
+| WebTransport (Debug) | 758/760 (2 skipped) | `webtransport-pacing-close-flake-debug.log` |
+| HTTP/3 (ReleaseSafe) | 927/931 (4 skipped) | `http3-ack-defer-rs.log` |
+| QUIC (ReleaseSafe) | 1108/1131 (23 skipped) | `quic-ack-defer-rs.log` |
+| Targeted send-wait test | 10/10 repeated runs, both batch shapes observed | live runs |

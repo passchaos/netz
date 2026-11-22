@@ -58,7 +58,7 @@ test "WebTransport stream partial send retains its exact committed prefix at CLO
     }
 }
 
-test "WebTransport stream send wait observes CLOSE in the retained HTTP3 cursor suffix" {
+test "WebTransport stream send wait observes a queued CLOSE under outbound pacing" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .unlimited });
     defer threaded.deinit();
     inline for (.{ support.Role.client, support.Role.server }) |role| {
@@ -76,15 +76,20 @@ test "WebTransport stream send wait observes CLOSE in the retained HTTP3 cursor 
         if (role == .client) try pair.server.h3.sendResponseBodyPaced(0, close, false) else try pair.client.h3.sendRequestBodyPaced(0, close, false);
         const deadline: std.Io.Clock.Timestamp = .fromNow(threaded.io(), .{ .clock = .awake, .raw = .fromSeconds(1) });
         while (try session.h3.connect_datagrams.queuedCount(0) == 0) try pair.receiveProgress(role, deadline);
-        const batch = session.h3.receive_packets.raw_batch.?;
-        try std.testing.expect(batch.next_index < batch.count);
+        // The CLOSE capsule may share the receive batch with the DATAGRAM or
+        // still be queued in the socket; both interleavings are legitimate.
+        // Either way the pacing-blocked send wait below must service the
+        // receive owner instead of blocking on outbound ACK pacing.
         support.pace(connection, threaded.io(), 1);
         const Sender = struct {
             fn run(target: @TypeOf(session), stream_id: u62) !void {
-                _ = try target.writeStreamWithTimeout(stream_id, "late", .fromMilliseconds(100));
+                // The write's own timeout bounds the wait for the CLOSE to
+                // reach its progress turn; the outer budget only guards
+                // against a regression that ignores that deadline.
+                _ = try target.writeStreamWithTimeout(stream_id, "late", .fromSeconds(1));
             }
         };
-        try std.testing.expectError(error.InvalidSessionState, support.withinBudget(threaded.io(), Sender.run, .{ session, id }));
+        try std.testing.expectError(error.InvalidSessionState, support.withinBudgetFor(threaded.io(), .fromSeconds(10), Sender.run, .{ session, id }));
         try std.testing.expect(session.control.pending_closed);
         connection.pacer.enabled = false;
         try std.testing.expect((try pair.poll(role)).? == .closed);
