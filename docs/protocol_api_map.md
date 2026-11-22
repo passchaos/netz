@@ -113,7 +113,9 @@ when the host does not configure a `127.0.0.0/8` alias.
 - Protocol suites: `zig build test-http`, `test-http1`, `test-http2`,
   `test-http3`, `test-quic`, `test-websocket`, `test-webtransport`; the public
   package surface is `test-package`, and `test-compile` compiles both test
-  roots without running them.
+  roots without running them. `test-lib` runs the whole library in one binary;
+  on a heavily loaded host its real-UDP and tight-timing tests can rotate, so
+  triage with the protocol-scoped steps first.
 - Bounded fuzz corpus replays: `zig build fuzz-parsers`, `fuzz-stateful`,
   `fuzz-http1-connection`, `fuzz-http1-tls-connection`,
   `fuzz-http2-connection`, `fuzz-http2-tls-connection`,

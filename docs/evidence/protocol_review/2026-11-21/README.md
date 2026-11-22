@@ -1499,3 +1499,16 @@ H3 clients. The existing flat-accessor test now also mutates and verifies
 | --- | --- | --- |
 | Full HTTP suite | 305/305 | `http-crypto-buffer-accessor.log` |
 | Public package surface tests | 26/26 | `test-package-crypto-buffer-accessor.log` |
+
+
+## Sixty-eighth pass: full-suite triage guidance
+
+The API map's verification section now lists `test-lib` and records that its
+single-binary run includes real-UDP and tight-timing tests that can rotate on
+a heavily loaded host; protocol-scoped steps are the first triage choice. This
+matches the observed full-library runs in passes 58 and 62, where the failing
+set changed between runs while the dedicated suites stayed green.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Documentation consistency | triage guidance matches passes 58/62 | `docs/protocol_api_map.md` |
