@@ -91,7 +91,8 @@ pub const Session = struct {
         return false;
     }
     /// Selected WebTransport application protocol negotiated on CONNECT,
-    /// matching `Accepted.applicationProtocol` on the endpoint facades.
+    /// matching `Accepted.applicationProtocol` on the endpoint facades. The
+    /// returned slice is borrowed until `deinit`.
     pub fn applicationProtocol(self: Session) ?[]const u8 {
         return self.selected_protocol;
     }
