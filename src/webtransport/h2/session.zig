@@ -90,6 +90,11 @@ pub const Session = struct {
     pub fn streamIndependence(_: Session) bool {
         return false;
     }
+    /// Selected WebTransport application protocol negotiated on CONNECT,
+    /// matching `Accepted.applicationProtocol` on the endpoint facades.
+    pub fn applicationProtocol(self: Session) ?[]const u8 {
+        return self.selected_protocol;
+    }
     pub fn responseStatus(self: Session) ?u16 {
         if (self.response) |response| return response.status;
         return if (self.duplex_response) |response| response.status else null;

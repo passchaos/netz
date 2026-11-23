@@ -2884,3 +2884,17 @@ ReleaseFast, loopback):
 Fixed-length framing is ~19% faster than chunked framing at this size; both
 exceed 1 GiB/s aggregate on loopback. Baseline only; no code change is
 warranted from a single run.
+
+
+## Hundred-and-fiftieth pass: WebTransport H2 Session application-protocol accessor
+
+`Session` stored the negotiated WebTransport application protocol but only
+exposed it as a field, while the endpoint facades provide
+`applicationProtocol()`. `Session.applicationProtocol()` now returns the
+selected token, and the runtime tests use it for the required `echo`
+negotiation cases. The API map also records the remaining H2 key-update and
+reconnecting-facade metadata asymmetries.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full WebTransport suite (Debug) | 761/763 (2 skipped) | live `zig build test-webtransport --summary all` |

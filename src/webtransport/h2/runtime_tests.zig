@@ -40,7 +40,7 @@ test "WebTransport HTTP2 TLS runtime exchanges virtual streams datagrams reset S
                 .initial_receive_stream_data = .{ .uni = 4096, .bidi_local = 4100, .bidi_remote = 4200 },
             }, .fromSeconds(3));
             defer session.deinit();
-            try std.testing.expectEqualStrings("echo", session.selected_protocol.?);
+            try std.testing.expectEqualStrings("echo", session.applicationProtocol().?);
             try std.testing.expectEqual(@as(u64, 3096), session.state.send_limit.uni_data);
             try std.testing.expectEqual(@as(u64, 4096), session.state.receive_limit.uni_data);
             const stream = (try next(&session)).stream;
@@ -87,7 +87,7 @@ test "WebTransport HTTP2 TLS runtime exchanges virtual streams datagrams reset S
         .initial_receive_stream_data = .{ .uni = 3096, .bidi_local = 3100, .bidi_remote = 3200 },
     }, .fromSeconds(3));
     defer session.deinit();
-    try std.testing.expectEqualStrings("echo", session.selected_protocol.?);
+    try std.testing.expectEqualStrings("echo", session.applicationProtocol().?);
     try std.testing.expectEqual(@as(?u16, 200), session.responseStatus());
     try std.testing.expectEqualStrings("accepted", session.responseHeader("x-session").?);
     try std.testing.expectEqual(@as(u64, 4096), session.state.send_limit.uni_data);
