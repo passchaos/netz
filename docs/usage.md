@@ -300,7 +300,8 @@ try client.sendClose(.normal_closure, "bye");
   services Ping/Close replies automatically. HTTP/3 always services them, so
   its `receiveFrameAuto*` forms alias the plain forms.
 - `sendText`/`sendBinary` are the typed forms; `sendMessage(opcode, payload)`
-  is the opcode-driven equivalent on every transport.
+  is the opcode-driven equivalent on every transport and on the byte-stream
+  adapter. Text payloads are UTF-8 validated before any bytes are written.
 - For caller-supplied byte streams use `websocket.stream_connection`; its
   bounded forms require `read_deadline_fn`/`write_deadline_fn` and otherwise
   return `error.DeadlineUnsupported`.

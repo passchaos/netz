@@ -717,7 +717,13 @@ test "WebSocket stream adapter rejects invalid UTF-8 text before I/O" {
         connection.sendText(&.{ 0xff, 0xfe }),
     );
     try std.testing.expectEqual(@as(usize, 0), peer.writes);
+    // The opcode-driven form shares the same validation and rejects controls.
+    try std.testing.expectError(
+        error.InvalidFrame,
+        connection.sendMessage(.ping, "control"),
+    );
     // Binary payloads remain opaque.
     try connection.sendBinary(&.{ 0xff, 0xfe });
+    try connection.sendMessage(.binary, &.{ 0xfe, 0xff });
     try std.testing.expect(peer.writes != 0);
 }

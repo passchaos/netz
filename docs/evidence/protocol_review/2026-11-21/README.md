@@ -3168,3 +3168,16 @@ rejected text and that the same bytes succeed as binary.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | Full WebSocket suite (Debug) | 526/527 (1 skipped) | live `zig build test-websocket --summary all` |
+
+
+## Hundred-and-seventy-first pass: stream-adapter sendMessage parity
+
+`websocket.stream_connection` exposed `sendText`/`sendBinary` but not the
+opcode-driven `sendMessage` available on every runtime connection. It now
+provides the same form, rejecting control opcodes and reusing the
+UTF-8-validated single-buffer send path; the adapter test covers the control
+rejection and a binary send through the new entry point.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full WebSocket suite (Debug) | 526/527 (1 skipped) | live `zig build test-websocket --summary all` |

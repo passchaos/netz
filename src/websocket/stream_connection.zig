@@ -378,6 +378,18 @@ pub const Connection = struct {
         try self.sendFrame(.binary, data);
     }
 
+    /// Opcode-driven counterpart to `sendText`/`sendBinary`, matching the
+    /// runtime connections. Control opcodes are rejected; text payloads must
+    /// be valid UTF-8.
+    pub fn sendMessage(
+        self: *Connection,
+        opcode: websocket.Opcode,
+        payload: []const u8,
+    ) !void {
+        if (opcode != .text and opcode != .binary) return error.InvalidFrame;
+        try self.sendFrame(opcode, payload);
+    }
+
     pub fn sendBinaryWithTimeout(
         self: *Connection,
         data: []const u8,
