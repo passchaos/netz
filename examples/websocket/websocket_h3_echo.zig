@@ -112,6 +112,16 @@ pub fn main() !void {
     );
     defer connection.close();
     defer closeIgnoringEvents(&connection, allocator);
+    std.debug.print(
+        "RFC 9220 negotiated ALPN: {s}\n",
+        .{connection.negotiatedAlpn()},
+    );
+    const server_chain = connection.peerCertificates() orelse
+        return error.MissingPeerCertificate;
+    std.debug.print(
+        "RFC 9220 server certificate chain: {d}\n",
+        .{server_chain.len},
+    );
     try connection.sendText("hello over RFC 9220");
     var reply = try connection.receiveMessageWithTimeout(.fromSeconds(5));
     defer reply.deinit(allocator);

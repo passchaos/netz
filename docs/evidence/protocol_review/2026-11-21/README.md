@@ -2755,3 +2755,17 @@ leak-free.
 | --- | --- | --- |
 | Full WebSocket suite (Debug) | 522/523 (1 skipped) | live `zig build test-websocket --summary all` |
 | RFC 9220 example | leak-free echo | live `zig build run-websocket-h3-echo` |
+
+
+## Hundred-and-forty-first pass: WebSocket close asymmetry and RFC 9220 auth metadata
+
+The HTTP/3 WebSocket connection has no send-only `sendClose`; its
+`closeWithTimeout` sends once and surfaces in-flight application frames so one
+call can drain and close. The API map records this asymmetry and
+`docs/usage.md` spells out the pattern. The RFC 9220 example now prints the
+negotiated `h3` ALPN and asserts the pinned server chain before echoing,
+demonstrating authenticated metadata through the public surface.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| RFC 9220 example | `ALPN: h3`, `server certificate chain: 1`, echo | live `zig build run-websocket-h3-echo` |
