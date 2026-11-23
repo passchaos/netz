@@ -3075,3 +3075,21 @@ required-subprotocol tests plus the WebTransport H2 Origin test:
 | Full HTTP/3 suite (Debug) | 928/932 (4 skipped) | live `zig build test-http3 --summary all` |
 | QUIC trust unit tests | 38/38 | live `zig build test-quic -Dtest-filter='trust' --summary all` |
 | Public package surface | 27/27 | live `zig build test-package --summary all` |
+
+
+## Hundred-and-sixty-fourth pass: 0-RTT verification record
+
+The user asked whether QUIC 0-RTT is verified. Live scoped runs:
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| QUIC 0-RTT filter | 62/62 | live `zig build test-quic -Dtest-filter='0-RTT' --summary all` |
+| H3 early-data filter | 101/101 | live `zig build test-http3 -Dtest-filter='early' --summary all` |
+
+Coverage includes authenticated 0-RTT stream data, ChaCha20 and
+AES-256-SHA384 cipher variants, retransmitted and socket-rejected packet
+numbers, ticket-age skew rejection with PSK resumption, Version Negotiation
+rejection reporting, the replay filter (duplicates, expiry, snapshots),
+PSK/ClientHello-bound keys, remembered transport-parameter validation, and H3
+typed early requests with `was_early_data` provenance across accepted and
+rejected cases.
