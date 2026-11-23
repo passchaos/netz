@@ -3391,3 +3391,13 @@ message. The client uses `connectAttempt` to inspect the rejection and
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | WebSocket auth example (Debug) | 401 challenge, accepted echo, 9/9 steps | live `zig build run-websocket-auth --summary all` |
+
+## Hundred-and-eighty-seventh pass: URI-form WebSocket auth attempt
+
+The WebSocket auth example now uses `connectUriAttempt` instead of resolving
+the loopback address by hand, so the rejection status is inspectable through
+the same URI path used by production WS/WSS clients.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| WebSocket auth example (Debug) | 401 challenge, accepted echo, 9/9 steps | live `zig build run-websocket-auth --summary all` |

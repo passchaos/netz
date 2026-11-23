@@ -85,12 +85,19 @@ pub fn main() !void {
     var server_task = io.async(ServerTask.run, .{&task});
     defer server_task.cancel(io);
 
+    const uri = try std.fmt.allocPrint(
+        allocator,
+        "ws://127.0.0.1:{d}/chat",
+        .{server.address().ip4.port},
+    );
+    defer allocator.free(uri);
+
     // Attempt 1: no Authorization. The server response stays inspectable.
-    var rejected = try netz.websocket.runtime.Client.connectAttempt(
+    var rejected = try netz.websocket.runtime.Client.connectUriAttempt(
         allocator,
         io,
-        server.address(),
-        .{ .host = "127.0.0.1", .target = "/chat" },
+        uri,
+        .{},
     );
     defer rejected.deinit();
     std.debug.print("client got status {d} challenge={?s}\n", .{
@@ -100,13 +107,11 @@ pub fn main() !void {
     try std.testing.expect(!rejected.accepted());
 
     // Attempt 2: send the bearer token in the opening handshake.
-    var attempt = try netz.websocket.runtime.Client.connectAttempt(
+    var attempt = try netz.websocket.runtime.Client.connectUriAttempt(
         allocator,
         io,
-        server.address(),
+        uri,
         .{
-            .host = "127.0.0.1",
-            .target = "/chat",
             .extra_headers = &.{.{
                 .name = "authorization",
                 .value = "Bearer " ++ bearer_token,
