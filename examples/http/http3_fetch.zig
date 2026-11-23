@@ -31,7 +31,7 @@ pub fn main(init: std.process.Init) !void {
     _ = args.next(); // executable name
     var uri_text: []const u8 = default_uri;
     var method: []const u8 = "GET";
-    var verify_server = false;
+    var verify_server = true;
     var discover = false;
     var manual_alt_svc: ?[]const u8 = null;
     var expected_status: ?u16 = null;
@@ -39,6 +39,9 @@ pub fn main(init: std.process.Init) !void {
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--verify")) {
             verify_server = true;
+        } else if (std.mem.eql(u8, arg, "--no-verify")) {
+            // Only for controlled test peers with self-signed certificates.
+            verify_server = false;
         } else if (std.mem.eql(u8, arg, "--discover")) {
             discover = true;
         } else if (std.mem.eql(u8, arg, "--head")) {
@@ -76,9 +79,9 @@ pub fn main(init: std.process.Init) !void {
         };
     }
 
-    // This is a protocol smoke tool, not a production WebPKI client: the QUIC
-    // handshake path uses the process environment's native roots when
-    // `--verify` is set and otherwise accepts the certificate chain.
+    // Verify the server with the platform roots by default, matching the
+    // unified HTTP client. `--no-verify` is only for controlled test peers;
+    // `--verify` remains accepted as an explicit no-op for older scripts.
     var response = try fetchWithRetries(allocator, io, uri, method, verify_server, if (discovered) |*target| target else null, init.minimal.environ);
     defer response.deinit(allocator);
     if (expected_status) |expected| {

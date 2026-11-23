@@ -302,14 +302,17 @@ zig build interop-websocket-chrome -Doptimize=ReleaseFast
 zig build interop-websocket-chrome -Doptimize=ReleaseFast -- --tls
 zig build run-websocket-echo
 zig build run-http3-fetch
-zig build run-http3-fetch -- https://robotics.bytedance.com/ --verify
-zig build run-http3-fetch -- https://robotics.bytedance.com/ --verify --head
+# Server certificates are verified with the platform roots by default.
+zig build run-http3-fetch -- https://robotics.bytedance.com/
+zig build run-http3-fetch -- https://robotics.bytedance.com/ --head
 # Optional diagnostic: performs a preliminary HTTPS HEAD Alt-Svc discovery.
-zig build run-http3-fetch -- https://robotics.bytedance.com/ --verify --discover
+zig build run-http3-fetch -- https://robotics.bytedance.com/ --discover
 # Independent CDN path with a cross-signed GTS Root R4 chain.
-zig build run-http3-fetch -- '--alt-svc=h3=":443"; ma=86400' --verify --expect-status=200 --min-body-bytes=100000 https://cloudflare-quic.com/
+zig build run-http3-fetch -- '--alt-svc=h3=":443"; ma=86400' --expect-status=200 --min-body-bytes=100000 https://cloudflare-quic.com/
 # Independent quiche deployment on a non-default HTTP/3 port.
-zig build run-http3-fetch -- '--alt-svc=h3=":8443"; ma=86400' --verify --expect-status=200 --min-body-bytes=400 https://quic.tech/
+zig build run-http3-fetch -- '--alt-svc=h3=":8443"; ma=86400' --expect-status=200 --min-body-bytes=400 https://quic.tech/
+# Controlled self-signed test peers only:
+zig build run-http3-fetch -- --no-verify https://127.0.0.1:4433/
 # Run all maintained public HTTP/3 status/body and WebPKI checks.
 zig build interop-http3-public -Doptimize=ReleaseFast
 ```

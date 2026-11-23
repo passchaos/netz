@@ -377,9 +377,11 @@ zig build run-quic-close
   zero-RTT tests and [quicz_parity.md](quicz_parity.md).
 - TLS trust: the low-level `quic.handshake.ClientOptions` leaves certificate
   verification disabled when `server_auth`, `system_store`, `system_environ`
-  and a non-default `root_source` are all unset. URI-level H3/WebTransport
-  facades install platform roots automatically; raw handshake callers should
-  set `server_auth`/`system_store` explicitly or call
+  and a non-default `root_source` are all unset. URI-level facades (unified
+  HTTP client/pool, WebSocket over H3, WebTransport) install platform roots
+  automatically; raw `quic.handshake` callers and the low-level
+  `http3.runtime.HandshakeClient.connectUri*`/`requestUri*` helpers require
+  explicit trust, or can call
   `netz.quic.client_trust.applyPlatformRootDefault` before connecting.
 - One owner drives each connection; ACKs, timers and loss recovery are
   serviced by the receive path.

@@ -2402,3 +2402,18 @@ QUIC callers and points at the helper.
 | Full WebTransport suite (Debug) | 761/763 (2 skipped) | live `zig build test-webtransport --summary all` |
 | H3 handshake server tests | 53/53 | live `zig build test-http3 -Dtest-filter='rejects a non-HTTP/3 ALPN'` |
 | Public package surface (trust helper) | 2/2 | live `zig build test-package -Dtest-filter='QUIC client trust'` |
+
+
+## Hundred-and-nineteenth pass: verified-by-default HTTP/3 fetch example
+
+`examples/http/http3_fetch.zig` connected without certificate verification
+unless `--verify` was passed, so the runnable H3 entry point diverged from the
+unified client's secure default. It now verifies with the platform roots by
+default; `--no-verify` remains only for controlled self-signed peers and
+`--verify` stays accepted as a no-op. `docs/build.md` and `docs/usage.md` now
+state that the low-level `HandshakeClient.connectUri*`/`requestUri*` helpers
+require explicit trust while the unified/WS/WT facades install roots.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Example compiles and parses flags | `HTTP/3 fetch attempt ... failed: InvalidUri` after 5 attempts for an `http://` URI | live `zig build run-http3-fetch -- http://127.0.0.1:1/` |
