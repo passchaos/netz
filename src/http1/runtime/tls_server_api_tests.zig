@@ -384,4 +384,21 @@ test "HTTP/1 TLS listener rejects non-HTTP/1.1 ALPN offers" {
             },
         ),
     );
+
+    // The HTTP/1.1-only list is the valid configuration.
+    var server = try runtime.TlsServer.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .identity = .{
+                .certificate_chain = &certificate_chain,
+                .signer = .{ .ecdsa_p256_sha256 = .{
+                    .key_pair = key_pair,
+                } },
+            },
+            .alpn_protocols = &.{"http/1.1"},
+        },
+    );
+    server.deinit();
 }

@@ -2489,3 +2489,19 @@ requests.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | Full WebTransport suite (Debug) | 761/763 (2 skipped) | live `zig build test-webtransport --summary all` |
+
+
+## Hundred-and-twenty-fifth pass: ALPN positive-path tests and API discoverability
+
+The ALPN hardening tests only covered rejection. Both listeners now also assert
+that an explicit `http/1.1`-only offer list is accepted, and
+`netz.tls.alpn_server` points callers at
+`http1.runtime.adoptNegotiatedTlsServer`/`http2.runtime.adoptNegotiatedTlsServer`
+and the runnable example. The protocol API map now records that the low-level
+`http3.runtime.HandshakeClient.connectUri*`/`requestUri*` helpers require
+explicit trust.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| ALPN-filtered HTTP suite | 105/105 | live `zig build test-http -Dtest-filter='ALPN' --summary all` |
+| ALPN-filtered WebSocket suite | 55/55 | live `zig build test-websocket -Dtest-filter='ALPN' --summary all` |

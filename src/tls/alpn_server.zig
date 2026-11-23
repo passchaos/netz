@@ -2,7 +2,10 @@
 //!
 //! Application protocols use this when one TCP port must serve more than one
 //! ALPN protocol (for example `h2` and `http/1.1`). The caller owns the
-//! accepted TLS connection and dispatches it to the matching protocol runtime.
+//! accepted TLS connection and dispatches it to the matching protocol runtime
+//! with `http1.runtime.adoptNegotiatedTlsServer` or
+//! `http2.runtime.adoptNegotiatedTlsServer`. See
+//! `examples/http/alpn_server.zig`.
 
 const std = @import("std");
 const accept_deadline = @import("../internal/accept.zig");
