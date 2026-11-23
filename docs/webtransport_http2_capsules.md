@@ -111,10 +111,15 @@ The owning `h2.Session` carries virtual streams, reliable datagrams, DRAIN and
 CLOSE, reset/stop signals, credit updates, and per-Session TLS exporter
 contexts over the CONNECT DATA stream. Payload events remain valid until the
 next public receive call. Flow-control waits retain unrelated events in bounded
-queues, while interrupted writes own their encoded capsule and resume only the
-uncommitted suffix before virtual-stream accounting advances. Deadline and
-relative-timeout forms cover admission, receive, sends, control updates,
-drain, close, and retained-write resumption.
+queues, while interrupted writes retain their capsule header and payload
+progress and resume only the uncommitted suffix before virtual-stream
+accounting advances. `sendStreamSlicesWith{Timeout,Deadline}` writes the
+encoded capsule header and borrowed payload slices directly (no payload copy);
+the caller keeps those slices valid until the write completes. The endpoint
+command queue still stages one buffer because a timed-out job may outlive the
+caller. `run-webtransport-h2-capsule-echo` demonstrates the path end to end.
+Deadline and relative-timeout forms cover admission, receive, sends, control
+updates, drain, close, and retained-write resumption.
 
 The protocol foundation's Debug and ReleaseFast filters pass 141/141, package
 checks pass 22/22, and the seeded plus deterministic parser fuzz checks pass.
