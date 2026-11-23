@@ -166,6 +166,16 @@ pub const State = struct {
         if (data_len == 0 and !fin and stream.send_started) return error.StreamStateError;
         if (data_len > stream.send_limit -| stream.sent or data_len > self.send_limit.data -| self.sent_data) return error.FlowControlBlocked;
     }
+
+    /// Commit a stream write whose payload was supplied as separate slices.
+    pub fn commitStreamLength(self: *State, id: u62, data_len: usize, fin: bool) Error!void {
+        try self.prepareStreamLength(id, data_len, fin);
+        const stream = self.streams.getPtr(id).?;
+        stream.sent += data_len;
+        self.sent_data += data_len;
+        stream.send_started = true;
+        stream.send_fin = fin;
+    }
     pub fn prepareReset(self: *State, id: u62, application_code: u32) Error!Capsule {
         try self.ensureOpen();
         if (!self.canSend(id)) return error.StreamStateError;
@@ -206,14 +216,11 @@ pub const State = struct {
     pub fn commit(self: *State, capsule: Capsule) Error!void {
         try self.ensureOpen();
         switch (capsule) {
-            .stream => |value| {
-                _ = try self.prepareStream(value.id, value.data, value.fin);
-                const stream = self.streams.getPtr(value.id).?;
-                stream.sent += value.data.len;
-                self.sent_data += value.data.len;
-                stream.send_started = true;
-                stream.send_fin = value.fin;
-            },
+            .stream => |value| try self.commitStreamLength(
+                value.id,
+                value.data.len,
+                value.fin,
+            ),
             .reset_stream => |value| {
                 const prepared = try self.prepareReset(value.id, value.code);
                 if (prepared.reset_stream.reliable_size != value.reliable_size) return error.StreamStateError;

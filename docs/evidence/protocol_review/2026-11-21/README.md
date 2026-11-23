@@ -2145,19 +2145,20 @@ their contiguous APIs.
 The HTTP/3 WebTransport session exposed `sendStreamSlices*`, but the HTTP/2
 session and its endpoint facades only accepted contiguous stream payloads.
 `Session` now has `sendStreamSlicesWithDeadline`/`WithTimeout`, backed by
-`State.prepareStreamLength` and `Capsule.writeStreamHeaderInto`;
-`EndpointClient` and `EndpointServer` forward the same shape through a staged
-buffer. Each H2 call still stages one contiguous capsule (the zero-copy
-multi-buffer redesign remains a documented performance gap), while H3 keeps
-true scatter/gather. The staging path takes ownership before resuming, so a
-bounded write interruption retains the exact capsule without a dangling
-buffer. The virtual-stream FIN travels in the capsule type, not as HTTP/2
-END_STREAM; the slice path stages with `pending.fin = false` so the session
-stream stays open for later capsules and datagrams.
+`State.prepareStreamLength`/`commitStreamLength` and
+`Capsule.writeStreamHeaderInto`; `EndpointClient` and `EndpointServer` forward
+the same shape through a staged command buffer. The H2 session itself writes
+the encoded capsule header and borrowed payload slices directly, so the slice
+path no longer copies the payload; `Pending` is a union of contiguous control
+writes and zero-copy stream writes with resumable header/payload progress. The
+virtual-stream FIN travels in the capsule type, not as HTTP/2 END_STREAM; the
+slice path stages with `pending.fin = false` so the session stream stays open
+for later capsules and datagrams.
 
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | H2 WebTransport tests | 205/205 | live `zig build test-webtransport -Dtest-filter='HTTP2'` |
+| H2 zero-copy slice staging | 106/106 | live `zig build test-webtransport -Dtest-filter='HTTP2 slice'` |
 | H2 slice sends over TLS/h2 duplex | client `hel`+`lo`, server `rep`+`ly`, datagram follows the finished stream | live `zig build test-webtransport -Dtest-filter='HTTP2 TLS runtime exchanges'` |
 | Full WebTransport suite (Debug) | 761/763 (2 skipped) | live `zig build test-webtransport` |
 

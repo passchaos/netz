@@ -1970,8 +1970,9 @@ rejection entities, streams, reliable datagrams,
 reset/stop, credit, drain/close, exporter contexts, bounded event retention,
 and resumable deadline-owned output. Session and endpoint facades expose
 `sendStreamSlicesWith{Timeout,Deadline}` with the same shape as the HTTP/3
-session; each H2 call stages one contiguous capsule buffer, while the H3
-session keeps true scatter/gather. Authenticated loopback regressions cover
+session; the H2 session writes the capsule header and borrowed payload slices
+directly, while the endpoint command queue still stages one buffer.
+Authenticated loopback regressions cover
 the complete exchange and prove malformed request streams do not poison a
 healthy sibling Session.
 

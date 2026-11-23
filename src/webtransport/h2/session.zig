@@ -9,7 +9,22 @@ pub const Error = model.Error || reader_mod.Error || http2.runtime.Error || erro
 pub const Event = model.Event;
 pub const Options = struct { max_payload: usize = 1024 * 1024, max_live_streams: usize = 256, max_pending_events: usize = 64, max_pending_bytes: usize = 64 * 1024 };
 
-const Pending = struct { bytes: []u8, offset: usize = 0, fin: bool = false };
+const BytesPending = struct { bytes: []u8, offset: usize = 0, fin: bool = false };
+/// Zero-copy stream write: the encoded capsule header plus borrowed payload
+/// slices. `fin` is the virtual-stream FIN carried by the capsule type; the
+/// HTTP/2 session stream stays open.
+const SlicesPending = struct {
+    header: []u8,
+    header_offset: usize = 0,
+    payload: [][]const u8,
+    payload_start: usize = 0,
+    payload_inner: usize = 0,
+    payload_written: usize = 0,
+    stream_id: u62,
+    data_len: usize,
+    fin: bool,
+};
+const Pending = union(enum) { bytes: BytesPending, slices: SlicesPending };
 const Retained = struct { event: Event, storage: std.ArrayList(u8) };
 pub const Session = struct {
     allocator: std.mem.Allocator,
@@ -51,7 +66,13 @@ pub const Session = struct {
     pub fn deinit(self: *Session) void {
         self.clearInput();
         if (self.duplex) |*duplex| duplex.deinit() else if (self.server_duplex) |*duplex| duplex.deinit() else self.tunnel.abort(null);
-        if (self.pending) |pending| self.allocator.free(pending.bytes);
+        if (self.pending) |*pending| switch (pending.*) {
+            .bytes => |value| self.allocator.free(value.bytes),
+            .slices => |value| {
+                self.allocator.free(value.header);
+                self.allocator.free(value.payload);
+            },
+        };
         self.reader.deinit();
         self.delivered_storage.deinit(self.allocator);
         for (self.queued.slice()) |*retained| retained.storage.deinit(self.allocator);
@@ -115,7 +136,7 @@ pub const Session = struct {
         const bytes = try self.allocator.alloc(u8, length);
         errdefer self.allocator.free(bytes);
         _ = try capsule.writeInto(bytes);
-        self.pending = .{ .bytes = bytes, .fin = fin };
+        self.pending = .{ .bytes = .{ .bytes = bytes, .fin = fin } };
     }
 
     /// Resume only the uncommitted encoded suffix. A bounded write interruption
@@ -123,6 +144,13 @@ pub const Session = struct {
     pub fn resumeWriteWithDeadline(self: *Session, deadline: std.Io.Clock.Timestamp) Error!void {
         if (self.terminal) return error.SessionClosed;
         const pending = if (self.pending) |*value| value else return;
+        switch (pending.*) {
+            .bytes => |*value| try self.resumeBytes(value, deadline),
+            .slices => |*value| try self.resumeSlices(value, deadline),
+        }
+    }
+
+    fn resumeBytes(self: *Session, pending: *BytesPending, deadline: std.Io.Clock.Timestamp) Error!void {
         var progress: http2.runtime.TunnelWriteProgress = .{};
         var response_available = false;
         if (self.duplex) |*duplex| {
@@ -170,6 +198,118 @@ pub const Session = struct {
         self.allocator.free(pending.bytes);
         self.pending = null;
     }
+
+    /// Zero-copy stream writes send the capsule header and borrowed payload
+    /// slices directly; the session stream is never ended by this path.
+    fn resumeSlices(self: *Session, pending: *SlicesPending, deadline: std.Io.Clock.Timestamp) Error!void {
+        if (pending.header_offset < pending.header.len) {
+            var written: usize = 0;
+            self.writeSlicesTracked(
+                &.{pending.header[pending.header_offset..]},
+                false,
+                &written,
+                deadline,
+            ) catch |err| {
+                pending.header_offset += written;
+                return err;
+            };
+            pending.header_offset += written;
+            if (pending.header_offset != pending.header.len) {
+                return error.PendingWrite;
+            }
+        }
+        while (true) {
+            const remaining = self.remainingPayload(pending);
+            if (remaining.len == 0) break;
+            var written: usize = 0;
+            self.writeSlicesTracked(remaining, false, &written, deadline) catch |err| {
+                self.advancePayload(pending, written);
+                return err;
+            };
+            self.advancePayload(pending, written);
+            if (pending.payload_written > pending.data_len) {
+                return error.PendingWrite;
+            }
+        }
+        if (pending.payload_written != pending.data_len) {
+            return error.PendingWrite;
+        }
+        try self.state.commitStreamLength(
+            pending.stream_id,
+            pending.data_len,
+            pending.fin,
+        );
+        self.allocator.free(pending.header);
+        self.allocator.free(pending.payload);
+        self.pending = null;
+    }
+
+    fn writeSlicesTracked(
+        self: *Session,
+        slices: []const []const u8,
+        end_stream: bool,
+        written: *usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!void {
+        written.* = 0;
+        if (self.duplex) |*duplex| {
+            const before = duplex.requestCommittedBytes();
+            const result = duplex.writeRequestSlicesWithDeadline(slices, end_stream, deadline) catch |err| {
+                written.* = duplex.requestCommittedBytes() - before;
+                if (err != error.Timeout and err != error.Canceled and err != error.ConcurrencyUnavailable and err != error.ResponseAvailable) self.fail(deadline);
+                return err;
+            };
+            written.* = result.written;
+            if (result.response_available) return error.ResponseAvailable;
+            return;
+        }
+        if (self.server_duplex) |*duplex| {
+            const before = duplex.responseCommittedBytes();
+            const result = duplex.writeResponseSlicesWithDeadline(slices, end_stream, deadline) catch |err| {
+                written.* = duplex.responseCommittedBytes() - before;
+                if (err != error.Timeout and err != error.Canceled and err != error.ConcurrencyUnavailable and err != error.ResponseAvailable) self.fail(deadline);
+                return err;
+            };
+            written.* = result.written;
+            if (result.response_available) return error.ResponseAvailable;
+            return;
+        }
+        var progress: http2.runtime.TunnelWriteProgress = .{};
+        self.tunnel.writeSlicesWithDeadline(slices, end_stream, &progress, deadline) catch |err| {
+            written.* = progress.committed_bytes;
+            if (err != error.Timeout and err != error.Canceled and err != error.ConcurrencyUnavailable and err != error.ResponseAvailable) self.fail(deadline);
+            return err;
+        };
+        written.* = progress.committed_bytes;
+    }
+
+    fn remainingPayload(self: *Session, pending: *SlicesPending) []const []const u8 {
+        _ = self;
+        if (pending.payload_start >= pending.payload.len) return &.{};
+        if (pending.payload_inner != 0) {
+            pending.payload[pending.payload_start] =
+                pending.payload[pending.payload_start][pending.payload_inner..];
+            pending.payload_inner = 0;
+        }
+        return pending.payload[pending.payload_start..];
+    }
+
+    fn advancePayload(self: *Session, pending: *SlicesPending, written: usize) void {
+        _ = self;
+        var remaining = written;
+        while (pending.payload_start < pending.payload.len) {
+            const slice_len = pending.payload[pending.payload_start].len -
+                pending.payload_inner;
+            if (remaining < slice_len) {
+                pending.payload_inner += remaining;
+                break;
+            }
+            remaining -= slice_len;
+            pending.payload_start += 1;
+            pending.payload_inner = 0;
+        }
+        pending.payload_written += written;
+    }
     pub fn resumeWriteWithTimeout(self: *Session, timeout: std.Io.Duration) Error!void {
         if (timeout.nanoseconds <= 0) return error.Timeout;
         return self.resumeWriteWithDeadline(.fromNow(self.connection().io, .{ .raw = timeout, .clock = .awake }));
@@ -206,9 +346,10 @@ pub const Session = struct {
     }
 
     /// Send one stream capsule whose payload is supplied as multiple slices.
-    /// The capsule is staged into one owned buffer; borrowed slices only need
-    /// to remain valid for this call. The HTTP/3 session exposes a zero-copy
-    /// slice form.
+    /// The capsule header is encoded separately and the borrowed payload slices
+    /// are written directly, so the caller must keep them valid until the
+    /// write completes (including bounded-write retries). The virtual-stream
+    /// FIN is carried by the capsule type, not by HTTP/2 END_STREAM.
     pub fn sendStreamSlicesWithDeadline(
         self: *Session,
         id: u62,
@@ -250,20 +391,26 @@ pub const Session = struct {
             if (length > self.reader.max_payload + 16) {
                 return error.CapsuleTooLarge;
             }
-            const bytes = try self.allocator.alloc(u8, length);
-            var owned = true;
-            defer if (owned) self.allocator.free(bytes);
-            @memcpy(bytes[0..header.len], header);
-            var offset = header.len;
-            for (slices) |slice| {
-                @memcpy(bytes[offset..][0..slice.len], slice);
-                offset += slice.len;
-            }
-            // The virtual-stream FIN is carried by the capsule type, not the
-            // HTTP/2 request END_STREAM; the session stream stays open for
-            // further capsules and datagrams.
-            self.pending = .{ .bytes = bytes, .fin = false };
-            owned = false;
+            const header_owned = try self.allocator.dupe(u8, header);
+            var header_owned_flag = true;
+            defer if (header_owned_flag) self.allocator.free(header_owned);
+            const payload_owned = try self.allocator.dupe(
+                []const u8,
+                slices,
+            );
+            var payload_owned_flag = true;
+            defer if (payload_owned_flag) {
+                self.allocator.free(payload_owned);
+            };
+            self.pending = .{ .slices = .{
+                .header = header_owned,
+                .payload = payload_owned,
+                .stream_id = id,
+                .data_len = total,
+                .fin = fin,
+            } };
+            header_owned_flag = false;
+            payload_owned_flag = false;
             return self.resumeWriteWithDeadline(deadline);
         }
     }

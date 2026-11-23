@@ -3,6 +3,23 @@ const http2 = @import("../../http2/mod.zig");
 const wt = @import("mod.zig");
 const allocator = std.testing.allocator;
 
+fn pendingSliceCapsule(session: *wt.Session) ![]u8 {
+    const pending = session.pending.?;
+    const slices = switch (pending) {
+        .slices => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    const encoded = try allocator.alloc(u8, slices.header.len + slices.data_len);
+    errdefer allocator.free(encoded);
+    @memcpy(encoded[0..slices.header.len], slices.header);
+    var offset = slices.header.len;
+    for (slices.payload) |part| {
+        @memcpy(encoded[offset..][0..part.len], part);
+        offset += part.len;
+    }
+    return encoded;
+}
+
 test "WebTransport HTTP2 encoded writes retain transaction and exact suffix across deadlines" {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -17,16 +34,16 @@ test "WebTransport HTTP2 encoded writes retain transaction and exact suffix acro
     const expired: std.Io.Clock.Timestamp = .{ .clock = .awake, .raw = .zero };
     try std.testing.expectError(error.Timeout, session.sendStreamWithDeadline(id, "kept", true, expired));
     try std.testing.expect(session.pending != null);
-    try std.testing.expectEqual(@as(usize, 0), session.pending.?.offset);
+    try std.testing.expectEqual(@as(usize, 0), session.pending.?.bytes.offset);
     try std.testing.expectEqual(@as(u64, 0), session.state.sent_data);
     try std.testing.expect(!session.state.streams.get(id).?.send_fin);
     try std.testing.expectError(error.PendingWrite, session.sendDatagramWithDeadline("later", .fromNow(io, .{ .raw = .fromSeconds(1), .clock = .awake })));
-    const expected = session.pending.?.bytes;
+    const expected = session.pending.?.bytes.bytes;
     try std.testing.expectEqualStrings("kept", (try wt.Capsule.parse(expected)).capsule.stream.data);
     // The retained encoding and virtual-stream accounting survive repeated
     // interruptions, including after the caller's original payload expires.
     try std.testing.expectError(error.Timeout, session.resumeWriteWithTimeout(.zero));
-    try std.testing.expectEqualSlices(u8, expected, session.pending.?.bytes);
+    try std.testing.expectEqualSlices(u8, expected, session.pending.?.bytes.bytes);
     try std.testing.expectEqual(@as(u64, 0), session.state.sent_data);
 }
 
@@ -51,7 +68,14 @@ test "WebTransport HTTP2 slice sends encode one stream capsule" {
         ),
     );
     try std.testing.expect(session.pending != null);
-    const parsed = try wt.Capsule.parse(session.pending.?.bytes);
+    try std.testing.expect(session.pending.? == .slices);
+    try std.testing.expectEqual(@as(usize, 5), session.pending.?.slices.data_len);
+    try std.testing.expectEqual(@as(usize, 3), session.pending.?.slices.payload.len);
+    try std.testing.expectEqual(@as(usize, 0), session.pending.?.slices.header_offset);
+    try std.testing.expectEqual(@as(usize, 0), session.pending.?.slices.payload_written);
+    const encoded = try pendingSliceCapsule(&session);
+    defer allocator.free(encoded);
+    const parsed = try wt.Capsule.parse(encoded);
     try std.testing.expectEqual(id, parsed.capsule.stream.id);
     try std.testing.expectEqualStrings("abcde", parsed.capsule.stream.data);
     try std.testing.expect(parsed.capsule.stream.fin);
@@ -81,7 +105,12 @@ test "WebTransport HTTP2 empty slice send encodes a fin-only stream capsule" {
         error.Timeout,
         session.sendStreamSlicesWithDeadline(id, &.{}, true, expired),
     );
-    const parsed = try wt.Capsule.parse(session.pending.?.bytes);
+    try std.testing.expect(session.pending.? == .slices);
+    try std.testing.expectEqual(@as(usize, 0), session.pending.?.slices.data_len);
+    try std.testing.expectEqual(@as(usize, 0), session.pending.?.slices.payload.len);
+    const encoded = try pendingSliceCapsule(&session);
+    defer allocator.free(encoded);
+    const parsed = try wt.Capsule.parse(encoded);
     try std.testing.expectEqual(id, parsed.capsule.stream.id);
     try std.testing.expectEqual(@as(usize, 0), parsed.capsule.stream.data.len);
     try std.testing.expect(parsed.capsule.stream.fin);
