@@ -749,10 +749,13 @@ pub const Connection = struct {
         };
     }
 
-    /// Return the remote socket endpoint captured when this transport was
-    /// connected or accepted. TLS retains the same underlying TCP stream, so
-    /// this value is available without a syscall or allocation for both h2c
-    /// and encrypted connections.
+    /// Return the socket address recorded by `std.Io.net` for this transport.
+    /// Accepted server connections record the remote peer; client-created
+    /// connections record the local ephemeral endpoint because the std
+    /// connect path stores the local sockname. Retain the resolved connect
+    /// address when a client peer is required. TLS reuses the same underlying
+    /// stream, so this needs no syscall or allocation for h2c and encrypted
+    /// connections.
     pub fn peerAddress(self: *const Connection) net.IpAddress {
         return self.stream.socket.address;
     }

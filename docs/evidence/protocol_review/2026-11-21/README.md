@@ -3365,3 +3365,17 @@ direct-H3 tests initiate one update and observe the sent counter.
 | --- | --- | --- |
 | HTTP aggregate (Debug) | 310/310 | live `zig build test-http --summary all` |
 | Package surface (Debug) | 28/28 | live `zig build test-package --summary all` |
+
+## Hundred-and-eighty-fifth pass: HTTP/2 peerAddress role semantics
+
+Attempting to add `peerAddress()` to the unified `http.Connection` showed that
+`std.Io.net` records the local sockname on client connects. The HTTP/2
+`Connection.peerAddress()` therefore reports the remote peer only for accepted
+server connections; client-created connections report the local ephemeral
+endpoint. The unified accessor was not landed, and the HTTP/2 accessor now
+documents the role-dependent value so callers retain the resolved address
+when they need the client peer.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| HTTP aggregate (Debug) | 310/310 | live `zig build test-http --summary all` |
