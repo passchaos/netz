@@ -173,6 +173,11 @@ when the host does not configure a `127.0.0.0/8` alias.
   `fuzz-http2-connection`, `fuzz-http2-tls-connection`,
   `fuzz-http3-connection`, and `fuzz-webtransport-endpoint`. Add `--fuzz=N`
   for coverage-guided runs.
+- Performance baselines: `bench-http1-pipeline`, `bench-http1-body`,
+  `bench-http2-h2c`, `bench-quic-handshake-stream`,
+  `bench-webtransport-stream`, and `bench-webtransport-datagram` (ReleaseFast,
+  same-application-shape loopback). Recent numbers and variance notes live in
+  `docs/evidence/protocol_review/`.
 - The pass-by-pass review ledger and archived logs live in
   `docs/evidence/protocol_review/`.
 

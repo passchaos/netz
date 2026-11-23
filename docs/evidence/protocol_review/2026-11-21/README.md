@@ -2797,3 +2797,17 @@ sends its echo through `sendMessage`.
 | --- | --- | --- |
 | Full WebSocket suite (Debug) | 522/523 (1 skipped) | live `zig build test-websocket --summary all` |
 | RFC 9220 example | echo through `sendMessage` | live `zig build run-websocket-h3-echo` |
+
+
+## Hundred-and-forty-fourth pass: compile-only library gate and benchmark entry points
+
+`zig build test-compile` compiled both test roots without running them after
+the WebSocket API-parity series: 9/9 steps succeeded. The API map now lists
+the maintained performance entry points (`bench-http1-pipeline`,
+`bench-http1-body`, `bench-http2-h2c`, `bench-quic-handshake-stream`,
+`bench-webtransport-stream`, `bench-webtransport-datagram`) and points at the
+review ledger for recent numbers.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Compile-only library gate | 9/9 steps | live `zig build test-compile --summary all` |
