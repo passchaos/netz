@@ -191,6 +191,10 @@ const AlpnTestServer = struct {
             .{},
         );
         defer connection.close();
+        try std.testing.expectEqualStrings(
+            "http/1.1",
+            connection.negotiatedAlpn().?,
+        );
 
         var request = try connection.readRequest(.{});
         defer request.deinit(std.testing.allocator);

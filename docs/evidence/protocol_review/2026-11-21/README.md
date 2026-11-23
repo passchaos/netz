@@ -2577,3 +2577,16 @@ through the pending surface.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | Full WebSocket suite (Debug) | 522/523 (1 skipped) | live `zig build test-websocket --summary all` |
+
+
+## Hundred-and-thirty-first pass: HTTP/1 server ALPN metadata
+
+The HTTP/1 server `Connection` exposed the peer chain, cipher suite, TLS
+version and transcript hash but not the negotiated ALPN token that the client,
+pending upgrade and HTTP/2 surfaces expose. `Connection.negotiatedAlpn()` now
+returns the selected token (null for cleartext and legacy no-ALPN peers), and
+the ALPN adoption test asserts `http/1.1` on a real negotiated connection.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| ALPN-filtered HTTP suite | 105/105 | live `zig build test-http -Dtest-filter='ALPN' --summary all` |

@@ -107,6 +107,13 @@ pub const Connection = struct {
         return connection.negotiatedCipherSuite();
     }
 
+    /// Return the ALPN token selected by the TLS handshake. Cleartext
+    /// connections and legacy peers without ALPN return null.
+    pub fn negotiatedAlpn(self: *const Connection) ?[]const u8 {
+        const connection = self.tls_server_conn orelse return null;
+        return connection.negotiatedAlpn();
+    }
+
     pub fn negotiatedTlsProtocol(
         self: *const Connection,
     ) ?tls_stream.Protocol {
