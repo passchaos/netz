@@ -10,7 +10,7 @@ external network access.
 ```text
 examples/
   http/          HTTP/1.1, HTTP/2 h2c, HTTP/3, unified client recipes
-                 (forms, JSON, download, multipart, cookies, redirects),
+                 (forms, JSON, auth, download, multipart, cookies, redirects),
                  streaming and chunked bodies
   quic/          preconfigured-key and real-handshake QUIC smoke tests
   websocket/     WebSocket echo over HTTP/1
@@ -33,6 +33,7 @@ Run individual examples:
 ```sh
 zig build run-http-unified-client
 zig build run-http-client-forms
+zig build run-http-client-auth
 zig build run-http-client-json
 zig build run-http-download
 zig build run-http-large-body-stream

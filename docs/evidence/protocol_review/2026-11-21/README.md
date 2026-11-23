@@ -3226,3 +3226,15 @@ local counter.
 | --- | --- | --- |
 | WebTransport suite (Debug) | 761/763 (2 skipped) | live `zig build test-webtransport --summary all` |
 | Package surface (Debug) | 28/28 | live `zig build test-package --summary all` |
+
+## Hundred-and-seventy-fifth pass: runnable HTTP Authorization example
+
+`examples/http/client_auth.zig` adds the missing hyper/reqwest/curl-style
+credential recipe: a local HTTP/1 server returns 401 with `WWW-Authenticate`,
+then accepts `Authorization: Bearer ...` and Basic credentials from the
+unified client. The example is registered as `run-http-client-auth` and
+referenced from the authentication guide.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Auth example (Debug) | 401/200/200 observed, 9/9 build steps | live `zig build run-http-client-auth --summary all` |

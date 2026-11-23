@@ -19,7 +19,8 @@ H1 uses `websocket.runtime.ConnectOptions.extra_headers`, and WebTransport
 uses its CONNECT option `headers`. Cookies can be managed through HTTP
 CookieSession and WebSocket CookieJar adapters. WebTransport can carry an
 explicit Cookie field through its native header API; it has no corresponding
-automatic CookieJar session composition.
+automatic CookieJar session composition. A runnable 401 challenge plus Bearer
+and Basic exchange lives in `examples/http/client_auth.zig`.
 
 WebSocket servers inspect `PendingUpgrade.header()`/`headers()` before sending
 101; extended CONNECT and WebTransport use their pending admission surfaces

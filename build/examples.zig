@@ -33,6 +33,12 @@ pub const specs = [_]Spec{
         .description = "Build query strings, POST URL-encoded forms, and send HEAD requests",
     },
     .{
+        .exe_name = "netz-http-client-auth",
+        .path = "examples/http/client_auth.zig",
+        .run_step = "run-http-client-auth",
+        .description = "Send Bearer and Basic Authorization headers and handle 401 challenges",
+    },
+    .{
         .exe_name = "netz-http-client-json",
         .path = "examples/http/client_json.zig",
         .run_step = "run-http-client-json",
