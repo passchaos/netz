@@ -13,10 +13,10 @@ examples/
                  (forms, JSON, auth, download, multipart, cookies, redirects),
                  streaming and chunked bodies
   quic/          preconfigured-key and real-handshake QUIC smoke tests
-  websocket/     WebSocket echo over HTTP/1
+  websocket/     WebSocket echo, WSS, RFC 8441/9220 and handshake auth
   mqtt/          finite MQTT broker and Mosquitto-style configuration runner
   grpc/          gRPC unary over HTTP/2 h2c
-  webtransport/  WebTransport over HTTP/3 handshake and streams
+  webtransport/  WebTransport over HTTP/3 handshake/streams and HTTP/2 capsules
   benchmarks/    native protocol and transport benchmarks
   support/       shared benchmark allocators, samplers, and fixtures
   logging.zig    process-wide kron logging setup
