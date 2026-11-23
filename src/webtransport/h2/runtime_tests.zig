@@ -46,7 +46,7 @@ test "WebTransport HTTP2 TLS runtime exchanges virtual streams datagrams reset S
             const stream = (try next(&session)).stream;
             try std.testing.expectEqualStrings("hello", stream.data);
             const bidi = stream.id;
-            try session.sendStreamWithTimeout(bidi, "reply", true, .fromSeconds(3));
+            try session.sendStreamSlicesWithTimeout(bidi, &.{ "rep", "ly" }, true, .fromSeconds(3));
             try session.consume(bidi, 5);
             try session.retireStream(bidi);
             const datagram = try next(&session);
@@ -94,7 +94,7 @@ test "WebTransport HTTP2 TLS runtime exchanges virtual streams datagrams reset S
     try std.testing.expectEqual(@as(u64, 3096), session.state.receive_limit.uni_data);
     try std.testing.expect(!session.unreliableDelivery());
     const bidi = try session.openStream(.bidirectional);
-    try session.sendStreamWithTimeout(bidi, "hello", true, .fromSeconds(3));
+    try session.sendStreamSlicesWithTimeout(bidi, &.{ "hel", "lo" }, true, .fromSeconds(3));
     const reply = (try next(&session)).stream;
     try std.testing.expectEqualStrings("reply", reply.data);
     try session.consume(bidi, 5);

@@ -259,7 +259,10 @@ pub const Session = struct {
                 @memcpy(bytes[offset..][0..slice.len], slice);
                 offset += slice.len;
             }
-            self.pending = .{ .bytes = bytes, .fin = fin };
+            // The virtual-stream FIN is carried by the capsule type, not the
+            // HTTP/2 request END_STREAM; the session stream stays open for
+            // further capsules and datagrams.
+            self.pending = .{ .bytes = bytes, .fin = false };
             owned = false;
             return self.resumeWriteWithDeadline(deadline);
         }
