@@ -2630,3 +2630,29 @@ Run-to-run variance is roughly 5-10% on this shared host. `auto` selects
 large-body auto and vectored runs execute the same path; the spread is host
 noise. No write-path regression or obvious optimization target was found, so
 no code change is warranted from this baseline.
+
+
+## Hundred-and-thirty-fourth pass: full HTTP/2 h2c benchmark coverage
+
+`bench_http2_h2c` excluded the 1-MiB response and duplex scenarios because they
+had deadlocked in the in-process single-executor harness. All three now
+complete, so the exclusion filter is removed and the default benchmark step
+exercises all ten scenarios. Full h2c baseline (ReleaseFast, zio-std-io;
+1000/2000 iterations, large scenarios 2/5):
+
+| Scenario | ns/request | requests/s |
+| --- | --- | --- |
+| consecutive x1 empty | 116,935 | 8,551 |
+| shared consecutive x1 empty | 139,482 | 7,169 |
+| consecutive x1 req 10 B | 67,689 | 14,773 |
+| consecutive x1 req 100 KiB | 137,112 | 7,293 |
+| consecutive x1 res 10 B | 99,597 | 10,040 |
+| parallel x10 empty | 12,180 | 82,100 |
+| parallel x10 req 10 KiB x100 max window | 827,063 | 1,200 |
+| parallel x10 res 1 MiB | 799,257 | 1,250 |
+| parallel x10 duplex 1 MiB aggregate | 1,844,688 | 540 |
+| parallel x10 duplex 1 MiB streaming | 1,716,526 | 580 |
+
+Run-to-run variance is roughly 5-10% on this shared host. The previously
+excluded scenarios completing is evidence that the old single-executor
+flow-control deadlock no longer reproduces.

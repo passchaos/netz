@@ -32,20 +32,6 @@ const ScenarioId = enum {
     http2_parallel_x10_duplex_1mb_streaming,
 };
 
-/// The 1-MiB response and duplex self-benchmarks currently deadlock in the
-/// in-process single-executor harness. Keep them selectable with --scenario
-/// while the flow-control issue is investigated, but do not hang the default
-/// benchmark step.
-fn largeScenario(id: ScenarioId) bool {
-    return switch (id) {
-        .http2_parallel_x10_res_1mb,
-        .http2_parallel_x10_duplex_1mb_aggregate,
-        .http2_parallel_x10_duplex_1mb_streaming,
-        => true,
-        else => false,
-    };
-}
-
 const Options = struct {
     scenario: ?ScenarioId = null,
     stats: bool = false,
@@ -157,8 +143,6 @@ pub fn main(init: std.process.Init) !void {
             for (scenarios) |scenario| {
                 if (shared.scenario != null and
                     scenario.id != shared.scenario.?) continue;
-                if (shared.scenario == null and
-                    largeScenario(scenario.id)) continue;
                 var connection = try shared.server.accept();
                 defer connection.close();
                 const scenario_iterations =
@@ -420,8 +404,6 @@ pub fn main(init: std.process.Init) !void {
     for (scenarios) |scenario| {
         if (options.scenario != null and
             scenario.id != options.scenario.?) continue;
-        if (options.scenario == null and
-            largeScenario(scenario.id)) continue;
         if (scenario.shared_sender) {
             try benchmarkSharedScenario(
                 allocator,
