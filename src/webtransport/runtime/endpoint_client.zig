@@ -343,6 +343,81 @@ pub const Session = struct {
         );
     }
 
+    /// Send one stream from borrowed payload slices. The slices stay borrowed
+    /// until the call completes, including bounded-write retries.
+    pub fn sendStreamSlices(
+        self: *Session,
+        client: *Client,
+        stream_id: u62,
+        parts: []const []const u8,
+        fin: bool,
+    ) Error!void {
+        try self.validateOwner(client);
+        try client.ensureConnectionOpen();
+        defer _ = client.observeConnection();
+        try self.control.ensureOpen();
+        try flow_write.sendSlices(
+            &self.control,
+            &client.h3,
+            &self.streams,
+            self.session_id,
+            stream_id,
+            parts,
+            fin,
+        );
+    }
+
+    pub fn sendStreamSlicesWithTimeout(
+        self: *Session,
+        client: *Client,
+        stream_id: u62,
+        parts: []const []const u8,
+        fin: bool,
+        committed: *usize,
+        timeout: std.Io.Duration,
+    ) TimeoutError!void {
+        committed.* = 0;
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendStreamSlicesWithDeadline(
+            client,
+            stream_id,
+            parts,
+            fin,
+            committed,
+            .fromNow(client.h3.established.connection.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn sendStreamSlicesWithDeadline(
+        self: *Session,
+        client: *Client,
+        stream_id: u62,
+        parts: []const []const u8,
+        fin: bool,
+        committed: *usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) TimeoutError!void {
+        committed.* = 0;
+        try self.validateOwner(client);
+        try client.ensureConnectionOpen();
+        defer _ = client.observeConnection();
+        try self.control.ensureOpen();
+        try flow_write.sendSlicesWithDeadline(
+            &self.control,
+            &client.h3,
+            &self.streams,
+            self.session_id,
+            stream_id,
+            parts,
+            fin,
+            committed,
+            deadline,
+        );
+    }
+
     pub fn resetStream(
         self: *Session,
         client: *Client,

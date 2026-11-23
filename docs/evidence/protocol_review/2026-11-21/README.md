@@ -2178,3 +2178,19 @@ echoed by the server, then both sides drain and close the session.
 | --- | --- | --- |
 | WebSocket slice echo | `hello websocket` / `echo from netz websocket` | live `zig build run-websocket-echo` |
 | HTTP/2 WebTransport capsule echo | `WebTransport H2 echo: echo: hello h2` | live `zig build run-webtransport-h2-capsule-echo` |
+
+
+## Hundred-and-seventh pass: H3 endpoint session slice sends
+
+`webtransport.runtime.EndpointClient` sessions only forwarded contiguous
+stream payloads even though the handshake/stateful sessions and the H2 endpoint
+already exposed slices. `Session.sendStreamSlices`,
+`sendStreamSlicesWithTimeout` and `sendStreamSlicesWithDeadline` now forward
+to `flow_write.sendSlices*` with the same owner, connection and control checks.
+A two-session authenticated test sends `stream-` + `first` from slices and
+verifies the echoed concatenation.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| H3 endpoint slice send | 107/107 matched | live `zig build test-webtransport -Dtest-filter='endpoint client multiplexes two authenticated'` |
+| Full WebTransport suite (Debug) | 761/763 (2 skipped) | live `zig build test-webtransport` |

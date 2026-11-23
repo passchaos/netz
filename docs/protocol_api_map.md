@@ -12,7 +12,7 @@ asymmetries.
 | QUIC | `quic.handshake.connect*` / `connectFrom*` | `quic.handshake.accept*`, `quic.runtime.Endpoint` | `one_rtt.Connection` streams and DATAGRAMs |
 | HTTP | `http.Client`, `http.Pool`, `http.Connection` | `http1.runtime.Server`, `http2.runtime.Server`, `http3.runtime.HandshakeServer` | `http.Connection.startRequest`, `http.Pool.startRequest`, `RequestHandle` |
 | WebSocket | `websocket.runtime` clients, `websocket.stream_connection` | runtime listeners/servers, caller-supplied byte streams | runtime message APIs, `stream_connection.Connection` |
-| WebTransport | `webtransport.runtime.Client` / `EndpointClient` | `webtransport.runtime.Server` / `EndpointServer` | `Session`, stream IDs, DATAGRAMs |
+| WebTransport | `webtransport.runtime.Client` / `EndpointClient` | `webtransport.runtime.Server` / `EndpointServer` | `Session`, stream IDs, DATAGRAMs, slice sends |
 | WebTransport over HTTP/2 | `webtransport.h2.runtime.connect*` / `h2.EndpointClient` | `webtransport.h2.runtime.accept*` / `h2.EndpointServer` | capsule virtual streams, DATAGRAMs, slice sends |
 
 `netz.http` is the unified HTTP facade. `netz.streaming.http1/http2/http3` are

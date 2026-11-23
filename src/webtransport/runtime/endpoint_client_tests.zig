@@ -296,10 +296,10 @@ test "WebTransport endpoint client multiplexes two authenticated Sessions" {
 
             const first_stream = try first.openBidirectionalStream(&client);
             const second_stream = try second.openBidirectionalStream(&client);
-            try first.sendStream(
+            try first.sendStreamSlices(
                 &client,
                 first_stream,
-                "stream-first",
+                &.{ "stream-", "first" },
                 true,
             );
             try second.sendStream(

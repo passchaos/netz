@@ -309,11 +309,12 @@ server address is already resolved (the address-based form shown in
 - Streams: `openBidirectionalStream`/`openUnidirectionalStream`,
   `sendStream`/`writeStream`, `receiveStream`, `resetStream`,
   `stopSending`, `finishStream`.
-- Slice sends: HTTP/3 sessions expose `sendStreamSlices`; HTTP/2 sessions and
-  endpoint facades expose `sendStreamSlicesWithTimeout/Deadline`. The H2
-  session writes the capsule header plus borrowed payload slices directly, so
-  keep the slices valid until the call (including bounded-write retries)
-  completes; the H2 endpoint facades stage one command buffer.
+- Slice sends: HTTP/3 sessions (including `webtransport.runtime` endpoint
+  sessions) expose `sendStreamSlices`; HTTP/2 sessions and endpoint facades
+  expose `sendStreamSlicesWithTimeout/Deadline`. The H2 session writes the
+  capsule header plus borrowed payload slices directly, so keep the slices
+  valid until the call (including bounded-write retries) completes; the H2
+  endpoint facades stage one command buffer.
 - DATAGRAMs: `sendDatagram(s)`, `receiveDatagram(s)Into` with deadlines.
 - Session termination: a peer CLOSE is reported as a session event; close
   metadata remains valid until deinit. See
