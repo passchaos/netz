@@ -2603,3 +2603,30 @@ real connection.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | Full WebTransport suite (Debug) | 761/763 (2 skipped) | live `zig build test-webtransport --summary all` |
+
+
+## Hundred-and-thirty-third pass: HTTP/1 pipeline performance baseline
+
+ReleaseFast builds succeeded after the host swap recovered. Same-application
+loopback numbers from `bench-http1-pipeline` (pipeline depth 16, 13-byte body,
+50 warmup + 500 iterations):
+
+| Strategy | ns/request | requests/s |
+| --- | --- | --- |
+| auto | 6,314 | 158,366 |
+| auto (repeat) | 6,622 | 151,002 |
+| vectored | 6,563 | 152,347 |
+| flatten | 6,695 | 149,352 |
+
+64 KiB body, 20 warmup + 200 iterations:
+
+| Strategy | ns/request | requests/s |
+| --- | --- | --- |
+| auto | 175,148 / 185,856 | 5,709 / 5,380 |
+| vectored | 153,467 | 6,516 |
+
+Run-to-run variance is roughly 5-10% on this shared host. `auto` selects
+`.vectored` for response batches above the 16-KiB borrow threshold, so the
+large-body auto and vectored runs execute the same path; the spread is host
+noise. No write-path regression or obvious optimization target was found, so
+no code change is warranted from this baseline.
