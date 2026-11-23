@@ -2350,3 +2350,17 @@ protocol selection, and server-side identity rotation and peer chains.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | Custom CA example | `custom CA http1 200: hello from a custom CA` | live `zig build run-http-custom-ca` |
+
+
+## Hundred-and-sixteenth pass: `curl --compressed` recipe
+
+`examples/http/content_coding.zig` serves a gzip body and decodes it on the
+client with `OwnedResponse.decodeContentAlloc`, after advertising the shared
+`content_coding.accept_encoding` offer. The server compresses with Zig's flate
+gzip container; the client reports the encoded and decoded sizes and verifies
+the round trip. `docs/usage.md` now points at the example and the
+`decodeContentInto` caller-buffer counterpart.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Content coding example | `content coding http1 200: 86 -> 528 bytes, codings=1, match=true` | live `zig build run-http-content-coding` |

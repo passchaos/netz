@@ -111,6 +111,12 @@ pub const specs = [_]Spec{
         .description = "Trust a private CA through an in-memory system store",
     },
     .{
+        .exe_name = "netz-http-content-coding",
+        .path = "examples/http/content_coding.zig",
+        .run_step = "run-http-content-coding",
+        .description = "Request and decode a gzip response like curl --compressed",
+    },
+    .{
         .exe_name = "netz-http-h3-prefer",
         .path = "examples/http/h3_prefer.zig",
         .run_step = "run-http-h3-prefer",

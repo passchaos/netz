@@ -95,6 +95,10 @@ std.debug.print("{t} {d}: {s}\n", .{
   `.tls.system_store` trusts a private CA for H1/H2 and H3, and
   `.tls.client_identity` adds mTLS. See `run-http-https-client`,
   `run-http-custom-ca` and `run-http-mutual-tls`.
+- Content coding: send `netz.http.content_coding.accept_encoding`, then call
+  `response.decodeContentAlloc(allocator, max_output)` or
+  `decodeContentInto(out, scratch)` to decode gzip/deflate/br/zstd bodies. See
+  `zig build run-http-content-coding`.
 - Errors: `error.Timeout` for expired or non-positive budgets, protocol errors
   for malformed peers, `error.ConnectionClosed` after a terminal close.
 
