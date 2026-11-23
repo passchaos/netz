@@ -133,8 +133,9 @@ There is no built-in user/password HTTP authentication: applications validate
 `Authorization` themselves.
 
 Examples: `run-http-https-client` (pinned key), `run-http-custom-ca` (private
-CA through a system store), `run-http-mutual-tls`, `run-http-proxy-client`
-(proxy credentials), `run-http-cookie-session`, `run-http-alpn-server`.
+CA through a system store), `run-http-mutual-tls`, `run-http-client-auth`
+(Bearer/Basic and a 401 challenge), `run-http-proxy-client` (proxy
+credentials), `run-http-cookie-session`, `run-http-alpn-server`.
 
 ## Wire-version feature map
 
