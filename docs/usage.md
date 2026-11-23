@@ -434,7 +434,10 @@ it on the client, so the raw handshake path demonstrates authenticated peers
 without external fixtures.
 
 - 0-RTT: `quic.zero_rtt` plus the handshake early-data options; see the
-  zero-RTT tests and [quicz_parity.md](quicz_parity.md).
+  zero-RTT tests and [quicz_parity.md](quicz_parity.md). Accepted, rejected and
+  not-offered outcomes are readable through `earlyDataStatus()` on HTTP/3
+  handshake clients/servers and on the H3 HTTP, WebSocket and WebTransport
+  facades.
 - TLS trust: the low-level `quic.handshake.ClientOptions` leaves certificate
   verification disabled when `server_auth`, `system_store`, `system_environ`
   and a non-default `root_source` are all unset. URI-level facades (unified
