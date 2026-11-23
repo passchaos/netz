@@ -207,6 +207,12 @@ pub const specs = [_]Spec{
         .description = "Run the WSS echo example with a pinned server key",
     },
     .{
+        .exe_name = "netz-websocket-h2-echo",
+        .path = "examples/websocket/websocket_h2_echo.zig",
+        .run_step = "run-websocket-h2-echo",
+        .description = "Run the RFC 8441 WebSocket-over-HTTP/2 echo example",
+    },
+    .{
         .exe_name = "netz-webtransport-datagram-echo",
         .path = "examples/webtransport/datagram_echo.zig",
         .run_step = "run-webtransport-datagram-echo",

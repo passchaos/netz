@@ -2549,3 +2549,16 @@ credential checks and redirect stripping).
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | Full WebSocket suite (Debug) | 522/523 (1 skipped) | live `zig build test-websocket --summary all` |
+
+
+## Hundred-and-twenty-ninth pass: RFC 8441 WebSocket-over-HTTP/2 example
+
+The WebSocket example set covered cleartext H1 and WSS but not RFC 8441.
+`examples/websocket/websocket_h2_echo.zig` reuses one h2c connection for an
+extended CONNECT with `:protocol = websocket`, negotiates the `echo.v1`
+subprotocol and echoes one message. The same shape works over TLS by swapping
+in `http2.runtime.TlsServer`/`TlsClient`.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| RFC 8441 example | `RFC 8441 server received: hello over RFC 8441` and the matching client line | live `zig build run-websocket-h2-echo` |

@@ -299,8 +299,9 @@ try client.sendClose(.normal_closure, "bye");
   before `accept()`. Redirects strip cross-origin `extra_headers` and client
   identities by default.
 
-Runnable: `zig build run-websocket-echo` (cleartext) and
-`zig build run-websocket-wss-echo` (WSS with a pinned server key).
+Runnable: `zig build run-websocket-echo` (cleartext),
+`zig build run-websocket-wss-echo` (WSS with a pinned server key), and
+`zig build run-websocket-h2-echo` (RFC 8441 over cleartext HTTP/2).
 
 ## 7. WebTransport
 
