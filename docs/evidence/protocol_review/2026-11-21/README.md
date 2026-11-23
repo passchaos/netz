@@ -3281,3 +3281,19 @@ accessor.
 | --- | --- | --- |
 | HTTP aggregate (Debug) | 310/310 | live `zig build test-http --summary all` |
 | Package surface (Debug) | 28/28 | live `zig build test-package --summary all` |
+
+## Hundred-and-seventy-ninth pass: WebTransport pending-admission TLS metadata
+
+Handshake-backed WebTransport admission surfaces now expose the authenticated
+connection metadata before acceptance: `PendingHandshakeSession` and
+`EndpointPendingSession` add `peerCertificates`, `negotiatedAlpn`,
+`negotiatedCipherSuite`, `negotiatedTranscriptHash`, `negotiatedTlsProtocol`,
+`wasTlsSessionResumed` and `earlyDataStatus`. Policy can therefore bind a
+client certificate or transcript to the admission decision before the session
+becomes visible. The pending-session deadline test asserts the metadata on a
+live TLS 1.3 CONNECT.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| WebTransport suite (Debug) | 761/763 (2 skipped) | live `zig build test-webtransport --summary all` |
+| Package surface (Debug) | 28/28 | live `zig build test-package --summary all` |

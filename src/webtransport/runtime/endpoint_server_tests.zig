@@ -941,6 +941,19 @@ test "WebTransport URI deadline includes Extended CONNECT response" {
         fn runFallible(self: *@This()) !void {
             var pending = try self.server.receiveSessionRequest();
             defer pending.deinit();
+            try std.testing.expectEqualStrings("h3", pending.negotiatedAlpn());
+            // The client authenticates the server but presents no certificate.
+            try std.testing.expect(pending.peerCertificates() == null);
+            try std.testing.expectEqual(
+                @TypeOf(pending.negotiatedTranscriptHash()).sha256,
+                pending.negotiatedTranscriptHash(),
+            );
+            try std.testing.expectEqual(
+                tls_stream.Protocol.tls13,
+                pending.negotiatedTlsProtocol().?,
+            );
+            try std.testing.expectEqual(false, pending.wasTlsSessionResumed().?);
+            try std.testing.expectEqual(.not_offered, pending.earlyDataStatus());
             // Receiving the CONNECT request proves QUIC/TLS completed before
             // the caller's deadline. Keep the response pending until after
             // that exact timestamp so this test cannot accidentally measure

@@ -9,6 +9,8 @@ const deadline_policy = @import("../../../internal/deadline.zig");
 const development_stream = @import("../development_stream.zig");
 const early_streams = @import("../association/early_streams.zig");
 const http3 = @import("../../../http3/mod.zig");
+const quic = @import("../../../quic/mod.zig");
+const tls_stream = @import("../../../tls/mod.zig").stream;
 const session_control = @import("../session_control.zig");
 const webtransport = @import("../../mod.zig");
 
@@ -1207,6 +1209,51 @@ pub const PendingHandshakeSession = struct {
 
     pub fn offeredApplicationProtocols(self: PendingHandshakeSession) ?application_protocol.Offered {
         return application_protocol.offered(self.request.request.headers);
+    }
+
+    /// Authenticated TLS metadata for the connection carrying this pending
+    /// CONNECT. Available before acceptance so admission policy can bind to
+    /// the client certificate, ALPN and transcript.
+    pub fn peerCertificates(
+        self: *const PendingHandshakeSession,
+    ) ?[]const []const u8 {
+        return self.h3.peerCertificates();
+    }
+
+    pub fn negotiatedAlpn(self: PendingHandshakeSession) []const u8 {
+        return self.h3.negotiatedAlpn();
+    }
+
+    pub fn negotiatedCipherSuite(
+        self: PendingHandshakeSession,
+    ) quic.tls.cipher_suite.Suite {
+        return self.h3.negotiatedCipherSuite();
+    }
+
+    pub fn negotiatedTranscriptHash(
+        self: PendingHandshakeSession,
+    ) quic.tls.secret.Hash {
+        return self.h3.negotiatedTranscriptHash();
+    }
+
+    /// QUIC mandates TLS 1.3; the optional shape matches the other transports.
+    pub fn negotiatedTlsProtocol(
+        self: PendingHandshakeSession,
+    ) ?tls_stream.Protocol {
+        _ = self;
+        return .tls13;
+    }
+
+    pub fn wasTlsSessionResumed(
+        self: PendingHandshakeSession,
+    ) ?bool {
+        return self.h3.established.resumed;
+    }
+
+    pub fn earlyDataStatus(
+        self: PendingHandshakeSession,
+    ) @TypeOf(self.h3.established.early_data_status) {
+        return self.h3.established.early_data_status;
     }
 
     pub fn deinit(self: *PendingHandshakeSession) void {

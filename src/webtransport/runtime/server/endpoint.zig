@@ -73,6 +73,51 @@ pub const EndpointPendingSession = struct {
         return application_protocol.offered(self.request.request.headers);
     }
 
+    /// Authenticated TLS metadata for the connection carrying this pending
+    /// CONNECT. Available before acceptance so admission policy can bind to
+    /// the client certificate, ALPN and transcript.
+    pub fn peerCertificates(
+        self: *const EndpointPendingSession,
+    ) ?[]const []const u8 {
+        return self.h3.peerCertificates();
+    }
+
+    pub fn negotiatedAlpn(self: EndpointPendingSession) []const u8 {
+        return self.h3.negotiatedAlpn();
+    }
+
+    pub fn negotiatedCipherSuite(
+        self: EndpointPendingSession,
+    ) quic.tls.cipher_suite.Suite {
+        return self.h3.negotiatedCipherSuite();
+    }
+
+    pub fn negotiatedTranscriptHash(
+        self: EndpointPendingSession,
+    ) quic.tls.secret.Hash {
+        return self.h3.negotiatedTranscriptHash();
+    }
+
+    /// QUIC mandates TLS 1.3; the optional shape matches the other transports.
+    pub fn negotiatedTlsProtocol(
+        self: EndpointPendingSession,
+    ) ?tls_stream.Protocol {
+        _ = self;
+        return .tls13;
+    }
+
+    pub fn wasTlsSessionResumed(
+        self: EndpointPendingSession,
+    ) ?bool {
+        return self.h3.established.resumed;
+    }
+
+    pub fn earlyDataStatus(
+        self: EndpointPendingSession,
+    ) @TypeOf(self.h3.established.early_data_status) {
+        return self.h3.established.early_data_status;
+    }
+
     pub fn authority(self: EndpointPendingSession) ?[]const u8 {
         return self.request.request.authority;
     }
