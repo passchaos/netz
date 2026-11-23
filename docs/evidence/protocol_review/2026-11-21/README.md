@@ -2990,3 +2990,17 @@ fail, and the usage guide now states that such clients must offer
 The HTTP/1 scope count grew from 478 to 479, confirming the new test is part
 of the full per-protocol gate (the `test-http` scope composes a different
 subset).
+
+
+## Hundred-and-fifty-eighth pass: WebTransport HTTP/2 Origin allowlist coverage
+
+The H2 capsule runtime already enforced `ServerOptions.origin`
+(`same_origin_or_absent` by default, `exact` allowlists, `allow_any`), but only
+the policy unit tests covered it. The invalid-CONNECT runtime test now sends a
+denied Origin, asserts the server returns `error.InvalidOrigin` with a 403
+rejection, and then completes the healthy sibling session.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full WebTransport suite (Debug) | 761/763 (2 skipped) | live `zig build test-webtransport --summary all` |
+| Invalid CONNECT/Init filter | 125/125 | live `zig build test-webtransport -Dtest-filter='invalid CONNECT and Init reject only their streams' --summary all` |

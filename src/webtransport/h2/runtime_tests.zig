@@ -227,6 +227,14 @@ test "WebTransport HTTP2 invalid CONNECT and Init reject only their streams" {
             var malformed = try wt.runtime.readRequestWithTimeout(&connection, .fromSeconds(3));
             defer malformed.deinit(allocator);
             try std.testing.expectError(error.InvalidWebTransportInit, wt.runtime.acceptWithTimeout(allocator, &connection, malformed, .{}, .fromSeconds(3)));
+            var denied = try wt.runtime.readRequestWithTimeout(&connection, .fromSeconds(3));
+            defer denied.deinit(allocator);
+            try std.testing.expectError(
+                error.InvalidOrigin,
+                wt.runtime.acceptWithTimeout(allocator, &connection, denied, .{
+                    .origin = .{ .exact = &.{"https://allowed.test"} },
+                }, .fromSeconds(3)),
+            );
             var pending = try wt.runtime.readRequestWithTimeout(&connection, .fromSeconds(3));
             defer pending.deinit(allocator);
             var session = try wt.runtime.acceptWithTimeout(allocator, &connection, pending, .{ .headers = &.{.{ .name = "x-sibling", .value = "healthy" }} }, .fromSeconds(3));
@@ -275,6 +283,14 @@ test "WebTransport HTTP2 invalid CONNECT and Init reject only their streams" {
     defer invalid_init.deinit(allocator);
     try std.testing.expectEqual(@as(u16, 400), invalid_init.status);
     try std.testing.expect(!invalid_init.accepted());
+    var denied_origin = try wt.runtime.connectAttemptWithTimeout(allocator, &connection, .{
+        .path = "/origin",
+        .authority = "localhost",
+        .origin = "https://denied.test",
+    }, .fromSeconds(3));
+    defer denied_origin.deinit();
+    try std.testing.expect(!denied_origin.accepted());
+    try std.testing.expectEqual(@as(u16, 403), denied_origin.status());
     var accepted = try wt.runtime.connectAttemptWithTimeout(allocator, &connection, .{ .path = "/healthy", .authority = "localhost" }, .fromSeconds(3));
     var accepted_owned = true;
     defer if (accepted_owned) accepted.deinit();
