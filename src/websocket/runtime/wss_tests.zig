@@ -1088,3 +1088,78 @@ fn localCaBundle(
     );
     return .{ bundle, .init };
 }
+
+test "WSS vail TLS rejects a non-HTTP/1.1 negotiated ALPN" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const alpn_server = @import("../../tls/alpn_server.zig");
+    const tls_client_identity = @import("tls_client_identity.zig");
+
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+    const key_pair = try tls_testing.serverKeyPair();
+    const public_key = key_pair.public_key.toUncompressedSec1();
+    const certificate_chain = [_][]const u8{&certificate_der};
+
+    var server = try alpn_server.Server.listen(allocator, io, .{
+        .address = .{ .ip4 = .loopback(0) },
+        .tls = .{
+            .identity = .{
+                .certificate_chain = &certificate_chain,
+                .signer = .{ .ecdsa_p256_sha256 = .{
+                    .key_pair = key_pair,
+                } },
+            },
+            .alpn_protocols = &.{"h2"},
+        },
+    });
+    defer server.deinit();
+
+    const Acceptor = struct {
+        server: *alpn_server.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            const accepted = self.server.acceptWithTimeout(
+                .fromSeconds(5),
+            ) catch |err| {
+                self.err = err;
+                return;
+            };
+            accepted.tls.deinit();
+        }
+    };
+
+    var acceptor = Acceptor{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Acceptor.run, .{&acceptor});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const stream = try server.address().connect(io, .{ .mode = .stream });
+    try std.testing.expectError(
+        error.InvalidAlpn,
+        tls_client_identity.init(
+            allocator,
+            io,
+            stream,
+            "localhost",
+            .{},
+            .{
+                .server_verifier = .{
+                    .pinned_ecdsa_p256_public_key = public_key,
+                },
+                .alpn_protocols = &.{"h2"},
+            },
+        ),
+    );
+
+    thread.join();
+    joined = true;
+    if (acceptor.err) |err| return err;
+}

@@ -510,8 +510,9 @@ pub const TlsListenOptions = struct {
     /// deadline starts independently after TLS succeeds.
     tls_handshake_timeout: ?std.Io.Duration = null,
     client_auth: ?vail.tls.client_auth.ServerPolicy = null,
-    /// Optional ALPN selection for WSS. Configured servers require one of
-    /// these protocols, matching the vail-backed client policy.
+    /// Optional ALPN selection for WSS. WSS runs an HTTP/1.1 Upgrade, so a
+    /// configured list may only contain `http/1.1`; an empty list keeps legacy
+    /// no-ALPN clients working.
     alpn_protocols: []const []const u8 = &.{},
     tcp_nodelay: bool = true,
 };

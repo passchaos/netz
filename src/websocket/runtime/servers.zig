@@ -612,6 +612,8 @@ pub const TlsServer = struct {
     fn validatedTlsOptions(
         options: TlsListenOptions,
     ) Error!tls_stream.ServerOptions {
+        // WSS runs an HTTP/1.1 Upgrade, so only `http/1.1` may be selected.
+        try http1_runtime.validateHttp1AlpnProtocols(options.alpn_protocols);
         const tls_options = tls_stream.ServerOptions{
             .identity = options.identity,
             .identity_provider = options.identity_provider,

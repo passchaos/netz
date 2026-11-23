@@ -30,7 +30,9 @@ pub const Options = struct {
     /// Emit status_request. Must remain enabled for `.require` and defaults on
     /// so RFC 7633 Must-Staple certificates work without another option.
     request_ocsp: bool = true,
-    /// Optional ALPN offer list for protocols layered over WebSocket.
+    /// Optional ALPN offer list. WSS is an HTTP/1.1 Upgrade, so a configured
+    /// list may only contain `http/1.1`; a negotiated result other than
+    /// `http/1.1` (or none, for legacy origins) fails the connect.
     alpn_protocols: []const []const u8 = &.{},
     cipher_suites: []const vail.tls.cipher_suite.Suite =
         &vail.tls.cipher_suite.default_preference,
@@ -99,8 +101,8 @@ fn initBefore(
         tls_options,
         identity_options,
     );
-    return if (deadline) |absolute|
-        tls_stream.ClientConnection.initVerifiedWithDeadline(
+    const connection = if (deadline) |absolute|
+        try tls_stream.ClientConnection.initVerifiedWithDeadline(
             allocator,
             io,
             stream,
@@ -108,12 +110,19 @@ fn initBefore(
             absolute,
         )
     else
-        tls_stream.ClientConnection.initVerified(
+        try tls_stream.ClientConnection.initVerified(
             allocator,
             io,
             stream,
             options,
         );
+    errdefer connection.deinit();
+    // WSS is an HTTP/1.1 Upgrade, so another negotiated protocol cannot carry
+    // the handshake. A missing ALPN stays accepted for legacy origins.
+    if (connection.negotiatedAlpn()) |alpn| {
+        if (!std.mem.eql(u8, alpn, "http/1.1")) return error.InvalidAlpn;
+    }
+    return connection;
 }
 
 fn verifiedOptions(

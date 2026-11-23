@@ -2313,3 +2313,26 @@ production deployments use distinct identities.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | Mutual TLS example | `mTLS http1 200: hello from mutual TLS (peer certs=1)` | live `zig build run-http-mutual-tls` |
+
+
+## Hundred-and-fourteenth pass: ALPN protocol-confusion hardening
+
+The one-port ALPN adoption exposed a general pattern: an HTTP/1.1 or WSS
+runtime can only speak its own protocol, but three entry points accepted a
+negotiated result they could not serve.
+
+- `http1.runtime.TlsServer.listen` now validates the ALPN offer list through
+  `validateHttp1AlpnProtocols` and rejects anything other than `http/1.1` with
+  `error.InvalidAlpn` before binding.
+- `websocket.runtime.TlsServer.listen` and `initWithListener` apply the same
+  rule, since WSS is an HTTP/1.1 Upgrade.
+- `websocket.runtime.tls_client_identity` now rejects a negotiated ALPN other
+  than `http/1.1` (null remains accepted for legacy origins), matching the H1
+  client.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full HTTP suite (Debug) | 310/310 | live `zig build test-http --summary all` |
+| Full WebSocket suite (Debug) | 521/522 (1 skipped) | live `zig build test-websocket --summary all` |
+| MQTT WebSocket-filtered suite | 595/596 (1 skipped) | live `zig build test-mqtt -Dtest-filter='websocket'` |
+| ALPN-filtered HTTP suite | 104/104 | live `zig build test-http -Dtest-filter='ALPN' --summary all` |

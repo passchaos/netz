@@ -696,6 +696,16 @@ pub const Server = transports.Server;
 pub const UnixServer = transports.UnixServer;
 pub const TlsServer = transports.TlsServer;
 
+/// Validate an HTTP/1.1 TLS listener's ALPN offer list. HTTP/1.1 is the only
+/// application protocol this runtime can speak, so a configured list may only
+/// contain `http/1.1`; anything else could negotiate a connection the parser
+/// cannot use. An empty list keeps legacy no-ALPN HTTPS support.
+pub fn validateHttp1AlpnProtocols(protocols: []const []const u8) Error!void {
+    for (protocols) |protocol| {
+        if (!std.mem.eql(u8, protocol, "http/1.1")) return error.InvalidAlpn;
+    }
+}
+
 /// Adopt a TLS server connection whose handshake, including ALPN, was already
 /// negotiated by `netz.tls.alpn_server` or a raw `tls_stream.ServerConnection`.
 ///
@@ -854,8 +864,9 @@ pub const TlsListenOptions = struct {
     /// and body deadlines. Null preserves unbounded handshake behavior.
     tls_handshake_timeout: ?std.Io.Duration = null,
     client_auth: ?vail.tls.client_auth.ServerPolicy = null,
-    /// Optional ALPN selection. HTTP/1 accepts empty negotiation for legacy
-    /// HTTPS, while configured servers require a shared protocol.
+    /// Optional ALPN selection. Only `http/1.1` is accepted in the list;
+    /// anything else returns `error.InvalidAlpn` at listen time. An empty list
+    /// keeps legacy no-ALPN HTTPS working.
     alpn_protocols: []const []const u8 = &.{},
     tcp_nodelay: bool = true,
 };

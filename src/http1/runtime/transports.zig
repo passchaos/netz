@@ -28,6 +28,7 @@ const setTcpNoDelay = runtime.setTcpNoDelay;
 const shutdownAfterTlsCloseNotify = runtime.shutdownAfterTlsCloseNotify;
 const tls = runtime.tls;
 const tls_stream = runtime.tls_stream;
+const validateHttp1AlpnProtocols = runtime.validateHttp1AlpnProtocols;
 const writeAllToStream = runtime.writeAllToStream;
 
 pub const TlsClientConnection = struct {
@@ -928,6 +929,7 @@ pub const TlsServer = struct {
         bind_address: net.IpAddress,
         options: TlsListenOptions,
     ) Error!TlsServer {
+        try validateHttp1AlpnProtocols(options.alpn_protocols);
         if (options.identity_provider) |provider| {
             var lease = provider.acquire();
             defer lease.deinit();

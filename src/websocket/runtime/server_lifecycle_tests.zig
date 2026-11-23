@@ -259,3 +259,38 @@ test "WebSocket serveUntil can stop on a handler error" {
     joined = true;
     try std.testing.expectEqual(error.ProtocolFailure, shared.err.?);
 }
+
+const tls_testing = @import("../../tls/testing.zig");
+
+test "WebSocket TLS listener rejects non-HTTP/1.1 ALPN offers" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+    const key_pair = try tls_testing.serverKeyPair();
+    const certificate_chain = [_][]const u8{&certificate_der};
+
+    try std.testing.expectError(
+        error.InvalidAlpn,
+        runtime.TlsServer.listen(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(0) },
+            .{
+                .identity = .{
+                    .certificate_chain = &certificate_chain,
+                    .signer = .{ .ecdsa_p256_sha256 = .{
+                        .key_pair = key_pair,
+                    } },
+                },
+                .alpn_protocols = &.{"h2"},
+            },
+        ),
+    );
+}
