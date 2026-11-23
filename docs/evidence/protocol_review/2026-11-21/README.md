@@ -2842,3 +2842,17 @@ snippet.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | Documentation audit | behavior matched to the `root_source`/`server_auth` verifier branches | code inspection of `quic.handshake.connectAttempt` |
+
+
+## Hundred-and-forty-seventh pass: trust documentation precision
+
+The HTTP overview claimed "every TLS route verifies the peer certificate by
+default", which overstates the low-level QUIC/H3 helpers. It now scopes the
+claim to the unified client, pool and Alt-Svc routes and points at the API map
+for the explicit-configuration helpers. The `verify_host = false` row now
+notes that it applies to TCP TLS only; H3 routes keep the configured
+verifier's hostname policy (`ClientTlsTrust` has no verify-host field).
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Documentation audit | claims matched to `ClientTlsTrust` fields and `quic.handshake.connectAttempt` branches | code inspection |

@@ -86,8 +86,10 @@ first 425 can trigger the supported one-time 1-RTT replay.
 
 ## Authentication and trust
 
-Server authentication is on by default: every TLS route verifies the peer
-certificate unless an explicit policy replaces the default trust set.
+The unified HTTP client, pool and Alt-Svc H3 routes verify the server
+certificate by default; an explicit policy replaces the default trust set.
+Low-level QUIC/H3 handshake helpers keep the explicit-configuration contract
+described in [the protocol API map](protocol_api_map.md).
 
 | Need | Client configuration | Boundary |
 | --- | --- | --- |
@@ -95,7 +97,7 @@ certificate unless an explicit policy replaces the default trust set.
 | Private CA file (TCP TLS) | `.tls.ca_bundle = .{ .bundle = &bundle, .lock = &lock }` | H1/H2 only; QUIC has no CA-bundle equivalent. |
 | Private CA for TCP and H3 | `.tls.system_store = &store` from `netz.tls.trust.SystemStore.initWithPaths` or `initEmpty` + `addCompatibleCertificate` | Inherited by the direct H3 route and the pool's Alt-Svc backend. |
 | Pin one key | `.tls.server_verifier = .{ .pinned_ecdsa_p256_public_key = key }` | Replaces the CA path; use it when the peer key is known out of band. |
-| Skip hostname match | `.tls.verify_host = false` | CA path, validity, EKU and revocation checks still run; intended for tunnels. |
+| Skip hostname match | `.tls.verify_host = false` | TCP TLS only; CA path, validity, EKU and revocation checks still run. H3 routes keep the configured verifier's own hostname policy. Intended for tunnels. |
 | Client certificate (mTLS) | `.tls.client_identity = .{ .certificate_chain = ..., .signer = ... }` | H1/H2/H3 and WebTransport share the same shape. |
 
 The direct H3 route and the Alt-Svc pool backend copy `.tls.server_verifier`,
