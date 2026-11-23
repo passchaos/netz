@@ -217,6 +217,12 @@ pushed to a measured limit.
   absolute-deadline, and nonblocking consumption with deep-owned results.
 - Cancellation is checked before state preparation and again at the commit
   point; an abandoned command cannot mutate state after its caller left.
+- Scatter/gather sends borrow caller slices until the operation completes.
+  HTTP/3 packetizes them directly; the WebTransport HTTP/2 session writes the
+  capsule header plus borrowed slices; HTTP/2 endpoint command queues stage
+  one owned buffer because a timed-out job may outlive its caller. WebSocket
+  runtime and stream-adapter slice sends follow the same borrow-until-complete
+  rule; client-role adapter frames mask into the staging buffer.
 
 ## 7. Measurement doctrine
 
