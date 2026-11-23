@@ -2959,3 +2959,16 @@ and the usage guide now state the live-endpoint contract explicitly.
 The H2 capsule guide and the usage TLS bullet now mention
 `Session.applicationProtocol()` alongside the TLS metadata accessors, so the
 negotiated application protocol is discoverable from the same section.
+
+
+## Hundred-and-fifty-sixth pass: aggregate example compile gate
+
+`zig build examples -j2 --summary all` compiled every registered example
+executable against the current public API after the WebSocket/WebTransport
+parity series: 102/102 steps succeeded. This covers the new HTTP/1 ALPN,
+mutual-TLS, custom-CA, content-coding, timeout, RFC 8441 and RFC 9220
+examples together with the pre-existing set.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Aggregate example compile | 102/102 steps | live `zig build examples -j2 --summary all` |
