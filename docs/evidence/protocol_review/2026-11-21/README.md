@@ -2926,3 +2926,17 @@ trust-documentation and benchmark series:
 | Full HTTP/3 suite (Debug) | 928/932 (4 skipped) | live `zig build test-http3 --summary all` |
 | QUIC trust unit tests | 38/38 | live `zig build test-quic -Dtest-filter='trust' --summary all` |
 | Public package surface | 27/27 | live `zig build test-package --summary all` |
+
+
+## Hundred-and-fifty-third pass: per-protocol suite gate
+
+The narrower per-protocol suites were run in addition to the cumulative gate:
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| HTTP/1 scope | 478/478 | live `zig build test-http1 --summary all` |
+| HTTP/2 scope | 985/985 | live `zig build test-http2 --summary all` |
+| QUIC scope | 1113/1136 (23 skipped) | live `zig build test-quic --summary all` |
+
+The full QUIC suite includes real-UDP timing tests; all executed tests passed
+on this run, with 23 environment-gated skips.
