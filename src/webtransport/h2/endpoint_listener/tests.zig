@@ -411,6 +411,38 @@ fn exercise() !void {
         (try next(&b_session)).datagram,
     );
 
+    const a_stream = try a_session.openStream(.bidirectional);
+    try a_session.sendStreamSlicesWithTimeout(
+        a_stream,
+        &.{ "seed-", "a" },
+        false,
+        .fromSeconds(3),
+    );
+    var stream_event = try listener.receiveWithTimeout(
+        a_accepted.?.handle,
+        .fromSeconds(3),
+    );
+    defer stream_event.deinit();
+    if (stream_event.value != .stream) return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        a_stream,
+        stream_event.value.stream.id,
+    );
+    try std.testing.expectEqualStrings(
+        "seed-a",
+        stream_event.value.stream.data,
+    );
+    try listener.sendStreamSlicesWithTimeout(
+        a_accepted.?.handle,
+        a_stream,
+        &.{ "to-", "a" },
+        true,
+        .fromSeconds(3),
+    );
+    const stream_echo = try next(&a_session);
+    if (stream_echo != .stream) return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("to-a", stream_echo.stream.data);
+
     a_session.deinit();
     a_session_live = false;
     a_connection.close();
