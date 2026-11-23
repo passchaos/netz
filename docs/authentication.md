@@ -23,8 +23,9 @@ automatic CookieJar session composition. A runnable 401 challenge plus Bearer
 and Basic exchange lives in `examples/http/client_auth.zig`.
 
 WebSocket servers inspect `PendingUpgrade.header()`/`headers()` before sending
-101; extended CONNECT and WebTransport use their pending admission surfaces
-before 2xx. Applications can validate a token, credentials or session and
+101; `examples/websocket/websocket_auth.zig` shows a 401 challenge followed by
+a Bearer-authenticated Upgrade. Extended CONNECT and WebTransport use their
+pending admission surfaces before 2xx. Applications can validate a token, credentials or session and
 return a failure response. Native custom-header options are not interchangeable
 with browser WebSocket/WebTransport constructors; browser credential behavior
 must be handled at that integration boundary.

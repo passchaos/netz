@@ -68,6 +68,7 @@ zig build run-quic-handshake-echo
 zig build run-quic-datagram-echo
 zig build run-quic-close
 zig build run-websocket-echo
+zig build run-websocket-auth
 zig build run-websocket-wss-echo
 zig build run-websocket-h2-echo
 zig build run-websocket-h3-echo

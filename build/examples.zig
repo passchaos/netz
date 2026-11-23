@@ -213,6 +213,12 @@ pub const specs = [_]Spec{
         .description = "Run the WebSocket local echo example",
     },
     .{
+        .exe_name = "netz-websocket-auth",
+        .path = "examples/websocket/websocket_auth.zig",
+        .run_step = "run-websocket-auth",
+        .description = "Reject an unauthenticated Upgrade and accept a Bearer token",
+    },
+    .{
         .exe_name = "netz-websocket-wss-echo",
         .path = "examples/websocket/wss_echo.zig",
         .run_step = "run-websocket-wss-echo",

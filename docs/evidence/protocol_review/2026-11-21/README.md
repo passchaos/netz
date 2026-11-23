@@ -3379,3 +3379,15 @@ when they need the client peer.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | HTTP aggregate (Debug) | 310/310 | live `zig build test-http --summary all` |
+
+## Hundred-and-eighty-sixth pass: WebSocket opening-handshake auth example
+
+`examples/websocket/websocket_auth.zig` adds the missing admission recipe: the
+server inspects `PendingUpgrade.header("authorization")`, rejects with 401 plus
+`WWW-Authenticate`, then accepts a Bearer-authenticated Upgrade and echoes one
+message. The client uses `connectAttempt` to inspect the rejection and
+`extra_headers` for the accepted attempt. Registered as `run-websocket-auth`.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| WebSocket auth example (Debug) | 401 challenge, accepted echo, 9/9 steps | live `zig build run-websocket-auth --summary all` |
