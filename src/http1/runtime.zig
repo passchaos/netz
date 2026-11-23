@@ -459,6 +459,9 @@ pub const VailTlsClientOptions = struct {
     /// so RFC 7633 Must-Staple certificates work without another option.
     request_ocsp: bool = true,
     client_identity: ?vail.tls.client_auth.ClientIdentity = null,
+    /// ALPN offer list. A negotiated protocol other than `http/1.1` fails the
+    /// connect with `error.InvalidAlpn`; an empty list keeps legacy no-ALPN
+    /// HTTPS origins working.
     alpn_protocols: []const []const u8 = &.{},
     cipher_suites: []const tls_stream.CipherSuite =
         &vail.tls.cipher_suite.default_preference,
