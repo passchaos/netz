@@ -2268,3 +2268,32 @@ remains 761/763 (2 skipped).
 | H2 EndpointListener tests | 137/137 | live `zig build test-webtransport -Dtest-filter='EndpointListener'` |
 | H2 listener slice stream round-trip | client `seed-`+`a`, listener `to-`+`a` | live listener test |
 | Full WebTransport suite (Debug) | 761/763 (2 skipped) | live `zig build test-webtransport` |
+
+
+## Hundred-and-twelfth pass: one-port H2/H1 ALPN dispatch
+
+`netz.tls.alpn_server` already reported the negotiated protocol, and HTTP/2 had
+`adoptNegotiatedTlsServer`, but HTTP/1 had no way to adopt an
+already-negotiated TLS server connection. HTTP/1 now exports
+`http1.runtime.adoptNegotiatedTlsServer`: `http/1.1` and legacy no-ALPN peers
+are accepted, any other protocol fails closed with `error.InvalidAlpn`, and
+ownership of the `tls_stream.ServerConnection` transfers at entry (deinit on
+failure).
+
+The audit also found that the HTTP/1 vail client connect path
+(`Client.connectVailTlsHost*`) did not validate the server's ALPN selection, so
+a server that selected `h2` could be driven with HTTP/1.1 bytes. It now rejects
+any negotiated protocol other than `http/1.1`, matching
+`Client.adoptNegotiatedTls`; a missing ALPN remains accepted for legacy HTTPS.
+
+`examples/http/alpn_server.zig` serves one TLS port with
+`alpn_protocols = {"h2","http/1.1"}`, dispatches on
+`accepted.tls.negotiatedAlpn()`, and is exercised by `http2_only` and
+`http1_only` unified clients with the pinned test key.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full HTTP suite (Debug) | 310/310 | live `zig build test-http --summary all` |
+| ALPN-filtered HTTP suite | 103/103 | live `zig build test-http -Dtest-filter='ALPN' --summary all` |
+| H1 TLS-filtered suite | passed | live `zig build test-http -Dtest-filter='TLS'` |
+| One-port ALPN example | `ALPN http2 200: hello over HTTP/2 ALPN` and `ALPN http1 200: hello over HTTP/1.1 ALPN` | live `zig build run-http-alpn-server` |

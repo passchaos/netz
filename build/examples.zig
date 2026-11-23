@@ -93,6 +93,12 @@ pub const specs = [_]Spec{
         .description = "HTTP/2 over TLS with the unified client",
     },
     .{
+        .exe_name = "netz-http-alpn-server",
+        .path = "examples/http/alpn_server.zig",
+        .run_step = "run-http-alpn-server",
+        .description = "Serve HTTP/2 and HTTP/1.1 on one TLS port via ALPN",
+    },
+    .{
         .exe_name = "netz-http-h3-prefer",
         .path = "examples/http/h3_prefer.zig",
         .run_step = "run-http-h3-prefer",

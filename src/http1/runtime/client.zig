@@ -889,6 +889,11 @@ pub const Client = struct {
             );
         stream_owned = false;
         errdefer tls_connection.deinit();
+        // HTTP/1.1 cannot run over a connection that negotiated another
+        // protocol. A missing ALPN stays accepted for legacy HTTPS origins.
+        if (tls_connection.negotiatedAlpn()) |alpn| {
+            if (!std.mem.eql(u8, alpn, "http/1.1")) return error.InvalidAlpn;
+        }
         const owned_host = try std.fmt.allocPrint(
             allocator,
             "{s}:{d}",

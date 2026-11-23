@@ -167,3 +167,188 @@ test "HTTP/1 TLS server serves one request" {
 test "HTTP/1 TLS server serves a persistent connection" {
     try exerciseTlsServerApi(.serve_connection);
 }
+
+const alpn_server = @import("../../tls/alpn_server.zig");
+
+const AlpnTestServer = struct {
+    server: *alpn_server.Server,
+    expected_body: []const u8 = "alpn-http1",
+    err: ?anyerror = null,
+
+    fn run(self: *@This()) void {
+        self.runFallible() catch |err| {
+            self.err = err;
+        };
+    }
+
+    fn runFallible(self: *@This()) !void {
+        const accepted = try self.server.acceptWithTimeout(.fromSeconds(5));
+        var connection = try runtime.adoptNegotiatedTlsServer(
+            std.testing.allocator,
+            self.server.io,
+            accepted.stream,
+            accepted.tls,
+            .{},
+        );
+        defer connection.close();
+
+        var request = try connection.readRequest(.{});
+        defer request.deinit(std.testing.allocator);
+        try connection.writeResponse(.{
+            .headers = &.{.{ .name = "Content-Type", .value = "text/plain" }},
+            .body = self.expected_body,
+            .request_method = request.request.method,
+        });
+    }
+};
+
+fn listenAlpnTestServer(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    key_pair: anytype,
+    certificate_chain: []const []const u8,
+) !alpn_server.Server {
+    return alpn_server.Server.listen(allocator, io, .{
+        .address = .{ .ip4 = .loopback(0) },
+        .tls = .{
+            .identity = .{
+                .certificate_chain = certificate_chain,
+                .signer = .{ .ecdsa_p256_sha256 = .{ .key_pair = key_pair.* } },
+            },
+            .alpn_protocols = &.{ "h2", "http/1.1" },
+        },
+    });
+}
+
+test "HTTP/1 adopts an ALPN-negotiated TLS server connection" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+    const key_pair = try tls_testing.serverKeyPair();
+    const public_key = key_pair.public_key.toUncompressedSec1();
+    const certificate_chain = [_][]const u8{&certificate_der};
+
+    var server = try listenAlpnTestServer(
+        allocator,
+        io,
+        &key_pair,
+        &certificate_chain,
+    );
+    defer server.deinit();
+
+    var shared = AlpnTestServer{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, AlpnTestServer.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try runtime.Client.connectVailTlsHost(
+        allocator,
+        io,
+        "localhost",
+        server.address().ip4.port,
+        .{},
+        .{
+            .server_verifier = .{
+                .pinned_ecdsa_p256_public_key = public_key,
+            },
+            .alpn_protocols = &.{"http/1.1"},
+        },
+    );
+    defer client.close();
+
+    var response = try client.request(.{ .target = "/alpn" });
+    defer response.deinit(allocator);
+    try std.testing.expectEqualStrings("alpn-http1", response.response.body);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/1 ALPN adoption fails closed for a negotiated h2 connection" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+    const key_pair = try tls_testing.serverKeyPair();
+    const public_key = key_pair.public_key.toUncompressedSec1();
+    const certificate_chain = [_][]const u8{&certificate_der};
+
+    var server = try listenAlpnTestServer(
+        allocator,
+        io,
+        &key_pair,
+        &certificate_chain,
+    );
+    defer server.deinit();
+
+    const Reject = struct {
+        server: *alpn_server.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            const accepted = try self.server.acceptWithTimeout(.fromSeconds(5));
+            var connection = runtime.adoptNegotiatedTlsServer(
+                std.testing.allocator,
+                self.server.io,
+                accepted.stream,
+                accepted.tls,
+                .{},
+            ) catch |err| {
+                self.err = err;
+                return;
+            };
+            connection.close();
+            self.err = error.ExpectedInvalidAlpn;
+        }
+    };
+
+    var shared = Reject{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Reject.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    // The handshake itself succeeds; the client rejects the negotiated `h2`
+    // protocol for an HTTP/1 client, while the server adoption rejects it for
+    // an HTTP/1 server. Both sides fail closed without serving any request.
+    try std.testing.expectError(
+        error.InvalidAlpn,
+        runtime.Client.connectVailTlsHost(
+            allocator,
+            io,
+            "localhost",
+            server.address().ip4.port,
+            .{},
+            .{
+                .server_verifier = .{
+                    .pinned_ecdsa_p256_public_key = public_key,
+                },
+                .alpn_protocols = &.{"h2"},
+            },
+        ),
+    );
+
+    thread.join();
+    joined = true;
+    const observed = shared.err orelse return error.ExpectedInvalidAlpn;
+    try std.testing.expectEqual(error.InvalidAlpn, observed);
+}

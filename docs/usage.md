@@ -225,6 +225,13 @@ context-owned storage). See `zig build run-http-server-serve-until`.
 
 - HTTP/2 h2c: `zig build run-http2-h2c`.
 - HTTP/3 (real QUIC/TLS handshake): `zig build run-http3-handshake`.
+- One TLS port for H2 and H1: accept with `netz.tls.alpn_server.Server`,
+  read `accepted.tls.negotiatedAlpn()`, then transfer the connection to
+  `netz.http2.runtime.adoptNegotiatedTlsServer` or
+  `netz.http1.runtime.adoptNegotiatedTlsServer`. The H2 adopter requires `h2`;
+  the H1 adopter accepts `http/1.1` or a legacy client with no ALPN and fails
+  closed on any other protocol. Ownership transfers at entry. See
+  `zig build run-http-alpn-server`.
 - Incremental request and response bodies: `zig build run-http-streaming`.
 - Chunked uploads with trailers: `zig build run-http-chunked`.
 - Concurrent handlers and pull bodies: see [http_streaming.md](http_streaming.md).

@@ -696,6 +696,37 @@ pub const Server = transports.Server;
 pub const UnixServer = transports.UnixServer;
 pub const TlsServer = transports.TlsServer;
 
+/// Adopt a TLS server connection whose handshake, including ALPN, was already
+/// negotiated by `netz.tls.alpn_server` or a raw `tls_stream.ServerConnection`.
+///
+/// Peers that selected `http/1.1`, and legacy peers that sent no ALPN
+/// extension, are accepted; any other selected protocol fails closed with
+/// `error.InvalidAlpn`. Ownership of `tls_connection` transfers at entry: it is
+/// deinitialized (closing the socket) on failure and owned by the returned
+/// `Connection` on success.
+pub fn adoptNegotiatedTlsServer(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stream: net.Stream,
+    tls_connection: *tls_stream.ServerConnection,
+    limits: Limits,
+) Error!Connection {
+    var tls_owned = true;
+    errdefer if (tls_owned) tls_connection.deinit();
+    if (tls_connection.selected_alpn) |alpn| {
+        if (!std.mem.eql(u8, alpn, "http/1.1")) return error.InvalidAlpn;
+    }
+    if (limits.tcp_nodelay) try setTcpNoDelay(stream);
+    tls_owned = false;
+    return .{
+        .io = io,
+        .allocator = allocator,
+        .stream = stream,
+        .limits = limits,
+        .tls_server_conn = tls_connection,
+    };
+}
+
 /// Once an authenticated TLS close_notify has reached the transport, a peer
 /// that concurrently closes the socket can make shutdown(SHUT_WR) report
 /// ENOTCONN. The TLS write half is already terminal in that case, so preserve
