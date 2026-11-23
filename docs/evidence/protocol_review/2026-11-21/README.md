@@ -2505,3 +2505,18 @@ explicit trust.
 | --- | --- | --- |
 | ALPN-filtered HTTP suite | 105/105 | live `zig build test-http -Dtest-filter='ALPN' --summary all` |
 | ALPN-filtered WebSocket suite | 55/55 | live `zig build test-websocket -Dtest-filter='ALPN' --summary all` |
+
+
+## Hundred-and-twenty-sixth pass: cumulative protocol gate after the trust/API series
+
+After the ALPN adoption, trust-default, WebTransport metadata and example
+series, the scoped protocol suites were rerun together:
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full HTTP suite (Debug) | 310/310 | live `zig build test-http --summary all` |
+| Full WebSocket suite (Debug) | 521/522 (1 skipped) | live `zig build test-websocket --summary all` |
+| Full WebTransport suite (Debug) | 761/763 (2 skipped) | live `zig build test-webtransport --summary all` |
+| Full HTTP/3 suite (Debug) | 928/932 (4 skipped) | live `zig build test-http3 --summary all` |
+| QUIC trust unit tests | 38/38 | live `zig build test-quic -Dtest-filter='trust' --summary all` |
+| Public package surface | 27/27 | live `zig build test-package --summary all` |
