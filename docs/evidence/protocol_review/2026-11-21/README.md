@@ -2822,4 +2822,7 @@ Bounded fuzz corpus replays after the WebSocket API-parity series:
 | Parser corpus | 2/2 tests | live `zig build fuzz-parsers --summary all` |
 | State-sequence corpus | 2/2 tests | live `zig build fuzz-stateful --summary all` |
 | HTTP/1 connection corpus | 3/3 tests | live `zig build fuzz-http1-connection --summary all` |
+| HTTP/1 TLS connection corpus | 3/3 tests | live `zig build fuzz-http1-tls-connection --summary all` |
+| HTTP/2 connection corpus | 3/3 tests | live `zig build fuzz-http2-connection --summary all` |
+| HTTP/3 connection corpus | 3/3 tests | live `zig build fuzz-http3-connection --summary all` |
 | WebTransport endpoint corpus | 3/3 tests | live `zig build fuzz-webtransport-endpoint --summary all` |
