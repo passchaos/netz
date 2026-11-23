@@ -20,6 +20,30 @@ pub const Reset = struct { id: u62, code: u32, reliable_size: u62 };
 pub const StreamError = struct { id: u62, code: u32 };
 pub const StreamLimit = struct { id: u62, limit: u62 };
 
+/// Maximum encoded stream capsule prefix: type, payload length, and stream id
+/// varints (8 bytes each).
+pub const max_stream_header_len = 24;
+
+/// Encode the capsule envelope and stream id for a payload supplied as
+/// separate slices. The caller writes the payload slices after this header.
+pub fn writeStreamHeaderInto(
+    storage: *[max_stream_header_len]u8,
+    id: u62,
+    data_len: usize,
+    fin: bool,
+) Error![]const u8 {
+    const kind: u64 = if (fin) CapsuleType.stream_fin else CapsuleType.stream;
+    const id_len = try quic.varint.length(id);
+    const payload_len = std.math.add(usize, id_len, data_len) catch
+        return error.IntegerOverflow;
+    if (payload_len > quic.varint.max_value) return error.IntegerOverflow;
+    var offset: usize = 0;
+    try append(storage, &offset, kind);
+    try append(storage, &offset, payload_len);
+    try append(storage, &offset, id);
+    return storage[0..offset];
+}
+
 pub const Capsule = union(enum) {
     padding: []const u8,
     stream: Stream,

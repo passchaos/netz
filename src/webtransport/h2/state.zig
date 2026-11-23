@@ -153,13 +153,18 @@ pub const State = struct {
     }
 
     pub fn prepareStream(self: *State, id: u62, data: []const u8, fin: bool) Error!Capsule {
+        try self.prepareStreamLength(id, data.len, fin);
+        return .{ .stream = .{ .id = id, .data = data, .fin = fin } };
+    }
+
+    /// Length-only stream admission for payloads supplied as multiple slices.
+    pub fn prepareStreamLength(self: *State, id: u62, data_len: usize, fin: bool) Error!void {
         try self.ensureOpen();
         if (!self.canSend(id)) return error.StreamStateError;
         const stream = try self.get(id);
         if (stream.send_fin or stream.send_reset != null or stream.stop_received != null) return error.StreamStateError;
-        if (data.len == 0 and !fin and stream.send_started) return error.StreamStateError;
-        if (data.len > stream.send_limit -| stream.sent or data.len > self.send_limit.data -| self.sent_data) return error.FlowControlBlocked;
-        return .{ .stream = .{ .id = id, .data = data, .fin = fin } };
+        if (data_len == 0 and !fin and stream.send_started) return error.StreamStateError;
+        if (data_len > stream.send_limit -| stream.sent or data_len > self.send_limit.data -| self.sent_data) return error.FlowControlBlocked;
     }
     pub fn prepareReset(self: *State, id: u62, application_code: u32) Error!Capsule {
         try self.ensureOpen();

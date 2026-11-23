@@ -295,10 +295,11 @@ These are current limits, not permission to ignore them:
   production endpoint queue. Browsers ship WebTransport over HTTP/3 only, so
   the remaining work is external coverage breadth, not a browser-interop gap
   (`docs/webtransport_parity.md`).
-- **WebTransport over HTTP/2 write staging**: each capsule write stages one
-  owned contiguous buffer (control bytes or stream data), so arbitrary-slice
-  stream sends need a multi-buffer staging redesign. The HTTP/3 session already
-  exposes slice forms.
+- **WebTransport over HTTP/2 write staging**: the H2 session and endpoint
+  facades now expose `sendStreamSlices*`, but each call stages one owned
+  contiguous capsule buffer (control bytes or stream data). Zero-copy
+  multi-buffer staging remains future work; the HTTP/3 session already exposes
+  true slice forms.
 - **Retained trie index cost** is an approximation (`node + edge-map slot`);
   the budget is conservative but not an exact allocator accounting.
 - **Deep-filter fallback** in the retained store allocates its level array and

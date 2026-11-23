@@ -2138,3 +2138,21 @@ their contiguous APIs.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | Stream adapter tests | 26/26 | live `zig build test-websocket -Dtest-filter='stream adapter'` |
+
+
+## Hundred-and-fifth pass: WebTransport over HTTP/2 slice sends
+
+The HTTP/3 WebTransport session exposed `sendStreamSlices*`, but the HTTP/2
+session and its endpoint facades only accepted contiguous stream payloads.
+`Session` now has `sendStreamSlicesWithDeadline`/`WithTimeout`, backed by
+`State.prepareStreamLength` and `Capsule.writeStreamHeaderInto`;
+`EndpointClient` and `EndpointServer` forward the same shape through a staged
+buffer. Each H2 call still stages one contiguous capsule (the zero-copy
+multi-buffer redesign remains a documented performance gap), while H3 keeps
+true scatter/gather. The staging path takes ownership before resuming, so a
+bounded write interruption retains the exact capsule without a dangling
+buffer.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| H2 WebTransport tests | 205/205 | live `zig build test-webtransport -Dtest-filter='HTTP2'` |

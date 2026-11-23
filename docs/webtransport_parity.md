@@ -1968,7 +1968,10 @@ strict multi-line RFC 8941 WebTransport-Init negotiation, application protocol
 selection, Origin policy, complete non-2xx response attempts and server
 rejection entities, streams, reliable datagrams,
 reset/stop, credit, drain/close, exporter contexts, bounded event retention,
-and resumable deadline-owned output. Authenticated loopback regressions cover
+and resumable deadline-owned output. Session and endpoint facades expose
+`sendStreamSlicesWith{Timeout,Deadline}` with the same shape as the HTTP/3
+session; each H2 call stages one contiguous capsule buffer, while the H3
+session keeps true scatter/gather. Authenticated loopback regressions cover
 the complete exchange and prove malformed request streams do not poison a
 healthy sibling Session.
 

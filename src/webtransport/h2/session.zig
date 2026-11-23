@@ -204,6 +204,85 @@ pub const Session = struct {
         if (timeout.nanoseconds <= 0) return error.Timeout;
         return self.sendStreamWithDeadline(id, data, fin, .fromNow(self.connection().io, .{ .raw = timeout, .clock = .awake }));
     }
+
+    /// Send one stream capsule whose payload is supplied as multiple slices.
+    /// The capsule is staged into one owned buffer; borrowed slices only need
+    /// to remain valid for this call. The HTTP/3 session exposes a zero-copy
+    /// slice form.
+    pub fn sendStreamSlicesWithDeadline(
+        self: *Session,
+        id: u62,
+        slices: []const []const u8,
+        fin: bool,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!void {
+        if (self.pending != null) return error.PendingWrite;
+        var total: usize = 0;
+        for (slices) |slice| {
+            total = std.math.add(usize, total, slice.len) catch
+                return error.CapsuleTooLarge;
+        }
+        while (true) {
+            if (self.deferred_event != null) try self.queueDeferred();
+            self.state.prepareStreamLength(id, total, fin) catch |err| switch (err) {
+                error.FlowControlBlocked => {
+                    const event = try self.receiveTransportWithDeadline(deadline);
+                    if (event != .progress) {
+                        self.deferred_event = event;
+                        try self.queueDeferred();
+                    }
+                    continue;
+                },
+                else => return err,
+            };
+            var header_storage: [capsules.max_stream_header_len]u8 = undefined;
+            const header = try capsules.writeStreamHeaderInto(
+                &header_storage,
+                id,
+                total,
+                fin,
+            );
+            const length = std.math.add(
+                usize,
+                header.len,
+                total,
+            ) catch return error.CapsuleTooLarge;
+            if (length > self.reader.max_payload + 16) {
+                return error.CapsuleTooLarge;
+            }
+            const bytes = try self.allocator.alloc(u8, length);
+            var owned = true;
+            defer if (owned) self.allocator.free(bytes);
+            @memcpy(bytes[0..header.len], header);
+            var offset = header.len;
+            for (slices) |slice| {
+                @memcpy(bytes[offset..][0..slice.len], slice);
+                offset += slice.len;
+            }
+            self.pending = .{ .bytes = bytes, .fin = fin };
+            owned = false;
+            return self.resumeWriteWithDeadline(deadline);
+        }
+    }
+
+    pub fn sendStreamSlicesWithTimeout(
+        self: *Session,
+        id: u62,
+        slices: []const []const u8,
+        fin: bool,
+        timeout: std.Io.Duration,
+    ) Error!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendStreamSlicesWithDeadline(
+            id,
+            slices,
+            fin,
+            .fromNow(self.connection().io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
     pub fn sendDatagramWithDeadline(self: *Session, data: []const u8, deadline: std.Io.Clock.Timestamp) Error!void {
         return self.submit(.{ .datagram = data }, deadline);
     }
