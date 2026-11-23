@@ -2985,3 +2985,8 @@ fail, and the usage guide now states that such clients must offer
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | ALPN-filtered HTTP suite | 106/106 | live `zig build test-http -Dtest-filter='ALPN' --summary all` |
+| Full HTTP/1 scope | 479/479 | live `zig build test-http1 --summary all` |
+
+The HTTP/1 scope count grew from 478 to 479, confirming the new test is part
+of the full per-protocol gate (the `test-http` scope composes a different
+subset).
