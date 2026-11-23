@@ -1,6 +1,7 @@
 //! Connection-owning background client for multiplexed HTTP/2 WebTransport.
 const std = @import("std");
 const http2 = @import("../../http2/mod.zig");
+const tls_stream = @import("../../tls/mod.zig").stream;
 const h2_state = @import("state.zig");
 const session_mod = @import("session.zig");
 const runtime = @import("runtime.zig");
@@ -203,6 +204,21 @@ const State = struct {
 
 pub const EndpointClient = struct {
     state: *State,
+
+    /// Authenticated TLS metadata for the connection owning this endpoint.
+    /// These values are fixed at handshake completion; cleartext transports
+    /// return null.
+    pub fn peerCertificates(self: EndpointClient) ?[]const []const u8 {
+        return self.state.connection.peerCertificates();
+    }
+    pub fn negotiatedAlpn(self: EndpointClient) ?[]const u8 {
+        return self.state.connection.negotiatedAlpn();
+    }
+    pub fn negotiatedCipherSuite(
+        self: EndpointClient,
+    ) ?tls_stream.NegotiatedCipherSuite {
+        return self.state.connection.negotiatedCipherSuite();
+    }
 
     /// Takes ownership of an already negotiated HTTP/2 connection.
     pub fn init(allocator: std.mem.Allocator, connection_value: http2.runtime.Connection, options: Options) Error!EndpointClient {

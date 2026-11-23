@@ -2446,3 +2446,17 @@ handshake while remaining self-contained. Other QUIC examples use preconfigured
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | Authenticated QUIC handshake example | `QUIC handshake echo ok: hello over a real netz QUIC handshake` | live `zig build run-quic-handshake-echo` |
+
+
+## Hundred-and-twenty-second pass: WebTransport HTTP/2 endpoint-client metadata
+
+The HTTP/2 WebTransport `EndpointClient` still hid the handshake metadata that
+its `Session`, `EndpointServer` and HTTP/3 counterpart expose. It now forwards
+`peerCertificates()`, `negotiatedAlpn()` and `negotiatedCipherSuite()` from the
+owned HTTP/2 connection; the TLS endpoint test asserts the `h2` ALPN and the
+server chain. This completes the same-code mTLS inspection story across
+WebTransport variants and endpoint facades.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full WebTransport suite (Debug) | 761/763 (2 skipped) | live `zig build test-webtransport --summary all` |
