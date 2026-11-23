@@ -40,6 +40,7 @@ zig build run-http-upload-multipart
 zig build run-http-cookie-session
 zig build run-http-redirects
 zig build run-http-https-client
+zig build run-http-custom-resolver
 zig build run-http-proxy-client
 zig build run-http-h2-tls
 zig build run-http-h3-prefer

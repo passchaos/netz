@@ -184,6 +184,7 @@ Common client recipes, each a runnable local example:
 | Cookie persistence across pooled requests | `zig build run-http-cookie-session` |
 | Relative redirect chains (`curl -L`) | `zig build run-http-redirects` |
 | HTTPS with a pinned server key (`curl --cacert`) | `zig build run-http-https-client` |
+| Map a hostname to a local origin (`curl --resolve`) | `zig build run-http-custom-resolver` |
 | HTTPS through an HTTP CONNECT proxy (`curl -x`) | `zig build run-http-proxy-client` |
 | HTTP/2 over TLS (`curl --http2`) | `zig build run-http-h2-tls` |
 | `prefer_http3` selection (`curl --http3`) | `zig build run-http-h3-prefer` |

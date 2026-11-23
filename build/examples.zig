@@ -75,6 +75,12 @@ pub const specs = [_]Spec{
         .description = "HTTPS with an explicit pinned server verifier",
     },
     .{
+        .exe_name = "netz-http-custom-resolver",
+        .path = "examples/http/custom_resolver.zig",
+        .run_step = "run-http-custom-resolver",
+        .description = "Map a hostname to a local origin with a custom resolver",
+    },
+    .{
         .exe_name = "netz-http-proxy-client",
         .path = "examples/http/proxy_client.zig",
         .run_step = "run-http-proxy-client",

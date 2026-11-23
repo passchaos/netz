@@ -2175,13 +2175,16 @@ draft-15 HTTP/2 capsule path end to end: a virtual stream sent from slices is
 echoed by the server, then both sides drain and close the session.
 `run-webtransport-handshake-stream` now sends both client and server HTTP/3
 streams from slices, covering the handshake session slice API in both
-directions.
+directions. `run-http-custom-resolver` maps `api.example.test` to the local
+TLS listener with a custom `AddressResolver`, mirroring `curl --resolve` while
+keeping the hostname as the request authority and TLS SNI.
 
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | WebSocket slice echo | `hello websocket` / `echo from netz websocket` | live `zig build run-websocket-echo` |
 | HTTP/2 WebTransport capsule echo | `WebTransport H2 echo: echo: hello h2` | live `zig build run-webtransport-h2-capsule-echo` |
 | HTTP/3 WebTransport slice streams | `WebTransport handshake streams ok: bidi=4, uni=14, server_uni=15` | live `zig build run-webtransport-handshake-stream` |
+| Custom resolver (`--resolve`) | `custom resolver http1 200: hello from api.example.test` | live `zig build run-http-custom-resolver` |
 
 
 ## Hundred-and-seventh pass: H3 endpoint session slice sends
