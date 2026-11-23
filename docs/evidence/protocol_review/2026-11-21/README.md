@@ -3181,3 +3181,16 @@ rejection and a binary send through the new entry point.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | Full WebSocket suite (Debug) | 526/527 (1 skipped) | live `zig build test-websocket --summary all` |
+
+
+## Hundred-and-seventy-second pass: stream-adapter outgoing opcode error alignment
+
+The stream adapter's outgoing slice path returned `error.InvalidOpcode` for a
+control opcode while every runtime connection returns `error.InvalidFrame`
+for the same outgoing-message mistake. The slice path now matches the runtime
+convention (incoming frame parsing keeps `InvalidOpcode`), and the slice test
+expectation is updated.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full WebSocket suite (Debug) | 526/527 (1 skipped) | live `zig build test-websocket --summary all` |

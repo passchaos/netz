@@ -608,7 +608,7 @@ test "WebSocket stream adapter sends unmasked frames from slices" {
     try std.testing.expectEqual(websocket.Opcode.binary, frame.header.opcode);
     try std.testing.expectEqualStrings("abcde", frame.payload);
     try std.testing.expectError(
-        error.InvalidOpcode,
+        error.InvalidFrame,
         connection.sendFrameSlices(.ping, &.{"x"}),
     );
 }

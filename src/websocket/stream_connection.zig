@@ -734,7 +734,7 @@ pub const Connection = struct {
         deadline: ?std.Io.Clock.Timestamp,
     ) !void {
         if (opcode != .text and opcode != .binary) {
-            return error.InvalidOpcode;
+            return error.InvalidFrame;
         }
         if (self.closed) return error.ConnectionClosed;
         if (self.close_sent or self.close_received) {
