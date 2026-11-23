@@ -341,7 +341,8 @@ server address is already resolved (the address-based form shown in
   `http2.runtime.TlsConnectOptions` (`server_verifier`, `ca_bundle`,
   `system_store`, `client_identity`). HTTP/2 sessions, endpoint clients and
   servers, and pending requests expose `peerCertificates()`,
-  `negotiatedAlpn()` and `negotiatedCipherSuite()`; cleartext returns null.
+  `negotiatedAlpn()`, `negotiatedCipherSuite()` and
+  `negotiatedTranscriptHash()`; cleartext returns null.
 - Streams: `openBidirectionalStream`/`openUnidirectionalStream`,
   `sendStream`/`writeStream`, `receiveStream`, `resetStream`,
   `stopSending`, `finishStream`.

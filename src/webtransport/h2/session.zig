@@ -121,6 +121,11 @@ pub const Session = struct {
     ) ?tls_stream.NegotiatedCipherSuite {
         return self.connection().negotiatedCipherSuite();
     }
+    pub fn negotiatedTranscriptHash(
+        self: *const Session,
+    ) ?tls_stream.TranscriptHash {
+        return self.connection().negotiatedTranscriptHash();
+    }
     fn connection(self: *const Session) *http2.runtime.Connection {
         if (self.duplex) |*duplex| return duplex.connection;
         if (self.server_duplex) |*duplex| return duplex.connection;

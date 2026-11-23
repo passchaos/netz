@@ -55,6 +55,11 @@ pub const PendingRequest = struct {
     ) ?tls_stream.NegotiatedCipherSuite {
         return self.request.negotiatedCipherSuite();
     }
+    pub fn negotiatedTranscriptHash(
+        self: PendingRequest,
+    ) ?tls_stream.TranscriptHash {
+        return self.request.negotiatedTranscriptHash();
+    }
 
     pub fn acceptWithDeadline(
         self: *PendingRequest,

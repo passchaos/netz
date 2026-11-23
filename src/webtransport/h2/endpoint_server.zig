@@ -266,6 +266,11 @@ pub const PendingRequest = struct {
     ) ?tls_stream.NegotiatedCipherSuite {
         return self.state.connection.negotiatedCipherSuite();
     }
+    pub fn negotiatedTranscriptHash(
+        self: PendingRequest,
+    ) ?tls_stream.TranscriptHash {
+        return self.state.connection.negotiatedTranscriptHash();
+    }
 
     pub fn acceptWithDeadline(self: *PendingRequest, options: runtime.ServerOptions, deadline: std.Io.Clock.Timestamp) Error!Accepted {
         const server = EndpointServer{ .state = self.state };
@@ -316,6 +321,11 @@ pub const EndpointServer = struct {
         self: *const EndpointServer,
     ) ?tls_stream.NegotiatedCipherSuite {
         return self.state.connection.negotiatedCipherSuite();
+    }
+    pub fn negotiatedTranscriptHash(
+        self: *const EndpointServer,
+    ) ?tls_stream.TranscriptHash {
+        return self.state.connection.negotiatedTranscriptHash();
     }
 
     /// Takes ownership of an already negotiated server HTTP/2 connection.

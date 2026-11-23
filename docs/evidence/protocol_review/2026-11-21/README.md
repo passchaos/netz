@@ -2460,3 +2460,17 @@ WebTransport variants and endpoint facades.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | Full WebTransport suite (Debug) | 761/763 (2 skipped) | live `zig build test-webtransport --summary all` |
+
+
+## Hundred-and-twenty-third pass: WebTransport HTTP/2 transcript-hash parity
+
+The HTTP/2 WebTransport surfaces exposed peer certificates, ALPN and cipher
+suite but not the negotiated transcript hash that WebSocket and HTTP/3
+WebTransport expose for channel binding. `webtransport.h2.Session`,
+`EndpointClient`, `EndpointServer` and pending requests now forward
+`negotiatedTranscriptHash()` from the underlying HTTP/2 connection. TLS tests
+assert it is present on both the client endpoint and a server pending request.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full WebTransport suite (Debug) | 761/763 (2 skipped) | live `zig build test-webtransport --summary all` |

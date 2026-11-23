@@ -219,6 +219,11 @@ pub const EndpointClient = struct {
     ) ?tls_stream.NegotiatedCipherSuite {
         return self.state.connection.negotiatedCipherSuite();
     }
+    pub fn negotiatedTranscriptHash(
+        self: EndpointClient,
+    ) ?tls_stream.TranscriptHash {
+        return self.state.connection.negotiatedTranscriptHash();
+    }
 
     /// Takes ownership of an already negotiated HTTP/2 connection.
     pub fn init(allocator: std.mem.Allocator, connection_value: http2.runtime.Connection, options: Options) Error!EndpointClient {
