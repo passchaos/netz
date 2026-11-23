@@ -133,10 +133,11 @@ test "WebTransport development streams preserve prefixes reverse path and limits
                 .fromSeconds(1),
             );
             try std.testing.expect(progress.completed);
-            // The second send takes the non-prefix path.
+            // The second send takes the non-prefix path; the trailing empty
+            // slice still carries FIN.
             try session.sendStreamSlicesWithTimeout(
                 server_uni,
-                &.{"ni"},
+                &.{ "ni", "" },
                 true,
                 &progress,
                 .fromSeconds(1),
