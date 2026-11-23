@@ -2120,3 +2120,21 @@ selection, so `prefer_http3` falls back to TCP through the same proxy.
 | --- | --- | --- |
 | Pool Alt-Svc H3 via SOCKS5 | h2 discovery then h3 `h3-through-socks5` | live `zig build test-http -Dtest-filter='Alt-Svc H3 through SOCKS5'` |
 | Full HTTP suite (Debug) | 310/310 | live `zig build test-http` |
+
+
+## Hundred-and-fourth pass: WebSocket stream-adapter slice sends
+
+The caller-supplied byte-stream adapter had only single-buffer and optional
+two-slice writes, so multi-slice payloads required staging or a contiguous
+copy. `Transport` now accepts `write_slices_fn` and
+`write_slices_deadline_fn` as `(context, header, slices)` callbacks, and
+`Connection` exposes `sendTextSlices`, `sendBinarySlices`, `sendFrameSlices`
+plus their timeout/deadline forms. Text validation (`utf8ValidateSlices`)
+spans slice boundaries. Server-role frames use the slice callback when present
+and otherwise write the header plus each non-empty slice under the same write
+lock; client-role frames mask into the staging buffer. Control frames remain on
+their contiguous APIs.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Stream adapter tests | 26/26 | live `zig build test-websocket -Dtest-filter='stream adapter'` |

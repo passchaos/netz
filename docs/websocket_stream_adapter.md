@@ -40,15 +40,25 @@ when both it and `write_parts_fn` are present. Both callbacks must write both
 ranges completely or return an error; empty payloads are valid. Client-role
 frames always take the masked copy path.
 
+`write_slices_fn` is the arbitrary-slice counterpart for unmasked frames:
+`(context, header, slices)` must write the header and every slice completely
+or return an error. `write_slices_deadline_fn` is its bounded form.
+`sendTextSlices`, `sendBinarySlices` and `sendFrameSlices` (plus
+`WithTimeout`/`WithDeadline`) accept `[]const []const u8`; text validation
+spans slice boundaries. Without a slice callback the adapter writes the header
+and each non-empty slice under the same write lock, and client-role frames are
+masked into the staging buffer.
+
 `read_deadline_fn` and `write_deadline_fn` are optional absolute-deadline
 callbacks. When supplied, `receiveMessageWithDeadline`,
 `sendFrameWithDeadline`, the typed `send*WithDeadline` forms,
-`sendCloseWithDeadline`, and `closeWithDeadline` bound lock acquisition and the
-transport operation with one awake-clock deadline. Every `WithDeadline` form
-has a `WithTimeout` counterpart that converts one relative budget at the
-boundary and rejects a non-positive duration before any transport I/O. Without
-the matching callback those calls return `error.DeadlineUnsupported`; the
-ordinary blocking forms remain available.
+`sendFrameSlicesWithDeadline`, `sendCloseWithDeadline`, and
+`closeWithDeadline` bound lock acquisition and the transport operation with one
+awake-clock deadline. Every `WithDeadline` form has a `WithTimeout` counterpart
+that converts one relative budget at the boundary and rejects a non-positive
+duration before any transport I/O. Without the matching callback those calls
+return `error.DeadlineUnsupported`; the ordinary blocking forms remain
+available.
 
 ```zig
 var message = try connection.receiveMessageWithDeadline(until);

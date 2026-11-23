@@ -1119,6 +1119,46 @@ fn validateOutgoingFrame(
     if (opcode == .close) try validateClosePayload(payload);
 }
 
+/// Validate one final text payload supplied as multiple slices without
+/// concatenating them. Codepoints may span slice boundaries.
+pub fn utf8ValidateSlices(slices: []const []const u8) bool {
+    var pending: [4]u8 = undefined;
+    var pending_len: usize = 0;
+    for (slices) |slice| {
+        var index: usize = 0;
+        while (index < slice.len) {
+            if (pending_len != 0) {
+                pending[pending_len] = slice[index];
+                pending_len += 1;
+                index += 1;
+                const needed = std.unicode.utf8ByteSequenceLength(
+                    pending[0],
+                ) catch return false;
+                if (pending_len < needed) continue;
+                _ = std.unicode.utf8Decode(pending[0..needed]) catch
+                    return false;
+                pending_len = 0;
+                continue;
+            }
+            const needed = std.unicode.utf8ByteSequenceLength(
+                slice[index],
+            ) catch return false;
+            if (index + needed <= slice.len) {
+                _ = std.unicode.utf8Decode(
+                    slice[index..][0..needed],
+                ) catch return false;
+                index += needed;
+                continue;
+            }
+            const remaining = slice.len - index;
+            @memcpy(pending[0..remaining], slice[index..]);
+            pending_len = remaining;
+            index = slice.len;
+        }
+    }
+    return pending_len == 0;
+}
+
 pub fn applyMask(payload: []u8, mask_key: [4]u8, offset: usize) void {
     if (payload.len == 0) return;
     const rotated = rotatedMask(mask_key, offset);

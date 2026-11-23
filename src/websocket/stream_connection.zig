@@ -44,6 +44,22 @@ pub const Transport = struct {
         []const u8,
         std.Io.Clock.Timestamp,
     ) anyerror!void = null,
+    /// Optional header-plus-arbitrary-slices write used for unmasked frames.
+    /// The callback must write the header and every slice completely or return
+    /// an error; partial output is not resumable. Empty slices are valid.
+    write_slices_fn: ?*const fn (
+        ?*anyopaque,
+        []const u8,
+        []const []const u8,
+    ) anyerror!void = null,
+    /// Optional deadline-aware arbitrary-slice write. Bounded slice sends use
+    /// it only when `write_slices_fn` is also present.
+    write_slices_deadline_fn: ?*const fn (
+        ?*anyopaque,
+        []const u8,
+        []const []const u8,
+        std.Io.Clock.Timestamp,
+    ) anyerror!void = null,
     /// Optional deadline-aware write. The `WithDeadline`/`WithTimeout` send
     /// APIs require this callback and return `error.DeadlineUnsupported` when
     /// it is absent.
@@ -101,6 +117,32 @@ pub const Transport = struct {
         const write_parts_deadline_fn = self.write_parts_deadline_fn orelse
             return error.DeadlineUnsupported;
         return write_parts_deadline_fn(self.context, header, payload, deadline);
+    }
+
+    fn writeSlices(
+        self: Transport,
+        header: []const u8,
+        slices: []const []const u8,
+    ) anyerror!void {
+        const write_slices_fn = self.write_slices_fn orelse
+            return error.PartsUnsupported;
+        return write_slices_fn(self.context, header, slices);
+    }
+
+    fn writeSlicesBefore(
+        self: Transport,
+        header: []const u8,
+        slices: []const []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) anyerror!void {
+        const write_slices_deadline_fn = self.write_slices_deadline_fn orelse
+            return error.DeadlineUnsupported;
+        return write_slices_deadline_fn(
+            self.context,
+            header,
+            slices,
+            deadline,
+        );
     }
 
     fn closeTransport(self: Transport) void {
@@ -352,6 +394,65 @@ pub const Connection = struct {
         return self.sendFrameWithDeadline(.binary, data, deadline);
     }
 
+    /// Send one text message from multiple payload slices without first
+    /// concatenating them. The concatenation must be valid UTF-8; codepoints
+    /// may span slice boundaries. Server-role frames use
+    /// `Transport.write_slices_fn` when available; client-role frames are
+    /// masked into the staging buffer.
+    pub fn sendTextSlices(
+        self: *Connection,
+        slices: []const []const u8,
+    ) !void {
+        return self.sendFrameSlicesBefore(.text, slices, null);
+    }
+
+    pub fn sendTextSlicesWithTimeout(
+        self: *Connection,
+        slices: []const []const u8,
+        timeout: std.Io.Duration,
+    ) !void {
+        return self.sendFrameSlicesBefore(
+            .text,
+            slices,
+            try deadline_policy.fromTimeout(self.io, timeout),
+        );
+    }
+
+    pub fn sendTextSlicesWithDeadline(
+        self: *Connection,
+        slices: []const []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) !void {
+        return self.sendFrameSlicesBefore(.text, slices, deadline);
+    }
+
+    pub fn sendBinarySlices(
+        self: *Connection,
+        slices: []const []const u8,
+    ) !void {
+        return self.sendFrameSlicesBefore(.binary, slices, null);
+    }
+
+    pub fn sendBinarySlicesWithTimeout(
+        self: *Connection,
+        slices: []const []const u8,
+        timeout: std.Io.Duration,
+    ) !void {
+        return self.sendFrameSlicesBefore(
+            .binary,
+            slices,
+            try deadline_policy.fromTimeout(self.io, timeout),
+        );
+    }
+
+    pub fn sendBinarySlicesWithDeadline(
+        self: *Connection,
+        slices: []const []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) !void {
+        return self.sendFrameSlicesBefore(.binary, slices, deadline);
+    }
+
     pub fn sendPing(self: *Connection, payload: []const u8) !void {
         try self.sendFrame(.ping, payload);
     }
@@ -419,6 +520,43 @@ pub const Connection = struct {
         return self.sendFrameBefore(
             opcode,
             payload,
+            try deadline_policy.usableAwake(self.io, deadline),
+        );
+    }
+
+    /// Send one unfragmented data frame whose payload is supplied as multiple
+    /// slices. Only `.text` and `.binary` are accepted; control frames keep
+    /// their contiguous APIs. Text validation spans slice boundaries.
+    pub fn sendFrameSlices(
+        self: *Connection,
+        opcode: websocket.Opcode,
+        slices: []const []const u8,
+    ) !void {
+        return self.sendFrameSlicesBefore(opcode, slices, null);
+    }
+
+    pub fn sendFrameSlicesWithTimeout(
+        self: *Connection,
+        opcode: websocket.Opcode,
+        slices: []const []const u8,
+        timeout: std.Io.Duration,
+    ) !void {
+        return self.sendFrameSlicesBefore(
+            opcode,
+            slices,
+            try deadline_policy.fromTimeout(self.io, timeout),
+        );
+    }
+
+    pub fn sendFrameSlicesWithDeadline(
+        self: *Connection,
+        opcode: websocket.Opcode,
+        slices: []const []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) !void {
+        return self.sendFrameSlicesBefore(
+            opcode,
+            slices,
             try deadline_policy.usableAwake(self.io, deadline),
         );
     }
@@ -565,6 +703,119 @@ pub const Connection = struct {
             payload,
             .{ .fin = true, .mask_key = mask_key },
         );
+        if (deadline) |absolute| {
+            try self.transport.writeBefore(self.write_buffer.items, absolute);
+        } else {
+            try self.transport.write(self.write_buffer.items);
+        }
+    }
+
+    fn sendFrameSlicesBefore(
+        self: *Connection,
+        opcode: websocket.Opcode,
+        slices: []const []const u8,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) !void {
+        if (opcode != .text and opcode != .binary) {
+            return error.InvalidOpcode;
+        }
+        if (self.closed) return error.ConnectionClosed;
+        if (self.close_sent or self.close_received) {
+            return error.ConnectionClosed;
+        }
+        var total: usize = 0;
+        for (slices) |slice| {
+            total = std.math.add(usize, total, slice.len) catch
+                return error.PayloadTooLarge;
+        }
+        if (opcode == .text and !websocket.utf8ValidateSlices(slices)) {
+            return error.InvalidUtf8;
+        }
+        var guard = if (deadline) |absolute|
+            try MutexGuard.initBefore(
+                &self.write_mutex,
+                self.io,
+                absolute,
+            )
+        else blk: {
+            self.write_mutex.lockUncancelable(self.io);
+            break :blk MutexGuard{
+                .mutex = &self.write_mutex,
+                .io = self.io,
+            };
+        };
+        defer guard.unlock();
+        var header_storage: [websocket.max_frame_header_len]u8 = undefined;
+        if (self.options.role == .server) {
+            const slices_available = if (deadline != null)
+                self.transport.write_slices_deadline_fn != null
+            else
+                self.transport.write_slices_fn != null;
+            const header = try websocket.writeFrameHeaderForLengthInto(
+                &header_storage,
+                opcode,
+                total,
+                .{ .fin = true },
+            );
+            if (slices_available) {
+                if (deadline) |absolute| {
+                    try self.transport.writeSlicesBefore(
+                        header,
+                        slices,
+                        absolute,
+                    );
+                } else {
+                    try self.transport.writeSlices(header, slices);
+                }
+                return;
+            }
+            // No slice callback: the write mutex still keeps the header and
+            // payload contiguous relative to other frames on this stream.
+            if (deadline) |absolute| {
+                try self.transport.writeBefore(header, absolute);
+            } else {
+                try self.transport.write(header);
+            }
+            for (slices) |slice| {
+                if (slice.len == 0) continue;
+                if (deadline) |absolute| {
+                    try self.transport.writeBefore(slice, absolute);
+                } else {
+                    try self.transport.write(slice);
+                }
+            }
+            return;
+        }
+        // Client-role frames are masked; stage the header and masked payload
+        // once so the transport still sees one write.
+        self.write_buffer.clearRetainingCapacity();
+        var mask_key: [4]u8 = undefined;
+        std.Io.random(self.io, &mask_key);
+        const header = try websocket.writeFrameHeaderForLengthInto(
+            &header_storage,
+            opcode,
+            total,
+            .{ .fin = true, .mask_key = mask_key },
+        );
+        const required = std.math.add(
+            usize,
+            header.len,
+            total,
+        ) catch return error.PayloadTooLarge;
+        try self.write_buffer.ensureUnusedCapacity(
+            self.allocator,
+            required,
+        );
+        self.write_buffer.appendSliceAssumeCapacity(header);
+        var offset: usize = 0;
+        for (slices) |slice| {
+            const out = self.write_buffer.addManyAsSliceAssumeCapacity(
+                slice.len,
+            );
+            @memcpy(out, slice);
+            websocket.applyMask(out, mask_key, offset);
+            offset += slice.len;
+        }
         if (deadline) |absolute| {
             try self.transport.writeBefore(self.write_buffer.items, absolute);
         } else {

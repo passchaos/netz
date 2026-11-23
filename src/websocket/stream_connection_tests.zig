@@ -11,6 +11,8 @@ const Peer = struct {
     output: std.ArrayList(u8) = .empty,
     fail_next_write: bool = false,
     writes: usize = 0,
+    slice_writes: usize = 0,
+    deadline_slice_writes: usize = 0,
     deadline_reads: usize = 0,
     deadline_writes: usize = 0,
 
@@ -59,6 +61,31 @@ const Peer = struct {
         self.writes += 1;
     }
 
+    fn writeSlices(
+        context: ?*anyopaque,
+        header: []const u8,
+        slices: []const []const u8,
+    ) anyerror!void {
+        const self: *Peer = @ptrCast(@alignCast(context.?));
+        try self.output.appendSlice(allocator, header);
+        for (slices) |slice| try self.output.appendSlice(allocator, slice);
+        self.slice_writes += 1;
+    }
+
+    fn writeSlicesDeadline(
+        context: ?*anyopaque,
+        header: []const u8,
+        slices: []const []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) anyerror!void {
+        const self: *Peer = @ptrCast(@alignCast(context.?));
+        self.deadline_slice_writes += 1;
+        if (deadline.durationFromNow(self.io).raw.nanoseconds <= 0) {
+            return error.Timeout;
+        }
+        try writeSlices(context, header, slices);
+    }
+
     fn deinit(self: *Peer) void {
         self.output.deinit(allocator);
     }
@@ -74,6 +101,27 @@ const Peer = struct {
             .read_deadline_fn = readDeadline,
             .write_fn = write,
             .write_deadline_fn = writeDeadline,
+        };
+    }
+
+    fn sliceTransport(self: *Peer) stream_connection.Transport {
+        return .{
+            .context = self,
+            .read_fn = read,
+            .write_fn = write,
+            .write_slices_fn = writeSlices,
+        };
+    }
+
+    fn sliceDeadlineTransport(self: *Peer) stream_connection.Transport {
+        return .{
+            .context = self,
+            .read_fn = read,
+            .read_deadline_fn = readDeadline,
+            .write_fn = write,
+            .write_deadline_fn = writeDeadline,
+            .write_slices_fn = writeSlices,
+            .write_slices_deadline_fn = writeSlicesDeadline,
         };
     }
 };
@@ -539,4 +587,116 @@ test "WebSocket stream adapter masks client frames instead of borrowing payloads
         @as(u64, "masked payload".len),
         header.payload_len,
     );
+}
+
+test "WebSocket stream adapter sends unmasked frames from slices" {
+    var peer = Peer{ .input = &.{} };
+    defer peer.deinit();
+    var connection = stream_connection.Connection.init(
+        allocator,
+        std.testing.io,
+        peer.sliceTransport(),
+        .{ .role = .server },
+    );
+    defer connection.deinit();
+
+    try connection.sendBinarySlices(&.{ "ab", "", "cde" });
+    try std.testing.expectEqual(@as(usize, 1), peer.slice_writes);
+    try std.testing.expectEqual(@as(usize, 0), peer.writes);
+    var frame = try websocket.parseFrame(allocator, peer.output.items);
+    defer frame.deinit(allocator);
+    try std.testing.expectEqual(websocket.Opcode.binary, frame.header.opcode);
+    try std.testing.expectEqualStrings("abcde", frame.payload);
+    try std.testing.expectError(
+        error.InvalidOpcode,
+        connection.sendFrameSlices(.ping, &.{"x"}),
+    );
+}
+
+test "WebSocket stream adapter falls back to sequential slice writes" {
+    var peer = Peer{ .input = &.{} };
+    defer peer.deinit();
+    var connection = stream_connection.Connection.init(
+        allocator,
+        std.testing.io,
+        peer.transport(),
+        .{ .role = .server },
+    );
+    defer connection.deinit();
+
+    try connection.sendBinarySlices(&.{ "ab", "", "cde" });
+    try std.testing.expectEqual(@as(usize, 0), peer.slice_writes);
+    try std.testing.expectEqual(@as(usize, 3), peer.writes);
+    var frame = try websocket.parseFrame(allocator, peer.output.items);
+    defer frame.deinit(allocator);
+    try std.testing.expectEqualStrings("abcde", frame.payload);
+}
+
+test "WebSocket stream adapter masks sliced client frames" {
+    var peer = Peer{ .input = &.{} };
+    defer peer.deinit();
+    var connection = stream_connection.Connection.init(
+        allocator,
+        std.testing.io,
+        peer.transport(),
+        .{ .role = .client },
+    );
+    defer connection.deinit();
+
+    try connection.sendTextSlices(&.{ "h", "\xc3\xa9llo" });
+    try std.testing.expectEqual(@as(usize, 1), peer.writes);
+    var frame = try websocket.parseFrameOptions(
+        allocator,
+        peer.output.items,
+        .{ .expect_mask = .masked },
+    );
+    defer frame.deinit(allocator);
+    try std.testing.expectEqualStrings("h\xc3\xa9llo", frame.payload);
+}
+
+test "WebSocket stream adapter validates text across slice boundaries" {
+    var peer = Peer{ .input = &.{} };
+    defer peer.deinit();
+    var connection = stream_connection.Connection.init(
+        allocator,
+        std.testing.io,
+        peer.sliceTransport(),
+        .{ .role = .server },
+    );
+    defer connection.deinit();
+
+    try connection.sendTextSlices(&.{ "\xc3", "\xa9" });
+    try std.testing.expectEqual(@as(usize, 1), peer.slice_writes);
+    try std.testing.expectError(
+        error.InvalidUtf8,
+        connection.sendTextSlices(&.{ "\xc3", "x" }),
+    );
+    try std.testing.expectError(
+        error.InvalidUtf8,
+        connection.sendTextSlices(&.{"\xa9"}),
+    );
+    try std.testing.expectEqual(@as(usize, 1), peer.slice_writes);
+}
+
+test "WebSocket stream adapter uses the deadline slice callback" {
+    var peer = Peer{ .input = &.{} };
+    defer peer.deinit();
+    var connection = stream_connection.Connection.init(
+        allocator,
+        std.testing.io,
+        peer.sliceDeadlineTransport(),
+        .{ .role = .server },
+    );
+    defer connection.deinit();
+
+    const future = std.Io.Clock.Timestamp.fromNow(
+        std.testing.io,
+        .{ .clock = .awake, .raw = .fromSeconds(5) },
+    );
+    try connection.sendBinarySlicesWithDeadline(&.{ "a", "b" }, future);
+    try std.testing.expectEqual(@as(usize, 1), peer.deadline_slice_writes);
+    try std.testing.expectEqual(@as(usize, 0), peer.deadline_writes);
+    var frame = try websocket.parseFrame(allocator, peer.output.items);
+    defer frame.deinit(allocator);
+    try std.testing.expectEqualStrings("ab", frame.payload);
 }

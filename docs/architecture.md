@@ -295,11 +295,6 @@ These are current limits, not permission to ignore them:
   production endpoint queue. Browsers ship WebTransport over HTTP/3 only, so
   the remaining work is external coverage breadth, not a browser-interop gap
   (`docs/webtransport_parity.md`).
-- **WebSocket stream-adapter slice sends**: runtime connections expose
-  arbitrary-slice text/binary sends, but the caller-supplied byte-stream
-  adapter only has single-buffer and optional two-slice write callbacks.
-  Multi-slice zero-copy sends there require a new transport callback rather
-  than a protocol change.
 - **WebTransport over HTTP/2 write staging**: each capsule write stages one
   owned contiguous buffer (control bytes or stream data), so arbitrary-slice
   stream sends need a multi-buffer staging redesign. The HTTP/3 session already
