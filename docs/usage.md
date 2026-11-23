@@ -280,6 +280,10 @@ try client.sendClose(.normal_closure, "bye");
 - For caller-supplied byte streams use `websocket.stream_connection`; its
   bounded forms require `read_deadline_fn`/`write_deadline_fn` and otherwise
   return `error.DeadlineUnsupported`.
+- WSS TLS: `.vail_tls = .{ .server_verifier = ..., .identity = ..., .alpn_protocols = &.{"http/1.1"} }`
+  on the client and `TlsListenOptions.alpn_protocols` on the server. WSS is an
+  HTTP/1.1 Upgrade, so a negotiated protocol other than `http/1.1` fails with
+  `error.InvalidAlpn`; a missing ALPN remains accepted for legacy peers.
 
 Runnable: `zig build run-websocket-echo` (cleartext) and
 `zig build run-websocket-wss-echo` (WSS with a pinned server key).
