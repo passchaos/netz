@@ -1569,3 +1569,118 @@ test "HTTP server streams a multipart request body through the parser" {
         "upload\x00a.txt\x00text/plain\x01hello\x02",
     ) != null);
 }
+
+test "unified HTTP connection exposes H1 TLS metadata and key updates" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+    const key_pair = try tls_testing.serverKeyPair();
+    const public_key = key_pair.public_key.toUncompressedSec1();
+    var server = try http1_runtime.TlsServer.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{ .ecdsa_p256_sha256 = .{
+                    .key_pair = key_pair,
+                } },
+            },
+            .alpn_protocols = &.{"http/1.1"},
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *http1_runtime.TlsServer,
+        release: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            var request = try connection.readRequest(.{});
+            defer request.deinit(self.server.allocator);
+            try connection.writeResponse(.{
+                .body = "h1-metadata",
+                .request_method = request.request.method,
+            });
+            try self.release.wait(self.server.io);
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) {
+        shared.release.set(io);
+        thread.join();
+    };
+
+    var client = try http.Client.init(allocator, io, .{
+        .protocol_policy = .http1_only,
+        .tls = .{ .server_verifier = .{
+            .pinned_ecdsa_p256_public_key = public_key,
+        } },
+    });
+    defer client.deinit();
+    const uri = try std.fmt.allocPrint(
+        allocator,
+        "https://localhost:{d}/",
+        .{server.address().ip4.port},
+    );
+    defer allocator.free(uri);
+    var connection = try client.connectUriWithTimeout(uri, .fromSeconds(5));
+    defer connection.close();
+    try std.testing.expectEqual(http.Protocol.http1, connection.protocol());
+    try std.testing.expectEqualStrings("http/1.1", connection.negotiatedAlpn().?);
+    try std.testing.expectEqual(
+        @as(?@import("../tls/mod.zig").stream.Protocol, .tls13),
+        connection.negotiatedTlsProtocol(),
+    );
+    try std.testing.expect(connection.wasTlsSessionResumed() != null);
+    try std.testing.expect(connection.peerCertificates() != null);
+    try std.testing.expect(connection.negotiatedCipherSuite() != null);
+    try std.testing.expect(connection.negotiatedTranscriptHash() != null);
+    var exported: [32]u8 = undefined;
+    try connection.exportKeyingMaterial(
+        "EXPORTER-netz-http1-connection",
+        "connection-metadata",
+        &exported,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        connection.keyUpdateCounts().?.sent,
+    );
+    try connection.initiateKeyUpdate();
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        connection.keyUpdateCounts().?.sent,
+    );
+    var response = try connection.requestWithTimeout(
+        "/meta",
+        .{},
+        .fromSeconds(3),
+    );
+    defer response.deinit();
+    try std.testing.expectEqualStrings("h1-metadata", response.body());
+
+    shared.release.set(io);
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}

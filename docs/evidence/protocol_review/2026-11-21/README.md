@@ -3426,3 +3426,15 @@ body budget through the accessors and observes the nested fields.
 | --- | --- | --- |
 | HTTP/3 suite (Debug) | 929/933 (4 skipped) | live `zig build test-http3 --summary all` |
 | Package surface (Debug) | 28/28 | live `zig build test-package --summary all` |
+
+## Hundred-and-ninetieth pass: unified H1 TLS metadata and key update test
+
+A new unified-client test connects over HTTP/1.1 TLS with a pinned key and
+asserts `peerCertificates`, ALPN, TLS 1.3, resumption, cipher suite,
+transcript hash, exporter, `initiateKeyUpdate()` and the sent counter before
+reusing the connection for a request. This covers the H1 forwarding branches
+that the H2 and direct-H3 tests did not.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| HTTP aggregate (Debug) | 311/311 | live `zig build test-http --summary all` |
