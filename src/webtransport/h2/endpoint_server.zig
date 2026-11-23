@@ -310,7 +310,8 @@ pub const EndpointServer = struct {
     state: *State,
 
     /// Authenticated TLS metadata for the connection carrying this endpoint.
-    /// Cleartext transports return null.
+    /// Cleartext transports return null. Call while the endpoint is live and
+    /// not concurrently with shutdown, which retires the owned connection.
     pub fn peerCertificates(self: *const EndpointServer) ?[]const []const u8 {
         return self.state.connection.peerCertificates();
     }

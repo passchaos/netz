@@ -2940,3 +2940,15 @@ The narrower per-protocol suites were run in addition to the cumulative gate:
 
 The full QUIC suite includes real-UDP timing tests; all executed tests passed
 on this run, with 23 environment-gated skips.
+
+
+## Hundred-and-fifty-fourth pass: WebTransport endpoint metadata lifetime contract
+
+The HTTP/2 endpoint metadata accessors read handshake-fixed TLS fields
+directly from the worker-owned connection, so they must not race with endpoint
+shutdown (which retires that connection). `EndpointClient`, `EndpointServer`
+and the usage guide now state the live-endpoint contract explicitly.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full WebTransport suite (Debug) | 761/763 (2 skipped) | live `zig build test-webtransport --summary all` |

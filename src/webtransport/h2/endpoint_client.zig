@@ -207,7 +207,8 @@ pub const EndpointClient = struct {
 
     /// Authenticated TLS metadata for the connection owning this endpoint.
     /// These values are fixed at handshake completion; cleartext transports
-    /// return null.
+    /// return null. Call while the endpoint is live and not concurrently with
+    /// shutdown, which retires the owned connection.
     pub fn peerCertificates(self: EndpointClient) ?[]const []const u8 {
         return self.state.connection.peerCertificates();
     }

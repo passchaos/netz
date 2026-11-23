@@ -373,7 +373,8 @@ server address is already resolved (the address-based form shown in
   servers, and pending requests expose `peerCertificates()`,
   `negotiatedAlpn()`, `negotiatedCipherSuite()` and
   `negotiatedTranscriptHash()`; HTTP/3 handshake sessions and endpoint clients
-  expose the same set. Cleartext returns null.
+  expose the same set. Cleartext returns null. Endpoint accessors read
+  handshake-fixed values directly and must not race with endpoint shutdown.
 - Streams: `openBidirectionalStream`/`openUnidirectionalStream`,
   `sendStream`/`writeStream`, `receiveStream`, `resetStream`,
   `stopSending`, `finishStream`.
