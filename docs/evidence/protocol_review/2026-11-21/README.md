@@ -2256,10 +2256,13 @@ contiguous path. The reconnecting filter compiles and passes 133/133.
 the slice forms. It now exposes `sendStreamSlicesWithDeadline` and
 `sendStreamSlicesWithTimeout`, acquiring the connection, releasing it after the
 call, and forwarding to `EndpointServer.sendStreamSlicesWithDeadline`. The
-EndpointListener filter passes 137/137. Together with the reconnecting client
-forwarding, the full WebTransport suite remains 761/763 (2 skipped).
+listener test now also opens a client stream, receives the seed payload, and
+replies from `to-` + `a` slices. The EndpointListener filter passes 137/137.
+Together with the reconnecting client forwarding, the full WebTransport suite
+remains 761/763 (2 skipped).
 
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | H2 EndpointListener tests | 137/137 | live `zig build test-webtransport -Dtest-filter='EndpointListener'` |
+| H2 listener slice stream round-trip | client `seed-`+`a`, listener `to-`+`a` | live listener test |
 | Full WebTransport suite (Debug) | 761/763 (2 skipped) | live `zig build test-webtransport` |
