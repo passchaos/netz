@@ -2911,3 +2911,18 @@ comparator.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | Documentation audit | H2 decode path (`decodedLen`/`decodeInto`) matched to H3 `String` | code inspection of `webtransport/h2/runtime.zig` |
+
+
+## Hundred-and-fifty-second pass: cumulative gate after the WebSocket/WebTransport parity series
+
+All scoped protocol suites were rerun live after the final API-parity,
+trust-documentation and benchmark series:
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full HTTP suite (Debug) | 310/310 | live `zig build test-http --summary all` |
+| Full WebSocket suite (Debug) | 522/523 (1 skipped) | live `zig build test-websocket --summary all` |
+| Full WebTransport suite (Debug) | 761/763 (2 skipped) | live `zig build test-webtransport --summary all` |
+| Full HTTP/3 suite (Debug) | 928/932 (4 skipped) | live `zig build test-http3 --summary all` |
+| QUIC trust unit tests | 38/38 | live `zig build test-quic -Dtest-filter='trust' --summary all` |
+| Public package surface | 27/27 | live `zig build test-package --summary all` |
