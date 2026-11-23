@@ -2156,6 +2156,7 @@ buffer.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | H2 WebTransport tests | 205/205 | live `zig build test-webtransport -Dtest-filter='HTTP2'` |
+| Full WebTransport suite (Debug) | 761/763 (2 skipped) | live `zig build test-webtransport` |
 
 
 ## Hundred-and-sixth pass: slice-send examples and usage notes
