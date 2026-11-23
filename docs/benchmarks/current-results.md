@@ -4,6 +4,23 @@
 
 ## Current netz results
 
+### Recent protocol baselines (2026-11-23, local loopback)
+
+ReleaseFast, zio-std-io, same-application-shape loopback runs on a shared
+macOS host (run-to-run variance roughly 5-10%). Raw logs and commands live in
+`docs/evidence/protocol_review/2026-11-21/README.md` (passes 133-149).
+
+| Workload | Result |
+| --- | --- |
+| HTTP/1 pipeline (16-deep, 13 B) | 6,314-6,622 ns/request; 151-158k req/s |
+| HTTP/1 body (1 MiB, fixed/chunked) | 1,235 / 1,038 MiB/s aggregate |
+| HTTP/2 h2c parallel x10 empty | 12,180 ns/request; 82,100 req/s |
+| HTTP/2 h2c res 1 MiB x10 | 799,257 ns/request; 1,250 req/s |
+| QUIC TLS 1.3 handshake (pinned) | p50 409,916 ns; 1,849.8 conn/s |
+| QUIC 1-KiB stream echo | p50 116,500 ns; p99 248,334 ns |
+| WebTransport 1 MiB stream | 39 MiB/s incremental; 59 MiB/s `--send-all` |
+| WebTransport DATAGRAM echo | 42,091 ns/datagram; 23,757 datagrams/s |
+
 ### zio linked deadline I/O
 
 `bench-io-deadline` measures zio only through its public `std.Io` boundary.

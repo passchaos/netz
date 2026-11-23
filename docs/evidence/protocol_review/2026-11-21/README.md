@@ -3105,3 +3105,15 @@ request, and removes the file on exit.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | Unix socket example | `Unix HTTP/1.1 200: hello over a Unix socket` | live `zig build run-http-unix-socket` |
+
+
+## Hundred-and-sixty-sixth pass: benchmark results discoverability
+
+The recent HTTP/1, HTTP/2 h2c, QUIC handshake/echo and WebTransport
+stream/datagram baselines are now summarized at the top of
+`docs/benchmarks/current-results.md`, with the shared-host variance caveat and
+a pointer to the raw logs in this ledger.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Documentation | baseline table added | `docs/benchmarks/current-results.md` |
