@@ -1,6 +1,7 @@
 //! Single-owner virtual-stream session on an established HTTP/2 Tunnel.
 const std = @import("std");
 const http2 = @import("../../http2/mod.zig");
+const tls_stream = @import("../../tls/mod.zig").stream;
 const model = @import("state.zig");
 const capsules = @import("capsule.zig");
 const reader_mod = @import("reader.zig");
@@ -107,7 +108,20 @@ pub const Session = struct {
     pub fn multiplexed(self: Session) bool {
         return self.duplex != null or self.server_duplex != null;
     }
-    fn connection(self: *Session) *http2.runtime.Connection {
+    /// Authenticated TLS metadata for the underlying HTTP/2 connection.
+    /// Cleartext and retired transports return null.
+    pub fn peerCertificates(self: *const Session) ?[]const []const u8 {
+        return self.connection().peerCertificates();
+    }
+    pub fn negotiatedAlpn(self: *const Session) ?[]const u8 {
+        return self.connection().negotiatedAlpn();
+    }
+    pub fn negotiatedCipherSuite(
+        self: *const Session,
+    ) ?tls_stream.NegotiatedCipherSuite {
+        return self.connection().negotiatedCipherSuite();
+    }
+    fn connection(self: *const Session) *http2.runtime.Connection {
         if (self.duplex) |*duplex| return duplex.connection;
         if (self.server_duplex) |*duplex| return duplex.connection;
         return self.tunnel.connection;

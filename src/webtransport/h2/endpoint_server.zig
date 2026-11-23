@@ -1,6 +1,7 @@
 //! Connection-owning background server for multiplexed HTTP/2 WebTransport.
 const std = @import("std");
 const http2 = @import("../../http2/mod.zig");
+const tls_stream = @import("../../tls/mod.zig").stream;
 const h2_state = @import("state.zig");
 const session_mod = @import("session.zig");
 const runtime = @import("runtime.zig");
@@ -253,6 +254,18 @@ pub const PendingRequest = struct {
     pub fn header(self: PendingRequest, name: []const u8) ?[]const u8 {
         return self.data.header(name);
     }
+    /// Authenticated TLS metadata for the connection carrying this request.
+    pub fn peerCertificates(self: PendingRequest) ?[]const []const u8 {
+        return self.state.connection.peerCertificates();
+    }
+    pub fn negotiatedAlpn(self: PendingRequest) ?[]const u8 {
+        return self.state.connection.negotiatedAlpn();
+    }
+    pub fn negotiatedCipherSuite(
+        self: PendingRequest,
+    ) ?tls_stream.NegotiatedCipherSuite {
+        return self.state.connection.negotiatedCipherSuite();
+    }
 
     pub fn acceptWithDeadline(self: *PendingRequest, options: runtime.ServerOptions, deadline: std.Io.Clock.Timestamp) Error!Accepted {
         const server = EndpointServer{ .state = self.state };
@@ -290,6 +303,20 @@ pub const PendingRequest = struct {
 
 pub const EndpointServer = struct {
     state: *State,
+
+    /// Authenticated TLS metadata for the connection carrying this endpoint.
+    /// Cleartext transports return null.
+    pub fn peerCertificates(self: *const EndpointServer) ?[]const []const u8 {
+        return self.state.connection.peerCertificates();
+    }
+    pub fn negotiatedAlpn(self: *const EndpointServer) ?[]const u8 {
+        return self.state.connection.negotiatedAlpn();
+    }
+    pub fn negotiatedCipherSuite(
+        self: *const EndpointServer,
+    ) ?tls_stream.NegotiatedCipherSuite {
+        return self.state.connection.negotiatedCipherSuite();
+    }
 
     /// Takes ownership of an already negotiated server HTTP/2 connection.
     pub fn init(allocator: std.mem.Allocator, connection_value: http2.runtime.Connection, options: Options) Error!EndpointServer {

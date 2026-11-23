@@ -1,6 +1,7 @@
 //! Public pending-admission and Session routing API.
 const std = @import("std");
 const http2 = @import("../../../http2/mod.zig");
+const tls_stream = @import("../../../tls/mod.zig").stream;
 const h2_state = @import("../state.zig");
 const runtime = @import("../runtime.zig");
 const endpoint = @import("../endpoint_server.zig");
@@ -41,6 +42,18 @@ pub const PendingRequest = struct {
     }
     pub fn header(self: PendingRequest, name: []const u8) ?[]const u8 {
         return self.request.header(name);
+    }
+    /// Authenticated TLS metadata for the connection carrying this request.
+    pub fn peerCertificates(self: PendingRequest) ?[]const []const u8 {
+        return self.request.peerCertificates();
+    }
+    pub fn negotiatedAlpn(self: PendingRequest) ?[]const u8 {
+        return self.request.negotiatedAlpn();
+    }
+    pub fn negotiatedCipherSuite(
+        self: PendingRequest,
+    ) ?tls_stream.NegotiatedCipherSuite {
+        return self.request.negotiatedCipherSuite();
     }
 
     pub fn acceptWithDeadline(

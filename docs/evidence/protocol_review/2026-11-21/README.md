@@ -2417,3 +2417,18 @@ require explicit trust while the unified/WS/WT facades install roots.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | Example compiles and parses flags | `HTTP/3 fetch attempt ... failed: InvalidUri` after 5 attempts for an `http://` URI | live `zig build run-http3-fetch -- http://127.0.0.1:1/` |
+
+
+## Hundred-and-twentieth pass: WebTransport HTTP/2 TLS metadata parity
+
+HTTP/3 WebTransport sessions exposed the authenticated peer chain and
+negotiated TLS metadata, but the HTTP/2 capsule `Session`, `EndpointServer` and
+pending-request surfaces did not. They now forward `peerCertificates()`,
+`negotiatedAlpn()` and `negotiatedCipherSuite()` from the underlying HTTP/2
+connection, so mTLS authorization works the same way on both WebTransport
+variants. Tests assert the negotiated `h2` ALPN and the server chain on a TLS
+session, and that an anonymous client has no peer certificate.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full WebTransport suite (Debug) | 761/763 (2 skipped) | live `zig build test-webtransport --summary all` |
