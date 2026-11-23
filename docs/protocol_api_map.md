@@ -75,7 +75,10 @@ native store, then the selected root source.
 
 A pinned ECDSA P-256 key (`pinned_ecdsa_p256_public_key`) checks possession and
 the certificate public key without a CA chain; it does not replace hostname
-policy for general WebPKI deployments.
+policy for general WebPKI deployments. `tls.verify_host = false` is a TCP TLS
+compatibility opt-out: QUIC native-store verification always checks the
+certificate identity, so supply an explicit `server_auth` verifier when a
+custom QUIC policy is required.
 
 A TCP `ca_bundle` cannot be converted into the QUIC trust representation. When
 it is set without explicit H3 trust material, `prefer_http3` keeps the request
