@@ -957,8 +957,8 @@ network gate rather than part of `zig build test`. Set
 `run-webtransport-handshake-stream` performs a real QUIC/TLS + HTTP/3
 WebTransport CONNECT, then exercises a client-opened bidirectional echo,
 client-to-server unidirectional data, and a server-to-client unidirectional
-stream. It uses the modern `0x41 + Session ID` bidirectional association prefix
-implemented by wtransport. `run-webtransport-h2-capsule-echo` covers the
+stream, all sent from multiple slices. It uses the modern `0x41 + Session ID`
+bidirectional association prefix implemented by wtransport. `run-webtransport-h2-capsule-echo` covers the
 draft-15 HTTP/2 capsule form: one client virtual stream sent from slices is
 echoed by the server, then both sides drain and close the session.
 

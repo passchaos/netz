@@ -71,9 +71,9 @@ pub fn main(init: std.process.Init) !void {
             {
                 return error.UnexpectedStream;
             }
-            try session.sendStream(
+            try session.sendStreamSlices(
                 bidi.stream_id,
-                "echo bidi",
+                &.{ "echo ", "bidi" },
                 true,
             );
 
@@ -87,9 +87,9 @@ pub fn main(init: std.process.Init) !void {
 
             const response_uni =
                 try session.openUnidirectionalStream();
-            try session.sendStream(
+            try session.sendStreamSlices(
                 response_uni,
-                "server uni",
+                &.{ "server ", "uni" },
                 true,
             );
         }
@@ -133,9 +133,9 @@ pub fn main(init: std.process.Init) !void {
     defer client.deinit();
 
     const bidi = try client.openBidirectionalStream();
-    try client.sendStream(bidi, "hello bidi", true);
+    try client.sendStreamSlices(bidi, &.{ "hello ", "bidi" }, true);
     const uni = try client.openUnidirectionalStream();
-    try client.sendStream(uni, "hello uni", true);
+    try client.sendStreamSlices(uni, &.{ "hello ", "uni" }, true);
 
     var bidi_response = try client.receiveStream();
     defer bidi_response.deinit();
