@@ -326,6 +326,7 @@ pub const Client = struct {
         host: []const u8,
         limits: Limits,
     ) Error!Client {
+        if (host.len == 0) return error.InvalidHost;
         const stream = try tcp_connect.unix(io, address, limits.connect_timeout);
         errdefer stream.close(io);
         const owned_host = try allocator.dupe(u8, host);
@@ -347,6 +348,7 @@ pub const Client = struct {
         limits: Limits,
         deadline: std.Io.Clock.Timestamp,
     ) Error!Client {
+        if (host.len == 0) return error.InvalidHost;
         const stream = try tcp_connect.unixWithDeadline(
             io,
             address,

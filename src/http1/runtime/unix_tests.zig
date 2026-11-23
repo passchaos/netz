@@ -127,3 +127,32 @@ test "HTTP/1 client and server exchange over a Unix socket" {
     joined = true;
     if (shared.err) |err| return err;
 }
+
+test "HTTP/1 Unix client rejects an empty Host before I/O" {
+    if (comptime @import("builtin").os.tag == .windows) {
+        return error.SkipZigTest;
+    }
+
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const address = try std.Io.net.UnixAddress.init(
+        "/tmp/netz-http-unix-empty-host.sock",
+    );
+    try std.testing.expectError(
+        error.InvalidHost,
+        runtime.Client.connectUnix(allocator, io, address, "", .{}),
+    );
+    try std.testing.expectError(
+        error.InvalidHost,
+        runtime.Client.connectUnixWithTimeout(
+            allocator,
+            io,
+            address,
+            "",
+            .{},
+            .fromSeconds(1),
+        ),
+    );
+}

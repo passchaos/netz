@@ -3117,3 +3117,15 @@ a pointer to the raw logs in this ledger.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | Documentation | baseline table added | `docs/benchmarks/current-results.md` |
+
+
+## Hundred-and-sixty-seventh pass: Unix client empty-Host validation
+
+`Client.connectUnix`/`connectUnixWithDeadline` accepted an empty `host` and
+only failed later when the request writer validated Host. They now reject
+`error.InvalidHost` before opening the socket, matching `adoptStream` and the
+TLS adoption helpers. A unit test covers both constructors.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full HTTP/1 suite (Debug) | 480/480 | live `zig build test-http1 --summary all` |
