@@ -2656,3 +2656,22 @@ exercises all ten scenarios. Full h2c baseline (ReleaseFast, zio-std-io;
 Run-to-run variance is roughly 5-10% on this shared host. The previously
 excluded scenarios completing is evidence that the old single-executor
 flow-control deadlock no longer reproduces.
+
+
+## Hundred-and-thirty-fifth pass: WebTransport performance baseline
+
+ReleaseFast WebTransport over the native QUIC/TLS endpoint (zio-std-io,
+loopback, 1 MiB transfer, one stream):
+
+| Configuration | Elapsed | Throughput | Send calls / partial |
+| --- | --- | --- | --- |
+| default (pacing, 16-KiB caller buffer) | 25.56 ms | 39 MiB/s | 273 / 273 |
+| `--disable-pacing` | 18.17 ms | 55 MiB/s | 273 / 273 |
+| `--send-all` | 16.87 ms | 59 MiB/s | 1 / 0 |
+| `--stream-window=262144` | 20.95 ms | 47 MiB/s | 284 / 284 |
+
+DATAGRAM echo: 20,000 round trips, 42,091 ns/datagram (23,757 datagrams/s).
+
+The incremental path pays per-call pacing/backpressure overhead; `--send-all`
+measures the continuous-send ceiling. No regression or single obvious runtime
+fix was identified from these numbers, so no code change is warranted.
