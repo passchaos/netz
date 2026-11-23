@@ -2194,3 +2194,20 @@ verifies the echoed concatenation.
 | --- | --- | --- |
 | H3 endpoint slice send | 107/107 matched | live `zig build test-webtransport -Dtest-filter='endpoint client multiplexes two authenticated'` |
 | Full WebTransport suite (Debug) | 761/763 (2 skipped) | live `zig build test-webtransport` |
+
+
+## Hundred-and-eighth pass: H3 server AcceptedSession slice sends
+
+The public `webtransport.runtime.AcceptedSession` only forwarded contiguous
+stream payloads, while the client and the stateful/handshake server sessions
+already exposed slices. The H3 server now has
+`sendDevelopmentStreamSlices*` and `sendDevelopmentStreamPartsSlices*`
+primitives that encode each borrowed slice into frames without joining them;
+`AcceptedSession` adds `sendStreamSlices`,
+`sendStreamSlicesWithTimeout` and `sendStreamSlicesWithDeadline` with the same
+prefix, rollback and `recordSent` behavior as the contiguous path.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Development server slice sends | 102/102 matched | live `zig build test-webtransport -Dtest-filter='development streams preserve prefixes'` |
+| Full WebTransport suite (Debug) | 761/763 (2 skipped) | live `zig build test-webtransport` |

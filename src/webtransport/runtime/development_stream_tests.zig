@@ -105,9 +105,9 @@ test "WebTransport development streams preserve prefixes reverse path and limits
                 @as(u64, 0),
                 server_bidi_state.bytes_sent,
             );
-            try session.sendStreamWithDeadline(
+            try session.sendStreamSlicesWithDeadline(
                 server_bidi,
-                "server bidi",
+                &.{ "server ", "bidi" },
                 true,
                 &progress,
                 futureDeadline(self.io),
@@ -125,9 +125,9 @@ test "WebTransport development streams preserve prefixes reverse path and limits
             );
 
             const server_uni = try session.openUnidirectionalStream();
-            try session.sendStreamWithTimeout(
+            try session.sendStreamSlicesWithTimeout(
                 server_uni,
-                "server uni",
+                &.{ "server ", "uni" },
                 true,
                 &progress,
                 .fromSeconds(1),

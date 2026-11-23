@@ -338,6 +338,151 @@ pub const AcceptedSession = struct {
         try self.streams.recordSent(stream_id, payload.len, fin);
     }
 
+    /// Send one stream from borrowed payload slices. The slices stay borrowed
+    /// until the call completes.
+    pub fn sendStreamSlices(
+        self: *AcceptedSession,
+        stream_id: u62,
+        parts: []const []const u8,
+        fin: bool,
+    ) Error!void {
+        const total = try sliceLength(parts);
+        try self.control.control.ensureOpen();
+        const stream = try developmentWritableStream(&self.streams, stream_id);
+        if (!stream.prefix_sent) {
+            var storage: [16]u8 = undefined;
+            var send_attempted = false;
+            self.server.h3.sendDevelopmentStreamPartsSlices(
+                self.request.from,
+                self.session_id.value,
+                stream_id,
+                try development_stream.prefix(
+                    &storage,
+                    stream.direction,
+                    self.session_id,
+                ),
+                parts,
+                fin,
+                &send_attempted,
+            ) catch |err| {
+                if (send_attempted) {
+                    stream.prefix_sent = true;
+                    stream.send_reset = .fromHttp3(
+                        webtransport.ApplicationErrorCode.session_gone,
+                    );
+                }
+                return err;
+            };
+            stream.prefix_sent = true;
+            try self.streams.recordSent(stream_id, total, fin);
+            return;
+        }
+        try self.server.h3.sendDevelopmentStreamSlices(
+            self.request.from,
+            self.session_id.value,
+            stream_id,
+            parts,
+            fin,
+        );
+        try self.streams.recordSent(stream_id, total, fin);
+    }
+
+    pub fn sendStreamSlicesWithTimeout(
+        self: *AcceptedSession,
+        stream_id: u62,
+        parts: []const []const u8,
+        fin: bool,
+        progress: *http3.runtime.DevelopmentBodyWriteProgress,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        progress.* = .{};
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendStreamSlicesWithDeadline(
+            stream_id,
+            parts,
+            fin,
+            progress,
+            .fromNow(self.server.h3.quic_server.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn sendStreamSlicesWithDeadline(
+        self: *AcceptedSession,
+        stream_id: u62,
+        parts: []const []const u8,
+        fin: bool,
+        progress: *http3.runtime.DevelopmentBodyWriteProgress,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        progress.* = .{};
+        _ = try deadline_policy.usableAwake(
+            self.server.h3.quic_server.endpoint.io,
+            deadline,
+        );
+        const total = try sliceLength(parts);
+        try self.control.control.ensureOpen();
+        const stream = try developmentWritableStream(&self.streams, stream_id);
+        if (!stream.prefix_sent) {
+            var storage: [16]u8 = undefined;
+            self.server.h3.sendDevelopmentStreamPartsSlicesWithDeadline(
+                self.request.from,
+                self.session_id.value,
+                stream_id,
+                try development_stream.prefix(
+                    &storage,
+                    stream.direction,
+                    self.session_id,
+                ),
+                parts,
+                fin,
+                progress,
+                deadline,
+            ) catch |err| {
+                if (progress.send_attempted or
+                    terminalSessionBodySendError(err))
+                {
+                    stream.prefix_sent = true;
+                    stream.send_reset = .fromHttp3(
+                        webtransport.ApplicationErrorCode.session_gone,
+                    );
+                }
+                return err;
+            };
+            stream.prefix_sent = true;
+            try self.streams.recordSent(stream_id, total, fin);
+            return;
+        }
+        self.server.h3.sendDevelopmentStreamSlicesWithDeadline(
+            self.request.from,
+            self.session_id.value,
+            stream_id,
+            parts,
+            fin,
+            progress,
+            deadline,
+        ) catch |err| {
+            if (progress.send_attempted or terminalSessionBodySendError(err)) {
+                stream.send_reset = .fromHttp3(
+                    webtransport.ApplicationErrorCode.session_gone,
+                );
+            }
+            return err;
+        };
+        try self.streams.recordSent(stream_id, total, fin);
+    }
+
+    fn sliceLength(parts: []const []const u8) Error!usize {
+        var total: usize = 0;
+        for (parts) |part| {
+            total = std.math.add(usize, total, part.len) catch
+                return error.MessageTooLarge;
+        }
+        return total;
+    }
+
     pub fn receiveStream(self: *AcceptedSession) Error!OwnedDevelopmentStream {
         const match = development_stream.match(
             &self.streams,

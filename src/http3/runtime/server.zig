@@ -925,11 +925,30 @@ pub const Server = struct {
         data: []const u8,
         fin: bool,
     ) Error!void {
-        return self.sendDevelopmentStreamUntil(
+        return self.sendDevelopmentStreamSlices(
             to,
             session_id,
             stream_id,
-            data,
+            &.{data},
+            fin,
+        );
+    }
+
+    /// Atomically submit borrowed payload slices as one stream send. The
+    /// slices are encoded into frames without joining them.
+    pub fn sendDevelopmentStreamSlices(
+        self: *Server,
+        to: net.IpAddress,
+        session_id: u62,
+        stream_id: u62,
+        parts: []const []const u8,
+        fin: bool,
+    ) Error!void {
+        return self.sendDevelopmentStreamSlicesUntil(
+            to,
+            session_id,
+            stream_id,
+            parts,
             fin,
             null,
             null,
@@ -975,28 +994,75 @@ pub const Server = struct {
         progress: *DevelopmentBodyWriteProgress,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!void {
-        progress.* = .{};
-        _ = try deadline_policy.usableAwake(
-            self.quic_server.endpoint.io,
-            deadline,
-        );
-        return self.sendDevelopmentStreamUntil(
+        return self.sendDevelopmentStreamSlicesWithDeadline(
             to,
             session_id,
             stream_id,
-            data,
+            &.{data},
             fin,
             progress,
             deadline,
         );
     }
 
-    fn sendDevelopmentStreamUntil(
+    pub fn sendDevelopmentStreamSlicesWithTimeout(
         self: *Server,
         to: net.IpAddress,
         session_id: u62,
         stream_id: u62,
-        data: []const u8,
+        parts: []const []const u8,
+        fin: bool,
+        progress: *DevelopmentBodyWriteProgress,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        progress.* = .{};
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendDevelopmentStreamSlicesWithDeadline(
+            to,
+            session_id,
+            stream_id,
+            parts,
+            fin,
+            progress,
+            .fromNow(self.quic_server.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn sendDevelopmentStreamSlicesWithDeadline(
+        self: *Server,
+        to: net.IpAddress,
+        session_id: u62,
+        stream_id: u62,
+        parts: []const []const u8,
+        fin: bool,
+        progress: *DevelopmentBodyWriteProgress,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        progress.* = .{};
+        _ = try deadline_policy.usableAwake(
+            self.quic_server.endpoint.io,
+            deadline,
+        );
+        return self.sendDevelopmentStreamSlicesUntil(
+            to,
+            session_id,
+            stream_id,
+            parts,
+            fin,
+            progress,
+            deadline,
+        );
+    }
+
+    fn sendDevelopmentStreamSlicesUntil(
+        self: *Server,
+        to: net.IpAddress,
+        session_id: u62,
+        stream_id: u62,
+        parts: []const []const u8,
         fin: bool,
         progress: ?*DevelopmentBodyWriteProgress,
         deadline: ?std.Io.Clock.Timestamp,
@@ -1047,13 +1113,24 @@ pub const Server = struct {
                 self.development_stream_sends.removeLast(to, stream_id);
             }
         };
-        state.appendFrames(
-            &frames,
-            self.quic_server.endpoint.allocator,
-            data,
-            self.limits.max_stream_frame_data,
-            fin,
-        ) catch |err| return err;
+        for (parts, 0..) |part, index| {
+            state.appendFrames(
+                &frames,
+                self.quic_server.endpoint.allocator,
+                part,
+                self.limits.max_stream_frame_data,
+                fin and index + 1 == parts.len,
+            ) catch |err| return err;
+        }
+        if (parts.len == 0 and fin) {
+            state.appendFrames(
+                &frames,
+                self.quic_server.endpoint.allocator,
+                "",
+                self.limits.max_stream_frame_data,
+                true,
+            ) catch |err| return err;
+        }
         send_packetizer.sendEndpointUntil(
             self.quic_server.endpoint.allocator,
             &self.quic_server.endpoint,
@@ -1083,12 +1160,35 @@ pub const Server = struct {
         fin: bool,
         send_attempted: *bool,
     ) Error!void {
-        return self.sendDevelopmentStreamPartsUntil(
+        return self.sendDevelopmentStreamPartsSlices(
             to,
             session_id,
             stream_id,
             prefix,
-            payload,
+            &.{payload},
+            fin,
+            send_attempted,
+        );
+    }
+
+    /// Atomically submit a stream prefix plus borrowed payload slices. The
+    /// slices are encoded into frames without joining them.
+    pub fn sendDevelopmentStreamPartsSlices(
+        self: *Server,
+        to: net.IpAddress,
+        session_id: u62,
+        stream_id: u62,
+        prefix: []const u8,
+        parts: []const []const u8,
+        fin: bool,
+        send_attempted: *bool,
+    ) Error!void {
+        return self.sendDevelopmentStreamPartsSlicesUntil(
+            to,
+            session_id,
+            stream_id,
+            prefix,
+            parts,
             fin,
             send_attempted,
             null,
@@ -1109,18 +1209,41 @@ pub const Server = struct {
         progress: *DevelopmentBodyWriteProgress,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!void {
+        return self.sendDevelopmentStreamPartsSlicesWithDeadline(
+            to,
+            session_id,
+            stream_id,
+            prefix,
+            &.{payload},
+            fin,
+            progress,
+            deadline,
+        );
+    }
+
+    pub fn sendDevelopmentStreamPartsSlicesWithDeadline(
+        self: *Server,
+        to: net.IpAddress,
+        session_id: u62,
+        stream_id: u62,
+        prefix: []const u8,
+        parts: []const []const u8,
+        fin: bool,
+        progress: *DevelopmentBodyWriteProgress,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
         progress.* = .{};
         _ = try deadline_policy.usableAwake(
             self.quic_server.endpoint.io,
             deadline,
         );
         var send_attempted = false;
-        self.sendDevelopmentStreamPartsUntil(
+        self.sendDevelopmentStreamPartsSlicesUntil(
             to,
             session_id,
             stream_id,
             prefix,
-            payload,
+            parts,
             fin,
             &send_attempted,
             deadline,
@@ -1134,13 +1257,13 @@ pub const Server = struct {
         };
     }
 
-    fn sendDevelopmentStreamPartsUntil(
+    fn sendDevelopmentStreamPartsSlicesUntil(
         self: *Server,
         to: net.IpAddress,
         session_id: u62,
         stream_id: u62,
         prefix: []const u8,
-        payload: []const u8,
+        parts: []const []const u8,
         fin: bool,
         send_attempted: *bool,
         deadline: ?std.Io.Clock.Timestamp,
@@ -1182,13 +1305,24 @@ pub const Server = struct {
             self.limits.max_stream_frame_data,
             false,
         );
-        try state.appendFrames(
-            &frames,
-            self.quic_server.endpoint.allocator,
-            payload,
-            self.limits.max_stream_frame_data,
-            fin,
-        );
+        for (parts, 0..) |part, index| {
+            try state.appendFrames(
+                &frames,
+                self.quic_server.endpoint.allocator,
+                part,
+                self.limits.max_stream_frame_data,
+                fin and index + 1 == parts.len,
+            );
+        }
+        if (parts.len == 0 and fin) {
+            try state.appendFrames(
+                &frames,
+                self.quic_server.endpoint.allocator,
+                "",
+                self.limits.max_stream_frame_data,
+                true,
+            );
+        }
         send_packetizer.sendEndpointUntil(
             self.quic_server.endpoint.allocator,
             &self.quic_server.endpoint,
