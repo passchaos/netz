@@ -3451,3 +3451,14 @@ metadata test asserts zero counters on a fresh connection.
 | --- | --- | --- |
 | Full WebSocket suite (Debug) | 526/527 (1 skipped) | live `zig build test-websocket --summary all` |
 | Package surface (Debug) | 28/28 | live `zig build test-package --summary all` |
+
+## Hundred-and-ninety-second pass: cross-surface compile after metadata parity
+
+`zig build test-compile` compiles both test roots without running them after
+the WebSocket, WebTransport, HTTP/3 and unified HTTP metadata additions. All
+nine steps succeed, confirming the new public surface and test imports link
+across protocol modules.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Test compile | 9/9 steps | live `zig build test-compile --summary all` |
