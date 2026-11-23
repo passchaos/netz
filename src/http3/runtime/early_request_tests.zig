@@ -278,7 +278,12 @@ test "HTTP/3 handshake adopts accepted typed early request" {
             defer session.deinit();
             try std.testing.expectEqual(
                 quic.zero_rtt.handshake.Status.accepted,
-                session.established.early_data_status,
+                session.earlyDataStatus(),
+            );
+            try std.testing.expectEqual(true, session.wasTlsSessionResumed().?);
+            try std.testing.expectEqual(
+                tls_protocol.tls13,
+                session.negotiatedTlsProtocol().?,
             );
             var early_request = try session.receiveRequestWithTimeout(
                 .fromSeconds(2),
@@ -665,7 +670,11 @@ test "HTTP/3 typed early request remains replayable after Version Negotiation" {
             defer session.deinit();
             try std.testing.expectEqual(
                 quic.zero_rtt.handshake.Status.not_offered,
-                session.established.early_data_status,
+                session.earlyDataStatus(),
+            );
+            try std.testing.expectEqual(
+                tls_protocol.tls13,
+                session.negotiatedTlsProtocol().?,
             );
             var request = try session.receiveRequestWithTimeout(
                 .fromSeconds(2),

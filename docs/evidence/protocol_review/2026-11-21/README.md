@@ -3324,3 +3324,15 @@ the owning endpoint client, and HTTP/2 sessions, which embed their connection.
 | --- | --- | --- |
 | WebTransport suite (Debug) | 761/763 (2 skipped) | live `zig build test-webtransport --summary all` |
 | Package surface (Debug) | 28/28 | live `zig build test-package --summary all` |
+
+## Hundred-and-eighty-second pass: HTTP/3 server 0-RTT metadata behavior
+
+The existing server-side early-request tests now assert through the public
+`HandshakeServerSession` accessors instead of reading `established` fields
+directly: the accepted 0-RTT case reports `.accepted`, a resumed session and
+TLS 1.3, and the version-negotiation replay case reports `.not_offered` with
+TLS 1.3.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| HTTP/3 suite (Debug) | 928/932 (4 skipped) | live `zig build test-http3 --summary all` |
