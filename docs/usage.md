@@ -363,6 +363,10 @@ server address is already resolved (the address-based form shown in
 `examples/webtransport/webtransport_handshake_stream.zig`).
 
 - Server: `webtransport.runtime.HandshakeServer.bind` then `accept()`.
+- Origin policy: H3 servers set `Limits.origin_policy`; HTTP/2 capsule servers
+  set `ServerOptions.origin`. The default accepts an absent Origin or one
+  matching `:scheme`/`:authority`; `.exact` requires an allowlisted
+  serialization and `.allow_any` accepts any single valid Origin.
 - TLS: `webtransport.runtime.EndpointClient` URI connects install platform
   roots unless `h3.handshake` configures `server_auth`, `system_store`,
   `system_environ` or `root_source`; `HandshakeClientSession` URI and address

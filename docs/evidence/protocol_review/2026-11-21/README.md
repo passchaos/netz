@@ -3033,3 +3033,16 @@ have an end-to-end Origin rejection test.
 | --- | --- | --- |
 | Full WebSocket suite (Debug) | 524/525 (1 skipped) | live `zig build test-websocket --summary all` |
 | Origin filter | 95/95 | live `zig build test-websocket -Dtest-filter='rejects a denied Origin' --summary all` |
+
+
+## Hundred-and-sixty-first pass: WebTransport origin-policy discoverability
+
+The WebTransport usage section now documents both server knobs:
+`Limits.origin_policy` for H3 and `ServerOptions.origin` for HTTP/2 capsules,
+including the default same-origin-or-absent behavior and the `.exact` /
+`.allow_any` modes. Together with the H1/RFC 8441/RFC 9220/H2/H3 rejection
+tests, the Origin matrix is fully covered and documented.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Origin rejection matrix | H1, RFC 8441, RFC 9220, WT H2, WT H3 | live test runs recorded in passes 128, 158, 159, 160 and `admission_tests.zig` |
