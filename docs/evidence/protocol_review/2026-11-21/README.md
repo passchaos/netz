@@ -3093,3 +3093,15 @@ rejection reporting, the replay filter (duplicates, expiry, snapshots),
 PSK/ClientHello-bound keys, remembered transport-parameter validation, and H3
 typed early requests with `was_early_data` provenance across accepted and
 rejected cases.
+
+
+## Hundred-and-sixty-fifth pass: Unix-socket HTTP recipe
+
+`examples/http/unix_socket.zig` mirrors `curl --unix-socket`: the same HTTP/1
+parser and writer run over `netz.http1.runtime.UnixServer` and
+`Client.connectUnix`. The example creates a unique `/tmp` socket, serves one
+request, and removes the file on exit.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Unix socket example | `Unix HTTP/1.1 200: hello over a Unix socket` | live `zig build run-http-unix-socket` |

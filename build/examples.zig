@@ -123,6 +123,12 @@ pub const specs = [_]Spec{
         .description = "Bound a complete request with a timeout or absolute deadline",
     },
     .{
+        .exe_name = "netz-http-unix-socket",
+        .path = "examples/http/unix_socket.zig",
+        .run_step = "run-http-unix-socket",
+        .description = "Serve and call HTTP/1.1 over a Unix domain socket",
+    },
+    .{
         .exe_name = "netz-http-h3-prefer",
         .path = "examples/http/h3_prefer.zig",
         .run_step = "run-http-h3-prefer",

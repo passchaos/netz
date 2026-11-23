@@ -102,6 +102,10 @@ std.debug.print("{t} {d}: {s}\n", .{
 - Deadlines: `requestUriWithTimeout` and `requestUriWithDeadline` cover the
   complete exchange (DNS/TCP, TLS, upload and response), not just connect. See
   `zig build run-http-timeouts`.
+- Unix sockets: `netz.http1.runtime.Client.connectUnix` and
+  `netz.http1.runtime.UnixServer` run the same HTTP/1 parser and writer over a
+  local socket, matching `curl --unix-socket`. See
+  `zig build run-http-unix-socket`.
 - Errors: `error.Timeout` for expired or non-positive budgets, protocol errors
   for malformed peers, `error.ConnectionClosed` after a terminal close.
 
