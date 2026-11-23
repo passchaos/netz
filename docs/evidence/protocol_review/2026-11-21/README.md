@@ -2156,3 +2156,16 @@ buffer.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | H2 WebTransport tests | 205/205 | live `zig build test-webtransport -Dtest-filter='HTTP2'` |
+
+
+## Hundred-and-sixth pass: slice-send examples and usage notes
+
+`run-websocket-echo` now sends text from multiple slices on both the client
+and server, demonstrating the runtime `sendTextSlices` API while keeping the
+existing permessage-deflate negotiation. `docs/usage.md` names the HTTP/3
+`sendStreamSlices` and HTTP/2 `sendStreamSlicesWith{Timeout,Deadline}` forms
+and their staging difference.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| WebSocket slice echo | `hello websocket` / `echo from netz websocket` | live `zig build run-websocket-echo` |

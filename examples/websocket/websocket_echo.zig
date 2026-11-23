@@ -43,7 +43,12 @@ pub fn main() !void {
 
             // Tungstenite's examples echo text/binary frames; this sends a text
             // response through the same negotiated RFC 6455 connection.
-            try connection.sendText("echo from netz websocket");
+            // Slice sends avoid joining the payload before framing.
+            try connection.sendTextSlices(&.{
+                "echo ",
+                "from ",
+                "netz websocket",
+            });
 
             var close = try connection.receiveFrame();
             defer close.deinit(server_ptr.http.allocator);
@@ -66,7 +71,7 @@ pub fn main() !void {
     defer client.close();
 
     std.debug.print("WebSocket client selected subprotocol {s}\n", .{client.selected_protocol orelse "(none)"});
-    try client.sendText("hello websocket");
+    try client.sendTextSlices(&.{ "hello ", "websocket" });
 
     var response = try client.receiveMessage();
     defer response.deinit(allocator);

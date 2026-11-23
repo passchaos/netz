@@ -303,6 +303,9 @@ server address is already resolved (the address-based form shown in
 - Streams: `openBidirectionalStream`/`openUnidirectionalStream`,
   `sendStream`/`writeStream`, `receiveStream`, `resetStream`,
   `stopSending`, `finishStream`.
+- Slice sends: HTTP/3 sessions expose `sendStreamSlices`; HTTP/2 sessions and
+  endpoint facades expose `sendStreamSlicesWithTimeout/Deadline`. H2 stages
+  one contiguous capsule, while H3 keeps true scatter/gather.
 - DATAGRAMs: `sendDatagram(s)`, `receiveDatagram(s)Into` with deadlines.
 - Session termination: a peer CLOSE is reported as a session event; close
   metadata remains valid until deinit. See
