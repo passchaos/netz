@@ -316,7 +316,11 @@ try client.sendClose(.normal_closure, "bye");
   pending upgrade exposes the parsed request and TLS metadata
   (`peerCertificates()`, `negotiatedAlpn()`, `negotiatedCipherSuite()`,
   `negotiatedTranscriptHash()`) for both HTTP/1 Upgrade and RFC 8441, so
-  credentials can be checked before `accept()`. Redirects strip cross-origin
+  credentials can be checked before `accept()`. Established connections keep
+  that surface plus `exportKeyingMaterial()`; H1/H2 add
+  `negotiatedTlsProtocol()`, `wasTlsSessionResumed()` and session-ticket
+  access, while H3 is TLS 1.3-only and adds `wasTlsSessionResumed()` plus
+  `earlyDataStatus()` for 0-RTT checks. Redirects strip cross-origin
   `extra_headers` and client identities by default.
 
 Runnable: `zig build run-websocket-echo` (cleartext),

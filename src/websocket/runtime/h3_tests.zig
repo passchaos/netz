@@ -4,6 +4,7 @@ const h3 = @import("h3.zig");
 const http3 = @import("../../http3/mod.zig");
 const quic = @import("../../quic/mod.zig");
 const tls_testing = @import("../../tls/mod.zig").testing;
+const tls_stream = @import("../../tls/mod.zig").stream;
 const large_header_value =
     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -2678,6 +2679,12 @@ test "WebSocket over HTTP3 extended CONNECT exchanges frames" {
     defer client.deinit();
     try std.testing.expectEqualStrings("chat", client.selectedProtocol().?);
     try std.testing.expectEqualStrings("h3", client.negotiatedAlpn());
+    try std.testing.expectEqual(
+        tls_stream.Protocol.tls13,
+        client.negotiatedTlsProtocol().?,
+    );
+    try std.testing.expectEqual(false, client.wasTlsSessionResumed().?);
+    try std.testing.expectEqual(.not_offered, client.earlyDataStatus());
     try std.testing.expect(client.permessage_deflate);
     try std.testing.expect(client.compression_send_context_takeover);
     try std.testing.expect(client.compression_receive_context_takeover);

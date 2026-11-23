@@ -192,6 +192,32 @@ pub const H2Connection = struct {
         return self.tunnel.connection.negotiatedTranscriptHash();
     }
 
+    pub fn negotiatedTlsProtocol(
+        self: *const H2Connection,
+    ) ?tls_stream.Protocol {
+        return self.tunnel.connection.negotiatedTlsProtocol();
+    }
+
+    pub fn wasTlsSessionResumed(self: *const H2Connection) ?bool {
+        return self.tunnel.connection.wasTlsSessionResumed();
+    }
+
+    /// Return and clear a TLS 1.2 session ticket. TLS 1.3 and cleartext h2c
+    /// report null.
+    pub fn takeTls12SessionTicket(
+        self: *H2Connection,
+    ) ?tls_stream.Tls12SessionTicket {
+        return self.tunnel.connection.takeTls12SessionTicket();
+    }
+
+    /// Return and clear a TLS 1.3 session ticket. TLS 1.2 and cleartext h2c
+    /// report null.
+    pub fn takeTls13SessionTicket(
+        self: *H2Connection,
+    ) tls_stream.Error!?tls_stream.Tls13SessionTicket {
+        return self.tunnel.connection.takeTls13SessionTicket();
+    }
+
     pub fn exportKeyingMaterial(
         self: *const H2Connection,
         label: []const u8,

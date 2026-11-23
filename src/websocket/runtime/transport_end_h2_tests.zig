@@ -3,6 +3,7 @@ const std = @import("std");
 const runtime = @import("../runtime.zig");
 const http2 = @import("../../http2/runtime.zig");
 const tls_testing = @import("../../tls/testing.zig");
+const tls_stream = @import("../../tls/mod.zig").stream;
 const stream_io = @import("../../internal/stream_io.zig");
 
 test "WebSocket HTTP2 TLS truncation retires allocating and caller-buffer messages" {
@@ -77,6 +78,11 @@ fn exercise(caller_buffer: bool, tls12: bool, truncated: bool) !void {
     defer parent.close();
     var connection = try runtime.H2Client.openWithTimeout(allocator, &parent, .{ .authority = "localhost", .limits = .{ .max_message_bytes = 64 } }, .fromSeconds(3));
     defer connection.close();
+    try std.testing.expectEqual(
+        if (tls12) tls_stream.Protocol.tls12 else tls_stream.Protocol.tls13,
+        connection.negotiatedTlsProtocol().?,
+    );
+    try std.testing.expect(connection.wasTlsSessionResumed() != null);
     const expected = if (truncated) error.TruncatedRecord else error.UnexpectedEof;
     if (caller_buffer) {
         var output: [64]u8 = undefined;

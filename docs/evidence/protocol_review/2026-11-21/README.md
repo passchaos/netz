@@ -3238,3 +3238,18 @@ referenced from the authentication guide.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | Auth example (Debug) | 401/200/200 observed, 9/9 build steps | live `zig build run-http-client-auth --summary all` |
+
+## Hundred-and-seventy-sixth pass: WebSocket TLS resumption metadata parity
+
+The RFC 8441 and RFC 9220 connection facades now expose the TLS metadata that
+HTTP/1 already provided. H2 forwards `negotiatedTlsProtocol`,
+`wasTlsSessionResumed`, `takeTls12SessionTicket` and
+`takeTls13SessionTicket` to the shared HTTP/2 transport. H3 reports TLS 1.3,
+the established resumption flag and `earlyDataStatus`, so 0-RTT acceptance can
+be inspected through the WebSocket facade. Tests cover TLS 1.2/1.3 protocol
+reporting and preconfigured-session 0-RTT defaults.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full WebSocket suite (Debug) | 526/527 (1 skipped) | live `zig build test-websocket --summary all` |
+| Package surface (Debug) | 28/28 | live `zig build test-package --summary all` |

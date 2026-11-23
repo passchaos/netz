@@ -20,6 +20,7 @@ const frame_validation = @import("message/frame_validation.zig");
 const timed_mutex = @import("../../internal/timed_mutex.zig");
 const deadline_policy = @import("../../internal/deadline.zig");
 const http3 = @import("../../http3/mod.zig");
+const tls_stream = @import("../../tls/mod.zig").stream;
 const client_trust = @import("../../quic/client_trust.zig");
 const rejection_drain_timeout: std.Io.Duration = .fromSeconds(5);
 const max_payload_read_chunk: usize = 16 * 1024;
@@ -565,6 +566,27 @@ pub fn Connection(comptime role: common.Role) type {
             self: *const Self,
         ) @TypeOf(self.h3.negotiatedTranscriptHash()) {
             return self.h3.negotiatedTranscriptHash();
+        }
+
+        /// QUIC mandates TLS 1.3 (RFC 9001); the optional shape matches the
+        /// HTTP/1 and HTTP/2 connection surface.
+        pub fn negotiatedTlsProtocol(
+            self: *const Self,
+        ) ?tls_stream.Protocol {
+            _ = self;
+            return .tls13;
+        }
+
+        pub fn wasTlsSessionResumed(self: *const Self) ?bool {
+            return self.h3.established.resumed;
+        }
+
+        /// Whether the peer accepted, rejected or did not receive a 0-RTT
+        /// offer. Preconfigured sessions report `.not_offered`.
+        pub fn earlyDataStatus(
+            self: *const Self,
+        ) @TypeOf(self.h3.established.early_data_status) {
+            return self.h3.established.early_data_status;
         }
 
         pub fn exportKeyingMaterial(
