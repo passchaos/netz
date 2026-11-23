@@ -2691,3 +2691,18 @@ verification (zio-std-io, loopback, 50 iterations):
 
 The pinned-verifier handshake path completes sub-millisecond at p50. This is a
 baseline only; no code change is warranted from a single noisy run.
+
+
+## Hundred-and-thirty-seventh pass: QUIC stream echo baseline
+
+Echo mode uses a fixed 1-KiB payload per round trip (`--transfer-bytes` applies
+to the upload/churn modes), 50 iterations, ReleaseFast, loopback:
+
+| Metric | Value |
+| --- | --- |
+| p50 | 116,500 ns |
+| p99 / p99.9 | 248,334 ns |
+| payload verified | 51,200 B |
+
+The 1-KiB echo path is ~3.5x lower latency at p50 than a full handshake and
+remains well below the 1-ms p99 bound on this host.
