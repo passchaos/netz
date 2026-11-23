@@ -65,6 +65,7 @@ zig build run-mqtt-broker
 zig build run-grpc-h2c
 zig build run-webtransport-handshake-stream
 zig build run-webtransport-datagram-echo
+zig build run-webtransport-h2-capsule-echo
 taskset -c 0 zig build bench-http1-pipeline -Doptimize=ReleaseFast
 taskset -c 0 zig build bench-http1-pipeline -Doptimize=ReleaseFast -- \
   --write-strategy=auto
@@ -957,7 +958,9 @@ network gate rather than part of `zig build test`. Set
 WebTransport CONNECT, then exercises a client-opened bidirectional echo,
 client-to-server unidirectional data, and a server-to-client unidirectional
 stream. It uses the modern `0x41 + Session ID` bidirectional association prefix
-implemented by wtransport.
+implemented by wtransport. `run-webtransport-h2-capsule-echo` covers the
+draft-15 HTTP/2 capsule form: one client virtual stream sent from slices is
+echoed by the server, then both sides drain and close the session.
 
 ## I/O backend note
 

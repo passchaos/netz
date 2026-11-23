@@ -177,6 +177,12 @@ pub const specs = [_]Spec{
         .description = "Run the WebTransport DATAGRAM echo example",
     },
     .{
+        .exe_name = "netz-webtransport-h2-capsule-echo",
+        .path = "examples/webtransport/h2_capsule_echo.zig",
+        .run_step = "run-webtransport-h2-capsule-echo",
+        .description = "Echo one virtual stream over HTTP/2 WebTransport capsules",
+    },
+    .{
         .exe_name = "netz-bench-websocket-frame",
         .path = "examples/benchmarks/bench_websocket_frame.zig",
         .run_step = "bench-websocket-frame",

@@ -2169,8 +2169,11 @@ for later capsules and datagrams.
 and server, demonstrating the runtime `sendTextSlices` API while keeping the
 existing permessage-deflate negotiation. `docs/usage.md` names the HTTP/3
 `sendStreamSlices` and HTTP/2 `sendStreamSlicesWith{Timeout,Deadline}` forms
-and their staging difference.
+and their staging difference. `run-webtransport-h2-capsule-echo` drives the
+draft-15 HTTP/2 capsule path end to end: a virtual stream sent from slices is
+echoed by the server, then both sides drain and close the session.
 
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | WebSocket slice echo | `hello websocket` / `echo from netz websocket` | live `zig build run-websocket-echo` |
+| HTTP/2 WebTransport capsule echo | `WebTransport H2 echo: echo: hello h2` | live `zig build run-webtransport-h2-capsule-echo` |

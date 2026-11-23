@@ -320,8 +320,10 @@ server address is already resolved (the address-based form shown in
 - HTTP/2 capsule WebTransport is available under `webtransport.h2`; see
   [webtransport_http2_capsules.md](webtransport_http2_capsules.md).
 
-Runnable: `zig build run-webtransport-handshake-stream` (streams) and
-`zig build run-webtransport-datagram-echo` (unreliable DATAGRAMs).
+Runnable: `zig build run-webtransport-handshake-stream` (streams),
+`zig build run-webtransport-datagram-echo` (unreliable DATAGRAMs), and
+`zig build run-webtransport-h2-capsule-echo` (HTTP/2 capsule streams with
+slice sends).
 
 ## 8. QUIC directly
 
