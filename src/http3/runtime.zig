@@ -909,6 +909,9 @@ pub const validateBodyWrite = client_runtime.validateBodyWrite;
 pub const bodyPartsLength = client_runtime.bodyPartsLength;
 
 pub const HandshakeServerOptions = struct {
+    /// Native QUIC/TLS options. `handshake.alpn_protocol` must be an HTTP/3
+    /// identifier (`h3` or `h3-NN`); `HandshakeServer.bind` rejects other
+    /// values with `error.InvalidAlpn` before binding.
     handshake: quic.handshake.ServerOptions,
     session: HandshakeSessionOptions = .{},
     /// Maximum time `serveConnection` keeps the sole connection pump alive
@@ -2551,8 +2554,10 @@ fn requestEventAlreadyReturned(
 pub const HandshakeClientOptions = struct {
     /// Native QUIC/TLS handshake options. URI-level facades (unified HTTP,
     /// WebSocket over H3, WebTransport `EndpointClient`) install platform
-    /// roots when no trust material is set; direct-address and session
-    /// helpers require explicit configuration.
+    /// roots when no trust material is set; the low-level
+    /// `HandshakeClient.connectUri*`/`requestUri*` helpers, direct-address
+    /// connects and session helpers require explicit configuration. An
+    /// established ALPN that is not HTTP/3 is rejected after the handshake.
     handshake: quic.handshake.ClientOptions,
     session: HandshakeSessionOptions = .{},
     /// Absolute budget for the complete QUIC/TLS connection. URI entry points
