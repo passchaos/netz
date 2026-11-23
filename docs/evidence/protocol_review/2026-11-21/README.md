@@ -2297,3 +2297,19 @@ any negotiated protocol other than `http/1.1`, matching
 | ALPN-filtered HTTP suite | 103/103 | live `zig build test-http -Dtest-filter='ALPN' --summary all` |
 | H1 TLS-filtered suite | passed | live `zig build test-http -Dtest-filter='TLS'` |
 | One-port ALPN example | `ALPN http2 200: hello over HTTP/2 ALPN` and `ALPN http1 200: hello over HTTP/1.1 ALPN` | live `zig build run-http-alpn-server` |
+
+
+## Hundred-and-thirteenth pass: mutual TLS example
+
+The HTTP example set covered pinned server trust but not client
+authentication. `examples/http/mutual_tls.zig` now mirrors `reqwest`'s
+`Identity` and `curl --cert --key`: the HTTP/1.1 TLS listener sets
+`.client_auth = .{ .verifier = ... }`, the unified client supplies
+`.tls.client_identity`, and the handler reads the authenticated chain from
+`Connection.peerCertificates()` before responding. Both sides use the
+deterministic test key so the example runs without files; the docs note that
+production deployments use distinct identities.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Mutual TLS example | `mTLS http1 200: hello from mutual TLS (peer certs=1)` | live `zig build run-http-mutual-tls` |

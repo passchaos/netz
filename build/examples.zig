@@ -99,6 +99,12 @@ pub const specs = [_]Spec{
         .description = "Serve HTTP/2 and HTTP/1.1 on one TLS port via ALPN",
     },
     .{
+        .exe_name = "netz-http-mutual-tls",
+        .path = "examples/http/mutual_tls.zig",
+        .run_step = "run-http-mutual-tls",
+        .description = "Require and present a client certificate over HTTPS",
+    },
+    .{
         .exe_name = "netz-http-h3-prefer",
         .path = "examples/http/h3_prefer.zig",
         .run_step = "run-http-h3-prefer",

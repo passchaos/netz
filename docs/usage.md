@@ -232,6 +232,10 @@ context-owned storage). See `zig build run-http-server-serve-until`.
   the H1 adopter accepts `http/1.1` or a legacy client with no ALPN and fails
   closed on any other protocol. Ownership transfers at entry. See
   `zig build run-http-alpn-server`.
+- Mutual TLS: set `.client_auth = .{ .verifier = ... }` on the server and
+  `.tls.client_identity = .{ .certificate_chain = ..., .signer = ... }` on the
+  client; the handler reads the authenticated chain from
+  `Connection.peerCertificates()`. See `zig build run-http-mutual-tls`.
 - Incremental request and response bodies: `zig build run-http-streaming`.
 - Chunked uploads with trailers: `zig build run-http-chunked`.
 - Concurrent handlers and pull bodies: see [http_streaming.md](http_streaming.md).
