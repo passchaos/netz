@@ -225,6 +225,15 @@ pub const EndpointClient = struct {
     ) ?tls_stream.TranscriptHash {
         return self.state.connection.negotiatedTranscriptHash();
     }
+    /// TLS version of the endpoint's HTTP/2 transport. Cleartext returns null.
+    pub fn negotiatedTlsProtocol(
+        self: EndpointClient,
+    ) ?tls_stream.Protocol {
+        return self.state.connection.negotiatedTlsProtocol();
+    }
+    pub fn wasTlsSessionResumed(self: EndpointClient) ?bool {
+        return self.state.connection.wasTlsSessionResumed();
+    }
     /// Start a TLS 1.3 traffic-key update on the endpoint's HTTP/2
     /// connection. The rotation is connection-wide and therefore shared by
     /// every multiplexed session; cleartext transports return

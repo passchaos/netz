@@ -388,9 +388,11 @@ server address is already resolved (the address-based form shown in
   servers, and pending requests expose `peerCertificates()`,
   `negotiatedAlpn()`, `negotiatedCipherSuite()` and
   `negotiatedTranscriptHash()`; sessions also expose `applicationProtocol()`.
-  HTTP/3 handshake sessions and endpoint clients expose the same TLS metadata.
-  Cleartext returns null. Endpoint accessors read handshake-fixed values
-  directly and must not race with endpoint shutdown.
+  HTTP/3 handshake sessions and endpoint clients expose the same TLS metadata
+  plus `wasTlsSessionResumed()` and `earlyDataStatus()`; HTTP/2 facades add
+  `negotiatedTlsProtocol()` and `wasTlsSessionResumed()`. Cleartext returns
+  null. Endpoint accessors read handshake-fixed values directly and must not
+  race with endpoint shutdown.
 - Streams: `openBidirectionalStream`/`openUnidirectionalStream`,
   `sendStream`/`writeStream`, `receiveStream`, `resetStream`,
   `stopSending`, `finishStream`.

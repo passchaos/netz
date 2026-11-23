@@ -3253,3 +3253,18 @@ reporting and preconfigured-session 0-RTT defaults.
 | --- | --- | --- |
 | Full WebSocket suite (Debug) | 526/527 (1 skipped) | live `zig build test-websocket --summary all` |
 | Package surface (Debug) | 28/28 | live `zig build test-package --summary all` |
+
+## Hundred-and-seventy-seventh pass: WebTransport resumption metadata parity
+
+WebTransport facades now expose connection resumption state alongside the
+existing certificate/ALPN/cipher metadata. HTTP/3 handshake client and server
+sessions and endpoints add `wasTlsSessionResumed()` and `earlyDataStatus()`;
+HTTP/2 sessions and endpoints add `negotiatedTlsProtocol()` and
+`wasTlsSessionResumed()`. The values describe the shared transport, not an
+individual virtual stream. TLS loopback tests assert TLS 1.3 reporting, a
+non-null resumption flag and `.not_offered` for fresh sessions.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| WebTransport suite (Debug) | 761/763 (2 skipped) | live `zig build test-webtransport --summary all` |
+| Package surface (Debug) | 28/28 | live `zig build test-package --summary all` |

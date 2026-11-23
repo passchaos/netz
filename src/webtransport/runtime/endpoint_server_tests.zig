@@ -3,6 +3,7 @@ const http3 = @import("../../http3/mod.zig");
 const runtime = @import("../runtime.zig");
 const webtransport = @import("../mod.zig");
 const quic = @import("../../quic/mod.zig");
+const tls_stream = @import("../../tls/mod.zig").stream;
 const tls_testing = @import("../../tls/testing.zig");
 
 const net = std.Io.net;
@@ -265,6 +266,12 @@ test "WebTransport endpoint accepted session forwards authenticated metadata" {
                 @TypeOf(client.negotiatedTranscriptHash()).sha256,
                 client.negotiatedTranscriptHash(),
             );
+            try std.testing.expectEqual(
+                tls_stream.Protocol.tls13,
+                client.negotiatedTlsProtocol().?,
+            );
+            try std.testing.expectEqual(false, client.wasTlsSessionResumed().?);
+            try std.testing.expectEqual(.not_offered, client.earlyDataStatus());
             const server_chain = client.peerCertificates() orelse
                 return error.TestUnexpectedResult;
             try std.testing.expectEqual(@as(usize, 1), server_chain.len);
@@ -394,6 +401,12 @@ test "WebTransport endpoint accepted session forwards authenticated metadata" {
         @TypeOf(session.negotiatedTranscriptHash()).sha256,
         session.negotiatedTranscriptHash(),
     );
+    try std.testing.expectEqual(
+        tls_stream.Protocol.tls13,
+        session.negotiatedTlsProtocol().?,
+    );
+    try std.testing.expectEqual(false, session.wasTlsSessionResumed().?);
+    try std.testing.expectEqual(.not_offered, session.earlyDataStatus());
     try std.testing.expectEqual(
         @as(?[]const []const u8, null),
         session.peerCertificates(),

@@ -4,6 +4,7 @@ const std = @import("std");
 const webtransport = @import("../mod.zig");
 const http3 = @import("../../http3/mod.zig");
 const quic = @import("../../quic/mod.zig");
+const tls_stream = @import("../../tls/mod.zig").stream;
 const net = std.Io.net;
 const runtime = @import("../runtime.zig");
 
@@ -864,6 +865,26 @@ pub const HandshakeClientSession = struct {
         self: HandshakeClientSession,
     ) quic.tls.secret.Hash {
         return self.h3.negotiatedTranscriptHash();
+    }
+
+    /// QUIC mandates TLS 1.3; the optional shape matches the other transports.
+    pub fn negotiatedTlsProtocol(
+        self: HandshakeClientSession,
+    ) ?tls_stream.Protocol {
+        _ = self;
+        return .tls13;
+    }
+
+    pub fn wasTlsSessionResumed(self: HandshakeClientSession) ?bool {
+        return self.h3.established.resumed;
+    }
+
+    /// Whether the peer accepted, rejected or did not receive a 0-RTT offer
+    /// on the underlying QUIC connection.
+    pub fn earlyDataStatus(
+        self: HandshakeClientSession,
+    ) @TypeOf(self.h3.established.early_data_status) {
+        return self.h3.established.early_data_status;
     }
 
     pub fn initiateKeyUpdate(self: *HandshakeClientSession) Error!void {

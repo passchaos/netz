@@ -1,6 +1,7 @@
 const std = @import("std");
 const http2 = @import("../../../http2/mod.zig");
 const tls = @import("../../../tls/testing.zig");
+const tls_stream = @import("../../../tls/mod.zig").stream;
 const h2 = @import("../mod.zig");
 const listener_mod = @import("../endpoint_listener.zig");
 
@@ -147,6 +148,11 @@ test "WebTransport HTTP2 EndpointListener isolates a slow TLS handshake" {
     try std.testing.expectEqualStrings("h2", session.negotiatedAlpn().?);
     try std.testing.expect(session.peerCertificates() != null);
     try std.testing.expect(session.negotiatedTranscriptHash() != null);
+    try std.testing.expectEqual(
+        tls_stream.Protocol.tls13,
+        session.negotiatedTlsProtocol().?,
+    );
+    try std.testing.expect(session.wasTlsSessionResumed() != null);
     try std.testing.expectEqual(@as(u64, 0), session.localKeyUpdateCount());
     try std.testing.expectEqual(@as(u64, 0), session.peerKeyUpdateCount());
     try session.initiateKeyUpdate();

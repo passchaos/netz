@@ -3,6 +3,7 @@ const runtime = @import("../runtime.zig");
 const webtransport = @import("../mod.zig");
 const http3 = @import("../../http3/mod.zig");
 const quic = @import("../../quic/mod.zig");
+const tls_stream = @import("../../tls/mod.zig").stream;
 
 const net = std.Io.net;
 
@@ -212,6 +213,12 @@ test "WebTransport endpoint client multiplexes two authenticated Sessions" {
                 @TypeOf(client.negotiatedTranscriptHash()).sha256,
                 client.negotiatedTranscriptHash(),
             );
+            try std.testing.expectEqual(
+                tls_stream.Protocol.tls13,
+                client.negotiatedTlsProtocol().?,
+            );
+            try std.testing.expectEqual(false, client.wasTlsSessionResumed().?);
+            try std.testing.expectEqual(.not_offered, client.earlyDataStatus());
             var exporter: [32]u8 = undefined;
             try client.exportKeyingMaterial(
                 "EXPORTER-netz-endpoint-client",

@@ -8,6 +8,7 @@ const std = @import("std");
 const webtransport = @import("../mod.zig");
 const http3 = @import("../../http3/mod.zig");
 const quic = @import("../../quic/mod.zig");
+const tls_stream = @import("../../tls/mod.zig").stream;
 const client_trust = @import("../../quic/client_trust.zig");
 const deadline_policy = @import("../../internal/deadline.zig");
 const round_robin = @import("../../internal/round_robin.zig");
@@ -845,6 +846,24 @@ pub const Client = struct {
         self: Client,
     ) quic.tls.secret.Hash {
         return self.h3.negotiatedTranscriptHash();
+    }
+
+    /// QUIC mandates TLS 1.3; the optional shape matches the other transports.
+    pub fn negotiatedTlsProtocol(self: Client) ?tls_stream.Protocol {
+        _ = self;
+        return .tls13;
+    }
+
+    pub fn wasTlsSessionResumed(self: Client) ?bool {
+        return self.h3.established.resumed;
+    }
+
+    /// Whether the peer accepted, rejected or did not receive a 0-RTT offer
+    /// on the endpoint connection.
+    pub fn earlyDataStatus(
+        self: Client,
+    ) @TypeOf(self.h3.established.early_data_status) {
+        return self.h3.established.early_data_status;
     }
 
     pub fn initiateKeyUpdate(self: *Client) Error!void {

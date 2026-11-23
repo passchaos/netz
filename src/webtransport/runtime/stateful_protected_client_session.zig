@@ -4,6 +4,7 @@ const std = @import("std");
 const webtransport = @import("../mod.zig");
 const http3 = @import("../../http3/mod.zig");
 const quic = @import("../../quic/mod.zig");
+const tls_stream = @import("../../tls/mod.zig").stream;
 const net = std.Io.net;
 const runtime = @import("../runtime.zig");
 
@@ -237,6 +238,24 @@ pub const StatefulProtectedClientSession = struct {
         self: StatefulProtectedClientSession,
     ) quic.tls.secret.Hash {
         return self.session.negotiatedTranscriptHash();
+    }
+
+    pub fn negotiatedTlsProtocol(
+        self: StatefulProtectedClientSession,
+    ) ?tls_stream.Protocol {
+        return self.session.negotiatedTlsProtocol();
+    }
+
+    pub fn wasTlsSessionResumed(
+        self: StatefulProtectedClientSession,
+    ) ?bool {
+        return self.session.wasTlsSessionResumed();
+    }
+
+    pub fn earlyDataStatus(
+        self: StatefulProtectedClientSession,
+    ) @TypeOf(self.session.earlyDataStatus()) {
+        return self.session.earlyDataStatus();
     }
 
     pub fn initiateKeyUpdate(

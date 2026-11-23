@@ -132,6 +132,15 @@ pub const Session = struct {
     ) ?tls_stream.TranscriptHash {
         return self.connection().negotiatedTranscriptHash();
     }
+    /// TLS version of the underlying HTTP/2 transport. Cleartext returns null.
+    pub fn negotiatedTlsProtocol(
+        self: *const Session,
+    ) ?tls_stream.Protocol {
+        return self.connection().negotiatedTlsProtocol();
+    }
+    pub fn wasTlsSessionResumed(self: *const Session) ?bool {
+        return self.connection().wasTlsSessionResumed();
+    }
     /// Start a TLS 1.3 traffic-key update on the shared HTTP/2 connection.
     /// The rotation is connection-wide, not scoped to this virtual stream;
     /// cleartext transports return `error.PostHandshakeTlsUnavailable`.

@@ -1,6 +1,7 @@
 const std = @import("std");
 const http2 = @import("../../../http2/mod.zig");
 const tls = @import("../../../tls/testing.zig");
+const tls_stream = @import("../../../tls/mod.zig").stream;
 const h2 = @import("../mod.zig");
 const endpoint = @import("../endpoint_server.zig");
 const allocator = std.testing.allocator;
@@ -55,6 +56,11 @@ test "WebTransport HTTP2 EndpointServer owns admission Sessions and capacity" {
             var faults = @import("../endpoint_client/testing/drop_faults.zig").Faults{ .caller = std.Thread.getCurrentId(), .base = self.listener.io };
             var server = try endpoint.EndpointServer.acceptTlsConnectionWithTimeout(faults.allocator(), self.listener, .{ .max_sessions = 2, .max_pending_sessions = 2 }, .fromSeconds(3));
             defer server.deinit();
+            try std.testing.expectEqual(
+                tls_stream.Protocol.tls13,
+                server.negotiatedTlsProtocol().?,
+            );
+            try std.testing.expect(server.wasTlsSessionResumed() != null);
             try std.testing.expectEqual(@as(u64, 0), server.localKeyUpdateCount());
             try std.testing.expectEqual(@as(u64, 0), server.peerKeyUpdateCount());
             try server.initiateKeyUpdate();

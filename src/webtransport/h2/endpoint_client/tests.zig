@@ -1,6 +1,7 @@
 const std = @import("std");
 const http2 = @import("../../../http2/mod.zig");
 const tls = @import("../../../tls/testing.zig");
+const tls_stream = @import("../../../tls/mod.zig").stream;
 const capsule = @import("../capsule.zig");
 const endpoint = @import("../endpoint_client.zig");
 const runtime = @import("../runtime.zig");
@@ -187,6 +188,11 @@ test "WebTransport HTTP2 EndpointClient owns multiplexed Sessions and stable han
     try std.testing.expectEqualStrings("h2", client.negotiatedAlpn().?);
     try std.testing.expect(client.peerCertificates() != null);
     try std.testing.expect(client.negotiatedTranscriptHash() != null);
+    try std.testing.expectEqual(
+        tls_stream.Protocol.tls13,
+        client.negotiatedTlsProtocol().?,
+    );
+    try std.testing.expect(client.wasTlsSessionResumed() != null);
     try std.testing.expectEqual(@as(u64, 0), client.localKeyUpdateCount());
     try std.testing.expectEqual(@as(u64, 0), client.peerKeyUpdateCount());
     try client.initiateKeyUpdate();
