@@ -842,6 +842,85 @@ test "WebSocket runtime negotiates subprotocol" {
     if (shared.err) |err| return err;
 }
 
+test "WebSocket server enforces the Origin allowlist before 101" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 4096, .max_frame_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            try std.testing.expectError(
+                error.InvalidOrigin,
+                server_ptr.receiveUpgradeRequest(.{
+                    .allowed_origins = &.{"https://allowed.test"},
+                }),
+            );
+
+            var pending = try server_ptr.receiveUpgradeRequest(.{
+                .allowed_origins = &.{"https://allowed.test"},
+            });
+            var connection = try pending.acceptWithHeaders(&.{});
+            defer connection.close();
+            var frame = try connection.receiveFrame();
+            defer frame.deinit(server_ptr.http.allocator);
+            try std.testing.expectEqualStrings("hello", frame.payload);
+            try connection.sendText("world");
+            var close = try connection.receiveFrame();
+            defer close.deinit(server_ptr.http.allocator);
+            try std.testing.expectEqual(websocket.Opcode.close, close.header.opcode);
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    // A different Origin is rejected before the 101 response.
+    if (Client.connect(allocator, io, server.address(), .{
+        .host = "127.0.0.1",
+        .target = "/denied",
+        .origin = "https://denied.test",
+        .limits = .{ .max_head_bytes = 4096, .max_frame_bytes = 4096 },
+    })) |client_value| {
+        var denied = client_value;
+        denied.close();
+        return error.ExpectedOriginRejection;
+    } else |_| {}
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .host = "127.0.0.1",
+        .target = "/allowed",
+        .origin = "https://allowed.test",
+        .limits = .{ .max_head_bytes = 4096, .max_frame_bytes = 4096 },
+    });
+    defer client.close();
+    try client.sendText("hello");
+    var response = try client.receiveFrame();
+    defer response.deinit(allocator);
+    try std.testing.expectEqualStrings("world", response.payload);
+    try client.sendClose(.normal_closure, "bye");
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
 test "WebSocket client connects by host name" {
     const allocator = std.testing.allocator;
 

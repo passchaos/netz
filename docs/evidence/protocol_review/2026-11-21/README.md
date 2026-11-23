@@ -2534,3 +2534,18 @@ server owner. The H2 capsule guide documents the shared metadata surface.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | Full WebTransport suite (Debug) | 761/763 (2 skipped) | live `zig build test-webtransport --summary all` |
+
+
+## Hundred-and-twenty-eighth pass: HTTP/1 WebSocket Origin allowlist coverage
+
+`AcceptOptions.allowed_origins` was exercised for RFC 8441/H3 and in unit
+tests, but not end-to-end on the HTTP/1 Upgrade server. A new test connects
+with a denied Origin, asserts the server returns `error.InvalidOrigin` before
+any 101 response, then completes a normal exchange with an allowed Origin over
+the same listener. `docs/usage.md` now documents the opening-handshake
+authentication surface (Origin, subprotocols, extra headers, pre-upgrade
+credential checks and redirect stripping).
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full WebSocket suite (Debug) | 522/523 (1 skipped) | live `zig build test-websocket --summary all` |
