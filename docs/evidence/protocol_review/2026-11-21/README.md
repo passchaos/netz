@@ -2245,3 +2245,16 @@ contiguous path. The reconnecting filter compiles and passes 133/133.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | Reconnecting H2 client tests | 133/133 | live `zig build test-webtransport -Dtest-filter='reconnecting'` |
+
+
+## Hundred-and-eleventh pass: H2 endpoint listener slice forwarding
+
+`webtransport.h2.EndpointListener` forwarded contiguous stream sends but not
+the slice forms. It now exposes `sendStreamSlicesWithDeadline` and
+`sendStreamSlicesWithTimeout`, acquiring the connection, releasing it after the
+call, and forwarding to `EndpointServer.sendStreamSlicesWithDeadline`. The
+EndpointListener filter passes 137/137.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| H2 EndpointListener tests | 137/137 | live `zig build test-webtransport -Dtest-filter='EndpointListener'` |

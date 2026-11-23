@@ -293,6 +293,15 @@ pub const EndpointListener = struct {
         if (timeout.nanoseconds <= 0) return error.Timeout;
         return self.sendStreamWithDeadline(handle, id, data, fin, .fromNow(self.state.io, .{ .raw = timeout, .clock = .awake }));
     }
+    pub fn sendStreamSlicesWithDeadline(self: EndpointListener, handle: Handle, id: u62, slices: []const []const u8, fin: bool, deadline: std.Io.Clock.Timestamp) Error!void {
+        const connection = try self.acquire(handle, deadline);
+        defer connection.release();
+        return connection.server.sendStreamSlicesWithDeadline(handle.session, id, slices, fin, deadline);
+    }
+    pub fn sendStreamSlicesWithTimeout(self: EndpointListener, handle: Handle, id: u62, slices: []const []const u8, fin: bool, timeout: std.Io.Duration) Error!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendStreamSlicesWithDeadline(handle, id, slices, fin, .fromNow(self.state.io, .{ .raw = timeout, .clock = .awake }));
+    }
     pub fn consumeWithDeadline(self: EndpointListener, handle: Handle, id: u62, bytes: u64, deadline: std.Io.Clock.Timestamp) Error!void {
         const connection = try self.acquire(handle, deadline);
         defer connection.release();
