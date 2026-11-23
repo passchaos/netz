@@ -132,6 +132,24 @@ pub const Session = struct {
     ) ?tls_stream.TranscriptHash {
         return self.connection().negotiatedTranscriptHash();
     }
+    /// Start a TLS 1.3 traffic-key update on the shared HTTP/2 connection.
+    /// The rotation is connection-wide, not scoped to this virtual stream;
+    /// cleartext transports return `error.PostHandshakeTlsUnavailable`.
+    pub fn initiateKeyUpdate(self: *Session) Error!void {
+        try self.connection().updateTrafficKeys(false);
+    }
+    /// Locally initiated TLS 1.3 key updates on the underlying connection.
+    /// Cleartext transports report 0.
+    pub fn localKeyUpdateCount(self: *const Session) u64 {
+        const counts = self.connection().keyUpdateCounts() orelse return 0;
+        return counts.sent;
+    }
+    /// Peer-initiated TLS 1.3 key updates observed on the underlying
+    /// connection. Cleartext transports report 0.
+    pub fn peerKeyUpdateCount(self: *const Session) u64 {
+        const counts = self.connection().keyUpdateCounts() orelse return 0;
+        return counts.received;
+    }
     fn connection(self: *const Session) *http2.runtime.Connection {
         if (self.duplex) |*duplex| return duplex.connection;
         if (self.server_duplex) |*duplex| return duplex.connection;

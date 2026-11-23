@@ -187,6 +187,11 @@ test "WebTransport HTTP2 EndpointClient owns multiplexed Sessions and stable han
     try std.testing.expectEqualStrings("h2", client.negotiatedAlpn().?);
     try std.testing.expect(client.peerCertificates() != null);
     try std.testing.expect(client.negotiatedTranscriptHash() != null);
+    try std.testing.expectEqual(@as(u64, 0), client.localKeyUpdateCount());
+    try std.testing.expectEqual(@as(u64, 0), client.peerKeyUpdateCount());
+    try client.initiateKeyUpdate();
+    try std.testing.expectEqual(@as(u64, 1), client.localKeyUpdateCount());
+    try std.testing.expectEqual(@as(u64, 0), client.peerKeyUpdateCount());
 
     var rejected = try client.connectAttemptWithTimeout(.{ .path = "/reject", .authority = "localhost" }, .fromSeconds(3));
     defer rejected.deinit();

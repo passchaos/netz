@@ -3211,3 +3211,18 @@ platform-gated ones recorded inside their own suites.
 | HTTP/3 suite (Debug) | 928/932 (4 skipped) | live `zig build test-http3 --summary all` |
 | QUIC trust filter (Debug) | 38/38 | live `zig build test-quic -Dtest-filter='trust' --summary all` |
 | Package surface (Debug) | 28/28 | live `zig build test-package --summary all` |
+
+## Hundred-and-seventy-fourth pass: WebTransport HTTP/2 key-update parity
+
+HTTP/2 WebTransport sessions and endpoints now expose the same
+`initiateKeyUpdate`/`localKeyUpdateCount`/`peerKeyUpdateCount` surface as
+HTTP/3. The rotation is connection-wide and shared by multiplexed sessions;
+cleartext reports zero counters and `initiateKeyUpdate` returns
+`error.PostHandshakeTlsUnavailable`. TLS loopback tests on the Session,
+EndpointClient and EndpointServer paths initiate one update and observe the
+local counter.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| WebTransport suite (Debug) | 761/763 (2 skipped) | live `zig build test-webtransport --summary all` |
+| Package surface (Debug) | 28/28 | live `zig build test-package --summary all` |

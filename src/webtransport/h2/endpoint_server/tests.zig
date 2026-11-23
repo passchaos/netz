@@ -55,6 +55,11 @@ test "WebTransport HTTP2 EndpointServer owns admission Sessions and capacity" {
             var faults = @import("../endpoint_client/testing/drop_faults.zig").Faults{ .caller = std.Thread.getCurrentId(), .base = self.listener.io };
             var server = try endpoint.EndpointServer.acceptTlsConnectionWithTimeout(faults.allocator(), self.listener, .{ .max_sessions = 2, .max_pending_sessions = 2 }, .fromSeconds(3));
             defer server.deinit();
+            try std.testing.expectEqual(@as(u64, 0), server.localKeyUpdateCount());
+            try std.testing.expectEqual(@as(u64, 0), server.peerKeyUpdateCount());
+            try server.initiateKeyUpdate();
+            try std.testing.expectEqual(@as(u64, 1), server.localKeyUpdateCount());
+            try std.testing.expectEqual(@as(u64, 0), server.peerKeyUpdateCount());
 
             var rejected = try acceptRequest(server, "/reject");
             var rejected_owned = true;

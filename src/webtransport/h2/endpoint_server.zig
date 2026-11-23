@@ -328,6 +328,25 @@ pub const EndpointServer = struct {
     ) ?tls_stream.TranscriptHash {
         return self.state.connection.negotiatedTranscriptHash();
     }
+    /// Start a TLS 1.3 traffic-key update on the endpoint's HTTP/2
+    /// connection. The rotation is connection-wide and therefore shared by
+    /// every multiplexed session; cleartext transports return
+    /// `error.PostHandshakeTlsUnavailable`.
+    pub fn initiateKeyUpdate(self: *EndpointServer) Error!void {
+        try self.state.connection.updateTrafficKeys(false);
+    }
+    /// Locally initiated TLS 1.3 key updates on the endpoint connection.
+    /// Cleartext transports report 0.
+    pub fn localKeyUpdateCount(self: *const EndpointServer) u64 {
+        const counts = self.state.connection.keyUpdateCounts() orelse return 0;
+        return counts.sent;
+    }
+    /// Peer-initiated TLS 1.3 key updates observed on the endpoint
+    /// connection. Cleartext transports report 0.
+    pub fn peerKeyUpdateCount(self: *const EndpointServer) u64 {
+        const counts = self.state.connection.keyUpdateCounts() orelse return 0;
+        return counts.received;
+    }
 
     /// Takes ownership of an already negotiated server HTTP/2 connection.
     pub fn init(allocator: std.mem.Allocator, connection_value: http2.runtime.Connection, options: Options) Error!EndpointServer {
