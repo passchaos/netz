@@ -2869,3 +2869,18 @@ pass 146.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | Documentation audit | bullet matches the `applyPlatformRootDefault` call sites | code inspection of `endpoint_client.zig` and `handshake_client_session.zig` |
+
+
+## Hundred-and-forty-ninth pass: HTTP/1 streaming-body baseline
+
+`bench-http1-body` (1-MiB body, 16-KiB chunks, 20 warmup + 100 iterations,
+ReleaseFast, loopback):
+
+| Mode | ns/round-trip | aggregate MiB/s |
+| --- | --- | --- |
+| fixed | 1,619,407 | 1,235 |
+| chunked | 1,926,780 | 1,038 |
+
+Fixed-length framing is ~19% faster than chunked framing at this size; both
+exceed 1 GiB/s aggregate on loopback. Baseline only; no code change is
+warranted from a single run.
