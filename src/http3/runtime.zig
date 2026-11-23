@@ -921,6 +921,20 @@ pub const HandshakeServerOptions = struct {
     /// packet without allowing graceful shutdown itself to block forever.
     serve_connection_recovery_drain_timeout: std.Io.Duration =
         .fromSeconds(5),
+
+    /// Native QUIC/TLS handshake options. Flat accessor for `handshake`.
+    pub fn nativeHandshake(
+        self: *HandshakeServerOptions,
+    ) *quic.handshake.ServerOptions {
+        return &self.handshake;
+    }
+
+    /// HTTP/3 session and 1-RTT limits. Flat accessor for `session`.
+    pub fn sessionOptions(
+        self: *HandshakeServerOptions,
+    ) *HandshakeSessionOptions {
+        return &self.session;
+    }
 };
 
 pub const HandshakeAdmissionOptions = struct {
@@ -2583,6 +2597,20 @@ pub const HandshakeClientOptions = struct {
     /// redirects, Alt-Svc routes, and pools. Literal IP route hosts bypass it;
     /// QUIC/TLS authentication remains bound to the URI origin.
     address_resolver: ?AddressResolver = null,
+
+    /// Native QUIC/TLS handshake options. Flat accessor for `handshake`.
+    pub fn nativeHandshake(
+        self: *HandshakeClientOptions,
+    ) *quic.handshake.ClientOptions {
+        return &self.handshake;
+    }
+
+    /// HTTP/3 session and 1-RTT limits. Flat accessor for `session`.
+    pub fn sessionOptions(
+        self: *HandshakeClientOptions,
+    ) *HandshakeSessionOptions {
+        return &self.session;
+    }
 };
 
 pub const HandshakeServer = struct {

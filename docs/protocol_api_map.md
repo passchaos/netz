@@ -149,7 +149,7 @@ automatically.
 
 | Item | Current state |
 | --- | --- |
-| H3 options nesting | `http3.handshake.handshake` still stores the native QUIC/TLS options, but `nativeHandshake()`/`sessionOptions()` provide flat mutable access. |
+| H3 options nesting | `http3.handshake.handshake` still stores the native QUIC/TLS options, but `nativeHandshake()`/`sessionOptions()` provide flat mutable access on both the unified HTTP and raw H3 option structs. |
 | WebSocket byte-stream deadlines | Optional transport callbacks enable bounded receive/send/close and relative-timeout forms; two-slice writes avoid payload copies for unmasked server frames. Runtime connections additionally expose arbitrary-slice `sendTextSlices*`/`sendMessageSlices*` forms. Without deadline callbacks the bounded forms report `DeadlineUnsupported`. |
 | WebSocket send-only close | HTTP/1, HTTP/2 and HTTP/3 expose `sendClose` without waiting for the peer. HTTP/3 additionally completes the handshake through `closeWithTimeout`, which surfaces in-flight application frames as `CloseHandshakeEvent.application` so one call can drain and close. |
 | WebSocket frame reception | HTTP/1 and HTTP/2 distinguish `receiveFrame` (returns control frames) from `receiveFrameAuto` (services Pong/Close replies). HTTP/3 always services automatic replies; its `receiveFrameAuto*` forms alias the plain forms so generic call sites stay source-compatible. |

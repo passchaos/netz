@@ -2886,3 +2886,22 @@ test "HTTP/3 response honors HEAD and CONNECT request semantics" {
     defer extended.deinit(allocator);
     try std.testing.expectEqualStrings("extended-data", extended.body);
 }
+
+test "H3 handshake options expose flat native and session accessors" {
+    var client: http3_root.runtime.HandshakeClientOptions = .{
+        .handshake = .{
+            .original_destination_connection_id = &.{},
+            .local_connection_id = &.{},
+        },
+    };
+    client.nativeHandshake().max_crypto_buffer = 4096;
+    client.sessionOptions().max_body_bytes = 4096;
+    try std.testing.expectEqual(
+        @as(usize, 4096),
+        client.handshake.max_crypto_buffer,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 4096),
+        client.session.max_body_bytes,
+    );
+}

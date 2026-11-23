@@ -3413,3 +3413,16 @@ non-null resumption flag on the pending request before acceptance.
 | --- | --- | --- |
 | WebTransport suite (Debug) | 761/763 (2 skipped) | live `zig build test-webtransport --summary all` |
 | Package surface (Debug) | 28/28 | live `zig build test-package --summary all` |
+
+## Hundred-and-eighty-ninth pass: flat H3 handshake option accessors
+
+`HandshakeClientOptions` and `HandshakeServerOptions` now provide
+`nativeHandshake()` and `sessionOptions()` flat mutable accessors, matching
+the unified HTTP H3 options and removing the remaining raw-runtime nesting
+ergonomics gap. A focused test mutates the native CRYPTO bound and session
+body budget through the accessors and observes the nested fields.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| HTTP/3 suite (Debug) | 929/933 (4 skipped) | live `zig build test-http3 --summary all` |
+| Package surface (Debug) | 28/28 | live `zig build test-package --summary all` |
