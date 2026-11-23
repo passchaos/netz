@@ -3018,3 +3018,18 @@ server aborts only that extended-CONNECT stream.
 | --- | --- | --- |
 | Full WebSocket suite (Debug) | 523/524 (1 skipped) | live `zig build test-websocket --summary all` |
 | Origin filter | 43/43 | live `zig build test-websocket -Dtest-filter='rejects a denied Origin' --summary all` |
+
+
+## Hundred-and-sixtieth pass: RFC 9220 Origin allowlist coverage
+
+The H3 WebSocket admission path validated `allowed_origins` but only positive
+cases were tested. A new QUIC/TLS test sends a denied Origin through an RFC
+9220 extended CONNECT, asserts the server returns `error.InvalidOrigin`
+before acceptance, and verifies the client receives no connection. Together
+with the H1, RFC 8441 and WebTransport H2 cases, all WebSocket transports now
+have an end-to-end Origin rejection test.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full WebSocket suite (Debug) | 524/525 (1 skipped) | live `zig build test-websocket --summary all` |
+| Origin filter | 95/95 | live `zig build test-websocket -Dtest-filter='rejects a denied Origin' --summary all` |

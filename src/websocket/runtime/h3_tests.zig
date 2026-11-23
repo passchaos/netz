@@ -5455,3 +5455,88 @@ test "WebSocket HTTP3 fragmented compression has no plaintext join" {
     try std.testing.expectEqual(second.end, third.start);
     try std.testing.expectEqual(@as(usize, 10), third.end);
 }
+
+test "WebSocket HTTP3 rejects a denied Origin before acceptance" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const server_cid = [_]u8{ 0x61, 0x62, 0x63, 0x64 };
+    const limits: http3.runtime.Limits = .{ .quic = .{
+        .max_datagram_size = 4096,
+        .max_frames_per_datagram = 8,
+    } };
+    var server = try h3.Server.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        limits,
+        .{ .handshake = .{
+            .local_connection_id = &server_cid,
+            .random = [_]u8{0x65} ** 32,
+            .x25519_secret_key = [_]u8{0x66} ** 32,
+        } },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *h3.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            try std.testing.expectError(
+                error.InvalidOrigin,
+                self.server.receiveUpgradeRequestWithTimeout(
+                    .{ .allowed_origins = &.{"https://allowed.test"} },
+                    .fromSeconds(3),
+                ),
+            );
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const original_dcid =
+        [_]u8{ 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78 };
+    const client_cid = [_]u8{ 0x81, 0x82, 0x83, 0x84 };
+    if (h3.Client.connectWithTimeout(
+        allocator,
+        io,
+        .{ .ip4 = .unspecified(0) },
+        server.address(),
+        limits,
+        .{ .handshake = .{
+            .original_destination_connection_id = &original_dcid,
+            .local_connection_id = &client_cid,
+            .server_name = "localhost",
+            .random = [_]u8{0x85} ** 32,
+            .x25519_secret_key = [_]u8{0x86} ** 32,
+        } },
+        .{
+            .authority = "localhost",
+            .path = "/origin",
+            .origin = "https://denied.test",
+        },
+        .fromSeconds(3),
+    )) |connection_value| {
+        var connection = connection_value;
+        connection.close();
+        return error.ExpectedOriginRejection;
+    } else |_| {}
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
