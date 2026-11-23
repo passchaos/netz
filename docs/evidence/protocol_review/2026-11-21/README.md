@@ -2562,3 +2562,18 @@ in `http2.runtime.TlsServer`/`TlsClient`.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | RFC 8441 example | `RFC 8441 server received: hello over RFC 8441` and the matching client line | live `zig build run-websocket-h2-echo` |
+
+
+## Hundred-and-thirtieth pass: RFC 8441 pending-upgrade TLS metadata
+
+The HTTP/1 pending upgrade exposed the parsed request plus TLS metadata, but
+`PendingH2Upgrade` only exposed request fields. It now forwards
+`peerCertificates()`, `negotiatedAlpn()`, `negotiatedCipherSuite()` and
+`negotiatedTranscriptHash()` from the parent HTTP/2 connection, so RFC 8441
+servers can authorize the peer before sending the 200 response. The TLS
+transport-end test asserts the `h2` ALPN, transcript hash and anonymous peer
+through the pending surface.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full WebSocket suite (Debug) | 522/523 (1 skipped) | live `zig build test-websocket --summary all` |

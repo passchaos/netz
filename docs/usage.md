@@ -295,9 +295,11 @@ try client.sendClose(.normal_closure, "bye");
   and `.extra_headers` (for example `Authorization`); the server's
   `AcceptOptions` selects `protocols`, optionally requires one with
   `require_subprotocol`, and enforces `allowed_origins` byte-for-byte. The
-  pending upgrade exposes the parsed request so credentials can be checked
-  before `accept()`. Redirects strip cross-origin `extra_headers` and client
-  identities by default.
+  pending upgrade exposes the parsed request and TLS metadata
+  (`peerCertificates()`, `negotiatedAlpn()`, `negotiatedCipherSuite()`,
+  `negotiatedTranscriptHash()`) for both HTTP/1 Upgrade and RFC 8441, so
+  credentials can be checked before `accept()`. Redirects strip cross-origin
+  `extra_headers` and client identities by default.
 
 Runnable: `zig build run-websocket-echo` (cleartext),
 `zig build run-websocket-wss-echo` (WSS with a pinned server key), and

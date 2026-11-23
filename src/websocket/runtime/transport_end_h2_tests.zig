@@ -44,7 +44,20 @@ fn exercise(caller_buffer: bool, tls12: bool, truncated: bool) !void {
         fn serve(self: *@This()) !void {
             var parent = try self.server.acceptWithTimeout(.fromSeconds(3));
             defer parent.close();
-            var connection = try runtime.H2Server.acceptWithTimeout(self.server.allocator, &parent, .{}, .fromSeconds(3));
+            var pending = try runtime.H2Server.receiveUpgradeRequestWithTimeout(
+                self.server.allocator,
+                &parent,
+                .{},
+                .fromSeconds(3),
+            );
+            var pending_owned = true;
+            defer if (pending_owned) pending.deinit();
+            try std.testing.expectEqualStrings("h2", pending.negotiatedAlpn().?);
+            try std.testing.expect(pending.negotiatedTranscriptHash() != null);
+            // The client verifies the server but presents no certificate.
+            try std.testing.expect(pending.peerCertificates() == null);
+            var connection = try pending.acceptWithHeaders(&.{});
+            pending_owned = false;
             defer connection.close();
             try runtime.testing.writeFrame(&connection, .text, "partial", false);
             if (self.truncated) try stream_io.writeAllSlices(parent.io, parent.stream, &.{&.{0x17}});

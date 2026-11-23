@@ -2217,6 +2217,27 @@ pub const PendingH2Upgrade = struct {
         return null;
     }
 
+    /// Authenticated TLS metadata for the HTTP/2 connection carrying this
+    /// extended CONNECT. Cleartext h2c returns null.
+    pub fn peerCertificates(
+        self: *const PendingH2Upgrade,
+    ) ?[]const []const u8 {
+        return self.connection.peerCertificates();
+    }
+    pub fn negotiatedAlpn(self: *const PendingH2Upgrade) ?[]const u8 {
+        return self.connection.negotiatedAlpn();
+    }
+    pub fn negotiatedCipherSuite(
+        self: *const PendingH2Upgrade,
+    ) ?tls_stream.NegotiatedCipherSuite {
+        return self.connection.negotiatedCipherSuite();
+    }
+    pub fn negotiatedTranscriptHash(
+        self: *const PendingH2Upgrade,
+    ) ?tls_stream.TranscriptHash {
+        return self.connection.negotiatedTranscriptHash();
+    }
+
     pub fn accept(self: *PendingH2Upgrade) Error!H2Connection {
         return self.acceptWithHeaders(&.{});
     }
