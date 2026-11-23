@@ -2235,6 +2235,7 @@ series, the three scoped protocol suites were rerun together:
 | Full HTTP suite (Debug) | 310/310 | live `zig build test-http` |
 | Full WebSocket suite (Debug) | 519/520 (1 skipped) | live `zig build test-websocket` |
 | Full WebTransport suite (Debug) | 761/763 (2 skipped) | live `zig build test-webtransport` |
+| QUIC trust unit tests | 38/38 | live `zig build test-quic -Dtest-filter='trust'` |
 
 
 ## Hundred-and-tenth pass: reconnecting H2 client slice forwarding
