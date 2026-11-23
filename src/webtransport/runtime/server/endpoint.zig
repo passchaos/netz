@@ -73,6 +73,10 @@ pub const EndpointPendingSession = struct {
         return application_protocol.offered(self.request.request.headers);
     }
 
+    pub fn sessionId(self: EndpointPendingSession) webtransport.SessionId {
+        return self.session_id;
+    }
+
     /// Authenticated TLS metadata for the connection carrying this pending
     /// CONNECT. Available before acceptance so admission policy can bind to
     /// the client certificate, ALPN and transcript.

@@ -391,10 +391,11 @@ server address is already resolved (the address-based form shown in
   HTTP/3 handshake sessions and endpoint clients expose the same TLS metadata
   plus `wasTlsSessionResumed()` and `earlyDataStatus()`; HTTP/2 facades add
   `negotiatedTlsProtocol()` and `wasTlsSessionResumed()`. Handshake-backed
-  pending admission surfaces expose the same metadata before `accept()`, so
-  client-certificate and transcript policy can reject a session before it
-  becomes visible. Cleartext returns null. Endpoint accessors read
-  handshake-fixed values directly and must not race with endpoint shutdown.
+  pending admission surfaces expose the same metadata plus `sessionId()`
+  before `accept()`, so client-certificate and transcript policy can reject a
+  session before it becomes visible. Cleartext returns null. Endpoint
+  accessors read handshake-fixed values directly and must not race with
+  endpoint shutdown.
 - Streams: `openBidirectionalStream`/`openUnidirectionalStream`,
   `sendStream`/`writeStream`, `receiveStream`, `resetStream`,
   `stopSending`, `finishStream`.

@@ -3311,3 +3311,16 @@ suite does not pull the TLS module's test graph (suite count stays 928/932).
 | --- | --- | --- |
 | HTTP/3 suite (Debug) | 928/932 (4 skipped) | live `zig build test-http3 --summary all` |
 | Package surface (Debug) | 28/28 | live `zig build test-package --summary all` |
+
+## Hundred-and-eighty-first pass: WebTransport pending session IDs
+
+Handshake-backed pending WebTransport admission now exposes `sessionId()` on
+`PendingHandshakeSession` and `EndpointPendingSession`, matching accepted
+sessions for logging and policy correlation. The protocol map also records the
+structural difference between multiplexed HTTP/3 sessions, whose methods take
+the owning endpoint client, and HTTP/2 sessions, which embed their connection.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| WebTransport suite (Debug) | 761/763 (2 skipped) | live `zig build test-webtransport --summary all` |
+| Package surface (Debug) | 28/28 | live `zig build test-package --summary all` |
