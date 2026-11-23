@@ -2675,3 +2675,19 @@ DATAGRAM echo: 20,000 round trips, 42,091 ns/datagram (23,757 datagrams/s).
 The incremental path pays per-call pacing/backpressure overhead; `--send-all`
 measures the continuous-send ceiling. No regression or single obvious runtime
 fix was identified from these numbers, so no code change is warranted.
+
+
+## Hundred-and-thirty-sixth pass: QUIC handshake performance baseline
+
+ReleaseFast QUIC/TLS 1.3 handshake benchmark with pinned P-256 server
+verification (zio-std-io, loopback, 50 iterations):
+
+| Metric | Value |
+| --- | --- |
+| total elapsed | 27.03 ms |
+| connections/s | 1,849.8 |
+| p50 | 409,916 ns |
+| p99 / p99.9 | 1,228,042 ns |
+
+The pinned-verifier handshake path completes sub-millisecond at p50. This is a
+baseline only; no code change is warranted from a single noisy run.
