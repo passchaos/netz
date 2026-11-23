@@ -237,6 +237,17 @@ pub const ReconnectingEndpointClient = struct {
         if (timeout.nanoseconds <= 0) return error.Timeout;
         return self.sendStreamWithDeadline(handle, id, data, fin, .fromNow(self.state.io, .{ .raw = timeout, .clock = .awake }));
     }
+    pub fn sendStreamSlicesWithDeadline(self: ReconnectingEndpointClient, handle: Handle, id: u62, slices: []const []const u8, fin: bool, deadline: std.Io.Clock.Timestamp) Error!void {
+        try self.state.enter(deadline);
+        defer self.state.leave();
+        const value = try self.generation(handle, deadline);
+        defer value.release();
+        return value.client.sendStreamSlicesWithDeadline(handle.session, id, slices, fin, deadline) catch |err| return @errorCast(self.failed(value, err));
+    }
+    pub fn sendStreamSlicesWithTimeout(self: ReconnectingEndpointClient, handle: Handle, id: u62, slices: []const []const u8, fin: bool, timeout: std.Io.Duration) Error!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendStreamSlicesWithDeadline(handle, id, slices, fin, .fromNow(self.state.io, .{ .raw = timeout, .clock = .awake }));
+    }
     pub fn consumeWithDeadline(self: ReconnectingEndpointClient, handle: Handle, id: u62, bytes: u64, deadline: std.Io.Clock.Timestamp) Error!void {
         try self.state.enter(deadline);
         defer self.state.leave();

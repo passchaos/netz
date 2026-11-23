@@ -26,7 +26,7 @@ Scatter/gather message sends:
 | WebSocket stream adapter | `sendText`/`sendBinary` | `sendTextSlices`/`sendBinarySlices` via `write_slices_fn` |
 | WebTransport H3 client/server sessions | `sendStream` | `sendStreamSlices` (borrowed slices) |
 | WebTransport H2 session | `sendStreamWith*` | `sendStreamSlicesWith*` (zero-copy header + slices) |
-| WebTransport H2 endpoint facades | `sendStreamWith*` | `sendStreamSlicesWith*` (staged command buffer) |
+| WebTransport H2 endpoint facades | `sendStreamWith*` | `sendStreamSlicesWith*` (staged command buffer; the reconnecting client forwards the same forms) |
 
 All slice forms have `WithTimeout` and `WithDeadline` counterparts where the
 contiguous form does; borrowed slices must outlive the call, including bounded

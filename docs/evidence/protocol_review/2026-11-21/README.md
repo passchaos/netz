@@ -2232,3 +2232,16 @@ series, the three scoped protocol suites were rerun together:
 | Full HTTP suite (Debug) | 310/310 | live `zig build test-http` |
 | Full WebSocket suite (Debug) | 519/520 (1 skipped) | live `zig build test-websocket` |
 | Full WebTransport suite (Debug) | 761/763 (2 skipped) | live `zig build test-webtransport` |
+
+
+## Hundred-and-tenth pass: reconnecting H2 client slice forwarding
+
+`webtransport.h2.ReconnectingEndpointClient` forwarded contiguous stream
+payloads but not the slice forms added to `EndpointClient`. It now exposes
+`sendStreamSlicesWithDeadline` and `sendStreamSlicesWithTimeout`, preserving
+the generation check, `state.enter/leave`, and failure classification of the
+contiguous path. The reconnecting filter compiles and passes 133/133.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Reconnecting H2 client tests | 133/133 | live `zig build test-webtransport -Dtest-filter='reconnecting'` |
