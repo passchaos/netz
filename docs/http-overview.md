@@ -26,6 +26,7 @@ See [findings](#findings-and-next-work) before choosing an upload API.
 | HTTP/3 runtime | `netz.http3.runtime` | Handshake-backed QUIC sessions, stream routing, paced output, concurrent serving, shared endpoints and pools; [client](../src/http3/runtime/handshake_client.zig), [server session](../src/http3/runtime/handshake_server_session.zig), `runtime/send/`, `runtime/receive/`, `runtime/qpack/`. |
 | Stable server streaming aliases | `netz.streaming.http1/http2/http3` | Public aliases to the existing runtime owners, rather than another reader or transport implementation; [aliases](../src/http/streaming.zig). |
 | Execution and TLS | `netz.runtime`, `netz.tls` | Protocols consume `std.Io`; the default execution backend is zio. Unified TCP TLS and native handshake-backed H3 use Vail. Direct H1 also retains its standard-library TLS path. |
+| One-port ALPN dispatch | `netz.tls.alpn_server` | Completes the TLS handshake and reports the selected protocol; transfer the accepted connection to `http1.runtime.adoptNegotiatedTlsServer` or `http2.runtime.adoptNegotiatedTlsServer`. [listener](../src/tls/alpn_server.zig), [example](../examples/http/alpn_server.zig). |
 
 The application layer in sibling `weft` owns routing, middleware and route
 behavior. `netz.http` exports a unified client; server integration uses the

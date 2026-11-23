@@ -3129,3 +3129,14 @@ TLS adoption helpers. A unit test covers both constructors.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | Full HTTP/1 suite (Debug) | 480/480 | live `zig build test-http1 --summary all` |
+
+
+## Hundred-and-sixty-eighth pass: one-port ALPN dispatch in the module map
+
+The HTTP overview module map now lists `netz.tls.alpn_server` with both
+adoption helpers and the runnable example, so the one-port H2/H1 story is
+discoverable from the architecture page rather than only the usage guide.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Documentation | module-map row added | `docs/http-overview.md` |
