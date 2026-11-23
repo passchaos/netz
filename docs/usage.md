@@ -363,6 +363,10 @@ zig build run-quic-close
   flight exceeded `max_crypto_buffer` (256 KiB default). Raise
   `http3.handshake.handshake.max_crypto_buffer` (or the equivalent low-level
   QUIC option); storage grows with received data up to that bound.
+- Slice sends follow the same deadline and close rules as contiguous sends.
+  HTTP/3 reports the committed logical prefix so callers can retry only the
+  suffix; the HTTP/2 session retains the pending capsule and resumes it with
+  `resumeWriteWithTimeout`/`resumeWriteWithDeadline`.
 
 ## 10. Limits and defaults
 
