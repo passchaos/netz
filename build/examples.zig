@@ -213,6 +213,12 @@ pub const specs = [_]Spec{
         .description = "Run the RFC 8441 WebSocket-over-HTTP/2 echo example",
     },
     .{
+        .exe_name = "netz-websocket-h3-echo",
+        .path = "examples/websocket/websocket_h3_echo.zig",
+        .run_step = "run-websocket-h3-echo",
+        .description = "Run the RFC 9220 WebSocket-over-HTTP/3 echo example",
+    },
+    .{
         .exe_name = "netz-webtransport-datagram-echo",
         .path = "examples/webtransport/datagram_echo.zig",
         .run_step = "run-webtransport-datagram-echo",

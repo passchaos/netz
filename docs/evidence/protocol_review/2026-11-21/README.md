@@ -2722,3 +2722,22 @@ coverage series:
 | Full HTTP/3 suite (Debug) | 928/932 (4 skipped) | live `zig build test-http3 --summary all` |
 | QUIC trust unit tests | 38/38 | live `zig build test-quic -Dtest-filter='trust' --summary all` |
 | Public package surface | 27/27 | live `zig build test-package --summary all` |
+
+
+## Hundred-and-thirty-ninth pass: RFC 9220 WebSocket-over-HTTP/3 example
+
+`examples/websocket/websocket_h3_echo.zig` completes the WebSocket transport
+matrix: an extended CONNECT on a real QUIC/TLS connection, pinned server key,
+`echo.v1` subprotocol and one echoed message. Building it surfaced two
+ownership requirements that were not documented: the H3 `Connection` owns the
+handshake client/session (`deinit` required) and `closeWithTimeout` returns a
+`CloseHandshakeEvent` that owns the peer Close or an in-flight application
+frame. The example now releases both, and `docs/usage.md` states the event
+ownership rule. Leak-free run:
+
+`RFC 9220 server received: hello over RFC 9220`
+`RFC 9220 client received: hello over RFC 9220`
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| RFC 9220 example | leak-free echo over QUIC/TLS | live `zig build run-websocket-h3-echo` |

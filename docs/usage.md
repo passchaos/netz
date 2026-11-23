@@ -280,7 +280,9 @@ try client.sendClose(.normal_closure, "bye");
 - After either side starts the closing handshake, only the Close frame may be
   sent; other writes return `error.ConnectionClosed`.
 - `closeWithDeadline`/`closeWithTimeout` are resumable: a failed or timed-out
-  Close write leaves the connection open for the unbounded `close`.
+  Close write leaves the connection open for the unbounded `close`. The
+  returned `CloseHandshakeEvent` owns the peer Close frame or an in-flight
+  application frame; release it with `event.deinit(allocator)`.
 - Arbitrary-slice single-frame sends avoid payload joins:
   `sendTextSlices`, `sendBinarySlices`, and their timeout/deadline forms.
   Text slices are validated as one UTF-8 message across slice boundaries.
@@ -302,8 +304,9 @@ try client.sendClose(.normal_closure, "bye");
   `extra_headers` and client identities by default.
 
 Runnable: `zig build run-websocket-echo` (cleartext),
-`zig build run-websocket-wss-echo` (WSS with a pinned server key), and
-`zig build run-websocket-h2-echo` (RFC 8441 over cleartext HTTP/2).
+`zig build run-websocket-wss-echo` (WSS with a pinned server key),
+`zig build run-websocket-h2-echo` (RFC 8441 over cleartext HTTP/2), and
+`zig build run-websocket-h3-echo` (RFC 9220 over QUIC/TLS).
 
 ## 7. WebTransport
 
