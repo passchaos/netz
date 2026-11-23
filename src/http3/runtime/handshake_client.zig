@@ -3,6 +3,7 @@
 const std = @import("std");
 const http3 = @import("../mod.zig");
 const quic = @import("../../quic/mod.zig");
+const tls_protocol = @import("../../tls/stream/version.zig").Protocol;
 const net = std.Io.net;
 const runtime = @import("../runtime.zig");
 
@@ -2931,6 +2932,19 @@ pub const HandshakeClient = struct {
         self: HandshakeClient,
     ) quic.zero_rtt.handshake.Status {
         return self.established.early_data_status;
+    }
+
+    /// QUIC mandates TLS 1.3; the optional shape matches the HTTP/1, HTTP/2
+    /// and WebSocket connection surfaces.
+    pub fn negotiatedTlsProtocol(
+        self: HandshakeClient,
+    ) ?tls_protocol {
+        _ = self;
+        return .tls13;
+    }
+
+    pub fn wasTlsSessionResumed(self: HandshakeClient) ?bool {
+        return self.established.resumed;
     }
 
     fn adoptAcceptedEarlyCriticalStreams(

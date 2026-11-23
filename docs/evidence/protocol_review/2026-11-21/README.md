@@ -3297,3 +3297,17 @@ live TLS 1.3 CONNECT.
 | --- | --- | --- |
 | WebTransport suite (Debug) | 761/763 (2 skipped) | live `zig build test-webtransport --summary all` |
 | Package surface (Debug) | 28/28 | live `zig build test-package --summary all` |
+
+## Hundred-and-eightieth pass: core HTTP/3 handshake resumption metadata
+
+`http3.runtime.HandshakeClient` and `HandshakeServerSession` now expose
+`negotiatedTlsProtocol()` (always TLS 1.3), `wasTlsSessionResumed()` and, on
+the server, `earlyDataStatus()`. The resumed early-request test asserts the
+resume flag and TLS version on a connection whose 0-RTT offer was rejected.
+The leaf `tls/stream/version.zig` type is imported directly so the HTTP/3
+suite does not pull the TLS module's test graph (suite count stays 928/932).
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| HTTP/3 suite (Debug) | 928/932 (4 skipped) | live `zig build test-http3 --summary all` |
+| Package surface (Debug) | 28/28 | live `zig build test-package --summary all` |

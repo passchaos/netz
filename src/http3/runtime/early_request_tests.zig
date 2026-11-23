@@ -42,6 +42,7 @@ const handshake_client_pool = runtime.handshake_client_pool;
 const paced_body = runtime.paced_body;
 const push_aggregate = runtime.push_aggregate;
 const quic = runtime.quic;
+const tls_protocol = @import("../../tls/stream/version.zig").Protocol;
 const receiveRuntimeStreamBytes = runtime.receiveRuntimeStreamBytes;
 const resolvePacedBodyChunkBytes = runtime.resolvePacedBodyChunkBytes;
 const responseHeadErrorAtFin = runtime.responseHeadErrorAtFin;
@@ -719,6 +720,11 @@ test "HTTP/3 typed early request remains replayable after Version Negotiation" {
     try std.testing.expectEqual(
         quic.zero_rtt.handshake.Status.rejected,
         client.earlyDataStatus(),
+    );
+    try std.testing.expectEqual(true, client.wasTlsSessionResumed().?);
+    try std.testing.expectEqual(
+        tls_protocol.tls13,
+        client.negotiatedTlsProtocol().?,
     );
     try std.testing.expectEqual(@as(u62, 0), client.next_stream_id);
     try std.testing.expectEqual(@as(u64, 0), client.established.connection.next_packet_number);
