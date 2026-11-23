@@ -57,6 +57,11 @@ test "WebTransport HTTP2 ReconnectingEndpointClient reconnects only future Sessi
             );
             var first_live = true;
             defer if (first_live) first.deinit();
+            try std.testing.expectEqualStrings("h2", first.negotiatedAlpn().?);
+            try std.testing.expect(first.negotiatedTranscriptHash() != null);
+            // The reconnecting client verifies the server but presents no
+            // client certificate.
+            try std.testing.expect(first.peerCertificates() == null);
             var rejected = try first.receiveRequestWithTimeout(.fromSeconds(3));
             var rejected_live = true;
             defer if (rejected_live) rejected.deinit();

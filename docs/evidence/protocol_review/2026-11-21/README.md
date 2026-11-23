@@ -2520,3 +2520,17 @@ series, the scoped protocol suites were rerun together:
 | Full HTTP/3 suite (Debug) | 928/932 (4 skipped) | live `zig build test-http3 --summary all` |
 | QUIC trust unit tests | 38/38 | live `zig build test-quic -Dtest-filter='trust' --summary all` |
 | Public package surface | 27/27 | live `zig build test-package --summary all` |
+
+
+## Hundred-and-twenty-seventh pass: EndpointServer TLS metadata coverage
+
+The new HTTP/2 `EndpointServer` TLS metadata accessors were not referenced by a
+test, so Zig's lazy analysis had not proven them. The reconnecting TLS endpoint
+test now asserts the `h2` ALPN, a non-null transcript hash and no client
+certificate for its anonymous client, exercising
+`peerCertificates()`/`negotiatedAlpn()`/`negotiatedTranscriptHash()` on the
+server owner. The H2 capsule guide documents the shared metadata surface.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full WebTransport suite (Debug) | 761/763 (2 skipped) | live `zig build test-webtransport --summary all` |
