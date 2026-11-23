@@ -86,6 +86,7 @@ fn exercise(io: std.Io, comptime ipv6: bool, comptime policy: http.ProtocolPolic
     try std.testing.expectEqualStrings("h3", connection.negotiatedAlpn().?);
     try std.testing.expectEqual(@as(?@import("../../tls/mod.zig").stream.Protocol, .tls13), connection.negotiatedTlsProtocol());
     try std.testing.expectEqual(@as(?bool, false), connection.wasTlsSessionResumed());
+    try std.testing.expectEqual(.not_offered, connection.earlyDataStatus().?);
     try std.testing.expect(connection.takeTls12SessionTicket() == null);
     try std.testing.expect((try connection.takeTls13SessionTicket()) == null);
     const trailers: []const http.Header = &.{.{ .name = "x-end", .value = "done", .never_indexed = true }};

@@ -3268,3 +3268,16 @@ non-null resumption flag and `.not_offered` for fresh sessions.
 | --- | --- | --- |
 | WebTransport suite (Debug) | 761/763 (2 skipped) | live `zig build test-webtransport --summary all` |
 | Package surface (Debug) | 28/28 | live `zig build test-package --summary all` |
+
+## Hundred-and-seventy-eighth pass: unified HTTP H3 early-data status
+
+`http.Connection` already reported the H3 resume flag and TLS 1.3; it now also
+exposes `earlyDataStatus()` for the direct H3 owner. H1/H2 return null because
+TCP TLS has no QUIC early data. The direct-H3 metadata test asserts the fresh
+connection reports `.not_offered`, and the public surface check pins the
+accessor.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| HTTP aggregate (Debug) | 310/310 | live `zig build test-http --summary all` |
+| Package surface (Debug) | 28/28 | live `zig build test-package --summary all` |

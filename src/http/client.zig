@@ -191,6 +191,17 @@ pub const Connection = struct {
         };
     }
 
+    /// Whether the H3 connection accepted, rejected or never received a 0-RTT
+    /// offer. H1/H2 return null because TCP TLS has no QUIC early data.
+    pub fn earlyDataStatus(
+        self: *const Connection,
+    ) ?@TypeOf(self.value.http3.client.established.early_data_status) {
+        return switch (self.value) {
+            .http1, .http2 => null,
+            .http3 => |owner| owner.client.established.early_data_status,
+        };
+    }
+
     pub fn takeTls12SessionTicket(
         self: *Connection,
     ) ?tls_stream.Tls12SessionTicket {
