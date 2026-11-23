@@ -2210,6 +2210,8 @@ primitives that encode each borrowed slice into frames without joining them;
 `AcceptedSession` adds `sendStreamSlices`,
 `sendStreamSlicesWithTimeout` and `sendStreamSlicesWithDeadline` with the same
 prefix, rollback and `recordSent` behavior as the contiguous path. The
+development stream test exercises both the association-prefix and non-prefix
+slice paths, including a trailing empty slice that still carries FIN. The
 stateful endpoint server's `EndpointAcceptedSession.sendStreamSlices` path is
 exercised by the concurrent real-session test as well.
 
