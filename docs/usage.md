@@ -129,6 +129,11 @@ store with `netz.tls.trust.SystemStore.initWithPaths` and assign
 TCP TLS. In minimal containers, `.tls.root_source = .bundled` selects the
 compiled-in Mozilla roots for both transports.
 
+The direct H3 route loads a platform-root store per connection when no
+reusable store is configured. For repeated `prefer_http3` connections, create
+one `SystemStore` and assign `.tls.system_store`, or use `Pool`, which keeps a
+single store for its lifetime.
+
 Proxy routes (mutually exclusive):
 
 | Option | TCP | HTTP/3 | Notes |
