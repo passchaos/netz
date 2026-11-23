@@ -2826,3 +2826,19 @@ Bounded fuzz corpus replays after the WebSocket API-parity series:
 | HTTP/2 connection corpus | 3/3 tests | live `zig build fuzz-http2-connection --summary all` |
 | HTTP/3 connection corpus | 3/3 tests | live `zig build fuzz-http3-connection --summary all` |
 | WebTransport endpoint corpus | 3/3 tests | live `zig build fuzz-webtransport-endpoint --summary all` |
+
+
+## Hundred-and-forty-sixth pass: WebTransport session trust documentation correction
+
+The WebTransport quick start used `HandshakeClientSession.connectUriWithTimeout`
+and claimed the URI form verifies against the system trust store by default.
+That is true for `EndpointClient` URI connects, but the lower-level session
+helper keeps the explicit-trust contract: a null `server_auth` with no store,
+environment, or non-default root source leaves QUIC verification disabled
+(`quic.handshake.connectAttempt` builds no verifier in that case). The usage
+guide now states the distinction and marks the trust fields required in the
+snippet.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Documentation audit | behavior matched to the `root_source`/`server_auth` verifier branches | code inspection of `quic.handshake.connectAttempt` |

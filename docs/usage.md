@@ -320,9 +320,13 @@ Runnable: `zig build run-websocket-echo` (cleartext),
 ## 7. WebTransport
 
 HTTP/3 WebTransport owns a CONNECT session; streams and DATAGRAMs borrow it.
-The URI form derives SNI, authority and path from one HTTPS URL and verifies
-the server against the system trust store by default. Connection IDs are
-caller-generated per connection (8-byte original DCID, 4-byte local CID):
+The URI form derives SNI, authority and path from one HTTPS URL.
+`webtransport.runtime.EndpointClient` URI connects verify the server against
+the system trust store by default; the lower-level `HandshakeClientSession`
+helper below keeps the explicit-trust contract, so configure
+`h3.handshake.server_auth`, `system_store`, `system_environ` or `root_source`
+before connecting. Connection IDs are caller-generated per connection (8-byte
+original DCID, 4-byte local CID):
 
 ```zig
 var original_dcid: [8]u8 = undefined;
@@ -338,6 +342,8 @@ var client = try netz.webtransport.runtime.HandshakeClientSession.connectUriWith
     .{ .h3 = .{ .handshake = .{
         .original_destination_connection_id = &original_dcid,
         .local_connection_id = &client_cid,
+        // HandshakeClientSession requires explicit trust here, e.g.
+        // .server_auth = ... or .system_environ = ... .
     } } },
     .fromSeconds(10),
 );
