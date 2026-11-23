@@ -2972,3 +2972,16 @@ examples together with the pre-existing set.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | Aggregate example compile | 102/102 steps | live `zig build examples -j2 --summary all` |
+
+
+## Hundred-and-fifty-seventh pass: no-ALPN client rejection coverage
+
+An H1 client using the default empty ALPN list cannot complete a handshake
+against an ALPN dispatcher configured with `{"h2","http/1.1"}`. A new test
+connects with no ALPN offer, asserts both the client and server handshakes
+fail, and the usage guide now states that such clients must offer
+`http/1.1` explicitly.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| ALPN-filtered HTTP suite | 106/106 | live `zig build test-http -Dtest-filter='ALPN' --summary all` |

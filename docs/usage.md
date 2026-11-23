@@ -241,7 +241,9 @@ context-owned storage). See `zig build run-http-server-serve-until`.
   `netz.http2.runtime.adoptNegotiatedTlsServer` or
   `netz.http1.runtime.adoptNegotiatedTlsServer`. The H2 adopter requires `h2`;
   the H1 adopter accepts `http/1.1` or a legacy client with no ALPN and fails
-  closed on any other protocol. Ownership transfers at entry. See
+  closed on any other protocol. Ownership transfers at entry. An H1 client
+  connecting to such a server must offer `.alpn_protocols = &.{"http/1.1"}`;
+  the default empty list is only accepted by legacy servers. See
   `zig build run-http-alpn-server`.
 - Mutual TLS: set `.client_auth = .{ .verifier = ... }` on the server and
   `.tls.client_identity = .{ .certificate_chain = ..., .signer = ... }` on the

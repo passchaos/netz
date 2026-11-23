@@ -406,3 +406,68 @@ test "HTTP/1 TLS listener rejects non-HTTP/1.1 ALPN offers" {
     );
     server.deinit();
 }
+
+test "HTTP/1 client without ALPN is rejected by an ALPN dispatcher" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+    const key_pair = try tls_testing.serverKeyPair();
+    const public_key = key_pair.public_key.toUncompressedSec1();
+    const certificate_chain = [_][]const u8{&certificate_der};
+
+    var server = try listenAlpnTestServer(
+        allocator,
+        io,
+        &key_pair,
+        &certificate_chain,
+    );
+    defer server.deinit();
+
+    const Acceptor = struct {
+        server: *alpn_server.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            const accepted = self.server.acceptWithTimeout(
+                .fromSeconds(5),
+            ) catch |err| {
+                self.err = err;
+                return;
+            };
+            accepted.tls.deinit();
+        }
+    };
+
+    var acceptor = Acceptor{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Acceptor.run, .{&acceptor});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    // The default client list is empty, so the dispatcher has no shared
+    // protocol and rejects the handshake.
+    if (runtime.Client.connectVailTlsHost(
+        allocator,
+        io,
+        "localhost",
+        server.address().ip4.port,
+        .{},
+        .{ .server_verifier = .{
+            .pinned_ecdsa_p256_public_key = public_key,
+        } },
+    )) |client_value| {
+        var client = client_value;
+        client.close();
+        return error.ExpectedAlpnRejection;
+    } else |_| {}
+
+    thread.join();
+    joined = true;
+    try std.testing.expect(acceptor.err != null);
+}
