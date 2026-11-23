@@ -2364,3 +2364,16 @@ the round trip. `docs/usage.md` now points at the example and the
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | Content coding example | `content coding http1 200: 86 -> 528 bytes, codings=1, match=true` | live `zig build run-http-content-coding` |
+
+
+## Hundred-and-seventeenth pass: timeout and deadline recipe
+
+`examples/http/timeouts.zig` mirrors reqwest's `.timeout()` and curl's
+`--max-time`. One slow origin answers after 200 ms; a 50 ms per-request
+timeout returns `error.Timeout`, while a 2 s absolute deadline completes the
+same exchange. The docs note that the budget spans DNS/TCP, TLS, upload and the
+complete response rather than only the connect.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Timeout example | `50 ms timeout: error.Timeout (expected)` and `2 s deadline: http1 200: slow but successful` | live `zig build run-http-timeouts` |

@@ -99,6 +99,9 @@ std.debug.print("{t} {d}: {s}\n", .{
   `response.decodeContentAlloc(allocator, max_output)` or
   `decodeContentInto(out, scratch)` to decode gzip/deflate/br/zstd bodies. See
   `zig build run-http-content-coding`.
+- Deadlines: `requestUriWithTimeout` and `requestUriWithDeadline` cover the
+  complete exchange (DNS/TCP, TLS, upload and response), not just connect. See
+  `zig build run-http-timeouts`.
 - Errors: `error.Timeout` for expired or non-positive budgets, protocol errors
   for malformed peers, `error.ConnectionClosed` after a terminal close.
 

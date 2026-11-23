@@ -47,6 +47,7 @@ zig build run-http-alpn-server
 zig build run-http-mutual-tls
 zig build run-http-custom-ca
 zig build run-http-content-coding
+zig build run-http-timeouts
 zig build run-http-h3-prefer
 zig build run-http-pool-alt-svc-h3
 zig build run-http-server-routes

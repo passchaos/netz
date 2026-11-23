@@ -117,6 +117,12 @@ pub const specs = [_]Spec{
         .description = "Request and decode a gzip response like curl --compressed",
     },
     .{
+        .exe_name = "netz-http-timeouts",
+        .path = "examples/http/timeouts.zig",
+        .run_step = "run-http-timeouts",
+        .description = "Bound a complete request with a timeout or absolute deadline",
+    },
+    .{
         .exe_name = "netz-http-h3-prefer",
         .path = "examples/http/h3_prefer.zig",
         .run_step = "run-http-h3-prefer",
