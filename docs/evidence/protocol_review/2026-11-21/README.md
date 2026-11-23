@@ -2898,3 +2898,16 @@ reconnecting-facade metadata asymmetries.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | Full WebTransport suite (Debug) | 761/763 (2 skipped) | live `zig build test-webtransport --summary all` |
+
+
+## Hundred-and-fifty-first pass: WebTransport application-protocol type note
+
+HTTP/2 `applicationProtocol()` returns the decoded selected identifier as a
+byte slice, while HTTP/3 returns a validated `application_protocol.String`
+whose comparisons decode RFC 9651 escapes. The API map now records the type
+difference so callers comparing escaped identifiers use the matching
+comparator.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Documentation audit | H2 decode path (`decodedLen`/`decodeInto`) matched to H3 `String` | code inspection of `webtransport/h2/runtime.zig` |
