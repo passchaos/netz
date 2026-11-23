@@ -11854,6 +11854,10 @@ test "public ALPN adoption and metadata surfaces are exported" {
     _ = &netz.webtransport.h2.Session.wasTlsSessionResumed;
     _ = &netz.webtransport.h2.EndpointClient.initiateKeyUpdate;
     _ = &netz.webtransport.h2.EndpointClient.negotiatedTlsProtocol;
+    _ = &netz.webtransport.h2.EndpointPendingRequest.negotiatedTlsProtocol;
+    _ = &netz.webtransport.h2.EndpointPendingRequest.wasTlsSessionResumed;
+    _ = &netz.webtransport.h2.ListenerPendingRequest.negotiatedTlsProtocol;
+    _ = &netz.webtransport.h2.ListenerPendingRequest.wasTlsSessionResumed;
     _ = &netz.webtransport.h2.EndpointServer.initiateKeyUpdate;
     _ = &netz.webtransport.h2.EndpointServer.negotiatedTlsProtocol;
     _ = &netz.webtransport.runtime.HandshakeClientSession.negotiatedTlsProtocol;

@@ -3401,3 +3401,15 @@ the same URI path used by production WS/WSS clients.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | WebSocket auth example (Debug) | 401 challenge, accepted echo, 9/9 steps | live `zig build run-websocket-auth --summary all` |
+
+## Hundred-and-eighty-eighth pass: HTTP/2 WebTransport pending TLS version
+
+HTTP/2 WebTransport pending requests now expose `negotiatedTlsProtocol()` and
+`wasTlsSessionResumed()`, matching the accepted sessions, endpoints and the
+HTTP/3 pending admission surfaces. The listener TLS test asserts TLS 1.3 and a
+non-null resumption flag on the pending request before acceptance.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| WebTransport suite (Debug) | 761/763 (2 skipped) | live `zig build test-webtransport --summary all` |
+| Package surface (Debug) | 28/28 | live `zig build test-package --summary all` |

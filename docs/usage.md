@@ -392,11 +392,11 @@ server address is already resolved (the address-based form shown in
   `http2.runtime.TlsConnectOptions` (`server_verifier`, `ca_bundle`,
   `system_store`, `client_identity`). HTTP/2 sessions, endpoint clients and
   servers, and pending requests expose `peerCertificates()`,
-  `negotiatedAlpn()`, `negotiatedCipherSuite()` and
-  `negotiatedTranscriptHash()`; sessions also expose `applicationProtocol()`.
+  `negotiatedAlpn()`, `negotiatedCipherSuite()`,
+  `negotiatedTranscriptHash()`, `negotiatedTlsProtocol()` and
+  `wasTlsSessionResumed()`; sessions also expose `applicationProtocol()`.
   HTTP/3 handshake sessions and endpoint clients expose the same TLS metadata
-  plus `wasTlsSessionResumed()` and `earlyDataStatus()`; HTTP/2 facades add
-  `negotiatedTlsProtocol()` and `wasTlsSessionResumed()`. Handshake-backed
+  plus `earlyDataStatus()`. Handshake-backed
   pending admission surfaces expose the same metadata plus `sessionId()`
   before `accept()`, so client-certificate and transcript policy can reject a
   session before it becomes visible. Cleartext returns null. Endpoint

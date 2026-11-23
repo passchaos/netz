@@ -60,6 +60,14 @@ pub const PendingRequest = struct {
     ) ?tls_stream.TranscriptHash {
         return self.request.negotiatedTranscriptHash();
     }
+    pub fn negotiatedTlsProtocol(
+        self: PendingRequest,
+    ) ?tls_stream.Protocol {
+        return self.request.negotiatedTlsProtocol();
+    }
+    pub fn wasTlsSessionResumed(self: PendingRequest) ?bool {
+        return self.request.wasTlsSessionResumed();
+    }
 
     pub fn acceptWithDeadline(
         self: *PendingRequest,

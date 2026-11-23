@@ -271,6 +271,14 @@ pub const PendingRequest = struct {
     ) ?tls_stream.TranscriptHash {
         return self.state.connection.negotiatedTranscriptHash();
     }
+    pub fn negotiatedTlsProtocol(
+        self: PendingRequest,
+    ) ?tls_stream.Protocol {
+        return self.state.connection.negotiatedTlsProtocol();
+    }
+    pub fn wasTlsSessionResumed(self: PendingRequest) ?bool {
+        return self.state.connection.wasTlsSessionResumed();
+    }
 
     pub fn acceptWithDeadline(self: *PendingRequest, options: runtime.ServerOptions, deadline: std.Io.Clock.Timestamp) Error!Accepted {
         const server = EndpointServer{ .state = self.state };
