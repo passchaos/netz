@@ -27,16 +27,38 @@ pub fn main(init: std.process.Init) !void {
     const server_cid = [_]u8{ 0x5e, 0x2e, 0x48, 0x03 };
     const payload = "hello over a real netz QUIC handshake";
 
+    // Raw QUIC handshakes do not install a trust policy implicitly. Use the
+    // deterministic test identity on the server and pin it on the client so
+    // the example models authenticated peers.
+    const key_pair = try netz.tls.testing.serverKeyPair();
+    const public_key = key_pair.public_key.toUncompressedSec1();
+    var certificate_der: [netz.tls.testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        netz.tls.testing.certificate_base64,
+    );
+    const certificate_chain = [_][]const u8{&certificate_der};
+    const server_options: netz.quic.handshake.ServerOptions = .{
+        .local_connection_id = &server_cid,
+        .random = [_]u8{0x91} ** 32,
+        .x25519_secret_key = [_]u8{0x92} ** 32,
+        .max_crypto_buffer = 64 * 1024,
+        .identity = .{
+            .certificate_chain = &certificate_chain,
+            .signer = .{ .ecdsa_p256_sha256 = .{ .key_pair = key_pair } },
+        },
+    };
+
     const Shared = struct {
         endpoint: *netz.quic.runtime.Endpoint,
-        cid: []const u8,
+        options: netz.quic.handshake.ServerOptions,
         expected_payload: []const u8,
         err: ?anyerror = null,
 
         fn run(shared: *@This()) void {
             runFallible(
                 shared.endpoint,
-                shared.cid,
+                shared.options,
                 shared.expected_payload,
             ) catch |err| {
                 shared.err = err;
@@ -45,15 +67,13 @@ pub fn main(init: std.process.Init) !void {
 
         fn runFallible(
             endpoint: *netz.quic.runtime.Endpoint,
-            cid: []const u8,
+            options: netz.quic.handshake.ServerOptions,
             expected_payload: []const u8,
         ) !void {
-            var established = try netz.quic.handshake.accept(endpoint, .{
-                .local_connection_id = cid,
-                .random = [_]u8{0x91} ** 32,
-                .x25519_secret_key = [_]u8{0x92} ** 32,
-                .max_crypto_buffer = 64 * 1024,
-            });
+            var established = try netz.quic.handshake.accept(
+                endpoint,
+                options,
+            );
             defer established.deinit();
 
             var request = try established.connection.receivePacket();
@@ -71,7 +91,7 @@ pub fn main(init: std.process.Init) !void {
 
     var shared = Shared{
         .endpoint = &server_endpoint,
-        .cid = &server_cid,
+        .options = server_options,
         .expected_payload = payload,
     };
     var server_task = io.async(Shared.run, .{&shared});
@@ -84,6 +104,9 @@ pub fn main(init: std.process.Init) !void {
             .original_destination_connection_id = &original_dcid,
             .local_connection_id = &client_cid,
             .server_name = "localhost",
+            .server_auth = .{
+                .pinned_ecdsa_p256_public_key = public_key,
+            },
             .random = [_]u8{0x81} ** 32,
             .x25519_secret_key = [_]u8{0x82} ** 32,
             .max_crypto_buffer = 64 * 1024,

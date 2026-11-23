@@ -375,6 +375,10 @@ zig build run-quic-datagram-echo
 zig build run-quic-close
 ```
 
+`run-quic-handshake-echo` presents the deterministic test certificate and pins
+it on the client, so the raw handshake path demonstrates authenticated peers
+without external fixtures.
+
 - 0-RTT: `quic.zero_rtt` plus the handshake early-data options; see the
   zero-RTT tests and [quicz_parity.md](quicz_parity.md).
 - TLS trust: the low-level `quic.handshake.ClientOptions` leaves certificate

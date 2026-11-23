@@ -2432,3 +2432,17 @@ session, and that an anonymous client has no peer certificate.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | Full WebTransport suite (Debug) | 761/763 (2 skipped) | live `zig build test-webtransport --summary all` |
+
+
+## Hundred-and-twenty-first pass: authenticated raw QUIC handshake example
+
+`examples/quic/quic_handshake_echo.zig` ran the raw `quic.handshake` path with
+no server identity and no client trust, which is the exact foot-gun documented
+for the low-level API. The server now presents the deterministic test identity
+and the client pins its key, so the example demonstrates an authenticated
+handshake while remaining self-contained. Other QUIC examples use preconfigured
+1-RTT keys and are unaffected.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Authenticated QUIC handshake example | `QUIC handshake echo ok: hello over a real netz QUIC handshake` | live `zig build run-quic-handshake-echo` |
