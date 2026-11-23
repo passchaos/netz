@@ -117,9 +117,10 @@ HTTPS-to-HTTP downgrades unless `allow_insecure_downgrade` is set.
 
 ALPN does not authenticate anyone; it selects the wire protocol after
 certificate verification. H1 accepts `http/1.1` or a legacy no-ALPN peer, H2
-requires `h2`, H3 requires `h3`, WSS requires `http/1.1`, and MQTT requires
-`mqtt`. `netz.tls.alpn_server` exposes the selected protocol so one port can
-dispatch to the matching runtime (`zig build run-http-alpn-server`).
+requires `h2`, H3 requires `h3` (or an `h3-NN` draft identifier), WSS requires
+`http/1.1`, and MQTT requires `mqtt`. `netz.tls.alpn_server` exposes the
+selected protocol so one port can dispatch to the matching runtime
+(`zig build run-http-alpn-server`).
 
 Server side, `TlsListenOptions.identity` supplies the certificate and
 `identity_provider` rotates it per handshake. `client_auth = .{ .verifier =
