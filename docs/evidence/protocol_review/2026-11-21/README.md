@@ -2706,3 +2706,19 @@ to the upload/churn modes), 50 iterations, ReleaseFast, loopback:
 
 The 1-KiB echo path is ~3.5x lower latency at p50 than a full handshake and
 remains well below the 1-ms p99 bound on this host.
+
+
+## Hundred-and-thirty-eighth pass: cumulative gate after the metadata and benchmark series
+
+All scoped protocol suites were rerun live after the ALPN metadata, RFC 8441
+pending-upgrade metadata, WebTransport TLS metadata/exporter and benchmark
+coverage series:
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full HTTP suite (Debug) | 310/310 | live `zig build test-http --summary all` |
+| Full WebSocket suite (Debug) | 522/523 (1 skipped) | live `zig build test-websocket --summary all` |
+| Full WebTransport suite (Debug) | 761/763 (2 skipped) | live `zig build test-webtransport --summary all` |
+| Full HTTP/3 suite (Debug) | 928/932 (4 skipped) | live `zig build test-http3 --summary all` |
+| QUIC trust unit tests | 38/38 | live `zig build test-quic -Dtest-filter='trust' --summary all` |
+| Public package surface | 27/27 | live `zig build test-package --summary all` |
