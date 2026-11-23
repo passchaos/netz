@@ -11898,4 +11898,5 @@ test "public ALPN adoption and metadata surfaces are exported" {
     _ = &netz.websocket.runtime.h3.Connection(.client).negotiatedTlsProtocol;
     _ = &netz.websocket.runtime.h3.Connection(.client).wasTlsSessionResumed;
     _ = &netz.websocket.runtime.h3.Connection(.client).earlyDataStatus;
+    _ = &netz.websocket.runtime.h3.Connection(.client).keyUpdateCounts;
 }

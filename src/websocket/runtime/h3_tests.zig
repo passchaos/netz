@@ -2685,6 +2685,9 @@ test "WebSocket over HTTP3 extended CONNECT exchanges frames" {
     );
     try std.testing.expectEqual(false, client.wasTlsSessionResumed().?);
     try std.testing.expectEqual(.not_offered, client.earlyDataStatus());
+    try std.testing.expectEqual(@as(u64, 0), client.keyUpdateCounts().?.sent);
+    try std.testing.expectEqual(@as(u64, 0), client.keyUpdateCounts().?.received);
+    try std.testing.expect(!client.keyUpdateCounts().?.awaiting_peer_response);
     try std.testing.expect(client.permessage_deflate);
     try std.testing.expect(client.compression_send_context_takeover);
     try std.testing.expect(client.compression_receive_context_takeover);

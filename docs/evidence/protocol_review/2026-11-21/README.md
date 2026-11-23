@@ -3438,3 +3438,16 @@ that the H2 and direct-H3 tests did not.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | HTTP aggregate (Debug) | 311/311 | live `zig build test-http --summary all` |
+
+## Hundred-and-ninety-first pass: WebSocket H3 combined key-update counters
+
+The RFC 9220 connection now exposes `keyUpdateCounts()` alongside its
+separate local/peer counters and ack flag, matching the HTTP/1 and HTTP/2
+WebSocket surfaces and the unified HTTP connection. QUIC reports
+`awaiting_peer_response = false` because its updates are unilateral. The H3
+metadata test asserts zero counters on a fresh connection.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full WebSocket suite (Debug) | 526/527 (1 skipped) | live `zig build test-websocket --summary all` |
+| Package surface (Debug) | 28/28 | live `zig build test-package --summary all` |

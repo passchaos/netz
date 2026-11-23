@@ -621,6 +621,17 @@ pub fn Connection(comptime role: common.Role) type {
             return self.h3.keyUpdateAwaitingAck();
         }
 
+        /// Combined TLS 1.3 key-update counters. QUIC updates are unilateral,
+        /// so `awaiting_peer_response` is always false; use
+        /// `keyUpdateAwaitingAck()` for the local key-phase acknowledgment.
+        pub fn keyUpdateCounts(self: *const Self) ?tls_stream.KeyUpdateCounts {
+            return .{
+                .sent = self.h3.localKeyUpdateCount(),
+                .received = self.h3.peerKeyUpdateCount(),
+                .awaiting_peer_response = false,
+            };
+        }
+
         /// Drive QUIC ACK/loss/PTO processing until all reliable data on this
         /// connection has been acknowledged. Short-lived owners should call
         /// this after the Close handshake and before destroying the connection.
