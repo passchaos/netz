@@ -257,7 +257,8 @@ context-owned storage). See `zig build run-http-server-serve-until`.
   exposing `peerCertificates()`, `negotiatedAlpn()`,
   `negotiatedTlsProtocol()`, `negotiatedCipherSuite()`,
   `negotiatedTranscriptHash()`, `wasTlsSessionResumed()`, `earlyDataStatus()`
-  (H3) and `exportKeyingMaterial()`. See `zig build run-http-https-client`.
+  (H3), `exportKeyingMaterial()`, `initiateKeyUpdate()` and
+  `keyUpdateCounts()`. See `zig build run-http-https-client`.
 - Incremental request and response bodies: `zig build run-http-streaming`.
 - Chunked uploads with trailers: `zig build run-http-chunked`.
 - Concurrent handlers and pull bodies: see [http_streaming.md](http_streaming.md).

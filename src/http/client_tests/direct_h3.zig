@@ -98,6 +98,16 @@ fn exercise(io: std.Io, comptime ipv6: bool, comptime policy: http.ProtocolPolic
     );
     try std.testing.expect(connection.takeTls12SessionTicket() == null);
     try std.testing.expect((try connection.takeTls13SessionTicket()) == null);
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        connection.keyUpdateCounts().?.sent,
+    );
+    try connection.initiateKeyUpdate();
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        connection.keyUpdateCounts().?.sent,
+    );
+    try std.testing.expect(!connection.keyUpdateCounts().?.awaiting_peer_response);
     const trailers: []const http.Header = &.{.{ .name = "x-end", .value = "done", .never_indexed = true }};
     var first = try connection.requestWithDeadline("/slice", .{ .method = "POST", .body = "ignored", .body_source = .{ .slice = "slice-source" }, .trailers = trailers }, deadline(io));
     defer first.deinit();

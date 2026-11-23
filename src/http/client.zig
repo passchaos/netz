@@ -269,6 +269,35 @@ pub const Connection = struct {
         };
     }
 
+    /// Start a TLS 1.3 application traffic-key update. H1/H2 rotate after the
+    /// current write completes with `update_not_requested`; H3 advances the
+    /// QUIC 1-RTT key phase. Use the protocol-specific connection when a
+    /// peer-requested TCP update or the H3 acknowledgment flag is required.
+    pub fn initiateKeyUpdate(self: *Connection) Error!void {
+        return switch (self.value) {
+            .http1 => |*client| client.updateTrafficKeys(false),
+            .http2 => |*connection| connection.updateTrafficKeys(false),
+            .http3 => |owner| owner.client.initiateKeyUpdate(),
+        };
+    }
+
+    /// TLS 1.3 key-update counters. Cleartext returns null. QUIC reports its
+    /// sent/received key phases with `awaiting_peer_response = false` because
+    /// QUIC updates are unilateral; use the H3 owner for its ack flag.
+    pub fn keyUpdateCounts(
+        self: *const Connection,
+    ) ?tls_stream.KeyUpdateCounts {
+        return switch (self.value) {
+            .http1 => |*client| client.keyUpdateCounts(),
+            .http2 => |*connection| connection.keyUpdateCounts(),
+            .http3 => |owner| .{
+                .sent = owner.client.localKeyUpdateCount(),
+                .received = owner.client.peerKeyUpdateCount(),
+                .awaiting_peer_response = false,
+            },
+        };
+    }
+
     pub fn request(
         self: *Connection,
         target: []const u8,

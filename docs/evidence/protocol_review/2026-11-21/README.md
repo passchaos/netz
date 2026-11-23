@@ -3352,3 +3352,16 @@ request; H2 and direct-H3 tests assert the new surface.
 | HTTP aggregate (Debug) | 310/310 | live `zig build test-http --summary all` |
 | Package surface (Debug) | 28/28 | live `zig build test-package --summary all` |
 | HTTPS metadata example (Debug) | `TLS tls13 alpn=http/1.1 resumed=false peer-certs=1`, 200 | live `zig build run-http-https-client --summary all` |
+
+## Hundred-and-eighty-fourth pass: unified HTTP key-update control
+
+`http.Connection` now exposes `initiateKeyUpdate()` and `keyUpdateCounts()`.
+H1/H2 rotate with `update_not_requested`; H3 advances the QUIC 1-RTT key
+phase. QUIC reports sent/received phases with `awaiting_peer_response = false`
+because its updates are unilateral; the H3 owner retains the ack flag. H2 and
+direct-H3 tests initiate one update and observe the sent counter.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| HTTP aggregate (Debug) | 310/310 | live `zig build test-http --summary all` |
+| Package surface (Debug) | 28/28 | live `zig build test-package --summary all` |

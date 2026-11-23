@@ -615,6 +615,16 @@ test "unified HTTP connection reuses negotiated h2 transport" {
         "connection-metadata",
         &exported,
     );
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        connection.keyUpdateCounts().?.sent,
+    );
+    try connection.initiateKeyUpdate();
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        connection.keyUpdateCounts().?.sent,
+    );
+    try std.testing.expect(!connection.keyUpdateCounts().?.awaiting_peer_response);
     var first = try connection.requestWithTimeout(
         "/one",
         .{},
