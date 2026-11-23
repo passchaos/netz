@@ -48,8 +48,8 @@ pub fn selectHttp3(allocator: std.mem.Allocator, io: std.Io, uri: std.Uri, optio
 
 /// Authentication, configuration, resource and caller-cancellation failures
 /// remain errors. Only connection/protocol unavailability advances selection.
-/// SOCKS5 replies that reject or cannot describe the UDP relay advance too:
-/// the same proxy can still carry the TCP fallback.
+/// Proxy-reported UDP path failures advance too because the same proxy can
+/// still carry the TCP fallback.
 pub fn unavailable(err: anyerror) bool {
     return switch (err) {
         error.Timeout,
@@ -72,6 +72,12 @@ pub fn unavailable(err: anyerror) bool {
         error.ProxyAddressTypeUnsupported,
         error.ProxyInvalidRelayAddress,
         error.ProxyProtocolViolation,
+        error.ProxyConnectionClosed,
+        error.ProxyGeneralFailure,
+        error.ProxyNetworkUnreachable,
+        error.ProxyHostUnreachable,
+        error.ProxyConnectionRefused,
+        error.ProxyTtlExpired,
         => true,
         else => false,
     };

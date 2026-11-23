@@ -2104,3 +2104,19 @@ the same proxy instead of failing the request.
 | Direct H3 through SOCKS5 | 200 over `http3`, body `socks-h3` | live `zig build test-http -Dtest-filter='SOCKS5 UDP ASSOCIATE'` |
 | UDP-denied proxy fallback | 200 over `http2`, body `tcp-fallback` | live `zig build test-http -Dtest-filter='SOCKS5 denies UDP'` |
 | Full HTTP suite (Debug) | 309/309 | live `zig build test-http` |
+
+
+## Hundred-and-third pass: pooled Alt-Svc H3 through SOCKS5
+
+The pool's shared SOCKS5 endpoint (`ensureSocks5SharedEndpoint` with proxy-side
+domain routing) had no end-to-end test against a real proxy. A new regression
+starts an H2/TLS origin advertising `alt-svc`, an H3 origin, and a SOCKS5
+server; the pool uses `client.socks5_proxy` plus `.http3 = .{}`. The first
+request is H2 through CONNECT, the second is H3 through UDP ASSOCIATE. Proxy
+replies that reject or cannot describe the UDP relay advance protocol
+selection, so `prefer_http3` falls back to TCP through the same proxy.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Pool Alt-Svc H3 via SOCKS5 | h2 discovery then h3 `h3-through-socks5` | live `zig build test-http -Dtest-filter='Alt-Svc H3 through SOCKS5'` |
+| Full HTTP suite (Debug) | 310/310 | live `zig build test-http` |

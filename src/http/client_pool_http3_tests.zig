@@ -5,6 +5,7 @@ const http1_runtime = @import("../http1/runtime.zig");
 const http2_runtime = @import("../http2/runtime.zig");
 const http3_runtime = @import("../http3/runtime.zig");
 const quic = @import("../quic/mod.zig");
+const socks = @import("../proxy/socks/server.zig");
 const tls_testing = @import("../tls/testing.zig");
 
 test "unified HTTP pool learns Alt-Svc then reuses HTTP3" {
@@ -1539,3 +1540,149 @@ const StreamSink = struct {
         self.trailer_value.deinit(self.allocator);
     }
 };
+
+test "unified HTTP pool upgrades to Alt-Svc H3 through SOCKS5" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+    const key_pair = try tls_testing.serverKeyPair();
+    const public_key = key_pair.public_key.toUncompressedSec1();
+    const identity: @FieldType(http1_runtime.TlsListenOptions, "identity") = .{
+        .certificate_chain = &.{&certificate_der},
+        .signer = .{ .ecdsa_p256_sha256 = .{ .key_pair = key_pair } },
+    };
+    const h3_limits: http3_runtime.Limits = .{ .quic = .{
+        .max_datagram_size = 4096,
+        .max_frames_per_datagram = 8,
+    } };
+    var h3_server = try http3_runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        h3_limits,
+        .{ .handshake = .{
+            .local_connection_id = &.{ 0x41, 0x42, 0x43, 0x44 },
+            .identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{ .ecdsa_p256_sha256 = .{ .key_pair = key_pair } },
+            },
+        } },
+    );
+    defer h3_server.deinit();
+    const alt_svc = try std.fmt.allocPrint(
+        allocator,
+        "h3=\":{d}\"; ma=60",
+        .{h3_server.address().ip4.port},
+    );
+    defer allocator.free(alt_svc);
+    var tcp_server = try http2_runtime.TlsServer.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .identity = identity },
+    );
+    defer tcp_server.deinit();
+
+    const TcpPeer = struct {
+        fn run(
+            server: *http2_runtime.TlsServer,
+            alt: []const u8,
+        ) !void {
+            var connection = try server.acceptWithTimeout(.fromSeconds(5));
+            defer connection.close();
+            var request = try connection.readRequestWithTimeout(
+                .fromSeconds(5),
+            );
+            defer request.deinit(server.allocator);
+            try connection.writeResponse(request.stream_id, .{
+                .headers = &.{.{ .name = "alt-svc", .value = alt }},
+                .body = "tcp-discovery",
+                .request_method = request.method,
+            });
+        }
+    };
+    const H3Peer = struct {
+        fn run(server: *http3_runtime.HandshakeServer) !void {
+            var session = try server.acceptWithTimeout(.fromSeconds(5));
+            defer session.deinit();
+            var request = try session.receiveRequest();
+            defer request.deinit(server.allocator);
+            try session.sendResponse(request.stream_id, .{
+                .status = 200,
+                .body = "h3-through-socks5",
+            });
+        }
+    };
+    var tcp_peer = try io.concurrent(TcpPeer.run, .{ &tcp_server, alt_svc });
+    defer _ = tcp_peer.cancel(io) catch {};
+    var h3_peer = try io.concurrent(H3Peer.run, .{&h3_server});
+    defer _ = h3_peer.cancel(io) catch {};
+
+    var proxy = try socks.Server.init(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .auth = .{ .allow_anonymous = true },
+            .acl = .{ .default_action = .allow },
+            .allow_udp = true,
+        },
+    );
+    defer proxy.deinit();
+    const ProxyLoop = struct {
+        fn run(proxy_server: *socks.Server) !void {
+            try proxy_server.serve();
+        }
+    };
+    var proxy_loop = try io.concurrent(ProxyLoop.run, .{&proxy});
+    defer _ = proxy_loop.cancel(io) catch {};
+
+    var pool = try http.Pool.init(allocator, io, .{
+        .client = .{
+            .tls = .{ .server_verifier = .{
+                .pinned_ecdsa_p256_public_key = public_key,
+            } },
+            .socks5_proxy = .{
+                .host = "127.0.0.1",
+                .port = proxy.listener.socket.address.ip4.port,
+            },
+        },
+        .http3 = .{},
+        .max_connections = 2,
+    });
+    defer pool.deinit();
+
+    const uri = try std.fmt.allocPrint(
+        allocator,
+        "https://127.0.0.1:{d}/discover",
+        .{tcp_server.address().ip4.port},
+    );
+    defer allocator.free(uri);
+    var first = try pool.requestUriWithTimeout(
+        uri,
+        .{},
+        .fromSeconds(10),
+    );
+    defer first.deinit();
+    try std.testing.expectEqual(http.Protocol.http2, first.protocol());
+    try std.testing.expectEqualStrings("tcp-discovery", first.body());
+    var second = try pool.requestUriWithTimeout(
+        uri,
+        .{},
+        .fromSeconds(10),
+    );
+    defer second.deinit();
+    try std.testing.expectEqual(http.Protocol.http3, second.protocol());
+    try std.testing.expectEqualStrings("h3-through-socks5", second.body());
+    try tcp_peer.await(io);
+    try h3_peer.await(io);
+}
