@@ -5540,3 +5540,90 @@ test "WebSocket HTTP3 rejects a denied Origin before acceptance" {
     joined = true;
     if (shared.err) |err| return err;
 }
+
+test "WebSocket HTTP3 requires a selected subprotocol when configured" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const server_cid = [_]u8{ 0x91, 0x92, 0x93, 0x94 };
+    const limits: http3.runtime.Limits = .{ .quic = .{
+        .max_datagram_size = 4096,
+        .max_frames_per_datagram = 8,
+    } };
+    var server = try h3.Server.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        limits,
+        .{ .handshake = .{
+            .local_connection_id = &server_cid,
+            .random = [_]u8{0x95} ** 32,
+            .x25519_secret_key = [_]u8{0x96} ** 32,
+        } },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *h3.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            try std.testing.expectError(
+                error.InvalidSubprotocol,
+                self.server.receiveUpgradeRequestWithTimeout(
+                    .{
+                        .protocols = &.{"chat"},
+                        .require_subprotocol = true,
+                    },
+                    .fromSeconds(3),
+                ),
+            );
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const original_dcid =
+        [_]u8{ 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8 };
+    const client_cid = [_]u8{ 0xb1, 0xb2, 0xb3, 0xb4 };
+    if (h3.Client.connectWithTimeout(
+        allocator,
+        io,
+        .{ .ip4 = .unspecified(0) },
+        server.address(),
+        limits,
+        .{ .handshake = .{
+            .original_destination_connection_id = &original_dcid,
+            .local_connection_id = &client_cid,
+            .server_name = "localhost",
+            .random = [_]u8{0xb5} ** 32,
+            .x25519_secret_key = [_]u8{0xb6} ** 32,
+        } },
+        .{
+            .authority = "localhost",
+            .path = "/no-subprotocol",
+        },
+        .fromSeconds(3),
+    )) |connection_value| {
+        var connection = connection_value;
+        connection.close();
+        return error.ExpectedSubprotocolRejection;
+    } else |_| {}
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}

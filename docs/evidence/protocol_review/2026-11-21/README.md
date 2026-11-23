@@ -3046,3 +3046,16 @@ tests, the Origin matrix is fully covered and documented.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | Origin rejection matrix | H1, RFC 8441, RFC 9220, WT H2, WT H3 | live test runs recorded in passes 128, 158, 159, 160 and `admission_tests.zig` |
+
+
+## Hundred-and-sixty-second pass: RFC 9220 required-subprotocol coverage
+
+`AcceptOptions.require_subprotocol` was enforced on H3 but only tested on
+H1/H2. A new QUIC/TLS test connects without offering a subprotocol to a server
+that requires one, asserts `error.InvalidSubprotocol` before acceptance, and
+verifies the client receives no connection.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full WebSocket suite (Debug) | 525/526 (1 skipped) | live `zig build test-websocket --summary all` |
+| Subprotocol filter | 70/70 | live `zig build test-websocket -Dtest-filter='requires a selected subprotocol' --summary all` |
