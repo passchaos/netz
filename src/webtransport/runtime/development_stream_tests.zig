@@ -127,7 +127,16 @@ test "WebTransport development streams preserve prefixes reverse path and limits
             const server_uni = try session.openUnidirectionalStream();
             try session.sendStreamSlicesWithTimeout(
                 server_uni,
-                &.{ "server ", "uni" },
+                &.{ "server ", "u" },
+                false,
+                &progress,
+                .fromSeconds(1),
+            );
+            try std.testing.expect(progress.completed);
+            // The second send takes the non-prefix path.
+            try session.sendStreamSlicesWithTimeout(
+                server_uni,
+                &.{"ni"},
                 true,
                 &progress,
                 .fromSeconds(1),

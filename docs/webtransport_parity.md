@@ -843,7 +843,9 @@ partial socket completion reports one exact prefix over the logical
 concatenation so retry never duplicates association or application bytes. The
 stateful preconfigured client forwards the same API. Shared-endpoint sessions
 provide the one-packet `sendStreamSlices` form, preserving their single UDP
-reader/nonblocking contract. The parallel `writeStreamSlices` family consumes
+reader/nonblocking contract. The development `AcceptedSession` forwards the
+same slice send family, including the association prefix and borrowed payload
+slices, with one packet per attempt. The parallel `writeStreamSlices` family consumes
 at most one packet-sized logical prefix, crosses slice boundaries without a
 join, excludes association bytes from its return count, and has timeout and
 absolute-deadline forms for standalone sessions; shared-endpoint sessions
