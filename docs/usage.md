@@ -291,6 +291,13 @@ try client.sendClose(.normal_closure, "bye");
   on the client and `TlsListenOptions.alpn_protocols` on the server. WSS is an
   HTTP/1.1 Upgrade, so a negotiated protocol other than `http/1.1` fails with
   `error.InvalidAlpn`; a missing ALPN remains accepted for legacy peers.
+- Opening-handshake authentication: the client sends `.protocols`, `.origin`
+  and `.extra_headers` (for example `Authorization`); the server's
+  `AcceptOptions` selects `protocols`, optionally requires one with
+  `require_subprotocol`, and enforces `allowed_origins` byte-for-byte. The
+  pending upgrade exposes the parsed request so credentials can be checked
+  before `accept()`. Redirects strip cross-origin `extra_headers` and client
+  identities by default.
 
 Runnable: `zig build run-websocket-echo` (cleartext) and
 `zig build run-websocket-wss-echo` (WSS with a pinned server key).
