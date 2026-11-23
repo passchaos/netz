@@ -3059,3 +3059,19 @@ verifies the client receives no connection.
 | --- | --- | --- |
 | Full WebSocket suite (Debug) | 525/526 (1 skipped) | live `zig build test-websocket --summary all` |
 | Subprotocol filter | 70/70 | live `zig build test-websocket -Dtest-filter='requires a selected subprotocol' --summary all` |
+
+
+## Hundred-and-sixty-third pass: cumulative gate after the Origin/subprotocol coverage
+
+All scoped suites were rerun live after the H1/RFC 8441/RFC 9220 Origin and
+required-subprotocol tests plus the WebTransport H2 Origin test:
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full HTTP suite (Debug) | 310/310 | live `zig build test-http --summary all` |
+| Full HTTP/1 suite (Debug) | 479/479 | live `zig build test-http1 --summary all` |
+| Full WebSocket suite (Debug) | 525/526 (1 skipped) | live `zig build test-websocket --summary all` |
+| Full WebTransport suite (Debug) | 761/763 (2 skipped) | live `zig build test-webtransport --summary all` |
+| Full HTTP/3 suite (Debug) | 928/932 (4 skipped) | live `zig build test-http3 --summary all` |
+| QUIC trust unit tests | 38/38 | live `zig build test-quic -Dtest-filter='trust' --summary all` |
+| Public package surface | 27/27 | live `zig build test-package --summary all` |
