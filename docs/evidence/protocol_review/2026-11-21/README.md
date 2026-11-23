@@ -3140,3 +3140,17 @@ discoverable from the architecture page rather than only the usage guide.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | Documentation | module-map row added | `docs/http-overview.md` |
+
+
+## Hundred-and-sixty-ninth pass: ALPN adoption in the findings ledger and package surface
+
+The HTTP overview findings table now records F15: one-port H2/H1 ALPN dispatch
+plus the listener/client/bind protocol-confusion hardening. The public package
+test also compile-references `http1.runtime.adoptNegotiatedTlsServer`,
+`validateHttp1AlpnProtocols`, `http2.runtime.adoptNegotiatedTlsServer`, the H1
+server `negotiatedAlpn`, the WT H2 `Session.applicationProtocol` and the
+RFC 8441 pending-upgrade `negotiatedAlpn`.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Public package surface | 28/28 | live `zig build test-package --summary all` |

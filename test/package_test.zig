@@ -11828,3 +11828,12 @@ test "public QUIC client trust helpers report explicit trust" {
     try std.testing.expect(store == null);
     try std.testing.expect(options.system_store == null);
 }
+
+test "public ALPN adoption and metadata surfaces are exported" {
+    _ = &netz.http1.runtime.adoptNegotiatedTlsServer;
+    _ = &netz.http1.runtime.validateHttp1AlpnProtocols;
+    _ = &netz.http2.runtime.adoptNegotiatedTlsServer;
+    _ = &netz.http1.runtime.Connection.negotiatedAlpn;
+    _ = &netz.webtransport.h2.Session.applicationProtocol;
+    _ = &netz.websocket.runtime.PendingH2Upgrade.negotiatedAlpn;
+}
