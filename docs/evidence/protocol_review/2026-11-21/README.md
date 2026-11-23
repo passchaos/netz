@@ -2741,3 +2741,17 @@ ownership rule. Leak-free run:
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | RFC 9220 example | leak-free echo over QUIC/TLS | live `zig build run-websocket-h3-echo` |
+
+
+## Hundred-and-fortieth pass: uniform WebSocket connection release
+
+The H3 WebSocket connection only exposed `deinit()`, while HTTP/1 and HTTP/2
+connections use `close()`. H3 now provides `close()` as a documented alias so
+one cleanup pattern works across transports; an internal local name was
+renamed to avoid shadowing. The RFC 9220 example uses `close()` and remains
+leak-free.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full WebSocket suite (Debug) | 522/523 (1 skipped) | live `zig build test-websocket --summary all` |
+| RFC 9220 example | leak-free echo | live `zig build run-websocket-h3-echo` |

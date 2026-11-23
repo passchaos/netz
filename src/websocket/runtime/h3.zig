@@ -535,6 +535,14 @@ pub fn Connection(comptime role: common.Role) type {
             self.* = undefined;
         }
 
+        /// Release the WebSocket stream and its HTTP/3 owner, matching the
+        /// HTTP/1 and HTTP/2 connection surface. This does not perform the
+        /// Close handshake; call `closeWithTimeout`/`closeWithDeadline` first
+        /// when a peer-visible close is required.
+        pub fn close(self: *Self) void {
+            self.deinit();
+        }
+
         pub fn selectedProtocol(self: *const Self) ?[]const u8 {
             return self.selected_protocol;
         }
@@ -2941,8 +2949,8 @@ pub fn Connection(comptime role: common.Role) type {
                     },
                     .close => {
                         errdefer frame.deinit(self.allocator);
-                        const close = try frame.takeClose(self.allocator);
-                        return .{ .closed = close };
+                        const owned_close = try frame.takeClose(self.allocator);
+                        return .{ .closed = owned_close };
                     },
                     .text, .binary, .continuation => {
                         return .{ .application = frame };

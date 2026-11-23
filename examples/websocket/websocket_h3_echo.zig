@@ -64,7 +64,7 @@ pub fn main() !void {
                 .{ .protocols = &.{"echo.v1"} },
                 .fromSeconds(5),
             );
-            defer connection.deinit();
+            defer connection.close();
             defer closeIgnoringEvents(&connection, self.allocator);
             var message = try connection.receiveMessageWithTimeout(
                 .fromSeconds(5),
@@ -110,7 +110,7 @@ pub fn main() !void {
             .protocols = &.{"echo.v1"},
         },
     );
-    defer connection.deinit();
+    defer connection.close();
     defer closeIgnoringEvents(&connection, allocator);
     try connection.sendText("hello over RFC 9220");
     var reply = try connection.receiveMessageWithTimeout(.fromSeconds(5));

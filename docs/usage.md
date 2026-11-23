@@ -282,7 +282,9 @@ try client.sendClose(.normal_closure, "bye");
 - `closeWithDeadline`/`closeWithTimeout` are resumable: a failed or timed-out
   Close write leaves the connection open for the unbounded `close`. The
   returned `CloseHandshakeEvent` owns the peer Close frame or an in-flight
-  application frame; release it with `event.deinit(allocator)`.
+  application frame; release it with `event.deinit(allocator)`. Release the
+  connection itself with `close()` on every transport (the H3 `close()` is an
+  alias for `deinit()`).
 - Arbitrary-slice single-frame sends avoid payload joins:
   `sendTextSlices`, `sendBinarySlices`, and their timeout/deadline forms.
   Text slices are validated as one UTF-8 message across slice boundaries.
