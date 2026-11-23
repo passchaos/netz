@@ -293,6 +293,8 @@ try client.sendClose(.normal_closure, "bye");
 - `receiveFrame` returns control frames to the caller; `receiveFrameAuto*`
   services Ping/Close replies automatically. HTTP/3 always services them, so
   its `receiveFrameAuto*` forms alias the plain forms.
+- `sendText`/`sendBinary` are the typed forms; `sendMessage(opcode, payload)`
+  is the opcode-driven equivalent on every transport.
 - For caller-supplied byte streams use `websocket.stream_connection`; its
   bounded forms require `read_deadline_fn`/`write_deadline_fn` and otherwise
   return `error.DeadlineUnsupported`.

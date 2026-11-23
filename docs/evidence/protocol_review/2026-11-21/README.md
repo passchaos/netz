@@ -2783,3 +2783,17 @@ the semantic difference.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | Full WebSocket suite (Debug) | 522/523 (1 skipped) | live `zig build test-websocket --summary all` |
+
+
+## Hundred-and-forty-third pass: WebSocket sendMessage parity
+
+HTTP/1 and HTTP/2 exposed the opcode-driven `sendMessage`, but the HTTP/3
+connection only had `sendText`/`sendBinary` plus deadline-bounded message
+forms. HTTP/3 now provides the same unbounded `sendMessage`, mirroring the
+typed send path and rejecting non-text/binary opcodes. The RFC 9220 example
+sends its echo through `sendMessage`.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full WebSocket suite (Debug) | 522/523 (1 skipped) | live `zig build test-websocket --summary all` |
+| RFC 9220 example | echo through `sendMessage` | live `zig build run-websocket-h3-echo` |

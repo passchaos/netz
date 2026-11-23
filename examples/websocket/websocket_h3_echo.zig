@@ -122,7 +122,7 @@ pub fn main() !void {
         "RFC 9220 server certificate chain: {d}\n",
         .{server_chain.len},
     );
-    try connection.sendText("hello over RFC 9220");
+    try connection.sendMessage(.text, "hello over RFC 9220");
     var reply = try connection.receiveMessageWithTimeout(.fromSeconds(5));
     defer reply.deinit(allocator);
     std.debug.print("RFC 9220 client received: {s}\n", .{reply.payload});

@@ -635,6 +635,25 @@ pub fn Connection(comptime role: common.Role) type {
             try self.sendDataFrameValidatedLocked(.text, text);
         }
 
+        /// Opcode-driven counterpart to `sendText`/`sendBinary`, matching the
+        /// HTTP/1 and HTTP/2 connection surface.
+        pub fn sendMessage(
+            self: *Self,
+            opcode: websocket.Opcode,
+            payload: []const u8,
+        ) Error!void {
+            if (opcode != .text and opcode != .binary) {
+                return error.InvalidFrame;
+            }
+            if (self.writeAborted() or self.closeSent() or self.closeReceived()) {
+                return error.ConnectionClosed;
+            }
+            try common.validateOutgoingMessage(self.limits, opcode, payload);
+            self.send_mutex.lockUncancelable(self.io());
+            defer self.unlockSendBefore(null);
+            try self.sendDataFrameValidatedLocked(opcode, payload);
+        }
+
         pub fn sendTextWithTimeout(
             self: *Self,
             text: []const u8,
