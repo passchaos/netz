@@ -2205,9 +2205,12 @@ already exposed slices. The H3 server now has
 primitives that encode each borrowed slice into frames without joining them;
 `AcceptedSession` adds `sendStreamSlices`,
 `sendStreamSlicesWithTimeout` and `sendStreamSlicesWithDeadline` with the same
-prefix, rollback and `recordSent` behavior as the contiguous path.
+prefix, rollback and `recordSent` behavior as the contiguous path. The
+stateful endpoint server's `EndpointAcceptedSession.sendStreamSlices` path is
+exercised by the concurrent real-session test as well.
 
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | Development server slice sends | 102/102 matched | live `zig build test-webtransport -Dtest-filter='development streams preserve prefixes'` |
+| H3 endpoint server slice sends | 105/105 matched | live `zig build test-webtransport -Dtest-filter='endpoint server owns concurrent real sessions'` |
 | Full WebTransport suite (Debug) | 761/763 (2 skipped) | live `zig build test-webtransport` |

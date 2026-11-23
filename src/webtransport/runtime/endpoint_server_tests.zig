@@ -1338,9 +1338,12 @@ test "WebTransport endpoint server owns concurrent real sessions" {
                     received.* += stream.data.bytes;
                     if (stream.data.fin) {
                         try std.testing.expectEqual(expected.len, received.*);
-                        try accepted.sendStream(
+                        try accepted.sendStreamSlices(
                             stream.data.stream_id,
-                            if (is_one) "echo-one" else "echo-two",
+                            if (is_one)
+                                &.{ "echo-", "one" }
+                            else
+                                &.{ "echo-", "two" },
                             true,
                         );
                         received_streams += 1;
