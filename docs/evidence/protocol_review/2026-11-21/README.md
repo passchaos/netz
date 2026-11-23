@@ -2160,6 +2160,7 @@ for later capsules and datagrams.
 | H2 WebTransport tests | 205/205 | live `zig build test-webtransport -Dtest-filter='HTTP2'` |
 | H2 zero-copy slice staging | 106/106 | live `zig build test-webtransport -Dtest-filter='HTTP2 slice'` |
 | H2 slice sends over TLS/h2 duplex | client `hel`+`lo`, server `rep`+`ly`, datagram follows the finished stream | live `zig build test-webtransport -Dtest-filter='HTTP2 TLS runtime exchanges'` |
+| H2 endpoint facade slice sends | client `hel`+`lo` and server `rep`+`ly` through `EndpointClient`/`EndpointServer` | live endpoint client/server tests |
 | Full WebTransport suite (Debug) | 761/763 (2 skipped) | live `zig build test-webtransport` |
 
 

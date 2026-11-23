@@ -111,7 +111,7 @@ test "WebTransport HTTP2 EndpointServer owns admission Sessions and capacity" {
             try std.testing.expectEqualStrings("hello", stream_event.value.stream.data);
             const stream_id = stream_event.value.stream.id;
             try server.consumeWithDeadline(a, stream_id, 5, deadline(server.state.io));
-            try server.sendStreamWithTimeout(a, stream_id, "reply", true, .fromSeconds(3));
+            try server.sendStreamSlicesWithTimeout(a, stream_id, &.{ "rep", "ly" }, true, .fromSeconds(3));
             try server.retireStreamWithDeadline(a, stream_id, deadline(server.state.io));
             var datagram = try server.receiveWithTimeout(b, .fromSeconds(3));
             defer datagram.deinit();

@@ -224,7 +224,7 @@ test "WebTransport HTTP2 EndpointClient owns multiplexed Sessions and stable han
     defer _ = send_b.cancel(io) catch {};
     const a_stream = try client.openStreamWithTimeout(a, .bidirectional, .fromSeconds(3));
     try std.testing.expectEqual(@as(u62, 0), a_stream);
-    try client.sendStreamWithTimeout(a, a_stream, "hello", true, .fromSeconds(3));
+    try client.sendStreamSlicesWithTimeout(a, a_stream, &.{ "hel", "lo" }, true, .fromSeconds(3));
     var send_a = io.async(Send.run, .{ client, a, "to-a" });
     defer _ = send_a.cancel(io) catch {};
     try send_b.await(io);
