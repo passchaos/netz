@@ -204,6 +204,14 @@ test "WebTransport endpoint client multiplexes two authenticated Sessions" {
             try std.testing.expectEqual(self.address, client.remoteAddress());
             try std.testing.expect(client.remoteAddressValidated());
             try std.testing.expectEqualStrings("h3", client.negotiatedAlpn());
+            try std.testing.expectEqual(
+                @TypeOf(client.negotiatedCipherSuite()).aes_128_gcm_sha256,
+                client.negotiatedCipherSuite(),
+            );
+            try std.testing.expectEqual(
+                @TypeOf(client.negotiatedTranscriptHash()).sha256,
+                client.negotiatedTranscriptHash(),
+            );
             var exporter: [32]u8 = undefined;
             try client.exportKeyingMaterial(
                 "EXPORTER-netz-endpoint-client",

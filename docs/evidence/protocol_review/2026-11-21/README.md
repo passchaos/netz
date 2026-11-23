@@ -2474,3 +2474,18 @@ assert it is present on both the client endpoint and a server pending request.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | Full WebTransport suite (Debug) | 761/763 (2 skipped) | live `zig build test-webtransport --summary all` |
+
+
+## Hundred-and-twenty-fourth pass: HTTP/3 WebTransport endpoint-client metadata
+
+The HTTP/3 WebTransport `EndpointClient` exposed peer certificates and ALPN but
+not the negotiated cipher suite or transcript hash that
+`HandshakeClientSession` and the endpoint server already provide.
+`EndpointClient` now forwards both from the handshake client, and the endpoint
+client test asserts AES-128-GCM/SHA-256. This completes the TLS metadata surface
+across HTTP/2 and HTTP/3 WebTransport sessions, clients, servers and pending
+requests.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full WebTransport suite (Debug) | 761/763 (2 skipped) | live `zig build test-webtransport --summary all` |

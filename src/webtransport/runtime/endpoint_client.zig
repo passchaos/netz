@@ -835,6 +835,18 @@ pub const Client = struct {
         return self.h3.negotiatedAlpn();
     }
 
+    pub fn negotiatedCipherSuite(
+        self: Client,
+    ) quic.tls.cipher_suite.Suite {
+        return self.h3.negotiatedCipherSuite();
+    }
+
+    pub fn negotiatedTranscriptHash(
+        self: Client,
+    ) quic.tls.secret.Hash {
+        return self.h3.negotiatedTranscriptHash();
+    }
+
     pub fn initiateKeyUpdate(self: *Client) Error!void {
         try self.h3.initiateKeyUpdate();
     }
