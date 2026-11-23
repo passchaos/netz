@@ -2590,3 +2590,16 @@ the ALPN adoption test asserts `http/1.1` on a real negotiated connection.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | ALPN-filtered HTTP suite | 105/105 | live `zig build test-http -Dtest-filter='ALPN' --summary all` |
+
+
+## Hundred-and-thirty-second pass: WebTransport HTTP/2 session exporter coverage
+
+The H2 `Session.exportKeyingMaterial` already wrapped the raw TLS exporter in
+the WebTransport `EXPORTER-WebTransport` context (stream ID + label +
+context), but no TLS test exercised it. The listener TLS test now exports a
+32-byte secret through the session API, proving the channel-binding path on a
+real connection.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full WebTransport suite (Debug) | 761/763 (2 skipped) | live `zig build test-webtransport --summary all` |

@@ -147,6 +147,12 @@ test "WebTransport HTTP2 EndpointListener isolates a slow TLS handshake" {
     try std.testing.expectEqualStrings("h2", session.negotiatedAlpn().?);
     try std.testing.expect(session.peerCertificates() != null);
     try std.testing.expect(session.negotiatedTranscriptHash() != null);
+    var exporter: [32]u8 = undefined;
+    try session.exportKeyingMaterial(
+        "EXPORTER-netz-wt-h2",
+        "session-binding",
+        &exporter,
+    );
     const snapshot = listener_mod.EndpointListener.testing.snapshot(listener);
     try std.testing.expectEqual(@as(usize, 1), snapshot.reserved);
     try std.testing.expectEqual(@as(usize, 1), snapshot.connected);
