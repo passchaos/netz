@@ -91,6 +91,10 @@ std.debug.print("{t} {d}: {s}\n", .{
   `finishBody()` before `readResponse()`; reading before the body is finished
   returns `error.InvalidWriterState`.
 - Redirects: `requestUriFollowingRedirects*`; the chain shares one deadline.
+- Trust: platform roots by default. `.tls.server_verifier` pins a key,
+  `.tls.system_store` trusts a private CA for H1/H2 and H3, and
+  `.tls.client_identity` adds mTLS. See `run-http-https-client`,
+  `run-http-custom-ca` and `run-http-mutual-tls`.
 - Errors: `error.Timeout` for expired or non-positive budgets, protocol errors
   for malformed peers, `error.ConnectionClosed` after a terminal close.
 

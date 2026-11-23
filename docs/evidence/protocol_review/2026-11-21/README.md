@@ -2336,3 +2336,17 @@ negotiated result they could not serve.
 | Full WebSocket suite (Debug) | 521/522 (1 skipped) | live `zig build test-websocket --summary all` |
 | MQTT WebSocket-filtered suite | 595/596 (1 skipped) | live `zig build test-mqtt -Dtest-filter='websocket'` |
 | ALPN-filtered HTTP suite | 104/104 | live `zig build test-http -Dtest-filter='ALPN' --summary all` |
+
+
+## Hundred-and-fifteenth pass: private-CA recipe and authentication overview
+
+`examples/http/custom_ca.zig` mirrors `curl --cacert`: it builds an empty
+`netz.tls.trust.SystemStore`, adds only the deterministic test certificate,
+and passes it as `.tls.system_store`, which H1/H2 and the H3 routes share.
+`docs/http-overview.md` now has an "Authentication and trust" section covering
+server verification choices, mTLS, proxy/cookie/redirect credential rules, ALPN
+protocol selection, and server-side identity rotation and peer chains.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Custom CA example | `custom CA http1 200: hello from a custom CA` | live `zig build run-http-custom-ca` |

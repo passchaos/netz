@@ -105,6 +105,12 @@ pub const specs = [_]Spec{
         .description = "Require and present a client certificate over HTTPS",
     },
     .{
+        .exe_name = "netz-http-custom-ca",
+        .path = "examples/http/custom_ca.zig",
+        .run_step = "run-http-custom-ca",
+        .description = "Trust a private CA through an in-memory system store",
+    },
+    .{
         .exe_name = "netz-http-h3-prefer",
         .path = "examples/http/h3_prefer.zig",
         .run_step = "run-http-h3-prefer",

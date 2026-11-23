@@ -84,6 +84,54 @@ Optional 0-RTT uses a new connection, remembered origin-scoped H3 SETTINGS and
 an origin/ALPN ticket; ordinary idle reuse stays 1-RTT. TLS rejection and a
 first 425 can trigger the supported one-time 1-RTT replay.
 
+## Authentication and trust
+
+Server authentication is on by default: every TLS route verifies the peer
+certificate unless an explicit policy replaces the default trust set.
+
+| Need | Client configuration | Boundary |
+| --- | --- | --- |
+| Public origins | none | Platform roots. `.tls.root_source = .bundled` selects the compiled-in Mozilla roots in minimal containers. |
+| Private CA file (TCP TLS) | `.tls.ca_bundle = .{ .bundle = &bundle, .lock = &lock }` | H1/H2 only; QUIC has no CA-bundle equivalent. |
+| Private CA for TCP and H3 | `.tls.system_store = &store` from `netz.tls.trust.SystemStore.initWithPaths` or `initEmpty` + `addCompatibleCertificate` | Inherited by the direct H3 route and the pool's Alt-Svc backend. |
+| Pin one key | `.tls.server_verifier = .{ .pinned_ecdsa_p256_public_key = key }` | Replaces the CA path; use it when the peer key is known out of band. |
+| Skip hostname match | `.tls.verify_host = false` | CA path, validity, EKU and revocation checks still run; intended for tunnels. |
+| Client certificate (mTLS) | `.tls.client_identity = .{ .certificate_chain = ..., .signer = ... }` | H1/H2/H3 and WebTransport share the same shape. |
+
+The direct H3 route and the Alt-Svc pool backend copy `.tls.server_verifier`,
+`.tls.system_store`, `.tls.environ`, `.tls.root_source` and `.tls.verify_host`
+into the QUIC handshake when no explicit `http3.handshake.handshake` trust is
+configured; `server_auth` and `client_identity` there override the inherited
+policy. A TCP `ca_bundle` cannot be translated to QUIC, so Alt-Svc H3 fails
+`Pool.init` with `error.UnsupportedH3TrustConfiguration` instead of connecting
+unverified, while `prefer_http3` keeps that request on TCP.
+
+HTTP-level credentials are ordinary fields. `Authorization`, `Cookie` and
+application headers travel in the request head; `http_proxy.headers` are sent
+only to the proxy (absolute-form or CONNECT), never to the origin.
+`netz.http.CookieSession` persists `Set-Cookie` across pooled requests.
+Redirects strip `Authorization`, `Proxy-Authorization`, `Cookie` and `Cookie2`
+on cross-origin hops, refuse to offer a TLS client identity unless
+`RedirectPolicy.allow_cross_origin_client_identity` is set, and reject
+HTTPS-to-HTTP downgrades unless `allow_insecure_downgrade` is set.
+
+ALPN does not authenticate anyone; it selects the wire protocol after
+certificate verification. H1 accepts `http/1.1` or a legacy no-ALPN peer, H2
+requires `h2`, H3 requires `h3`, WSS requires `http/1.1`, and MQTT requires
+`mqtt`. `netz.tls.alpn_server` exposes the selected protocol so one port can
+dispatch to the matching runtime (`zig build run-http-alpn-server`).
+
+Server side, `TlsListenOptions.identity` supplies the certificate and
+`identity_provider` rotates it per handshake. `client_auth = .{ .verifier =
+... }` requires a client certificate, and handlers read the authenticated
+chain from `Connection.peerCertificates()` (`zig build run-http-mutual-tls`).
+There is no built-in user/password HTTP authentication: applications validate
+`Authorization` themselves.
+
+Examples: `run-http-https-client` (pinned key), `run-http-custom-ca` (private
+CA through a system store), `run-http-mutual-tls`, `run-http-proxy-client`
+(proxy credentials), `run-http-cookie-session`, `run-http-alpn-server`.
+
 ## Wire-version feature map
 
 | Area | HTTP/1.1 | HTTP/2 | HTTP/3 |
