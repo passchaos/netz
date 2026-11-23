@@ -18,6 +18,20 @@ asymmetries.
 `netz.http` is the unified HTTP facade. `netz.streaming.http1/http2/http3` are
 aliases for the version-specific streaming owners, not another transport.
 
+Scatter/gather message sends:
+
+| Layer | Contiguous | Slice form |
+| --- | --- | --- |
+| WebSocket runtime | `sendText`/`sendBinary` | `sendTextSlices`/`sendBinarySlices` (compression-aware) |
+| WebSocket stream adapter | `sendText`/`sendBinary` | `sendTextSlices`/`sendBinarySlices` via `write_slices_fn` |
+| WebTransport H3 client/server sessions | `sendStream` | `sendStreamSlices` (borrowed slices) |
+| WebTransport H2 session | `sendStreamWith*` | `sendStreamSlicesWith*` (zero-copy header + slices) |
+| WebTransport H2 endpoint facades | `sendStreamWith*` | `sendStreamSlicesWith*` (staged command buffer) |
+
+All slice forms have `WithTimeout` and `WithDeadline` counterparts where the
+contiguous form does; borrowed slices must outlive the call, including bounded
+write retries.
+
 ## Ownership
 
 - One task owns a QUIC connection, HTTP/2 connection or HTTP/3 connection at a
