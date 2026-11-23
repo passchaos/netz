@@ -333,6 +333,13 @@ server address is already resolved (the address-based form shown in
 `examples/webtransport/webtransport_handshake_stream.zig`).
 
 - Server: `webtransport.runtime.HandshakeServer.bind` then `accept()`.
+- TLS: URI connects install platform roots unless `h3.handshake` configures
+  `server_auth`, `system_store`, `system_environ` or `root_source`. Client
+  certificates use `h3.handshake.client_identity`; a server requires them with
+  `handshake.client_auth` and exposes the authenticated chain through
+  `peerCertificates()`. The HTTP/2 capsule variant takes
+  `http2.runtime.TlsConnectOptions` (`server_verifier`, `ca_bundle`,
+  `system_store`, `client_identity`).
 - Streams: `openBidirectionalStream`/`openUnidirectionalStream`,
   `sendStream`/`writeStream`, `receiveStream`, `resetStream`,
   `stopSending`, `finishStream`.
@@ -368,6 +375,12 @@ zig build run-quic-close
 
 - 0-RTT: `quic.zero_rtt` plus the handshake early-data options; see the
   zero-RTT tests and [quicz_parity.md](quicz_parity.md).
+- TLS trust: the low-level `quic.handshake.ClientOptions` leaves certificate
+  verification disabled when `server_auth`, `system_store`, `system_environ`
+  and a non-default `root_source` are all unset. URI-level H3/WebTransport
+  facades install platform roots automatically; raw handshake callers should
+  set `server_auth`/`system_store` explicitly or call
+  `netz.quic.client_trust.applyPlatformRootDefault` before connecting.
 - One owner drives each connection; ACKs, timers and loss recovery are
   serviced by the receive path.
 

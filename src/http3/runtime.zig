@@ -2595,6 +2595,11 @@ pub const HandshakeServer = struct {
         if (options.serve_connection_recovery_drain_timeout.nanoseconds <= 0) {
             return error.InvalidHandshakeRecovery;
         }
+        // The server speaks HTTP/3 framing on this ALPN. Reject a configured
+        // protocol the client-side check would also refuse after negotiation.
+        if (!http3.isHttp3Alpn(options.handshake.alpn_protocol)) {
+            return error.InvalidAlpn;
+        }
         var quic_server = try quic.runtime.Server.bind(allocator, io, bind_address, limits.quic);
         errdefer quic_server.deinit();
 

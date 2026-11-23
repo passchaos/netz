@@ -2377,3 +2377,28 @@ complete response rather than only the connect.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | Timeout example | `50 ms timeout: error.Timeout (expected)` and `2 s deadline: http1 200: slow but successful` | live `zig build run-http-timeouts` |
+
+
+## Hundred-and-eighteenth pass: HTTP/3 server ALPN validation and public QUIC trust helper
+
+`http3.runtime.HandshakeServer.bind` accepted any `alpn_protocol` string even
+though the HTTP/3 runtime can only speak `h3`/`h3-NN`; a misconfigured
+`hq-interop` server would negotiate a protocol its framing cannot use. `bind`
+now rejects non-HTTP/3 identifiers with `error.InvalidAlpn`, symmetric with the
+client's post-handshake check, and a test covers both rejection and the
+`h3-29` draft form.
+
+The QUIC low-level handshake disables certificate verification when
+`server_auth`, `system_store`, `system_environ` and a non-default
+`root_source` are all unset. That remains the documented low-level contract,
+but the helper that installs platform roots was private to the H3 facades.
+`quic.mod` now exports `client_trust`, and the package surface test covers
+`hasExplicitTrust` and `applyPlatformRootDefault`; `docs/usage.md` warns raw
+QUIC callers and points at the helper.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full HTTP/3 suite (Debug) | 928/932 (4 skipped) | live `zig build test-http3 --summary all` |
+| Full WebTransport suite (Debug) | 761/763 (2 skipped) | live `zig build test-webtransport --summary all` |
+| H3 handshake server tests | 53/53 | live `zig build test-http3 -Dtest-filter='rejects a non-HTTP/3 ALPN'` |
+| Public package surface (trust helper) | 2/2 | live `zig build test-package -Dtest-filter='QUIC client trust'` |

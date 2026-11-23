@@ -11803,3 +11803,28 @@ test "HTTP response types expose shared content decoding" {
 test {
     _ = @import("http_request_content_coding_test.zig");
 }
+
+test "public QUIC client trust helpers report explicit trust" {
+    const trust = netz.quic.client_trust;
+    var options: netz.quic.handshake.ClientOptions = .{
+        .original_destination_connection_id = &.{},
+        .local_connection_id = &.{},
+    };
+    try std.testing.expect(!trust.hasExplicitTrust(&options));
+    options.root_source = .bundled;
+    try std.testing.expect(trust.hasExplicitTrust(&options));
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var store: ?trust.SystemStore = null;
+    defer if (store) |*value| value.deinit();
+    // Explicit bundled roots suppress the platform-root default.
+    try trust.applyPlatformRootDefault(
+        std.testing.allocator,
+        threaded.io(),
+        &options,
+        &store,
+    );
+    try std.testing.expect(store == null);
+    try std.testing.expect(options.system_store == null);
+}

@@ -10,6 +10,7 @@ pub const initial_exchange = @import("initial_exchange.zig");
 pub const tls_client_hello = @import("tls_client_hello.zig");
 pub const tls = @import("tls/mod.zig");
 pub const handshake = @import("handshake.zig");
+pub const client_trust = @import("client_trust.zig");
 pub const zero_rtt = @import("zero_rtt/mod.zig");
 pub const one_rtt = @import("one_rtt.zig");
 pub const packet_space = @import("packet_space.zig");

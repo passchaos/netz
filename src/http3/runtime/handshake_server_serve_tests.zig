@@ -1612,3 +1612,37 @@ test "HTTP/3 handshake supervisor establishes concurrent clients" {
     try std.testing.expectEqual(@as(usize, 0), dispatcher.pendingHandshakeCount());
     try std.testing.expectEqual(@as(usize, 2), dispatcher.connectionCount());
 }
+
+test "HTTP/3 handshake server rejects a non-HTTP/3 ALPN" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    try std.testing.expectError(
+        error.InvalidAlpn,
+        runtime.HandshakeServer.bind(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(0) },
+            .{},
+            .{ .handshake = .{
+                .local_connection_id = "h3-alpn-server",
+                .alpn_protocol = "hq-interop",
+            } },
+        ),
+    );
+
+    // Draft identifiers remain valid; only non-HTTP/3 values are rejected.
+    var server = try runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+        .{ .handshake = .{
+            .local_connection_id = "h3-alpn-server",
+            .alpn_protocol = "h3-29",
+        } },
+    );
+    server.deinit();
+}
