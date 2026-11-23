@@ -361,9 +361,11 @@ server address is already resolved (the address-based form shown in
 `examples/webtransport/webtransport_handshake_stream.zig`).
 
 - Server: `webtransport.runtime.HandshakeServer.bind` then `accept()`.
-- TLS: URI connects install platform roots unless `h3.handshake` configures
-  `server_auth`, `system_store`, `system_environ` or `root_source`. Client
-  certificates use `h3.handshake.client_identity`; a server requires them with
+- TLS: `webtransport.runtime.EndpointClient` URI connects install platform
+  roots unless `h3.handshake` configures `server_auth`, `system_store`,
+  `system_environ` or `root_source`; `HandshakeClientSession` URI and address
+  helpers require explicit trust. Client certificates use
+  `h3.handshake.client_identity`; a server requires them with
   `handshake.client_auth` and exposes the authenticated chain through
   `peerCertificates()`. The HTTP/2 capsule variant takes
   `http2.runtime.TlsConnectOptions` (`server_verifier`, `ca_bundle`,

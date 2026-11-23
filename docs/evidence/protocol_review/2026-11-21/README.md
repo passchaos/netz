@@ -2856,3 +2856,16 @@ verifier's hostname policy (`ClientTlsTrust` has no verify-host field).
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | Documentation audit | claims matched to `ClientTlsTrust` fields and `quic.handshake.connectAttempt` branches | code inspection |
+
+
+## Hundred-and-forty-eighth pass: WebTransport TLS bullet scoped to the verifying facade
+
+The WebTransport usage bullet still said URI connects install platform roots
+without distinguishing `EndpointClient` from `HandshakeClientSession`. It now
+names `EndpointClient` as the verifying URI facade and marks the session
+helpers as requiring explicit trust, matching the quick-start correction from
+pass 146.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Documentation audit | bullet matches the `applyPlatformRootDefault` call sites | code inspection of `endpoint_client.zig` and `handshake_client_session.zig` |
