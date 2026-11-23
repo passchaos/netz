@@ -132,7 +132,8 @@ compiled-in Mozilla roots for both transports.
 The direct H3 route loads a platform-root store per connection when no
 reusable store is configured. For repeated `prefer_http3` connections, create
 one `SystemStore` and assign `.tls.system_store`, or use `Pool`, which keeps a
-single store for its lifetime.
+single store for its lifetime. A caller-provided `system_store` is borrowed:
+keep it alive for every Client/Pool that inherits it.
 
 Proxy routes (mutually exclusive):
 

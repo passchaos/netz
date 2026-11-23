@@ -30,8 +30,14 @@ aliases for the version-specific streaming owners, not another transport.
   controls the optional Alt-Svc dispatcher backend.
 - `websocket.stream_connection` never owns the byte stream; the caller supplies
   `read_fn`/`write_fn`/`close_fn`. Runtime connections own their sockets.
+  Optional slice callbacks (`write_slices_fn`, `write_slices_deadline_fn`)
+  receive the encoded header plus borrowed payload slices.
 - WebTransport `Session`, stream and DATAGRAM handles borrow the owning client
   or server connection. Close/terminal events remain owned until deinit.
+  Scatter/gather stream sends (H3 `sendStreamSlices*`, H2 session
+  `sendStreamSlices*`) borrow the caller's payload slices until the call
+  completes, including bounded-write retries; the H2 endpoint command queue
+  copies its input.
 
 ## Deadlines and cancellation
 
