@@ -290,9 +290,9 @@ try client.sendClose(.normal_closure, "bye");
   returned `CloseHandshakeEvent` owns the peer Close frame or an in-flight
   application frame; release it with `event.deinit(allocator)`. Release the
   connection itself with `close()` on every transport (the H3 `close()` is an
-  alias for `deinit()`). H1/H2 additionally expose a send-only `sendClose`;
-  on H3 `closeWithTimeout` sends once and surfaces in-flight application
-  frames, so one call can drain and close.
+  alias for `deinit()`). Every transport exposes a send-only `sendClose`;
+  H3's `closeWithTimeout` additionally sends once and surfaces in-flight
+  application frames, so one call can drain and close.
 - Arbitrary-slice single-frame sends avoid payload joins:
   `sendTextSlices`, `sendBinarySlices`, and their timeout/deadline forms.
   Text slices are validated as one UTF-8 message across slice boundaries.
