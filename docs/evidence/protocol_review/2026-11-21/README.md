@@ -2769,3 +2769,17 @@ demonstrating authenticated metadata through the public surface.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | RFC 9220 example | `ALPN: h3`, `server certificate chain: 1`, echo | live `zig build run-websocket-h3-echo` |
+
+
+## Hundred-and-forty-second pass: WebSocket frame-reception parity
+
+HTTP/1 and HTTP/2 distinguish `receiveFrame` (returns control frames) from
+`receiveFrameAuto*` (services Pong/Close replies), while HTTP/3 already
+services them inside its plain receive path. HTTP/3 now exposes
+`receiveFrameAuto`/`WithTimeout`/`WithDeadline` as documented aliases so
+generic call sites stay source-compatible; the API map and usage guide record
+the semantic difference.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full WebSocket suite (Debug) | 522/523 (1 skipped) | live `zig build test-websocket --summary all` |

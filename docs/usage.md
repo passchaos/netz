@@ -290,6 +290,9 @@ try client.sendClose(.normal_closure, "bye");
 - Arbitrary-slice single-frame sends avoid payload joins:
   `sendTextSlices`, `sendBinarySlices`, and their timeout/deadline forms.
   Text slices are validated as one UTF-8 message across slice boundaries.
+- `receiveFrame` returns control frames to the caller; `receiveFrameAuto*`
+  services Ping/Close replies automatically. HTTP/3 always services them, so
+  its `receiveFrameAuto*` forms alias the plain forms.
 - For caller-supplied byte streams use `websocket.stream_connection`; its
   bounded forms require `read_deadline_fn`/`write_deadline_fn` and otherwise
   return `error.DeadlineUnsupported`.

@@ -2897,6 +2897,27 @@ pub fn Connection(comptime role: common.Role) type {
             return self.receiveFrameInternal(null, .frame);
         }
 
+        /// HTTP/3 frame reception always services automatic Pong/Close replies
+        /// (see `receiveFrameInternal`), so this matches `receiveFrame` and
+        /// keeps the HTTP/1 and HTTP/2 call sites source-compatible.
+        pub fn receiveFrameAuto(self: *Self) Error!websocket.Frame {
+            return self.receiveFrame();
+        }
+
+        pub fn receiveFrameAutoWithTimeout(
+            self: *Self,
+            timeout: std.Io.Duration,
+        ) Error!websocket.Frame {
+            return self.receiveFrameWithTimeout(timeout);
+        }
+
+        pub fn receiveFrameAutoWithDeadline(
+            self: *Self,
+            deadline: std.Io.Clock.Timestamp,
+        ) Error!websocket.Frame {
+            return self.receiveFrameWithDeadline(deadline);
+        }
+
         pub fn receiveFrameWithTimeout(
             self: *Self,
             timeout: std.Io.Duration,

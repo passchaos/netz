@@ -3342,6 +3342,10 @@ test "WebSocket HTTP3 control progress APIs reject expired budgets" {
         error.Timeout,
         client.receiveCloseFrameWithTimeout(.zero),
     );
+    try std.testing.expectError(
+        error.Timeout,
+        client.receiveFrameAutoWithTimeout(.zero),
+    );
     var message_storage: [1]u8 = undefined;
     try std.testing.expectError(
         error.Timeout,
