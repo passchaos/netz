@@ -11835,6 +11835,10 @@ test "public ALPN adoption and metadata surfaces are exported" {
     _ = &netz.http2.runtime.adoptNegotiatedTlsServer;
     _ = &netz.http1.runtime.Connection.negotiatedAlpn;
     _ = &netz.http.Connection.earlyDataStatus;
+    _ = &netz.http.Connection.peerCertificates;
+    _ = &netz.http.Connection.negotiatedCipherSuite;
+    _ = &netz.http.Connection.negotiatedTranscriptHash;
+    _ = &netz.http.Connection.exportKeyingMaterial;
     _ = &netz.http3.runtime.HandshakeClient.negotiatedTlsProtocol;
     _ = &netz.http3.runtime.HandshakeClient.wasTlsSessionResumed;
     _ = &netz.http3.runtime.HandshakeServerSession.negotiatedTlsProtocol;

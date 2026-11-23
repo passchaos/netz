@@ -87,11 +87,12 @@ an operation deadline becomes `Timeout`.
 Explicit redirect helpers use the common method, downgrade and credential
 policies. Preserving redirects need a replayable Reader. Crossing an origin
 clears QUIC resumption inputs, and client identities remain restricted by
-default. Negotiation metadata reports `h3`, TLS 1.3, the native resume flag and
-the QUIC 0-RTT status (`earlyDataStatus()`). The handshake client and server
-sessions expose the same TLS-version, resume-flag and 0-RTT accessors. TCP
-session-ticket getters return null on an H3 connection; QUIC resumption uses
-the native H3 handshake inputs.
+default. Negotiation metadata reports `h3`, TLS 1.3, the native resume flag,
+the QUIC 0-RTT status (`earlyDataStatus()`), the peer chain, cipher suite,
+transcript hash and exporter. The handshake client and server sessions expose
+the same TLS-version, resume-flag and 0-RTT accessors. TCP session-ticket
+getters return null on an H3 connection; QUIC resumption uses the native H3
+handshake inputs.
 
 The strict H3 policy requires HTTPS and an H3 ALPN list. TLS-1.2-only policy,
 HTTP/SOCKS proxy options, invalid connection budgets and raw early-data offers

@@ -3336,3 +3336,19 @@ TLS 1.3.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | HTTP/3 suite (Debug) | 928/932 (4 skipped) | live `zig build test-http3 --summary all` |
+
+## Hundred-and-eighty-third pass: unified HTTP connection TLS metadata
+
+`http.Connection` exposed ALPN, TLS version, resumption and early-data state
+but not the peer chain, cipher suite, transcript hash or exporter that the
+H1/H2/H3 owners already provide. It now forwards `peerCertificates()`,
+`negotiatedCipherSuite()`, `negotiatedTranscriptHash()` and
+`exportKeyingMaterial()` across all three protocols. The HTTPS example now
+connects explicitly and prints `curl -v`-style TLS metadata before its
+request; H2 and direct-H3 tests assert the new surface.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| HTTP aggregate (Debug) | 310/310 | live `zig build test-http --summary all` |
+| Package surface (Debug) | 28/28 | live `zig build test-package --summary all` |
+| HTTPS metadata example (Debug) | `TLS tls13 alpn=http/1.1 resumed=false peer-certs=1`, 200 | live `zig build run-http-https-client --summary all` |

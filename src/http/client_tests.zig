@@ -605,6 +605,16 @@ test "unified HTTP connection reuses negotiated h2 transport" {
     var connection = try client.connectUriWithTimeout(uri, .fromSeconds(5));
     defer connection.close();
     try std.testing.expectEqual(http.Protocol.http2, connection.protocol());
+    try std.testing.expectEqualStrings("h2", connection.negotiatedAlpn().?);
+    try std.testing.expect(connection.peerCertificates() != null);
+    try std.testing.expect(connection.negotiatedCipherSuite() != null);
+    try std.testing.expect(connection.negotiatedTranscriptHash() != null);
+    var exported: [32]u8 = undefined;
+    try connection.exportKeyingMaterial(
+        "EXPORTER-netz-http-connection",
+        "connection-metadata",
+        &exported,
+    );
     var first = try connection.requestWithTimeout(
         "/one",
         .{},

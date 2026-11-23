@@ -253,6 +253,11 @@ context-owned storage). See `zig build run-http-server-serve-until`.
   `.tls.client_identity = .{ .certificate_chain = ..., .signer = ... }` on the
   client; the handler reads the authenticated chain from
   `Connection.peerCertificates()`. See `zig build run-http-mutual-tls`.
+- Connection TLS metadata: `Client.connectUri*` returns a `Connection`
+  exposing `peerCertificates()`, `negotiatedAlpn()`,
+  `negotiatedTlsProtocol()`, `negotiatedCipherSuite()`,
+  `negotiatedTranscriptHash()`, `wasTlsSessionResumed()`, `earlyDataStatus()`
+  (H3) and `exportKeyingMaterial()`. See `zig build run-http-https-client`.
 - Incremental request and response bodies: `zig build run-http-streaming`.
 - Chunked uploads with trailers: `zig build run-http-chunked`.
 - Concurrent handlers and pull bodies: see [http_streaming.md](http_streaming.md).

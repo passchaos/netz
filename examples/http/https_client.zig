@@ -1,8 +1,11 @@
-//! HTTPS with an explicit server verifier.
+//! HTTPS with an explicit server verifier and TLS metadata.
 //!
-//! Mirrors `curl --cacert` / a pinned-key `reqwest` client: the server runs
-//! the HTTP/1.1 TLS listener with the test identity, and the client trusts
-//! exactly that ECDSA P-256 public key instead of the system root store.
+//! Mirrors `curl --cacert` plus `curl -v` / a pinned-key `reqwest` client:
+//! the server runs the HTTP/1.1 TLS listener with the test identity, and the
+//! client trusts exactly that ECDSA P-256 public key instead of the system
+//! root store. `connectUri` exposes the authenticated connection so the
+//! negotiated version, ALPN, resumption flag and peer chain can be inspected
+//! before the request.
 
 const std = @import("std");
 const netz = @import("netz");
@@ -95,8 +98,24 @@ pub fn main() !void {
         },
     });
     defer client.deinit();
-    var response = try client.requestUriWithTimeout(
-        uri,
+
+    // `connectUri*` returns the authenticated connection, so TLS metadata is
+    // available before the request, similar to `curl -v`.
+    var connection = try client.connectUriWithTimeout(uri, .fromSeconds(10));
+    defer connection.close();
+    std.debug.print(
+        "TLS {t} alpn={?s} resumed={?} peer-certs={d}\n",
+        .{
+            connection.negotiatedTlsProtocol().?,
+            connection.negotiatedAlpn(),
+            connection.wasTlsSessionResumed(),
+            connection.peerCertificates().?.len,
+        },
+    );
+
+    // The connection target is origin-form; the URI above selected the peer.
+    var response = try connection.requestWithTimeout(
+        "/secure",
         .{ .method = "GET" },
         .fromSeconds(10),
     );

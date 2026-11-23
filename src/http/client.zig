@@ -173,6 +173,53 @@ pub const Connection = struct {
         };
     }
 
+    /// Verified peer certificate chain for the authenticated transport.
+    /// Cleartext connections return null; slices remain valid until close.
+    pub fn peerCertificates(self: *const Connection) ?[]const []const u8 {
+        return switch (self.value) {
+            .http1 => |*client| client.peerCertificates(),
+            .http2 => |*connection| connection.peerCertificates(),
+            .http3 => |owner| owner.client.peerCertificates(),
+        };
+    }
+
+    pub fn negotiatedCipherSuite(
+        self: *const Connection,
+    ) ?tls_stream.NegotiatedCipherSuite {
+        return switch (self.value) {
+            .http1 => |*client| client.negotiatedCipherSuite(),
+            .http2 => |*connection| connection.negotiatedCipherSuite(),
+            .http3 => |owner| @enumFromInt(
+                @intFromEnum(owner.client.negotiatedCipherSuite()),
+            ),
+        };
+    }
+
+    pub fn negotiatedTranscriptHash(
+        self: *const Connection,
+    ) ?tls_stream.TranscriptHash {
+        return switch (self.value) {
+            .http1 => |*client| client.negotiatedTranscriptHash(),
+            .http2 => |*connection| connection.negotiatedTranscriptHash(),
+            .http3 => |owner| owner.client.negotiatedTranscriptHash(),
+        };
+    }
+
+    /// Export RFC 8446 channel-bound keying material. Cleartext returns
+    /// `error.PostHandshakeTlsUnavailable`.
+    pub fn exportKeyingMaterial(
+        self: *const Connection,
+        label: []const u8,
+        context: []const u8,
+        out: []u8,
+    ) Error!void {
+        return switch (self.value) {
+            .http1 => |*client| client.exportKeyingMaterial(label, context, out),
+            .http2 => |*connection| connection.exportKeyingMaterial(label, context, out),
+            .http3 => |owner| owner.client.exportKeyingMaterial(label, context, out),
+        };
+    }
+
     pub fn negotiatedTlsProtocol(
         self: *const Connection,
     ) ?tls_stream.Protocol {
