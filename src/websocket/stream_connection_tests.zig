@@ -700,3 +700,24 @@ test "WebSocket stream adapter uses the deadline slice callback" {
     defer frame.deinit(allocator);
     try std.testing.expectEqualStrings("ab", frame.payload);
 }
+
+test "WebSocket stream adapter rejects invalid UTF-8 text before I/O" {
+    var peer = Peer{ .input = &.{} };
+    defer peer.deinit();
+    var connection = stream_connection.Connection.init(
+        allocator,
+        std.testing.io,
+        peer.transport(),
+        .{ .role = .server },
+    );
+    defer connection.deinit();
+
+    try std.testing.expectError(
+        error.InvalidUtf8,
+        connection.sendText(&.{ 0xff, 0xfe }),
+    );
+    try std.testing.expectEqual(@as(usize, 0), peer.writes);
+    // Binary payloads remain opaque.
+    try connection.sendBinary(&.{ 0xff, 0xfe });
+    try std.testing.expect(peer.writes != 0);
+}

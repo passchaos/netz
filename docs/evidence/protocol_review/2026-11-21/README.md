@@ -3154,3 +3154,17 @@ RFC 8441 pending-upgrade `negotiatedAlpn`.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | Public package surface | 28/28 | live `zig build test-package --summary all` |
+
+
+## Hundred-and-seventieth pass: stream-adapter outgoing text validation
+
+`websocket.stream_connection` validated UTF-8 only on the slice send path;
+`sendText`/`sendTextWithTimeout`/`sendTextWithDeadline` could emit an invalid
+text frame. The single-buffer send path now rejects invalid UTF-8 with
+`error.InvalidUtf8` before taking the write mutex or emitting a header, while
+binary payloads stay opaque. A unit test asserts zero bytes are written for the
+rejected text and that the same bytes succeed as binary.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full WebSocket suite (Debug) | 526/527 (1 skipped) | live `zig build test-websocket --summary all` |

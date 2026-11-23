@@ -647,6 +647,11 @@ pub const Connection = struct {
         if (opcode != .close and (self.close_sent or self.close_received)) {
             return error.ConnectionClosed;
         }
+        // Text frames carry UTF-8; binary frames remain opaque. Validate before
+        // taking the write mutex or emitting any header bytes.
+        if (opcode == .text and !std.unicode.utf8ValidateSlice(payload)) {
+            return error.InvalidUtf8;
+        }
         var guard = if (deadline) |absolute|
             try MutexGuard.initBefore(
                 &self.write_mutex,
