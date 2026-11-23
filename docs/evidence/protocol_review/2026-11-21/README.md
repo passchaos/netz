@@ -2952,3 +2952,10 @@ and the usage guide now state the live-endpoint contract explicitly.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | Full WebTransport suite (Debug) | 761/763 (2 skipped) | live `zig build test-webtransport --summary all` |
+
+
+## Hundred-and-fifty-fifth pass: WebTransport applicationProtocol discoverability
+
+The H2 capsule guide and the usage TLS bullet now mention
+`Session.applicationProtocol()` alongside the TLS metadata accessors, so the
+negotiated application protocol is discoverable from the same section.

@@ -372,9 +372,10 @@ server address is already resolved (the address-based form shown in
   `system_store`, `client_identity`). HTTP/2 sessions, endpoint clients and
   servers, and pending requests expose `peerCertificates()`,
   `negotiatedAlpn()`, `negotiatedCipherSuite()` and
-  `negotiatedTranscriptHash()`; HTTP/3 handshake sessions and endpoint clients
-  expose the same set. Cleartext returns null. Endpoint accessors read
-  handshake-fixed values directly and must not race with endpoint shutdown.
+  `negotiatedTranscriptHash()`; sessions also expose `applicationProtocol()`.
+  HTTP/3 handshake sessions and endpoint clients expose the same TLS metadata.
+  Cleartext returns null. Endpoint accessors read handshake-fixed values
+  directly and must not race with endpoint shutdown.
 - Streams: `openBidirectionalStream`/`openUnidirectionalStream`,
   `sendStream`/`writeStream`, `receiveStream`, `resetStream`,
   `stopSending`, `finishStream`.

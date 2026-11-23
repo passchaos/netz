@@ -172,7 +172,8 @@ socket pump, and use an atomic completion race so a timed-out caller never
 leaves borrowed memory or an unowned accepted Session behind. Queue and Session
 capacity are independently bounded. Accepted attempts own response metadata and
 the selected application protocol; dropped attempts automatically remove their
-Session. Receive events and TLS exporter bytes are caller-owned values. TLS
+Session. `Session.applicationProtocol()` exposes the decoded selection.
+Receive events and TLS exporter bytes are caller-owned values. TLS
 sessions, endpoint clients and servers, and pending requests expose
 `peerCertificates()`, `negotiatedAlpn()`, `negotiatedCipherSuite()` and
 `negotiatedTranscriptHash()`; cleartext endpoints return null.
