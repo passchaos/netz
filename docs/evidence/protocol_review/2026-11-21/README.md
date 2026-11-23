@@ -2218,3 +2218,15 @@ exercised by the concurrent real-session test as well.
 | Development server slice sends | 102/102 matched | live `zig build test-webtransport -Dtest-filter='development streams preserve prefixes'` |
 | H3 endpoint server slice sends | 105/105 matched | live `zig build test-webtransport -Dtest-filter='endpoint server owns concurrent real sessions'` |
 | Full WebTransport suite (Debug) | 761/763 (2 skipped) | live `zig build test-webtransport` |
+
+
+## Hundred-and-ninth pass: cumulative protocol gate
+
+After the trust-parity, SOCKS5, WebSocket slice and WebTransport slice/capsule
+series, the three scoped protocol suites were rerun together:
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full HTTP suite (Debug) | 310/310 | live `zig build test-http` |
+| Full WebSocket suite (Debug) | 519/520 (1 skipped) | live `zig build test-websocket` |
+| Full WebTransport suite (Debug) | 761/763 (2 skipped) | live `zig build test-webtransport` |
