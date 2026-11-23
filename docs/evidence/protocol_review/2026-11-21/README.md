@@ -3004,3 +3004,17 @@ rejection, and then completes the healthy sibling session.
 | --- | --- | --- |
 | Full WebTransport suite (Debug) | 761/763 (2 skipped) | live `zig build test-webtransport --summary all` |
 | Invalid CONNECT/Init filter | 125/125 | live `zig build test-webtransport -Dtest-filter='invalid CONNECT and Init reject only their streams' --summary all` |
+
+
+## Hundred-and-fifty-ninth pass: RFC 8441 Origin allowlist coverage
+
+The H2 WebSocket admission path validated `allowed_origins` but had no
+end-to-end test. A new TLS test sends a denied Origin through an RFC 8441
+extended CONNECT, asserts the server returns `error.InvalidOrigin` before any
+acceptance response, and verifies the client sees no accepted connection. The
+server aborts only that extended-CONNECT stream.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full WebSocket suite (Debug) | 523/524 (1 skipped) | live `zig build test-websocket --summary all` |
+| Origin filter | 43/43 | live `zig build test-websocket -Dtest-filter='rejects a denied Origin' --summary all` |

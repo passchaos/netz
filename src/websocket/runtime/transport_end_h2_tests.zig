@@ -92,3 +92,94 @@ fn exercise(caller_buffer: bool, tls12: bool, truncated: bool) !void {
     joined = true;
     if (peer.err) |err| return err;
 }
+
+test "WebSocket RFC 8441 rejects a denied Origin before acceptance" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+    const key_pair = try tls_testing.serverKeyPair();
+    const h2_limits = http2.Limits{ .enable_connect_protocol = true };
+    var server = try http2.TlsServer.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{ .ecdsa_p256_sha256 = .{
+                    .key_pair = key_pair,
+                } },
+            },
+            .protocol_policy = .tls13_only,
+            .limits = h2_limits,
+        },
+    );
+    defer server.deinit();
+
+    const Peer = struct {
+        server: *http2.TlsServer,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var parent = try self.server.acceptWithTimeout(.fromSeconds(3));
+            defer parent.close();
+            try std.testing.expectError(
+                error.InvalidOrigin,
+                runtime.H2Server.receiveUpgradeRequestWithTimeout(
+                    self.server.allocator,
+                    &parent,
+                    .{ .allowed_origins = &.{"https://allowed.test"} },
+                    .fromSeconds(3),
+                ),
+            );
+        }
+    };
+
+    var peer = Peer{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Peer.run, .{&peer});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var parent = try http2.Client.connectTlsAddressWithTimeout(
+        allocator,
+        io,
+        server.address(),
+        "localhost",
+        "localhost",
+        h2_limits,
+        .{
+            .protocol_policy = .tls13_only,
+            .server_verifier = .{
+                .pinned_ecdsa_p256_public_key = key_pair.public_key
+                    .toUncompressedSec1(),
+            },
+        },
+        .fromSeconds(3),
+    );
+    defer parent.close();
+    if (runtime.H2Client.openWithTimeout(allocator, &parent, .{
+        .authority = "localhost",
+        .origin = "https://denied.test",
+    }, .fromSeconds(3))) |connection_value| {
+        var connection = connection_value;
+        connection.close();
+        return error.ExpectedOriginRejection;
+    } else |_| {}
+
+    thread.join();
+    joined = true;
+    if (peer.err) |err| return err;
+}
