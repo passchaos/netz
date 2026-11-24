@@ -237,9 +237,9 @@ jobs:
         if: runner.os != 'Windows'
         run: zig build test-compile -j1 -Dtarget=${{ matrix.target }} --summary all
 
-      - name: Run native Windows peer-address and stream-adapter regressions
+      - name: Run native Windows transport regressions
         if: runner.os == 'Windows'
-        run: zig build test-http test-websocket -Dtarget=${{ matrix.target }} '-Dtest-filter=peer address' '-Dtest-filter=WebSocket stream adapter' --summary all
+        run: zig build test-http test-http3 test-websocket -Dtarget=${{ matrix.target }} '-Dtest-filter=peer address' '-Dtest-filter=HTTP/3 CONNECT DATAGRAM' '-Dtest-filter=WebSocket stream adapter' --summary all
 
   portable-macos:
     if: github.event_name != 'schedule'

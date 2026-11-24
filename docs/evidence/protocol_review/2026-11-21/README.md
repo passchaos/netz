@@ -3674,3 +3674,15 @@ in Debug and ReleaseSafe, native allocation overlaps pass 96/96, and Windows
 test binaries compile/link. [Admission evidence](../../websocket_stream_admission/2026-11-24/README.md)
 records the source and behavioral closure of the prior limit review, including
 successful native Windows execution at `8de454c2` (3m 36s).
+
+
+## Two-hundred-and-ninth pass: HTTP/3 DATAGRAM preflight and delivery ownership
+
+Rejected callback/dispatcher batch calls now clear per-call progress. Shared
+DATAGRAM receive admission precedes protocol callbacks, and nonblocking
+buffered inspection cannot add a post-fulfillment deadline rejection. The
+common receive loop is extracted without changing facade names. Three red
+baseline cases are fixed; DATAGRAM Debug/ReleaseSafe bundles pass 84/84,
+WebTransport flow/termination overlaps pass 107/107 and Windows binaries
+compile/link. [DATAGRAM preflight evidence](../../http3_datagram_preflight/2026-11-24/README.md)
+records owner, counter, delivery and protocol-error coverage.

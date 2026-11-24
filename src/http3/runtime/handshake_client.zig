@@ -5996,8 +5996,8 @@ pub const HandshakeClient = struct {
         committed_count: *usize,
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!void {
-        if (self.callback_reader_active) return error.ConcurrentRead;
         committed_count.* = 0;
+        if (self.callback_reader_active) return error.ConcurrentRead;
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
         if (timeout.nanoseconds <= 0) return error.Timeout;
         return self.sendConnectDatagramsWithDeadline(
@@ -6283,6 +6283,7 @@ pub const HandshakeClient = struct {
         outputs: [][]u8,
         received_count: *usize,
     ) Error!void {
+        received_count.* = 0;
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
         return receiveConnectDatagramsIntoFromSession(
             self,

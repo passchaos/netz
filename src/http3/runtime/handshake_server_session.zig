@@ -2381,6 +2381,7 @@ pub const HandshakeServerSession = struct {
         outputs: [][]u8,
         received_count: *usize,
     ) Error!void {
+        received_count.* = 0;
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
         return receiveConnectDatagramsIntoFromSession(
             self,
