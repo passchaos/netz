@@ -61,7 +61,7 @@ test "WebTransport HTTP2 EndpointServer owns admission Sessions and capacity" {
                 server.negotiatedTlsProtocol().?,
             );
             try std.testing.expect(server.wasTlsSessionResumed() != null);
-            try std.testing.expect(server.remoteAddress().getPort() != 0);
+            try std.testing.expect(server.remoteAddress().?.getPort() != 0);
             try std.testing.expectEqual(@as(u64, 0), server.localKeyUpdateCount());
             try std.testing.expectEqual(@as(u64, 0), server.peerKeyUpdateCount());
             try server.initiateKeyUpdate();

@@ -3,6 +3,7 @@
 const std = @import("std");
 const http1 = @import("../mod.zig");
 const net = std.Io.net;
+const socket_address = @import("../../internal/socket_address.zig");
 const runtime = @import("../runtime.zig");
 
 const AcceptedConnectIp = runtime.AcceptedConnectIp;
@@ -89,13 +90,9 @@ pub const Connection = struct {
         return .{ .tcp = .{ .io = self.io, .stream = self.stream } };
     }
 
-    /// Return the socket address recorded by `std.Io.net` for this transport.
-    /// Accepted server connections record the remote peer; client-created
-    /// connections record the local ephemeral endpoint because the std
-    /// connect path stores the local sockname. Retain the resolved connect
-    /// address when a client peer is required.
-    pub fn peerAddress(self: *const Connection) net.IpAddress {
-        return self.stream.socket.address;
+    /// Remote IP peer recorded by accept. Unix streams return null.
+    pub fn peerAddress(self: *const Connection) ?net.IpAddress {
+        return socket_address.accepted(self.stream);
     }
 
     /// Return the authenticated client certificate chain for TLS server
@@ -323,7 +320,7 @@ pub const Connection = struct {
             }
             return read_err;
         };
-        owned.request.from = self.stream.socket.address;
+        owned.request.from = self.peerAddress();
         return owned;
     }
 
@@ -373,7 +370,7 @@ pub const Connection = struct {
             }
             return err;
         };
-        owned.request.from = self.stream.socket.address;
+        owned.request.from = self.peerAddress();
         return owned;
     }
 
@@ -808,7 +805,7 @@ pub const Connection = struct {
                 .max_informational_responses = self.limits.max_informational_responses,
             },
             .options = options,
-            .peer_address = self.stream.socket.address,
+            .peer_address = self.peerAddress(),
         };
         const result = reader.readRequest(
             context,
@@ -925,7 +922,7 @@ pub const Connection = struct {
                     },
                     else => return err,
                 };
-                head.from = self.stream.socket.address;
+                head.from = self.peerAddress();
                 // Header completion ends this request's budget even when its
                 // body is incomplete. A later pipelined head receives a fresh
                 // budget when parsing first needs more transport bytes.

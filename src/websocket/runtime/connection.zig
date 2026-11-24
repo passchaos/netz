@@ -3,6 +3,7 @@
 const std = @import("std");
 const websocket = @import("../mod.zig");
 const net = std.Io.net;
+const socket_address = @import("../../internal/socket_address.zig");
 const runtime = @import("../runtime.zig");
 
 const AllocatingMessageReceiver = runtime.AllocatingMessageReceiver;
@@ -118,11 +119,13 @@ pub const Connection = struct {
     /// that must be delivered after a bounded reply resumes to completion.
     pending_auto_control: ?PendingAutomaticControl = null,
 
-    /// Return the socket address recorded by `std.Io.net` for this transport.
-    /// Accepted server connections record the remote peer; client-created
-    /// connections record the local ephemeral endpoint.
-    pub fn peerAddress(self: *const Connection) net.IpAddress {
-        return self.stream.socket.address;
+    /// Remote transport IP peer. Unix streams and unavailable native queries
+    /// return null; a proxy tunnel reports its connected proxy's address.
+    pub fn peerAddress(self: *const Connection) ?net.IpAddress {
+        return if (self.role == .server)
+            socket_address.accepted(self.stream)
+        else
+            socket_address.connected(self.stream);
     }
 
     /// Return the authenticated peer certificate chain. Server-side WSS

@@ -84,6 +84,7 @@ fn exercise(io: std.Io, comptime ipv6: bool, comptime policy: http.ProtocolPolic
     defer connection.close();
     try std.testing.expectEqual(http.Protocol.http3, connection.protocol());
     try std.testing.expectEqualStrings("h3", connection.negotiatedAlpn().?);
+    try std.testing.expect(connection.peerAddress().?.eql(&server.address()));
     try std.testing.expectEqual(@as(?@import("../../tls/mod.zig").stream.Protocol, .tls13), connection.negotiatedTlsProtocol());
     try std.testing.expectEqual(@as(?bool, false), connection.wasTlsSessionResumed());
     try std.testing.expectEqual(.not_offered, connection.earlyDataStatus().?);

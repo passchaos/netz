@@ -11835,6 +11835,9 @@ test "public ALPN adoption and metadata surfaces are exported" {
     _ = &netz.http2.runtime.adoptNegotiatedTlsServer;
     _ = &netz.http1.runtime.Connection.negotiatedAlpn;
     _ = &netz.http1.runtime.Connection.peerAddress;
+    _ = &netz.http1.runtime.Client.peerAddress;
+    _ = &netz.http2.runtime.Connection.peerAddress;
+    _ = &netz.http.Connection.peerAddress;
     _ = &netz.http.Connection.earlyDataStatus;
     _ = &netz.http.Connection.peerCertificates;
     _ = &netz.http.Connection.negotiatedCipherSuite;

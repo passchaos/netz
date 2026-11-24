@@ -68,7 +68,7 @@ pub const PendingRequest = struct {
     pub fn wasTlsSessionResumed(self: PendingRequest) ?bool {
         return self.request.wasTlsSessionResumed();
     }
-    pub fn peerAddress(self: PendingRequest) std.Io.net.IpAddress {
+    pub fn peerAddress(self: PendingRequest) ?std.Io.net.IpAddress {
         return self.request.peerAddress();
     }
 

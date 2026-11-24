@@ -204,6 +204,7 @@ test "WebSocket WS URI connects through HTTP CONNECT proxy" {
         .fromSeconds(3),
     );
     defer connection.close();
+    const remote_address = connection.peerAddress();
     try connection.sendText("proxy-ws");
     var response = try connection.receiveMessage();
     defer response.deinit(allocator);
@@ -212,6 +213,9 @@ test "WebSocket WS URI connects through HTTP CONNECT proxy" {
     thread.join();
     joined = true;
     if (shared.err) |err| return err;
+    if (@import("builtin").os.tag != .windows) {
+        try std.testing.expect(proxy.socket.address.eql(&remote_address.?));
+    }
     try std.testing.expectEqual(@as(u8, 1), resolver.calls.load(.acquire));
 }
 
@@ -311,6 +315,7 @@ test "WebSocket WSS URI authenticates origin through HTTP CONNECT proxy" {
         .fromSeconds(3),
     );
     defer connection.close();
+    const remote_address = connection.peerAddress();
     try connection.sendText("proxy-wss");
     var response = try connection.receiveMessage();
     defer response.deinit(allocator);
@@ -319,6 +324,9 @@ test "WebSocket WSS URI authenticates origin through HTTP CONNECT proxy" {
     thread.join();
     joined = true;
     if (shared.err) |err| return err;
+    if (@import("builtin").os.tag != .windows) {
+        try std.testing.expect(proxy.socket.address.eql(&remote_address.?));
+    }
 }
 
 test "WebSocket proxy URI rejects zero timeout before I/O" {

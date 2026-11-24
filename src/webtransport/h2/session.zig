@@ -132,8 +132,8 @@ pub const Session = struct {
     ) ?tls_stream.TranscriptHash {
         return self.connection().negotiatedTranscriptHash();
     }
-    /// Socket address recorded for the underlying HTTP/2 connection.
-    pub fn remoteAddress(self: *const Session) std.Io.net.IpAddress {
+    /// Remote transport IP peer; null for Unix or unavailable native queries.
+    pub fn remoteAddress(self: *const Session) ?std.Io.net.IpAddress {
         return self.connection().peerAddress();
     }
     /// TLS version of the underlying HTTP/2 transport. Cleartext returns null.

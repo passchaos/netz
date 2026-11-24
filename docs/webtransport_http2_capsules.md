@@ -177,6 +177,10 @@ Receive events and TLS exporter bytes are caller-owned values. TLS
 sessions, endpoint clients and servers, and pending requests expose
 `peerCertificates()`, `negotiatedAlpn()`, `negotiatedCipherSuite()` and
 `negotiatedTranscriptHash()`; cleartext endpoints return null.
+`remoteAddress()` on sessions and endpoint owners, and `peerAddress()` on
+pending requests, expose the optional remote transport IP independently of
+TLS. [Peer address contracts](peer_addresses.md) cover Unix streams, proxy
+tunnels and native-query availability.
 
 The endpoint surface covers CONNECT attempts, DATAGRAM, virtual-stream open and
 send, consume/retire, RESET/STOP, credit grants, DRAIN/CLOSE, removal and

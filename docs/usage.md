@@ -403,10 +403,13 @@ server address is already resolved (the address-based form shown in
   `wasTlsSessionResumed()`; sessions also expose `applicationProtocol()`.
   HTTP/3 handshake sessions and endpoint clients expose the same TLS metadata
   plus `earlyDataStatus()`. Established HTTP/2 and HTTP/3 sessions/endpoints
-  expose `remoteAddress()`. Handshake-backed pending admission surfaces expose
+  expose `remoteAddress()`. TCP address accessors return an optional remote
+  transport IP; Unix streams and unavailable native client queries return null.
+  [Peer address contracts](peer_addresses.md) describe platform support and
+  proxy semantics. Handshake-backed pending admission surfaces expose
   the same metadata plus `sessionId()` and `peerAddress()` before `accept()`,
   so client-certificate, peer-address and transcript policy can reject a
-  session before it becomes visible. Cleartext returns null. Endpoint
+  session before it becomes visible. Cleartext TLS metadata returns null. Endpoint
   accessors read handshake-fixed values directly and must not race with
   endpoint shutdown.
 - Streams: `openBidirectionalStream`/`openUnidirectionalStream`,

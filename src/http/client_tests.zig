@@ -11,6 +11,7 @@ const vort = @import("vort");
 
 test {
     _ = @import("client_tests/duplex.zig");
+    _ = @import("client_tests/peer_address.zig");
     _ = @import("client_tests/direct_h3.zig");
     _ = @import("client_tests/protocol_policy.zig");
     _ = @import("client_tests/trailers.zig");
@@ -1656,6 +1657,9 @@ test "unified HTTP connection exposes H1 TLS metadata and key updates" {
     try std.testing.expect(connection.peerCertificates() != null);
     try std.testing.expect(connection.negotiatedCipherSuite() != null);
     try std.testing.expect(connection.negotiatedTranscriptHash() != null);
+    if (@import("builtin").os.tag != .windows) {
+        try std.testing.expect(connection.peerAddress().?.eql(&server.address()));
+    }
     var exported: [32]u8 = undefined;
     try connection.exportKeyingMaterial(
         "EXPORTER-netz-http1-connection",

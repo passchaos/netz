@@ -107,6 +107,11 @@ test "WebSocket client and server exchange over a Unix socket" {
                 self.err = err;
                 return;
             };
+            if (pending.peerAddress() != null) {
+                self.err = error.UnexpectedMessage;
+                pending.deinit();
+                return;
+            }
             var pending_owned = true;
             defer if (pending_owned) pending.deinit();
             if (!std.mem.eql(u8, pending.target(), "/unix") or
@@ -125,6 +130,10 @@ test "WebSocket client and server exchange over a Unix socket" {
             };
             pending_owned = false;
             defer connection.close();
+            if (connection.peerAddress() != null) {
+                self.err = error.UnexpectedMessage;
+                return;
+            }
             var message = connection.receiveMessage() catch |err| {
                 self.err = err;
                 return;
@@ -176,6 +185,7 @@ test "WebSocket client and server exchange over a Unix socket" {
         },
     );
     defer client.close();
+    try std.testing.expect(client.peerAddress() == null);
     try std.testing.expectEqualStrings(
         "unix.test",
         client.selected_protocol.?,

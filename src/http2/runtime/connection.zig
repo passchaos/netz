@@ -7,6 +7,7 @@ const accept_deadline = @import("../../internal/accept.zig");
 const deadline_policy = @import("../../internal/deadline.zig");
 const tls_stream = @import("../../tls/mod.zig").stream;
 const net = std.Io.net;
+const socket_address = @import("../../internal/socket_address.zig");
 const runtime = @import("../runtime.zig");
 const frame_io = @import("frame/io.zig");
 const frame_wire = @import("frame/wire.zig");
@@ -749,15 +750,14 @@ pub const Connection = struct {
         };
     }
 
-    /// Return the socket address recorded by `std.Io.net` for this transport.
-    /// Accepted server connections record the remote peer; client-created
-    /// connections record the local ephemeral endpoint because the std
-    /// connect path stores the local sockname. Retain the resolved connect
-    /// address when a client peer is required. TLS reuses the same underlying
-    /// stream, so this needs no syscall or allocation for h2c and encrypted
-    /// connections.
-    pub fn peerAddress(self: *const Connection) net.IpAddress {
-        return self.stream.socket.address;
+    /// Remote transport IP peer, including on client-created connections.
+    /// Accepted connections use cached accept metadata; clients query the native
+    /// socket. Unix streams and unavailable native queries return null.
+    pub fn peerAddress(self: *const Connection) ?net.IpAddress {
+        return if (self.role == .server)
+            socket_address.accepted(self.stream)
+        else
+            socket_address.connected(self.stream);
     }
 
     pub fn negotiatedTlsProtocol(
@@ -6653,7 +6653,7 @@ pub const Connection = struct {
             error.Timeout => unreachable,
             else => |other| return @errorCast(other),
         };
-        owned_request.from = self.stream.socket.address;
+        owned_request.from = self.peerAddress();
         return owned_request;
     }
 
@@ -6678,7 +6678,7 @@ pub const Connection = struct {
     ) RequestTimeoutError!OwnedRequest {
         _ = try deadline_policy.usableAwake(self.io, deadline);
         var owned_request = try self.readRequestUntil(deadline);
-        owned_request.from = self.stream.socket.address;
+        owned_request.from = self.peerAddress();
         return owned_request;
     }
 
@@ -7679,7 +7679,7 @@ pub const Connection = struct {
                 .body_bytes = body_bytes,
                 .trailers = trailers,
                 .priority = request_priority,
-                .from = self.stream.socket.address,
+                .from = self.peerAddress(),
             };
         }
     }
@@ -7947,7 +7947,7 @@ pub const Connection = struct {
                         .authority = lookup.requestAuthority(),
                         .body_bytes = 0,
                         .priority = request_priority,
-                        .from = self.stream.socket.address,
+                        .from = self.peerAddress(),
                     };
                     expected[index] = lookup.content_length;
                     initialized += 1;

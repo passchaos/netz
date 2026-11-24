@@ -3624,3 +3624,14 @@ addresses match for two sessions on one connection.
 | --- | --- | --- |
 | WebTransport suite (Debug) | 761/763 (2 skipped) | live `zig build test-webtransport --summary all` |
 | Package surface (Debug) | 28/28 | live `zig build test-package --summary all` |
+
+
+## Two-hundred-and-fifth pass: remote transport address semantics
+
+Client HTTP/2 and HTTP/1 WebSocket peer accessors now report the remote native
+socket peer instead of std.Io's local sockname; HTTP/2 WebTransport inherits the
+corrected value. TCP metadata is optional, Unix requests retain null source
+addresses, and unified HTTP now exposes `Connection.peerAddress()` across
+H1/H2/H3. Exact-address, dual-stack, TLS, proxy, Unix and layout regressions pass
+382/382 in the focused Debug bundle. Further compile evidence and the public
+contract are recorded in [the independent peer-address evidence](../../transport_peer_addresses/2026-11-24/README.md).

@@ -91,6 +91,7 @@ test "HTTP/2 client and server exchange over a Unix socket" {
                 {
                     return error.UnexpectedFrame;
                 }
+                if (request.from != null) return error.UnexpectedFrame;
                 return .{ .status = 201, .body = "unix-http2" };
             }
         };
@@ -121,6 +122,7 @@ test "HTTP/2 client and server exchange over a Unix socket" {
         limits,
     );
     defer client.close();
+    try std.testing.expect(client.peerAddress() == null);
     var response = try client.request(.{
         .method = "POST",
         .path = "/unix",

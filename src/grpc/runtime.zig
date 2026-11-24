@@ -1033,8 +1033,9 @@ pub const ServerConnection = struct {
     }
 
     /// Return the client's real TCP endpoint for connection-aware services
-    /// such as the official gRPC interop peer-socket-address response.
-    pub fn peerAddress(self: *const ServerConnection) net.IpAddress {
+    /// such as the official gRPC interop peer-socket-address response. Unix
+    /// streams have no IP peer and return null.
+    pub fn peerAddress(self: *const ServerConnection) ?net.IpAddress {
         return self.connection.peerAddress();
     }
 

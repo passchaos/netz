@@ -3,6 +3,7 @@
 const std = @import("std");
 const http1 = @import("../mod.zig");
 const net = std.Io.net;
+const socket_address = @import("../../internal/socket_address.zig");
 const runtime = @import("../runtime.zig");
 
 const ConnectIpSession = runtime.ConnectIpSession;
@@ -259,6 +260,12 @@ pub const Client = struct {
         if (self.tls_vail_conn) |conn| return .{ .tls_vail = conn };
         if (self.tls_conn) |conn| return .{ .tls_client = conn };
         return .{ .tcp = .{ .io = self.io, .stream = self.stream } };
+    }
+
+    /// Remote transport IP peer. Unix streams and unavailable native queries
+    /// return null; proxy tunnels report the connected proxy, not the origin.
+    pub fn peerAddress(self: *const Client) ?net.IpAddress {
+        return socket_address.connected(self.stream);
     }
 
     pub fn connect(allocator: std.mem.Allocator, io: std.Io, address: net.IpAddress, limits: Limits) Error!Client {

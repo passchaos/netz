@@ -193,7 +193,9 @@ test "WebTransport HTTP2 EndpointClient owns multiplexed Sessions and stable han
         client.negotiatedTlsProtocol().?,
     );
     try std.testing.expect(client.wasTlsSessionResumed() != null);
-    try std.testing.expect(client.remoteAddress().getPort() != 0);
+    if (@import("builtin").os.tag != .windows) {
+        try std.testing.expectEqual(server.address().getPort(), client.remoteAddress().?.getPort());
+    }
     try std.testing.expectEqual(@as(u64, 0), client.localKeyUpdateCount());
     try std.testing.expectEqual(@as(u64, 0), client.peerKeyUpdateCount());
     try client.initiateKeyUpdate();

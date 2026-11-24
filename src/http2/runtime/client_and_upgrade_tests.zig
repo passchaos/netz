@@ -138,6 +138,10 @@ test "HTTP/2 client connects by host name" {
     thread.join();
     if (shared.err) |err| return err;
     try std.testing.expectEqualStrings("h2-dns-ok", response.body);
+    if (@import("builtin").os.tag != .windows) {
+        try std.testing.expect(server.address().eql(&client.peerAddress().?));
+        try std.testing.expect(client.peerAddress().?.getPort() != client.stream.socket.address.getPort());
+    }
 }
 
 test "HTTP/2 client sends request to URI" {

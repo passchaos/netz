@@ -139,7 +139,7 @@ fn processConnection(
     config: Config,
     limiter: ?*limits.ConnectionLimiter,
 ) !void {
-    const peer = connection.peerAddress();
+    const peer = connection.peerAddress() orelse return error.SocketUnconnected;
     while (true) {
         var request = connection.readRequestWithTimeout(config.auth_timeout) catch break;
         defer request.deinit(allocator);

@@ -165,6 +165,17 @@ pub const Connection = struct {
         };
     }
 
+    /// Current remote transport IP peer. H3 follows the current QUIC path;
+    /// TCP proxy tunnels report the proxy. Unix streams and unavailable native
+    /// socket queries return null.
+    pub fn peerAddress(self: *const Connection) ?std.Io.net.IpAddress {
+        return switch (self.value) {
+            .http1 => |*client| client.peerAddress(),
+            .http2 => |*connection| connection.peerAddress(),
+            .http3 => |owner| owner.client.remoteAddress(),
+        };
+    }
+
     pub fn negotiatedAlpn(self: *const Connection) ?[]const u8 {
         return switch (self.value) {
             .http1 => |*client| client.negotiatedAlpn(),

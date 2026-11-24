@@ -80,7 +80,7 @@ test "HTTP/2 server duplex handles coexist under one frame reader" {
     var fixture = try Fixture.init(threaded.io());
     defer fixture.deinit();
 
-    const peer = fixture.connection.peerAddress();
+    const peer = fixture.connection.peerAddress().?;
     try std.testing.expect(peer.getPort() != 0);
     try std.testing.expect(
         peer.getPort() != fixture.listener.socket.address.getPort(),

@@ -18,7 +18,7 @@ pub fn serve(
         tls_server,
     );
     defer connection_a.deinit();
-    const peer_a = connection_a.peerAddress();
+    const peer_a = connection_a.peerAddress().?;
     const peer_a_text = try std.fmt.allocPrint(
         allocator,
         "{f}",
@@ -45,7 +45,7 @@ pub fn serve(
         tls_server,
     );
     defer connection_b.deinit();
-    const peer_b = connection_b.peerAddress();
+    const peer_b = connection_b.peerAddress().?;
     if (peer_a.eql(&peer_b)) return error.ExpectedDistinctPeerAddress;
     const peer_b_text = try std.fmt.allocPrint(
         allocator,

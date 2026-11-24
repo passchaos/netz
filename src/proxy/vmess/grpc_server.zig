@@ -143,7 +143,7 @@ fn processConnection(
     config: Config,
     limiter: ?*limits.ConnectionLimiter,
 ) !void {
-    const peer = connection.connection.peerAddress();
+    const peer = connection.connection.peerAddress() orelse return error.SocketUnconnected;
     while (true) {
         var duplex = connection.acceptDuplexWithTimeout(
             config.auth_timeout,

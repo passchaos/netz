@@ -2195,9 +2195,9 @@ pub const PendingH2Upgrade = struct {
         return self.request.stream_id;
     }
 
-    /// Socket address recorded for the parent HTTP/2 connection.
+    /// Remote IP peer of the parent HTTP/2 connection.
     pub fn peerAddress(self: PendingH2Upgrade) ?std.Io.net.IpAddress {
-        return self.connection.stream.socket.address;
+        return self.connection.peerAddress();
     }
 
     pub fn target(self: PendingH2Upgrade) []const u8 {

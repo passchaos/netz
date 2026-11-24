@@ -180,8 +180,8 @@ pub const H2Connection = struct {
         return self.tunnel.connection.negotiatedAlpn();
     }
 
-    /// Socket address recorded for the parent HTTP/2 connection.
-    pub fn peerAddress(self: *const H2Connection) std.Io.net.IpAddress {
+    /// Remote transport IP peer; null for Unix or unavailable native queries.
+    pub fn peerAddress(self: *const H2Connection) ?std.Io.net.IpAddress {
         return self.tunnel.connection.peerAddress();
     }
 

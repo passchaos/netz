@@ -481,6 +481,7 @@ test "WebSocket runtime client and server exchange over TCP" {
         },
     });
     defer client.close();
+    const remote_address = client.peerAddress();
 
     try std.testing.expectError(
         error.MessageTooLarge,
@@ -497,6 +498,9 @@ test "WebSocket runtime client and server exchange over TCP" {
 
     thread.join();
     if (shared.err) |err| return err;
+    if (@import("builtin").os.tag != .windows) {
+        try std.testing.expect(server.address().eql(&remote_address.?));
+    }
 }
 
 test "WebSocket runtime streams large immutable payload without mutation" {
@@ -1621,6 +1625,7 @@ test "WebSocket over HTTP/2 extended CONNECT exchanges messages" {
         .limits = .{ .max_head_bytes = 4096, .max_frame_bytes = 4096, .max_message_bytes = 4096 },
     });
     defer ws_client.close();
+    const remote_address = ws_client.peerAddress();
     try std.testing.expectEqualStrings("chat.v1", ws_client.selected_protocol.?);
     try std.testing.expect(ws_client.permessage_deflate);
     try std.testing.expect(!ws_client.compression_send_context_takeover);
@@ -1671,6 +1676,9 @@ test "WebSocket over HTTP/2 extended CONNECT exchanges messages" {
 
     thread.join();
     if (shared.err) |err| return err;
+    if (@import("builtin").os.tag != .windows) {
+        try std.testing.expect(server.address().eql(&remote_address.?));
+    }
 }
 
 test "WebSocket HTTP2 context takeover spans runtime API shapes" {

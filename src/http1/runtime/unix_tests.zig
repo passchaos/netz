@@ -80,7 +80,9 @@ test "HTTP/1 client and server exchange over a Unix socket" {
                 return;
             };
             defer request.deinit(connection.allocator);
-            if (!std.mem.eql(u8, request.request.target, "/health") or
+            if (connection.peerAddress() != null or
+                request.request.from != null or
+                !std.mem.eql(u8, request.request.target, "/health") or
                 !std.mem.eql(
                     u8,
                     request.request.header("host") orelse "",
@@ -112,6 +114,7 @@ test "HTTP/1 client and server exchange over a Unix socket" {
         .{ .max_head_bytes = 4096, .max_body_bytes = 4096 },
     );
     defer client.close();
+    try std.testing.expect(client.peerAddress() == null);
     var response = try client.request(.{
         .method = .GET,
         .target = "/health",
