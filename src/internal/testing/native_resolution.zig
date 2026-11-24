@@ -74,10 +74,13 @@ pub fn exercise(comptime Runtime: type, comptime h2: bool) !void {
                 const body = if (h2) response.body else response.response.body;
                 try std.testing.expectEqualStrings("resolved", body);
             } else {
-                var client_connection = switch (mode) {
-                    0 => try Runtime.Client.connectHost(allocator, io, "native.endpoint.test", 8443, limits),
-                    1 => try Runtime.Client.connectHostWithDeadline(allocator, io, "native.endpoint.test", 8443, limits, deadline),
-                    else => try Runtime.Client.connectHostWithTimeout(allocator, io, "native.endpoint.test", 8443, limits, .fromSeconds(2)),
+                var client_connection = (switch (mode) {
+                    0 => Runtime.Client.connectHost(allocator, io, "native.endpoint.test", 8443, limits),
+                    1 => Runtime.Client.connectHostWithDeadline(allocator, io, "native.endpoint.test", 8443, limits, deadline),
+                    else => Runtime.Client.connectHostWithTimeout(allocator, io, "native.endpoint.test", 8443, limits, .fromSeconds(2)),
+                }) catch |err| {
+                    std.log.err("native resolver H{d} mode={d} connect failed with {s}; resolver calls={d}; deadline remaining={d}ms", .{ if (h2) @as(u8, 2) else 1, mode, @errorName(err), resolver.calls.load(.acquire), @divTrunc(deadline.durationFromNow(io).raw.nanoseconds, std.time.ns_per_ms) });
+                    return err;
                 };
                 defer client_connection.close();
                 const authority = if (h2) client_connection.default_authority.? else client_connection.default_host.?;
