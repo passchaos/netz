@@ -34,6 +34,7 @@ need a separate extension tombstone or an association kept alive indefinitely.
 | Closed and active extension cases (Debug) | 108/108 | [closed.Debug.log](closed.Debug.log) |
 | QUIC retirement/H3 role/CONNECT/extension overlap (Debug) | 324/324 | [overlap.Debug.log](overlap.Debug.log) |
 | QUIC retirement/H3 role/CONNECT/extension overlap (ReleaseSafe) | 324/324 | [overlap.ReleaseSafe.log](overlap.ReleaseSafe.log) |
+| Native Windows closed extension/transport job | Success at `b89c762f`, 3m 17s | [native-windows.json](native-windows.json) |
 
 The overlap includes closed/local stream and recovery checks, H3 strict server-
 bidi rejection and CONNECT DATAGRAM cases, and WTP CONNECT/target event cases.
@@ -49,6 +50,13 @@ zig build test-webtransport \
 Native Windows CI includes the closed-extension filter alongside the previous
 transport, ownership and target-event checks. Its result is recorded after the
 matching source revision's Windows job finishes.
+
+The [native Windows job at `b89c762f`](https://github.com/passchaos/netz/actions/runs/45360231099/job/138328299278)
+completed successfully in 3m 17s. The public matrix success label identifies
+the Windows runner and the run's commit link matches the source revision.
+[The snapshot](native-windows.json) records those sources and the exact native
+command. The late extension case uses zio with no platform skip. Other workflow
+jobs have their own status.
 
 [Stream target and lifetime contracts](../../../stream_target_events.md)
 describe active extension routing and authoritative closed-stream history.

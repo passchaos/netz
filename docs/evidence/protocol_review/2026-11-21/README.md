@@ -3773,3 +3773,6 @@ still succeeds. The red baseline is fixed, closed/active extension cases pass
 108/108, and retirement/H3 role/CONNECT overlaps pass 324/324 in Debug and
 ReleaseSafe. [Closed extension evidence](../../closed_extension_streams/2026-11-24/README.md)
 records the full close chain, association teardown and late-packet qualification.
+The native Windows transport job passed at `b89c762f` (3m 17s), including the
+new lifetime case and existing strict-role/target/ownership/transport checks.
+The linked evidence records the matching source and public success label.
