@@ -239,7 +239,26 @@ jobs:
 
       - name: Run native Windows transport regressions
         if: runner.os == 'Windows'
-        run: zig build test-http test-http3 test-websocket -Dtarget=${{ matrix.target }} '-Dtest-filter=peer address' '-Dtest-filter=HTTP/3 CONNECT DATAGRAM' '-Dtest-filter=WebSocket stream adapter' --summary all
+        run: |
+          transport_status=0
+          zig build test-http test-http3 test-websocket -Dtarget=${{ matrix.target }} '-Dtest-filter=peer address' '-Dtest-filter=HTTP/3 CONNECT DATAGRAM' '-Dtest-filter=WebSocket stream adapter' --summary all > native-transport.log 2>&1 || transport_status=$?
+          cat native-transport.log
+          if [ "$transport_status" -ne 0 ]; then
+            {
+              echo '### Native transport test failure'
+              echo '```text'
+              head -n 160 native-transport.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            python - <<'PY'
+          from pathlib import Path
+          diagnostics = [line for line in Path('native-transport.log').read_text(errors='replace').splitlines() if 'error:' in line or 'expected ' in line]
+          for line in diagnostics[:12]:
+              message = line.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+              print('::error title=Native transport regression::' + message)
+          PY
+          fi
+          exit "$transport_status"
 
   portable-macos:
     if: github.event_name != 'schedule'
