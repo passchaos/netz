@@ -1,0 +1,76 @@
+[traex-zig-guard 2026-11-24 22:49:24] started Zig tree root=21450 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=1800s
+test-websocket
++- run test 39 pass, 2 fail (41 total)
+error: 'websocket.runtime.tls_ownership_tests.test.WSS vail TLS rejection closes one socket across client entry points' failed:
+       expected 1, found 2
+       /Users/bytedance/project-z/netz/src/websocket/runtime/tls_client_identity.zig:123:49: 0x105526f37 in initBefore (test)
+               if (!std.mem.eql(u8, alpn, "http/1.1")) return error.InvalidAlpn;
+                                                       ^
+       /Users/bytedance/project-z/netz/src/websocket/runtime/tls_client_identity.zig:79:5: 0x105d00407 in initWithDeadline (test)
+           return initBefore(
+           ^
+       /Users/bytedance/project-z/netz/src/websocket/runtime/client.zig:1134:17: 0x105d08b63 in connectTlsStreamAttemptMaybeBefore (test)
+                       try tls_client_identity.initWithDeadline(
+                       ^
+       /Users/bytedance/project-z/netz/src/websocket/runtime/client.zig:1094:9: 0x105d080fb in connectTlsStreamAttemptBefore (test)
+               return connectTlsStreamAttemptMaybeBefore(
+               ^
+       /Users/bytedance/project-z/netz/src/websocket/runtime/client.zig:860:23: 0x105d32247 in connectTlsHostAttemptWithDeadline (test)
+               var attempt = try connectTlsStreamAttemptBefore(
+                             ^
+       /Users/bytedance/project-z/netz/src/websocket/runtime/client.zig:830:23: 0x105d319c7 in connectTlsHostWithDeadline (test)
+               var attempt = try connectTlsHostAttemptWithDeadline(
+                             ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:118:17: 0x1052d180f in expectEqualInner__anon_39244 (test)
+                       return error.TestExpectedEqual;
+                       ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:83:5: 0x1052d2e8f in expectEqual (test)
+           return expectEqualInner(T, expected, actual);
+           ^
+       /Users/bytedance/project-z/netz/src/websocket/runtime/tls_ownership_tests.zig:131:13: 0x1052d2f47 in test.WSS vail TLS rejection closes one socket across client entry points (test)
+                   try std.testing.expectEqual(@as(usize, 1), probe.closes.load(.monotonic));
+                   ^
+error: 'websocket.runtime.tls_ownership_tests.test.WSS vail TLS helper failure closes its input stream' failed:
+       expected 1, found 0
+       /Users/bytedance/project-z/netz/src/internal/deadline.zig:13:36: 0x10535d4a3 in fromTimeout (test)
+           if (duration.nanoseconds <= 0) return error.Timeout;
+                                          ^
+       /Users/bytedance/project-z/netz/src/internal/deadline.zig:52:27: 0x10535cf97 in capTimeout (test)
+           return earlier(outer, try fromTimeout(io, timeout)).?;
+                                 ^
+       /Users/bytedance/project-z/netz/src/tls/stream/handshake_deadline.zig:35:5: 0x1055366bf in capTimeout (test)
+           return deadline_policy.capTimeout(
+           ^
+       /Users/bytedance/project-z/netz/src/tls/stream/versioned_client_connection.zig:214:13: 0x10553203b in initWithDeadline (test)
+                   try handshake_deadline.capTimeout(
+                   ^
+       /Users/bytedance/project-z/netz/src/tls/stream/versioned_client_connection.zig:586:9: 0x105531d17 in initVerifiedBefore (test)
+               return if (outer_deadline) |deadline|
+               ^
+       /Users/bytedance/project-z/netz/src/tls/stream/versioned_client_connection.zig:492:9: 0x1055276c7 in initVerifiedWithDeadline (test)
+               return initVerifiedBefore(
+               ^
+       /Users/bytedance/project-z/netz/src/websocket/runtime/tls_client_identity.zig:105:9: 0x105526e5f in initBefore (test)
+               try tls_stream.ClientConnection.initVerifiedWithDeadline(
+               ^
+       /Users/bytedance/project-z/netz/src/websocket/runtime/tls_client_identity.zig:79:5: 0x105d00407 in initWithDeadline (test)
+           return initBefore(
+           ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:118:17: 0x1052d180f in expectEqualInner__anon_39244 (test)
+                       return error.TestExpectedEqual;
+                       ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:83:5: 0x106246fe3 in expectEqual (test)
+           return expectEqualInner(T, expected, actual);
+           ^
+       /Users/bytedance/project-z/netz/src/websocket/runtime/tls_ownership_tests.zig:169:9: 0x1062470e7 in test.WSS vail TLS helper failure closes its input stream (test)
+               try std.testing.expectEqual(@as(usize, 1), probe.closes.load(.monotonic));
+               ^
+failed command: ./.zig-cache/o/c17085a2a85dc0d9cfd14177ee01fccc/test --cache-dir=./.zig-cache --seed=0xa12f49d0 --listen=-
+
+Build Summary: 8/10 steps succeeded (1 failed); 39/41 tests passed (2 failed)
+test-websocket transitive failure
++- run test 39 pass, 2 fail (41 total)
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/4f43002d28e7c626e498fafc36e312bb/build /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/zig /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib /Users/bytedance/project-z/netz .zig-cache /Users/bytedance/.cache/zig --seed 0xa12f49d0 -Z42e1c31220b3dad7 test-websocket -Dtest-filter=WSS vail TLS rejection closes -Dtest-filter=WSS vail TLS helper failure -j1 --summary failures
+[traex-zig-guard 2026-11-24 22:49:59] finished Zig tree root=21450 peak=3166MiB result=0

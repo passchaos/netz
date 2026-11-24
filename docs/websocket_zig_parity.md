@@ -450,6 +450,15 @@ rechecking its absolute deadline, so expiry at the TCP/TLS transition closes
 the socket once. The [transition regressions](evidence/tls_transition_ownership/2026-11-24/README.md)
 verify both TLS backends through public APIs and observe the actual peer EOF.
 
+The WSS-specific `tls_client_identity.init*` helpers likewise consume their
+connected stream at entry. Initialization failure closes the raw stream; ALPN
+rejection after a successful TLS handshake destroys the TLS connection. WSS
+constructors transfer ownership before calling the helper so each error has
+one close owner. Direct helper callers must not close the stream after a failed
+call. The [TLS ownership regressions](evidence/wss_tls_ownership/2026-11-24/README.md)
+cover both TLS versions and all four public connection routes with actual close
+counts and peer EOF.
+
 HTTP/1 Upgrade clients now also accept typed `ConnectOptions.extra_headers`,
 matching the reference client's custom handshake-header facility without its
 raw string injection surface. The option is shared by WS, WSS, and Unix-socket

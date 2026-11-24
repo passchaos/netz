@@ -313,6 +313,9 @@ pub const Client = struct {
         }
         const effective_tls_options = tls_policy.effective(options, tls_options);
         if (options.vail_tls orelse options.tls_identity) |identity| {
+            // The WSS helper owns the stream on every outcome, including
+            // failure after the TLS handshake has established a connection.
+            stream_owned = false;
             const tls_conn = if (deadline) |absolute|
                 try tls_client_identity.initWithDeadline(
                     allocator,
@@ -332,7 +335,6 @@ pub const Client = struct {
                     effective_tls_options,
                     identity,
                 );
-            stream_owned = false;
             errdefer tls_conn.deinit();
             var attempt = try connectTransportAttempt(
                 allocator,
@@ -1130,6 +1132,7 @@ pub const Client = struct {
         if (connect_options.vail_tls orelse
             connect_options.tls_identity) |identity|
         {
+            stream_owned = false;
             const tls_conn = if (deadline) |absolute|
                 try tls_client_identity.initWithDeadline(
                     allocator,
@@ -1149,7 +1152,6 @@ pub const Client = struct {
                     effective_tls_options,
                     identity,
                 );
-            stream_owned = false;
             errdefer tls_conn.deinit();
             return connectTransportAttempt(
                 allocator,
@@ -2102,6 +2104,7 @@ pub const Client = struct {
         if (is_wss) {
             const effective_tls_options = tls_policy.effective(options, tls_options);
             if (options.vail_tls orelse options.tls_identity) |identity| {
+                stream_owned = false;
                 const tls_conn = if (deadline) |absolute|
                     try tls_client_identity.initWithDeadline(
                         allocator,
@@ -2121,7 +2124,6 @@ pub const Client = struct {
                         effective_tls_options,
                         identity,
                     );
-                stream_owned = false;
                 errdefer tls_conn.deinit();
                 return connectTransportAttempt(
                     allocator,

@@ -48,6 +48,9 @@ pub const Options = struct {
     handshake_timeout: ?std.Io.Duration = null,
 };
 
+/// Own `stream` from entry. Handshake/setup failure closes the raw stream;
+/// policy rejection closes the established TLS connection. Success returns
+/// the sole owner of the transport.
 pub fn init(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -67,6 +70,7 @@ pub fn init(
     );
 }
 
+/// Same ownership contract as `init`, under a caller-owned deadline.
 pub fn initWithDeadline(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -96,6 +100,8 @@ fn initBefore(
     identity_options: Options,
     deadline: ?std.Io.Clock.Timestamp,
 ) tls_stream.Error!*tls_stream.ClientConnection {
+    var stream_owned = true;
+    errdefer if (stream_owned) stream.close(io);
     const options = verifiedOptions(
         server_name,
         tls_options,
@@ -116,6 +122,7 @@ fn initBefore(
             stream,
             options,
         );
+    stream_owned = false;
     errdefer connection.deinit();
     // WSS is an HTTP/1.1 Upgrade, so another negotiated protocol cannot carry
     // the handshake. A missing ALPN stays accepted for legacy origins.

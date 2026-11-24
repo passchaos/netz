@@ -43,6 +43,12 @@ Windows CI select all three new h2c ownership tests.
 | Baseline before the fix | 33/36 passed, 3 expected failures with zero closes | [before.log](before.log) |
 | Synchronized fixture and affected connection/Upgrade paths | 112/112 passed | [Debug.log](Debug.log) |
 
+At commit `a821d3d6`, the [native Linux connection/Upgrade step](https://github.com/passchaos/netz/actions/runs/45417181440/job/138526713207)
+and [native Windows transport step](https://github.com/passchaos/netz/actions/runs/45417181440/job/138526713809)
+both completed successfully. The exact conclusions and timestamps are recorded
+in [native-platforms.json](native-platforms.json), independently of cross-compilation
+and the overall CI workflow result.
+
 ```sh
 zig build test-http2 '-Dtest-filter=HTTP/2 h2c stream ownership' -j1 --summary failures
 zig build test-http1 test-http2 test-websocket '-Dtest-filter=HTTP/2 h2c stream ownership' '-Dtest-filter=deadline expires after TCP connect' '-Dtest-filter=HTTP/2 h2c deadline preserves SETTINGS coalesced with 101' '-Dtest-filter=HTTP/2 h2c caller deadline spans 101 and binary bootstrap' '-Dtest-filter=HTTP/2 h2c client bounds' -j1 --summary all
