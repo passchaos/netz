@@ -30,7 +30,14 @@ rejection, and foreign-backend rejection before handle access. Windows-only
 cases disable receive filtering while preserving the outgoing interface, or
 add a second receive-list entry; both must be rejected without rewriting the
 policy. The second-entry test skips if the host accepts no other interface.
-Native execution is recorded separately from cross-compilation when CI finishes.
+Native execution is recorded separately from cross-compilation in
+[native-platforms.json](native-platforms.json). The matching run commit was
+checked against the GitHub Actions API before recording the job conclusions.
+
+| Native execution at `44b420f1` | Result | Duration |
+| --- | --- | --- |
+| [Linux library compile and interface regressions](https://github.com/passchaos/netz/actions/runs/45380513459/job/138398197700) | Success | 4m 0s |
+| [Windows transport/interface regressions](https://github.com/passchaos/netz/actions/runs/45380513459/job/138398197982) | Success | 6m 15s |
 
 ## Creation and adoption error boundaries
 

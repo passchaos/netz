@@ -1,0 +1,447 @@
+{
+  "source": "GitHub Actions API matching run commit and native job conclusions",
+  "head_sha": "44b420f122caf74fce231d30f4aef3a2066c54fd",
+  "run_id": 45380513459,
+  "run_url": "https://github.com/passchaos/netz/actions/runs/45380513459",
+  "observed_at": "2026-11-24T11:12:41.500396+00:00",
+  "jobs": [
+    {
+      "id": 138398197700,
+      "name": "Portable x86_64-linux-gnu (ubuntu-latest)",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-11-24T11:03:16Z",
+      "completed_at": "2026-11-24T11:07:16Z",
+      "html_url": "https://github.com/passchaos/netz/actions/runs/45380513459/job/138398197700",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-11-24T11:03:17Z",
+          "completed_at": "2026-11-24T11:03:19Z"
+        },
+        {
+          "name": "Checkout netz",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2,
+          "started_at": "2026-11-24T11:03:19Z",
+          "completed_at": "2026-11-24T11:03:22Z"
+        },
+        {
+          "name": "Checkout pinned vail",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-11-24T11:03:22Z",
+          "completed_at": "2026-11-24T11:03:24Z"
+        },
+        {
+          "name": "Checkout pinned vort",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4,
+          "started_at": "2026-11-24T11:03:24Z",
+          "completed_at": "2026-11-24T11:03:36Z"
+        },
+        {
+          "name": "Checkout pinned pbz",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 5,
+          "started_at": "2026-11-24T11:03:36Z",
+          "completed_at": "2026-11-24T11:03:37Z"
+        },
+        {
+          "name": "Checkout pinned kron",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 6,
+          "started_at": "2026-11-24T11:03:37Z",
+          "completed_at": "2026-11-24T11:03:38Z"
+        },
+        {
+          "name": "Checkout pinned webpkiz",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 7,
+          "started_at": "2026-11-24T11:03:38Z",
+          "completed_at": "2026-11-24T11:03:38Z"
+        },
+        {
+          "name": "Checkout pinned regexz",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 8,
+          "started_at": "2026-11-24T11:03:38Z",
+          "completed_at": "2026-11-24T11:03:39Z"
+        },
+        {
+          "name": "Checkout pinned harnessz",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 9,
+          "started_at": "2026-11-24T11:03:39Z",
+          "completed_at": "2026-11-24T11:03:40Z"
+        },
+        {
+          "name": "Install Zig 0.16.0",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 10,
+          "started_at": "2026-11-24T11:03:40Z",
+          "completed_at": "2026-11-24T11:03:47Z"
+        },
+        {
+          "name": "Cache Zig downloads",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 11,
+          "started_at": "2026-11-24T11:03:47Z",
+          "completed_at": "2026-11-24T11:03:47Z"
+        },
+        {
+          "name": "Compile library and public-package tests",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 12,
+          "started_at": "2026-11-24T11:03:47Z",
+          "completed_at": "2026-11-24T11:06:11Z"
+        },
+        {
+          "name": "Run native Linux interface binding regressions",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 13,
+          "started_at": "2026-11-24T11:06:11Z",
+          "completed_at": "2026-11-24T11:07:10Z"
+        },
+        {
+          "name": "Probe native Winsock interface option semantics",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 14,
+          "started_at": "2026-11-24T11:07:10Z",
+          "completed_at": "2026-11-24T11:07:10Z"
+        },
+        {
+          "name": "Run native Windows transport regressions",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 15,
+          "started_at": "2026-11-24T11:07:10Z",
+          "completed_at": "2026-11-24T11:07:10Z"
+        },
+        {
+          "name": "Post Cache Zig downloads",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 21,
+          "started_at": "2026-11-24T11:07:10Z",
+          "completed_at": "2026-11-24T11:07:10Z"
+        },
+        {
+          "name": "Post Install Zig 0.16.0",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 22,
+          "started_at": "2026-11-24T11:07:10Z",
+          "completed_at": "2026-11-24T11:07:12Z"
+        },
+        {
+          "name": "Post Checkout pinned harnessz",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 23,
+          "started_at": "2026-11-24T11:07:12Z",
+          "completed_at": "2026-11-24T11:07:12Z"
+        },
+        {
+          "name": "Post Checkout pinned regexz",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 24,
+          "started_at": "2026-11-24T11:07:12Z",
+          "completed_at": "2026-11-24T11:07:12Z"
+        },
+        {
+          "name": "Post Checkout pinned webpkiz",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 25,
+          "started_at": "2026-11-24T11:07:12Z",
+          "completed_at": "2026-11-24T11:07:12Z"
+        },
+        {
+          "name": "Post Checkout pinned kron",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 26,
+          "started_at": "2026-11-24T11:07:12Z",
+          "completed_at": "2026-11-24T11:07:13Z"
+        },
+        {
+          "name": "Post Checkout pinned pbz",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 27,
+          "started_at": "2026-11-24T11:07:13Z",
+          "completed_at": "2026-11-24T11:07:13Z"
+        },
+        {
+          "name": "Post Checkout pinned vort",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 28,
+          "started_at": "2026-11-24T11:07:13Z",
+          "completed_at": "2026-11-24T11:07:13Z"
+        },
+        {
+          "name": "Post Checkout pinned vail",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 29,
+          "started_at": "2026-11-24T11:07:13Z",
+          "completed_at": "2026-11-24T11:07:13Z"
+        },
+        {
+          "name": "Post Checkout netz",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 30,
+          "started_at": "2026-11-24T11:07:13Z",
+          "completed_at": "2026-11-24T11:07:14Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 31,
+          "started_at": "2026-11-24T11:07:14Z",
+          "completed_at": "2026-11-24T11:07:14Z"
+        }
+      ]
+    },
+    {
+      "id": 138398197982,
+      "name": "Portable x86_64-windows-gnu (windows-latest)",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-11-24T11:03:16Z",
+      "completed_at": "2026-11-24T11:09:31Z",
+      "html_url": "https://github.com/passchaos/netz/actions/runs/45380513459/job/138398197982",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-11-24T11:03:17Z",
+          "completed_at": "2026-11-24T11:03:23Z"
+        },
+        {
+          "name": "Checkout netz",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2,
+          "started_at": "2026-11-24T11:03:23Z",
+          "completed_at": "2026-11-24T11:03:35Z"
+        },
+        {
+          "name": "Checkout pinned vail",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-11-24T11:03:35Z",
+          "completed_at": "2026-11-24T11:03:40Z"
+        },
+        {
+          "name": "Checkout pinned vort",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4,
+          "started_at": "2026-11-24T11:03:40Z",
+          "completed_at": "2026-11-24T11:04:08Z"
+        },
+        {
+          "name": "Checkout pinned pbz",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 5,
+          "started_at": "2026-11-24T11:04:08Z",
+          "completed_at": "2026-11-24T11:04:14Z"
+        },
+        {
+          "name": "Checkout pinned kron",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 6,
+          "started_at": "2026-11-24T11:04:14Z",
+          "completed_at": "2026-11-24T11:04:19Z"
+        },
+        {
+          "name": "Checkout pinned webpkiz",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 7,
+          "started_at": "2026-11-24T11:04:19Z",
+          "completed_at": "2026-11-24T11:04:24Z"
+        },
+        {
+          "name": "Checkout pinned regexz",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 8,
+          "started_at": "2026-11-24T11:04:24Z",
+          "completed_at": "2026-11-24T11:04:29Z"
+        },
+        {
+          "name": "Checkout pinned harnessz",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 9,
+          "started_at": "2026-11-24T11:04:29Z",
+          "completed_at": "2026-11-24T11:04:34Z"
+        },
+        {
+          "name": "Install Zig 0.16.0",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 10,
+          "started_at": "2026-11-24T11:04:34Z",
+          "completed_at": "2026-11-24T11:04:55Z"
+        },
+        {
+          "name": "Cache Zig downloads",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 11,
+          "started_at": "2026-11-24T11:04:55Z",
+          "completed_at": "2026-11-24T11:04:56Z"
+        },
+        {
+          "name": "Compile library and public-package tests",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 12,
+          "started_at": "2026-11-24T11:04:56Z",
+          "completed_at": "2026-11-24T11:04:56Z"
+        },
+        {
+          "name": "Run native Linux interface binding regressions",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 13,
+          "started_at": "2026-11-24T11:04:56Z",
+          "completed_at": "2026-11-24T11:04:56Z"
+        },
+        {
+          "name": "Probe native Winsock interface option semantics",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 14,
+          "started_at": "2026-11-24T11:04:56Z",
+          "completed_at": "2026-11-24T11:04:58Z"
+        },
+        {
+          "name": "Run native Windows transport regressions",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 15,
+          "started_at": "2026-11-24T11:04:58Z",
+          "completed_at": "2026-11-24T11:08:44Z"
+        },
+        {
+          "name": "Post Cache Zig downloads",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 21,
+          "started_at": "2026-11-24T11:08:44Z",
+          "completed_at": "2026-11-24T11:08:45Z"
+        },
+        {
+          "name": "Post Install Zig 0.16.0",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 22,
+          "started_at": "2026-11-24T11:08:45Z",
+          "completed_at": "2026-11-24T11:09:10Z"
+        },
+        {
+          "name": "Post Checkout pinned harnessz",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 23,
+          "started_at": "2026-11-24T11:09:10Z",
+          "completed_at": "2026-11-24T11:09:12Z"
+        },
+        {
+          "name": "Post Checkout pinned regexz",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 24,
+          "started_at": "2026-11-24T11:09:12Z",
+          "completed_at": "2026-11-24T11:09:14Z"
+        },
+        {
+          "name": "Post Checkout pinned webpkiz",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 25,
+          "started_at": "2026-11-24T11:09:14Z",
+          "completed_at": "2026-11-24T11:09:16Z"
+        },
+        {
+          "name": "Post Checkout pinned kron",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 26,
+          "started_at": "2026-11-24T11:09:16Z",
+          "completed_at": "2026-11-24T11:09:18Z"
+        },
+        {
+          "name": "Post Checkout pinned pbz",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 27,
+          "started_at": "2026-11-24T11:09:18Z",
+          "completed_at": "2026-11-24T11:09:21Z"
+        },
+        {
+          "name": "Post Checkout pinned vort",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 28,
+          "started_at": "2026-11-24T11:09:21Z",
+          "completed_at": "2026-11-24T11:09:23Z"
+        },
+        {
+          "name": "Post Checkout pinned vail",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 29,
+          "started_at": "2026-11-24T11:09:23Z",
+          "completed_at": "2026-11-24T11:09:25Z"
+        },
+        {
+          "name": "Post Checkout netz",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 30,
+          "started_at": "2026-11-24T11:09:25Z",
+          "completed_at": "2026-11-24T11:09:27Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 31,
+          "started_at": "2026-11-24T11:09:27Z",
+          "completed_at": "2026-11-24T11:09:27Z"
+        }
+      ]
+    }
+  ]
+}
