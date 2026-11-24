@@ -165,6 +165,15 @@ pub const Session = struct {
         return client.stableId();
     }
 
+    /// Current QUIC peer path for the connection owning this session.
+    pub fn remoteAddress(
+        self: *Session,
+        client: *Client,
+    ) Error!std.Io.net.IpAddress {
+        try self.validateOwner(client);
+        return client.remoteAddress();
+    }
+
     fn deinit(self: *Session, client: *Client) void {
         client.h3.closeConnectDatagramAssociation(
             self.session_id.value,

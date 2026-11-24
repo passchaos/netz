@@ -273,6 +273,14 @@ test "WebTransport endpoint client multiplexes two authenticated Sessions" {
                 stable_id,
                 try second.stableId(&client),
             );
+            try std.testing.expectEqual(
+                client.remoteAddress(),
+                try first.remoteAddress(&client),
+            );
+            try std.testing.expectEqual(
+                client.remoteAddress(),
+                try second.remoteAddress(&client),
+            );
             try std.testing.expect(client.rttNanos() != null);
             try std.testing.expectEqual(@as(u62, 4), first.id().value);
             try std.testing.expectEqual(@as(u62, 8), second.id().value);

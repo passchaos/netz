@@ -3611,3 +3611,16 @@ peer-address field through the pooled client path.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | Server-routes example (Debug) | `/whoami` 200 with peer port, 9/9 steps | live `zig build run-http-server-routes --summary all` |
+
+## Two-hundred-and-fourth pass: H3 WebTransport per-session remote address
+
+The multiplexed HTTP/3 WebTransport session now forwards
+`remoteAddress(client)`, matching its `stableId(client)` shape, so callers
+holding only a session can read the current QUIC peer path without bypassing
+the owner check. The endpoint-client test asserts the session and client
+addresses match for two sessions on one connection.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| WebTransport suite (Debug) | 761/763 (2 skipped) | live `zig build test-webtransport --summary all` |
+| Package surface (Debug) | 28/28 | live `zig build test-package --summary all` |

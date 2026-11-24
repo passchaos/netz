@@ -11891,6 +11891,7 @@ test "public ALPN adoption and metadata surfaces are exported" {
     _ = &netz.webtransport.runtime.EndpointClient.negotiatedTlsProtocol;
     _ = &netz.webtransport.runtime.EndpointClient.wasTlsSessionResumed;
     _ = &netz.webtransport.runtime.EndpointClient.earlyDataStatus;
+    _ = &netz.webtransport.runtime.EndpointClientSession.remoteAddress;
     _ = &netz.webtransport.runtime.EndpointAcceptedSession.negotiatedTlsProtocol;
     _ = &netz.webtransport.runtime.EndpointAcceptedSession.wasTlsSessionResumed;
     _ = &netz.webtransport.runtime.EndpointAcceptedSession.earlyDataStatus;
