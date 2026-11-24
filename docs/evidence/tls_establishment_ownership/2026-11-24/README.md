@@ -33,6 +33,12 @@ the two new establishment regressions.
 | Baseline before the fix | 9/10 passed; expected missing-ALPN ownership failure | [before.log](before.log) |
 | OOM/transfer and real version/ticket overlap | 15/15 passed | [Debug.log](Debug.log) |
 
+At commit `e1ccea56`, the [native Linux connection/Upgrade step](https://github.com/passchaos/netz/actions/runs/45422908359/job/138547501275)
+and [native Windows transport step](https://github.com/passchaos/netz/actions/runs/45422908359/job/138547501468)
+both completed successfully. Exact conclusions and timestamps appear in
+[native-platforms.json](native-platforms.json), independently of cross-compilation
+and the overall CI result.
+
 ```sh
 zig build test-tls '-Dtest-filter=versioned TLS establishment' -j1 --summary failures
 zig build test-tls '-Dtest-filter=versioned TLS establishment' '-Dtest-filter=TLS 1.3 RFC 8446 ticket resumes the authenticated session' '-Dtest-filter=versioned TLS stream negotiates TLS 1.3 only' '-Dtest-filter=versioned TLS stream negotiates highest version' '-Dtest-filter=versioned TLS stream negotiates TLS 1.2 only' -j1 --summary all

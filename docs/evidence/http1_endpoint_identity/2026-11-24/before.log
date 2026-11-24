@@ -1,0 +1,66 @@
+[traex-zig-guard 2026-11-24 23:20:49] waiting for the global TRAE Zig build slot
+[traex-zig-guard 2026-11-24 23:21:14] started Zig tree root=48089 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=1800s
+test-http1
++- run test 19 pass, 3 fail (22 total)
+error: 'http1.runtime.client.endpoint_tests.test.HTTP1 named endpoint accepts IPv6 and formats default authority' failed:
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/Io/net/HostName.zig:56:51: 0x104d0a023 in validate (test)
+                       if (!std.ascii.isAlphanumeric(c)) return error.InvalidHostName;
+                                                         ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/Io/net/HostName.zig:101:5: 0x104d09a63 in init (test)
+           try validate(bytes);
+           ^
+       /Users/bytedance/project-z/netz/src/http1/runtime/client.zig:409:27: 0x104cfdaef in connectHost (test)
+               const host_name = try net.HostName.init(host);
+                                 ^
+       /Users/bytedance/project-z/netz/src/http1/runtime/client/endpoint_tests.zig:46:13: 0x104bcdc0b in test.HTTP1 named endpoint accepts IPv6 and formats default authority (test)
+                   try runtime.Client.connectHost(allocator, io, case.host, server.address().getPort(), .{});
+                   ^
+error: 'http1.runtime.client.endpoint_tests.test.HTTP1 named endpoint TLS accepts IPv6 identities and request authority overrides' failed:
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/Io/net/HostName.zig:56:51: 0x104d0a023 in validate (test)
+                       if (!std.ascii.isAlphanumeric(c)) return error.InvalidHostName;
+                                                         ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/Io/net/HostName.zig:101:5: 0x104d09a63 in init (test)
+           try validate(bytes);
+           ^
+       /Users/bytedance/project-z/netz/src/http1/runtime/client.zig:490:27: 0x105b1f7e3 in connectTlsHost (test)
+               const host_name = try net.HostName.init(host);
+                                 ^
+       /Users/bytedance/project-z/netz/src/http1/runtime/client/endpoint_tests.zig:121:164: 0x105b1d81f in exerciseTls__anon_11001801 (test)
+                           if (case.bounded) try runtime.Client.connectTlsHostWithDeadline(allocator, io, case.host, server.address().getPort(), .{}, tls, deadline) else try runtime.Client.connectTlsHost(allocator, io, case.host, server.address().getPort(), .{}, tls)
+                                                                                                                                                                          ^
+       /Users/bytedance/project-z/netz/src/http1/runtime/client/endpoint_tests.zig:137:5: 0x105b1eafb in test.HTTP1 named endpoint TLS accepts IPv6 identities and request authority overrides (test)
+           try exerciseTls(true);
+           ^
+error: 'http1.runtime.client.endpoint_tests.test.HTTP1 TLS address endpoint formats IPv6 identities and request authority overrides' failed:
+       ====== expected this output: =========
+       [::1]:63310␃
+
+       ======== instead found this: =========
+       ::1:63310␃
+
+       ======================================
+       First difference occurs on line 1:
+       expected:
+       [::1]:63310
+       ^ ('\x5b')
+       found:
+       ::1:63310
+       ^ ('\x3a')
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:682:9: 0x104bcd4d3 in expectEqualStrings (test)
+               return error.TestExpectedEqual;
+               ^
+       /Users/bytedance/project-z/netz/src/http1/runtime/client/endpoint_tests.zig:125:13: 0x104d64b63 in exerciseTls__anon_67657 (test)
+                   try std.testing.expectEqualStrings(authority, client.default_host.?);
+                   ^
+       /Users/bytedance/project-z/netz/src/http1/runtime/client/endpoint_tests.zig:141:5: 0x104d64ef3 in test.HTTP1 TLS address endpoint formats IPv6 identities and request authority overrides (test)
+           try exerciseTls(false);
+           ^
+failed command: ./.zig-cache/o/3ffb0751f622abb8ee6492b37eb9bc13/test --cache-dir=./.zig-cache --seed=0x640bf566 --listen=-
+
+Build Summary: 8/10 steps succeeded (1 failed); 19/22 tests passed (3 failed)
+test-http1 transitive failure
++- run test 19 pass, 3 fail (22 total)
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/4f43002d28e7c626e498fafc36e312bb/build /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/zig /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib /Users/bytedance/project-z/netz .zig-cache /Users/bytedance/.cache/zig --seed 0x640bf566 -Z955e7c84f3cfb84e test-http1 -Dtest-filter=HTTP1 named endpoint -Dtest-filter=HTTP1 TLS address endpoint -j1 --summary failures
+[traex-zig-guard 2026-11-24 23:21:52] finished Zig tree root=48089 peak=3200MiB result=0

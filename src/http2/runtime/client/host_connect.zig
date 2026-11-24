@@ -1,30 +1,13 @@
 //! Validate and open one DNS/IP route while retaining its logical identity.
 const std = @import("std");
 const runtime = @import("../../runtime.zig");
-const endpoint_host = @import("../../../internal/endpoint_host.zig");
-const tcp = @import("../../../internal/tcp_connect.zig");
-const deadline_policy = @import("../../../internal/deadline.zig");
+const named = @import("../../../internal/tcp_connect/named.zig");
 
-pub const Opened = struct {
-    stream: std.Io.net.Stream,
-    authority: []u8,
-    identity: []const u8,
-};
+pub const Opened = named.Opened;
 
-/// The caller takes both resources on success. Parse/budget/OOM rejection
-/// happens before network admission; a failed connect releases the authority.
+/// Retain the public H2 limits/error shape over the shared DNS/IP boundary.
 pub fn open(allocator: std.mem.Allocator, io: std.Io, host: []const u8, port: u16, limits: runtime.Limits, deadline: ?std.Io.Clock.Timestamp) runtime.Error!Opened {
-    const parsed = try endpoint_host.parse(host, port);
-    const until = if (deadline) |value| try deadline_policy.capTimeout(io, value, limits.connect_timeout) else try deadline_policy.fromTimeout(io, limits.connect_timeout);
-    const authority = try parsed.authorityAlloc(allocator, port);
-    errdefer allocator.free(authority);
-    const stream = if (parsed.literal) |address|
-        if (until) |value| try tcp.ipWithDeadlineAndOptions(io, address, value, limits) else try tcp.ipWithOptions(io, address, null, limits)
-    else if (until) |value|
-        try tcp.hostWithDeadlineAndOptions(io, try std.Io.net.HostName.init(parsed.host), port, value, limits)
-    else
-        try tcp.hostWithOptions(io, try std.Io.net.HostName.init(parsed.host), port, null, limits);
-    return .{ .stream = stream, .authority = authority, .identity = parsed.host };
+    return named.open(allocator, io, host, port, limits, deadline);
 }
 
 test "HTTP/2 host connection validates literal budgets and OOM before network admission" {

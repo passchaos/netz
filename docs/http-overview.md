@@ -49,6 +49,15 @@ retains traffic sequence numbers and the configured ticket policy. The
 [establishment regressions](evidence/tls_establishment_ownership/2026-11-24/README.md)
 cover allocation failure and real TLS1.3 session resumption.
 
+H1 named TCP and both TLS backends accept DNS, IPv4 and IPv6 identities with
+optional brackets. H1/H2 share the same DNS/IP connection boundary: an IPv6
+identity reaches TLS without brackets, while the default HTTP authority uses
+`[address]:port`. H1 TLS address constructors normalize their separate TLS host;
+standard TLS retains an explicit authority argument and vail TLS derives its
+default from that identity. Per-request Host/authority remains independent of
+the destination. The [endpoint regressions](evidence/http1_endpoint_identity/2026-11-24/README.md)
+record live IPv6 exchanges, admission rejection and source/interface binding.
+
 H2c `Client.connectStreamUpgrade*` also consumes the supplied stream at entry,
 including expired/foreign-clock deadlines and non-positive timeouts. Failed
 admission closes it before sending the HTTP/1 Upgrade request. The TCP-opening

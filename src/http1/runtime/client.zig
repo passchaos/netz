@@ -5,6 +5,8 @@ const http1 = @import("../mod.zig");
 const net = std.Io.net;
 const socket_address = @import("../../internal/socket_address.zig");
 const runtime = @import("../runtime.zig");
+const endpoint_host = @import("../../internal/endpoint_host.zig");
+const named_connect = @import("../../internal/tcp_connect/named.zig");
 
 const ConnectIpSession = runtime.ConnectIpSession;
 const ConnectUdpSession = runtime.ConnectUdpSession;
@@ -406,10 +408,10 @@ pub const Client = struct {
         port: u16,
         limits: Limits,
     ) Error!Client {
-        const host_name = try net.HostName.init(host);
-        const owned_host = try std.fmt.allocPrint(allocator, "{s}:{d}", .{ host, port });
+        const opened = try named_connect.open(allocator, io, host, port, limits, null);
+        const owned_host = opened.authority;
         errdefer allocator.free(owned_host);
-        const stream = try tcp_connect.hostWithOptions(io, host_name, port, limits.connect_timeout, limits);
+        const stream = opened.stream;
         errdefer stream.close(io);
         if (limits.tcp_nodelay) try setTcpNoDelay(stream);
         return .{
@@ -431,24 +433,10 @@ pub const Client = struct {
         limits: Limits,
         deadline: std.Io.Clock.Timestamp,
     ) Error!Client {
-        const host_name = try net.HostName.init(host);
-        const owned_host = try std.fmt.allocPrint(
-            allocator,
-            "{s}:{d}",
-            .{ host, port },
-        );
+        const opened = try named_connect.open(allocator, io, host, port, limits, deadline);
+        const owned_host = opened.authority;
         errdefer allocator.free(owned_host);
-        const stream = try tcp_connect.hostWithDeadlineAndOptions(
-            io,
-            host_name,
-            port,
-            try deadline_policy.capTimeout(
-                io,
-                deadline,
-                limits.connect_timeout,
-            ),
-            limits,
-        );
+        const stream = opened.stream;
         errdefer stream.close(io);
         if (limits.tcp_nodelay) try setTcpNoDelay(stream);
         return .{
@@ -487,16 +475,16 @@ pub const Client = struct {
         limits: Limits,
         tls_options: TlsClientOptions,
     ) Error!Client {
-        const host_name = try net.HostName.init(host);
-        const stream = try tcp_connect.hostWithOptions(io, host_name, port, limits.connect_timeout, limits);
+        const opened = try named_connect.open(allocator, io, host, port, limits, null);
+        const owned_host = opened.authority;
+        errdefer allocator.free(owned_host);
+        const stream = opened.stream;
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(io);
         if (limits.tcp_nodelay) try setTcpNoDelay(stream);
-        const tls_conn = try TlsClientConnection.init(allocator, io, stream, host, tls_options);
+        const tls_conn = try TlsClientConnection.init(allocator, io, stream, opened.identity, tls_options);
         stream_owned = false;
         errdefer tls_conn.deinit();
-        const owned_host = try std.fmt.allocPrint(allocator, "{s}:{d}", .{ host, port });
-        errdefer allocator.free(owned_host);
         return .{
             .io = io,
             .allocator = allocator,
@@ -518,18 +506,10 @@ pub const Client = struct {
         tls_options: TlsClientOptions,
         deadline: std.Io.Clock.Timestamp,
     ) Error!Client {
-        const host_name = try net.HostName.init(host);
-        const stream = try tcp_connect.hostWithDeadlineAndOptions(
-            io,
-            host_name,
-            port,
-            try deadline_policy.capTimeout(
-                io,
-                deadline,
-                limits.connect_timeout,
-            ),
-            limits,
-        );
+        const opened = try named_connect.open(allocator, io, host, port, limits, deadline);
+        const owned_host = opened.authority;
+        errdefer allocator.free(owned_host);
+        const stream = opened.stream;
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(io);
         if (limits.tcp_nodelay) try setTcpNoDelay(stream);
@@ -537,18 +517,12 @@ pub const Client = struct {
             allocator,
             io,
             stream,
-            host,
+            opened.identity,
             tls_options,
             deadline,
         );
         stream_owned = false;
         errdefer tls_conn.deinit();
-        const owned_host = try std.fmt.allocPrint(
-            allocator,
-            "{s}:{d}",
-            .{ host, port },
-        );
-        errdefer allocator.free(owned_host);
         return .{
             .io = io,
             .allocator = allocator,
@@ -589,6 +563,7 @@ pub const Client = struct {
         limits: Limits,
         tls_options: TlsClientOptions,
     ) Error!Client {
+        const identity = try endpoint_host.parse(tls_host, address.getPort());
         const stream = try tcp_connect.ipWithOptions(io, address, limits.connect_timeout, limits);
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(io);
@@ -597,7 +572,7 @@ pub const Client = struct {
             allocator,
             io,
             stream,
-            tls_host,
+            identity.host,
             tls_options,
         );
         stream_owned = false;
@@ -623,6 +598,7 @@ pub const Client = struct {
         tls_options: TlsClientOptions,
         deadline: std.Io.Clock.Timestamp,
     ) Error!Client {
+        const identity = try endpoint_host.parse(tls_host, address.getPort());
         const stream = try tcp_connect.ipWithDeadlineAndOptions(
             io,
             address,
@@ -640,7 +616,7 @@ pub const Client = struct {
             allocator,
             io,
             stream,
-            tls_host,
+            identity.host,
             tls_options,
             deadline,
         );
@@ -688,14 +664,13 @@ pub const Client = struct {
         limits: Limits,
         tls_options: VailTlsClientOptions,
     ) Error!Client {
-        const host_name = try net.HostName.init(host);
-        const stream = try tcp_connect.hostWithOptions(io, host_name, port, limits.connect_timeout, limits);
+        const opened = try named_connect.open(allocator, io, host, port, limits, null);
         return connectVailTlsStream(
             allocator,
             io,
-            stream,
-            host,
-            port,
+            opened.stream,
+            opened.identity,
+            opened.authority,
             limits,
             tls_options,
         );
@@ -710,24 +685,13 @@ pub const Client = struct {
         tls_options: VailTlsClientOptions,
         deadline: std.Io.Clock.Timestamp,
     ) Error!Client {
-        const host_name = try net.HostName.init(host);
-        const stream = try tcp_connect.hostWithDeadlineAndOptions(
-            io,
-            host_name,
-            port,
-            try deadline_policy.capTimeout(
-                io,
-                deadline,
-                limits.connect_timeout,
-            ),
-            limits,
-        );
+        const opened = try named_connect.open(allocator, io, host, port, limits, deadline);
         return connectVailTlsStreamBefore(
             allocator,
             io,
-            stream,
-            host,
-            port,
+            opened.stream,
+            opened.identity,
+            opened.authority,
             limits,
             tls_options,
             deadline,
@@ -763,17 +727,22 @@ pub const Client = struct {
         limits: Limits,
         tls_options: VailTlsClientOptions,
     ) Error!Client {
-        const stream = try tcp_connect.ipWithOptions(io, address, limits.connect_timeout, limits);
-        const port = switch (address) {
-            .ip4 => |ip4| ip4.port,
-            .ip6 => |ip6| ip6.port,
-        };
+        const identity = try endpoint_host.parse(tls_host, address.getPort());
+        const until = try deadline_policy.fromTimeout(io, limits.connect_timeout);
+        const owned_host = try identity.authorityAlloc(allocator, address.getPort());
+        var host_owned = true;
+        errdefer if (host_owned) allocator.free(owned_host);
+        const stream = if (until) |deadline|
+            try tcp_connect.ipWithDeadlineAndOptions(io, address, deadline, limits)
+        else
+            try tcp_connect.ipWithOptions(io, address, null, limits);
+        host_owned = false;
         return connectVailTlsStream(
             allocator,
             io,
             stream,
-            tls_host,
-            port,
+            identity.host,
+            owned_host,
             limits,
             tls_options,
         );
@@ -788,22 +757,24 @@ pub const Client = struct {
         tls_options: VailTlsClientOptions,
         deadline: std.Io.Clock.Timestamp,
     ) Error!Client {
+        const identity = try endpoint_host.parse(tls_host, address.getPort());
+        const until = try deadline_policy.capTimeout(io, deadline, limits.connect_timeout);
+        const owned_host = try identity.authorityAlloc(allocator, address.getPort());
+        var host_owned = true;
+        errdefer if (host_owned) allocator.free(owned_host);
         const stream = try tcp_connect.ipWithDeadlineAndOptions(
             io,
             address,
-            try deadline_policy.capTimeout(
-                io,
-                deadline,
-                limits.connect_timeout,
-            ),
+            until,
             limits,
         );
+        host_owned = false;
         return connectVailTlsStreamBefore(
             allocator,
             io,
             stream,
-            tls_host,
-            address.getPort(),
+            identity.host,
+            owned_host,
             limits,
             tls_options,
             deadline,
@@ -836,7 +807,7 @@ pub const Client = struct {
         io: std.Io,
         stream: net.Stream,
         tls_host: []const u8,
-        port: u16,
+        owned_host: []u8,
         limits: Limits,
         tls_options: VailTlsClientOptions,
     ) Error!Client {
@@ -845,7 +816,7 @@ pub const Client = struct {
             io,
             stream,
             tls_host,
-            port,
+            owned_host,
             limits,
             tls_options,
             null,
@@ -857,7 +828,7 @@ pub const Client = struct {
         io: std.Io,
         stream: net.Stream,
         tls_host: []const u8,
-        port: u16,
+        owned_host: []u8,
         limits: Limits,
         tls_options: VailTlsClientOptions,
         deadline: std.Io.Clock.Timestamp,
@@ -867,7 +838,7 @@ pub const Client = struct {
             io,
             stream,
             tls_host,
-            port,
+            owned_host,
             limits,
             tls_options,
             deadline,
@@ -879,13 +850,14 @@ pub const Client = struct {
         io: std.Io,
         stream: net.Stream,
         tls_host: []const u8,
-        port: u16,
+        owned_host: []u8,
         limits: Limits,
         tls_options: VailTlsClientOptions,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!Client {
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(io);
+        errdefer allocator.free(owned_host);
         if (deadline) |absolute| _ = try deadline_policy.usableAwake(io, absolute);
         if (limits.tcp_nodelay) try setTcpNoDelay(stream);
         const options = verifiedTlsClientOptions(tls_host, tls_options);
@@ -911,11 +883,6 @@ pub const Client = struct {
         if (tls_connection.negotiatedAlpn()) |alpn| {
             if (!std.mem.eql(u8, alpn, "http/1.1")) return error.InvalidAlpn;
         }
-        const owned_host = try std.fmt.allocPrint(
-            allocator,
-            "{s}:{d}",
-            .{ tls_host, port },
-        );
         return .{
             .io = io,
             .allocator = allocator,
