@@ -1954,7 +1954,14 @@ alongside the sole endpoint receive, under the original absolute deadline.
 They no longer depend on `handshake_poll_interval` to advance a completed
 worker or launch the next candidate. The shared endpoint/activity wait joins
 its receive before the next acquisition poll changes routes, and retains any
-endpoint event that completed during cancellation. Resumption and
+endpoint event that completed during cancellation. Pending acquisitions also
+enforce their connection deadline before consuming worker results, including
+the resolution phase. The driver schedules the earlier of each request and
+pending connection deadline, even for requests without an overall timeout.
+An expired connection phase returns `HandshakeTimeout`; an earlier request
+deadline retains `Timeout`. Teardown joins the cancellable resolver and releases
+its shared connection reservation. Custom resolver callbacks remain responsible
+for honoring `std.Io` cancellation. Resumption and
 0-RTT remain first-attempt-only, while a later winner reports rejection for one
 safe 1-RTT replay. Loser cleanup unregisters and closes its inbox before
 joining the worker, avoiding a wait for its phase deadline. Only the pool's

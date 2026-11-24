@@ -251,7 +251,7 @@ jobs:
 
       - name: Run native HTTP3 shared acquisition regressions
         if: runner.os == 'Windows' || (runner.os == 'Linux' && matrix.target == 'x86_64-linux-gnu')
-        run: zig build test-http3 -j1 -Dtarget=${{ matrix.target }} '-Dtest-filter=HTTP/3 shared synchronous acquire wakes' '-Dtest-filter=HTTP/3 shared synchronous acquire cancels' --summary all
+        run: zig build test-http3 -j1 -Dtarget=${{ matrix.target }} '-Dtest-filter=HTTP/3 shared synchronous acquire wakes' '-Dtest-filter=HTTP/3 shared synchronous acquire cancels' '-Dtest-filter=HTTP/3 shared acquisition deadline' --summary all
 
       - name: Run native Windows transport regressions
         if: runner.os == 'Windows'

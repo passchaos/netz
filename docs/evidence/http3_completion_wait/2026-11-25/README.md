@@ -38,3 +38,5 @@ zig build test-http3 '-Dtest-filter=HTTP/3 shared synchronous acquire' '-Dtest-f
 | Baseline resolver latency regression | 59/60 passed; expected latency failure | [before.log](before.log) |
 | Resolver completion after the fix | Passed; acquisition within 250 ms | [after.log](after.log) |
 | Completion, cancellation, dual-family and dispatcher overlap | 69/69 passed | [Debug.log](Debug.log) |
+| Native Linux completion/cancellation, commit `3a8ae1d0` | Passed acquisition step, 2026-11-24 19:36 UTC | [Linux job](https://github.com/passchaos/netz/actions/runs/45471261803/job/138719511665) |
+| Native Windows completion/cancellation, commit `3a8ae1d0` | Passed acquisition step, 2026-11-24 19:37 UTC | [Windows job](https://github.com/passchaos/netz/actions/runs/45471261803/job/138719511025) |

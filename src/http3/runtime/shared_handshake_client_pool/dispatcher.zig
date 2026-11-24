@@ -13,6 +13,7 @@ const std = @import("std");
 const Guard = @import("../../../internal/mutex_guard.zig").Guard;
 const http3 = @import("../../mod.zig");
 const connection_budget = @import("../../../internal/connection_budget.zig");
+const deadline_policy = @import("../../../internal/deadline.zig");
 const early_data = @import("../../../http/early_data.zig");
 const authority = @import("../handshake_client_pool/shared/authority.zig");
 const route_key = @import("../handshake_client_pool/shared/route.zig");
@@ -1833,15 +1834,11 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
             for (state.connections) |connection| {
                 if (!connection.active) continue;
                 for (connection.commands[0..connection.command_count]) |maybe| {
-                    const deadline = maybe.?.deadline orelse continue;
-                    earliest = if (earliest) |current|
-                        if (std.Io.Clock.Timestamp.compare(
-                            deadline,
-                            .lt,
-                            current,
-                        )) deadline else current
-                    else
-                        deadline;
+                    const command = maybe.?;
+                    earliest = deadline_policy.earlier(earliest, command.deadline);
+                    if (command.pending_acquire) |pending| {
+                        earliest = deadline_policy.earlier(earliest, pending.deadline);
+                    }
                 }
             }
             state.mutex.lockUncancelable(state.io);
@@ -1855,14 +1852,7 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
                         .raw = state.options.capacity_poll_interval,
                     },
                 );
-                earliest = if (earliest) |current|
-                    if (std.Io.Clock.Timestamp.compare(
-                        poll_deadline,
-                        .lt,
-                        current,
-                    )) poll_deadline else current
-                else
-                    poll_deadline;
+                earliest = deadline_policy.earlier(earliest, poll_deadline);
             }
             return earliest;
         }

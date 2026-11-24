@@ -1,0 +1,125 @@
+[traex-zig-guard 2026-11-25 03:36:00] started Zig tree root=31279 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=1800s
+test-http3
++- run test 61 pass, 2 fail (63 total)
+error: 'http3.runtime.shared_handshake_client_pool.acquisition_deadline_tests.test.HTTP/3 shared acquisition deadline cancels a slow synchronous resolver' failed:
+       expected error.HandshakeTimeout, found error.UnknownHostName
+       /Users/bytedance/project-z/netz/src/http3/runtime/shared_handshake_client_pool.zig:521:25: 0x10064d24f in poll (test)
+                               return err;
+                               ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/shared_handshake_client_pool.zig:1912:25: 0x100de4c33 in acquireUriBefore (test)
+                           if (try pending.poll()) |lease| return lease;
+                               ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/shared_handshake_client_pool.zig:1441:13: 0x100de6097 in acquireUri (test)
+                   return self.acquireUriBefore(
+                   ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:72:13: 0x100de6233 in expectError__anon_7999675 (test)
+                   return error.TestUnexpectedError;
+                   ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/shared_handshake_client_pool/acquisition_deadline_tests.zig:58:5: 0x100de664b in test.HTTP/3 shared acquisition deadline cancels a slow synchronous resolver (test)
+           try std.testing.expectError(error.HandshakeTimeout, pool.acquireUri("https://slow.acquire.test/"));
+           ^
+error: 'http3.runtime.shared_handshake_client_pool.acquisition_deadline_tests.test.HTTP/3 shared acquisition deadline wakes a request driver before its request budget' failed:
+       expected error.HandshakeTimeout, found error.UnknownHostName
+       /Users/bytedance/project-z/netz/src/http3/runtime/shared_handshake_client_pool/dispatcher.zig:1804:36: 0x1003e3803 in takeResult (test)
+                   if (command.err) |err| return err;
+                                          ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/shared_handshake_client_pool/dispatcher.zig:545:34: 0x1003e3433 in requestBeforeConfigured (test)
+                       const response = try takeResult(self.state, &command);
+                                        ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/shared_handshake_client_pool/dispatcher.zig:501:17: 0x1003e2ccb in requestBefore (test)
+                       return self.requestBeforeConfigured(
+                       ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/shared_handshake_client_pool/dispatcher.zig:233:17: 0x1003e26ef in request (test)
+                       return self.requestBefore(
+                       ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:118:17: 0x1003dd3ab in expectEqualInner__anon_40693 (test)
+                       return error.TestExpectedEqual;
+                       ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:83:5: 0x1003de053 in expectEqual (test)
+           return expectEqualInner(T, expected, actual);
+           ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/shared_handshake_client_pool/acquisition_deadline_tests.zig:97:22: 0x1003de153 in test.HTTP/3 shared acquisition deadline wakes a request driver before its request budget (test)
+               } else |err| try std.testing.expectEqual(@as(anyerror, if (index == 2) error.Timeout else error.HandshakeTimeout), err);
+                            ^
+failed command: ./.zig-cache/o/5b67df09386c8a23e167e05b03e449c1/test --cache-dir=./.zig-cache --seed=0x2c7002f3 --listen=-
+
+Build Summary: 8/10 steps succeeded (1 failed); 61/63 tests passed (2 failed)
+test-http3 transitive failure
++- run test 61 pass, 2 fail (63 total)
+   +- compile test Debug native success 22s MaxRSS:2G
+      +- WriteFile macho_0_p256_field_arm64.S cached
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 191ms MaxRSS:31M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 213ms MaxRSS:31M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options success
+      +- options cached
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/4f43002d28e7c626e498fafc36e312bb/build /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/zig /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib /Users/bytedance/project-z/netz .zig-cache /Users/bytedance/.cache/zig --seed 0x2c7002f3 -Z430b73553fccff1f test-http3 -Dtest-filter=HTTP/3 shared acquisition deadline -j1 --summary all
+[traex-zig-guard 2026-11-25 03:36:27] finished Zig tree root=31279 peak=2550MiB result=0

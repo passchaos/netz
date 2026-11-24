@@ -512,6 +512,12 @@ pub fn Pool(comptime Runtime: type) type {
             }
 
             pub fn poll(self: *@This()) !?Lease {
+                // The acquisition owner enforces the whole connection budget
+                // before harvesting a resolver or handshake result.
+                if (self.deadline) |absolute| {
+                    _ = deadline_policy.usableAwake(self.pool.io, absolute) catch
+                        return error.HandshakeTimeout;
+                }
                 if (self.resolution) |resolution| {
                     const completion = resolution.takeCompletion() orelse
                         return null;
