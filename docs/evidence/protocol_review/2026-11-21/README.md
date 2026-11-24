@@ -3693,3 +3693,16 @@ contexts and distinguishes runtime verification from compilation.
 Native Windows transport execution then passed at `fc948153` (2m 44s),
 including the DATAGRAM bundle alongside HTTP metadata and WebSocket adapter
 regressions; the linked evidence records the matching job and step results.
+
+
+## Two-hundred-and-tenth pass: WebTransport operation admission
+
+Session callback and blocking-reader admission now precede buffered control,
+flow rejection and lifecycle cleanup. Deferred observers preserve the active
+H3 borrow, and event polling plus local DRAIN/CLOSE retain input and retry state
+on rejection. Relative DATAGRAM receive facades delegate through one entry
+deadline. Four original side-effect regressions fail on the base; seven owner
+tests and their control/flow/termination overlaps pass 271/271 in Debug and
+ReleaseSafe. [Operation admission evidence](../../webtransport_operation_admission/2026-11-24/README.md)
+records the baseline, exact API forms, protected UDP continuation and native
+CI coverage.

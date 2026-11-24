@@ -241,7 +241,7 @@ jobs:
         if: runner.os == 'Windows'
         run: |
           transport_status=0
-          zig build test-http test-http3 test-websocket -Dtarget=${{ matrix.target }} '-Dtest-filter=peer address' '-Dtest-filter=HTTP/3 CONNECT DATAGRAM' '-Dtest-filter=WebSocket stream adapter' --summary all > native-transport.log 2>&1 || transport_status=$?
+          zig build test-http test-http3 test-websocket test-webtransport -Dtarget=${{ matrix.target }} '-Dtest-filter=peer address' '-Dtest-filter=HTTP/3 CONNECT DATAGRAM' '-Dtest-filter=WebSocket stream adapter' '-Dtest-filter=WebTransport operation admission' --summary all > native-transport.log 2>&1 || transport_status=$?
           cat native-transport.log
           if [ "$transport_status" -ne 0 ]; then
             {

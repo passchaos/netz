@@ -3714,5 +3714,6 @@ pub fn preferPeerError(shared: anytype, fallback: anyerror) anyerror {
 }
 
 test {
+    _ = @import("runtime/owner.zig");
     _ = @import("runtime/tests.zig");
 }

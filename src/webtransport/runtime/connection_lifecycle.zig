@@ -5,6 +5,7 @@ const flow_credits = @import("flow/credits.zig");
 const flow_streams = @import("flow/streams.zig");
 const abandoned_receive = @import("association/abandoned.zig");
 const quic = @import("../../quic/mod.zig");
+const operation_owner = @import("owner.zig");
 
 pub const max_close_reason: usize = 1024;
 
@@ -51,12 +52,16 @@ pub fn observeWithoutCredits(control: *control_mod.Control, h3: anytype, registr
 /// method's ordinary timer refresh. Mirror the resulting recovery/pacing work
 /// before the shared socket owner next waits for an event.
 pub fn observeWithTimer(control: *control_mod.Control, h3: anytype, registry: anytype, dispatcher: ?*quic.endpoint_dispatcher.Dispatcher, handle: ?quic.endpoint_dispatcher.ConnectionHandle) void {
+    if (operation_owner.callbackBorrowed(h3)) return;
     _ = observe(control, h3, registry);
     const owner = dispatcher orelse return;
     owner.refreshConnectionTimer(handle orelse return) catch {};
 }
 
 fn observeInternal(control: *control_mod.Control, h3: anytype, registry: anytype, replenish: bool) bool {
+    // Deferred observers also run when an application facade rejects reentry.
+    // The existing callback keeps its borrowed input until it returns.
+    if (operation_owner.callbackBorrowed(h3)) return false;
     observeConnectSend(control, h3);
     observeConnectReceive(control, h3);
     // DATAGRAM-only consumers and send-side flow waits still own Session
@@ -80,18 +85,21 @@ fn observeInternal(control: *control_mod.Control, h3: anytype, registry: anytype
 }
 
 pub fn ensureOpen(control: *control_mod.Control, h3: anytype, registry: anytype) control_mod.Error!void {
+    try operation_owner.buffered(h3);
     control.bindFlow(registry.flow);
     if (observeInternal(control, h3, registry, false)) return error.ConnectionClosed;
     try control.ensureOpen();
 }
 
 pub fn ensureCloseOpen(control: *control_mod.Control, h3: anytype, registry: anytype) control_mod.Error!void {
+    try operation_owner.buffered(h3);
     control.bindFlow(registry.flow);
     if (observeInternal(control, h3, registry, false)) return error.ConnectionClosed;
     try control.ensureCloseOpen();
 }
 
 pub fn ensureDatagramReceiveOpen(control: *control_mod.Control, h3: anytype, registry: anytype) control_mod.Error!void {
+    try operation_owner.buffered(h3);
     control.bindFlow(registry.flow);
     // This also supports callers that assemble a preconfigured session value
     // directly rather than promoting it through a CONNECT constructor.

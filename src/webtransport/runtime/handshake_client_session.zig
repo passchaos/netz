@@ -7,6 +7,7 @@ const quic = @import("../../quic/mod.zig");
 const tls_stream = @import("../../tls/mod.zig").stream;
 const net = std.Io.net;
 const runtime = @import("../runtime.zig");
+const operation_owner = @import("owner.zig");
 
 const ConnectOptions = runtime.ConnectOptions;
 const Error = runtime.Error;
@@ -1153,9 +1154,9 @@ pub const HandshakeClientSession = struct {
     }
 
     pub fn receiveDatagram(self: *HandshakeClientSession) Error!OwnedHandshakeDatagram {
+        try operation_owner.receive(self);
         try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
         defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
-        if (self.dispatcher != null) return error.InvalidDispatcherState;
         try connect_negotiation.ensure(&self.h3);
         return ownedHandshakeDatagram(
             try flow_datagram.receive(&self.control, &self.h3, &self.streams, self.session_id.value),
@@ -1168,20 +1169,10 @@ pub const HandshakeClientSession = struct {
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!OwnedHandshakeDatagram {
         if (timeout.nanoseconds <= 0) return error.Timeout;
-        try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
-        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
-        if (self.dispatcher != null) return error.InvalidDispatcherState;
-        try connect_negotiation.ensure(&self.h3);
-        return ownedHandshakeDatagram(
-            try flow_datagram.receiveWithTimeout(
-                &self.control,
-                &self.h3,
-                &self.streams,
-                self.session_id.value,
-                timeout,
-            ),
-            self.session_id,
-        );
+        return self.receiveDatagramWithDeadline(.fromNow(
+            self.h3.established.connection.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
     }
 
     pub fn receiveDatagramWithDeadline(
@@ -1189,9 +1180,9 @@ pub const HandshakeClientSession = struct {
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!OwnedHandshakeDatagram {
         _ = try deadline_policy.usableAwake(self.h3.established.connection.endpoint.io, deadline);
+        try operation_owner.receive(self);
         try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
         defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
-        if (self.dispatcher != null) return error.InvalidDispatcherState;
         try connect_negotiation.ensure(&self.h3);
         return ownedHandshakeDatagram(
             try flow_datagram.receiveWithDeadline(
@@ -1212,9 +1203,9 @@ pub const HandshakeClientSession = struct {
         self: *HandshakeClientSession,
         output: []u8,
     ) Error![]u8 {
+        try operation_owner.receive(self);
         try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
         defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
-        if (self.dispatcher != null) return error.InvalidDispatcherState;
         try connect_negotiation.ensure(&self.h3);
         return flow_datagram.receiveInto(
             &self.control,
@@ -1231,18 +1222,10 @@ pub const HandshakeClientSession = struct {
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError![]u8 {
         if (timeout.nanoseconds <= 0) return error.Timeout;
-        try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
-        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
-        if (self.dispatcher != null) return error.InvalidDispatcherState;
-        try connect_negotiation.ensure(&self.h3);
-        return flow_datagram.receiveIntoWithTimeout(
-            &self.control,
-            &self.h3,
-            &self.streams,
-            self.session_id.value,
-            output,
-            timeout,
-        );
+        return self.receiveDatagramIntoWithDeadline(output, .fromNow(
+            self.h3.established.connection.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
     }
 
     pub fn receiveDatagramIntoWithDeadline(
@@ -1251,9 +1234,9 @@ pub const HandshakeClientSession = struct {
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError![]u8 {
         _ = try deadline_policy.usableAwake(self.h3.established.connection.endpoint.io, deadline);
+        try operation_owner.receive(self);
         try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
         defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
-        if (self.dispatcher != null) return error.InvalidDispatcherState;
         try connect_negotiation.ensure(&self.h3);
         return flow_datagram.receiveIntoWithDeadline(
             &self.control,
@@ -1273,9 +1256,9 @@ pub const HandshakeClientSession = struct {
         received_count: *usize,
     ) Error!void {
         received_count.* = 0;
+        try operation_owner.receive(self);
         try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
         defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
-        if (self.dispatcher != null) return error.InvalidDispatcherState;
         try connect_negotiation.ensure(&self.h3);
         return flow_datagram.receiveManyInto(
             &self.control,
@@ -1295,19 +1278,10 @@ pub const HandshakeClientSession = struct {
     ) ReceiveTimeoutError!void {
         received_count.* = 0;
         if (timeout.nanoseconds <= 0) return error.Timeout;
-        try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
-        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
-        if (self.dispatcher != null) return error.InvalidDispatcherState;
-        try connect_negotiation.ensure(&self.h3);
-        return flow_datagram.receiveManyIntoWithTimeout(
-            &self.control,
-            &self.h3,
-            &self.streams,
-            self.session_id.value,
-            outputs,
-            received_count,
-            timeout,
-        );
+        return self.receiveDatagramsIntoWithDeadline(outputs, received_count, .fromNow(
+            self.h3.established.connection.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
     }
 
     pub fn receiveDatagramsIntoWithDeadline(
@@ -1318,9 +1292,9 @@ pub const HandshakeClientSession = struct {
     ) ReceiveTimeoutError!void {
         received_count.* = 0;
         _ = try deadline_policy.usableAwake(self.h3.established.connection.endpoint.io, deadline);
+        try operation_owner.receive(self);
         try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
         defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
-        if (self.dispatcher != null) return error.InvalidDispatcherState;
         try connect_negotiation.ensure(&self.h3);
         return flow_datagram.receiveManyIntoWithDeadline(
             &self.control,
@@ -1356,9 +1330,9 @@ pub const HandshakeClientSession = struct {
     }
 
     pub fn receiveManyDatagrams(self: *HandshakeClientSession, count: usize) Error!OwnedHandshakeDatagramBatch {
+        try operation_owner.receive(self);
         try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
         defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
-        if (self.dispatcher != null) return error.InvalidDispatcherState;
         try connect_negotiation.ensure(&self.h3);
         return receiveManyHandshakeDatagrams(
             &self.control,
@@ -1378,16 +1352,10 @@ pub const HandshakeClientSession = struct {
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!OwnedHandshakeDatagramBatch {
         if (timeout.nanoseconds <= 0) return error.Timeout;
-        try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
-        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
-        if (self.dispatcher != null) return error.InvalidDispatcherState;
-        return self.receiveManyDatagramsWithDeadline(
-            count,
-            .fromNow(self.h3.established.connection.endpoint.io, .{
-                .raw = timeout,
-                .clock = .awake,
-            }),
-        );
+        return self.receiveManyDatagramsWithDeadline(count, .fromNow(
+            self.h3.established.connection.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
     }
 
     pub fn receiveManyDatagramsWithDeadline(
@@ -1396,9 +1364,9 @@ pub const HandshakeClientSession = struct {
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!OwnedHandshakeDatagramBatch {
         _ = try deadline_policy.usableAwake(self.h3.established.connection.endpoint.io, deadline);
+        try operation_owner.receive(self);
         try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
         defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
-        if (self.dispatcher != null) return error.InvalidDispatcherState;
         try connect_negotiation.ensure(&self.h3);
         return receiveManyHandshakeDatagramsUntil(
             &self.control,
@@ -2559,6 +2527,7 @@ pub const HandshakeClientSession = struct {
     }
 
     pub fn drain(self: *HandshakeClientSession) Error!void {
+        try operation_owner.buffered(&self.h3);
         if (self.control.local_drain_sent) return;
         if (self.dispatcher != null) {
             try self.ensureApplicationSendOpen();
@@ -2609,7 +2578,7 @@ pub const HandshakeClientSession = struct {
             self.h3.established.connection.endpoint.io,
             deadline,
         );
-        if (self.dispatcher != null) return error.InvalidDispatcherState;
+        try operation_owner.receive(self);
         if (self.control.local_drain_sent) return;
         if (self.pending_drain == null) {
             const pending = try PendingSessionDrain.init();
@@ -2643,6 +2612,7 @@ pub const HandshakeClientSession = struct {
         code: u32,
         reason: []const u8,
     ) Error!void {
+        try operation_owner.buffered(&self.h3);
         if (self.control.local_close_sent or
             self.control.local_close_failed)
         {
@@ -2745,7 +2715,7 @@ pub const HandshakeClientSession = struct {
             self.h3.established.connection.endpoint.io,
             deadline,
         );
-        if (self.dispatcher != null) return error.InvalidDispatcherState;
+        try operation_owner.receive(self);
         if (self.control.local_close_failed) {
             return session_control.terminateStreamsWithDeadline(
                 &self.h3.established.connection,
@@ -2796,6 +2766,7 @@ pub const HandshakeClientSession = struct {
         code: u32,
         reason: []const u8,
     ) Error!void {
+        try operation_owner.buffered(&self.h3);
         if (self.pending_drain != null) return error.InvalidSessionState;
         if (self.pending_close) |*pending| {
             if (!try pending.matches(code, reason)) {
@@ -2816,8 +2787,8 @@ pub const HandshakeClientSession = struct {
     pub fn receiveSessionEvent(
         self: *HandshakeClientSession,
     ) Error!SessionEvent {
+        try operation_owner.receive(self);
         defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
-        if (self.dispatcher != null) return error.InvalidDispatcherState;
         return while (true) {
             if (try self.pollSessionEvent()) |ready| break ready;
             try self.receiveControlProgress();
@@ -2830,6 +2801,7 @@ pub const HandshakeClientSession = struct {
     pub fn pollSessionEvent(
         self: *HandshakeClientSession,
     ) Error!?SessionEvent {
+        try operation_owner.buffered(&self.h3);
         self.control.bindFlow(self.streams.flow);
         connection_lifecycle.observeGoAway(&self.control, &self.h3);
         defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
@@ -2888,8 +2860,9 @@ pub const HandshakeClientSession = struct {
         self: *HandshakeClientSession,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!SessionEvent {
+        _ = try deadline_policy.usableAwake(self.h3.established.connection.endpoint.io, deadline);
+        try operation_owner.receive(self);
         defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
-        if (self.dispatcher != null) return error.InvalidDispatcherState;
         return while (true) {
             if (try self.pollSessionEventWithCleanupDeadline(deadline)) |ready| {
                 break ready;
@@ -2902,11 +2875,12 @@ pub const HandshakeClientSession = struct {
         self: *HandshakeClientSession,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!?SessionEvent {
-        self.control.bindFlow(self.streams.flow);
         _ = try deadline_policy.usableAwake(
             self.h3.established.connection.endpoint.io,
             deadline,
         );
+        try operation_owner.receive(self);
+        self.control.bindFlow(self.streams.flow);
         connection_lifecycle.observeGoAway(&self.control, &self.h3);
         if (capsule_rejection.pending(&self.control)) {
             try capsule_rejection.finishWithDeadline(&self.control, &self.h3.established.connection, &self.streams, deadline);

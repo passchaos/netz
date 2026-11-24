@@ -174,7 +174,8 @@ custom secret.
 Pushes and pull requests also compile the complete library and public-package
 test surfaces for baseline AArch64/x86_64 Linux, x86_64 Windows, and
 AArch64/x86_64 macOS. A native Windows runner additionally executes the focused
-HTTP peer-address, HTTP/3 CONNECT DATAGRAM and WebSocket byte-stream adapter
+HTTP peer-address, HTTP/3 CONNECT DATAGRAM, WebTransport operation admission
+and WebSocket byte-stream adapter
 tests, covering zio Winsock queries, portable address vectors, datagram owner/
 progress preflight, terminal write failures and queued Close/send ordering.
 Live CONNECT DATAGRAM regressions use Netz's zio backend on every platform.

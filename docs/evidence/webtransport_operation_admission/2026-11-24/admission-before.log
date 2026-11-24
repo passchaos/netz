@@ -1,0 +1,153 @@
+[traex-zig-guard 2026-11-24 14:42:23] waiting for the global TRAE Zig build slot
+[traex-zig-guard 2026-11-24 14:42:28] started Zig tree root=92166 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=1800s
+test-webtransport
++- run test 103 pass, 4 fail (107 total)
+error: 'webtransport.runtime.flow.datagram.admission_tests.test.WebTransport DATAGRAM admission rejects callback sends before buffered CLOSE' failed:
+       expected error.ConcurrentRead, found error.InvalidSessionState
+       /Users/bytedance/project-z/netz/src/webtransport/runtime/session_control.zig:282:13: 0x100ae526b in ensureOpen (test)
+                   return error.InvalidSessionState;
+                   ^
+       /Users/bytedance/project-z/netz/src/webtransport/runtime/application.zig:11:5: 0x100d724ab in ensureOpen__anon_164461 (test)
+           try control.ensureOpen();
+           ^
+       /Users/bytedance/project-z/netz/src/webtransport/runtime/flow/datagram.zig:20:5: 0x100d72263 in prepareSend__anon_164435 (test)
+           return application.ensureOpen(control, h3, registry);
+           ^
+       /Users/bytedance/project-z/netz/src/webtransport/runtime/handshake_client_session.zig:910:9: 0x100d7ee8f in sendDatagram (test)
+               try flow_datagram.prepareSend(&self.control, &self.h3, &self.streams);
+               ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:72:13: 0x100d65f7b in expectError__anon_163781 (test)
+                   return error.TestUnexpectedError;
+                   ^
+       /Users/bytedance/project-z/netz/src/webtransport/runtime/flow/datagram/admission_tests.zig:82:9: 0x100d66aeb in test.WebTransport DATAGRAM admission rejects callback sends before buffered CLOSE (test)
+               try std.testing.expectError(error.ConcurrentRead, result);
+               ^
+error: 'webtransport.runtime.flow.datagram.admission_tests.test.WebTransport DATAGRAM admission rejects callback receives before flow cleanup' failed:
+       expected error.ConcurrentRead, found error.ConnectDatagramAssociationClosed
+       /Users/bytedance/project-z/netz/src/webtransport/runtime/session_control.zig:299:32: 0x100cfc997 in ensureDatagramReceiveOpen (test)
+               if (self.state.closed) return error.ConnectDatagramAssociationClosed;
+                                      ^
+       /Users/bytedance/project-z/netz/src/webtransport/runtime/connection_lifecycle.zig:100:5: 0x100cfce13 in ensureDatagramReceiveOpen__anon_152240 (test)
+           try control.ensureDatagramReceiveOpen();
+           ^
+       /Users/bytedance/project-z/netz/src/webtransport/runtime/handshake_client_session.zig:1156:9: 0x100d08707 in receiveDatagram (test)
+               try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
+               ^
+       /Users/bytedance/project-z/netz/src/webtransport/runtime/flow/datagram/admission_tests.zig:22:25: 0x100cd4f0b in read__anon_151811 (test)
+                       .one => try session.receiveDatagram(),
+                               ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:72:13: 0x100cd541f in expectError__anon_151815 (test)
+                   return error.TestUnexpectedError;
+                   ^
+       /Users/bytedance/project-z/netz/src/webtransport/runtime/flow/datagram/admission_tests.zig:107:9: 0x100d65933 in test.WebTransport DATAGRAM admission rejects callback receives before flow cleanup (test)
+               try std.testing.expectError(error.ConcurrentRead, read(&pair.client, kind, until, &output));
+               ^
+error: 'webtransport.runtime.flow.datagram.admission_tests.test.WebTransport DATAGRAM admission rejects dispatcher receives before flow cleanup' failed:
+       expected error.InvalidDispatcherState, found error.ConnectDatagramAssociationClosed
+       /Users/bytedance/project-z/netz/src/webtransport/runtime/session_control.zig:299:32: 0x100cfc997 in ensureDatagramReceiveOpen (test)
+               if (self.state.closed) return error.ConnectDatagramAssociationClosed;
+                                      ^
+       /Users/bytedance/project-z/netz/src/webtransport/runtime/connection_lifecycle.zig:100:5: 0x100cfce13 in ensureDatagramReceiveOpen__anon_152240 (test)
+           try control.ensureDatagramReceiveOpen();
+           ^
+       /Users/bytedance/project-z/netz/src/webtransport/runtime/handshake_client_session.zig:1156:9: 0x100d08707 in receiveDatagram (test)
+               try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
+               ^
+       /Users/bytedance/project-z/netz/src/webtransport/runtime/flow/datagram/admission_tests.zig:22:25: 0x100cd4f0b in read__anon_151811 (test)
+                       .one => try session.receiveDatagram(),
+                               ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:72:13: 0x100cd541f in expectError__anon_151815 (test)
+                   return error.TestUnexpectedError;
+                   ^
+       /Users/bytedance/project-z/netz/src/webtransport/runtime/flow/datagram/admission_tests.zig:127:13: 0x100cd8cdb in test.WebTransport DATAGRAM admission rejects dispatcher receives before flow cleanup (test)
+                   try std.testing.expectError(error.InvalidDispatcherState, read(session, kind, until, &output));
+                   ^
+error: 'webtransport.runtime.flow.datagram.admission_tests.test.WebTransport DATAGRAM admission defers lifecycle cleanup during a borrowed callback' failed:
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:615:14: 0x100a08373 in expect (test)
+           if (!ok) return error.TestUnexpectedResult;
+                    ^
+       /Users/bytedance/project-z/netz/src/webtransport/runtime/flow/datagram/admission_tests.zig:144:5: 0x100a0ab27 in test.WebTransport DATAGRAM admission defers lifecycle cleanup during a borrowed callback (test)
+           try std.testing.expect(!pair.client.control.flow_violation);
+           ^
+failed command: ./.zig-cache/o/25f5ade2b7c63b12f69a7f05a34d1808/test --cache-dir=./.zig-cache --seed=0xe9263ecd --listen=-
+
+Build Summary: 8/10 steps succeeded (1 failed); 103/107 tests passed (4 failed)
+test-webtransport transitive failure
++- run test 103 pass, 4 fail (107 total)
+   +- compile test Debug native success 16s MaxRSS:1G
+      +- WriteFile macho_0_p256_field_arm64.S cached
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 207ms MaxRSS:31M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 215ms MaxRSS:31M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options success
+      +- options cached
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/dc551c8273fff33d6557bf3ca490b20b/build /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/zig /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib /Users/bytedance/project-z/netz .zig-cache /Users/bytedance/.cache/zig --seed 0xe9263ecd -Z6d46f84756cf748f test-webtransport -Dtest-filter=WebTransport DATAGRAM admission -j1 --summary all
+[traex-zig-guard 2026-11-24 14:42:47] finished Zig tree root=92166 peak=873MiB result=0

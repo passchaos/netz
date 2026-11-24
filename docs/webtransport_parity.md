@@ -29,6 +29,11 @@ that backpressure resumes its committed suffix after GOAWAY.
 
 ## CONNECT transport termination
 
+[Operation ownership](webtransport_operation_admission.md) precedes buffered
+Session control and lifecycle maintenance. Callback-reader rejection preserves
+the current H3 borrow, while dispatcher-bound DATAGRAM receivers reject before
+Session cleanup. Relative receive forms delegate through one entry deadline.
+
 Application operations inspect buffered CONNECT control before reserving a new
 stream or submitting associated-stream data. This applies with opening credit
 already available, and covers shared-server contiguous/scatter/batch writes,

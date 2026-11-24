@@ -7,6 +7,7 @@ const quic = @import("../../quic/mod.zig");
 const tls_stream = @import("../../tls/mod.zig").stream;
 const net = std.Io.net;
 const runtime = @import("../runtime.zig");
+const operation_owner = @import("owner.zig");
 
 const Error = runtime.Error;
 const OwnedHandshakeConnectRequest = runtime.OwnedHandshakeConnectRequest;
@@ -198,6 +199,7 @@ pub const AcceptedHandshakeSession = struct {
     }
 
     pub fn receiveDatagram(self: *AcceptedHandshakeSession) Error!OwnedHandshakeDatagram {
+        try operation_owner.receive(self);
         try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
         try connect_negotiation.ensure(&self.h3);
@@ -212,19 +214,10 @@ pub const AcceptedHandshakeSession = struct {
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!OwnedHandshakeDatagram {
         if (timeout.nanoseconds <= 0) return error.Timeout;
-        try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
-        try connect_negotiation.ensure(&self.h3);
-        return ownedHandshakeDatagram(
-            try flow_datagram.receiveWithTimeout(
-                &self.control,
-                &self.h3,
-                &self.streams,
-                self.session_id.value,
-                timeout,
-            ),
-            self.session_id,
-        );
+        return self.receiveDatagramWithDeadline(.fromNow(
+            self.h3.established.connection.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
     }
 
     pub fn receiveDatagramWithDeadline(
@@ -232,6 +225,7 @@ pub const AcceptedHandshakeSession = struct {
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!OwnedHandshakeDatagram {
         _ = try deadline_policy.usableAwake(self.h3.established.connection.endpoint.io, deadline);
+        try operation_owner.receive(self);
         try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
         try connect_negotiation.ensure(&self.h3);
@@ -254,6 +248,7 @@ pub const AcceptedHandshakeSession = struct {
         self: *AcceptedHandshakeSession,
         output: []u8,
     ) Error![]u8 {
+        try operation_owner.receive(self);
         try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
         try connect_negotiation.ensure(&self.h3);
@@ -272,17 +267,10 @@ pub const AcceptedHandshakeSession = struct {
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError![]u8 {
         if (timeout.nanoseconds <= 0) return error.Timeout;
-        try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
-        try connect_negotiation.ensure(&self.h3);
-        return flow_datagram.receiveIntoWithTimeout(
-            &self.control,
-            &self.h3,
-            &self.streams,
-            self.session_id.value,
-            output,
-            timeout,
-        );
+        return self.receiveDatagramIntoWithDeadline(output, .fromNow(
+            self.h3.established.connection.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
     }
 
     pub fn receiveDatagramIntoWithDeadline(
@@ -291,6 +279,7 @@ pub const AcceptedHandshakeSession = struct {
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError![]u8 {
         _ = try deadline_policy.usableAwake(self.h3.established.connection.endpoint.io, deadline);
+        try operation_owner.receive(self);
         try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
         try connect_negotiation.ensure(&self.h3);
@@ -312,6 +301,7 @@ pub const AcceptedHandshakeSession = struct {
         received_count: *usize,
     ) Error!void {
         received_count.* = 0;
+        try operation_owner.receive(self);
         try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
         try connect_negotiation.ensure(&self.h3);
@@ -333,18 +323,10 @@ pub const AcceptedHandshakeSession = struct {
     ) ReceiveTimeoutError!void {
         received_count.* = 0;
         if (timeout.nanoseconds <= 0) return error.Timeout;
-        try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
-        try connect_negotiation.ensure(&self.h3);
-        return flow_datagram.receiveManyIntoWithTimeout(
-            &self.control,
-            &self.h3,
-            &self.streams,
-            self.session_id.value,
-            outputs,
-            received_count,
-            timeout,
-        );
+        return self.receiveDatagramsIntoWithDeadline(outputs, received_count, .fromNow(
+            self.h3.established.connection.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
     }
 
     pub fn receiveDatagramsIntoWithDeadline(
@@ -355,6 +337,7 @@ pub const AcceptedHandshakeSession = struct {
     ) ReceiveTimeoutError!void {
         received_count.* = 0;
         _ = try deadline_policy.usableAwake(self.h3.established.connection.endpoint.io, deadline);
+        try operation_owner.receive(self);
         try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
         try connect_negotiation.ensure(&self.h3);
@@ -370,6 +353,7 @@ pub const AcceptedHandshakeSession = struct {
     }
 
     pub fn receiveManyDatagrams(self: *AcceptedHandshakeSession, count: usize) Error!OwnedHandshakeDatagramBatch {
+        try operation_owner.receive(self);
         try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
         try connect_negotiation.ensure(&self.h3);
@@ -391,15 +375,10 @@ pub const AcceptedHandshakeSession = struct {
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!OwnedHandshakeDatagramBatch {
         if (timeout.nanoseconds <= 0) return error.Timeout;
-        try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
-        return self.receiveManyDatagramsWithDeadline(
-            count,
-            .fromNow(self.h3.established.connection.endpoint.io, .{
-                .raw = timeout,
-                .clock = .awake,
-            }),
-        );
+        return self.receiveManyDatagramsWithDeadline(count, .fromNow(
+            self.h3.established.connection.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
     }
 
     pub fn receiveManyDatagramsWithDeadline(
@@ -408,6 +387,7 @@ pub const AcceptedHandshakeSession = struct {
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!OwnedHandshakeDatagramBatch {
         _ = try deadline_policy.usableAwake(self.h3.established.connection.endpoint.io, deadline);
+        try operation_owner.receive(self);
         try connection_lifecycle.ensureDatagramReceiveOpen(&self.control, &self.h3, &self.streams);
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
         try connect_negotiation.ensure(&self.h3);
@@ -1426,6 +1406,7 @@ pub const AcceptedHandshakeSession = struct {
     pub fn pollSessionEvent(
         self: *AcceptedHandshakeSession,
     ) Error!?SessionEvent {
+        try operation_owner.buffered(&self.h3);
         self.control.bindFlow(self.streams.flow);
         connection_lifecycle.observeGoAway(&self.control, &self.h3);
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
@@ -1594,6 +1575,7 @@ pub const AcceptedHandshakeSession = struct {
     }
 
     pub fn drain(self: *AcceptedHandshakeSession) Error!void {
+        try operation_owner.buffered(&self.h3);
         if (self.control.local_drain_sent) return;
         if (self.pending_drain == null) {
             const pending = try PendingSessionDrain.init();
@@ -1629,7 +1611,7 @@ pub const AcceptedHandshakeSession = struct {
             self.h3.established.connection.endpoint.io,
             deadline,
         );
-        if (self.h3.dispatcherBound()) return error.InvalidDispatcherState;
+        try operation_owner.receive(self);
         if (self.control.local_drain_sent) return;
         if (self.pending_drain == null) {
             const pending = try PendingSessionDrain.init();
@@ -1663,6 +1645,7 @@ pub const AcceptedHandshakeSession = struct {
         code: u32,
         reason: []const u8,
     ) Error!void {
+        try operation_owner.buffered(&self.h3);
         if (self.control.local_close_sent or
             self.control.local_close_failed)
         {
@@ -1726,7 +1709,7 @@ pub const AcceptedHandshakeSession = struct {
             self.h3.established.connection.endpoint.io,
             deadline,
         );
-        if (self.h3.dispatcherBound()) return error.InvalidDispatcherState;
+        try operation_owner.receive(self);
         if (self.control.local_close_failed) {
             return session_control.terminateStreamsWithDeadline(
                 &self.h3.established.connection,
@@ -1777,6 +1760,7 @@ pub const AcceptedHandshakeSession = struct {
         code: u32,
         reason: []const u8,
     ) Error!void {
+        try operation_owner.buffered(&self.h3);
         if (self.pending_drain != null) return error.InvalidSessionState;
         if (self.pending_close) |*pending| {
             if (!try pending.matches(code, reason)) {
@@ -1797,6 +1781,7 @@ pub const AcceptedHandshakeSession = struct {
     pub fn receiveSessionEvent(
         self: *AcceptedHandshakeSession,
     ) Error!SessionEvent {
+        try operation_owner.receive(self);
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
         const event = while (true) {
             if (try self.pollSessionEvent()) |ready| break ready;
@@ -1821,6 +1806,8 @@ pub const AcceptedHandshakeSession = struct {
         self: *AcceptedHandshakeSession,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!SessionEvent {
+        _ = try deadline_policy.usableAwake(self.h3.established.connection.endpoint.io, deadline);
+        try operation_owner.receive(self);
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
         return while (true) {
             if (try self.pollSessionEventWithCleanupDeadline(deadline)) |ready| {
@@ -1834,11 +1821,12 @@ pub const AcceptedHandshakeSession = struct {
         self: *AcceptedHandshakeSession,
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!?SessionEvent {
-        self.control.bindFlow(self.streams.flow);
         _ = try deadline_policy.usableAwake(
             self.h3.established.connection.endpoint.io,
             deadline,
         );
+        try operation_owner.receive(self);
+        self.control.bindFlow(self.streams.flow);
         connection_lifecycle.observeGoAway(&self.control, &self.h3);
         if (capsule_rejection.pending(&self.control)) {
             try capsule_rejection.finishWithDeadline(&self.control, &self.h3.established.connection, &self.streams, deadline);
