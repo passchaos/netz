@@ -1,0 +1,116 @@
+[traex-zig-guard 2026-11-24 19:19:29] started Zig tree root=91024 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=1800s
+test-http3
++- run test 57 pass, 3 fail (60 total)
+error: 'http3.runtime.shared_handshake_client_pool.endpoint_adoption_tests.test.HTTP3 endpoint adoption rejects a different IO context and preserves caller ownership' failed:
+       /Users/bytedance/project-z/netz/src/http3/runtime/shared_handshake_client_pool/endpoint_adoption_tests.zig:30:9: 0x100abce77 in expectIoRejection (test)
+               return error.TestExpectedError;
+               ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/shared_handshake_client_pool/endpoint_adoption_tests.zig:48:5: 0x100adb293 in test.HTTP3 endpoint adoption rejects a different IO context and preserves caller ownership (test)
+           try expectIoRejection(first.io(), second.io());
+           ^
+error: 'http3.runtime.shared_handshake_client_pool.endpoint_adoption_tests.test.HTTP3 endpoint adoption rejects a different IO backend without taking ownership' failed:
+       /Users/bytedance/project-z/netz/src/http3/runtime/shared_handshake_client_pool/endpoint_adoption_tests.zig:30:9: 0x100abce77 in expectIoRejection (test)
+               return error.TestExpectedError;
+               ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/shared_handshake_client_pool/endpoint_adoption_tests.zig:56:5: 0x100abd69f in test.HTTP3 endpoint adoption rejects a different IO backend without taking ownership (test)
+           try expectIoRejection(owner.io(), foreign.io());
+           ^
+error: 'http3.runtime.shared_handshake_client_pool.endpoint_adoption_tests.test.HTTP3 endpoint adoption checks IO before pool allocation' failed:
+       expected error.InvalidPoolOptions, found error.OutOfMemory
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/mem/Allocator.zig:300:82: 0x100828de3 in allocBytesWithAlignment__anon_9208 (test)
+           const byte_ptr = self.rawAlloc(byte_count, alignment, return_address) orelse return error.OutOfMemory;
+                                                                                        ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/mem/Allocator.zig:170:30: 0x1009f658b in create__anon_37927 (test)
+           const ptr: *T = @ptrCast(try a.allocBytesWithAlignment(.of(T), @sizeOf(T), @returnAddress()));
+                                    ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/shared_handshake_client_pool.zig:1316:32: 0x100925f5f in initWithOwnedEndpoint (test)
+                   const dispatcher = try allocator.create(
+                                      ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:72:13: 0x10092614b in expectError__anon_37865 (test)
+                   return error.TestUnexpectedError;
+                   ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/shared_handshake_client_pool/endpoint_adoption_tests.zig:92:5: 0x1009265d7 in test.HTTP3 endpoint adoption checks IO before pool allocation (test)
+           try std.testing.expectError(error.InvalidPoolOptions, runtime.SharedHandshakeClientPool.initWithOwnedEndpoint(failing.allocator(), foreign.io(), .{
+           ^
+failed command: ./.zig-cache/o/3cd18179ce6dd28d7f5f4f5bb29d748a/test --cache-dir=./.zig-cache --seed=0x9237850a --listen=-
+
+Build Summary: 8/10 steps succeeded (1 failed); 57/60 tests passed (3 failed)
+test-http3 transitive failure
++- run test 57 pass, 3 fail (60 total)
+   +- compile test Debug native success 7s MaxRSS:769M
+      +- WriteFile macho_0_p256_field_arm64.S cached
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 192ms MaxRSS:31M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 256ms MaxRSS:31M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options cached
+      +- options cached
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/dc551c8273fff33d6557bf3ca490b20b/build /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/zig /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib /Users/bytedance/project-z/netz .zig-cache /Users/bytedance/.cache/zig --seed 0x9237850a -Z666c7bf3146dbfb9 test-http3 -Dtest-filter=HTTP3 endpoint adoption -j1 --summary all
+[traex-zig-guard 2026-11-24 19:19:39] finished Zig tree root=91024 peak=665MiB result=0

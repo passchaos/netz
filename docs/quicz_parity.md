@@ -1936,7 +1936,13 @@ pool can reject that boundary before second-hop I/O. Local TLS/QUIC tests cover
 same- and cross-origin paths. The repository-pinned quic-go v1/v2 gate requires
 the exclusive pool's two redirect requests to use one connection.
 `SharedHandshakeClientPool` owns one primary and an optional opposite-family
-`std.Io` UDP endpoint plus one QUIC dispatcher across all pooled origins. Its
+`std.Io` UDP endpoint plus one QUIC dispatcher across all pooled origins.
+Adopting a caller-created endpoint requires the exact same `std.Io` context
+(userdata and vtable) for the pool and endpoint. Mismatches return
+`InvalidPoolOptions` before pool allocation or ownership transfer, preserving
+the caller's endpoint. Pass `endpoint.io` when adopting, and allocate the
+endpoint pointer with the allocator passed to the pool. This keeps scheduling,
+clock/deadline handling and UDP operations on one backend context. Its
 CID-routed handshake inboxes keep TLS workers off both sockets, successful
 clients move into stable heap storage before atomic dispatcher promotion, and
 idle reuse/global LRU eviction retain the configured connection cap. An opt-in

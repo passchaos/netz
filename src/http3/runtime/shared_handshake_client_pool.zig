@@ -1295,6 +1295,8 @@ pub fn Pool(comptime Runtime: type) type {
         /// receive owner. Ownership transfers only after this function
         /// returns successfully. A requested network interface must already
         /// constrain the endpoint; adoption never changes its socket policy.
+        /// `io` must identify the endpoint's exact IO context, and the endpoint
+        /// pointer must have been allocated with `allocator`.
         pub fn initWithOwnedEndpoint(
             allocator: std.mem.Allocator,
             io: std.Io,
@@ -1302,6 +1304,7 @@ pub fn Pool(comptime Runtime: type) type {
             endpoint: *quic.runtime.Endpoint,
         ) !Self {
             try validateOptions(options);
+            if (!std.meta.eql(io, endpoint.io)) return error.InvalidPoolOptions;
             if (options.migration_local_address != null or
                 options.client.alternate_local_address != null or
                 (options.proxy_domain_routing and

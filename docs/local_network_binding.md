@@ -72,7 +72,9 @@ An unconstrained or differently constrained socket returns
 `InterfaceBindingMismatch`; failed adoption retains the caller's resources and
 socket settings. Configure the interface while creating the association or
 endpoint, before bind. Windows adoption checks both outgoing UNICAST_IF and an
-enabled receive list containing exactly the requested interface.
+enabled receive list containing exactly the requested interface. Shared H3
+endpoint adoption also requires `io` to match `endpoint.io` exactly; a different
+I/O context returns `InvalidPoolOptions` before allocation or ownership transfer.
 
 ## QUIC, HTTP/3 and WebTransport
 
