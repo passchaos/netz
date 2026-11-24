@@ -1,0 +1,22 @@
+[traex-zig-guard 2026-11-24 23:03:24] started Zig tree root=34637 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=1800s
+test-tls
++- run test 9 pass, 1 fail (10 total)
+error: 'tls.stream.versioned_client_connection.test.versioned TLS establishment OOM preserves caller-owned metadata and keys' failed:
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:615:14: 0x104976757 in expect (test)
+           if (!ok) return error.TestUnexpectedResult;
+                    ^
+       /Users/bytedance/project-z/netz/src/tls/stream/testing/established_ownership.zig:88:9: 0x104977213 in failure__anon_45609 (test)
+               try std.testing.expect(established.tls13.selected_alpn != null);
+               ^
+       /Users/bytedance/project-z/netz/src/tls/stream/versioned_client_connection.zig:1026:5: 0x104978ccb in test.versioned TLS establishment OOM preserves caller-owned metadata and keys (test)
+           try @import("testing/established_ownership.zig").failure(fromEstablished, AutoClient.Established);
+           ^
+failed command: ./.zig-cache/o/04258cc4fd78a97244ef566f8b46142e/test --cache-dir=./.zig-cache --seed=0x4a50305b --listen=-
+
+Build Summary: 8/10 steps succeeded (1 failed); 9/10 tests passed (1 failed)
+test-tls transitive failure
++- run test 9 pass, 1 fail (10 total)
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/4f43002d28e7c626e498fafc36e312bb/build /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/zig /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib /Users/bytedance/project-z/netz .zig-cache /Users/bytedance/.cache/zig --seed 0x4a50305b -Z465edba62766c979 test-tls -Dtest-filter=versioned TLS establishment -j1 --summary failures
+[traex-zig-guard 2026-11-24 23:03:33] finished Zig tree root=34637 peak=567MiB result=0

@@ -39,6 +39,12 @@ Linux and Windows CI select both new ownership regressions.
 | Debug ownership and affected WSS paths | 48/48 passed | [Debug.log](Debug.log) |
 | Client-module test layout and ownership regressions | 41/41 passed | [layout.Debug.log](layout.Debug.log) |
 
+At commit `0404e28a`, the [native Linux connection/Upgrade step](https://github.com/passchaos/netz/actions/runs/45419867302/job/138536360414)
+and [native Windows transport step](https://github.com/passchaos/netz/actions/runs/45419867302/job/138536361066)
+both completed successfully. Exact conclusions and timestamps appear in
+[native-platforms.json](native-platforms.json), independently of cross-compilation
+and the overall CI workflow result.
+
 ```sh
 zig build test-websocket '-Dtest-filter=WSS vail TLS rejection closes' '-Dtest-filter=WSS vail TLS helper failure' -j1 --summary failures
 zig build test-websocket '-Dtest-filter=WSS vail TLS rejection closes' '-Dtest-filter=WSS vail TLS helper failure' '-Dtest-filter=WSS vail TLS rejects a non-HTTP/1.1 negotiated ALPN' '-Dtest-filter=WSS common handshake budget' '-Dtest-filter=WSS named endpoint' '-Dtest-filter=WSS TLS ownership closes' '-Dtest-filter=ordinary vail WSS client exposes TLS state and KeyUpdate' '-Dtest-filter=WSS public client identity completes mTLS echo' -j1 --summary all

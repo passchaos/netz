@@ -1,0 +1,28 @@
+{
+  "commit": "0404e28a12f2be38c9d046fcfb3e3a80719be524",
+  "run_id": 45419867302,
+  "observed_at": "2026-11-24T15:11:11.200998+00:00",
+  "checks": [
+    {
+      "platform": "linux",
+      "job_id": 138536360414,
+      "step": "Run native Linux connection and Upgrade regressions",
+      "conclusion": "success",
+      "started_at": "2026-11-24T15:00:57Z",
+      "completed_at": "2026-11-24T15:03:04Z",
+      "duration_seconds": 127,
+      "source_url": "https://github.com/passchaos/netz/actions/runs/45419867302/job/138536360414"
+    },
+    {
+      "platform": "windows",
+      "job_id": 138536361066,
+      "step": "Run native Windows transport regressions",
+      "conclusion": "success",
+      "started_at": "2026-11-24T14:59:12Z",
+      "completed_at": "2026-11-24T15:02:06Z",
+      "duration_seconds": 174,
+      "source_url": "https://github.com/passchaos/netz/actions/runs/45419867302/job/138536361066"
+    }
+  ],
+  "observation": "Native regression step conclusions read from public GitHub job pages, independently of cross-compilation and the overall CI result."
+}

@@ -42,6 +42,13 @@ standard/vail, H2 and WSS use this ordering. The
 [transition regressions](evidence/tls_transition_ownership/2026-11-24/README.md)
 observe real socket closes and peer EOF through the public named/address APIs.
 
+The shared vail TLS stream wrapper completes fallible ticket-context allocation
+before moving the handshake result's buffers and keys. An OOM during this
+conversion leaves the original result deinitializable; successful conversion
+retains traffic sequence numbers and the configured ticket policy. The
+[establishment regressions](evidence/tls_establishment_ownership/2026-11-24/README.md)
+cover allocation failure and real TLS1.3 session resumption.
+
 H2c `Client.connectStreamUpgrade*` also consumes the supplied stream at entry,
 including expired/foreign-clock deadlines and non-positive timeouts. Failed
 admission closes it before sending the HTTP/1 Upgrade request. The TCP-opening

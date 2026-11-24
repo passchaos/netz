@@ -910,12 +910,11 @@ fn fromEstablished(
         .tls13 => |*value| blk: {
             const resumed = value.resumed;
             const certificate_compression = value.certificate_compression;
-            const selected_alpn = value.selected_alpn;
-            value.selected_alpn = null;
-            const peer_certificate_chain = value.peer_certificate_chain;
-            value.peer_certificate_chain = &.{};
             const cipher_suite = value.application.suite;
             const exporter = value.exporter_master_secret;
+            // Finish fallible ticket-context allocation before detaching any
+            // handshake-owned buffers or secrets. The caller can then deinit
+            // the intact Established result on every conversion failure.
             var ticket_context: ?Connection.Tls13TicketContext =
                 if (retain_tls13_session_tickets) .{
                     .master_secret = value.master_secret,
@@ -925,6 +924,10 @@ fn fromEstablished(
             errdefer if (ticket_context) |*context| {
                 context.deinit(allocator);
             };
+            const selected_alpn = value.selected_alpn;
+            value.selected_alpn = null;
+            const peer_certificate_chain = value.peer_certificate_chain;
+            value.peer_certificate_chain = &.{};
             var records = record_stream.Stream.init(
                 value.application.traffic.read.keys,
                 value.application.traffic.write.keys,
@@ -1020,6 +1023,14 @@ fn fromEstablished(
     };
     established.* = undefined;
     return connection;
+}
+
+test "versioned TLS establishment OOM preserves caller-owned metadata and keys" {
+    try @import("testing/established_ownership.zig").failure(fromEstablished, AutoClient.Established);
+}
+
+test "versioned TLS establishment transfers metadata keys sequences and ticket policy" {
+    try @import("testing/established_ownership.zig").success(fromEstablished, AutoClient.Established);
 }
 
 fn cachedAlpnOffered(
