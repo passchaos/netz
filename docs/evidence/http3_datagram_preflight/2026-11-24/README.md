@@ -31,6 +31,7 @@ maintenance keeps credit/pacing waits within the operation deadline.
 | CONNECT DATAGRAM with zio backend (ReleaseSafe) | 84/84 | [datagram-zio.ReleaseSafe.log](datagram-zio.ReleaseSafe.log) |
 | WebTransport datagram flow/termination overlap | 107/107 | [webtransport-overlap.Debug.log](webtransport-overlap.Debug.log) |
 | Windows test compilation and linking | 8/8 steps | [windows-compile.log](windows-compile.log) |
+| Native Windows HTTP metadata/H3 DATAGRAM/WebSocket command | Success at `fc948153`, job 2m 44s | [native-windows.json](native-windows.json) |
 
 Counts include imported support tests and overlap. Tests cover both H3 roles,
 owned/direct/batch receivers, callback and dispatcher rejection, invalid stream,
@@ -71,3 +72,10 @@ socket receive uses `std.Io.operateTimeout`, which submits that operation to
 The live pacing, QPACK feedback and preflight tests therefore use Netz's
 supported zio backend on every platform. Their protocol assertions and UDP
 packet exchange are unchanged.
+
+The [native Windows job at `fc948153`](https://github.com/passchaos/netz/actions/runs/45341282669/job/138265624060)
+then completed successfully. Both the transport regression step and the job
+report `success`; the [API snapshot](native-windows.json) records the matching
+run revision, target, command, step result and timestamps. This qualifies the
+selected DATAGRAM bundle on native Windows without inferring execution from
+the earlier cross-compile result. Other workflow jobs have their own status.

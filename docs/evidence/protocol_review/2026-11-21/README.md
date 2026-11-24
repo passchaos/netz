@@ -3690,3 +3690,6 @@ The live fixtures now use zio across platforms after native Windows diagnosed
 Zig 0.16 Threaded's unsupported timed UDP receive; the zio Debug/ReleaseSafe
 bundles also pass 84/84. The linked evidence retains the failed native exception
 contexts and distinguishes runtime verification from compilation.
+Native Windows transport execution then passed at `fc948153` (2m 44s),
+including the DATAGRAM bundle alongside HTTP metadata and WebSocket adapter
+regressions; the linked evidence records the matching job and step results.

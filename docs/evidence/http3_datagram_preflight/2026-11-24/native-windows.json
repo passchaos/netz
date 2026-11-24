@@ -1,0 +1,27 @@
+{
+  "source": "Public GitHub Actions run and job API snapshots",
+  "run_id": 45341282669,
+  "head_sha": "fc948153cd3f8d6e59f6eb4a271d1a274e311c52",
+  "run_url": "https://github.com/passchaos/netz/actions/runs/45341282669",
+  "job": {
+    "id": 138265624060,
+    "name": "Portable x86_64-windows-gnu (windows-latest)",
+    "html_url": "https://github.com/passchaos/netz/actions/runs/45341282669/job/138265624060",
+    "status": "completed",
+    "conclusion": "success",
+    "started_at": "2026-11-24T06:33:58Z",
+    "completed_at": "2026-11-24T06:36:42Z",
+    "labels": [
+      "windows-latest"
+    ]
+  },
+  "native_transport_step": {
+    "name": "Run native Windows transport regressions",
+    "status": "completed",
+    "conclusion": "success",
+    "number": 13,
+    "started_at": "2026-11-24T06:35:01Z",
+    "completed_at": "2026-11-24T06:36:19Z"
+  },
+  "command": "zig build test-http test-http3 test-websocket -Dtarget=x86_64-windows-gnu '-Dtest-filter=peer address' '-Dtest-filter=HTTP/3 CONNECT DATAGRAM' '-Dtest-filter=WebSocket stream adapter' --summary all"
+}
