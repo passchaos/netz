@@ -3659,5 +3659,5 @@ retryable. Close state commits under the mutex, queued writers recheck it,
 and atomic snapshots publish lifecycle and peer metadata. The 36-case adapter
 bundles pass in Debug and ReleaseSafe; callback-shape, public-surface and
 Windows compile checks pass. [Write lifecycle evidence](../../websocket_stream_writes/2026-11-24/README.md)
-records the red baseline, deterministic concurrency checks and a remaining
-admission-limit review.
+records the red baseline, deterministic concurrency checks, successful native
+Windows execution at `2920a159` (2m 41s), and a remaining admission-limit review.

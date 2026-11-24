@@ -34,6 +34,7 @@ scatter and repeated Close behind both a successful Close and a failed write.
 | Callback-prefix and independent bounded-callback checks (Debug) | 9/9 | [callback-shapes.Debug.log](callback-shapes.Debug.log) |
 | Callback-prefix and independent bounded-callback checks (ReleaseSafe) | 9/9 | [callback-shapes.ReleaseSafe.log](callback-shapes.ReleaseSafe.log) |
 | Windows test compilation and linking | 8/8 steps | [windows-compile.log](windows-compile.log) |
+| Native Windows metadata/adapter job at `2920a159` | Success, 2m 41s | [CI job](https://github.com/passchaos/netz/actions/runs/45327785643/job/138221736463), [metadata](native-windows-ci.json) |
 | Public package surfaces | 25/25 | [public-package.log](public-package.log) |
 
 Counts include imported support tests and overlap. Error-shape coverage checks
@@ -67,3 +68,24 @@ Source inspection also found that generic send paths do not apply
 applied by the assembler after frame decoding. Those admission and allocation
 boundaries still need a separate correctness/performance pass; this write
 lifecycle change does not establish them as complete.
+
+## Current-revision CI scheduling
+
+The implementation run `45327237655` for `2df70d88` was observed waiting for
+`ci #1847` (the preceding documentation-only run `45324367051`) before any
+matrix job started. Push runs previously retained the branch-wide concurrency
+queue instead of superseding stale code checks.
+
+The scheduling change in `2920a159` keeps the original branch concurrency key
+for push/PR validation and enables cancellation of older runs. Scheduled and
+manual fuzz runs append their event name while retaining branch identity, so
+current branch pushes do not cancel those independent fuzz tasks. The new run
+`45327785643` was observed in progress with all four portable jobs running and
+no stale-run concurrency banner. The runtime source is identical to `2df70d88`.
+
+The native Windows job `138221736463` completed successfully in 2m 41s.
+It executes the configured HTTP metadata and generic WebSocket adapter
+filters. The same run's x86_64 Linux compile job also succeeded. Public matrix
+status confirms native job success without asserting an unobserved Windows
+test count. The record above identifies both the scheduling commit and its
+unchanged runtime revision.
