@@ -255,7 +255,14 @@ jobs:
 
       - name: Run native ordered TCP hostname regressions
         if: runner.os == 'Windows' || (runner.os == 'Linux' && matrix.target == 'x86_64-linux-gnu')
-        run: zig build test-http1 -j1 -Dtarget=${{ matrix.target }} '-Dtest-filter=TCP ordered hostname' '-Dtest-filter=HTTP/1 client connects by host name' --summary all
+        run: |
+          hostname_status=0
+          zig build test-http1 -j1 -Dtarget=${{ matrix.target }} '-Dtest-filter=TCP ordered hostname' '-Dtest-filter=HTTP/1 client connects by host name' --summary all > native-hostname.log 2>&1 || hostname_status=$?
+          cat native-hostname.log
+          if [ "$hostname_status" -ne 0 ]; then
+            python tools/ci/test_failure_annotations.py native-hostname.log
+          fi
+          exit "$hostname_status"
 
       - name: Run native Windows transport regressions
         if: runner.os == 'Windows'
