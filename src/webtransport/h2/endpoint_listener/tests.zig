@@ -159,6 +159,7 @@ test "WebTransport HTTP2 EndpointListener isolates a slow TLS handshake" {
         session.negotiatedTlsProtocol().?,
     );
     try std.testing.expect(session.wasTlsSessionResumed() != null);
+    try std.testing.expect(session.remoteAddress().getPort() != 0);
     try std.testing.expectEqual(@as(u64, 0), session.localKeyUpdateCount());
     try std.testing.expectEqual(@as(u64, 0), session.peerKeyUpdateCount());
     try session.initiateKeyUpdate();

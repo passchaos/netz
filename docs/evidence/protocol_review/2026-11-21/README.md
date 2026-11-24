@@ -3588,3 +3588,15 @@ TLS metadata.
 | --- | --- | --- |
 | Full WebSocket suite (Debug) | 526/527 (1 skipped) | live `zig build test-websocket --summary all` |
 | Package surface (Debug) | 28/28 | live `zig build test-package --summary all` |
+
+## Two-hundred-and-second pass: HTTP/2 WebTransport remote address
+
+HTTP/2 WebTransport sessions, endpoint clients and endpoint servers now
+expose `remoteAddress()`, matching the HTTP/3 facades. TLS loopback tests
+assert a non-zero address on the Session, EndpointClient and EndpointServer
+paths.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| WebTransport suite (Debug) | 761/763 (2 skipped) | live `zig build test-webtransport --summary all` |
+| Package surface (Debug) | 28/28 | live `zig build test-package --summary all` |

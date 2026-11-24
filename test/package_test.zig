@@ -11863,6 +11863,9 @@ test "public ALPN adoption and metadata surfaces are exported" {
     _ = &netz.webtransport.h2.Session.initiateKeyUpdate;
     _ = &netz.webtransport.h2.Session.localKeyUpdateCount;
     _ = &netz.webtransport.h2.Session.peerKeyUpdateCount;
+    _ = &netz.webtransport.h2.Session.remoteAddress;
+    _ = &netz.webtransport.h2.EndpointClient.remoteAddress;
+    _ = &netz.webtransport.h2.EndpointServer.remoteAddress;
     _ = &netz.webtransport.h2.Session.negotiatedTlsProtocol;
     _ = &netz.webtransport.h2.Session.wasTlsSessionResumed;
     _ = &netz.webtransport.h2.EndpointClient.initiateKeyUpdate;

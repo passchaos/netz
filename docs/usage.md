@@ -402,7 +402,8 @@ server address is already resolved (the address-based form shown in
   `negotiatedTranscriptHash()`, `negotiatedTlsProtocol()` and
   `wasTlsSessionResumed()`; sessions also expose `applicationProtocol()`.
   HTTP/3 handshake sessions and endpoint clients expose the same TLS metadata
-  plus `earlyDataStatus()`. Handshake-backed pending admission surfaces expose
+  plus `earlyDataStatus()`. Established HTTP/2 and HTTP/3 sessions/endpoints
+  expose `remoteAddress()`. Handshake-backed pending admission surfaces expose
   the same metadata plus `sessionId()` and `peerAddress()` before `accept()`,
   so client-certificate, peer-address and transcript policy can reject a
   session before it becomes visible. Cleartext returns null. Endpoint

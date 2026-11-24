@@ -340,6 +340,10 @@ pub const EndpointServer = struct {
     ) ?tls_stream.TranscriptHash {
         return self.state.connection.negotiatedTranscriptHash();
     }
+    /// Socket address recorded for the endpoint's HTTP/2 connection.
+    pub fn remoteAddress(self: *const EndpointServer) std.Io.net.IpAddress {
+        return self.state.connection.peerAddress();
+    }
     /// TLS version of the endpoint's HTTP/2 transport. Cleartext returns null.
     pub fn negotiatedTlsProtocol(
         self: *const EndpointServer,
