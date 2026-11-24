@@ -808,6 +808,7 @@ pub const Connection = struct {
                 .max_informational_responses = self.limits.max_informational_responses,
             },
             .options = options,
+            .peer_address = self.stream.socket.address,
         };
         const result = reader.readRequest(
             context,
@@ -924,6 +925,7 @@ pub const Connection = struct {
                     },
                     else => return err,
                 };
+                head.from = self.stream.socket.address;
                 // Header completion ends this request's budget even when its
                 // body is incomplete. A later pipelined head receives a fresh
                 // budget when parsing first needs more transport bytes.

@@ -107,6 +107,7 @@ test "HTTP/1 borrowed pipeline batch preserves bodies until consume" {
         .{ .max_headers = 4 },
     );
     try std.testing.expect(heads[0].method == .GET);
+    try std.testing.expect(heads[0].from != null);
     try std.testing.expectEqualStrings("/one", heads[0].target);
     try std.testing.expect(heads[1].method == .POST);
     try std.testing.expectEqualStrings("abc", bodies[1]);

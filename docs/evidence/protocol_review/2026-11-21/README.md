@@ -3523,3 +3523,18 @@ from the stream rather than stored per connection.
 | HTTP/2 runtime (Debug) | 985/985 | live `zig build test-http2 --summary all` |
 | HTTP aggregate (Debug) | 311/311 | live `zig build test-http --summary all` |
 | Package surface (Debug) | 28/28 | live `zig build test-package --summary all` |
+
+## Hundred-and-ninety-seventh pass: peer address on batch and streaming requests
+
+The accepted peer now reaches every buffered, batch and streaming request
+shape: H1 `RequestHead.from` and streaming `Request.from`, H2
+`StreamingRequestHead`/`StreamingRequest.from`, alongside the existing
+`Request.from` and `OwnedRequest.from`. H1 batch tests assert the field on a
+pipelined batch; the H1 `Connection` layout guard remains 384 bytes.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| HTTP/1 runtime (Debug) | 480/480 | live `zig build test-http1 --summary all` |
+| HTTP/2 runtime (Debug) | 985/985 | live `zig build test-http2 --summary all` |
+| HTTP aggregate (Debug) | 311/311 | live `zig build test-http --summary all` |
+| Package surface (Debug) | 28/28 | live `zig build test-package --summary all` |

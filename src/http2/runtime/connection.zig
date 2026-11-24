@@ -7679,6 +7679,7 @@ pub const Connection = struct {
                 .body_bytes = body_bytes,
                 .trailers = trailers,
                 .priority = request_priority,
+                .from = self.stream.socket.address,
             };
         }
     }
@@ -7946,6 +7947,7 @@ pub const Connection = struct {
                         .authority = lookup.requestAuthority(),
                         .body_bytes = 0,
                         .priority = request_priority,
+                        .from = self.stream.socket.address,
                     };
                     expected[index] = lookup.content_length;
                     initialized += 1;

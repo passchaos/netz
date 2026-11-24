@@ -258,6 +258,10 @@ pub const RequestHead = struct {
     /// request carrying both is an HTTP request-smuggling hazard. The message
     /// remains parseable as chunked while its connection becomes one-shot.
     must_close: bool = false,
+    /// Socket address recorded for this request's transport. Accepted server
+    /// connections record the remote peer; client-created connections record
+    /// the local endpoint.
+    from: ?std.Io.net.IpAddress = null,
 
     pub fn header(self: RequestHead, name: []const u8) ?[]const u8 {
         return wire.findHeader(self.headers, name);
@@ -388,8 +392,9 @@ pub const Request = struct {
     /// True when safe message framing requires retiring the connection even
     /// if its Connection fields would otherwise permit persistence.
     must_close: bool = false,
-    /// Peer socket address captured for server-accepted TCP requests. Null
-    /// for client-created requests and transports without an IP peer.
+    /// Socket address recorded for this request's transport. Accepted server
+    /// connections record the remote peer; client-created connections record
+    /// the local endpoint.
     from: ?std.Io.net.IpAddress = null,
 
     pub fn deinit(self: *Request, allocator: std.mem.Allocator) void {

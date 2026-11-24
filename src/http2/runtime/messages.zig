@@ -175,6 +175,10 @@ pub const StreamingRequest = struct {
     body_bytes: usize,
     trailers: []http2.Hpack.HeaderField = &.{},
     priority: http2.ExtensiblePriority = .{},
+    /// Socket address recorded for this request's transport. Accepted server
+    /// connections record the remote peer; client-created connections record
+    /// the local endpoint.
+    from: ?std.Io.net.IpAddress = null,
 
     pub fn deinit(
         self: *StreamingRequest,
@@ -195,6 +199,10 @@ pub const StreamingRequestHead = struct {
     scheme: []const u8,
     authority: ?[]const u8,
     protocol: ?[]const u8 = null,
+    /// Socket address recorded for this request's transport. Accepted server
+    /// connections record the remote peer; client-created connections record
+    /// the local endpoint.
+    from: ?std.Io.net.IpAddress = null,
 
     pub fn streamContentDecoder(
         self: StreamingRequestHead,
@@ -216,6 +224,7 @@ pub const StreamingRequestHead = struct {
             .scheme = request.scheme,
             .authority = request.authority,
             .protocol = request.protocol,
+            .from = request.from,
         };
     }
 };
@@ -230,6 +239,7 @@ pub fn streamingRequestFromOwned(request: OwnedRequest) StreamingRequest {
         .authority = request.authority,
         .protocol = request.protocol,
         .body_bytes = request.body.len,
+        .from = request.from,
         .trailers = request.trailers,
         .priority = request.priority,
     };

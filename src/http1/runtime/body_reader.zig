@@ -38,6 +38,8 @@ pub fn Reader(comptime RuntimeError: type) type {
         offset: usize = 0,
         limits: Limits,
         options: http1.ParseOptions,
+        /// Transport address recorded for the request being streamed.
+        peer_address: ?std.Io.net.IpAddress = null,
 
         const Self = @This();
 
@@ -60,6 +62,8 @@ pub fn Reader(comptime RuntimeError: type) type {
             trailers: []http1.Header = &.{},
             trailer_bytes: ?[]u8 = null,
             trailer_value_storage: [][]u8 = &.{},
+            /// Socket address recorded for this request's transport.
+            from: ?std.Io.net.IpAddress = null,
             /// False when the slices borrow a connection-owned arena that is
             /// released as a unit; `deinit` then frees nothing.
             owned: bool = true,
@@ -275,7 +279,7 @@ pub fn Reader(comptime RuntimeError: type) type {
             defer if (headers.ptr != headers_stack[0..].ptr) {
                 self.allocator.free(headers);
             };
-            const head = if (self.options.allow_obs_fold) blk: {
+            var head = if (self.options.allow_obs_fold) blk: {
                 owned_head = try http1.parseOwnedRequestHead(self.allocator, head_bytes, self.options);
                 break :blk owned_head.?.head;
             } else try http1.parseRequestHead(
@@ -283,6 +287,7 @@ pub fn Reader(comptime RuntimeError: type) type {
                 headers,
                 self.options,
             );
+            head.from = self.peer_address;
             try self.validateKnownBodyLength(
                 head.body_framing,
                 head.content_length,
@@ -336,6 +341,7 @@ pub fn Reader(comptime RuntimeError: type) type {
                 .header_value_storage = if (owned_head) |*owned| owned.takeValues() else &.{},
                 .trailer_bytes = body.trailers.bytes,
                 .trailer_value_storage = body.trailers.value_storage,
+                .from = self.peer_address,
             };
         }
 
