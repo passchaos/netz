@@ -1,0 +1,25 @@
+{
+  "run_id": 45502434742,
+  "run_url": "https://github.com/passchaos/netz/actions/runs/45502434742",
+  "head_sha": "8b0dcd15f083870436c90c648c32af5ae9bc95d2",
+  "job_id": 138828891890,
+  "job_name": "Portable x86_64-windows-gnu (windows-latest)",
+  "steps": [
+    {
+      "name": "Run native ordered TCP hostname regressions",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 17,
+      "started_at": "2026-11-24T22:37:23Z",
+      "completed_at": "2026-11-24T22:37:34Z"
+    },
+    {
+      "name": "Run native H1 H2 resolver policy regressions",
+      "status": "completed",
+      "conclusion": "failure",
+      "number": 18,
+      "started_at": "2026-11-24T22:37:34Z",
+      "completed_at": "2026-11-24T22:37:48Z"
+    }
+  ]
+}

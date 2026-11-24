@@ -34,9 +34,13 @@ tests without attempting to execute a foreign binary.
 | Final prebound callback and AFD implementation, Windows target | Compiled | [compile.log](compile.log) |
 | Local ABI/status/refusal, native resolver, binding, identity and WS overlap | 196/196 passed | [Debug.log](Debug.log) |
 | Refusal test budget follow-up on the local host | 23/23 passed | [refusal-budget.log](refusal-budget.log) |
+| Native Windows ordered TCP gate, including IPv4/IPv6 Threaded and prebound refusal | Passed at `8b0dcd15` | [native-windows-refusal.json](native-windows-refusal.json) |
 
 The first repair CI executes the original ordered-hostname and source-binding
 cases successfully. Its two additional closed-port refusal tests reach their
 one-second test deadline before Windows reports refusal. Their regression-only
 budget is increased to five seconds; production timeout values are unchanged.
-The next native CI run must confirm the final refusal status for both families.
+Native [CI run 45502434742](https://github.com/passchaos/netz/actions/runs/45502434742)
+confirms the ordered TCP gate, including the final refusal status for both
+families. Its subsequent H1/H2 resolver-policy gate fails separately at the
+explicit deadline route; that fixture is tracked by the native resolver evidence.

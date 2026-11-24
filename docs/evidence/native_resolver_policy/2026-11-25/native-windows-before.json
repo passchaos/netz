@@ -1,0 +1,65 @@
+{
+  "run_id": 45508066951,
+  "run_url": "https://github.com/passchaos/netz/actions/runs/45508066951",
+  "head_sha": "3fa4e581c55cac1a7fef4cdfaa8eb2a578ba1f40",
+  "job_id": 138848331687,
+  "job_name": "Portable x86_64-windows-gnu (windows-latest)",
+  "step": {
+    "name": "Run native H1 H2 resolver policy regressions",
+    "status": "completed",
+    "conclusion": "failure",
+    "number": 18,
+    "started_at": "2026-11-24T23:16:56Z",
+    "completed_at": "2026-11-24T23:19:19Z"
+  },
+  "annotations": [
+    {
+      "path": ".github",
+      "blob_href": "https://github.com/passchaos/netz/blob/3fa4e581c55cac1a7fef4cdfaa8eb2a578ba1f40/.github",
+      "start_line": 198,
+      "start_column": null,
+      "end_line": 198,
+      "end_column": null,
+      "annotation_level": "failure",
+      "title": "Native hostname regression",
+      "message": "error: the following build command failed with exit code 1:\nD:\\a\\netz\\netz\\.zig-cache\\o\\738ceec97816e07ddd8640b6b4c22900\\build.exe D:\\a\\_temp\\37869bbc-7674-4c93-a3da-e1c7a968643f\\zig-x86_64-windows-0.16.0\\zig.exe D:\\a\\_temp\\37869bbc-7674-4c93-a3da-e1c7a968643f\\zig-x86_64-windows-0.16.0\\lib D:\\a\\netz\\netz\\netz D:\\a\\netz\\netz\\.zig-cache D:\\a\\netz\\netz\\.zig-cache --seed 0xc61aca6a -Z70624f574cf69846 test-http1 test-http2 -j1 -Dtarget=x86_64-windows-gnu -Dtest-filter=HTTP1 native resolver policy -Dtest-filter=HTTP2 native resolver policy --summary all",
+      "raw_details": ""
+    },
+    {
+      "path": ".github",
+      "blob_href": "https://github.com/passchaos/netz/blob/3fa4e581c55cac1a7fef4cdfaa8eb2a578ba1f40/.github",
+      "start_line": 184,
+      "start_column": null,
+      "end_line": 184,
+      "end_column": null,
+      "annotation_level": "failure",
+      "title": "Native hostname regression",
+      "message": "error: 'http1.runtime.client.resolution_tests.test.HTTP1 native resolver policy routes named and URI connections' failed:\n       [default] (err): native resolver H1 mode=1 connect failed with Timeout; resolver calls=2; deadline remaining=0ms\n       D:\\a\\netz\\netz\\netz\\src\\internal\\tcp_connect.zig:526:13: 0x7ff6467e8cdc in race__anon_115581 (test_zcu.obj)\n                   return error.Timeout;\n                   ^\n       D:\\a\\netz\\netz\\netz\\src\\internal\\tcp_connect.zig:78:5: 0x7ff6467eb654 in ipWithDeadline (test_zcu.obj)\n           return race(\n           ^\n       D:\\a\\netz\\netz\\netz\\src\\internal\\tcp_connect.zig:247:53: 0x7ff6467e3d1c in resolvedBefore (test_zcu.obj)\n                   if (!shouldTryNextResolvedAddress(err)) return err;\n                                                           ^\n       D:\\a\\netz\\netz\\netz\\src\\internal\\tcp_connect.zig:219:5: 0x7ff6467e3837 in resolvedWithPolicyBefore (test_zcu.obj)\n           return switch (policy) {\n           ^",
+      "raw_details": ""
+    },
+    {
+      "path": ".github",
+      "blob_href": "https://github.com/passchaos/netz/blob/3fa4e581c55cac1a7fef4cdfaa8eb2a578ba1f40/.github",
+      "start_line": 170,
+      "start_column": null,
+      "end_line": 170,
+      "end_column": null,
+      "annotation_level": "failure",
+      "title": "Native hostname regression",
+      "message": "error: 'http2.runtime.client.resolution_tests.test.HTTP2 native resolver policy routes named and URI connections' failed:\n       [default] (err): native resolver H2 mode=1 connect failed with Timeout; resolver calls=2; deadline remaining=-10ms\n       D:\\a\\netz\\netz\\netz\\src\\internal\\tcp_connect.zig:526:13: 0x7ff6467e8cdc in race__anon_115581 (test_zcu.obj)\n                   return error.Timeout;\n                   ^\n       D:\\a\\netz\\netz\\netz\\src\\internal\\tcp_connect.zig:78:5: 0x7ff6467eb654 in ipWithDeadline (test_zcu.obj)\n           return race(\n           ^\n       D:\\a\\netz\\netz\\netz\\src\\internal\\tcp_connect.zig:247:53: 0x7ff6467e3d1c in resolvedBefore (test_zcu.obj)\n                   if (!shouldTryNextResolvedAddress(err)) return err;\n                                                           ^\n       D:\\a\\netz\\netz\\netz\\src\\internal\\tcp_connect.zig:219:5: 0x7ff6467e3837 in resolvedWithPolicyBefore (test_zcu.obj)\n           return switch (policy) {\n           ^",
+      "raw_details": ""
+    },
+    {
+      "path": ".github",
+      "blob_href": "https://github.com/passchaos/netz/blob/3fa4e581c55cac1a7fef4cdfaa8eb2a578ba1f40/.github",
+      "start_line": 156,
+      "start_column": null,
+      "end_line": 156,
+      "end_column": null,
+      "annotation_level": "failure",
+      "title": "Native hostname regression",
+      "message": "error: 'http1.runtime.client.resolution_tests.test.HTTP1 native resolver policy routes named and URI connections' failed:\n       [default] (err): native resolver H1 mode=1 connect failed with Timeout; resolver calls=2; deadline remaining=-1ms\n       D:\\a\\netz\\netz\\netz\\src\\internal\\tcp_connect.zig:526:13: 0x7ff78a9953ac in race__anon_103880 (test_zcu.obj)\n                   return error.Timeout;\n                   ^\n       D:\\a\\netz\\netz\\netz\\src\\internal\\tcp_connect.zig:78:5: 0x7ff78a997d24 in ipWithDeadline (test_zcu.obj)\n           return race(\n           ^\n       D:\\a\\netz\\netz\\netz\\src\\internal\\tcp_connect.zig:247:53: 0x7ff78a9903ec in resolvedBefore (test_zcu.obj)\n                   if (!shouldTryNextResolvedAddress(err)) return err;\n                                                           ^\n       D:\\a\\netz\\netz\\netz\\src\\internal\\tcp_connect.zig:219:5: 0x7ff78a98fdd7 in resolvedWithPolicyBefore (test_zcu.obj)\n           return switch (policy) {\n           ^",
+      "raw_details": ""
+    }
+  ]
+}

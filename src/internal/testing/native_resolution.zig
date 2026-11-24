@@ -1,5 +1,6 @@
 //! Shared native H1/H2 resolver, authority and admission exercises.
 const std = @import("std");
+const builtin = @import("builtin");
 const net = std.Io.net;
 
 const Resolver = struct {
@@ -36,10 +37,15 @@ pub fn exercise(comptime Runtime: type, comptime h2: bool) !void {
         const refused_address = refused.socket.address;
         refused.deinit(io);
         var resolver: Resolver = .{ .peers = .{ refused_address, server.address() } };
+        // Native Windows can spend more than two seconds reporting refusal
+        // for the first loopback candidate. This exercises successful fallback,
+        // so leave room for refusal and keep the peer alive through that budget.
+        const connect_budget = std.Io.Duration.fromSeconds(if (builtin.os.tag == .windows) 5 else 2);
         const Worker = struct {
             server: *Runtime.Server,
             fn run(state: *@This()) !void {
-                var peer_connection = try state.server.acceptWithTimeout(.fromSeconds(3));
+                const accept_budget = std.Io.Duration.fromSeconds(if (builtin.os.tag == .windows) 6 else 3);
+                var peer_connection = try state.server.acceptWithTimeout(accept_budget);
                 defer peer_connection.close();
                 if (h2) {
                     var received = try peer_connection.readRequestWithTimeout(.fromSeconds(3));
@@ -58,7 +64,7 @@ pub fn exercise(comptime Runtime: type, comptime h2: bool) !void {
             }
         };
         for (0..6) |mode| {
-            const deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(2) });
+            const deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .clock = .awake, .raw = connect_budget });
             resolver.expected_deadline = if (mode == 1) deadline else null;
             const limits: Runtime.Limits = .{
                 .address_resolver = .{ .context = &resolver, .resolve = Resolver.resolve },
@@ -77,7 +83,7 @@ pub fn exercise(comptime Runtime: type, comptime h2: bool) !void {
                 var client_connection = (switch (mode) {
                     0 => Runtime.Client.connectHost(allocator, io, "native.endpoint.test", 8443, limits),
                     1 => Runtime.Client.connectHostWithDeadline(allocator, io, "native.endpoint.test", 8443, limits, deadline),
-                    else => Runtime.Client.connectHostWithTimeout(allocator, io, "native.endpoint.test", 8443, limits, .fromSeconds(2)),
+                    else => Runtime.Client.connectHostWithTimeout(allocator, io, "native.endpoint.test", 8443, limits, connect_budget),
                 }) catch |err| {
                     std.log.err("native resolver H{d} mode={d} connect failed with {s}; resolver calls={d}; deadline remaining={d}ms", .{ if (h2) @as(u8, 2) else 1, mode, @errorName(err), resolver.calls.load(.acquire), @divTrunc(deadline.durationFromNow(io).raw.nanoseconds, std.time.ns_per_ms) });
                     return err;
