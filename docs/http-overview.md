@@ -34,6 +34,14 @@ version-specific listeners/connections and stable streaming aliases.
 WebSocket, WebTransport and gRPC reuse HTTP transport boundaries but own their
 application protocols in their separate modules.
 
+TLS connection setup retains ownership of the connected TCP stream while it
+rechecks the caller's deadline. An expiry between TCP completion and TLS
+initialization returns `Timeout` and closes that stream once; a successful TLS
+initialization transfers cleanup responsibility to the TLS connection. H1
+standard/vail, H2 and WSS use this ordering. The
+[transition regressions](evidence/tls_transition_ownership/2026-11-24/README.md)
+observe real socket closes and peer EOF through the public named/address APIs.
+
 ## Unified client and request path
 
 ```mermaid

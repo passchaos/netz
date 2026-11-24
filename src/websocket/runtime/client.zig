@@ -46,7 +46,8 @@ const validateHttp1ClientExtraHeadersImpl = runtime.validateHttp1ClientExtraHead
 pub const Client = struct {
     /// Perform a cleartext WebSocket handshake on an already connected stream.
     /// This is primarily for adapters that must emit a transport preface before
-    /// the HTTP Upgrade request. Ownership transfers on success.
+    /// the HTTP Upgrade request. Ownership transfers at entry; every failure
+    /// closes the stream.
     pub fn connectAcceptedStream(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -166,6 +167,7 @@ pub const Client = struct {
 
     /// Perform TLS and WebSocket handshakes on a connected stream after an
     /// adapter has emitted a transport preface such as PROXY protocol.
+    /// Ownership transfers at entry; every failure closes the stream.
     pub fn connectAcceptedTlsStream(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -1089,7 +1091,6 @@ pub const Client = struct {
         tls_options: http1_runtime.TlsClientOptions,
         deadline: std.Io.Clock.Timestamp,
     ) Error!ConnectAttempt {
-        _ = try deadline_policy.usableAwake(io, deadline);
         return connectTlsStreamAttemptMaybeBefore(
             allocator,
             io,
@@ -1114,6 +1115,7 @@ pub const Client = struct {
     ) Error!ConnectAttempt {
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(io);
+        if (deadline) |absolute| _ = try deadline_policy.usableAwake(io, absolute);
         const parsed = try endpoint_host.parse(tls_host, port);
         try socket_options.applyTcp(stream, .{
             .no_delay = options.tcp_nodelay,

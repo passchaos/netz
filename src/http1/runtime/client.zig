@@ -862,7 +862,6 @@ pub const Client = struct {
         tls_options: VailTlsClientOptions,
         deadline: std.Io.Clock.Timestamp,
     ) Error!Client {
-        _ = try deadline_policy.usableAwake(io, deadline);
         return connectVailTlsStreamMaybeBefore(
             allocator,
             io,
@@ -887,6 +886,7 @@ pub const Client = struct {
     ) Error!Client {
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(io);
+        if (deadline) |absolute| _ = try deadline_policy.usableAwake(io, absolute);
         if (limits.tcp_nodelay) try setTcpNoDelay(stream);
         const options = verifiedTlsClientOptions(tls_host, tls_options);
         const tls_connection = if (deadline) |absolute|

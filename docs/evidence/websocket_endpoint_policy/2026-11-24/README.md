@@ -45,6 +45,13 @@ new endpoint-policy tests.
 | Debug endpoint policy and affected connection paths | 53/53 passed | [Debug.log](Debug.log) |
 | ReleaseSafe endpoint policy and WebSocket interface binding | 94/94 passed | [ReleaseSafe.log](ReleaseSafe.log) |
 
+At commit `0e448d89`, the [native Linux endpoint regression step](https://github.com/passchaos/netz/actions/runs/45410444250/job/138502643349)
+and [native Windows transport regression step](https://github.com/passchaos/netz/actions/runs/45410444250/job/138502642444)
+both completed successfully. The selected Windows transport filters include
+the three endpoint-policy tests. Their exact step conclusions and timestamps
+are recorded in [native-platforms.json](native-platforms.json); this records
+native execution independently of cross-compilation or the overall CI run.
+
 ```sh
 zig build test-websocket '-Dtest-filter=WebSocket named endpoint' '-Dtest-filter=WSS named endpoint' '-Dtest-filter=WSS common handshake budget' '-Dtest-filter=WebSocket client connects by host name' '-Dtest-filter=WebSocket client connects by bracketed IPv6 URI' '-Dtest-filter=WSS client connects to resolved address' '-Dtest-filter=WebSocket WSS URI authenticates origin through HTTP CONNECT proxy' '-Dtest-filter=WebSocket URI resolver consumes' '-Dtest-filter=WSS caller deadline bounds TLS handshake' '-Dtest-filter=WSS connect options forward TLS timeout' '-Dtest-filter=WebSocket caller-connected timeouts own stream cleanup' -j1 --summary all
 zig build test-websocket test-http '-Dtest-filter=WebSocket named endpoint' '-Dtest-filter=WSS named endpoint' '-Dtest-filter=WSS common handshake budget' '-Dtest-filter=WebSocket network interface reaches' -Doptimize=ReleaseSafe -j1 --summary all

@@ -5,6 +5,31 @@ const tls_testing = @import("../../tls/testing.zig");
 
 const net = std.Io.net;
 
+test "HTTP1 TLS ownership closes stream when deadline expires after TCP connect" {
+    inline for (.{ false, true }) |vail_tls| {
+        inline for (.{ false, true }) |named| {
+            const Connect = struct {
+                fn run(allocator: std.mem.Allocator, io: std.Io, address: net.IpAddress, deadline: std.Io.Clock.Timestamp) http1_runtime.Error!http1_runtime.Client {
+                    const limits: http1_runtime.Limits = .{ .connect_timeout = null };
+                    if (vail_tls) {
+                        const tls: http1_runtime.VailTlsClientOptions = .{ .verify_host = false, .handshake_timeout = .fromSeconds(10) };
+                        return if (named)
+                            http1_runtime.Client.connectVailTlsHostWithDeadline(allocator, io, "127.0.0.1", address.getPort(), limits, tls, deadline)
+                        else
+                            http1_runtime.Client.connectVailTlsAddressWithDeadline(allocator, io, address, "localhost", limits, tls, deadline);
+                    }
+                    const tls: http1_runtime.TlsClientOptions = .{ .verify_host = false, .handshake_timeout = .fromSeconds(10) };
+                    return if (named)
+                        http1_runtime.Client.connectTlsHostWithDeadline(allocator, io, "127.0.0.1", address.getPort(), limits, tls, deadline)
+                    else
+                        http1_runtime.Client.connectTlsAddressWithDeadline(allocator, io, address, "localhost", "localhost", limits, tls, deadline);
+                }
+            };
+            try @import("../../internal/testing/tls_transition.zig").expectClosedAfterConnect(Connect.run);
+        }
+    }
+}
+
 test "HTTP1 TLS connection deadline bounds a silent handshake" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

@@ -219,7 +219,7 @@ test "HTTP/1 negotiates TLS 1.2 with ALPN and serves a request" {
     var joined = false;
     defer if (!joined) thread.join();
 
-    var client = try Client.connectVailTlsHost(
+    var client = try Client.connectVailTlsHostWithTimeout(
         allocator,
         io,
         "localhost",
@@ -235,6 +235,7 @@ test "HTTP/1 negotiates TLS 1.2 with ALPN and serves a request" {
             },
             .protocol_policy = .tls12_only,
         },
+        .fromSeconds(5),
     );
     defer client.close();
     try std.testing.expectEqual(
@@ -347,7 +348,7 @@ test "HTTP/1 vail TLS client exposes mTLS metadata and key updates" {
     var joined = false;
     defer if (!joined) thread.join();
 
-    var client = try Client.connectVailTlsHost(
+    var client = try Client.connectVailTlsHostWithDeadline(
         allocator,
         io,
         "localhost",
@@ -366,6 +367,7 @@ test "HTTP/1 vail TLS client exposes mTLS metadata and key updates" {
             .alpn_protocols = &.{"http/1.1"},
             .cipher_suites = &.{.aes_256_gcm_sha384},
         },
+        .fromNow(io, .{ .raw = .fromSeconds(5), .clock = .awake }),
     );
     defer client.close();
     const chain = client.peerCertificates() orelse

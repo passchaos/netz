@@ -64,55 +64,17 @@ test "HTTP/2 IP and host authority allocation cannot renew a connect deadline" {
     }
 }
 
-test "HTTP/2 TLS host closes ownership when the deadline expires after TCP connect" {
-    const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
-    defer threaded.deinit();
-    const parent = threaded.io();
-    var server = try runtime.Server.listen(allocator, parent, .{ .ip4 = .loopback(0) }, .{});
-    defer server.deinit();
-    const Peer = struct {
-        fn run(listener: *runtime.Server) !void {
-            var connection = listener.acceptWithTimeout(.fromSeconds(3)) catch |err| switch (err) {
-                error.ConnectionClosed, error.UnexpectedEof, error.SocketUnconnected, error.ConnectionResetByPeer => return,
-                else => return err,
-            };
-            defer connection.close();
-            return error.UnexpectedClientAdmission;
-        }
-    };
-    var task = parent.async(Peer.run, .{&server});
-    defer _ = task.cancel(parent) catch {};
-    const Fake = struct {
-        var base: std.Io = undefined;
-        var expired: std.atomic.Value(bool) = .init(false);
-        var after: std.Io.Timestamp = .zero;
-        var timer: std.Io.Event = .unset;
-        fn now(userdata: ?*anyopaque, clock: std.Io.Clock) std.Io.Timestamp {
-            if (clock == .awake and expired.load(.acquire)) return after;
-            return base.vtable.now(userdata, clock);
-        }
-        fn connect(userdata: ?*anyopaque, address: *const std.Io.net.IpAddress, options: std.Io.net.IpAddress.ConnectOptions) std.Io.net.IpAddress.ConnectError!std.Io.net.Socket {
-            const socket = try base.vtable.netConnectIp(userdata, address, options);
-            expired.store(true, .release);
-            return socket;
-        }
-        fn sleep(_: ?*anyopaque, _: std.Io.Timeout) std.Io.Cancelable!void {
-            // Keep the connect race's timer pending until cancellation. The
-            // completed socket must reach the TLS ownership boundary.
-            try timer.wait(base);
-        }
-    };
-    Fake.base = parent;
-    Fake.expired.store(false, .monotonic);
-    const deadline = std.Io.Clock.Timestamp.fromNow(parent, .{ .raw = .fromSeconds(2), .clock = .awake });
-    Fake.after = deadline.raw.addDuration(.fromSeconds(1));
-    var vtable = parent.vtable.*;
-    vtable.now = Fake.now;
-    vtable.netConnectIp = Fake.connect;
-    vtable.sleep = Fake.sleep;
-    const io: std.Io = .{ .userdata = parent.userdata, .vtable = &vtable };
-    try std.testing.expectError(error.Timeout, runtime.Client.connectTlsHostWithDeadline(allocator, io, "127.0.0.1", server.address().getPort(), .{ .connect_timeout = null }, .{}, deadline));
-    try std.testing.expect(Fake.expired.load(.acquire));
-    try task.await(parent);
+test "HTTP/2 TLS ownership closes stream when deadline expires after TCP connect" {
+    inline for (.{ false, true }) |named| {
+        const Connect = struct {
+            fn run(allocator: std.mem.Allocator, io: std.Io, address: std.Io.net.IpAddress, deadline: std.Io.Clock.Timestamp) runtime.Error!runtime.Connection {
+                const limits: runtime.Limits = .{ .connect_timeout = null };
+                return if (named)
+                    runtime.Client.connectTlsHostWithDeadline(allocator, io, "127.0.0.1", address.getPort(), limits, .{}, deadline)
+                else
+                    runtime.Client.connectTlsAddressWithDeadline(allocator, io, address, "localhost", "localhost", limits, .{}, deadline);
+            }
+        };
+        try @import("../../../internal/testing/tls_transition.zig").expectClosedAfterConnect(Connect.run);
+    }
 }

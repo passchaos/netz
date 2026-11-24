@@ -1,0 +1,81 @@
+[traex-zig-guard 2026-11-24 22:11:22] waiting for the global TRAE Zig build slot
+[traex-zig-guard 2026-11-24 22:16:43] started Zig tree root=93988 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=1800s
+test-http1
++- run test 15 pass, 1 fail (16 total)
+error: 'http1.runtime.tls_client_deadline_tests.test.HTTP1 TLS ownership closes stream when deadline expires after TCP connect' failed:
+       expected 1, found 0
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:118:17: 0x100ead50b in expectEqualInner__anon_37300 (test)
+                       return error.TestExpectedEqual;
+                       ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:83:5: 0x100eb023f in expectEqual (test)
+           return expectEqualInner(T, expected, actual);
+           ^
+       /Users/bytedance/project-z/netz/src/internal/testing/tls_transition.zig:78:5: 0x100eb0397 in expectClosedAfterConnect__anon_37342 (test)
+           try std.testing.expectEqual(@as(usize, 1), Probe.closes.load(.monotonic));
+           ^
+       /Users/bytedance/project-z/netz/src/http1/runtime/tls_client_deadline_tests.zig:28:13: 0x100eb1e63 in test.HTTP1 TLS ownership closes stream when deadline expires after TCP connect (test)
+                   try @import("../../internal/testing/tls_transition.zig").expectClosedAfterConnect(Connect.run);
+                   ^
+failed command: ./.zig-cache/o/5450ba526214627ceac9c5dede81d094/test --cache-dir=./.zig-cache --seed=0x679ce4fb --listen=-
+
+test-http2
++- run test 33 pass, 1 fail (34 total)
+error: 'http1.runtime.tls_client_deadline_tests.test.HTTP1 TLS ownership closes stream when deadline expires after TCP connect' failed:
+       expected 1, found 0
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:118:17: 0x10136150b in expectEqualInner__anon_37617 (test)
+                       return error.TestExpectedEqual;
+                       ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:83:5: 0x101d06eab in expectEqual (test)
+           return expectEqualInner(T, expected, actual);
+           ^
+       /Users/bytedance/project-z/netz/src/internal/testing/tls_transition.zig:78:5: 0x101d07003 in expectClosedAfterConnect__anon_10852942 (test)
+           try std.testing.expectEqual(@as(usize, 1), Probe.closes.load(.monotonic));
+           ^
+       /Users/bytedance/project-z/netz/src/http1/runtime/tls_client_deadline_tests.zig:28:13: 0x101d08acf in test.HTTP1 TLS ownership closes stream when deadline expires after TCP connect (test)
+                   try @import("../../internal/testing/tls_transition.zig").expectClosedAfterConnect(Connect.run);
+                   ^
+failed command: ./.zig-cache/o/00d9a8546d530259cafb29ee3ad78aab/test --cache-dir=./.zig-cache --seed=0x679ce4fb --listen=-
+
+test-websocket
++- run test 42 pass, 2 fail (44 total)
+error: 'websocket.runtime.tls_transition_tests.test.WSS TLS ownership closes stream when deadline expires after TCP connect' failed:
+       expected 1, found 0
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:118:17: 0x1030f94f7 in expectEqualInner__anon_37463 (test)
+                       return error.TestExpectedEqual;
+                       ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:83:5: 0x1030f9e5f in expectEqual (test)
+           return expectEqualInner(T, expected, actual);
+           ^
+       /Users/bytedance/project-z/netz/src/internal/testing/tls_transition.zig:78:5: 0x1030f9fb7 in expectClosedAfterConnect__anon_37311 (test)
+           try std.testing.expectEqual(@as(usize, 1), Probe.closes.load(.monotonic));
+           ^
+       /Users/bytedance/project-z/netz/src/websocket/runtime/tls_transition_tests.zig:18:13: 0x1030fde1b in test.WSS TLS ownership closes stream when deadline expires after TCP connect (test)
+                   try transition.expectClosedAfterConnect(Connect.run);
+                   ^
+error: 'http1.runtime.tls_client_deadline_tests.test.HTTP1 TLS ownership closes stream when deadline expires after TCP connect' failed:
+       expected 1, found 0
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:118:17: 0x1030f94f7 in expectEqualInner__anon_37463 (test)
+                       return error.TestExpectedEqual;
+                       ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:83:5: 0x103c2c0bf in expectEqual (test)
+           return expectEqualInner(T, expected, actual);
+           ^
+       /Users/bytedance/project-z/netz/src/internal/testing/tls_transition.zig:78:5: 0x103c2c217 in expectClosedAfterConnect__anon_10861538 (test)
+           try std.testing.expectEqual(@as(usize, 1), Probe.closes.load(.monotonic));
+           ^
+       /Users/bytedance/project-z/netz/src/http1/runtime/tls_client_deadline_tests.zig:28:13: 0x103c2dce3 in test.HTTP1 TLS ownership closes stream when deadline expires after TCP connect (test)
+                   try @import("../../internal/testing/tls_transition.zig").expectClosedAfterConnect(Connect.run);
+                   ^
+failed command: ./.zig-cache/o/9e5e2d7596550efd2357b99dbcc3f71a/test --cache-dir=./.zig-cache --seed=0x679ce4fb --listen=-
+
+Build Summary: 12/18 steps succeeded (3 failed); 90/94 tests passed (4 failed)
+test-http1 transitive failure
++- run test 15 pass, 1 fail (16 total)
+test-http2 transitive failure
++- run test 33 pass, 1 fail (34 total)
+test-websocket transitive failure
++- run test 42 pass, 2 fail (44 total)
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/4f43002d28e7c626e498fafc36e312bb/build /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/zig /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib /Users/bytedance/project-z/netz .zig-cache /Users/bytedance/.cache/zig --seed 0x679ce4fb -Z87e9bc8d7a276091 test-http1 test-http2 test-websocket -Dtest-filter=deadline expires after TCP connect -j1 --summary failures
+[traex-zig-guard 2026-11-24 22:18:17] finished Zig tree root=93988 peak=2883MiB result=0

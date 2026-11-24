@@ -443,6 +443,13 @@ helpers accept the same literal forms for their separate TLS host. The
 [live endpoint-policy regressions](evidence/websocket_endpoint_policy/2026-11-24/README.md)
 record IPv6 authorities, TLS timeout precedence and affected connection paths.
 
+Caller-connected `connectAcceptedStream*` and `connectAcceptedTlsStream*`
+helpers take stream ownership at entry, including timeout and handshake-error
+outcomes. Named/address WSS setup also owns the newly connected stream before
+rechecking its absolute deadline, so expiry at the TCP/TLS transition closes
+the socket once. The [transition regressions](evidence/tls_transition_ownership/2026-11-24/README.md)
+verify both TLS backends through public APIs and observe the actual peer EOF.
+
 HTTP/1 Upgrade clients now also accept typed `ConnectOptions.extra_headers`,
 matching the reference client's custom handshake-header facility without its
 raw string injection surface. The option is shared by WS, WSS, and Unix-socket
