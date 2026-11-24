@@ -3646,4 +3646,5 @@ the WebSocket forwarding test passes 48/48 and Windows test binaries compile
 and link. The CI matrix now includes native Windows peer tests, and verified
 public dependency pins no longer require a custom credential before any build
 can start. [Backend and CI evidence](../../winsock_peer_addresses/2026-11-24/README.md)
-records the remaining native execution gate.
+records the successful native Windows job at `03f15fbd` (3m 45s) as well as
+the local compile and runtime checks.

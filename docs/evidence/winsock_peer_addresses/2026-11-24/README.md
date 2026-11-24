@@ -27,6 +27,7 @@ the actual peer at both ends of Threaded and zio IPv4/IPv6 connections. The
 | Scoped peer-address tests on macOS | 100/100 | [peer-address.Debug.log](peer-address.Debug.log) |
 | Scoped WebSocket connection test on macOS | 48/48 | [websocket.Debug.log](websocket.Debug.log) |
 | Windows library/public-package test compile and link | 8/8 steps | [windows-compile.log](windows-compile.log) |
+| Native Windows focused peer-address execution at `03f15fbd` | Success, 3m 45s | [CI job](https://github.com/passchaos/netz/actions/runs/45323505958/job/138207379776), [metadata](native-windows-ci.json) |
 | CI YAML and matrix/token invariants | Passed with Ruby YAML parser | `.github/workflows/ci.yml` |
 
 Counts include imported support tests. The local Windows gate compiles and
@@ -55,6 +56,11 @@ pin: vail `3b772b0c`, vort `a48e1151`, pbz `6513ef1f`, kron `77b9572a`,
 webpkiz `35c9f4bf`, regexz `f1507670`, and harnessz `e626f26b`.
 CI now uses its read-only `github.token` for public dependency checkouts and
 retains `NETZ_DEPENDENCIES_TOKEN` as an optional override. Native Windows
-execution is tracked by the new job after publication.
+execution at `03f15fbd` succeeded in run `45323505958`, job `138207379776`.
+The same run also completed the x86_64 Linux compile job successfully. The
+Windows result was read from the public workflow matrix panel after the
+REST API rate limit prevented API polling. The job runs the focused
+peer-address test command on its native Windows target; the public result
+confirms job success without adding an unobserved Windows test-count claim.
 
 Reference: [Microsoft getpeername contract](https://learn.microsoft.com/en-us/windows/win32/api/winsock/nf-winsock-getpeername).

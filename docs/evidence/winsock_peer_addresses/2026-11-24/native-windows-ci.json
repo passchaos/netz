@@ -1,0 +1,11 @@
+{
+  "head_sha": "03f15fbdfdb5bdeb30b08c01e9f9e971f7ee7398",
+  "run_id": 45323505958,
+  "job_id": 138207379776,
+  "job_name": "Portable x86_64-windows-gnu (windows-latest)",
+  "conclusion": "success",
+  "duration": "3m 45s",
+  "run_url": "https://github.com/passchaos/netz/actions/runs/45323505958",
+  "job_url": "https://github.com/passchaos/netz/actions/runs/45323505958/job/138207379776",
+  "source": "public workflow matrix panel with matching commit link"
+}
