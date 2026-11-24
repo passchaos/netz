@@ -30,10 +30,18 @@ fn expectIoRejection(owner_io: std.Io, requested_io: std.Io) !void {
         return error.TestExpectedError;
     } else |err| try std.testing.expectEqual(@as(anyerror, error.InvalidPoolOptions), err);
 
-    var peer = try quic.runtime.Endpoint.bind(allocator, owner_io, .{ .ip4 = .loopback(0) }, .{});
+    // Windows Threaded has no timed UDP receive. Use an independent native
+    // receiver while retaining the original Threaded/Zio endpoint as sender.
+    const receiver = if (zio.Runtime.fromIo(owner_io) == null)
+        try zio.Runtime.init(allocator, .{})
+    else
+        null;
+    defer if (receiver) |native| native.deinit();
+    const receive_io = if (receiver) |native| native.io() else owner_io;
+    var peer = try quic.runtime.Endpoint.bind(allocator, receive_io, .{ .ip4 = .loopback(0) }, .{});
     defer peer.deinit();
     try endpoint.sendFrames(peer.address(), &.{.{ .ping = {} }});
-    var received = try peer.receiveBytesWithDeadline(.fromNow(owner_io, .{ .clock = .awake, .raw = .fromSeconds(1) }));
+    var received = try peer.receiveBytesWithDeadline(.fromNow(receive_io, .{ .clock = .awake, .raw = .fromSeconds(1) }));
     defer received.deinit(allocator);
     try std.testing.expect(received.from.eql(&endpoint.address()));
 }

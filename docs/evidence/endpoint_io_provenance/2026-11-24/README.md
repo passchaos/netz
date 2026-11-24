@@ -18,10 +18,19 @@ allocator so its eventual destruction uses the right allocation owner.
 | IO adoption, ReleaseSafe | 60/60 passed | [ReleaseSafe.log](ReleaseSafe.log) |
 | Shared SOCKS5 and interface adoption overlap | 69 passed, 2 Windows-only skips | [overlap.Debug.log](overlap.Debug.log) |
 | Windows compile | 8/8 build steps passed | [windows-compile.log](windows-compile.log) |
+| Portable receiver, Debug | 60/60 passed | [portable.Debug.log](portable.Debug.log) |
+| Portable receiver, ReleaseSafe | 60/60 passed | [portable.ReleaseSafe.log](portable.ReleaseSafe.log) |
+| Portable receiver, Windows compile | 8/8 build steps passed | [portable.windows-compile.log](portable.windows-compile.log) |
 
 Tests use two Threaded instances sharing one vtable but distinct userdata,
-and zio versus Threaded. Rejected endpoints still exchange real UDP packets
-through their original IO context. A failing pool allocator proves the IO
+and zio versus Threaded. Rejected endpoints still send real UDP packets through
+their original IO context to an independent zio receiver. Windows Threaded in
+Zig 0.16 cannot perform timed UDP receives; the first native failure is recorded
+in [windows-first-failure.json](windows-first-failure.json), and the portable
+fixture retains Threaded as the tested owner while moving only its peer's timed
+receive onto zio. An existing zio owner reuses its runtime for the receiver;
+Threaded owners create one independent zio runtime, avoiding nested event-loop
+lifetimes on the same thread. A failing pool allocator proves the IO
 check happens before allocation. A positive test adopts an exact IO copy.
 The native Linux and Windows CI filters also select these regressions; native
 results are recorded separately from cross-compilation once CI completes.
