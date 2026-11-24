@@ -4578,6 +4578,7 @@ test "WebSocket connection serializes concurrent sends" {
 }
 
 test {
+    _ = @import("client_endpoint_tests.zig");
     _ = @import("message/tests/close_ownership.zig");
     _ = @import("message/tests/automatic_preparation.zig");
     _ = @import("control/ping_tests.zig");

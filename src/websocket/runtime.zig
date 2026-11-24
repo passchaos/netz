@@ -1,5 +1,6 @@
 const std = @import("std");
 const io_interruption = @import("../internal/io_interruption.zig");
+const endpoint_host = @import("../internal/endpoint_host.zig");
 const builtin = @import("builtin");
 const websocket = @import("mod.zig");
 pub const common = @import("runtime/common.zig");
@@ -1395,6 +1396,7 @@ pub fn connectNamedEndpointBefore(
     options: ConnectOptions,
     deadline: ?std.Io.Clock.Timestamp,
 ) Error!net.Stream {
+    const parsed = try endpoint_host.parse(host, port);
     try tcp_connect.validateAddressConnectPolicy(
         options.address_connect_policy,
     );
@@ -1409,8 +1411,8 @@ pub fn connectNamedEndpointBefore(
     return tcp_connect.endpointWithOptions(
         allocator,
         io,
-        net.IpAddress.parse(host, port) catch null,
-        host,
+        parsed.literal,
+        parsed.host,
         port,
         options.address_resolver,
         options.address_connect_policy,
@@ -1427,8 +1429,8 @@ pub const ConnectOptions = struct {
     /// Names are borrowed; unsupported platforms/backends fail explicitly.
     network_interface: ?tcp_connect.NetworkInterface = null,
 
-    /// HTTP Host authority for the WebSocket opening handshake.  `connectHost`
-    /// defaults this to its resolved host name when left empty.
+    /// HTTP Host authority for the WebSocket opening handshake. Named connects
+    /// default to host:port, with brackets around an IPv6 literal.
     host: []const u8 = "",
     target: []const u8 = "/",
     protocols: []const []const u8 = &.{},

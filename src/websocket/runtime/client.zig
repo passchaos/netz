@@ -4,6 +4,8 @@ const std = @import("std");
 const websocket = @import("../mod.zig");
 const net = std.Io.net;
 const runtime = @import("../runtime.zig");
+const endpoint_host = @import("../../internal/endpoint_host.zig");
+const tls_policy = @import("client/tls_policy.zig");
 
 const ConnectAttempt = runtime.ConnectAttempt;
 const ConnectOptions = runtime.ConnectOptions;
@@ -307,11 +309,7 @@ pub const Client = struct {
         if (deadline) |absolute| {
             _ = try deadline_policy.usableAwake(io, absolute);
         }
-        var effective_tls_options = tls_options;
-        if (effective_tls_options.handshake_timeout == null) {
-            effective_tls_options.handshake_timeout =
-                options.tls_handshake_timeout;
-        }
+        const effective_tls_options = tls_policy.effective(options, tls_options);
         if (options.vail_tls orelse options.tls_identity) |identity| {
             const tls_conn = if (deadline) |absolute|
                 try tls_client_identity.initWithDeadline(
@@ -661,10 +659,11 @@ pub const Client = struct {
             null,
         );
         errdefer stream.close(io);
-        const default_host = try std.fmt.allocPrint(allocator, "{s}:{d}", .{ host, port });
-        defer allocator.free(default_host);
+        const parsed = try endpoint_host.parse(host, port);
+        const default_host = if (options.host.len == 0) try parsed.authorityAlloc(allocator, port) else null;
+        defer if (default_host) |authority| allocator.free(authority);
         var connect_options = options;
-        if (connect_options.host.len == 0) connect_options.host = default_host;
+        if (default_host) |authority| connect_options.host = authority;
         var attempt = try connectStreamAttempt(
             allocator,
             io,
@@ -715,14 +714,11 @@ pub const Client = struct {
             deadline,
         );
         errdefer stream.close(io);
-        const default_host = try std.fmt.allocPrint(
-            allocator,
-            "{s}:{d}",
-            .{ host, port },
-        );
-        defer allocator.free(default_host);
+        const parsed = try endpoint_host.parse(host, port);
+        const default_host = if (options.host.len == 0) try parsed.authorityAlloc(allocator, port) else null;
+        defer if (default_host) |authority| allocator.free(authority);
         var connect_options = options;
-        if (connect_options.host.len == 0) connect_options.host = default_host;
+        if (default_host) |authority| connect_options.host = authority;
         var attempt = try connectStreamAttemptBefore(
             allocator,
             io,
@@ -946,7 +942,7 @@ pub const Client = struct {
         options: ConnectOptions,
         tls_options: http1_runtime.TlsClientOptions,
     ) Error!ConnectAttempt {
-        _ = try net.HostName.init(tls_host);
+        _ = try endpoint_host.parse(tls_host, address.getPort());
         const stream = try tcp_connect.ipWithOptions(
             io,
             address,
@@ -996,7 +992,7 @@ pub const Client = struct {
         tls_options: http1_runtime.TlsClientOptions,
         deadline: std.Io.Clock.Timestamp,
     ) Error!ConnectAttempt {
-        _ = try net.HostName.init(tls_host);
+        _ = try endpoint_host.parse(tls_host, address.getPort());
         const stream = try tcp_connect.ipWithDeadlineAndOptions(
             io,
             address,
@@ -1118,19 +1114,17 @@ pub const Client = struct {
     ) Error!ConnectAttempt {
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(io);
+        const parsed = try endpoint_host.parse(tls_host, port);
         try socket_options.applyTcp(stream, .{
             .no_delay = options.tcp_nodelay,
             .keep_alive = options.tcp_keepalive,
             .user_timeout_ms = options.tcp_user_timeout_ms,
         });
-        const default_host = try std.fmt.allocPrint(
-            allocator,
-            "{s}:{d}",
-            .{ tls_host, port },
-        );
-        defer allocator.free(default_host);
+        const default_host = if (options.host.len == 0) try parsed.authorityAlloc(allocator, port) else null;
+        defer if (default_host) |authority| allocator.free(authority);
         var connect_options = options;
-        if (connect_options.host.len == 0) connect_options.host = default_host;
+        if (default_host) |authority| connect_options.host = authority;
+        const effective_tls_options = tls_policy.effective(options, tls_options);
         if (connect_options.vail_tls orelse
             connect_options.tls_identity) |identity|
         {
@@ -1139,8 +1133,8 @@ pub const Client = struct {
                     allocator,
                     io,
                     stream,
-                    tls_host,
-                    tls_options,
+                    parsed.host,
+                    effective_tls_options,
                     identity,
                     absolute,
                 )
@@ -1149,8 +1143,8 @@ pub const Client = struct {
                     allocator,
                     io,
                     stream,
-                    tls_host,
-                    tls_options,
+                    parsed.host,
+                    effective_tls_options,
                     identity,
                 );
             stream_owned = false;
@@ -1168,8 +1162,8 @@ pub const Client = struct {
                 allocator,
                 io,
                 stream,
-                tls_host,
-                tls_options,
+                parsed.host,
+                effective_tls_options,
                 absolute,
             )
         else
@@ -1177,8 +1171,8 @@ pub const Client = struct {
                 allocator,
                 io,
                 stream,
-                tls_host,
-                tls_options,
+                parsed.host,
+                effective_tls_options,
             );
         stream_owned = false;
         errdefer tls_conn.deinit();
@@ -2104,6 +2098,7 @@ pub const Client = struct {
             .user_timeout_ms = options.tcp_user_timeout_ms,
         });
         if (is_wss) {
+            const effective_tls_options = tls_policy.effective(options, tls_options);
             if (options.vail_tls orelse options.tls_identity) |identity| {
                 const tls_conn = if (deadline) |absolute|
                     try tls_client_identity.initWithDeadline(
@@ -2111,7 +2106,7 @@ pub const Client = struct {
                         io,
                         stream,
                         endpoint.tls_host,
-                        tls_options,
+                        effective_tls_options,
                         identity,
                         absolute,
                     )
@@ -2121,7 +2116,7 @@ pub const Client = struct {
                         io,
                         stream,
                         endpoint.tls_host,
-                        tls_options,
+                        effective_tls_options,
                         identity,
                     );
                 stream_owned = false;
@@ -2134,18 +2129,13 @@ pub const Client = struct {
                     deadline,
                 );
             }
-            var standard_tls_options = tls_options;
-            if (standard_tls_options.handshake_timeout == null) {
-                standard_tls_options.handshake_timeout =
-                    connect_options.tls_handshake_timeout;
-            }
             const tls_conn = if (deadline) |absolute|
                 try http1_runtime.TlsClientConnection.initWithDeadline(
                     allocator,
                     io,
                     stream,
                     endpoint.tls_host,
-                    standard_tls_options,
+                    effective_tls_options,
                     absolute,
                 )
             else
@@ -2154,7 +2144,7 @@ pub const Client = struct {
                     io,
                     stream,
                     endpoint.tls_host,
-                    standard_tls_options,
+                    effective_tls_options,
                 );
             stream_owned = false;
             errdefer tls_conn.deinit();

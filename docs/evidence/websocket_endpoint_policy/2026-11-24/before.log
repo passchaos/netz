@@ -1,0 +1,187 @@
+[traex-zig-guard 2026-11-24 21:53:10] started Zig tree root=24233 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=1800s
+test-websocket
++- run test 39 pass, 2 fail (41 total)
+error: 'websocket.runtime.client_endpoint_tests.test.WebSocket named endpoint formats IPv6 Upgrade authority' failed:
+       /Users/bytedance/project-z/netz/src/http1/mod.zig:2585:41: 0x10326044b in validateHostValue (test)
+                       if (port_colon != null) return error.InvalidHost;
+                                               ^
+       /Users/bytedance/project-z/netz/src/http1/mod.zig:2541:9: 0x103261b23 in validateHostHeaderBlockIndex (test)
+               try validateHostValue(header.value);
+               ^
+       /Users/bytedance/project-z/netz/src/http1/mod.zig:2528:19: 0x103261657 in validateHostHeaderBlockValue (test)
+           const index = try validateHostHeaderBlockIndex(version, headers);
+                         ^
+       /Users/bytedance/project-z/netz/src/http1/mod.zig:2524:9: 0x1032631b3 in validateHostHeaderBlock (test)
+           _ = try validateHostHeaderBlockValue(version, headers);
+               ^
+       /Users/bytedance/project-z/netz/src/websocket/runtime/handshake/request.zig:46:5: 0x1031e320b in write__anon_49223 (test)
+           try http1.validateHostHeaderBlock(options.version, headers);
+           ^
+       /Users/bytedance/project-z/netz/src/websocket/runtime/client.zig:2551:9: 0x1031e4a9b in connectTransportAttempt (test)
+               try handshake_request.write(
+               ^
+       /Users/bytedance/project-z/netz/src/websocket/runtime/client.zig:2444:9: 0x1031e228f in connectStreamAttemptMaybeBefore (test)
+               return connectTransportAttempt(
+               ^
+       /Users/bytedance/project-z/netz/src/websocket/runtime/client.zig:2420:9: 0x1031e1e83 in connectStreamAttemptBefore (test)
+               return connectStreamAttemptMaybeBefore(
+               ^
+       /Users/bytedance/project-z/netz/src/websocket/runtime/client.zig:726:23: 0x1031e1997 in connectHostAttemptWithDeadline (test)
+               var attempt = try connectStreamAttemptBefore(
+                             ^
+       /Users/bytedance/project-z/netz/src/websocket/runtime/client.zig:686:23: 0x1031d05f7 in connectHostWithDeadline (test)
+               var attempt = try connectHostAttemptWithDeadline(
+                             ^
+       /Users/bytedance/project-z/netz/src/websocket/runtime/client.zig:746:9: 0x1031d040b in connectHostWithTimeout (test)
+               return connectHostWithDeadline(
+               ^
+       /Users/bytedance/project-z/netz/src/websocket/runtime/client_endpoint_tests.zig:40:29: 0x10314c4e3 in test.WebSocket named endpoint formats IPv6 Upgrade authority (test)
+               if (peer.err) |err| return err;
+                                   ^
+error: 'websocket.runtime.client_endpoint_tests.test.WSS common handshake budget is inherited by named address URI and adopted connects' failed:
+       expected error.Timeout, found error.ConnectionResetByPeer
+       /Users/bytedance/project-z/netz/zig-pkg/zio-0.19.1-xHbVVE1kLABhvcTZ2InisM3hdkwDdj0fzzAUxvw2AmGk/src/os/net.zig:912:13: 0x1032241af in errnoToRecvError (test)
+                   return switch (err) {
+                   ^
+       /Users/bytedance/project-z/netz/zig-pkg/zio-0.19.1-xHbVVE1kLABhvcTZ2InisM3hdkwDdj0fzzAUxvw2AmGk/src/ev/completion.zig:486:26: 0x10324a05f in getResult__anon_58593 (test)
+               if (c.err) |err| return @errorCast(err);
+                                ^
+       /Users/bytedance/project-z/netz/zig-pkg/zio-0.19.1-xHbVVE1kLABhvcTZ2InisM3hdkwDdj0fzzAUxvw2AmGk/src/ev/completion.zig:907:9: 0x103249713 in getResult (test)
+               return self.c.getResult(.net_recv);
+               ^
+       /Users/bytedance/project-z/netz/zig-pkg/zio-0.19.1-xHbVVE1kLABhvcTZ2InisM3hdkwDdj0fzzAUxvw2AmGk/src/net.zig:49:12: 0x10324942b in readBuf (test)
+           return try op.getResult();
+                  ^
+       /Users/bytedance/project-z/netz/src/internal/stream_io/timed_read.zig:20:63: 0x1032471bf in readSomeWithDeadline (test)
+           if (native.tryRead(io, stream, buffer, deadline)) |value| return value;
+                                                                     ^
+       /Users/bytedance/project-z/netz/src/http1/runtime/tls_client/reader.zig:97:23: 0x103c33a9b in readTlsClientTransportWithDeadline (test)
+               const count = try stream_io.readSomeWithDeadline(
+                             ^
+       /Users/bytedance/project-z/netz/src/http1/runtime/tls_client/reader.zig:49:13: 0x103c336b3 in tlsClientReaderReadVec (test)
+                   return error.ReadFailed;
+                   ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/Io/Reader.zig:1124:36: 0x10302df9f in fillUnbuffered (test)
+           while (r.end < r.seek + n) _ = try r.vtable.readVec(r, &bufs);
+                                          ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/Io/Reader.zig:1110:5: 0x10302ddb3 in fill (test)
+           return fillUnbuffered(r, n);
+           ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/Io/Reader.zig:511:5: 0x103075f6b in peek (test)
+           try r.fill(n);
+           ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/crypto/tls/Client.zig:348:37: 0x1033eecef in init (test)
+                   error.ReadFailed => |e| return e,
+                                           ^
+       /Users/bytedance/project-z/netz/src/http1/runtime/transports.zig:289:13: 0x10324e72b in takeReadError (test)
+                   return err;
+                   ^
+       /Users/bytedance/project-z/netz/src/http1/runtime/transports.zig:210:17: 0x10331f39b in initBefore (test)
+                       return conn.takeReadError();
+                       ^
+       /Users/bytedance/project-z/netz/src/http1/runtime/transports.zig:87:9: 0x1034e6a8f in initWithDeadline (test)
+               return initBefore(
+               ^
+       /Users/bytedance/project-z/netz/src/websocket/runtime/client.zig:1167:13: 0x1034f2737 in connectTlsStreamAttemptMaybeBefore (test)
+                   try http1_runtime.TlsClientConnection.initWithDeadline(
+                   ^
+       /Users/bytedance/project-z/netz/src/websocket/runtime/client.zig:1097:9: 0x1034e770f in connectTlsStreamAttemptBefore (test)
+               return connectTlsStreamAttemptMaybeBefore(
+               ^
+       /Users/bytedance/project-z/netz/src/websocket/runtime/client.zig:862:23: 0x103c27bbf in connectTlsHostAttemptWithDeadline (test)
+               var attempt = try connectTlsStreamAttemptBefore(
+                             ^
+       /Users/bytedance/project-z/netz/src/websocket/runtime/client.zig:832:23: 0x103c277df in connectTlsHostWithDeadline (test)
+               var attempt = try connectTlsHostAttemptWithDeadline(
+                             ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:118:17: 0x103318083 in expectEqualInner__anon_75296 (test)
+                       return error.TestExpectedEqual;
+                       ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:83:5: 0x103318aa3 in expectEqual (test)
+           return expectEqualInner(T, expected, actual);
+           ^
+       /Users/bytedance/project-z/netz/src/websocket/runtime/client_endpoint_tests.zig:88:26: 0x103318b4f in test.WSS common handshake budget is inherited by named address URI and adopted connects (test)
+                   } else |err| try std.testing.expectEqual(@as(anyerror, error.Timeout), err);
+                                ^
+failed command: ./.zig-cache/o/cb34aa55e249d66daa4a1910a2b4b56d/test --cache-dir=./.zig-cache --seed=0x52b25c68 --listen=-
+
+Build Summary: 8/10 steps succeeded (1 failed); 39/41 tests passed (2 failed)
+test-websocket transitive failure
++- run test 39 pass, 2 fail (41 total)
+   +- compile test Debug native success 28s MaxRSS:2G
+      +- WriteFile macho_0_p256_field_arm64.S cached
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 212ms MaxRSS:31M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 369ms MaxRSS:31M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options cached
+      +- options cached
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/4f43002d28e7c626e498fafc36e312bb/build /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/zig /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib /Users/bytedance/project-z/netz .zig-cache /Users/bytedance/.cache/zig --seed 0x52b25c68 -Z82f303f0ca2fa045 test-websocket -Dtest-filter=WebSocket named endpoint -Dtest-filter=WSS common handshake budget -j1 --summary all
+[traex-zig-guard 2026-11-24 21:53:42] finished Zig tree root=24233 peak=2830MiB result=0

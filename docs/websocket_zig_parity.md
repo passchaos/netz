@@ -424,10 +424,24 @@ and a connection that wins concurrently with the timer is explicitly closed if
 it was not selected. This is separate from the TLS and HTTP Upgrade handshake
 budgets, so enabling it cannot silently shorten a configured response-head
 deadline. Standard-library and vail-backed WSS clients both honor the public
-`ConnectOptions.tls_handshake_timeout`; the nested vail option may override it
-when a distinct policy is required. The audited websocket.zig client also exposes connect timeouts; netz
+`ConnectOptions.tls_handshake_timeout` across named-host, resolved-address,
+URI/proxy and adopted-stream entry points. An explicit
+`TlsClientOptions.handshake_timeout` takes precedence over this shorthand;
+`vail_tls.handshake_timeout` (or the legacy `tls_identity` alias) takes precedence
+over both. A caller's absolute deadline still caps the entire connection.
+The audited websocket.zig client also exposes connect timeouts; netz
 now covers the same liveness boundary without its POSIX-only nonblocking/poll
 implementation.
+
+Named WS/WSS helpers accept DNS names, IPv4, and IPv6 literals with optional
+brackets. They use the shared endpoint parser so bracketed literals connect
+directly, TLS receives the identity without brackets, and the default Upgrade
+Host formats IPv6 as `[address]:port`. `ConnectOptions.host` independently
+overrides the HTTP authority and avoids allocating the unused default; it does
+not change the destination address or TLS identity. The resolved-address WSS
+helpers accept the same literal forms for their separate TLS host. The
+[live endpoint-policy regressions](evidence/websocket_endpoint_policy/2026-11-24/README.md)
+record IPv6 authorities, TLS timeout precedence and affected connection paths.
 
 HTTP/1 Upgrade clients now also accept typed `ConnectOptions.extra_headers`,
 matching the reference client's custom handshake-header facility without its
