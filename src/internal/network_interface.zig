@@ -52,6 +52,25 @@ pub fn prepareDatagram(handle: net.Socket.Handle, family: net.IpAddress.Family) 
     }
 }
 
+/// Validate the actual family policy once a native UDP socket is bound.
+/// This also checks caller-owned sockets when an association is adopted.
+pub fn validateDatagramFamily(handle: net.Socket.Handle, family: net.IpAddress.Family) Error!void {
+    if (comptime builtin.os.tag == .windows) {
+        if (family == .ip6) {
+            var ipv6_only: u32 = 0;
+            var length: c_int = @sizeOf(u32);
+            if (windows_native.getsockopt(@ptrCast(handle), 41, 27, std.mem.asBytes(&ipv6_only).ptr, &length) != 0) return error.SocketOptionFailed;
+            // Winsock providers may report BOOLEAN (one byte) or DWORD for
+            // boolean options. Zero-initialize the remaining bytes before
+            // decoding the value; interface indices still require DWORD.
+            if ((length != 1 and length != @sizeOf(u32)) or ipv6_only == 0) {
+                if (comptime @import("builtin").is_test) std.debug.print("Winsock V6ONLY length={d} value={d}\n", .{ length, ipv6_only });
+                return error.OptionUnsupported;
+            }
+        }
+    }
+}
+
 /// Apply before TCP connect or the first UDP send. Windows foreign backends
 /// can expose AFD handles rather than Winsock sockets and are rejected.
 pub fn apply(io: std.Io, handle: net.Socket.Handle, family: net.IpAddress.Family, mode: net.Socket.Mode, interface: NetworkInterface) Error!void {
@@ -59,12 +78,7 @@ pub fn apply(io: std.Io, handle: net.Socket.Handle, family: net.IpAddress.Family
         _ = zio.Runtime.fromIo(io) orelse return error.OptionUnsupported;
         // Winsock has no device constraint for received TCP packets.
         if (mode != .dgram) return error.OptionUnsupported;
-        if (family == .ip6) {
-            var ipv6_only: u32 = undefined;
-            var length: c_int = @sizeOf(u32);
-            if (windows_native.getsockopt(@ptrCast(handle), 41, 27, std.mem.asBytes(&ipv6_only).ptr, &length) != 0) return error.SocketOptionFailed;
-            if (length != @sizeOf(u32) or ipv6_only == 0) return error.OptionUnsupported;
-        }
+
     }
     const resolved = try interface.resolve(io);
     switch (comptime builtin.os.tag) {

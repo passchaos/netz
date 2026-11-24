@@ -7,6 +7,7 @@ const net = std.Io.net;
 pub const NetworkInterface = interfaces.NetworkInterface;
 pub const Error = interfaces.Error;
 pub const applyInterface = interfaces.apply;
+pub const validateDatagramFamily = interfaces.validateDatagramFamily;
 pub const ConnectError = net.IpAddress.ConnectError || Error || error{AddressInUse};
 
 pub const Binding = struct {
@@ -50,6 +51,7 @@ pub fn bindDatagram(io: std.Io, address: net.IpAddress, interface: ?NetworkInter
     try interfaces.prepareDatagram(stdHandle(socket.handle), family);
     try interfaces.apply(io, stdHandle(socket.handle), family, .dgram, selected);
     socket.bind(.{ .ip = zioAddress(address) }) catch |err| return mapDatagramBindError(err);
+    try interfaces.validateDatagramFamily(stdHandle(socket.handle), family);
     return .{ .handle = stdHandle(socket.handle), .address = stdAddress(socket.address.ip) };
 }
 

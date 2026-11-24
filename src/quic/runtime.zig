@@ -547,6 +547,7 @@ pub const Endpoint = struct {
         }
         const io = association.io;
         if (limits.network_interface) |interface| {
+            try socket_binding.validateDatagramFamily(association.socket.handle, std.meta.activeTag(association.socket.address));
             try socket_binding.applyInterface(association.io, association.socket.handle, std.meta.activeTag(association.socket.address), .dgram, interface);
         }
         const socket = association.socket;

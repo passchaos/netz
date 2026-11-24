@@ -27,7 +27,10 @@ pub fn expectBound(io: std.Io, socket: net.Socket) !void {
     } else if (comptime builtin.os.tag == .windows) {
         const level: i32 = if (family == .ip4) 0 else 41;
         try expectInteger(socket.handle, level, 31, interface.index);
-        try expectInteger(socket.handle, level, 28, 1);
+        var enabled: u32 = 0;
+        const enabled_len = try getOption(socket.handle, level, 28, std.mem.asBytes(&enabled));
+        try std.testing.expect(enabled_len == 1 or enabled_len == @sizeOf(u32));
+        try std.testing.expect(enabled != 0);
         try expectInteger(socket.handle, level, 33, interface.index);
     } else {
         try expectInteger(socket.handle, if (family == .ip4) 0 else 41, if (family == .ip4) 25 else 125, interface.index);

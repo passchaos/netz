@@ -52,6 +52,22 @@ retain their existing path. The native Windows probe compares enable/add and
 bind ordering plus both interface-index byte orders; its outcomes and the next
 native regression result will be recorded separately.
 
+## Windows receive list and family checks
+
+The bounded native probe at `6d6cd8ec` confirmed that receive filtering must be
+enabled before ADD_IFLIST, and that interface-list indices use host byte order
+for both IPv4 and IPv6. The successful probe rows and subsequent protocol
+failure stacks are recorded in [windows-probe-messages.json](windows-probe-messages.json).
+IPv4 progressed through the real send/receive regression; the remaining failure
+was the V6ONLY query performed before bind.
+
+The next correction configures V6ONLY before bind and validates its actual value
+after bind, before returning the socket. Boolean query buffers are initialized
+and accept byte or DWORD results; interface indices still require DWORD. The
+native probe additionally records raw V6ONLY and IFLIST bytes. Linux native
+execution of the UDP setup before bind succeeded at `6d6cd8ec`, recorded in
+[native-linux-before-bind.json](native-linux-before-bind.json).
+
 ## Fixture corrections found by overlap checks
 
 The initial overlap run exposed two fixture problems, recorded in

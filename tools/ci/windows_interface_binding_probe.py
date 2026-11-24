@@ -32,6 +32,7 @@ def main():
                         try:
                             if family == socket.AF_INET6:
                                 sock.setsockopt(level, 27, 1)
+                                row["v6_only_bytes"] = sock.getsockopt(level, 27, 4).hex()
                             if bind_first:
                                 sock.bind((address, 0))
                             step = "UNICAST_IF"
@@ -49,7 +50,7 @@ def main():
                                 sock.bind((address, 0))
                             step = "GET_IFLIST"
                             data = sock.getsockopt(level, 33, 64)
-                            row.update(state=sock.getsockopt(level, 28), indices=list(struct.unpack("=" + "I" * (len(data) // 4), data)), result="success")
+                            row.update(state=sock.getsockopt(level, 28), iflist_bytes=sock.getsockopt(level, 28, 4).hex(), indices=list(struct.unpack("=" + "I" * (len(data) // 4), data)), result="success")
                         except OSError as err:
                             row.update(step=step, winerror=getattr(err, "winerror", None), errno=err.errno, result=str(err))
                     print("::notice title=Winsock interface probe::" + json.dumps(row))
