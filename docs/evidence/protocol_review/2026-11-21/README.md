@@ -3706,3 +3706,7 @@ tests and their control/flow/termination overlaps pass 271/271 in Debug and
 ReleaseSafe. [Operation admission evidence](../../webtransport_operation_admission/2026-11-24/README.md)
 records the baseline, exact API forms, protected UDP continuation and native
 CI coverage.
+The focused Windows transport job passed at `18b1b9d8` (3m 42s), including the
+seven operation-admission cases with zio and the existing HTTP/H3 DATAGRAM/
+WebSocket checks. The linked evidence records the public success label and
+matching source revision.

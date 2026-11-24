@@ -39,6 +39,7 @@ exchange to prove continued progress.
 | Four original owner regressions | Expected failures, 103/107 passing | [admission-before.log](admission-before.log) |
 | Owner/control/flow/termination overlap (Debug) | 271/271 | [overlap.Debug.log](overlap.Debug.log) |
 | Owner/control/flow/termination overlap (ReleaseSafe) | 271/271 | [overlap.ReleaseSafe.log](overlap.ReleaseSafe.log) |
+| Native Windows transport and operation admission job | Success at `18b1b9d8`, 3m 42s | [native-windows.json](native-windows.json) |
 
 Counts include imported support tests and overlapping existing cases. The
 selected bundle covers DATAGRAM pacing/QPACK, CONNECT FIN/RESET/STOP_SENDING,
@@ -59,6 +60,15 @@ ReleaseSafe uses the same filters with `-Doptimize=ReleaseSafe`. Native Windows
 CI additionally runs the operation-admission filter through `test-webtransport`
 alongside the existing HTTP/H3 DATAGRAM/WebSocket transport checks. Its result
 is recorded separately from local runtime verification.
+
+The [native Windows job at `18b1b9d8`](https://github.com/passchaos/netz/actions/runs/45344570750/job/138276065497)
+completed successfully in 3m 42s. The public matrix label reports success for
+the Windows runner, and the run's commit link matches the source revision.
+[The public snapshot](native-windows.json) records both sources and the native
+command. All seven owner tests are unconditional and use zio; the selected
+WebTransport suite also retains its guard against matching dependency tests
+without a named protocol case. This evidence qualifies the focused native
+transport job; other workflow jobs have their own status.
 
 [The public contract](../../../webtransport_operation_admission.md) documents
 ownership, progress preservation and relative-deadline delegation.

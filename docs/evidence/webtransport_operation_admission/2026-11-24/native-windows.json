@@ -1,0 +1,22 @@
+{
+  "source": "Public GitHub Actions matrix and matching run commit link",
+  "run_id": 45344570750,
+  "head_sha": "18b1b9d833a426a1dae148bc79efe65a38daa6f6",
+  "run_url": "https://github.com/passchaos/netz/actions/runs/45344570750",
+  "matrix_url": "https://github.com/passchaos/netz/actions/runs/45344570750/graph/matrix/fC1wb3J0YWJsZS18?attempt=1&expanded=true",
+  "native_job_id": 138276065497,
+  "conclusion": "success",
+  "observed_at": "2026-11-24T07:04:17.647408+00:00",
+  "card": {
+    "url": "https://github.com/passchaos/netz/actions/runs/45344570750/job/138276065497",
+    "labels": [
+      "completed successfully:"
+    ],
+    "text": [
+      "Portable x86_64-windows-gnu (windows-latest)",
+      "3m 42s",
+      "Portable x86_64-windows-gnu (windows-latest)"
+    ]
+  },
+  "command": "zig build test-http test-http3 test-websocket test-webtransport -Dtarget=x86_64-windows-gnu '-Dtest-filter=peer address' '-Dtest-filter=HTTP/3 CONNECT DATAGRAM' '-Dtest-filter=WebSocket stream adapter' '-Dtest-filter=WebTransport operation admission' --summary all"
+}
