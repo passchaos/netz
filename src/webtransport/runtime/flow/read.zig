@@ -7,6 +7,7 @@ const control_mod = @import("../session_control.zig");
 const progress_mod = @import("progress.zig");
 const incremental = @import("../stream_incremental.zig");
 const stream = @import("../stream.zig");
+const operation_owner = @import("../owner.zig");
 
 pub fn read(control: *control_mod.Control, h3: anytype, registry: *webtransport.StreamRegistry, session_id: webtransport.SessionId, out: []u8) incremental.Error!incremental.Read {
     return readUntil(control, h3, registry, session_id, null, out, null) catch |err| switch (err) {
@@ -31,6 +32,7 @@ pub fn readIdWithDeadline(control: *control_mod.Control, h3: anytype, registry: 
 }
 
 fn readUntil(control: *control_mod.Control, h3: anytype, registry: *webtransport.StreamRegistry, session_id: webtransport.SessionId, target: ?u62, out: []u8, deadline: ?std.Io.Clock.Timestamp) incremental.TimeoutError!incremental.Read {
+    try operation_owner.receiveH3(h3);
     var context = progress_mod.Context(@TypeOf(h3)){ .control = control, .h3 = h3, .registry = registry, .input = .incremental, .target = target };
     return incremental.readWithProgress(&h3.established.connection, registry, session_id, target, out, deadline, context.progress());
 }
@@ -47,6 +49,7 @@ pub fn receiveWithDeadline(control: *control_mod.Control, h3: anytype, registry:
 }
 
 fn receiveUntil(control: *control_mod.Control, h3: anytype, registry: *webtransport.StreamRegistry, session_id: webtransport.SessionId, maximum: usize, deadline: ?std.Io.Clock.Timestamp) stream.TimeoutError!stream.OwnedHandshakeStream {
+    try operation_owner.receiveH3(h3);
     var context = progress_mod.Context(@TypeOf(h3)){ .control = control, .h3 = h3, .registry = registry, .input = .whole };
     return stream.receiveWithProgress(&h3.established.connection, registry, session_id, maximum, deadline, context.progress());
 }

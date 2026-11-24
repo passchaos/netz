@@ -1139,6 +1139,7 @@ pub const AcceptedHandshakeSession = struct {
     pub fn receiveStream(
         self: *AcceptedHandshakeSession,
     ) Error!OwnedHandshakeStream {
+        try operation_owner.receive(self);
         try connection_lifecycle.ensureOpen(&self.control, &self.h3, &self.streams);
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
         return flow_read.receive(
@@ -1155,8 +1156,6 @@ pub const AcceptedHandshakeSession = struct {
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!OwnedHandshakeStream {
         if (timeout.nanoseconds <= 0) return error.Timeout;
-        try connection_lifecycle.ensureOpen(&self.control, &self.h3, &self.streams);
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
         return self.receiveStreamWithDeadline(.fromNow(
             self.h3.established.connection.endpoint.io,
             .{ .raw = timeout, .clock = .awake },
@@ -1168,6 +1167,7 @@ pub const AcceptedHandshakeSession = struct {
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!OwnedHandshakeStream {
         _ = try deadline_policy.usableAwake(self.h3.established.connection.endpoint.io, deadline);
+        try operation_owner.receive(self);
         try connection_lifecycle.ensureOpen(&self.control, &self.h3, &self.streams);
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
         return flow_read.receiveWithDeadline(
@@ -1199,6 +1199,7 @@ pub const AcceptedHandshakeSession = struct {
         self: *AcceptedHandshakeSession,
         out: []u8,
     ) Error!StreamRead {
+        try operation_owner.receive(self);
         try connection_lifecycle.ensureOpen(&self.control, &self.h3, &self.streams);
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
         return flow_read.read(
@@ -1216,19 +1217,10 @@ pub const AcceptedHandshakeSession = struct {
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!StreamRead {
         if (timeout.nanoseconds <= 0) return error.Timeout;
-        try connection_lifecycle.ensureOpen(&self.control, &self.h3, &self.streams);
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
-        return flow_read.readWithDeadline(
-            &self.control,
-            &self.h3,
-            &self.streams,
-            self.session_id,
-            out,
-            .fromNow(self.h3.established.connection.endpoint.io, .{
-                .raw = timeout,
-                .clock = .awake,
-            }),
-        );
+        return self.readStreamWithDeadline(out, .fromNow(
+            self.h3.established.connection.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
     }
 
     pub fn readStreamWithDeadline(
@@ -1237,6 +1229,7 @@ pub const AcceptedHandshakeSession = struct {
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!StreamRead {
         _ = try deadline_policy.usableAwake(self.h3.established.connection.endpoint.io, deadline);
+        try operation_owner.receive(self);
         try connection_lifecycle.ensureOpen(&self.control, &self.h3, &self.streams);
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
         return flow_read.readWithDeadline(
@@ -1255,6 +1248,7 @@ pub const AcceptedHandshakeSession = struct {
         stream_id: u62,
         out: []u8,
     ) Error!StreamRead {
+        try operation_owner.receive(self);
         try connection_lifecycle.ensureOpen(&self.control, &self.h3, &self.streams);
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
         return flow_read.readId(
@@ -1274,16 +1268,10 @@ pub const AcceptedHandshakeSession = struct {
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!StreamRead {
         if (timeout.nanoseconds <= 0) return error.Timeout;
-        try connection_lifecycle.ensureOpen(&self.control, &self.h3, &self.streams);
-        defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
-        return self.readStreamIdWithDeadline(
-            stream_id,
-            out,
-            .fromNow(self.h3.established.connection.endpoint.io, .{
-                .raw = timeout,
-                .clock = .awake,
-            }),
-        );
+        return self.readStreamIdWithDeadline(stream_id, out, .fromNow(
+            self.h3.established.connection.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
     }
 
     pub fn readStreamIdWithDeadline(
@@ -1293,6 +1281,7 @@ pub const AcceptedHandshakeSession = struct {
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!StreamRead {
         _ = try deadline_policy.usableAwake(self.h3.established.connection.endpoint.io, deadline);
+        try operation_owner.receive(self);
         try connection_lifecycle.ensureOpen(&self.control, &self.h3, &self.streams);
         defer _ = connection_lifecycle.observe(&self.control, &self.h3, &self.streams);
         return flow_read.readIdWithDeadline(

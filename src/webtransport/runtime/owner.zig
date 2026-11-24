@@ -2,6 +2,7 @@
 
 test {
     _ = @import("owner/tests.zig");
+    _ = @import("owner/stream_tests.zig");
 }
 
 pub fn callbackBorrowed(h3: anytype) bool {
@@ -15,9 +16,13 @@ pub fn buffered(h3: anytype) error{ConcurrentRead}!void {
 }
 
 /// Shared endpoints keep their socket owner and use pollers for ready data.
+pub fn receiveH3(h3: anytype) error{ ConcurrentRead, InvalidDispatcherState }!void {
+    try buffered(h3);
+    if (h3.dispatcherBound()) return error.InvalidDispatcherState;
+}
+
 pub fn receive(session: anytype) error{ ConcurrentRead, InvalidDispatcherState }!void {
-    try buffered(&session.h3);
-    if (session.h3.dispatcherBound()) return error.InvalidDispatcherState;
+    try receiveH3(&session.h3);
     const Session = @typeInfo(@TypeOf(session)).pointer.child;
     if (comptime @hasField(Session, "dispatcher")) {
         if (session.dispatcher != null) return error.InvalidDispatcherState;

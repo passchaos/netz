@@ -21,15 +21,24 @@ Blocking Session-event waits and deadline-bound event cleanup have the same
 owner requirement. Ordinary Session-event polling remains nonblocking for a
 shared endpoint, while still rejecting callback reentry.
 
+Incremental `readStream*`, targeted `readStreamId*` and whole-stream
+`receiveStream*` have the same blocking-owner requirement. Admission precedes
+stream association, reader-mode claims, buffered payload copies and receive
+credit updates, even when a complete payload and FIN are already buffered.
+Rejection preserves receive cursors, registry records and caller storage.
+`pollStream` and `pollCompleteStream` retain buffered delivery for shared owners.
+The composable H3 readers in `runtime/flow/read.zig` enforce this admission before
+their progress callbacks as well.
+
 Caller-buffer batch progress is per call: `received_count` clears before owner
 admission and retains the completed prefix after work begins. Rejected calls
 preserve output bytes, destination pointers and lengths. Batch send similarly
 clears `committed_count` before application preflight.
 
-Relative DATAGRAM receive timeouts become an awake-clock deadline at the public
-entry point and delegate to the matching deadline form. Owned, caller-buffer
-and batch forms therefore keep one budget through Session admission,
-negotiation, control maintenance and socket waits.
+Relative DATAGRAM and stream receive timeouts become an awake-clock deadline at
+the public entry point and delegate to the matching deadline form. Owned,
+caller-buffer, targeted and batch forms therefore keep one budget through
+Session admission, negotiation, control maintenance and socket waits.
 
 The common admission rules live in `webtransport/runtime/owner.zig`.
 `connection_lifecycle.zig` uses them before mutable buffered inspection and

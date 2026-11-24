@@ -2028,9 +2028,9 @@ pub const HandshakeClientSession = struct {
     pub fn receiveStream(
         self: *HandshakeClientSession,
     ) Error!OwnedHandshakeStream {
+        try operation_owner.receive(self);
         try connection_lifecycle.ensureOpen(&self.control, &self.h3, &self.streams);
         defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
-        if (self.dispatcher != null) return error.InvalidDispatcherState;
         return flow_read.receive(
             &self.control,
             &self.h3,
@@ -2045,9 +2045,6 @@ pub const HandshakeClientSession = struct {
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!OwnedHandshakeStream {
         if (timeout.nanoseconds <= 0) return error.Timeout;
-        try connection_lifecycle.ensureOpen(&self.control, &self.h3, &self.streams);
-        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
-        if (self.dispatcher != null) return error.InvalidDispatcherState;
         return self.receiveStreamWithDeadline(.fromNow(
             self.h3.established.connection.endpoint.io,
             .{ .raw = timeout, .clock = .awake },
@@ -2059,9 +2056,9 @@ pub const HandshakeClientSession = struct {
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!OwnedHandshakeStream {
         _ = try deadline_policy.usableAwake(self.h3.established.connection.endpoint.io, deadline);
+        try operation_owner.receive(self);
         try connection_lifecycle.ensureOpen(&self.control, &self.h3, &self.streams);
         defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
-        if (self.dispatcher != null) return error.InvalidDispatcherState;
         return flow_read.receiveWithDeadline(
             &self.control,
             &self.h3,
@@ -2160,9 +2157,9 @@ pub const HandshakeClientSession = struct {
         self: *HandshakeClientSession,
         out: []u8,
     ) Error!StreamRead {
+        try operation_owner.receive(self);
         try connection_lifecycle.ensureOpen(&self.control, &self.h3, &self.streams);
         defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
-        if (self.dispatcher != null) return error.InvalidDispatcherState;
         return flow_read.read(
             &self.control,
             &self.h3,
@@ -2178,20 +2175,10 @@ pub const HandshakeClientSession = struct {
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!StreamRead {
         if (timeout.nanoseconds <= 0) return error.Timeout;
-        try connection_lifecycle.ensureOpen(&self.control, &self.h3, &self.streams);
-        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
-        if (self.dispatcher != null) return error.InvalidDispatcherState;
-        return flow_read.readWithDeadline(
-            &self.control,
-            &self.h3,
-            &self.streams,
-            self.session_id,
-            out,
-            .fromNow(self.h3.established.connection.endpoint.io, .{
-                .raw = timeout,
-                .clock = .awake,
-            }),
-        );
+        return self.readStreamWithDeadline(out, .fromNow(
+            self.h3.established.connection.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
     }
 
     pub fn readStreamWithDeadline(
@@ -2200,9 +2187,9 @@ pub const HandshakeClientSession = struct {
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!StreamRead {
         _ = try deadline_policy.usableAwake(self.h3.established.connection.endpoint.io, deadline);
+        try operation_owner.receive(self);
         try connection_lifecycle.ensureOpen(&self.control, &self.h3, &self.streams);
         defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
-        if (self.dispatcher != null) return error.InvalidDispatcherState;
         return flow_read.readWithDeadline(
             &self.control,
             &self.h3,
@@ -2219,9 +2206,9 @@ pub const HandshakeClientSession = struct {
         stream_id: u62,
         out: []u8,
     ) Error!StreamRead {
+        try operation_owner.receive(self);
         try connection_lifecycle.ensureOpen(&self.control, &self.h3, &self.streams);
         defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
-        if (self.dispatcher != null) return error.InvalidDispatcherState;
         return flow_read.readId(
             &self.control,
             &self.h3,
@@ -2239,16 +2226,10 @@ pub const HandshakeClientSession = struct {
         timeout: std.Io.Duration,
     ) ReceiveTimeoutError!StreamRead {
         if (timeout.nanoseconds <= 0) return error.Timeout;
-        try connection_lifecycle.ensureOpen(&self.control, &self.h3, &self.streams);
-        defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
-        return self.readStreamIdWithDeadline(
-            stream_id,
-            out,
-            .fromNow(self.h3.established.connection.endpoint.io, .{
-                .raw = timeout,
-                .clock = .awake,
-            }),
-        );
+        return self.readStreamIdWithDeadline(stream_id, out, .fromNow(
+            self.h3.established.connection.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
     }
 
     pub fn readStreamIdWithDeadline(
@@ -2258,9 +2239,9 @@ pub const HandshakeClientSession = struct {
         deadline: std.Io.Clock.Timestamp,
     ) ReceiveTimeoutError!StreamRead {
         _ = try deadline_policy.usableAwake(self.h3.established.connection.endpoint.io, deadline);
+        try operation_owner.receive(self);
         try connection_lifecycle.ensureOpen(&self.control, &self.h3, &self.streams);
         defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
-        if (self.dispatcher != null) return error.InvalidDispatcherState;
         return flow_read.readIdWithDeadline(
             &self.control,
             &self.h3,

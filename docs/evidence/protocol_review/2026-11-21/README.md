@@ -3710,3 +3710,16 @@ The focused Windows transport job passed at `18b1b9d8` (3m 42s), including the
 seven operation-admission cases with zio and the existing HTTP/H3 DATAGRAM/
 WebSocket checks. The linked evidence records the public success label and
 matching source revision.
+
+
+## Two-hundred-and-eleventh pass: stream reader owner admission
+
+Blocking incremental, targeted and whole-stream facades now admit their owner
+before lifecycle inspection or buffered delivery. Composable H3 flow readers
+reuse the same receive guard before progress callbacks, while relative stream
+timeouts delegate through one entry deadline. Four FIN-qualified baseline
+regressions are fixed; the reader bundle passes 108/108 and the related Debug
+stream/grant/termination overlap passes 199/200 with one Linux-only UDP GRO
+skip. [Stream reader evidence](../../webtransport_stream_reader_admission/2026-11-24/README.md)
+records preserved buffers, registry/credit state, poll continuation, the failed
+baseline and the native CI filter.
