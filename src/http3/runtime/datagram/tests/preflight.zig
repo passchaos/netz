@@ -1,4 +1,5 @@
 const std = @import("std");
+const Backend = @import("../../../../runtime.zig").Backend;
 const pair_mod = @import("../test_support/pair.zig");
 
 const Spy = struct {
@@ -32,10 +33,10 @@ const Spy = struct {
 };
 
 test "HTTP/3 CONNECT DATAGRAM rejected callback send clears batch progress" {
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
+    var backend = try Backend.initZio(std.testing.allocator);
+    defer backend.deinit();
     var pair: pair_mod.Pair = undefined;
-    try pair.init(threaded.io());
+    try pair.init(backend.io());
     defer pair.deinit();
     pair.client.callback_reader_active = true;
     defer pair.client.callback_reader_active = false;
@@ -45,10 +46,10 @@ test "HTTP/3 CONNECT DATAGRAM rejected callback send clears batch progress" {
 }
 
 test "HTTP/3 CONNECT DATAGRAM dispatcher rejection clears receive progress" {
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
+    var backend = try Backend.initZio(std.testing.allocator);
+    defer backend.deinit();
     var pair: pair_mod.Pair = undefined;
-    try pair.init(threaded.io());
+    try pair.init(backend.io());
     defer pair.deinit();
     inline for (.{ true, false }) |client| {
         const owner = if (client) &pair.client else &pair.server;
@@ -64,10 +65,10 @@ test "HTTP/3 CONNECT DATAGRAM dispatcher rejection clears receive progress" {
 }
 
 test "HTTP/3 CONNECT DATAGRAM callback receive rejects before protocol inspection" {
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
+    var backend = try Backend.initZio(std.testing.allocator);
+    defer backend.deinit();
     var pair: pair_mod.Pair = undefined;
-    try pair.init(threaded.io());
+    try pair.init(backend.io());
     defer pair.deinit();
     pair.client.callback_reader_active = true;
     defer pair.client.callback_reader_active = false;
@@ -78,10 +79,10 @@ test "HTTP/3 CONNECT DATAGRAM callback receive rejects before protocol inspectio
 }
 
 test "HTTP/3 CONNECT DATAGRAM all callback receive forms reject before inspection" {
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
+    var backend = try Backend.initZio(std.testing.allocator);
+    defer backend.deinit();
     var pair: pair_mod.Pair = undefined;
-    try pair.init(threaded.io());
+    try pair.init(backend.io());
     defer pair.deinit();
     pair.client.callback_reader_active = true;
     defer pair.client.callback_reader_active = false;
@@ -98,10 +99,10 @@ test "HTTP/3 CONNECT DATAGRAM all callback receive forms reject before inspectio
 }
 
 test "HTTP/3 CONNECT DATAGRAM invalid receive preflight never invokes protocol callbacks" {
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
+    var backend = try Backend.initZio(std.testing.allocator);
+    defer backend.deinit();
     var pair: pair_mod.Pair = undefined;
-    try pair.init(threaded.io());
+    try pair.init(backend.io());
     defer pair.deinit();
     inline for (.{ true, false }) |client| {
         const owner = if (client) &pair.client else &pair.server;
@@ -142,20 +143,20 @@ test "HTTP/3 CONNECT DATAGRAM fulfilled input uses nonblocking buffered inspecti
             pub fn maintain(_: @This(), _: ?std.Io.Clock.Timestamp) error{Timeout}!void {}
         };
     };
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
+    var backend = try Backend.initZio(std.testing.allocator);
+    defer backend.deinit();
     const Mode = enum { owned, into, batch };
     inline for (.{ true, false }) |client| {
         inline for (std.meta.tags(Mode)) |mode| {
             var pair: pair_mod.Pair = undefined;
-            try pair.init(threaded.io());
+            try pair.init(backend.io());
             defer pair.deinit();
             const owner = if (client) &pair.client else &pair.server;
             const peer = if (client) &pair.server else &pair.client;
             try peer.sendConnectDatagram(0, "delivered");
             var budget = BudgetSensitive{};
             const progress = BudgetSensitive.Progress{ .state = &budget };
-            const until = std.Io.Clock.Timestamp.fromNow(threaded.io(), .{ .clock = .awake, .raw = .fromSeconds(1) });
+            const until = std.Io.Clock.Timestamp.fromNow(backend.io(), .{ .clock = .awake, .raw = .fromSeconds(1) });
             var storage: [16]u8 = undefined;
             switch (mode) {
                 .owned => {
@@ -189,15 +190,15 @@ test "HTTP/3 CONNECT DATAGRAM buffered inspection still propagates protocol reje
 
         pub fn maintain(_: @This(), _: ?std.Io.Clock.Timestamp) ErrorSet!void {}
     };
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
+    var backend = try Backend.initZio(std.testing.allocator);
+    defer backend.deinit();
     var pair: pair_mod.Pair = undefined;
-    try pair.init(threaded.io());
+    try pair.init(backend.io());
     defer pair.deinit();
     try pair.server.sendConnectDatagram(0, "delivered");
     var storage: [16]u8 = @splat(0);
     const progress = Reject{ .output = &storage };
-    try std.testing.expectError(error.InvalidCapsule, pair.client.receiveConnectDatagramIntoWithProgress(0, &storage, .fromNow(threaded.io(), .{
+    try std.testing.expectError(error.InvalidCapsule, pair.client.receiveConnectDatagramIntoWithProgress(0, &storage, .fromNow(backend.io(), .{
         .clock = .awake,
         .raw = .fromSeconds(1),
     }), progress));

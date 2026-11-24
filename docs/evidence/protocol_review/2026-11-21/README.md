@@ -3686,3 +3686,7 @@ baseline cases are fixed; DATAGRAM Debug/ReleaseSafe bundles pass 84/84,
 WebTransport flow/termination overlaps pass 107/107 and Windows binaries
 compile/link. [DATAGRAM preflight evidence](../../http3_datagram_preflight/2026-11-24/README.md)
 records owner, counter, delivery and protocol-error coverage.
+The live fixtures now use zio across platforms after native Windows diagnosed
+Zig 0.16 Threaded's unsupported timed UDP receive; the zio Debug/ReleaseSafe
+bundles also pass 84/84. The linked evidence retains the failed native exception
+contexts and distinguishes runtime verification from compilation.

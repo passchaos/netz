@@ -7,6 +7,11 @@ associate HTTP DATAGRAM payloads with an Extended CONNECT request stream.
 reuses this association and supplies Session control/flow maintenance through
 the progress forms.
 
+Deadline-bound operations require an I/O backend that supports timed UDP
+receives. `runtime.Backend.init` supplies Netz's zio backend for these operations
+on supported platforms. Zig 0.16's Windows `std.Io.Threaded` returns
+`ConcurrencyUnavailable` for timed UDP receives, including CONNECT setup.
+
 Every receive operation validates its owner, awake-clock deadline, request
 stream ID, association and negotiated HTTP/QUIC DATAGRAM capability before
 calling protocol progress or touching the delivery queue. Blocking receive

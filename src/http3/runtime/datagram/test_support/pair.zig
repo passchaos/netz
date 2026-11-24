@@ -1,4 +1,6 @@
 //! Two HTTP/3 owners sharing a real protected UDP CONNECT exchange.
+//! Live callers use runtime.Backend's zio std.Io: Zig 0.16 Threaded on
+//! Windows rejects deadline-bound net_receive with ConcurrencyUnavailable.
 const std = @import("std");
 const http3 = @import("../../../mod.zig");
 const runtime = @import("../../../runtime.zig");

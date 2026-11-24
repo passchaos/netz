@@ -1,0 +1,154 @@
+Public annotation excerpts (not a complete test log)
+Run: https://github.com/passchaos/netz/actions/runs/45340299557
+Job: https://github.com/passchaos/netz/actions/runs/45340299557/job/138262215079
+Revision: e7067de449ba4f10f0a4e1d784c532445b1ba14f
+
+error: 'http3.runtime.datagram.tests.receive_feedback.test.HTTP/3 CONNECT DATAGRAM caller buffer survives QPACK feedback backpressure' failed:
+       D:\a\netz\netz\netz\src\quic\runtime.zig:1704:38: 0x7ff71e522406 in finishManyKernelBytesInto (test_zcu.obj)
+                   if (receive_error) |err| return err;
+                                            ^
+       D:\a\netz\netz\netz\src\quic\runtime.zig:1686:13: 0x7ff71e521d8b in receiveManyBytesIntoTimeout (test_zcu.obj)
+                   return self.finishManyKernelBytesInto(
+                   ^
+       D:\a\netz\netz\netz\src\quic\one_rtt\connection.zig:11272:25: 0x7ff71e51f2d8 in receiveDatagramsIntoServicingTimersUntil (test_zcu.obj)
+                               return error.ConcurrencyUnavailable;
+                               ^
+       D:\a\netz\netz\netz\src\quic\one_rtt\connection.zig:11156:9: 0x7ff71e59b8e6 in receiveDatagramsIntoServicingTimersDeadline (test_zcu.obj)
+               return self.receiveDatagramsIntoServicingTimersUntil(
+               ^
+       D:\a\netz\netz\netz\src\http3\runtime\receive\cursor.zig:243:36: 0x7ff71e59b3db in fillRawBatchWithDeadline (test_zcu.obj)
+
+error: 'http3.runtime.datagram.tests.feedback.test.HTTP/3 CONNECT DATAGRAM pacing wake resumes QPACK feedback without another peer packet' failed:
+       D:\a\netz\netz\netz\src\quic\runtime.zig:1704:38: 0x7ff71e522406 in finishManyKernelBytesInto (test_zcu.obj)
+                   if (receive_error) |err| return err;
+                                            ^
+       D:\a\netz\netz\netz\src\quic\runtime.zig:1686:13: 0x7ff71e521d8b in receiveManyBytesIntoTimeout (test_zcu.obj)
+                   return self.finishManyKernelBytesInto(
+                   ^
+       D:\a\netz\netz\netz\src\quic\one_rtt\connection.zig:11272:25: 0x7ff71e51f2d8 in receiveDatagramsIntoServicingTimersUntil (test_zcu.obj)
+                               return error.ConcurrencyUnavailable;
+                               ^
+       D:\a\netz\netz\netz\src\quic\one_rtt\connection.zig:11156:9: 0x7ff71e59b8e6 in receiveDatagramsIntoServicingTimersDeadline (test_zcu.obj)
+               return self.receiveDatagramsIntoServicingTimersUntil(
+               ^
+       D:\a\netz\netz\netz\src\http3\runtime\receive\cursor.zig:243:36: 0x7ff71e59b3db in fillRawBatchWithDeadline (test_zcu.obj)
+
+error: 'http3.runtime.datagram.tests.feedback.test.HTTP/3 CONNECT DATAGRAM batch preserves its prefix with QPACK feedback and STOP_SENDING' failed:
+       D:\a\netz\netz\netz\src\quic\runtime.zig:1704:38: 0x7ff71e522406 in finishManyKernelBytesInto (test_zcu.obj)
+                   if (receive_error) |err| return err;
+                                            ^
+       D:\a\netz\netz\netz\src\quic\runtime.zig:1686:13: 0x7ff71e521d8b in receiveManyBytesIntoTimeout (test_zcu.obj)
+                   return self.finishManyKernelBytesInto(
+                   ^
+       D:\a\netz\netz\netz\src\quic\one_rtt\connection.zig:11272:25: 0x7ff71e51f2d8 in receiveDatagramsIntoServicingTimersUntil (test_zcu.obj)
+                               return error.ConcurrencyUnavailable;
+                               ^
+       D:\a\netz\netz\netz\src\quic\one_rtt\connection.zig:11156:9: 0x7ff71e59b8e6 in receiveDatagramsIntoServicingTimersDeadline (test_zcu.obj)
+               return self.receiveDatagramsIntoServicingTimersUntil(
+               ^
+       D:\a\netz\netz\netz\src\http3\runtime\receive\cursor.zig:243:36: 0x7ff71e59b3db in fillRawBatchWithDeadline (test_zcu.obj)
+
+error: 'http3.runtime.datagram.tests.feedback.test.HTTP/3 CONNECT DATAGRAM wait retains its deadline while QPACK feedback is blocked' failed:
+       D:\a\netz\netz\netz\src\quic\runtime.zig:1704:38: 0x7ff71e522406 in finishManyKernelBytesInto (test_zcu.obj)
+                   if (receive_error) |err| return err;
+                                            ^
+       D:\a\netz\netz\netz\src\quic\runtime.zig:1686:13: 0x7ff71e521d8b in receiveManyBytesIntoTimeout (test_zcu.obj)
+                   return self.finishManyKernelBytesInto(
+                   ^
+       D:\a\netz\netz\netz\src\quic\one_rtt\connection.zig:11272:25: 0x7ff71e51f2d8 in receiveDatagramsIntoServicingTimersUntil (test_zcu.obj)
+                               return error.ConcurrencyUnavailable;
+                               ^
+       D:\a\netz\netz\netz\src\quic\one_rtt\connection.zig:11156:9: 0x7ff71e59b8e6 in receiveDatagramsIntoServicingTimersDeadline (test_zcu.obj)
+               return self.receiveDatagramsIntoServicingTimersUntil(
+               ^
+       D:\a\netz\netz\netz\src\http3\runtime\receive\cursor.zig:243:36: 0x7ff71e59b3db in fillRawBatchWithDeadline (test_zcu.obj)
+
+error: 'http3.runtime.datagram.tests.feedback.test.HTTP/3 CONNECT DATAGRAM pacing wait preserves queued QPACK feedback at STOP_SENDING' failed:
+       D:\a\netz\netz\netz\src\quic\runtime.zig:1704:38: 0x7ff71e522406 in finishManyKernelBytesInto (test_zcu.obj)
+                   if (receive_error) |err| return err;
+                                            ^
+       D:\a\netz\netz\netz\src\quic\runtime.zig:1686:13: 0x7ff71e521d8b in receiveManyBytesIntoTimeout (test_zcu.obj)
+                   return self.finishManyKernelBytesInto(
+                   ^
+       D:\a\netz\netz\netz\src\quic\one_rtt\connection.zig:11272:25: 0x7ff71e51f2d8 in receiveDatagramsIntoServicingTimersUntil (test_zcu.obj)
+                               return error.ConcurrencyUnavailable;
+                               ^
+       D:\a\netz\netz\netz\src\quic\one_rtt\connection.zig:11156:9: 0x7ff71e59b8e6 in receiveDatagramsIntoServicingTimersDeadline (test_zcu.obj)
+               return self.receiveDatagramsIntoServicingTimersUntil(
+               ^
+       D:\a\netz\netz\netz\src\http3\runtime\receive\cursor.zig:243:36: 0x7ff71e59b3db in fillRawBatchWithDeadline (test_zcu.obj)
+
+error: 'http3.runtime.datagram.tests.pacing.test.HTTP/3 CONNECT DATAGRAM pacing wait retains caller timeout without peer traffic' failed:
+       D:\a\netz\netz\netz\src\quic\runtime.zig:1704:38: 0x7ff71e522406 in finishManyKernelBytesInto (test_zcu.obj)
+                   if (receive_error) |err| return err;
+                                            ^
+       D:\a\netz\netz\netz\src\quic\runtime.zig:1686:13: 0x7ff71e521d8b in receiveManyBytesIntoTimeout (test_zcu.obj)
+                   return self.finishManyKernelBytesInto(
+                   ^
+       D:\a\netz\netz\netz\src\quic\one_rtt\connection.zig:11272:25: 0x7ff71e51f2d8 in receiveDatagramsIntoServicingTimersUntil (test_zcu.obj)
+                               return error.ConcurrencyUnavailable;
+                               ^
+       D:\a\netz\netz\netz\src\quic\one_rtt\connection.zig:11156:9: 0x7ff71e59b8e6 in receiveDatagramsIntoServicingTimersDeadline (test_zcu.obj)
+               return self.receiveDatagramsIntoServicingTimersUntil(
+               ^
+       D:\a\netz\netz\netz\src\http3\runtime\receive\cursor.zig:243:36: 0x7ff71e59b3db in fillRawBatchWithDeadline (test_zcu.obj)
+
+error: 'http3.runtime.datagram.tests.pacing.test.HTTP/3 CONNECT DATAGRAM pacing wait preserves sibling datagrams and detached DATA' failed:
+       D:\a\netz\netz\netz\src\quic\runtime.zig:1704:38: 0x7ff71e522406 in finishManyKernelBytesInto (test_zcu.obj)
+                   if (receive_error) |err| return err;
+                                            ^
+       D:\a\netz\netz\netz\src\quic\runtime.zig:1686:13: 0x7ff71e521d8b in receiveManyBytesIntoTimeout (test_zcu.obj)
+                   return self.finishManyKernelBytesInto(
+                   ^
+       D:\a\netz\netz\netz\src\quic\one_rtt\connection.zig:11272:25: 0x7ff71e51f2d8 in receiveDatagramsIntoServicingTimersUntil (test_zcu.obj)
+                               return error.ConcurrencyUnavailable;
+                               ^
+       D:\a\netz\netz\netz\src\quic\one_rtt\connection.zig:11156:9: 0x7ff71e59b8e6 in receiveDatagramsIntoServicingTimersDeadline (test_zcu.obj)
+               return self.receiveDatagramsIntoServicingTimersUntil(
+               ^
+       D:\a\netz\netz\netz\src\http3\runtime\receive\cursor.zig:243:36: 0x7ff71e59b3db in fillRawBatchWithDeadline (test_zcu.obj)
+
+error: 'http3.runtime.datagram.tests.pacing.test.HTTP/3 CONNECT DATAGRAM pacing wait resumes at a local timer' failed:
+       D:\a\netz\netz\netz\src\quic\runtime.zig:1704:38: 0x7ff71e522406 in finishManyKernelBytesInto (test_zcu.obj)
+                   if (receive_error) |err| return err;
+                                            ^
+       D:\a\netz\netz\netz\src\quic\runtime.zig:1686:13: 0x7ff71e521d8b in receiveManyBytesIntoTimeout (test_zcu.obj)
+                   return self.finishManyKernelBytesInto(
+                   ^
+       D:\a\netz\netz\netz\src\quic\one_rtt\connection.zig:11272:25: 0x7ff71e51f2d8 in receiveDatagramsIntoServicingTimersUntil (test_zcu.obj)
+                               return error.ConcurrencyUnavailable;
+                               ^
+       D:\a\netz\netz\netz\src\quic\one_rtt\connection.zig:11156:9: 0x7ff71e59b8e6 in receiveDatagramsIntoServicingTimersDeadline (test_zcu.obj)
+               return self.receiveDatagramsIntoServicingTimersUntil(
+               ^
+       D:\a\netz\netz\netz\src\http3\runtime\receive\cursor.zig:243:36: 0x7ff71e59b3db in fillRawBatchWithDeadline (test_zcu.obj)
+
+error: 'http3.runtime.datagram.tests.pacing.test.HTTP/3 CONNECT DATAGRAM pacing wait observes peer STOP_SENDING' failed:
+       D:\a\netz\netz\netz\src\quic\runtime.zig:1704:38: 0x7ff71e522406 in finishManyKernelBytesInto (test_zcu.obj)
+                   if (receive_error) |err| return err;
+                                            ^
+       D:\a\netz\netz\netz\src\quic\runtime.zig:1686:13: 0x7ff71e521d8b in receiveManyBytesIntoTimeout (test_zcu.obj)
+                   return self.finishManyKernelBytesInto(
+                   ^
+       D:\a\netz\netz\netz\src\quic\one_rtt\connection.zig:11272:25: 0x7ff71e51f2d8 in receiveDatagramsIntoServicingTimersUntil (test_zcu.obj)
+                               return error.ConcurrencyUnavailable;
+                               ^
+       D:\a\netz\netz\netz\src\quic\one_rtt\connection.zig:11156:9: 0x7ff71e59b8e6 in receiveDatagramsIntoServicingTimersDeadline (test_zcu.obj)
+               return self.receiveDatagramsIntoServicingTimersUntil(
+               ^
+       D:\a\netz\netz\netz\src\http3\runtime\receive\cursor.zig:243:36: 0x7ff71e59b3db in fillRawBatchWithDeadline (test_zcu.obj)
+
+error: 'http3.runtime.datagram.tests.pacing.test.HTTP/3 CONNECT DATAGRAM pacing wait observes peer connection close' failed:
+       D:\a\netz\netz\netz\src\quic\runtime.zig:1704:38: 0x7ff71e522406 in finishManyKernelBytesInto (test_zcu.obj)
+                   if (receive_error) |err| return err;
+                                            ^
+       D:\a\netz\netz\netz\src\quic\runtime.zig:1686:13: 0x7ff71e521d8b in receiveManyBytesIntoTimeout (test_zcu.obj)
+                   return self.finishManyKernelBytesInto(
+                   ^
+       D:\a\netz\netz\netz\src\quic\one_rtt\connection.zig:11272:25: 0x7ff71e51f2d8 in receiveDatagramsIntoServicingTimersUntil (test_zcu.obj)
+                               return error.ConcurrencyUnavailable;
+                               ^
+       D:\a\netz\netz\netz\src\quic\one_rtt\connection.zig:11156:9: 0x7ff71e59b8e6 in receiveDatagramsIntoServicingTimersDeadline (test_zcu.obj)
+               return self.receiveDatagramsIntoServicingTimersUntil(
+               ^
+       D:\a\netz\netz\netz\src\http3\runtime\receive\cursor.zig:243:36: 0x7ff71e59b3db in fillRawBatchWithDeadline (test_zcu.obj)

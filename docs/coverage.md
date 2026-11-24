@@ -177,6 +177,9 @@ AArch64/x86_64 macOS. A native Windows runner additionally executes the focused
 HTTP peer-address, HTTP/3 CONNECT DATAGRAM and WebSocket byte-stream adapter
 tests, covering zio Winsock queries, portable address vectors, datagram owner/
 progress preflight, terminal write failures and queued Close/send ordering.
+Live CONNECT DATAGRAM regressions use Netz's zio backend on every platform.
+Zig 0.16's Windows `std.Io.Threaded` rejects deadline-bound UDP `net_receive`
+operations with `ConcurrencyUnavailable`, including CONNECT fixture setup.
 
 Use `zig build test-lib` for the complete in-process library suite without
 external interoperability and release-tool checks; `zig build test` remains
