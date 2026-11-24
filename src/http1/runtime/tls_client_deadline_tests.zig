@@ -25,7 +25,7 @@ test "HTTP1 TLS ownership closes stream when deadline expires after TCP connect"
                         http1_runtime.Client.connectTlsAddressWithDeadline(allocator, io, address, "localhost", "localhost", limits, tls, deadline);
                 }
             };
-            try @import("../../internal/testing/tls_transition.zig").expectClosedAfterConnect(Connect.run);
+            try @import("../../internal/testing/connection_transition.zig").expectClosedAfterConnect(Connect.run);
         }
     }
 }

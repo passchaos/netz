@@ -42,6 +42,14 @@ standard/vail, H2 and WSS use this ordering. The
 [transition regressions](evidence/tls_transition_ownership/2026-11-24/README.md)
 observe real socket closes and peer EOF through the public named/address APIs.
 
+H2c `Client.connectStreamUpgrade*` also consumes the supplied stream at entry,
+including expired/foreign-clock deadlines and non-positive timeouts. Failed
+admission closes it before sending the HTTP/1 Upgrade request. The TCP-opening
+Upgrade constructors retain the same cleanup responsibility when the budget
+expires after connect. Successful `H2cUpgradeResult` values own both the H2
+connection and consumed 101 metadata. The [h2c ownership regressions](evidence/h2c_upgrade_ownership/2026-11-24/README.md)
+cover both budget forms and observe one close and peer EOF.
+
 ## Unified client and request path
 
 ```mermaid

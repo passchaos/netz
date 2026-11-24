@@ -241,9 +241,9 @@ jobs:
         if: runner.os == 'Linux' && matrix.target == 'x86_64-linux-gnu'
         run: zig build test-http test-quic -j1 -Dtarget=${{ matrix.target }} '-Dtest-filter=network interface' '-Dtest-filter=HTTP3 endpoint adoption' --summary all
 
-      - name: Run native Linux TLS and WebSocket endpoint regressions
+      - name: Run native Linux connection and Upgrade regressions
         if: runner.os == 'Linux' && matrix.target == 'x86_64-linux-gnu'
-        run: zig build test-http1 test-http2 test-websocket -j1 -Dtarget=${{ matrix.target }} '-Dtest-filter=WebSocket named endpoint' '-Dtest-filter=WSS named endpoint' '-Dtest-filter=WSS common handshake budget' '-Dtest-filter=deadline expires after TCP connect' --summary failures
+        run: zig build test-http1 test-http2 test-websocket -j1 -Dtarget=${{ matrix.target }} '-Dtest-filter=WebSocket named endpoint' '-Dtest-filter=WSS named endpoint' '-Dtest-filter=WSS common handshake budget' '-Dtest-filter=deadline expires after TCP connect' '-Dtest-filter=HTTP/2 h2c stream ownership' --summary failures
 
       - name: Probe native Winsock interface option semantics
         if: runner.os == 'Windows'
@@ -253,7 +253,7 @@ jobs:
         if: runner.os == 'Windows'
         run: |
           transport_status=0
-          zig build test-http test-http3 test-quic test-websocket test-webtransport -Dtarget=${{ matrix.target }} '-Dtest-filter=peer address' '-Dtest-filter=network interface' '-Dtest-filter=HTTP3 endpoint adoption' '-Dtest-filter=HTTP/3 CONNECT DATAGRAM' '-Dtest-filter=QUIC stream receive target admission' '-Dtest-filter=HTTP/3 protected runtime rejects server-initiated bidirectional message streams' '-Dtest-filter=WebSocket stream adapter' '-Dtest-filter=WebSocket named endpoint' '-Dtest-filter=WSS named endpoint' '-Dtest-filter=WSS common handshake budget' '-Dtest-filter=deadline expires after TCP connect' '-Dtest-filter=WebTransport operation admission' '-Dtest-filter=WebTransport stream reader admission' '-Dtest-filter=WebTransport stream read buffer admission' '-Dtest-filter=WebTransport stream read target admission' '-Dtest-filter=WebTransport closed extension routing' --summary all > native-transport.log 2>&1 || transport_status=$?
+          zig build test-http test-http3 test-quic test-websocket test-webtransport -Dtarget=${{ matrix.target }} '-Dtest-filter=peer address' '-Dtest-filter=network interface' '-Dtest-filter=HTTP3 endpoint adoption' '-Dtest-filter=HTTP/3 CONNECT DATAGRAM' '-Dtest-filter=QUIC stream receive target admission' '-Dtest-filter=HTTP/3 protected runtime rejects server-initiated bidirectional message streams' '-Dtest-filter=WebSocket stream adapter' '-Dtest-filter=WebSocket named endpoint' '-Dtest-filter=WSS named endpoint' '-Dtest-filter=WSS common handshake budget' '-Dtest-filter=deadline expires after TCP connect' '-Dtest-filter=HTTP/2 h2c stream ownership' '-Dtest-filter=WebTransport operation admission' '-Dtest-filter=WebTransport stream reader admission' '-Dtest-filter=WebTransport stream read buffer admission' '-Dtest-filter=WebTransport stream read target admission' '-Dtest-filter=WebTransport closed extension routing' --summary all > native-transport.log 2>&1 || transport_status=$?
           cat native-transport.log
           if [ "$transport_status" -ne 0 ]; then
             {

@@ -1144,9 +1144,9 @@ pub const Client = struct {
 
     /// Upgrade an existing cleartext HTTP/1.1 stream to HTTP/2 and return the
     /// established connection plus the consumed 101 response metadata.  The
-    /// stream transfers to this function. The caller owns both returned values
-    /// and should call `H2cUpgradeResult.deinit` or close/deinit each field
-    /// manually after taking ownership.
+    /// stream transfers at entry and every failure closes it. The caller owns
+    /// both returned values and should call `H2cUpgradeResult.deinit` or
+    /// close/deinit each field manually after taking ownership.
     pub fn connectStreamUpgrade(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -1167,6 +1167,7 @@ pub const Client = struct {
     /// Transfer `stream` into an h2c connection under one caller-owned
     /// awake-clock deadline spanning the HTTP/1.1 101 response and HTTP/2
     /// SETTINGS bootstrap. Configured handshake limits may shorten the wait.
+    /// Ownership transfers at entry, including invalid/expired deadlines.
     pub fn connectStreamUpgradeWithDeadline(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -1193,9 +1194,6 @@ pub const Client = struct {
         request_options: RequestOptions,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!H2cUpgradeResult {
-        if (deadline) |absolute| {
-            _ = try deadline_policy.usableAwake(io, absolute);
-        }
         // This entry point owns the stream immediately. Constructing the
         // Connection first gives validation, allocation, and both handshake
         // variants one authoritative failure-close path.
@@ -1212,6 +1210,9 @@ pub const Client = struct {
             .default_scheme = "http",
         };
         errdefer connection.close();
+        if (deadline) |absolute| {
+            _ = try deadline_policy.usableAwake(io, absolute);
+        }
         try validateLocalLimits(limits);
         if (limits.tcp_nodelay) try socket_options.setTcpNoDelay(stream);
         connection.applyLocalLimits();
@@ -1375,6 +1376,7 @@ pub const Client = struct {
         return .{ .connection = connection, .upgrade_response = upgrade };
     }
 
+    /// Ownership transfers at entry, including non-positive timeouts.
     pub fn connectStreamUpgradeWithTimeout(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -1383,7 +1385,10 @@ pub const Client = struct {
         request_options: RequestOptions,
         timeout: std.Io.Duration,
     ) Error!H2cUpgradeResult {
-        if (timeout.nanoseconds <= 0) return error.Timeout;
+        if (timeout.nanoseconds <= 0) {
+            stream.close(io);
+            return error.Timeout;
+        }
         return connectStreamUpgradeWithDeadline(
             allocator,
             io,

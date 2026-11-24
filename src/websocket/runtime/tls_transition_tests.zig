@@ -1,6 +1,6 @@
 const std = @import("std");
 const runtime = @import("../runtime.zig");
-const transition = @import("../../internal/testing/tls_transition.zig");
+const transition = @import("../../internal/testing/connection_transition.zig");
 
 test "WSS TLS ownership closes stream when deadline expires after TCP connect" {
     inline for (.{ false, true }) |vail_tls| {

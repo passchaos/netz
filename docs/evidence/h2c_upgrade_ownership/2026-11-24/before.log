@@ -1,0 +1,54 @@
+[traex-zig-guard 2026-11-24 22:31:54] started Zig tree root=15443 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=1800s
+test-http2
++- run test 33 pass, 3 fail (36 total)
+error: 'http2.runtime.client.upgrade_ownership_tests.test.HTTP/2 h2c stream ownership closes when deadline expires after TCP connect' failed:
+       expected 1, found 0
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:118:17: 0x10062149f in expectEqualInner__anon_37640 (test)
+                       return error.TestExpectedEqual;
+                       ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:83:5: 0x1008009f3 in expectEqual (test)
+           return expectEqualInner(T, expected, actual);
+           ^
+       /Users/bytedance/project-z/netz/src/internal/testing/connection_transition.zig:78:5: 0x100800b4b in expectClosedAfterConnect__anon_139342 (test)
+           try std.testing.expectEqual(@as(usize, 1), Probe.closes.load(.monotonic));
+           ^
+       /Users/bytedance/project-z/netz/src/http2/runtime/client/upgrade_ownership_tests.zig:18:9: 0x100802533 in test.HTTP/2 h2c stream ownership closes when deadline expires after TCP connect (test)
+               try transition.expectClosedAfterConnect(Connect.run);
+               ^
+error: 'http2.runtime.client.upgrade_ownership_tests.test.HTTP/2 h2c stream ownership closes on expired or foreign-clock adopted deadlines' failed:
+       expected 1, found 0
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:118:17: 0x10062149f in expectEqualInner__anon_37640 (test)
+                       return error.TestExpectedEqual;
+                       ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:83:5: 0x1007a63b3 in expectEqual (test)
+           return expectEqualInner(T, expected, actual);
+           ^
+       /Users/bytedance/project-z/netz/src/internal/testing/connection_transition.zig:78:5: 0x1007a650b in expectClosedAfterConnect__anon_131752 (test)
+           try std.testing.expectEqual(@as(usize, 1), Probe.closes.load(.monotonic));
+           ^
+       /Users/bytedance/project-z/netz/src/http2/runtime/client/upgrade_ownership_tests.zig:32:9: 0x1007a7f1f in test.HTTP/2 h2c stream ownership closes on expired or foreign-clock adopted deadlines (test)
+               try transition.expectClosedAfterConnect(Adopt.run);
+               ^
+error: 'http2.runtime.client.upgrade_ownership_tests.test.HTTP/2 h2c stream ownership closes on non-positive adopted timeouts' failed:
+       expected 1, found 0
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:118:17: 0x10062149f in expectEqualInner__anon_37640 (test)
+                       return error.TestExpectedEqual;
+                       ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:83:5: 0x100621e0f in expectEqual (test)
+           return expectEqualInner(T, expected, actual);
+           ^
+       /Users/bytedance/project-z/netz/src/internal/testing/connection_transition.zig:78:5: 0x100621f67 in expectClosedAfterConnect__anon_37480 (test)
+           try std.testing.expectEqual(@as(usize, 1), Probe.closes.load(.monotonic));
+           ^
+       /Users/bytedance/project-z/netz/src/http2/runtime/client/upgrade_ownership_tests.zig:44:9: 0x100623957 in test.HTTP/2 h2c stream ownership closes on non-positive adopted timeouts (test)
+               try transition.expectClosedAfterConnect(Adopt.run);
+               ^
+failed command: ./.zig-cache/o/abcacea4f112e0b3a4b4a66e0e095e8c/test --cache-dir=./.zig-cache --seed=0x3a5ad69d --listen=-
+
+Build Summary: 8/10 steps succeeded (1 failed); 33/36 tests passed (3 failed)
+test-http2 transitive failure
++- run test 33 pass, 3 fail (36 total)
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/4f43002d28e7c626e498fafc36e312bb/build /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/zig /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib /Users/bytedance/project-z/netz .zig-cache /Users/bytedance/.cache/zig --seed 0x3a5ad69d -Z848d0cb553a37b82 test-http2 -Dtest-filter=HTTP/2 h2c stream ownership -j1 --summary failures
+[traex-zig-guard 2026-11-24 22:32:04] finished Zig tree root=15443 peak=719MiB result=0

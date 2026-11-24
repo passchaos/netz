@@ -2,9 +2,18 @@
 const std = @import("std");
 const net = std.Io.net;
 
-/// The callback calls a public TLS constructor and returns its owned client.
-/// Observe one socket close and peer EOF, with no TLS/HTTP bytes sent.
+/// The callback calls a public connection/Upgrade constructor and returns its
+/// owned client or response. Observe one close and EOF, with no protocol bytes.
 pub fn expectClosedAfterConnect(comptime connect_client: anytype) !void {
+    return exercise(connect_client, true);
+}
+
+/// The callback first opens a stream directly, then calls its adoption API.
+pub fn expectClosedAfterAdoption(comptime adopt_client: anytype) !void {
+    return exercise(adopt_client, false);
+}
+
+fn exercise(comptime connect_client: anytype, comptime await_timer: bool) !void {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
     defer threaded.deinit();
@@ -17,6 +26,7 @@ pub fn expectClosedAfterConnect(comptime connect_client: anytype) !void {
         var socket: ?net.Socket = null;
         var after: std.Io.Timestamp = .zero;
         var timer: std.Io.Event = .unset;
+        var timer_started: std.Io.Event = .unset;
         var closes: std.atomic.Value(usize) = .init(0);
         var writes: std.atomic.Value(usize) = .init(0);
 
@@ -26,6 +36,10 @@ pub fn expectClosedAfterConnect(comptime connect_client: anytype) !void {
         }
 
         fn connect(userdata: ?*anyopaque, address: *const net.IpAddress, options: net.IpAddress.ConnectOptions) net.IpAddress.ConnectError!net.Socket {
+            // Start the timer's blocking wait before allowing the clock to
+            // expire. Otherwise it could win selection and close the socket
+            // itself, hiding a broken next owner behind correct race cleanup.
+            if (await_timer) try timer_started.wait(base);
             const connected = try base.vtable.netConnectIp(userdata, address, options);
             socket = connected;
             expired.store(true, .release);
@@ -35,6 +49,7 @@ pub fn expectClosedAfterConnect(comptime connect_client: anytype) !void {
         fn sleep(_: ?*anyopaque, _: std.Io.Timeout) std.Io.Cancelable!void {
             // The connected socket must win selection and reach its next owner.
             // The connect race joins this pending timer through cancellation.
+            timer_started.set(base);
             try timer.wait(base);
         }
 
@@ -56,6 +71,7 @@ pub fn expectClosedAfterConnect(comptime connect_client: anytype) !void {
     Probe.closes.store(0, .monotonic);
     Probe.writes.store(0, .monotonic);
     Probe.timer = .unset;
+    Probe.timer_started = .unset;
     // Rescue an unfixed constructor's leak so a failing test still cleans up.
     defer if (Probe.socket) |socket| {
         if (Probe.closes.load(.monotonic) == 0) socket.close(parent);
@@ -71,10 +87,11 @@ pub fn expectClosedAfterConnect(comptime connect_client: anytype) !void {
     const io: std.Io = .{ .userdata = parent.userdata, .vtable = &table };
     if (connect_client(allocator, io, listener.socket.address, deadline)) |value| {
         var client = value;
-        client.close();
+        if (@hasDecl(@TypeOf(client), "close")) client.close() else client.deinit(allocator);
         return error.TestExpectedError;
     } else |err| try std.testing.expectEqual(@as(anyerror, error.Timeout), err);
     try std.testing.expect(Probe.expired.load(.acquire));
+    if (await_timer) try std.testing.expect(Probe.timer_started.isSet());
     try std.testing.expectEqual(@as(usize, 1), Probe.closes.load(.monotonic));
     try std.testing.expectEqual(@as(usize, 0), Probe.writes.load(.monotonic));
     const peer = try listener.accept(parent);

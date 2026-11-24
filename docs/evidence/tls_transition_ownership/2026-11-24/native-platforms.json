@@ -1,0 +1,28 @@
+{
+  "commit": "704b673c63b5973983ac9ca3d47ad26849ca7675",
+  "run_id": 45414572910,
+  "observed_at": "2026-11-24T14:40:01.311095+00:00",
+  "checks": [
+    {
+      "platform": "linux",
+      "job_id": 138517405759,
+      "step": "Run native Linux TLS and WebSocket endpoint regressions",
+      "conclusion": "success",
+      "started_at": "2026-11-24T14:32:47Z",
+      "completed_at": "2026-11-24T14:34:13Z",
+      "duration_seconds": 86,
+      "source_url": "https://github.com/passchaos/netz/actions/runs/45414572910/job/138517405759"
+    },
+    {
+      "platform": "windows",
+      "job_id": 138517405952,
+      "step": "Run native Windows transport regressions",
+      "conclusion": "success",
+      "started_at": "2026-11-24T14:30:40Z",
+      "completed_at": "2026-11-24T14:34:35Z",
+      "duration_seconds": 235,
+      "source_url": "https://github.com/passchaos/netz/actions/runs/45414572910/job/138517405952"
+    }
+  ],
+  "observation": "Native regression step conclusions read from public GitHub job pages; recorded independently of cross-compilation and the overall CI result."
+}

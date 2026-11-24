@@ -13,7 +13,7 @@ initialization. A successful TLS initialization then transfers ownership to
 the TLS connection, whose own guard protects the remaining client setup.
 HTTP/2 already followed this ordering and remains the control implementation.
 
-The shared `internal/testing/tls_transition.zig` fixture calls public connection
+The shared `internal/testing/connection_transition.zig` fixture calls public connection
 constructors over a real IPv4 loopback socket. Its wrapped IO clock expires
 only after the underlying TCP connect succeeds. The connect timer stays
 pending until cancellation so the connected result must reach the next owner.
@@ -34,6 +34,12 @@ verification set. Native Linux and Windows CI select the transition tests.
 | --- | --- | --- |
 | Baseline before the production fix | 90/94 passed, 4 expected failures from 2 defects | [before.log](before.log) |
 | Debug transition regressions and affected TLS/adoption paths | 118/118 passed | [Debug.log](Debug.log) |
+
+At commit `704b673c`, the [native Linux TLS/endpoint step](https://github.com/passchaos/netz/actions/runs/45414572910/job/138517405759)
+and [native Windows transport step](https://github.com/passchaos/netz/actions/runs/45414572910/job/138517405952)
+both completed successfully. Exact conclusions and timestamps appear in
+[native-platforms.json](native-platforms.json), separately from cross-compilation
+and the overall workflow result.
 
 ```sh
 zig build test-http1 test-http2 test-websocket '-Dtest-filter=deadline expires after TCP connect' -j1 --summary failures

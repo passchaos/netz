@@ -112,6 +112,7 @@ test {
     _ = @import("window_and_settings_tests.zig");
     _ = @import("client/authority_tests.zig");
     _ = @import("client/authority_deadline_tests.zig");
+    _ = @import("client/upgrade_ownership_tests.zig");
     _ = @import("client/authority_uri_tests.zig");
     _ = @import("headers/authority_reuse_tests.zig");
     _ = client_authority;
