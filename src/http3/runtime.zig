@@ -4122,5 +4122,6 @@ pub fn visitConnectionResponsePacket(
 }
 
 test {
+    _ = @import("runtime/interface_adoption_tests.zig");
     _ = @import("runtime/tests.zig");
 }

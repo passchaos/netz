@@ -6,6 +6,7 @@
 //! stable, and only `receive*` reads either UDP socket.
 
 const std = @import("std");
+const socket_binding = @import("../../internal/socket_binding.zig");
 const http3 = @import("../mod.zig");
 const quic = @import("../../quic/mod.zig");
 const owned_receive_race = @import("../../quic/owned_receive_race.zig");
@@ -1292,7 +1293,8 @@ pub fn Pool(comptime Runtime: type) type {
 
         /// Adopt a caller-created endpoint while preserving the pool's single
         /// receive owner. Ownership transfers only after this function
-        /// returns successfully.
+        /// returns successfully. A requested network interface must already
+        /// constrain the endpoint; adoption never changes its socket policy.
         pub fn initWithOwnedEndpoint(
             allocator: std.mem.Allocator,
             io: std.Io,
@@ -1307,6 +1309,9 @@ pub fn Pool(comptime Runtime: type) type {
                 !sameAddressFamily(options.local_address, endpoint.address()))
             {
                 return error.InvalidPoolOptions;
+            }
+            if (options.limits.quic.network_interface) |interface| {
+                try socket_binding.requireInterface(endpoint.io, endpoint.socket, interface);
             }
             const dispatcher = try allocator.create(
                 quic.endpoint_dispatcher.Dispatcher,

@@ -65,6 +65,15 @@ HTTP/WS connection options override corresponding proxy binding fields when
 set. H3's QUIC interface policy reaches both the SOCKS5 control connection and
 its UDP association.
 
+When adopting a `UdpAssociation` with `Endpoint.fromSocks5Association*`, or an
+endpoint with `SharedHandshakeClientPool.initWithOwnedEndpoint`, a requested
+`network_interface` asserts the policy already installed on that socket.
+An unconstrained or differently constrained socket returns
+`InterfaceBindingMismatch`; failed adoption retains the caller's resources and
+socket settings. Configure the interface while creating the association or
+endpoint, before bind. Windows adoption checks both outgoing UNICAST_IF and an
+enabled receive list containing exactly the requested interface.
+
 ## QUIC, HTTP/3 and WebTransport
 
 QUIC already accepts a positional local IP/port. Its `runtime.Limits` now adds
@@ -108,12 +117,13 @@ own family's wildcard bind on the selected interface.
 
 TCP source/device binding requires Netz's zio backend: Zig 0.16's generic
 `std.Io` cannot connect an already bound socket. Unconstrained connects retain
-the existing generic backend path. UDP interface constraints likewise require zio to install the policy before
-bind; unconstrained UDP source-address binding retains generic std.Io support.
+the existing generic backend path. UDP interface constraints likewise require
+zio to install the policy before bind; unconstrained UDP source-address binding retains generic std.Io support.
 Foreign Windows backends can expose AFD handles and are rejected.
 
 Empty names, embedded NULs and index zero return `InvalidNetworkInterface`.
 Missing devices return `InterfaceNotFound`; overlong names return `NameTooLong`.
+Adoption policy mismatches return `InterfaceBindingMismatch`.
 Kernel permission failures return `AccessDenied`. Unsupported socket options
 return `OptionUnsupported`; other option failures return `SocketOptionFailed`.
 Constrained Windows IPv6 UDP sockets are IPv6-only so mapped IPv4 packets

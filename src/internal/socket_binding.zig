@@ -8,6 +8,7 @@ pub const NetworkInterface = interfaces.NetworkInterface;
 pub const Error = interfaces.Error;
 pub const applyInterface = interfaces.apply;
 pub const validateDatagramFamily = interfaces.validateDatagramFamily;
+pub const requireInterface = interfaces.requireBinding;
 pub const ConnectError = net.IpAddress.ConnectError || Error || error{AddressInUse};
 
 pub const Binding = struct {

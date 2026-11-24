@@ -11,6 +11,7 @@ const windows_native = struct {
 
 pub const Error = net.Interface.Name.ResolveError || net.Interface.NameError || error{
     InvalidNetworkInterface,
+    InterfaceBindingMismatch,
     OptionUnsupported,
     SocketOptionFailed,
 };
@@ -41,6 +42,9 @@ pub const NetworkInterface = union(enum) {
         }
     }
 };
+
+/// Assert an existing native socket's exact interface policy without changing it.
+pub const requireBinding = @import("network_interface/validation.zig").require;
 
 /// Prepare a native UDP socket before interface policy and bind.
 pub fn prepareDatagram(handle: net.Socket.Handle, family: net.IpAddress.Family) Error!void {

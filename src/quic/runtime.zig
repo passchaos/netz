@@ -448,7 +448,9 @@ pub const Endpoint = struct {
     /// The association pointer becomes invalid on success. SOCKS5 cannot carry
     /// destination-path ECN or preserve kernel GSO/GRO records, so the adapter
     /// explicitly disables those capabilities while retaining exact batch
-    /// prefix progress through bounded per-datagram framing.
+    /// prefix progress through bounded per-datagram framing. A requested
+    /// network interface asserts the existing UDP policy; it must be set when
+    /// opening the association. Failure retains the caller's ownership.
     pub fn fromSocks5Association(
         allocator: std.mem.Allocator,
         association: *socks5_proxy.UdpAssociation,
@@ -530,6 +532,9 @@ pub const Endpoint = struct {
         max_domain_routes: usize,
         max_sources_per_route: usize,
     ) Error!Endpoint {
+        if (limits.network_interface) |interface| {
+            try socket_binding.requireInterface(association.io, association.socket, interface);
+        }
         const send_storage = try allocator.alloc(
             u8,
             socks5FrameCapacity(limits.max_datagram_size),
@@ -546,10 +551,6 @@ pub const Endpoint = struct {
             );
         }
         const io = association.io;
-        if (limits.network_interface) |interface| {
-            try socket_binding.validateDatagramFamily(association.socket.handle, std.meta.activeTag(association.socket.address));
-            try socket_binding.applyInterface(association.io, association.socket.handle, std.meta.activeTag(association.socket.address), .dgram, interface);
-        }
         const socket = association.socket;
         const relay = association.relay;
         const control = association.control.takeStream();
@@ -3465,4 +3466,5 @@ pub const RejectMessageOversizeReceives = struct {
 test {
     _ = @import("runtime/tests.zig");
     _ = @import("runtime/network_interface_tests.zig");
+    _ = @import("runtime/interface_adoption_tests.zig");
 }
