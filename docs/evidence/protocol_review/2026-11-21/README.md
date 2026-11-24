@@ -3477,3 +3477,17 @@ bindings were renamed to avoid shadowing the new method.
 | --- | --- | --- |
 | HTTP/3 suite (Debug) | 929/933 (4 skipped) | live `zig build test-http3 --summary all` |
 | Package surface (Debug) | 28/28 | live `zig build test-package --summary all` |
+
+## Hundred-and-ninety-fourth pass: HTTP/1 connection peer address
+
+`http1.runtime.Connection` now exposes `peerAddress()` with the same
+role-dependent contract as HTTP/2: accepted server connections report the
+remote peer, while client-created connections report the local ephemeral
+endpoint recorded by `std.Io.net`. The TLS server API test asserts a non-zero
+peer port on an accepted connection, and the usage guide points manual
+server loops at the accessor.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| HTTP/1 runtime (Debug) | 480/480 | live `zig build test-http1 --summary all` |
+| Package surface (Debug) | 28/28 | live `zig build test-package --summary all` |

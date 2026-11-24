@@ -238,7 +238,7 @@ policies, and stops when a `std.Io.Event` is set. The handler returns
 `ResponseOptions`; its body must outlive the handler call (use static or
 context-owned storage). Handlers receive only the parsed request, so use the
 manual accept/serve loop when a handler needs the connection itself, such as
-the peer socket address or TLS metadata. See
+`Connection.peerAddress()` or TLS metadata. See
 `zig build run-http-server-serve-until`.
 
 - HTTP/2 h2c: `zig build run-http2-h2c`.

@@ -195,6 +195,7 @@ const AlpnTestServer = struct {
             "http/1.1",
             connection.negotiatedAlpn().?,
         );
+        try std.testing.expect(connection.peerAddress().getPort() != 0);
 
         var request = try connection.readRequest(.{});
         defer request.deinit(std.testing.allocator);
