@@ -118,6 +118,7 @@ test {
     _ = client_authority;
     _ = endpoint_host;
     _ = host_connect;
+    _ = @import("client/resolution_tests.zig");
     _ = @import("connect/deadline_tests.zig");
     _ = @import("connect/output_deadline_tests.zig");
     _ = @import("connect/owned_accept.zig");

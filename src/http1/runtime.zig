@@ -261,8 +261,8 @@ fn connectProxyUriBefore(
         },
         endpoint.tls_host,
         endpoint.port,
-        proxy_options.address_resolver,
-        proxy_options.address_connect_policy orelse .ordered,
+        proxy_options.address_resolver orelse limits.address_resolver,
+        proxy_options.address_connect_policy orelse limits.address_connect_policy orelse .ordered,
         connect_deadline,
         .fromOptions(limits),
     );
@@ -324,6 +324,12 @@ pub const Limits = struct {
     /// Constrain the socket's network interface independently of source IP.
     /// Names are borrowed; unsupported platforms/backends fail explicitly.
     network_interface: ?tcp_connect.NetworkInterface = null,
+    /// Application resolution for named and URI client connections.
+    /// Returned peers do not replace TLS identity or HTTP authority.
+    address_resolver: ?AddressResolver = null,
+    /// Null uses ordered fallback. Explicit values also govern inherited
+    /// proxy transport policy unless a proxy-specific option overrides it.
+    address_connect_policy: ?AddressConnectPolicy = null,
 
     max_head_bytes: usize = 64 * 1024,
     /// Maximum request fields accepted by connection-owning `serve*` helpers.

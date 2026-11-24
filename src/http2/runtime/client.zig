@@ -627,6 +627,8 @@ pub const Client = struct {
         var proxy_limits = proxy.limits;
         if (limits.local_address) |address| proxy_limits.local_address = address;
         if (limits.network_interface) |interface| proxy_limits.network_interface = interface;
+        if (limits.address_resolver) |resolver| proxy_limits.address_resolver = resolver;
+        if (limits.address_connect_policy) |policy| proxy_limits.address_connect_policy = policy;
         const stream = try http1_runtime.Client.connectTunnelViaProxyUri(
             allocator,
             io,
@@ -668,6 +670,8 @@ pub const Client = struct {
         var proxy_limits = proxy.limits;
         if (limits.local_address) |address| proxy_limits.local_address = address;
         if (limits.network_interface) |interface| proxy_limits.network_interface = interface;
+        if (limits.address_resolver) |resolver| proxy_limits.address_resolver = resolver;
+        if (limits.address_connect_policy) |policy| proxy_limits.address_connect_policy = policy;
         const stream = try http1_runtime.Client
             .connectTunnelViaProxyUriWithDeadline(
             allocator,
@@ -1021,27 +1025,27 @@ pub const Client = struct {
     ) Error!OwnedResponse {
         const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
         if (!std.ascii.eqlIgnoreCase(uri.scheme, "http")) return error.UnsupportedScheme;
+        try tcp_connect.validateAddressConnectPolicy(limits.address_connect_policy orelse .ordered);
         const target = try uriTargetAlloc(allocator, uri);
         defer allocator.free(target);
         var endpoint = try http1_runtime.uriEndpoint(allocator, uri, 80);
         defer endpoint.deinit();
 
         try validateLocalLimits(limits);
-        const stream = switch (endpoint.target) {
-            .host => |host| try tcp_connect.hostWithOptions(
-                io,
-                host,
-                endpoint.port,
-                limits.connect_timeout,
-                limits,
-            ),
-            .ip => |address| try tcp_connect.ipWithOptions(
-                io,
-                address,
-                limits.connect_timeout,
-                limits,
-            ),
-        };
+        const stream = try tcp_connect.endpointWithOptions(
+            allocator,
+            io,
+            switch (endpoint.target) {
+                .ip => |address| address,
+                .host => null,
+            },
+            endpoint.tls_host,
+            endpoint.port,
+            limits.address_resolver,
+            limits.address_connect_policy orelse .ordered,
+            try deadline_policy.fromTimeout(io, limits.connect_timeout),
+            .fromOptions(limits),
+        );
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(io);
         var options = request_options;
@@ -1074,6 +1078,7 @@ pub const Client = struct {
         if (!std.ascii.eqlIgnoreCase(uri.scheme, "http")) {
             return error.UnsupportedScheme;
         }
+        try tcp_connect.validateAddressConnectPolicy(limits.address_connect_policy orelse .ordered);
         const target = try uriTargetAlloc(allocator, uri);
         defer allocator.free(target);
         var endpoint = try http1_runtime.uriEndpoint(allocator, uri, 80);
@@ -1084,21 +1089,20 @@ pub const Client = struct {
             deadline,
             limits.connect_timeout,
         );
-        const stream = switch (endpoint.target) {
-            .host => |host| try tcp_connect.hostWithDeadlineAndOptions(
-                io,
-                host,
-                endpoint.port,
-                network_deadline,
-                limits,
-            ),
-            .ip => |address| try tcp_connect.ipWithDeadlineAndOptions(
-                io,
-                address,
-                network_deadline,
-                limits,
-            ),
-        };
+        const stream = try tcp_connect.endpointWithOptions(
+            allocator,
+            io,
+            switch (endpoint.target) {
+                .ip => |address| address,
+                .host => null,
+            },
+            endpoint.tls_host,
+            endpoint.port,
+            limits.address_resolver,
+            limits.address_connect_policy orelse .ordered,
+            network_deadline,
+            .fromOptions(limits),
+        );
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(io);
         var options = request_options;
@@ -1852,6 +1856,7 @@ pub const Client = struct {
         const is_http = std.ascii.eqlIgnoreCase(uri.scheme, "http");
         const is_https = std.ascii.eqlIgnoreCase(uri.scheme, "https");
         if (!is_http and !is_https) return error.UnsupportedScheme;
+        try tcp_connect.validateAddressConnectPolicy(limits.address_connect_policy orelse .ordered);
         const target = try uriTargetAlloc(allocator, uri);
         defer allocator.free(target);
         var endpoint = try http1_runtime.uriEndpoint(
@@ -1881,21 +1886,20 @@ pub const Client = struct {
                 tls_options,
             ),
         } else blk: {
-            const stream = switch (endpoint.target) {
-                .host => |host| try tcp_connect.hostWithOptions(
-                    io,
-                    host,
-                    endpoint.port,
-                    limits.connect_timeout,
-                    limits,
-                ),
-                .ip => |address| try tcp_connect.ipWithOptions(
-                    io,
-                    address,
-                    limits.connect_timeout,
-                    limits,
-                ),
-            };
+            const stream = try tcp_connect.endpointWithOptions(
+                allocator,
+                io,
+                switch (endpoint.target) {
+                    .ip => |address| address,
+                    .host => null,
+                },
+                endpoint.tls_host,
+                endpoint.port,
+                limits.address_resolver,
+                limits.address_connect_policy orelse .ordered,
+                try deadline_policy.fromTimeout(io, limits.connect_timeout),
+                .fromOptions(limits),
+            );
             var stream_owned = true;
             errdefer if (stream_owned) stream.close(io);
             const established = try connectStream(allocator, io, stream, limits);
@@ -1967,6 +1971,7 @@ pub const Client = struct {
         const is_http = std.ascii.eqlIgnoreCase(uri.scheme, "http");
         const is_https = std.ascii.eqlIgnoreCase(uri.scheme, "https");
         if (!is_http and !is_https) return error.UnsupportedScheme;
+        try tcp_connect.validateAddressConnectPolicy(limits.address_connect_policy orelse .ordered);
         const target = try uriTargetAlloc(allocator, uri);
         defer allocator.free(target);
         var endpoint = try http1_runtime.uriEndpoint(

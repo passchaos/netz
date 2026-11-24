@@ -1,0 +1,192 @@
+[traex-zig-guard 2026-11-25 04:32:45] started Zig tree root=67727 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=1800s
+test-http2
++- run test 14 pass, 2 fail (16 total)
+error: 'http2.runtime.client.resolution_tests.test.HTTP2 native resolver policy routes named and URI connections' failed:
+       /Users/bytedance/project-z/netz/src/internal/testing/native_resolution.zig:27:9: 0x10501d373 in exercise__anon_36624 (test)
+               return error.MissingNativeResolverOptions;
+               ^
+       /Users/bytedance/project-z/netz/src/http2/runtime/client/resolution_tests.zig:5:5: 0x10501d3df in test.HTTP2 native resolver policy routes named and URI connections (test)
+           try shared.exercise(runtime, true);
+           ^
+error: 'http2.runtime.client.resolution_tests.test.HTTP2 native resolver policy preserves preflight and TLS propagation' failed:
+       /Users/bytedance/project-z/netz/src/internal/testing/native_resolution.zig:124:9: 0x10501d2f7 in admission__anon_36569 (test)
+               return error.MissingNativeResolverOptions;
+               ^
+       /Users/bytedance/project-z/netz/src/http2/runtime/client/resolution_tests.zig:9:5: 0x10501d363 in test.HTTP2 native resolver policy preserves preflight and TLS propagation (test)
+           try shared.admission(runtime, true);
+           ^
+failed command: ./.zig-cache/o/00a9bb0246a729d50803a64e2073a563/test --cache-dir=./.zig-cache --seed=0xdcf540 --listen=-
+
+test-http1
++- run test 8 pass, 2 fail (10 total)
+error: 'http1.runtime.client.resolution_tests.test.HTTP1 native resolver policy routes named and URI connections' failed:
+       /Users/bytedance/project-z/netz/src/internal/testing/native_resolution.zig:27:9: 0x104d152e3 in exercise__anon_36536 (test)
+               return error.MissingNativeResolverOptions;
+               ^
+       /Users/bytedance/project-z/netz/src/http1/runtime/client/resolution_tests.zig:5:5: 0x104d1534f in test.HTTP1 native resolver policy routes named and URI connections (test)
+           try shared.exercise(runtime, false);
+           ^
+error: 'http1.runtime.client.resolution_tests.test.HTTP1 native resolver policy preserves preflight and TLS propagation' failed:
+       /Users/bytedance/project-z/netz/src/internal/testing/native_resolution.zig:124:9: 0x104d15387 in admission__anon_36593 (test)
+               return error.MissingNativeResolverOptions;
+               ^
+       /Users/bytedance/project-z/netz/src/http1/runtime/client/resolution_tests.zig:9:5: 0x104d153f3 in test.HTTP1 native resolver policy preserves preflight and TLS propagation (test)
+           try shared.admission(runtime, false);
+           ^
+failed command: ./.zig-cache/o/ebeb8e6e9a2f2653c99b47d950d3f7a0/test --cache-dir=./.zig-cache --seed=0xdcf540 --listen=-
+
+Build Summary: 10/14 steps succeeded (2 failed); 22/26 tests passed (4 failed)
+test-http1 transitive failure
++- run test 8 pass, 2 fail (10 total)
+   +- compile test Debug native success 2s MaxRSS:543M
+      +- WriteFile macho_0_p256_field_arm64.S cached
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 181ms MaxRSS:31M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 527ms MaxRSS:31M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options success
+      +- options cached
+test-http2 transitive failure
++- run test 14 pass, 2 fail (16 total)
+   +- compile test Debug native success 3s MaxRSS:540M
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile (reused)
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- WriteFile (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options success
+      +- options (reused)
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/4f43002d28e7c626e498fafc36e312bb/build /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/zig /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib /Users/bytedance/project-z/netz .zig-cache /Users/bytedance/.cache/zig --seed 0xdcf540 -Z33688910eddc4b10 test-http1 test-http2 -Dtest-filter=HTTP1 native resolver policy -Dtest-filter=HTTP2 native resolver policy -j1 --summary all
+[traex-zig-guard 2026-11-25 04:32:54] finished Zig tree root=67727 peak=494MiB result=0

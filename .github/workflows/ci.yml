@@ -264,6 +264,11 @@ jobs:
           fi
           exit "$hostname_status"
 
+      - name: Run native H1 H2 resolver policy regressions
+        if: runner.os == 'Windows' || (runner.os == 'Linux' && matrix.target == 'x86_64-linux-gnu')
+        run: zig build test-http1 test-http2 -j1 -Dtarget=${{ matrix.target }} '-Dtest-filter=HTTP1 native resolver policy' '-Dtest-filter=HTTP2 native resolver policy' --summary all
+
+
       - name: Run native Windows transport regressions
         if: runner.os == 'Windows'
         run: |

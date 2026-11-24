@@ -6,7 +6,8 @@ SNI, HTTP authority and pool identity. Literal IP routes bypass application
 resolution in the URI facades. Native socket interface constraints do not
 configure DNS traffic; see [local network binding](../local_network_binding.md).
 
-The unified HTTP `Options.address_resolver`, HTTP/1 runtime resolver,
+The unified HTTP `Options.address_resolver`, native HTTP/1 and HTTP/2
+`Limits.address_resolver`,
 WebSocket `ConnectOptions.address_resolver`, HTTP/3
 `HandshakeClientOptions.address_resolver` and SOCKS5
 `Options.address_resolver` use the same callback contract. A resolver value
@@ -17,6 +18,33 @@ storing it and their pending calls. The implementation must honor I/O cancellati
 and the deadline, and return an allocator-owned address slice. Callers free that
 slice after address scheduling completes. Authentication identity remains
 independent of those returned addresses.
+
+Native H1/H2 named TCP/TLS constructors and URI request helpers use the resolver
+and address policy in their `Limits`. `address_connect_policy = null` selects
+ordered fallback; setting `.happy_eyeballs` enables bounded staggered attempts.
+These choices compose with `local_address`, `network_interface` and the original
+connection deadline. Literal IP routes bypass the application resolver.
+
+```zig
+var connection = try netz.http2.runtime.Client.connectTlsHost(
+    allocator, io, "api.example.com", 443,
+    .{
+        .address_resolver = resolver,
+        .address_connect_policy = .{ .happy_eyeballs = .{
+            .attempt_delay = .fromMilliseconds(250),
+            .max_in_flight = 2,
+        } },
+    },
+    .{},
+);
+defer connection.close();
+```
+
+Native proxy transports inherit configured resolver/policy from the owning
+limits. Proxy-specific `ProxyOptions` fields override those inherited values;
+origin hostnames in CONNECT remain proxy-resolved. `http2.runtime.limitsToHttp1`
+preserves all shared transport fields when adapting limits. See [native option
+evidence](../evidence/native_resolver_policy/2026-11-25/README.md).
 
 System full-address resolution is shared by TCP address racing, SOCKS5 relay
 resolution, proxy ACL destination resolution and HTTP/3 URI/Alt-Svc resolution.

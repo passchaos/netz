@@ -53,6 +53,7 @@ const writeResponsesToTransportScratch = runtime.writeResponsesToTransportScratc
 test {
     _ = @import("tls_tests.zig");
     _ = @import("client/endpoint_tests.zig");
+    _ = @import("client/resolution_tests.zig");
     _ = @import("client_and_continue_tests.zig");
     _ = @import("tunnel_tests.zig");
     _ = @import("write_strategy_tests.zig");

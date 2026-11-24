@@ -27,6 +27,7 @@ pub const hostWithOptions = binding.host;
 pub const hostWithDeadlineAndOptions = binding.hostWithDeadline;
 pub const resolvedWithOptions = binding.resolved;
 pub const endpointWithOptions = @import("tcp_connect/endpoint.zig").open;
+pub const EndpointConnectError = @import("tcp_connect/endpoint.zig").Error;
 
 pub fn validateUnixOptions(options: anytype) error{OptionUnsupported}!void {
     if (Binding.fromOptions(options).isRequested()) return error.OptionUnsupported;

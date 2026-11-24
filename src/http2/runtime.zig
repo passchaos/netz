@@ -563,6 +563,12 @@ pub const Limits = struct {
     /// Constrain the socket's network interface independently of source IP.
     /// Names are borrowed; unsupported platforms/backends fail explicitly.
     network_interface: ?tcp_connect.NetworkInterface = null,
+    /// Application resolution for named and URI client connections.
+    /// Returned peers do not replace TLS identity or HTTP authority.
+    address_resolver: ?AddressResolver = null,
+    /// Null uses ordered fallback; explicit values propagate to inherited
+    /// proxy transport limits unless proxy-specific options override them.
+    address_connect_policy: ?AddressConnectPolicy = null,
 
     /// Local allocation/test ceiling for any inbound or outbound frame payload.
     /// `max_frame_size` below is the HTTP/2 SETTINGS_MAX_FRAME_SIZE value that
@@ -761,6 +767,10 @@ pub const ServeUntilOptions = server_runtime.ServeUntilOptions;
 pub const Client = client_runtime.Client;
 
 pub const StapledOcspPolicy = tls_stream.StapledOcspPolicy;
+
+pub const AddressResolver = http1_runtime.AddressResolver;
+pub const AddressConnectPolicy = http1_runtime.AddressConnectPolicy;
+pub const HappyEyeballsOptions = http1_runtime.HappyEyeballsOptions;
 
 pub const TlsConnectOptions = struct {
     verify_host: bool = true,
@@ -2784,6 +2794,11 @@ fn writeSettingsPayloadForLimits(allocator: std.mem.Allocator, payload: *std.Arr
 
 pub fn limitsToHttp1(limits: Limits) http1_runtime.Limits {
     return .{
+        .local_address = limits.local_address,
+        .network_interface = limits.network_interface,
+        .address_resolver = limits.address_resolver,
+        .address_connect_policy = limits.address_connect_policy,
+        .connect_timeout = limits.connect_timeout,
         .max_head_bytes = limits.max_header_list_size,
         .max_body_bytes = limits.max_body_bytes,
         .request_head_timeout = limits.handshake_timeout,

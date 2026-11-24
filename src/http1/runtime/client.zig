@@ -2176,26 +2176,26 @@ pub const Client = struct {
         const is_http = std.ascii.eqlIgnoreCase(uri.scheme, "http");
         const is_https = std.ascii.eqlIgnoreCase(uri.scheme, "https");
         if (!is_http and !is_https) return error.UnsupportedScheme;
+        try tcp_connect.validateAddressConnectPolicy(limits.address_connect_policy orelse .ordered);
         const target = try uriTargetAlloc(allocator, uri);
         defer allocator.free(target);
         var endpoint = try uriEndpoint(allocator, uri, if (is_https) 443 else 80);
         defer endpoint.deinit();
 
-        const stream = switch (endpoint.target) {
-            .host => |host| try tcp_connect.hostWithOptions(
-                io,
-                host,
-                endpoint.port,
-                limits.connect_timeout,
-                limits,
-            ),
-            .ip => |address| try tcp_connect.ipWithOptions(
-                io,
-                address,
-                limits.connect_timeout,
-                limits,
-            ),
-        };
+        const stream = try tcp_connect.endpointWithOptions(
+            allocator,
+            io,
+            switch (endpoint.target) {
+                .ip => |address| address,
+                .host => null,
+            },
+            endpoint.tls_host,
+            endpoint.port,
+            limits.address_resolver,
+            limits.address_connect_policy orelse .ordered,
+            try deadline_policy.fromTimeout(io, limits.connect_timeout),
+            .fromOptions(limits),
+        );
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(io);
         if (limits.tcp_nodelay) try setTcpNoDelay(stream);
@@ -2285,6 +2285,7 @@ pub const Client = struct {
         const is_http = std.ascii.eqlIgnoreCase(uri.scheme, "http");
         const is_https = std.ascii.eqlIgnoreCase(uri.scheme, "https");
         if (!is_http and !is_https) return error.UnsupportedScheme;
+        try tcp_connect.validateAddressConnectPolicy(limits.address_connect_policy orelse .ordered);
         const target = try uriTargetAlloc(allocator, uri);
         defer allocator.free(target);
         var endpoint = try uriEndpoint(
