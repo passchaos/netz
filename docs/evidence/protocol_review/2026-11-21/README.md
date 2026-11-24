@@ -3740,3 +3740,6 @@ termination overlaps pass 207/208 in Debug and ReleaseSafe with one Linux-only
 GRO skip. [Read buffer evidence](../../webtransport_read_buffer_admission/2026-11-24/README.md)
 records unclaimed whole-stream retention, RESET/EOF event retry and the common
 protected buffered-stream fixture.
+The native Windows transport job passed at `b01c7766` (2m 39s), including the
+buffer-admission groups and prior owner/reader/HTTP/H3/WebSocket filters. The
+linked evidence records the matching source revision and public success label.

@@ -30,6 +30,7 @@ is shared with the previous reader-owner regressions.
 | Buffer and prior reader-owner cases (Debug) | 112/112 | [reader.Debug.log](reader.Debug.log) |
 | Incremental/whole/shared/credit/termination overlap (Debug) | 207/208, 1 platform skip | [overlap.Debug.log](overlap.Debug.log) |
 | Incremental/whole/shared/credit/termination overlap (ReleaseSafe) | 207/208, 1 platform skip | [overlap.ReleaseSafe.log](overlap.ReleaseSafe.log) |
+| Native Windows buffer/reader/operation/transport job | Success at `b01c7766`, 2m 39s | [native-windows.json](native-windows.json) |
 
 The overlap includes the new buffer, prior reader-owner and operation-owner
 filters plus `WebTransport whole-stream`, `WebTransport incremental`,
@@ -49,6 +50,14 @@ zig build test-webtransport \
 Native Windows CI includes the new buffer filter alongside existing operation/
 reader admission and HTTP/H3 DATAGRAM/WebSocket checks. Native evidence is
 recorded after the matching source revision's Windows job finishes.
+
+The [native Windows job at `b01c7766`](https://github.com/passchaos/netz/actions/runs/45350516410/job/138295611148)
+completed successfully in 2m 39s. The public matrix success label identifies
+the Windows runner, and the run's commit link matches the source revision.
+[The snapshot](native-windows.json) records those sources and the exact native
+command. All four buffer-admission groups use zio with no platform skip; the
+command also includes prior owner/reader and HTTP/H3 DATAGRAM/WebSocket cases.
+Other workflow jobs have their own status.
 
 [The public operation contract](../../../webtransport_operation_admission.md)
 documents the buffer requirement and retained terminal-event semantics.
