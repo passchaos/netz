@@ -32,6 +32,24 @@ add a second receive-list entry; both must be rejected without rewriting the
 policy. The second-entry test skips if the host accepts no other interface.
 Native execution is recorded separately from cross-compilation when CI finishes.
 
+## Creation and adoption error boundaries
+
+The first native Linux job failed its complete library/public-package compile
+gate, while the first native Windows transport job succeeded. The shared
+interface error set had included the adoption-only mismatch error in socket
+creation signatures. Configuration/creation errors are now distinct from
+read-only adoption errors, preserving the existing source-bound TCP APIs.
+The complete Linux compile gate passed after this separation (8/8 steps), and
+the owning library's source-bound TCP tests passed (225 passed, 1 platform skip).
+The combined creation/adoption checks passed (98 passed, 5 platform skips).
+
+| Additional verification | Result | Evidence |
+| --- | --- | --- |
+| Full Linux library/public-package compilation | 8/8 build steps passed | [linux-full-compile.log](linux-full-compile.log) |
+| Source-bound TCP owning library tests | 225 passed, 1 skip | [legacy-tcp.Debug.log](legacy-tcp.Debug.log) |
+| Creation/adoption error boundary | 98 passed, 5 skips | [errors.Debug.log](errors.Debug.log) |
+| Final Windows error boundary compilation | 8/8 build steps passed | [errors.windows-compile.log](errors.windows-compile.log) |
+
 See [the interface contract](../../../local_network_binding.md).
 
 ```sh

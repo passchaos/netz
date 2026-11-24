@@ -119,7 +119,7 @@ pub fn listen(
     io: std.Io,
     address: net.IpAddress,
     options: Options,
-) (net.IpAddress.ListenError || interfaces.Error)!net.Server {
+) (net.IpAddress.ListenError || interfaces.ConfigurationError)!net.Server {
     _ = zio.Runtime.fromIo(io) orelse return error.OptionUnsupported;
     if (options.ip6_only != null and address != .ip6) {
         return error.OptionUnsupported;

@@ -9,12 +9,13 @@ const windows_native = struct {
     extern "ws2_32" fn WSAGetLastError() callconv(.winapi) c_int;
 };
 
-pub const Error = net.Interface.Name.ResolveError || net.Interface.NameError || error{
+pub const ConfigurationError = net.Interface.Name.ResolveError || net.Interface.NameError || error{
     InvalidNetworkInterface,
-    InterfaceBindingMismatch,
     OptionUnsupported,
     SocketOptionFailed,
 };
+
+pub const Error = ConfigurationError || error{InterfaceBindingMismatch};
 
 /// A socket routing constraint. Names are borrowed for the owning client's
 /// lifetime. Windows accepts an adapter alias (for example `Ethernet`) or its
@@ -23,7 +24,7 @@ pub const NetworkInterface = union(enum) {
     name: []const u8,
     index: u32,
 
-    pub fn resolve(self: NetworkInterface, io: std.Io) Error!net.Interface {
+    pub fn resolve(self: NetworkInterface, io: std.Io) ConfigurationError!net.Interface {
         switch (self) {
             .index => |index| {
                 if (index == 0) return error.InvalidNetworkInterface;
@@ -47,7 +48,7 @@ pub const NetworkInterface = union(enum) {
 pub const requireBinding = @import("network_interface/validation.zig").require;
 
 /// Prepare a native UDP socket before interface policy and bind.
-pub fn prepareDatagram(handle: net.Socket.Handle, family: net.IpAddress.Family) Error!void {
+pub fn prepareDatagram(handle: net.Socket.Handle, family: net.IpAddress.Family) ConfigurationError!void {
     if (comptime builtin.os.tag == .windows) {
         if (family == .ip6) {
             const enabled: u32 = 1;
@@ -58,7 +59,7 @@ pub fn prepareDatagram(handle: net.Socket.Handle, family: net.IpAddress.Family) 
 
 /// Validate the actual family policy once a native UDP socket is bound.
 /// This also checks caller-owned sockets when an association is adopted.
-pub fn validateDatagramFamily(handle: net.Socket.Handle, family: net.IpAddress.Family) Error!void {
+pub fn validateDatagramFamily(handle: net.Socket.Handle, family: net.IpAddress.Family) ConfigurationError!void {
     if (comptime builtin.os.tag == .windows) {
         if (family == .ip6) {
             var ipv6_only: u32 = 0;
@@ -77,7 +78,7 @@ pub fn validateDatagramFamily(handle: net.Socket.Handle, family: net.IpAddress.F
 
 /// Apply before TCP connect or the first UDP send. Windows foreign backends
 /// can expose AFD handles rather than Winsock sockets and are rejected.
-pub fn apply(io: std.Io, handle: net.Socket.Handle, family: net.IpAddress.Family, mode: net.Socket.Mode, interface: NetworkInterface) Error!void {
+pub fn apply(io: std.Io, handle: net.Socket.Handle, family: net.IpAddress.Family, mode: net.Socket.Mode, interface: NetworkInterface) ConfigurationError!void {
     if (comptime builtin.os.tag == .windows) {
         _ = zio.Runtime.fromIo(io) orelse return error.OptionUnsupported;
         // Winsock has no device constraint for received TCP packets.
@@ -114,7 +115,7 @@ fn windowsIndex(family: net.IpAddress.Family, index: u32) u32 {
     return if (family == .ip4) std.mem.nativeToBig(u32, index) else index;
 }
 
-fn setOption(handle: net.Socket.Handle, level: i32, option: u32, bytes: []const u8) Error!void {
+fn setOption(handle: net.Socket.Handle, level: i32, option: u32, bytes: []const u8) ConfigurationError!void {
     if (comptime builtin.os.tag == .windows) {
         if (windows_native.setsockopt(@ptrCast(handle), level, @intCast(option), bytes.ptr, @intCast(bytes.len)) != 0) {
             return switch (windows_native.WSAGetLastError()) {
@@ -139,7 +140,7 @@ fn setOption(handle: net.Socket.Handle, level: i32, option: u32, bytes: []const 
     }
 }
 
-fn resolveWindows(name: []const u8) Error!net.Interface {
+fn resolveWindows(name: []const u8) ConfigurationError!net.Interface {
     // std.Io Interface.Name has zero capacity on Windows in Zig 0.16.
     // Use IP Helper's UTF-16 API without exposing OS types to callers.
     if (name.len > 768) return error.NameTooLong;
@@ -166,7 +167,7 @@ fn resolveWindows(name: []const u8) Error!net.Interface {
     return .{ .index = index };
 }
 
-fn lookupWindows(comptime Function: type, library: *anyopaque, symbol: []const u8) Error!Function {
+fn lookupWindows(comptime Function: type, library: *anyopaque, symbol: []const u8) ConfigurationError!Function {
     var result: std.os.windows.PVOID = undefined;
     switch (std.os.windows.ntdll.LdrGetProcedureAddress(library, &.init(symbol), 0, &result)) {
         .SUCCESS => return @ptrCast(result),

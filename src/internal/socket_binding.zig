@@ -6,10 +6,12 @@ const net = std.Io.net;
 
 pub const NetworkInterface = interfaces.NetworkInterface;
 pub const Error = interfaces.Error;
+pub const ConfigurationError = interfaces.ConfigurationError;
+pub const BindError = net.IpAddress.BindError || ConfigurationError;
 pub const applyInterface = interfaces.apply;
 pub const validateDatagramFamily = interfaces.validateDatagramFamily;
 pub const requireInterface = interfaces.requireBinding;
-pub const ConnectError = net.IpAddress.ConnectError || Error || error{AddressInUse};
+pub const ConnectError = net.IpAddress.ConnectError || ConfigurationError || error{AddressInUse};
 
 pub const Binding = struct {
     local_address: ?net.IpAddress = null,
@@ -43,7 +45,7 @@ pub fn connect(io: std.Io, address: net.IpAddress, binding: Binding, timeout: zi
 
 /// Install a requested interface before bind, so the socket never queues
 /// datagrams from another device. Unconstrained source binds retain std.Io.
-pub fn bindDatagram(io: std.Io, address: net.IpAddress, interface: ?NetworkInterface) (net.IpAddress.BindError || Error)!net.Socket {
+pub fn bindDatagram(io: std.Io, address: net.IpAddress, interface: ?NetworkInterface) BindError!net.Socket {
     const selected = interface orelse return address.bind(io, .{ .mode = .dgram, .protocol = .udp });
     _ = zio.Runtime.fromIo(io) orelse return error.OptionUnsupported;
     const family = std.meta.activeTag(address);
@@ -56,7 +58,7 @@ pub fn bindDatagram(io: std.Io, address: net.IpAddress, interface: ?NetworkInter
     return .{ .handle = stdHandle(socket.handle), .address = stdAddress(socket.address.ip) };
 }
 
-fn mapDatagramBindError(err: anyerror) (net.IpAddress.BindError || Error) {
+fn mapDatagramBindError(err: anyerror) BindError {
     return switch (err) {
         error.AddressInUse => error.AddressInUse,
         error.AddressUnavailable => error.AddressUnavailable,
@@ -77,7 +79,7 @@ fn mapDatagramBindError(err: anyerror) (net.IpAddress.BindError || Error) {
 
 /// A requested device policy is installed before bind/listen, so queued
 /// incoming TCP handshakes cannot predate the constraint.
-pub fn listenTcp(io: std.Io, address: net.IpAddress, options: net.IpAddress.ListenOptions, interface: ?NetworkInterface) (net.IpAddress.ListenError || Error)!net.Server {
+pub fn listenTcp(io: std.Io, address: net.IpAddress, options: net.IpAddress.ListenOptions, interface: ?NetworkInterface) (net.IpAddress.ListenError || ConfigurationError)!net.Server {
     if (interface) |selected| {
         if (options.mode != .stream or options.protocol != .tcp) return error.OptionUnsupported;
         return @import("../runtime/ip_listener.zig").listen(io, address, .{
