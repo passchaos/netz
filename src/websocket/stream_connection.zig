@@ -10,11 +10,13 @@ const assembler = @import("message/assembler.zig");
 const deadline_policy = @import("../internal/deadline.zig");
 const MutexGuard = @import("../internal/mutex_guard.zig").Guard;
 const writes = @import("stream_connection/writes.zig");
+const admission = @import("stream_connection/admission.zig");
 
 test {
     _ = @import("stream_connection_tests.zig");
     _ = @import("stream_connection/failure_tests.zig");
     _ = @import("stream_connection/concurrency_tests.zig");
+    _ = @import("stream_connection/admission_tests.zig");
 }
 
 pub const Role = enum { client, server };
@@ -248,38 +250,30 @@ pub const Connection = struct {
         deadline: ?std.Io.Clock.Timestamp,
     ) !Message {
         if (self.isClosed() or self.closeReceived()) return error.ConnectionClosed;
+        if (deadline != null and self.transport.read_deadline_fn == null) {
+            return error.DeadlineUnsupported;
+        }
         while (true) {
             var frame = self.readFrameBefore(deadline) catch |err| {
-                // A malformed Close/control frame is a protocol error. Send
-                // 1002 and make the failure terminal instead of re-reading
-                // the same buffered bytes on the next call.
-                switch (err) {
-                    error.InvalidCloseCode,
-                    error.InvalidUtf8,
-                    error.InvalidControlFrame,
-                    => {
-                        self.sendCloseBefore(.protocol_error, "", deadline) catch {};
-                        @atomicStore(bool, &self.close_received, true, .release);
-                    },
-                    else => {},
-                }
+                self.failReceive(err, deadline);
                 return err;
             };
             defer frame.deinit(self.allocator);
             switch (frame.header.opcode) {
                 .ping => {
                     try self.sendFrameBefore(.pong, frame.payload, deadline);
+                    self.consumeFrame(frame.consumed);
                     continue;
                 },
-                .pong => continue,
+                .pong => {
+                    self.consumeFrame(frame.consumed);
+                    continue;
+                },
                 .close => {
                     const parsed = websocket.parseClosePayload(
                         frame.payload,
                     ) catch |err| {
-                        // An invalid Close payload is a protocol error. Reply
-                        // with 1002 before surfacing the parse failure.
-                        self.sendCloseBefore(.protocol_error, "", deadline) catch {};
-                        @atomicStore(bool, &self.close_received, true, .release);
+                        self.failReceive(err, deadline);
                         return err;
                     };
                     if (parsed) |frame_close| {
@@ -303,11 +297,17 @@ pub const Connection = struct {
                             self.sendCloseBefore(.normal_closure, "", deadline) catch {};
                         }
                     }
+                    self.consumeFrame(frame.consumed);
                     @atomicStore(bool, &self.close_received, true, .release);
                     return error.ConnectionClosed;
                 },
                 .text, .binary, .continuation => {
-                    if (try self.assembler.feedOwned(&frame)) |message| {
+                    const assembled = self.assembler.feedOwned(&frame) catch |err| {
+                        self.failReceive(err, deadline);
+                        return err;
+                    };
+                    self.consumeFrame(frame.consumed);
+                    if (assembled) |message| {
                         return .{
                             .opcode = message.opcode,
                             .payload = message.payload,
@@ -630,6 +630,7 @@ pub const Connection = struct {
         deadline: ?std.Io.Clock.Timestamp,
     ) !void {
         try self.ensureWritable(opcode);
+        try admission.outbound(self.options, opcode, payload.len);
         // Text frames carry UTF-8; binary frames remain opaque. Validate before
         // taking the write mutex or emitting any header bytes.
         if (opcode == .text and !std.unicode.utf8ValidateSlice(payload)) {
@@ -708,6 +709,7 @@ pub const Connection = struct {
             total = std.math.add(usize, total, slice.len) catch
                 return error.PayloadTooLarge;
         }
+        try admission.outbound(self.options, opcode, total);
         if (opcode == .text and !websocket.utf8ValidateSlices(slices)) {
             return error.InvalidUtf8;
         }
@@ -794,6 +796,29 @@ pub const Connection = struct {
         self.frameSent(opcode);
     }
 
+    fn consumeFrame(self: *Connection, length: usize) void {
+        self.start += length;
+        if (self.start == self.buffer.items.len) {
+            self.buffer.clearRetainingCapacity();
+            self.start = 0;
+        }
+    }
+
+    fn failReceive(self: *Connection, err: anyerror, deadline: ?std.Io.Clock.Timestamp) void {
+        const code: websocket.CloseCode = switch (err) {
+            error.PayloadTooLarge => .message_too_big,
+            error.InvalidUtf8 => .invalid_payload_data,
+            error.InvalidOpcode, error.InvalidFrame, error.InvalidControlFrame, error.InvalidCloseCode, error.UnexpectedRsv, error.NonMinimalLength, error.UnmaskedClientFrame, error.MaskedServerFrame => .protocol_error,
+            error.EndOfStream => {
+                self.abort();
+                return;
+            },
+            else => return,
+        };
+        self.sendCloseBefore(code, "", deadline) catch {};
+        self.abort();
+    }
+
     fn readFrame(self: *Connection) !websocket.Frame {
         return self.readFrameBefore(null);
     }
@@ -809,15 +834,13 @@ pub const Connection = struct {
                 self.buffer.items[self.start..],
             ) catch |err| switch (err) {
                 error.BufferTooShort => {
-                    try self.ensureBefore(websocket.max_frame_header_len, deadline);
+                    const needed = admission.requiredHeaderLen(self.buffer.items[self.start..][0..2].*);
+                    try self.ensureBefore(needed, deadline);
                     continue;
                 },
                 else => return err,
             };
-            const wire_len = try header.wireLen();
-            if (wire_len > self.options.max_frame_bytes) {
-                return error.PayloadTooLarge;
-            }
+            const wire_len = try admission.inbound(self.options, &self.assembler, header);
             try self.ensureBefore(wire_len, deadline);
             const bytes = self.buffer.items[self.start..][0..wire_len];
             const frame = try websocket.parseFrameWithHeader(
@@ -832,11 +855,8 @@ pub const Connection = struct {
                     .validate_utf8 = false,
                 },
             );
-            self.start += wire_len;
-            if (self.start == self.buffer.items.len) {
-                self.buffer.clearRetainingCapacity();
-                self.start = 0;
-            }
+            // The caller commits input only after assembly/control succeeds.
+            // OOM or a pre-write timeout can therefore retry these exact bytes.
             return frame;
         }
     }
@@ -846,11 +866,7 @@ pub const Connection = struct {
         wanted: usize,
         deadline: ?std.Io.Clock.Timestamp,
     ) !void {
-        const limit = std.math.add(
-            usize,
-            self.options.max_frame_bytes,
-            websocket.max_frame_header_len,
-        ) catch return error.PayloadTooLarge;
+        const limit = admission.stagingLimit(self.options);
         while (self.buffer.items.len - self.start < wanted) {
             if (self.start != 0) {
                 const remaining = self.buffer.items.len - self.start;
@@ -867,12 +883,19 @@ pub const Connection = struct {
             // bounding each reservation so a peer cannot force a whole-frame
             // allocation before sending the payload.
             const missing = wanted - self.buffer.items.len;
-            const read_len = @min(
+            var read_len = @min(
                 @max(missing, 16 * 1024),
                 @min(limit - self.buffer.items.len, 64 * 1024),
             );
             if (read_len == 0) return error.PayloadTooLarge;
-            try self.buffer.ensureUnusedCapacity(self.allocator, read_len);
+            const available = self.buffer.capacity - self.buffer.items.len;
+            if (available != 0) {
+                read_len = @min(read_len, available);
+            } else {
+                const wanted_capacity = self.buffer.items.len + read_len;
+                const growth = self.buffer.capacity +| (self.buffer.capacity / 2) +| 8;
+                try self.buffer.ensureTotalCapacityPrecise(self.allocator, @min(limit, @max(wanted_capacity, growth)));
+            }
             const spare = self.buffer.unusedCapacitySlice();
             const count = if (deadline) |absolute|
                 try self.transport.readBefore(spare[0..read_len], absolute)

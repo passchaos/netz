@@ -82,9 +82,29 @@ fallback that committed its header also retires the transport if a later
 slice's preflight fails. A fresh frame cannot complete that existing prefix.
 
 Client-role connections mask outgoing frames and require unmasked peer frames;
-server-role connections do the reverse. `max_frame_bytes` bounds one wire frame
-(including the header) and `max_message_bytes` bounds a reassembled fragmented
-message. Both are checked before allocating the frame payload.
+server-role connections do the reverse. `max_frame_bytes` bounds each incoming
+and outgoing wire frame, including its length encoding and optional four-byte
+mask. `max_message_bytes` bounds application payloads in both directions and
+the aggregate incoming fragmented message. Control payloads remain subject to
+the RFC 125-byte cap and the wire-frame limit, independently of the application
+message budget. A rejected outgoing frame returns `PayloadTooLarge` before
+staging, mask generation, UTF-8 scanning or any write callback; the connection
+remains usable.
+
+Incoming headers are validated for masking, RSV bits, minimal length encoding,
+fragment association and remaining message budget before payload copying or
+requesting the remaining body. Oversize input sends Close 1009 when the configured frame budget
+and transport permit, then retires the adapter; protocol/header failures use
+1002 and invalid text uses 1007. Subsequent receives return `ConnectionClosed`.
+Small message limits also bound read-ahead to the application/control window;
+default limits retain 16 KiB receive batching. Split headers request their
+actual 2/4/6/8/10/14 bytes rather than requiring a following frame.
+
+Input is committed after control handling or assembly succeeds. A read timeout,
+frame payload allocation failure, or assembly OOM preserves
+the exact frame and accepted fragment prefix for retry. A Pong whose deadline
+or capability is rejected before its write likewise leaves its Ping available.
+An invoked write callback error still follows the terminal policy above.
 
 ## Close state
 
@@ -98,9 +118,9 @@ message. Both are checked before allocating the frame payload.
   peer supplied one, and makes `receiveMessage` return
   `error.ConnectionClosed`. `peerClose()` exposes the retained code/reason
   until deinit.
-- A malformed Close payload or another invalid control frame sends Close 1002,
-  marks the adapter terminal and returns the parser error. The same buffered
-  bytes are not re-read on the next call.
+- Malformed Close/control headers use Close 1002; invalid UTF-8 uses 1007.
+  The adapter retires the transport and returns the parser error. Terminal
+  errors do not fabricate a received peer Close or re-read buffered bytes.
 
 `receiveMessage` returns an owned `Message`; its payload is freed by
 `Message.deinit`. Close metadata is copied into the connection, so it remains

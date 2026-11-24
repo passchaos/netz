@@ -3661,3 +3661,15 @@ bundles pass in Debug and ReleaseSafe; callback-shape, public-surface and
 Windows compile checks pass. [Write lifecycle evidence](../../websocket_stream_writes/2026-11-24/README.md)
 records the red baseline, deterministic concurrency checks, successful native
 Windows execution at `2920a159` (2m 41s), and a remaining admission-limit review.
+
+
+## Two-hundred-and-eighth pass: generic WebSocket frame admission
+
+Generic sends now apply both declared wire and message limits before staging,
+masking and callbacks. Receives validate headers and aggregate fragment credit
+before payload copies, use exact header lengths and bound read-ahead. Input
+commits after control/assembly success, preserving OOM and timeout retries.
+The three red baseline cases are fixed; adapter/assembler bundles pass 58/58
+in Debug and ReleaseSafe, native allocation overlaps pass 96/96, and Windows
+test binaries compile/link. [Admission evidence](../../websocket_stream_admission/2026-11-24/README.md)
+records the source and behavioral closure of the prior limit review.

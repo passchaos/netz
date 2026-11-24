@@ -87,6 +87,29 @@ pub const Assembler = struct {
         return self.feedInternal(frame, text_utf8, null);
     }
 
+    /// Validate association and aggregate length without mutating assembly
+    /// state. Stream readers can reject this header before acquiring payload
+    /// storage, while a timed-out payload read can safely retry the same frame.
+    pub fn validateFrameHeader(self: *const Assembler, header: websocket.FrameHeader) websocket.Error!void {
+        return self.validateDataHeader(header, header.payload_len);
+    }
+
+    fn validateDataHeader(self: *const Assembler, header: anytype, payload_len: u64) websocket.Error!void {
+        switch (header.opcode) {
+            .close, .ping, .pong => return,
+            .text, .binary => if (self.opcode != null) return error.InvalidFrame,
+            .continuation => {
+                if (self.opcode == null) return error.InvalidFrame;
+                if (header.rsv1) return error.UnexpectedRsv;
+            },
+            else => return error.InvalidOpcode,
+        }
+        const buffered = if (header.opcode == .continuation) self.buffer.items.len else 0;
+        if (buffered > self.max_message_bytes or payload_len > self.max_message_bytes - buffered) {
+            return error.PayloadTooLarge;
+        }
+    }
+
     fn validateFastPayload(
         self: *Assembler,
         payload: []const u8,
@@ -126,18 +149,14 @@ pub const Assembler = struct {
         steal_from: ?*Frame,
     ) !?Message {
         if (frame.header.opcode.isControl()) return null;
+        try self.validateDataHeader(frame.header, @intCast(frame.payload.len));
         const checkpoint = Checkpoint.capture(self);
         errdefer |err| if (err == error.OutOfMemory) checkpoint.restore(self);
         if (frame.header.opcode != .continuation) {
-            if (self.opcode != null) return error.InvalidFrame;
             self.opcode = frame.header.opcode;
             self.compressed = frame.header.rsv1;
             self.text_utf8.reset();
             self.buffer.clearRetainingCapacity();
-        } else if (self.opcode == null) {
-            return error.InvalidFrame;
-        } else if (frame.header.rsv1) {
-            return error.UnexpectedRsv;
         }
         if (frame.header.fin and self.buffer.items.len == 0) {
             if (steal_from) |owned| {
@@ -190,6 +209,35 @@ pub const Assembler = struct {
         };
     }
 };
+
+test "WebSocket message assembler header admission preserves the accepted prefix" {
+    var assembly = Assembler.initLimited(std.testing.allocator, 3);
+    defer assembly.deinit();
+    assembly.opcode = .text;
+    try assembly.buffer.appendSlice(std.testing.allocator, "ab");
+    const before = Assembler.Checkpoint.capture(&assembly);
+    var header: websocket.FrameHeader = .{
+        .fin = true,
+        .opcode = .continuation,
+        .masked = false,
+        .payload_len = 2,
+        .mask_key = null,
+        .header_len = 2,
+    };
+    try std.testing.expectError(error.PayloadTooLarge, assembly.validateFrameHeader(header));
+    try std.testing.expectEqualDeep(before, Assembler.Checkpoint.capture(&assembly));
+    header.opcode = .binary;
+    try std.testing.expectError(error.InvalidFrame, assembly.validateFrameHeader(header));
+    try std.testing.expectEqualDeep(before, Assembler.Checkpoint.capture(&assembly));
+    header.opcode = .ping;
+    header.payload_len = 125;
+    try assembly.validateFrameHeader(header);
+    try std.testing.expectEqualDeep(before, Assembler.Checkpoint.capture(&assembly));
+    header.opcode = .continuation;
+    header.payload_len = 1;
+    try assembly.validateFrameHeader(header);
+    try std.testing.expectEqualDeep(before, Assembler.Checkpoint.capture(&assembly));
+}
 
 test "WebSocket message assembler allocation failures preserve the accepted UTF8 prefix" {
     const allocator = std.testing.allocator;

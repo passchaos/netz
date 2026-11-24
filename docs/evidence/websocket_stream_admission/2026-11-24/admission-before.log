@@ -1,0 +1,132 @@
+[traex-zig-guard 2026-11-24 12:49:04] started Zig tree root=55804 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=1800s
+test-websocket
++- run test 8 pass, 3 fail (11 total)
+error: 'websocket.stream_connection.admission_tests.test.WebSocket stream adapter rejects outbound message limits before writing' failed:
+       expected error.PayloadTooLarge, found void
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:65:9: 0x102ee5d5b in expectError__anon_38245 (test)
+               return error.TestExpectedError;
+               ^
+       /Users/bytedance/project-z/netz/src/websocket/stream_connection/admission_tests.zig:39:5: 0x102ee5fcb in test.WebSocket stream adapter rejects outbound message limits before writing (test)
+           try std.testing.expectError(error.PayloadTooLarge, connection.sendBinary("abc"));
+           ^
+error: 'websocket.stream_connection.admission_tests.test.WebSocket stream adapter receives a short frame with a split masked header' failed:
+       /Users/bytedance/project-z/netz/src/websocket/mod.zig:121:38: 0x102ee1bdb in parse (test)
+                   if (bytes.len < pos + 4) return error.BufferTooShort;
+                                            ^
+       /Users/bytedance/project-z/netz/src/websocket/stream_connection.zig:882:29: 0x102ed5d6b in ensureBefore (test)
+                   if (count == 0) return error.EndOfStream;
+                                   ^
+       /Users/bytedance/project-z/netz/src/websocket/stream_connection.zig:813:21: 0x102ed613b in readFrameBefore (test)
+                           try self.ensureBefore(websocket.max_frame_header_len, deadline);
+                           ^
+       /Users/bytedance/project-z/netz/src/websocket/stream_connection.zig:267:17: 0x102ed8d0b in receiveMessageBefore (test)
+                       return err;
+                       ^
+       /Users/bytedance/project-z/netz/src/websocket/stream_connection.zig:221:9: 0x102ed94f7 in receiveMessage (test)
+               return self.receiveMessageBefore(null);
+               ^
+       /Users/bytedance/project-z/netz/src/websocket/stream_connection/admission_tests.zig:49:19: 0x102ee3687 in test.WebSocket stream adapter receives a short frame with a split masked header (test)
+           var message = try connection.receiveMessage();
+                         ^
+error: 'websocket.stream_connection.admission_tests.test.WebSocket stream adapter rejects aggregate message length at the continuation header' failed:
+       expected error.PayloadTooLarge, found error.EndOfStream
+       /Users/bytedance/project-z/netz/src/websocket/stream_connection.zig:882:29: 0x102ed5d6b in ensureBefore (test)
+                   if (count == 0) return error.EndOfStream;
+                                   ^
+       /Users/bytedance/project-z/netz/src/websocket/stream_connection.zig:822:13: 0x102ed631f in readFrameBefore (test)
+                   try self.ensureBefore(wire_len, deadline);
+                   ^
+       /Users/bytedance/project-z/netz/src/websocket/stream_connection.zig:267:17: 0x102ed8d0b in receiveMessageBefore (test)
+                       return err;
+                       ^
+       /Users/bytedance/project-z/netz/src/websocket/stream_connection.zig:221:9: 0x102ed94f7 in receiveMessage (test)
+               return self.receiveMessageBefore(null);
+               ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:72:13: 0x102ed966b in expectError__anon_36658 (test)
+                   return error.TestUnexpectedError;
+                   ^
+       /Users/bytedance/project-z/netz/src/websocket/stream_connection/admission_tests.zig:66:5: 0x102ed9b8f in test.WebSocket stream adapter rejects aggregate message length at the continuation header (test)
+           try std.testing.expectError(error.PayloadTooLarge, connection.receiveMessage());
+           ^
+failed command: ./.zig-cache/o/bce7014ecc3764de82d73754e1536772/test --cache-dir=./.zig-cache --seed=0xc4e61032 --listen=-
+
+Build Summary: 8/10 steps succeeded (1 failed); 8/11 tests passed (3 failed)
+test-websocket transitive failure
++- run test 8 pass, 3 fail (11 total)
+   +- compile test Debug native success 8s MaxRSS:551M
+      +- WriteFile macho_0_p256_field_arm64.S cached
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 236ms MaxRSS:31M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 236ms MaxRSS:31M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options success
+      +- options cached
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/dc551c8273fff33d6557bf3ca490b20b/build /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/zig /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib /Users/bytedance/project-z/netz .zig-cache /Users/bytedance/.cache/zig --seed 0xc4e61032 -Zf2b739b020a8d19b test-websocket -Dtest-filter=outbound message limits -Dtest-filter=short frame with a split -Dtest-filter=aggregate message length at --summary all
+[traex-zig-guard 2026-11-24 12:49:14] finished Zig tree root=55804 peak=484MiB result=0
