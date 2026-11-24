@@ -8,6 +8,7 @@ const tls_stream = @import("../../tls/mod.zig").stream;
 const net = std.Io.net;
 const runtime = @import("../runtime.zig");
 const operation_owner = @import("owner.zig");
+const stream_read_buffer = @import("stream/read_buffer.zig");
 
 const ConnectOptions = runtime.ConnectOptions;
 const Error = runtime.Error;
@@ -2130,9 +2131,10 @@ pub const HandshakeClientSession = struct {
         self: *HandshakeClientSession,
         out: []u8,
     ) Error!?StreamRead {
+        try operation_owner.buffered(&self.h3);
+        try stream_read_buffer.validate(out);
         try connection_lifecycle.ensureOpen(&self.control, &self.h3, &self.streams);
         defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
-        if (out.len == 0) return error.BufferTooShort;
         if (!try self.prepareDispatcherPoll()) return null;
         const result = if (self.dispatcher != null)
             incremental_stream.pollOnce(
@@ -2158,6 +2160,7 @@ pub const HandshakeClientSession = struct {
         out: []u8,
     ) Error!StreamRead {
         try operation_owner.receive(self);
+        try stream_read_buffer.validate(out);
         try connection_lifecycle.ensureOpen(&self.control, &self.h3, &self.streams);
         defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         return flow_read.read(
@@ -2188,6 +2191,7 @@ pub const HandshakeClientSession = struct {
     ) ReceiveTimeoutError!StreamRead {
         _ = try deadline_policy.usableAwake(self.h3.established.connection.endpoint.io, deadline);
         try operation_owner.receive(self);
+        try stream_read_buffer.validate(out);
         try connection_lifecycle.ensureOpen(&self.control, &self.h3, &self.streams);
         defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         return flow_read.readWithDeadline(
@@ -2207,6 +2211,7 @@ pub const HandshakeClientSession = struct {
         out: []u8,
     ) Error!StreamRead {
         try operation_owner.receive(self);
+        try stream_read_buffer.validate(out);
         try connection_lifecycle.ensureOpen(&self.control, &self.h3, &self.streams);
         defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         return flow_read.readId(
@@ -2240,6 +2245,7 @@ pub const HandshakeClientSession = struct {
     ) ReceiveTimeoutError!StreamRead {
         _ = try deadline_policy.usableAwake(self.h3.established.connection.endpoint.io, deadline);
         try operation_owner.receive(self);
+        try stream_read_buffer.validate(out);
         try connection_lifecycle.ensureOpen(&self.control, &self.h3, &self.streams);
         defer connection_lifecycle.observeWithTimer(&self.control, &self.h3, &self.streams, self.dispatcher, self.dispatcher_handle);
         return flow_read.readIdWithDeadline(

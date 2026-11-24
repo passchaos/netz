@@ -9,9 +9,11 @@ const connection_lifecycle = @import("connection_lifecycle.zig");
 const flow_receive = @import("flow/receive.zig");
 const flow_progress = @import("flow/progress.zig");
 const receive_credit = @import("stream/receive_credit.zig");
+const stream_read_buffer = @import("stream/read_buffer.zig");
 
 test {
     _ = @import("stream/receive_credit_tests.zig");
+    _ = @import("stream/read_buffer_tests.zig");
 }
 
 pub const Error = association.Error || @import("session_control.zig").Error;
@@ -154,7 +156,7 @@ pub fn readWithProgress(
     deadline: ?std.Io.Clock.Timestamp,
     progress: ?flow_progress.Progress,
 ) TimeoutError!Read {
-    if (out.len == 0) return error.BufferTooShort;
+    try stream_read_buffer.validate(out);
     while (true) {
         if (deadline) |absolute| _ = try deadline_policy.usableAwake(connection.endpoint.io, absolute);
         if (progress) |owner| try owner.maintain(deadline);
@@ -340,6 +342,7 @@ fn pollInternal(
     single_attempt: bool,
     sessions: ?association.SessionLookup,
 ) Error!?Read {
+    try stream_read_buffer.validate(out);
     if (connection_lifecycle.terminating(connection)) return error.ConnectionClosed;
     const drained = try association.drainAbandonedReceives(
         connection,

@@ -30,6 +30,15 @@ Rejection preserves receive cursors, registry records and caller storage.
 The composable H3 readers in `runtime/flow/read.zig` enforce this admission before
 their progress callbacks as well.
 
+Incremental stream read and poll methods require a nonempty destination buffer,
+including calls that receive RESET or FIN events. `BufferTooShort` rejects empty
+storage before Session lifecycle maintenance, stream association, reader-mode
+selection or terminal-event consumption. Callback and blocking-owner admission
+retain their existing precedence. A rejected empty poll leaves a complete
+stream available to the whole-stream reader. With valid storage, an EOF event
+can still report `bytes = 0, fin = true`; a zero-byte nonterminal data event
+does not represent read progress.
+
 Caller-buffer batch progress is per call: `received_count` clears before owner
 admission and retains the completed prefix after work begins. Rejected calls
 preserve output bytes, destination pointers and lengths. Batch send similarly

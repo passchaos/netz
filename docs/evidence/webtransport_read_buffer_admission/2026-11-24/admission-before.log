@@ -1,0 +1,122 @@
+[traex-zig-guard 2026-11-24 15:35:28] waiting for the global TRAE Zig build slot
+[traex-zig-guard 2026-11-24 15:36:11] started Zig tree root=97125 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=1800s
+test-webtransport
++- run test 105 pass, 3 fail (108 total)
+error: 'webtransport.runtime.stream.read_buffer_tests.test.WebTransport stream read buffer admission preserves whole reader after empty poll' failed:
+       expected error.BufferTooShort, found void
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:65:9: 0x1051c16f7 in expectError__anon_153289 (test)
+               return error.TestExpectedError;
+               ^
+       /Users/bytedance/project-z/netz/src/webtransport/runtime/stream/read_buffer_tests.zig:51:13: 0x1052416eb in test.WebTransport stream read buffer admission preserves whole reader after empty poll (test)
+                   try std.testing.expectError(error.BufferTooShort, poll(&pair, role, kind, &empty));
+                   ^
+error: 'webtransport.runtime.stream.read_buffer_tests.test.WebTransport stream read buffer admission precedes facade lifecycle rejection' failed:
+       expected error.BufferTooShort, found error.InvalidSessionState
+       /Users/bytedance/project-z/netz/src/webtransport/runtime/session_control.zig:282:13: 0x104fba71b in ensureOpen (test)
+                   return error.InvalidSessionState;
+                   ^
+       /Users/bytedance/project-z/netz/src/webtransport/runtime/connection_lifecycle.zig:91:5: 0x104fca16f in ensureOpen__anon_42367 (test)
+           try control.ensureOpen();
+           ^
+       /Users/bytedance/project-z/netz/src/webtransport/runtime/handshake_client_session.zig:2133:9: 0x1050cf1cf in pollStream (test)
+               try connection_lifecycle.ensureOpen(&self.control, &self.h3, &self.streams);
+               ^
+       /Users/bytedance/project-z/netz/src/webtransport/runtime/stream/read_buffer_tests.zig:28:22: 0x104edaadb in callFacade__anon_41176 (test)
+               .poll => _ = try session.pollStream(output),
+                            ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:72:13: 0x104edae43 in expectError__anon_41180 (test)
+                   return error.TestUnexpectedError;
+                   ^
+       /Users/bytedance/project-z/netz/src/webtransport/runtime/stream/read_buffer_tests.zig:75:13: 0x10523ef83 in test.WebTransport stream read buffer admission precedes facade lifecycle rejection (test)
+                   try std.testing.expectError(error.BufferTooShort, callFacade(session, kind, &empty, until));
+                   ^
+error: 'webtransport.runtime.stream.read_buffer_tests.test.WebTransport stream read buffer admission preserves RESET and zero byte FIN events' failed:
+       expected error.BufferTooShort, found void
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:65:9: 0x1051c16f7 in expectError__anon_153289 (test)
+               return error.TestExpectedError;
+               ^
+       /Users/bytedance/project-z/netz/src/webtransport/runtime/stream/read_buffer_tests.zig:108:17: 0x1051c300f in test.WebTransport stream read buffer admission preserves RESET and zero byte FIN events (test)
+                       try std.testing.expectError(error.BufferTooShort, poll(&pair, role, kind, &empty));
+                       ^
+failed command: ./.zig-cache/o/956d508ddecefd142213055047ce4fcc/test --cache-dir=./.zig-cache --seed=0x81d5438d --listen=-
+
+Build Summary: 8/10 steps succeeded (1 failed); 105/108 tests passed (3 failed)
+test-webtransport transitive failure
++- run test 105 pass, 3 fail (108 total)
+   +- compile test Debug native success 9s MaxRSS:1G
+      +- WriteFile macho_0_p256_field_arm64.S cached
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 207ms MaxRSS:31M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 180ms MaxRSS:31M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options success
+      +- options cached
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/dc551c8273fff33d6557bf3ca490b20b/build /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/zig /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib /Users/bytedance/project-z/netz .zig-cache /Users/bytedance/.cache/zig --seed 0x81d5438d -Z9bc0b56e3fb6422c test-webtransport -Dtest-filter=WebTransport stream read buffer admission -j1 --summary all
+[traex-zig-guard 2026-11-24 15:36:23] finished Zig tree root=97125 peak=877MiB result=0

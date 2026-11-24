@@ -3727,3 +3727,16 @@ The same overlap passes 199/200 in ReleaseSafe with the same GRO platform skip.
 The native Windows transport job passed at `ab2ecc73` (2m 51s), including all
 four reader-admission cases and the previous operation/HTTP/H3/WebSocket
 filters. The linked evidence records the matching native success label.
+
+
+## Two-hundred-and-twelfth pass: incremental read buffer admission
+
+Empty incremental read/poll storage now rejects before association, reader-mode
+claims, terminal-event consumption or Session lifecycle observation. The shared
+buffer check preserves callback-owner precedence and normal zero-byte FIN
+delivery with valid storage. Three actual baseline failures are fixed; the
+buffer/reader bundle passes 112/112, and incremental/whole/shared/credit/
+termination overlaps pass 207/208 in Debug and ReleaseSafe with one Linux-only
+GRO skip. [Read buffer evidence](../../webtransport_read_buffer_admission/2026-11-24/README.md)
+records unclaimed whole-stream retention, RESET/EOF event retry and the common
+protected buffered-stream fixture.

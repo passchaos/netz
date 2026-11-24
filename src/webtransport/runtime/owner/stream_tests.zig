@@ -10,21 +10,7 @@ const Incremental = enum { any, timeout, deadline, targeted, targeted_timeout, t
 const Whole = enum { ordinary, timeout, deadline };
 
 fn ready(pair: *Pair, comptime role: support.Role, fin: bool) !u62 {
-    const peer = if (role == .client) &pair.server else &pair.client;
-    const id = try peer.openUnidirectionalStream();
-    try peer.sendStream(id, "delivered", fin);
-    const source = pair.connection(if (role == .client) .server else .client);
-    const expected = source.sendStreamStats(id).?.highest_sent_offset;
-    const receiver = pair.connection(role);
-    const until: std.Io.Clock.Timestamp = .fromNow(receiver.endpoint.io, .{ .clock = .awake, .raw = .fromSeconds(1) });
-    while (true) {
-        if (receiver.recvStreamStats(id)) |stats| {
-            const complete = !fin or (stats.final_size != null and stats.final_size.? == expected);
-            if (stats.highest_received_offset >= expected and complete) break;
-        }
-        try pair.receiveProgress(role, until);
-    }
-    return id;
+    return @import("../session_control/test_support/buffered_stream.zig").ready(pair, role, "delivered", fin);
 }
 
 fn read(session: anytype, kind: Incremental, id: u62, output: []u8, until: std.Io.Clock.Timestamp) !void {
