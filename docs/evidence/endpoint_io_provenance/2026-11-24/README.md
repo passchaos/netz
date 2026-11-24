@@ -32,8 +32,14 @@ receive onto zio. An existing zio owner reuses its runtime for the receiver;
 Threaded owners create one independent zio runtime, avoiding nested event-loop
 lifetimes on the same thread. A failing pool allocator proves the IO
 check happens before allocation. A positive test adopts an exact IO copy.
-The native Linux and Windows CI filters also select these regressions; native
-results are recorded separately from cross-compilation once CI completes.
+The native Linux and Windows CI filters also select these regressions. The
+matching run commit and native conclusions are recorded separately from
+cross-compilation in [native-platforms.json](native-platforms.json).
+
+| Native execution at `c876797a` | Result | Duration |
+| --- | --- | --- |
+| [Linux compile and endpoint adoption regressions](https://github.com/passchaos/netz/actions/runs/45387130014/job/138421067883) | Success | 4m 32s |
+| [Windows transport and endpoint adoption regressions](https://github.com/passchaos/netz/actions/runs/45387130014/job/138421067687) | Success | 5m 20s |
 
 ```sh
 zig build test-http3 '-Dtest-filter=HTTP3 endpoint adoption' -j1 --summary all
