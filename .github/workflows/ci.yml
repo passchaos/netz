@@ -241,6 +241,10 @@ jobs:
         if: runner.os == 'Linux' && matrix.target == 'x86_64-linux-gnu'
         run: zig build test-http test-quic -j1 -Dtarget=${{ matrix.target }} '-Dtest-filter=network interface' --summary all
 
+      - name: Probe native Winsock interface option semantics
+        if: runner.os == 'Windows'
+        run: python tools/ci/windows_interface_binding_probe.py
+
       - name: Run native Windows transport regressions
         if: runner.os == 'Windows'
         run: |

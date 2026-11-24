@@ -108,9 +108,9 @@ own family's wildcard bind on the selected interface.
 
 TCP source/device binding requires Netz's zio backend: Zig 0.16's generic
 `std.Io` cannot connect an already bound socket. Unconstrained connects retain
-the existing generic backend path. UDP interface binding works on native POSIX
-sockets and on zio Winsock sockets; foreign Windows backends can expose AFD
-handles and are rejected.
+the existing generic backend path. UDP interface constraints likewise require zio to install the policy before
+bind; unconstrained UDP source-address binding retains generic std.Io support.
+Foreign Windows backends can expose AFD handles and are rejected.
 
 Empty names, embedded NULs and index zero return `InvalidNetworkInterface`.
 Missing devices return `InterfaceNotFound`; overlong names return `NameTooLong`.
@@ -123,8 +123,9 @@ Failed setup closes the socket. Configuration, permission and unsupported
 binding errors terminate the attempt instead of retrying through an unbound
 socket or a different interface.
 
-Address selection and interface constraints are applied before TCP connect or
-the first UDP send. DNS resolution remains the resolver's responsibility;
+Interface constraints are installed before native TCP/UDP bind, TCP connect,
+and the first UDP send, preventing unfiltered incoming packets from entering a
+new socket during setup. DNS resolution remains the resolver's responsibility;
 system DNS and custom resolver callbacks do not inherit socket binding.
 An explicit source IP must belong to the desired interface and match the peer
 address family. Use source port zero for pools or address racing; a fixed

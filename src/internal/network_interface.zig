@@ -42,6 +42,16 @@ pub const NetworkInterface = union(enum) {
     }
 };
 
+/// Prepare a native UDP socket before interface policy and bind.
+pub fn prepareDatagram(handle: net.Socket.Handle, family: net.IpAddress.Family) Error!void {
+    if (comptime builtin.os.tag == .windows) {
+        if (family == .ip6) {
+            const enabled: u32 = 1;
+            try setOption(handle, 41, 27, std.mem.asBytes(&enabled));
+        }
+    }
+}
+
 /// Apply before TCP connect or the first UDP send. Windows foreign backends
 /// can expose AFD handles rather than Winsock sockets and are rejected.
 pub fn apply(io: std.Io, handle: net.Socket.Handle, family: net.IpAddress.Family, mode: net.Socket.Mode, interface: NetworkInterface) Error!void {
@@ -75,9 +85,9 @@ pub fn apply(io: std.Io, handle: net.Socket.Handle, family: net.IpAddress.Family
             const level: i32 = if (family == .ip4) 0 else 41;
             const value = windowsIndex(family, resolved.index);
             try setOption(handle, level, 31, std.mem.asBytes(&value));
-            try setOption(handle, level, 29, std.mem.asBytes(&resolved.index));
             const enabled: u32 = 1;
             try setOption(handle, level, 28, std.mem.asBytes(&enabled));
+            try setOption(handle, level, 29, std.mem.asBytes(&resolved.index));
         },
         else => return error.OptionUnsupported,
     }

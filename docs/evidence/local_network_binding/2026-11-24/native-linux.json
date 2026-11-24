@@ -1,0 +1,143 @@
+{
+  "source": "GitHub Actions API",
+  "head_sha": "d920f47b472a8bcca75d0be619f256867d06ad69",
+  "observed_at": "2026-11-24T09:48:08.427953+00:00",
+  "run_id": 45367934553,
+  "job": {
+    "id": 138354432420,
+    "name": "Portable x86_64-linux-gnu (ubuntu-latest)",
+    "status": "completed",
+    "conclusion": "success",
+    "started_at": "2026-11-24T09:43:49Z",
+    "completed_at": "2026-11-24T09:46:36Z",
+    "html_url": "https://github.com/passchaos/netz/actions/runs/45367934553/job/138354432420",
+    "steps": [
+      {
+        "name": "Set up job",
+        "status": "completed",
+        "conclusion": "success"
+      },
+      {
+        "name": "Checkout netz",
+        "status": "completed",
+        "conclusion": "success"
+      },
+      {
+        "name": "Checkout pinned vail",
+        "status": "completed",
+        "conclusion": "success"
+      },
+      {
+        "name": "Checkout pinned vort",
+        "status": "completed",
+        "conclusion": "success"
+      },
+      {
+        "name": "Checkout pinned pbz",
+        "status": "completed",
+        "conclusion": "success"
+      },
+      {
+        "name": "Checkout pinned kron",
+        "status": "completed",
+        "conclusion": "success"
+      },
+      {
+        "name": "Checkout pinned webpkiz",
+        "status": "completed",
+        "conclusion": "success"
+      },
+      {
+        "name": "Checkout pinned regexz",
+        "status": "completed",
+        "conclusion": "success"
+      },
+      {
+        "name": "Checkout pinned harnessz",
+        "status": "completed",
+        "conclusion": "success"
+      },
+      {
+        "name": "Install Zig 0.16.0",
+        "status": "completed",
+        "conclusion": "success"
+      },
+      {
+        "name": "Cache Zig downloads",
+        "status": "completed",
+        "conclusion": "success"
+      },
+      {
+        "name": "Compile library and public-package tests",
+        "status": "completed",
+        "conclusion": "success"
+      },
+      {
+        "name": "Run native Linux interface binding regressions",
+        "status": "completed",
+        "conclusion": "success"
+      },
+      {
+        "name": "Run native Windows transport regressions",
+        "status": "completed",
+        "conclusion": "skipped"
+      },
+      {
+        "name": "Post Cache Zig downloads",
+        "status": "completed",
+        "conclusion": "success"
+      },
+      {
+        "name": "Post Install Zig 0.16.0",
+        "status": "completed",
+        "conclusion": "success"
+      },
+      {
+        "name": "Post Checkout pinned harnessz",
+        "status": "completed",
+        "conclusion": "success"
+      },
+      {
+        "name": "Post Checkout pinned regexz",
+        "status": "completed",
+        "conclusion": "success"
+      },
+      {
+        "name": "Post Checkout pinned webpkiz",
+        "status": "completed",
+        "conclusion": "success"
+      },
+      {
+        "name": "Post Checkout pinned kron",
+        "status": "completed",
+        "conclusion": "success"
+      },
+      {
+        "name": "Post Checkout pinned pbz",
+        "status": "completed",
+        "conclusion": "success"
+      },
+      {
+        "name": "Post Checkout pinned vort",
+        "status": "completed",
+        "conclusion": "success"
+      },
+      {
+        "name": "Post Checkout pinned vail",
+        "status": "completed",
+        "conclusion": "success"
+      },
+      {
+        "name": "Post Checkout netz",
+        "status": "completed",
+        "conclusion": "success"
+      },
+      {
+        "name": "Complete job",
+        "status": "completed",
+        "conclusion": "success"
+      }
+    ]
+  },
+  "command": "zig build test-http test-quic -j1 -Dtarget=x86_64-linux-gnu '-Dtest-filter=network interface' --summary all"
+}

@@ -3,8 +3,8 @@
 This change adds actual named/indexed socket interface constraints independently
 from source IP/port selection. HTTP/1, HTTP/2, WebSocket, unified HTTP and SOCKS5
 TCP owners share the binding connector; QUIC endpoint limits carry the same
-interface into H3/WebTransport, shared pools and migration endpoints. HTTP/1,
-HTTP/2 and lower TCP listeners apply it before bind/listen.
+interface into H3/WebTransport, shared pools and migration endpoints. Native TCP/UDP sockets install the
+interface policy before bind; TCP listeners apply it before bind/listen.
 
 See [the API and native support contract](../../../local_network_binding.md).
 Linux uses SO_BINDTODEVICE, Darwin uses IP_BOUND_IF/IPV6_BOUND_IF, and Windows
@@ -17,6 +17,9 @@ explicitly because Winsock has no corresponding received-TCP constraint.
 | Binding, ReleaseSafe | 156/156 passed | [binding.ReleaseSafe.log](binding.ReleaseSafe.log) |
 | TCP timeout/hostname/address racing and HTTP/WS/SOCKS overlap | 372 passed, 5 platform skips, 0 failures | [connection-overlap.Debug.log](connection-overlap.Debug.log) |
 | Windows binding-path compilation | 8/8 build steps passed | [windows-compile.log](windows-compile.log) |
+| UDP policy before bind, Debug | 158/158 passed | [before-bind.Debug.log](before-bind.Debug.log) |
+| UDP policy before bind, ReleaseSafe | 158/158 passed | [before-bind.ReleaseSafe.log](before-bind.ReleaseSafe.log) |
+| UDP policy before bind, Windows compilation | 8/8 build steps passed | [before-bind.windows-compile.log](before-bind.windows-compile.log) |
 
 ## Scope of the native checks
 
@@ -32,6 +35,22 @@ Cross-compilation is recorded separately from execution. The portable workflow
 runs the binding suite natively on x86_64 Linux and includes it in the native
 Windows transport suite. Native CI snapshots will identify the exact tested
 commit and jobs once those runs finish.
+
+## First native Windows result
+
+The first native Linux job at `d920f47b` succeeded; its exact steps are recorded
+in [native-linux.json](native-linux.json). The first native Windows job failed
+while adding the receive interface with ADD_IFLIST (option 29), after the
+outgoing-interface option succeeded. Its error annotations are preserved in
+[windows-first-annotations.json](windows-first-annotations.json).
+
+The follow-up configures receive filtering before adding the index and moves
+all interface policy before UDP bind. This prevents another interface's packet
+from entering an initially unconstrained receive queue. Explicit UDP device
+binding uses zio's native socket creation, while ordinary std.Io source binds
+retain their existing path. The native Windows probe compares enable/add and
+bind ordering plus both interface-index byte orders; its outcomes and the next
+native regression result will be recorded separately.
 
 ## Fixture corrections found by overlap checks
 

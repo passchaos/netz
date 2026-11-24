@@ -1,6 +1,5 @@
 //! Native socket creation with independent address and interface constraints.
 const std = @import("std");
-const builtin = @import("builtin");
 const zio = @import("zio");
 const interfaces = @import("network_interface.zig");
 const net = std.Io.net;
@@ -40,20 +39,37 @@ pub fn connect(io: std.Io, address: net.IpAddress, binding: Binding, timeout: zi
     return .{ .socket = .{ .handle = stdHandle(socket.handle), .address = bound_address } };
 }
 
-/// UDP bind retains arbitrary std.Io support unless a native interface
-/// constraint is requested. Apply it before handing the socket to a sender.
+/// Install a requested interface before bind, so the socket never queues
+/// datagrams from another device. Unconstrained source binds retain std.Io.
 pub fn bindDatagram(io: std.Io, address: net.IpAddress, interface: ?NetworkInterface) (net.IpAddress.BindError || Error)!net.Socket {
-    const socket = try address.bind(io, .{
-        .mode = .dgram,
-        .protocol = .udp,
-        // Windows receive lists and indices apply per IP protocol. Keep a
-        // constrained IPv6 socket single-family rather than admitting mapped
-        // IPv4 traffic through an unconstrained protocol-level policy.
-        .ip6_only = builtin.os.tag == .windows and interface != null and address == .ip6,
-    });
-    errdefer socket.close(io);
-    if (interface) |selected| try interfaces.apply(io, socket.handle, std.meta.activeTag(address), .dgram, selected);
-    return socket;
+    const selected = interface orelse return address.bind(io, .{ .mode = .dgram, .protocol = .udp });
+    _ = zio.Runtime.fromIo(io) orelse return error.OptionUnsupported;
+    const family = std.meta.activeTag(address);
+    var socket = zio.net.Socket.open(.dgram, if (family == .ip4) .ipv4 else .ipv6, .udp) catch |err| return mapDatagramBindError(err);
+    errdefer socket.close();
+    try interfaces.prepareDatagram(stdHandle(socket.handle), family);
+    try interfaces.apply(io, stdHandle(socket.handle), family, .dgram, selected);
+    socket.bind(.{ .ip = zioAddress(address) }) catch |err| return mapDatagramBindError(err);
+    return .{ .handle = stdHandle(socket.handle), .address = stdAddress(socket.address.ip) };
+}
+
+fn mapDatagramBindError(err: anyerror) (net.IpAddress.BindError || Error) {
+    return switch (err) {
+        error.AddressInUse => error.AddressInUse,
+        error.AddressUnavailable => error.AddressUnavailable,
+        error.AddressFamilyUnsupported => error.AddressFamilyUnsupported,
+        error.SystemResources => error.SystemResources,
+        error.NetworkDown => error.NetworkDown,
+        error.ProtocolUnsupportedBySystem, error.ProtocolNotSupported => error.ProtocolUnsupportedBySystem,
+        error.ProtocolUnsupportedByAddressFamily => error.ProtocolUnsupportedByAddressFamily,
+        error.ProcessFdQuotaExceeded => error.ProcessFdQuotaExceeded,
+        error.SystemFdQuotaExceeded => error.SystemFdQuotaExceeded,
+        error.SocketModeUnsupported => error.SocketModeUnsupported,
+        error.OptionUnsupported => error.OptionUnsupported,
+        error.AccessDenied => error.AccessDenied,
+        error.Canceled => error.Canceled,
+        else => error.Unexpected,
+    };
 }
 
 /// A requested device policy is installed before bind/listen, so queued

@@ -36,3 +36,9 @@ test "QUIC network interface rejects invalid configuration without leaking socke
         try std.testing.expectError(error.InvalidNetworkInterface, runtime.Endpoint.bind(std.testing.allocator, backend.io(), .{ .ip4 = .loopback(0) }, .{ .network_interface = interface }));
     }
 }
+
+test "QUIC network interface rejects foreign backends before UDP bind" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    try std.testing.expectError(error.OptionUnsupported, runtime.Endpoint.bind(std.testing.allocator, threaded.io(), .{ .ip4 = .loopback(0) }, .{ .network_interface = checks.loopback() }));
+}
