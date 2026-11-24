@@ -89,3 +89,8 @@ filters. The same run's x86_64 Linux compile job also succeeded. Public matrix
 status confirms native job success without asserting an unobserved Windows
 test count. The record above identifies both the scheduling commit and its
 unchanged runtime revision.
+
+The admission follow-up above was resolved at `8de454c2`. See
+[frame admission evidence](../../websocket_stream_admission/2026-11-24/README.md)
+for send limits, exact header reads, bounded staging and input rollback, with
+native Windows verification.

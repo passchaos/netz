@@ -37,6 +37,7 @@ terminal, and local protocol errors do not fabricate a received peer Close.
 | Generic adapter and assembler (ReleaseSafe) | 58/58 | [admission.ReleaseSafe.log](admission.ReleaseSafe.log) |
 | Existing native H1/H2/H3 allocation-failure overlap | 96/96 | [runtime-overlap.Debug.log](runtime-overlap.Debug.log) |
 | Windows test compilation and linking | 8/8 steps | [windows-compile.log](windows-compile.log) |
+| Native Windows metadata/adapter job at `8de454c2` | Success, 3m 36s | [CI job](https://github.com/passchaos/netz/actions/runs/45331030845/job/138232163030), [metadata](native-windows-ci.json) |
 
 Counts include imported support tests and overlap. Tests cover masked/unmasked
 roles, staged/vector/scatter callbacks, bounded and unbounded sends, empty and
@@ -57,7 +58,8 @@ zig build test-compile '-Dtest-filter=WebSocket stream adapter' \
   '-Dtest-filter=WebSocket message assembler' -Dtarget=x86_64-windows --summary all
 ```
 
-The native Windows CI job already runs the generic adapter filter. Native
-execution after publication remains separate from the local compile/link
-result. The [public contract](../../../websocket_stream_adapter.md) documents
+The native Windows CI job runs the generic adapter filter and completed
+successfully at `8de454c2` in 3m 36s. The same run's AArch64 and x86_64 Linux
+compile jobs also succeeded. Native job success was verified through the
+public workflow matrix panel; no unobserved Windows test count is claimed. The [public contract](../../../websocket_stream_adapter.md) documents
 bidirectional limits, control exceptions and input ownership.

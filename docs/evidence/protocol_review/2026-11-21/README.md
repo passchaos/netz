@@ -3672,4 +3672,5 @@ commits after control/assembly success, preserving OOM and timeout retries.
 The three red baseline cases are fixed; adapter/assembler bundles pass 58/58
 in Debug and ReleaseSafe, native allocation overlaps pass 96/96, and Windows
 test binaries compile/link. [Admission evidence](../../websocket_stream_admission/2026-11-24/README.md)
-records the source and behavioral closure of the prior limit review.
+records the source and behavioral closure of the prior limit review, including
+successful native Windows execution at `8de454c2` (3m 36s).
