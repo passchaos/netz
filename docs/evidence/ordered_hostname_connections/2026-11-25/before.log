@@ -1,0 +1,127 @@
+[traex-zig-guard 2026-11-25 04:10:51] started Zig tree root=76039 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=1800s
+test-http1
++- run test 22 pass, 6 fail (28 total)
+error: 'internal.tcp_connect.hostname_tests.test.TCP ordered hostname unbounded connect preserves address order' failed:
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:615:14: 0x1054d2ba7 in expect (test)
+           if (!ok) return error.TestUnexpectedResult;
+                    ^
+       /Users/bytedance/project-z/netz/src/internal/tcp_connect/hostname_tests.zig:100:5: 0x1054ee63b in ordered__anon_70430 (test)
+           try std.testing.expect(!probe.overlapped.load(.acquire));
+           ^
+       /Users/bytedance/project-z/netz/src/internal/tcp_connect/hostname_tests.zig:108:5: 0x1054eea33 in test.TCP ordered hostname unbounded connect preserves address order (test)
+           try ordered(.host);
+           ^
+error: 'internal.tcp_connect.hostname_tests.test.TCP ordered hostname deadline connect preserves address order' failed:
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:615:14: 0x1054d2ba7 in expect (test)
+           if (!ok) return error.TestUnexpectedResult;
+                    ^
+       /Users/bytedance/project-z/netz/src/internal/tcp_connect/hostname_tests.zig:100:5: 0x1054edc2f in ordered__anon_70419 (test)
+           try std.testing.expect(!probe.overlapped.load(.acquire));
+           ^
+       /Users/bytedance/project-z/netz/src/internal/tcp_connect/hostname_tests.zig:111:5: 0x1054ee027 in test.TCP ordered hostname deadline connect preserves address order (test)
+           try ordered(.deadline);
+           ^
+error: 'internal.tcp_connect.hostname_tests.test.TCP ordered hostname endpoint policy preserves order without address allocation' failed:
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:615:14: 0x1054d2ba7 in expect (test)
+           if (!ok) return error.TestUnexpectedResult;
+                    ^
+       /Users/bytedance/project-z/netz/src/internal/tcp_connect/hostname_tests.zig:100:5: 0x1054d969b in ordered__anon_68458 (test)
+           try std.testing.expect(!probe.overlapped.load(.acquire));
+           ^
+       /Users/bytedance/project-z/netz/src/internal/tcp_connect/hostname_tests.zig:114:5: 0x1054d9a93 in test.TCP ordered hostname endpoint policy preserves order without address allocation (test)
+           try ordered(.endpoint);
+           ^
+error: 'internal.tcp_connect.hostname_tests.test.TCP ordered hostname drains large DNS answers without async budget' failed:
+       /Users/bytedance/project-z/netz/src/internal/tcp_connect/hostname_tests.zig:156:5: 0x1054d5773 in test.TCP ordered hostname drains large DNS answers without async budget (test)
+           try done.waitTimeout(io, .{ .duration = .{ .clock = .awake, .raw = .fromMilliseconds(500) } });
+           ^
+error: 'internal.tcp_connect.hostname_tests.test.TCP ordered hostname refuses missing concurrency before DNS' failed:
+       /Users/bytedance/project-z/netz/src/internal/tcp_connect/hostname_tests.zig:176:9: 0x1054d4fff in test.TCP ordered hostname refuses missing concurrency before DNS (test)
+               return error.TestExpectedError;
+               ^
+error: 'internal.tcp_connect.hostname_tests.test.TCP ordered hostname stops on a fatal first candidate' failed:
+       /Users/bytedance/project-z/netz/src/internal/tcp_connect/hostname_tests.zig:191:9: 0x1054d2f0b in test.TCP ordered hostname stops on a fatal first candidate (test)
+               return error.TestExpectedError;
+               ^
+failed command: ./.zig-cache/o/930b1ff92d99315d0ca1ca3c60503e55/test --cache-dir=./.zig-cache --seed=0x47c2cc58 --listen=-
+
+Build Summary: 8/10 steps succeeded (1 failed); 22/28 tests passed (6 failed)
+test-http1 transitive failure
++- run test 22 pass, 6 fail (28 total)
+   +- compile test Debug native success 4s MaxRSS:766M
+      +- WriteFile macho_0_p256_field_arm64.S cached
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 192ms MaxRSS:31M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 202ms MaxRSS:31M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options success
+      +- options cached
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/4f43002d28e7c626e498fafc36e312bb/build /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/zig /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib /Users/bytedance/project-z/netz .zig-cache /Users/bytedance/.cache/zig --seed 0x47c2cc58 -Z4bddea3bb88782c0 test-http1 -Dtest-filter=TCP ordered hostname -Dtest-filter=HTTP/1 client connects by host name -j1 --summary all
+[traex-zig-guard 2026-11-25 04:10:58] finished Zig tree root=76039 peak=696MiB result=0

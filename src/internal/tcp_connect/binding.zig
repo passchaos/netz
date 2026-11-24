@@ -5,6 +5,7 @@ const tcp = @import("../tcp_connect.zig");
 const sockets = @import("../socket_binding.zig");
 const deadlines = @import("../deadline.zig");
 const happy_eyeballs = @import("happy_eyeballs.zig");
+const hostname_connect = @import("hostname.zig");
 const net = std.Io.net;
 
 pub const Binding = sockets.Binding;
@@ -74,31 +75,17 @@ fn connect(io: std.Io, address: net.IpAddress, binding: Binding) ConnectError!ne
 
 fn connectHost(io: std.Io, hostname: net.HostName, port: u16, binding: Binding) HostConnectError!net.Stream {
     _ = zio.Runtime.fromIo(io) orelse return error.OptionUnsupported;
-    var buffer: [32]net.HostName.LookupResult = undefined;
-    var queue: std.Io.Queue(net.HostName.LookupResult) = .init(&buffer);
-    var lookup = io.async(net.HostName.lookup, .{ hostname, io, &queue, .{
-        .port = port,
-        .family = if (binding.local_address) |address| std.meta.activeTag(address) else null,
-    } });
-    defer {
-        lookup.cancel(io) catch {};
-        while (queue.getOneUncancelable(io)) |_| {} else |err| switch (err) {
-            error.Closed => {},
-        }
-    }
-    var last_error: ?ConnectError = null;
-    while (queue.getOne(io)) |result| switch (result) {
-        .canonical_name => {},
-        .address => |address| return connect(io, address, binding) catch |err| {
-            if (!tcp.shouldTryNextResolvedAddress(err)) return err;
-            last_error = err;
-            continue;
-        },
-    } else |err| switch (err) {
-        error.Canceled => return error.Canceled,
-        error.Closed => {
-            try lookup.await(io);
-            return last_error orelse error.UnknownHostName;
-        },
-    }
+    return hostname_connect.connect(
+        ConnectError,
+        io,
+        hostname,
+        .{ .port = port, .family = if (binding.local_address) |address| std.meta.activeTag(address) else null },
+        binding,
+        connectHostCandidate,
+        tcp.shouldTryNextResolvedAddress,
+    );
+}
+
+fn connectHostCandidate(binding: Binding, io: std.Io, address: net.IpAddress) ConnectError!net.Stream {
+    return connect(io, address, binding);
 }

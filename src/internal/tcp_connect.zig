@@ -14,6 +14,7 @@ const deadline_policy = @import("deadline.zig");
 const happy_eyeballs = @import("tcp_connect/happy_eyeballs.zig");
 const binding = @import("tcp_connect/binding.zig");
 const socket_binding = @import("socket_binding.zig");
+const hostname_connect = @import("tcp_connect/hostname.zig");
 
 pub const NetworkInterface = socket_binding.NetworkInterface;
 pub const Binding = socket_binding.Binding;
@@ -127,7 +128,7 @@ pub fn host(
     timeout: ?std.Io.Duration,
 ) net.HostName.ConnectError!net.Stream {
     const duration = timeout orelse
-        return host_name.connect(io, port, .{ .mode = .stream });
+        return connectHost(io, host_name, port);
     const deadline = (try deadline_policy.fromTimeout(io, duration)).?;
     return race(io, deadline, connectHost, .{ io, host_name, port });
 }
@@ -430,59 +431,26 @@ fn connectHostBoundBefore(
     deadline: ?std.Io.Clock.Timestamp,
 ) BoundHostConnectError!net.Stream {
     _ = zio.Runtime.fromIo(io) orelse return error.OptionUnsupported;
-    var lookup_buffer: [32]net.HostName.LookupResult = undefined;
-    var lookup_queue: std.Io.Queue(net.HostName.LookupResult) =
-        .init(&lookup_buffer);
-    var lookup = io.async(net.HostName.lookup, .{
-        host_name,
-        io,
-        &lookup_queue,
-        .{
-            .port = port,
-            .family = std.meta.activeTag(local_address),
-        },
-    });
-    defer {
-        lookup.cancel(io) catch {};
-        while (lookup_queue.getOneUncancelable(io)) |_| {} else |err| switch (err) {
-            error.Closed => {},
-        }
-    }
+    return if (deadline) |absolute|
+        race(io, absolute, connectHostBound, .{ io, host_name, port, local_address })
+    else
+        connectHostBound(io, host_name, port, local_address);
+}
 
-    var last_error: ?BoundConnectError = null;
-    while (lookup_queue.getOne(io)) |result| switch (result) {
-        .canonical_name => {},
-        .address => |address| {
-            const stream = if (deadline) |absolute|
-                ipBoundWithDeadline(
-                    io,
-                    address,
-                    local_address,
-                    absolute,
-                )
-            else
-                ipBound(io, address, local_address, null);
-            return stream catch |err| switch (err) {
-                error.Canceled,
-                error.OptionUnsupported,
-                error.SystemResources,
-                error.ProcessFdQuotaExceeded,
-                error.SystemFdQuotaExceeded,
-                error.AddressInUse,
-                => |fatal| return fatal,
-                else => |connect_error| {
-                    last_error = connect_error;
-                    continue;
-                },
-            };
-        },
-    } else |err| switch (err) {
-        error.Canceled => |cancelled| return cancelled,
-        error.Closed => {
-            try lookup.await(io);
-            return last_error orelse error.UnknownHostName;
-        },
-    }
+fn connectHostBound(io: std.Io, host_name: net.HostName, port: u16, local_address: net.IpAddress) BoundHostConnectError!net.Stream {
+    return hostname_connect.connect(
+        BoundConnectError,
+        io,
+        host_name,
+        .{ .port = port, .family = std.meta.activeTag(local_address) },
+        local_address,
+        connectHostBoundCandidate,
+        shouldTryNextResolvedAddress,
+    );
+}
+
+fn connectHostBoundCandidate(local_address: net.IpAddress, io: std.Io, address: net.IpAddress) BoundConnectError!net.Stream {
+    return ipBound(io, address, local_address, null);
 }
 
 fn connectBoundZio(io: std.Io, address: net.IpAddress, local_address: net.IpAddress, timeout: zio.Timeout) BoundConnectError!net.Stream {
@@ -592,7 +560,19 @@ fn connectHost(
     host_name: net.HostName,
     port: u16,
 ) net.HostName.ConnectError!net.Stream {
-    return host_name.connect(io, port, .{ .mode = .stream });
+    return hostname_connect.connect(
+        net.IpAddress.ConnectError,
+        io,
+        host_name,
+        .{ .port = port },
+        {},
+        connectHostCandidate,
+        shouldTryNextResolvedAddress,
+    );
+}
+
+fn connectHostCandidate(_: void, io: std.Io, address: net.IpAddress) net.IpAddress.ConnectError!net.Stream {
+    return connectIp(io, address);
 }
 
 fn connectUnix(
@@ -612,4 +592,6 @@ fn waitUntil(
 test {
     _ = @import("tcp_connect/tests.zig");
     _ = @import("tcp_connect/binding_tests.zig");
+    _ = @import("tcp_connect/hostname_tests.zig");
+    _ = @import("tcp_connect/hostname_binding_tests.zig");
 }

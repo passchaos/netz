@@ -253,6 +253,10 @@ jobs:
         if: runner.os == 'Windows' || (runner.os == 'Linux' && matrix.target == 'x86_64-linux-gnu')
         run: zig build test-http3 -j1 -Dtarget=${{ matrix.target }} '-Dtest-filter=HTTP3 system resolver' '-Dtest-filter=HTTP/3 shared synchronous acquire wakes' '-Dtest-filter=HTTP/3 shared synchronous acquire cancels' '-Dtest-filter=HTTP/3 shared acquisition deadline' --summary all
 
+      - name: Run native ordered TCP hostname regressions
+        if: runner.os == 'Windows' || (runner.os == 'Linux' && matrix.target == 'x86_64-linux-gnu')
+        run: zig build test-http1 -j1 -Dtarget=${{ matrix.target }} '-Dtest-filter=TCP ordered hostname' '-Dtest-filter=HTTP/1 client connects by host name' --summary all
+
       - name: Run native Windows transport regressions
         if: runner.os == 'Windows'
         run: |

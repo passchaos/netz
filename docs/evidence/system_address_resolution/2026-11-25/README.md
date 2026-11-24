@@ -45,3 +45,5 @@ zig build test-http3 test-http1 test-http2 test-websocket test-proxy '-Dtest-fil
 | Baseline zero-async scheduling regressions | 52/61 passed; all 9 new cases fail | [before.log](before.log) |
 | Shared concurrent DNS implementation | 61/61 passed | [after.log](after.log) |
 | Final callback delegation, H3 collection/budgets and H1/H2/WS/proxy overlap | 215/215 passed | [Debug.log](Debug.log) |
+| Native Linux DNS/admission regressions, commit `dbe61805` | Passed resolver/acquisition step, 2026-11-24 20:08 UTC | [Linux job](https://github.com/passchaos/netz/actions/runs/45476538688/job/138738349090) |
+| Native Windows DNS/admission regressions, commit `dbe61805` | Passed resolver/acquisition step, 2026-11-24 20:07 UTC | [Windows job](https://github.com/passchaos/netz/actions/runs/45476538688/job/138738349437) |

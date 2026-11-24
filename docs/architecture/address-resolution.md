@@ -27,6 +27,22 @@ answers; the returned slice is owned by the caller. HTTP/3's first-address
 resolver uses the same producer ownership and cancels/drains remaining results
 after taking the first address.
 
+Ordered TCP hostname connects consume that same reader incrementally. An
+available address starts a connection immediately, and the next attempt begins
+only after a retryable failure. Ordinary, source-address-bound and
+interface-bound paths share this ordering, source-family filter and DNS
+teardown. Their connection deadline covers lookup and all attempts, including
+the compatibility `hostBound` entry points. Native socket connect APIs report
+concurrent task admission failure as `SystemResources`.
+
+An `.ordered` policy keeps one TCP attempt active, so a pending first candidate
+holds back later candidates. Applications choosing overlapping attempts can
+set the unified HTTP or WebSocket `address_connect_policy` to
+`.{ .happy_eyeballs = .{ .attempt_delay = .fromMilliseconds(250), .max_in_flight = 2 } }`.
+URI authentication, authority and binding policy stay attached to the owning
+connection options. [Ordered hostname evidence](../evidence/ordered_hostname_connections/2026-11-25/README.md)
+covers exact ordering, early DNS results and source-family bindings.
+
 A bounded system lookup validates its awake-clock deadline before task
 admission and races collection against that original timestamp. Explicit
 concurrency prevents the lookup or timeout task from executing inline when an
