@@ -136,6 +136,7 @@ test "WebSocket HTTP3 bounds paced admission with 80 headers at 1200 MTU" {
                 "localhost",
                 pending.authority() orelse return error.TestUnexpectedResult,
             );
+            try std.testing.expect(pending.peerAddress().?.getPort() != 0);
             try std.testing.expectEqual(
                 @as(usize, 80),
                 countHeaders(pending.headers(), "x-many-request"),

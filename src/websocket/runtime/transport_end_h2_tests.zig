@@ -54,6 +54,7 @@ fn exercise(caller_buffer: bool, tls12: bool, truncated: bool) !void {
             var pending_owned = true;
             defer if (pending_owned) pending.deinit();
             try std.testing.expectEqualStrings("h2", pending.negotiatedAlpn().?);
+            try std.testing.expect(pending.peerAddress().?.getPort() != 0);
             try std.testing.expect(pending.negotiatedTranscriptHash() != null);
             // The client verifies the server but presents no certificate.
             try std.testing.expect(pending.peerCertificates() == null);

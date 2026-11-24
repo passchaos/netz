@@ -3550,3 +3550,16 @@ also carries `from` through the `begin` callback.
 | --- | --- | --- |
 | HTTP/1 runtime (Debug) | 480/480 | live `zig build test-http1 --summary all` |
 | Package surface (Debug) | 28/28 | live `zig build test-package --summary all` |
+
+## Hundred-and-ninety-ninth pass: WebSocket pending peer address
+
+All WebSocket admission surfaces now expose `peerAddress()` before accept:
+HTTP/1 `PendingUpgrade` reads `Request.from`, RFC 8441 `PendingH2Upgrade`
+reads the parent connection socket, and RFC 9220 reads the current QUIC peer
+path. H2 and H3 pending tests assert a non-zero peer port, and the usage guide
+lists the accessor with the other pending metadata.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full WebSocket suite (Debug) | 526/527 (1 skipped) | live `zig build test-websocket --summary all` |
+| Package surface (Debug) | 28/28 | live `zig build test-package --summary all` |

@@ -11900,6 +11900,9 @@ test "public ALPN adoption and metadata surfaces are exported" {
     _ = &netz.webtransport.runtime.EndpointPendingSession.wasTlsSessionResumed;
     _ = &netz.webtransport.runtime.EndpointPendingSession.earlyDataStatus;
     _ = &netz.websocket.runtime.PendingH2Upgrade.negotiatedAlpn;
+    _ = &netz.websocket.runtime.PendingUpgrade.peerAddress;
+    _ = &netz.websocket.runtime.PendingH2Upgrade.peerAddress;
+    _ = &netz.websocket.runtime.h3.PendingUpgrade.peerAddress;
     _ = &netz.websocket.runtime.H2Connection.negotiatedTlsProtocol;
     _ = &netz.websocket.runtime.H2Connection.wasTlsSessionResumed;
     _ = &netz.websocket.runtime.H2Connection.takeTls12SessionTicket;

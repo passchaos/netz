@@ -5520,6 +5520,11 @@ pub const PendingUpgrade = struct {
         return self.request.stream_id;
     }
 
+    /// Current QUIC peer path for the connection carrying this Upgrade.
+    pub fn peerAddress(self: PendingUpgrade) ?std.Io.net.IpAddress {
+        return self.h3.established.connection.peerAddress();
+    }
+
     pub fn target(self: PendingUpgrade) []const u8 {
         return self.request.head.path;
     }

@@ -946,6 +946,12 @@ pub const PendingUpgrade = struct {
         return self.request.target;
     }
 
+    /// Socket address recorded for this Upgrade's transport. Accepted server
+    /// connections record the remote peer.
+    pub fn peerAddress(self: PendingUpgrade) ?std.Io.net.IpAddress {
+        return self.request.from;
+    }
+
     pub fn headers(self: PendingUpgrade) []const http1.Header {
         return self.request.headers;
     }
@@ -2187,6 +2193,11 @@ pub const PendingH2Upgrade = struct {
 
     pub fn streamId(self: PendingH2Upgrade) u31 {
         return self.request.stream_id;
+    }
+
+    /// Socket address recorded for the parent HTTP/2 connection.
+    pub fn peerAddress(self: PendingH2Upgrade) ?std.Io.net.IpAddress {
+        return self.connection.stream.socket.address;
     }
 
     pub fn target(self: PendingH2Upgrade) []const u8 {
