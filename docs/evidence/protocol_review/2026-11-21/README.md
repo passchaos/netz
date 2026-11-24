@@ -3462,3 +3462,18 @@ across protocol modules.
 | Gate | Result | Artifact |
 | --- | --- | --- |
 | Test compile | 9/9 steps | live `zig build test-compile --summary all` |
+
+## Hundred-and-ninety-third pass: HTTP/3 connection metric accessors
+
+`HandshakeClient` and `HandshakeServerSession` now expose
+`remoteAddress()`, `remoteAddressValidated()`, `stats()` and `rttNanos()`
+directly, matching the WebTransport handshake facades instead of requiring
+callers to reach into `established.connection`. The server serve test asserts
+the RTT accessor matches the stats snapshot, the peer port is non-zero and the
+client address is validated after the exchange. Existing local `stats`
+bindings were renamed to avoid shadowing the new method.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| HTTP/3 suite (Debug) | 929/933 (4 skipped) | live `zig build test-http3 --summary all` |
+| Package surface (Debug) | 28/28 | live `zig build test-package --summary all` |

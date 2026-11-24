@@ -333,12 +333,12 @@ pub const HandshakeClient = struct {
         {
             return false;
         }
-        const stats = self.established.connection.sendStreamStats(stream_id) orelse
+        const stream_stats = self.established.connection.sendStreamStats(stream_id) orelse
             return true;
-        return stats.highest_sent_offset == 0 and
-            stats.final_size == null and
-            stats.stopped == null and
-            stats.reset == null;
+        return stream_stats.highest_sent_offset == 0 and
+            stream_stats.final_size == null and
+            stream_stats.stopped == null and
+            stream_stats.reset == null;
     }
 
     fn retireReservedRequestStreamId(
@@ -2947,6 +2947,23 @@ pub const HandshakeClient = struct {
         return self.established.resumed;
     }
 
+    /// Current QUIC peer path, following authenticated migration/rebinding.
+    pub fn remoteAddress(self: HandshakeClient) net.IpAddress {
+        return self.established.connection.peerAddress();
+    }
+
+    pub fn remoteAddressValidated(self: HandshakeClient) bool {
+        return self.established.connection.peerAddressValidated();
+    }
+
+    pub fn stats(self: HandshakeClient) quic.one_rtt.ConnectionStats {
+        return self.established.connection.stats();
+    }
+
+    pub fn rttNanos(self: HandshakeClient) ?u64 {
+        return self.stats().smoothed_rtt_ns;
+    }
+
     fn adoptAcceptedEarlyCriticalStreams(
         self: *HandshakeClient,
         early_request: *const PreparedEarlyRequest,
@@ -2969,12 +2986,12 @@ pub const HandshakeClient = struct {
             },
         };
         for (expected) |stream| {
-            const stats = self.established.connection
+            const stream_stats = self.established.connection
                 .sendStreamStats(stream.stream_id) orelse
                 return error.UnexpectedStream;
-            if (stats.highest_sent_offset != stream.bytes.len or
-                stats.final_size != null or stats.reset != null or
-                stats.stopped != null)
+            if (stream_stats.highest_sent_offset != stream.bytes.len or
+                stream_stats.final_size != null or stream_stats.reset != null or
+                stream_stats.stopped != null)
             {
                 return error.UnexpectedStream;
             }
@@ -3019,11 +3036,11 @@ pub const HandshakeClient = struct {
         {
             return error.UnexpectedStream;
         }
-        const stats = self.established.connection.sendStreamStats(stream_id) orelse
+        const stream_stats = self.established.connection.sendStreamStats(stream_id) orelse
             return error.UnexpectedStream;
-        if (stats.highest_sent_offset != early_request.request_bytes.len or
-            stats.final_size != stats.highest_sent_offset or
-            stats.reset != null or stats.stopped != null)
+        if (stream_stats.highest_sent_offset != early_request.request_bytes.len or
+            stream_stats.final_size != stream_stats.highest_sent_offset or
+            stream_stats.reset != null or stream_stats.stopped != null)
         {
             return error.UnexpectedStream;
         }
@@ -3717,8 +3734,8 @@ pub const HandshakeClient = struct {
             // flow-control preflight. Keep its request semantics so the exact
             // same stream ID can be retried without colliding namespaces.
             const keep_for_retry = if (self.established.connection
-                .sendStreamStats(stream_id)) |stats|
-                stats.highest_sent_offset == 0 and stats.final_size == null
+                .sendStreamStats(stream_id)) |stream_stats|
+                stream_stats.highest_sent_offset == 0 and stream_stats.final_size == null
             else
                 false;
             if (!keep_for_retry) {
@@ -4141,8 +4158,8 @@ pub const HandshakeClient = struct {
         }
         errdefer if (!lifecycle_exists) {
             const keep_for_retry = if (self.established.connection
-                .sendStreamStats(stream_id)) |stats|
-                stats.highest_sent_offset == 0 and stats.final_size == null
+                .sendStreamStats(stream_id)) |stream_stats|
+                stream_stats.highest_sent_offset == 0 and stream_stats.final_size == null
             else
                 false;
             if (!keep_for_retry) {

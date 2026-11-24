@@ -456,6 +456,23 @@ pub const HandshakeServerSession = struct {
         return self.established.early_data_status;
     }
 
+    /// Current QUIC peer path, following authenticated migration/rebinding.
+    pub fn remoteAddress(self: HandshakeServerSession) net.IpAddress {
+        return self.established.connection.peerAddress();
+    }
+
+    pub fn remoteAddressValidated(self: HandshakeServerSession) bool {
+        return self.established.connection.peerAddressValidated();
+    }
+
+    pub fn stats(self: HandshakeServerSession) quic.one_rtt.ConnectionStats {
+        return self.established.connection.stats();
+    }
+
+    pub fn rttNanos(self: HandshakeServerSession) ?u64 {
+        return self.stats().smoothed_rtt_ns;
+    }
+
     pub fn peerCertificates(
         self: *const HandshakeServerSession,
     ) ?[]const []const u8 {
@@ -510,14 +527,14 @@ pub const HandshakeServerSession = struct {
                     if (((stream_id & 0x02) != 0) != route_unidirectional) {
                         continue;
                     }
-                    const stats = self.established.connection
+                    const stream_stats = self.established.connection
                         .recvStreamStats(stream_id) orelse continue;
-                    const reset = stats.reset;
+                    const reset = stream_stats.reset;
                     const bytes = self.established.connection
                         .retainedReceivedStream(stream_id) orelse &.{};
                     const end = std.math.add(
                         u64,
-                        stats.bytes_read,
+                        stream_stats.bytes_read,
                         std.math.cast(u64, bytes.len) orelse
                             return error.InvalidStreamRange,
                     ) catch return error.InvalidStreamRange;
@@ -530,13 +547,13 @@ pub const HandshakeServerSession = struct {
                     else
                         [_]quic.Frame{.{ .stream = .{
                             .stream_id = stream_id,
-                            .offset = stats.bytes_read,
+                            .offset = stream_stats.bytes_read,
                             .data = bytes,
-                            .fin = stats.final_size != null and
-                                stats.final_size.? == end,
+                            .fin = stream_stats.final_size != null and
+                                stream_stats.final_size.? == end,
                         } }};
                     if (reset == null and bytes.len == 0 and
-                        stats.final_size == null)
+                        stream_stats.final_size == null)
                     {
                         continue;
                     }

@@ -11847,6 +11847,14 @@ test "public ALPN adoption and metadata surfaces are exported" {
     _ = &netz.http3.runtime.HandshakeServerOptions.sessionOptions;
     _ = &netz.http3.runtime.HandshakeClient.negotiatedTlsProtocol;
     _ = &netz.http3.runtime.HandshakeClient.wasTlsSessionResumed;
+    _ = &netz.http3.runtime.HandshakeClient.remoteAddress;
+    _ = &netz.http3.runtime.HandshakeClient.remoteAddressValidated;
+    _ = &netz.http3.runtime.HandshakeClient.stats;
+    _ = &netz.http3.runtime.HandshakeClient.rttNanos;
+    _ = &netz.http3.runtime.HandshakeServerSession.remoteAddress;
+    _ = &netz.http3.runtime.HandshakeServerSession.remoteAddressValidated;
+    _ = &netz.http3.runtime.HandshakeServerSession.stats;
+    _ = &netz.http3.runtime.HandshakeServerSession.rttNanos;
     _ = &netz.http3.runtime.HandshakeServerSession.negotiatedTlsProtocol;
     _ = &netz.http3.runtime.HandshakeServerSession.wasTlsSessionResumed;
     _ = &netz.http3.runtime.HandshakeServerSession.earlyDataStatus;

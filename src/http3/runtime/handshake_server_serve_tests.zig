@@ -440,6 +440,9 @@ test "HTTP/3 handshake server automatically retires completed request streams" {
     joined = true;
     if (shared.err) |err| return err;
     const stats = server.established.connection.stats();
+    try std.testing.expectEqual(stats.smoothed_rtt_ns, server.rttNanos());
+    try std.testing.expect(server.remoteAddress().getPort() != 0);
+    try std.testing.expect(server.remoteAddressValidated());
     // The three long-lived HTTP/3 control/QPACK streams remain active in each
     // direction; only the four completed request streams are reclaimed.
     try std.testing.expectEqual(@as(usize, 3), stats.active_receive_streams);
