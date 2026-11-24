@@ -143,19 +143,28 @@ pub fn applyServerRequestPacketFrames(
     var first_reset: ?RequestStreamReset = null;
     for (frames) |frame| {
         try rejectCriticalStreamClosureFrame(control.*, frame, .server);
+        const maybe_stream_id: ?u62 = switch (frame) {
+            .stream => |stream| @intCast(stream.stream_id),
+            .reset_stream => |reset| @intCast(reset.stream_id),
+            .stop_sending => |stop| @intCast(stop.stream_id),
+            else => null,
+        };
+        if (maybe_stream_id) |stream_id| {
+            if (frame != .stop_sending and request_id_validator.peerStreamClosed(stream_id)) continue;
+            if (hasDetachedAssociation(detached_stream_id, detached_streams) and
+                localDetachedBidiOwned(request_id_validator, stream_id))
+            {
+                // HTTP/3 cannot create a server-initiated request stream.
+                // A locally sent bidi under a detached adapter belongs to
+                // that adapter, including its unprefixed reverse direction.
+                continue;
+            }
+        }
         if (frame == .stop_sending) {
             request_lifecycle.observePeerResponseCancellation(
                 @intCast(frame.stop_sending.stream_id),
                 frame.stop_sending.application_error_code,
             );
-        }
-        const maybe_stream_id: ?u62 = switch (frame) {
-            .stream => |stream| @intCast(stream.stream_id),
-            .reset_stream => |reset| @intCast(reset.stream_id),
-            else => null,
-        };
-        if (maybe_stream_id) |stream_id| {
-            if (request_id_validator.peerStreamClosed(stream_id)) continue;
         }
         if (frame == .reset_stream and
             (frame.reset_stream.stream_id & 0x02) != 0)
@@ -459,6 +468,17 @@ fn hasDetachedAssociation(
             detached.hasDetachedStreams()
         else
             false;
+}
+
+fn localDetachedBidiOwned(validator: ServerRequestIdValidator, stream_id: u62) bool {
+    if ((stream_id & 0x03) != 1) return false;
+    const connection = switch (validator) {
+        .connection => |value| value,
+        .static_limit => return false,
+    };
+    return connection.config.local_endpoint == .server and
+        (connection.sendStreamStats(stream_id) != null or
+            connection.localStreamClosed(stream_id));
 }
 
 fn shouldPreserveDetachedUniReset(

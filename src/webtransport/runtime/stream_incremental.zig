@@ -14,6 +14,7 @@ const stream_read_buffer = @import("stream/read_buffer.zig");
 test {
     _ = @import("stream/receive_credit_tests.zig");
     _ = @import("stream/read_buffer_tests.zig");
+    _ = @import("stream/read_target_tests.zig");
 }
 
 pub const Error = association.Error || @import("session_control.zig").Error;
@@ -447,7 +448,11 @@ fn pollStream(
     // single receive direction never changes mode. Skip streams claimed by
     // the whole-stream reader so an already-consumed stream cannot prevent
     // incremental events from other associated streams being observed.
-    if (registry.get(stream_id)) |registered| {
+    const known_stream = registry.get(stream_id);
+    if (known_stream) |registered| {
+        // Send-side control is independent of receive mode. A targeted read
+        // must still observe STOP when whole-stream data has another owner.
+        if (try pollStoppedStream(connection, registered)) |event| return event;
         if (registered.receive_mode == .whole) return null;
     }
     const identification = (if (single_attempt)
@@ -491,25 +496,8 @@ fn pollStream(
         .unclaimed => return null,
     };
 
-    if (connection.sendStreamStats(stream_id)) |stats| {
-        if (stats.reset) |reset_info| {
-            stream.send_reset =
-                .fromHttp3(reset_info.application_error_code);
-        }
-        if (stats.stopped) |stopped| {
-            if (stream.stopped == null) {
-                stream.stopped =
-                    .fromHttp3(stopped.application_error_code);
-            }
-            if (!stream.stopped_reported) {
-                stream.stopped_reported = true;
-                return stoppedEvent(stream, stream_id);
-            }
-        }
-    }
-    if (stream.stopped != null and !stream.stopped_reported) {
-        stream.stopped_reported = true;
-        return stoppedEvent(stream, stream_id);
+    if (known_stream == null) {
+        if (try pollStoppedStream(connection, stream)) |event| return event;
     }
     if (try pollKnownReset(connection, registry, stream_id)) |event| {
         return event;
@@ -577,21 +565,25 @@ fn pollStream(
     return null;
 }
 
+fn pollStoppedStream(connection: *quic.one_rtt.Connection, stream: *webtransport.StreamState) Error!?Read {
+    if (connection.sendStreamStats(stream.stream_id)) |stats| {
+        if (stats.reset) |reset_info| stream.send_reset = .fromHttp3(reset_info.application_error_code);
+        if (stats.stopped) |stopped| {
+            if (stream.stopped == null) stream.stopped = .fromHttp3(stopped.application_error_code);
+        }
+    }
+    if (stream.stopped == null or stream.stopped_reported) return null;
+    try association.requestAfterSendTerminal(connection, stream);
+    stream.stopped_reported = true;
+    return stoppedEvent(stream, stream.stream_id);
+}
+
 fn pollKnownStopped(
     connection: *quic.one_rtt.Connection,
     registry: *webtransport.StreamRegistry,
 ) Error!?Read {
     for (registry.registered()) |*stream| {
-        if (connection.sendStreamStats(stream.stream_id)) |stats| {
-            if (stats.reset) |reset_info| stream.send_reset = .fromHttp3(reset_info.application_error_code);
-            if (stats.stopped) |stopped| {
-                if (stream.stopped == null) stream.stopped = .fromHttp3(stopped.application_error_code);
-            }
-        }
-        if (stream.stopped == null or stream.stopped_reported) continue;
-        try association.requestAfterSendTerminal(connection, stream);
-        stream.stopped_reported = true;
-        return stoppedEvent(stream, stream.stream_id);
+        if (try pollStoppedStream(connection, stream)) |event| return event;
     }
     return null;
 }

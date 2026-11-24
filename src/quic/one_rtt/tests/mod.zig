@@ -1,4 +1,5 @@
 test {
+    _ = @import("receive_target.zig");
     _ = @import("closed_streams.zig");
     _ = @import("datagram_queue.zig");
     _ = @import("datagram_receive.zig");

@@ -8341,6 +8341,7 @@ pub const Connection = struct {
         stream_id: u62,
         out: []u8,
     ) Error!StreamRead {
+        try self.validateStreamReceiveTarget(stream_id, out);
         while (true) {
             if (try self.pollStreamId(stream_id, out)) |event| return event;
             try self.servicePacketServicingTimers();
@@ -8371,10 +8372,16 @@ pub const Connection = struct {
         deadline: std.Io.Clock.Timestamp,
     ) (Error || quic.runtime.ReceiveTimeoutError)!StreamRead {
         _ = try deadline_policy.usableAwake(self.endpoint.io, deadline);
+        try self.validateStreamReceiveTarget(stream_id, out);
         while (true) {
             if (try self.pollStreamId(stream_id, out)) |event| return event;
             try self.servicePacketServicingTimersDeadline(deadline);
         }
+    }
+
+    fn validateStreamReceiveTarget(self: *const Connection, stream_id: u62, out: []const u8) Error!void {
+        if (out.len == 0) return error.BufferTooShort;
+        if (!streamHasReceiveSide(self.config.local_endpoint, stream_id)) return error.StreamStateError;
     }
 
     fn pollStreamEntry(

@@ -30,6 +30,10 @@ Rejection preserves receive cursors, registry records and caller storage.
 The composable H3 readers in `runtime/flow/read.zig` enforce this admission before
 their progress callbacks as well.
 
+[Targeted stream events](stream_target_events.md) distinguish QUIC receive-side
+data/RESET from WebTransport's additional sending-side STOP notification.
+Receive reader mode keeps data ownership while targeted STOP remains available.
+
 Incremental stream read and poll methods require a nonempty destination buffer,
 including calls that receive RESET or FIN events. `BufferTooShort` rejects empty
 storage before Session lifecycle maintenance, stream association, reader-mode

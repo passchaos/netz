@@ -3743,3 +3743,17 @@ protected buffered-stream fixture.
 The native Windows transport job passed at `b01c7766` (2m 39s), including the
 buffer-admission groups and prior owner/reader/HTTP/H3/WebSocket filters. The
 linked evidence records the matching source revision and public success label.
+
+
+## Two-hundred-and-thirteenth pass: target receive and sending-side events
+
+QUIC blocking stream-ID receives reject directions that cannot carry received
+data, while nullable polling remains unchanged. WebTransport targeted STOP
+delivery now precedes receive-mode filtering, preserving local unidirectional
+control events and whole-reader data. The shared per-stream event helper avoids
+another registry scan. H3 detached server routing also retains known local
+bidirectional reverse STREAM/RESET/STOP traffic for its adapter. Direction,
+strict H3 role rejection, targeted/whole events and flow overlaps pass 309/310
+in Debug and ReleaseSafe with one Linux-only GRO skip. [Target event evidence](../../stream_target_events/2026-11-24/README.md)
+records the original two distinct failures, exact reverse RESET code and
+unaffected send-side completion.

@@ -161,6 +161,7 @@ automatically.
 | WebTransport operation admission | Owning H3 Session operations admit callback and socket ownership before buffered control or lifecycle cleanup. DATAGRAM and stream relative receive forms share their deadline implementation; blocking stream readers validate ownership before buffered delivery or reader-mode claims. Incremental read/poll requires nonempty storage before lifecycle or event consumption. Rejected batches clear per-call progress while preserving caller buffers. [Operation ownership](webtransport_operation_admission.md). |
 | WebTransport application protocol | HTTP/2 `applicationProtocol()` returns the decoded selected identifier as `[]const u8`; HTTP/3 returns a validated `application_protocol.String` whose `eql` decodes RFC 9651 escapes. Plain identifiers compare identically; escaped identifiers need the transport-specific comparator. |
 | Pool Alt-Svc fallback | A setup failure can use TCP without rewinding; a started request keeps method/replay gating. |
+| Targeted stream events | QUIC blocking `receiveStreamId*` rejects local unidirectional receive targets. WebTransport `readStreamId*` also reports sending-side STOP, including while a whole reader owns the receive data. [Target and event contracts](stream_target_events.md). |
 | QUIC anti-amplification | The server plans the largest unacknowledged CRYPTO prefix that fits the allowance and advances the delivered range from client ACKs; client PTO probes run on an independent timer. |
 
 The full QUIC suite includes real-UDP timing tests that can rotate under heavy
