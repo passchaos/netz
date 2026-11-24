@@ -105,6 +105,7 @@ test "HTTP/3 shared synchronous acquire races both endpoint families" {
         .migration_local_address = .{ .ip4 = .loopback(0) },
         .limits = limits,
         .max_connections = 1,
+        .handshake_poll_interval = .fromSeconds(10),
         .client = .{
             .handshake = .{
                 .original_destination_connection_id = &.{},
@@ -216,6 +217,7 @@ test "HTTP/3 shared Happy Eyeballs deadline cancels every route" {
         .local_address = .{ .ip6 = .loopback(0) },
         .migration_local_address = .{ .ip4 = .loopback(0) },
         .max_connections = 1,
+        .handshake_poll_interval = .fromSeconds(10),
         .client = .{
             .handshake = .{
                 .original_destination_connection_id = &.{},

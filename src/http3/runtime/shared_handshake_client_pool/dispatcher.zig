@@ -17,7 +17,7 @@ const early_data = @import("../../../http/early_data.zig");
 const authority = @import("../handshake_client_pool/shared/authority.zig");
 const route_key = @import("../handshake_client_pool/shared/route.zig");
 const stream_command = @import("stream_command.zig");
-const receive_race = @import("dispatcher/receive.zig");
+const receive_race = @import("../../../internal/receive_activity.zig");
 
 pub const Error = error{
     SharedEndpointDriverClosed,

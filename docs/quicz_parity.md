@@ -1948,7 +1948,13 @@ clients move into stable heap storage before atomic dispatcher promotion, and
 idle reuse/global LRU eviction retain the configured connection cap. An opt-in
 RFC 8305 policy stable-interleaves resolver results and staggers concurrent
 handshakes from the matching endpoint; both synchronous acquisition and the
-cloneable request driver promote a winner on either socket. Resumption and
+cloneable request driver promote a winner on either socket. Synchronous address
+races wait on resolver, stagger-timer and handshake completion notifications
+alongside the sole endpoint receive, under the original absolute deadline.
+They no longer depend on `handshake_poll_interval` to advance a completed
+worker or launch the next candidate. The shared endpoint/activity wait joins
+its receive before the next acquisition poll changes routes, and retains any
+endpoint event that completed during cancellation. Resumption and
 0-RTT remain first-attempt-only, while a later winner reports rejection for one
 safe 1-RTT replay. Loser cleanup unregisters and closes its inbox before
 joining the worker, avoiding a wait for its phase deadline. Only the pool's

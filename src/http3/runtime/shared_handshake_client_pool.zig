@@ -12,6 +12,7 @@ const quic = @import("../../quic/mod.zig");
 const owned_receive_race = @import("../../quic/owned_receive_race.zig");
 const connection_budget = @import("../../internal/connection_budget.zig");
 const deadline_policy = @import("../../internal/deadline.zig");
+const receive_activity = @import("../../internal/receive_activity.zig");
 const owning_pool = @import("handshake_client_pool.zig");
 const shared_dispatcher = @import("shared_handshake_client_pool/dispatcher.zig");
 const launch_timer = @import("shared_handshake_client_pool/launch_timer.zig");
@@ -1890,23 +1891,38 @@ pub fn Pool(comptime Runtime: type) type {
                     return err;
                 };
                 defer pending.deinit();
+                const Receiver = struct {
+                    pub const Event = quic.endpoint_dispatcher.Event;
+                    pool: *Self,
+                    allocator: std.mem.Allocator,
+
+                    pub fn receive(receiver: *@This()) quic.endpoint_dispatcher.ReceiveError!quic.endpoint_dispatcher.Event {
+                        return receiver.pool.receiveTransportUntil(null);
+                    }
+
+                    pub fn receiveWithDeadline(receiver: *@This(), absolute: std.Io.Clock.Timestamp) quic.endpoint_dispatcher.ReceiveError!quic.endpoint_dispatcher.Event {
+                        return receiver.pool.receiveTransportWithDeadline(absolute);
+                    }
+                };
+                var receiver = Receiver{ .pool = self, .allocator = self.allocator };
                 while (true) {
+                    // Reset before checking done states so a completion that
+                    // races poll remains set for the following wait.
+                    completion_event.reset();
                     if (try pending.poll()) |lease| return lease;
-                    const poll_deadline = deadline_policy.earlier(
+                    const maybe_event = try receive_activity.beforeActivity(
+                        Receiver,
+                        quic.endpoint_dispatcher.ReceiveError,
+                        &receiver,
+                        self.io,
+                        &completion_event,
                         deadline,
-                        .fromNow(self.io, .{
-                            .clock = .awake,
-                            .raw = self.options.handshake_poll_interval,
-                        }),
-                    ).?;
-                    var event = self.receiveTransportWithDeadline(
-                        poll_deadline,
-                    ) catch |err| switch (err) {
-                        error.Timeout => continue,
-                        else => |other| return other,
-                    };
-                    defer event.deinit(self.allocator);
-                    try self.applyEndpointProgress(&event);
+                    );
+                    if (maybe_event) |event_value| {
+                        var event = event_value;
+                        defer event.deinit(self.allocator);
+                        try self.applyEndpointProgress(&event);
+                    }
                 }
             }
 

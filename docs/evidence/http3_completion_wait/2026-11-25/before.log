@@ -1,0 +1,19 @@
+[traex-zig-guard 2026-11-25 02:59:08] started Zig tree root=13947 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=1800s
+test-http3
++- run test 59 pass, 1 fail (60 total)
+error: 'http3.runtime.shared_handshake_client_pool.completion_wait_tests.test.HTTP/3 shared synchronous acquire wakes on resolver completion' failed:
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:615:14: 0x103002f27 in expect (test)
+           if (!ok) return error.TestUnexpectedResult;
+                    ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/shared_handshake_client_pool/completion_wait_tests.zig:40:5: 0x103003903 in test.HTTP/3 shared synchronous acquire wakes on resolver completion (test)
+           try std.testing.expect(elapsed.nanoseconds < 250 * std.time.ns_per_ms);
+           ^
+failed command: ./.zig-cache/o/a04a7bac5a1be0595a881947834e8f92/test --cache-dir=./.zig-cache --seed=0x57156a65 --listen=-
+
+Build Summary: 8/10 steps succeeded (1 failed); 59/60 tests passed (1 failed)
+test-http3 transitive failure
++- run test 59 pass, 1 fail (60 total)
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/4f43002d28e7c626e498fafc36e312bb/build /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/zig /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib /Users/bytedance/project-z/netz .zig-cache /Users/bytedance/.cache/zig --seed 0x57156a65 -Z7dd9652655a56c3d test-http3 -Dtest-filter=HTTP/3 shared synchronous acquire wakes -j1 --summary failures
+[traex-zig-guard 2026-11-25 02:59:36] finished Zig tree root=13947 peak=2568MiB result=0

@@ -149,6 +149,7 @@ test {
     _ = @import("shared_handshake_client_pool_tests.zig");
     _ = @import("shared_handshake_client_pool_socks5_tests.zig");
     _ = @import("shared_handshake_client_pool_happy_eyeballs_tests.zig");
+    _ = @import("shared_handshake_client_pool/completion_wait_tests.zig");
     _ = @import("shared_handshake_client_pool_request_tests.zig");
     _ = @import("shared_handshake_client_pool_stream_tests.zig");
     _ = @import("shared_handshake_client_pool_stream_dispatcher_tests.zig");
