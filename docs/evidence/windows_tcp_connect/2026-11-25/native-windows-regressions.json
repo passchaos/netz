@@ -1,0 +1,51 @@
+{
+  "run_id": 45510626807,
+  "run_url": "https://github.com/passchaos/netz/actions/runs/45510626807",
+  "head_sha": "11746f1219ced3f00a960f78187140e7eb9d6a03",
+  "job_id": 138857297831,
+  "job_name": "Portable x86_64-windows-gnu (windows-latest)",
+  "status": "completed",
+  "conclusion": "success",
+  "steps": [
+    {
+      "name": "Probe native Winsock interface option semantics",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 15,
+      "started_at": "2026-11-24T23:33:04Z",
+      "completed_at": "2026-11-24T23:33:05Z"
+    },
+    {
+      "name": "Run native HTTP3 resolver and acquisition regressions",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 16,
+      "started_at": "2026-11-24T23:33:05Z",
+      "completed_at": "2026-11-24T23:35:22Z"
+    },
+    {
+      "name": "Run native ordered TCP hostname regressions",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 17,
+      "started_at": "2026-11-24T23:35:22Z",
+      "completed_at": "2026-11-24T23:35:42Z"
+    },
+    {
+      "name": "Run native H1 H2 resolver policy regressions",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 18,
+      "started_at": "2026-11-24T23:35:42Z",
+      "completed_at": "2026-11-24T23:37:17Z"
+    },
+    {
+      "name": "Run native Windows transport regressions",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 19,
+      "started_at": "2026-11-24T23:37:17Z",
+      "completed_at": "2026-11-24T23:40:51Z"
+    }
+  ]
+}

@@ -35,6 +35,7 @@ tests without attempting to execute a foreign binary.
 | Local ABI/status/refusal, native resolver, binding, identity and WS overlap | 196/196 passed | [Debug.log](Debug.log) |
 | Refusal test budget follow-up on the local host | 23/23 passed | [refusal-budget.log](refusal-budget.log) |
 | Native Windows ordered TCP gate, including IPv4/IPv6 Threaded and prebound refusal | Passed at `8b0dcd15` | [native-windows-refusal.json](native-windows-refusal.json) |
+| Final native Windows resolver, ordered TCP, H1/H2 policy and transport gates | Passed at `11746f12` | [native-windows-regressions.json](native-windows-regressions.json) |
 
 The first repair CI executes the original ordered-hostname and source-binding
 cases successfully. Its two additional closed-port refusal tests reach their
@@ -44,3 +45,8 @@ Native [CI run 45502434742](https://github.com/passchaos/netz/actions/runs/45502
 confirms the ordered TCP gate, including the final refusal status for both
 families. Its subsequent H1/H2 resolver-policy gate fails separately at the
 explicit deadline route; that fixture is tracked by the native resolver evidence.
+After correcting only the Windows refused-first fixture budget, native
+[CI run 45510626807](https://github.com/passchaos/netz/actions/runs/45510626807)
+passes every Windows native gate, including the subsequent HTTP, WebSocket,
+QUIC and WebTransport transport regressions. Native Linux policy execution
+also passes on that revision.

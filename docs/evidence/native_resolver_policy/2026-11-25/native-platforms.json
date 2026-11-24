@@ -1,0 +1,31 @@
+{
+  "run_id": 45510626807,
+  "run_url": "https://github.com/passchaos/netz/actions/runs/45510626807",
+  "head_sha": "11746f1219ced3f00a960f78187140e7eb9d6a03",
+  "jobs": [
+    {
+      "id": 138857297826,
+      "name": "Portable x86_64-linux-gnu (ubuntu-latest)",
+      "policy_step": {
+        "name": "Run native H1 H2 resolver policy regressions",
+        "status": "completed",
+        "conclusion": "success",
+        "number": 18,
+        "started_at": "2026-11-24T23:35:35Z",
+        "completed_at": "2026-11-24T23:36:34Z"
+      }
+    },
+    {
+      "id": 138857297831,
+      "name": "Portable x86_64-windows-gnu (windows-latest)",
+      "policy_step": {
+        "name": "Run native H1 H2 resolver policy regressions",
+        "status": "completed",
+        "conclusion": "success",
+        "number": 18,
+        "started_at": "2026-11-24T23:35:42Z",
+        "completed_at": "2026-11-24T23:37:17Z"
+      }
+    }
+  ]
+}

@@ -55,3 +55,4 @@ zig build test-http1 test-http2 '-Dtest-filter=HTTP1 native resolver policy' '-D
 | Native Windows refused-first fixture before budget correction | `Timeout` at the original deadline | [native-windows-before.json](native-windows-before.json) |
 | Platform-specific refusal budget correction on the local host | 65/65 passed | [windows-budget.Debug.log](windows-budget.Debug.log) |
 | Corrected native resolver fixtures for Windows | Compiled | [windows-budget.compile.log](windows-budget.compile.log) |
+| Native Linux and Windows resolver-policy execution after correction | Passed at `11746f12` | [native-platforms.json](native-platforms.json) |
