@@ -23,5 +23,14 @@ remain with the adapter; ordinary H3 message role validation still rejects
 server bidirectional request streams. The router uses established QUIC send
 state or compacted local stream history, without a second ownership map.
 
+Closed-stream history remains authoritative after the adapter's last
+association is removed. The H3 request router filters received STREAM/RESET
+for both local and peer streams already retired by QUIC before message
+classification. Late authenticated frames cannot resurrect the stream or
+turn a retired server bidirectional extension into a new HTTP request.
+Half-closing the send side retains live stream state until bidirectional
+receive completion and the required delivery acknowledgement permit reclaim;
+closed-ID history is installed before the active entries are removed.
+
 [Operation admission](webtransport_operation_admission.md) defines callback,
 dispatcher, output-buffer and deadline requirements before these operations.

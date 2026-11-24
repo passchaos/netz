@@ -114,12 +114,12 @@ pub const ServerRequestIdValidator = union(enum) {
         };
     }
 
-    pub fn peerStreamClosed(
+    pub fn streamClosed(
         self: @This(),
         stream_id: u62,
     ) bool {
         return switch (self) {
-            .connection => |connection| connection.peerStreamClosed(stream_id),
+            .connection => |connection| connection.streamLifecycle(stream_id) == .closed,
             .static_limit => false,
         };
     }

@@ -1,0 +1,131 @@
+[traex-zig-guard 2026-11-24 16:44:07] started Zig tree root=70897 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=1800s
+test-webtransport
++- run test 104 pass, 1 fail (105 total)
+error: 'webtransport.runtime.stream.closed_extension_tests.test.WebTransport closed extension routing ignores late local bidi after final association teardown' failed:
+       /Users/bytedance/project-z/netz/src/http3/runtime/control/receive.zig:82:34: 0x102be89ab in messageStreamDisposition (test)
+           if ((stream_id & 0x01) != 0) return error.StreamCreationError;
+                                        ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/receive/routing/request.zig:342:14: 0x102b9fe73 in applyServerRequestPacketFrames (test)
+               if ((try messageStreamDisposition(
+                    ^
+       /Users/bytedance/project-z/netz/src/http3/runtime.zig:3541:9: 0x102b8e077 in visitStreamingServerRequestPacket (test)
+               return err;
+               ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/receive/cursor.zig:123:17: 0x102b34ac3 in visit (test)
+                       try visitor(adapter.context, packet);
+                       ^
+       /Users/bytedance/project-z/netz/src/quic/one_rtt/connection.zig:11980:9: 0x102b75c0b in processOpenedBytesInPlaceVisitingAt__anon_57844 (test)
+               try visitor(context, .{
+               ^
+       /Users/bytedance/project-z/netz/src/quic/one_rtt/connection.zig:11713:17: 0x102b34597 in processReceivedBytesVisitingWithDestinationIdAt__anon_57811 (test)
+                       try self.processOpenedBytesInPlaceVisitingAt(
+                       ^
+       /Users/bytedance/project-z/netz/src/quic/one_rtt/connection.zig:11058:9: 0x102b33eb3 in visitReceivedDatagramAt__anon_57798 (test)
+               return self.processReceivedBytesVisitingWithDestinationIdAt(
+               ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/receive/cursor.zig:131:9: 0x102b339eb in visitRawDatagram__anon_57731 (test)
+               return connection.visitReceivedDatagramAt(
+               ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/receive/cursor.zig:211:17: 0x102b3331f in visitRetainedRawDatagram__anon_46363 (test)
+                   if (try self.visitRawDatagram(
+                       ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/receive/cursor.zig:369:21: 0x102a9e1fb in visitWithDeadline__anon_46248 (test)
+                       if (try self.visitRetainedRawDatagram(
+                           ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/handshake_server_session.zig:5346:13: 0x102a9d087 in receiveAttachedConnectDatagramPacket (test)
+                   try self.receive_packets.visitWithDeadline(
+                   ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/handshake_server_session.zig:5323:9: 0x102c86a93 in receiveRequestPacketUntil (test)
+               try self.receiveAttachedConnectDatagramPacket(deadline);
+               ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/handshake_server_session.zig:841:13: 0x102c89b07 in receiveRequestEventInternal (test)
+                   try self.receiveRequestPacketUntil(deadline);
+                   ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/handshake_server_session.zig:817:9: 0x102c89283 in receiveRequestEventWithTimeout (test)
+               return self.receiveRequestEventInternal(
+               ^
+       /Users/bytedance/project-z/netz/src/webtransport/runtime/stream/closed_extension_tests.zig:51:21: 0x102a24237 in test.WebTransport closed extension routing ignores late local bidi after final association teardown (test)
+               var event = try pair.server.h3.receiveRequestEventWithTimeout(.fromSeconds(1));
+                           ^
+failed command: ./.zig-cache/o/29a41e5bd76ffa46bedf8335bac5e934/test --cache-dir=./.zig-cache --seed=0x9ca9156b --listen=-
+
+Build Summary: 8/10 steps succeeded (1 failed); 104/105 tests passed (1 failed)
+test-webtransport transitive failure
++- run test 104 pass, 1 fail (105 total)
+   +- compile test Debug native success 9s MaxRSS:988M
+      +- WriteFile macho_0_p256_field_arm64.S cached
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 252ms MaxRSS:31M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 186ms MaxRSS:31M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options success
+      +- options cached
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/dc551c8273fff33d6557bf3ca490b20b/build /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/zig /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib /Users/bytedance/project-z/netz .zig-cache /Users/bytedance/.cache/zig --seed 0x9ca9156b -Z72a6c51b43cbd87b test-webtransport -Dtest-filter=WebTransport closed extension routing -j1 --summary all
+[traex-zig-guard 2026-11-24 16:44:19] finished Zig tree root=70897 peak=863MiB result=0

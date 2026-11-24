@@ -3760,3 +3760,16 @@ unaffected send-side completion.
 The native Windows transport job passed at `2f2b0ab8` (4m 17s), covering the
 target and strict-role filters alongside prior owner/reader/HTTP/H3/WebSocket
 checks. The linked evidence records the matching source and public success.
+
+
+## Two-hundred-and-fourteenth pass: closed extension stream routing
+
+H3 request routing now consults generic QUIC closed-stream history before
+association and message classification, covering retired local as well as peer
+streams. A real FIN/ACK-compacted server bidi remains ignored after its last
+detached association is removed; fresh authenticated late STREAM/RESET cannot
+turn it into a request or rebuild transport state. The following ordinary GET
+still succeeds. The red baseline is fixed, closed/active extension cases pass
+108/108, and retirement/H3 role/CONNECT overlaps pass 324/324 in Debug and
+ReleaseSafe. [Closed extension evidence](../../closed_extension_streams/2026-11-24/README.md)
+records the full close chain, association teardown and late-packet qualification.

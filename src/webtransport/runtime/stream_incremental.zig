@@ -15,6 +15,7 @@ test {
     _ = @import("stream/receive_credit_tests.zig");
     _ = @import("stream/read_buffer_tests.zig");
     _ = @import("stream/read_target_tests.zig");
+    _ = @import("stream/closed_extension_tests.zig");
 }
 
 pub const Error = association.Error || @import("session_control.zig").Error;

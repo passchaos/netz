@@ -150,7 +150,7 @@ pub fn applyServerRequestPacketFrames(
             else => null,
         };
         if (maybe_stream_id) |stream_id| {
-            if (frame != .stop_sending and request_id_validator.peerStreamClosed(stream_id)) continue;
+            if (frame != .stop_sending and request_id_validator.streamClosed(stream_id)) continue;
             if (hasDetachedAssociation(detached_stream_id, detached_streams) and
                 localDetachedBidiOwned(request_id_validator, stream_id))
             {
