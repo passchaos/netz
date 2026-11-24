@@ -3491,3 +3491,18 @@ server loops at the accessor.
 | --- | --- | --- |
 | HTTP/1 runtime (Debug) | 480/480 | live `zig build test-http1 --summary all` |
 | Package surface (Debug) | 28/28 | live `zig build test-package --summary all` |
+
+## Hundred-and-ninety-fifth pass: cumulative gate after the metadata series
+
+Cumulative rerun after the TLS metadata, admission, key-update and example
+changes. All protocol suites and the public package surface pass on the
+committed tree; skipped cases remain the platform-gated ones recorded inside
+their suites.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| HTTP aggregate (Debug) | 311/311 | live `zig build test-http --summary all` |
+| Full WebSocket suite (Debug) | 526/527 (1 skipped) | live `zig build test-websocket --summary all` |
+| WebTransport suite (Debug) | 761/763 (2 skipped) | live `zig build test-webtransport --summary all` |
+| HTTP/3 suite (Debug) | 929/933 (4 skipped) | live `zig build test-http3 --summary all` |
+| Package surface (Debug) | 28/28 | live `zig build test-package --summary all` |
