@@ -1,11 +1,13 @@
 //! Protocol-independent asynchronous address resolution contract.
 
 const std = @import("std");
+const deadline_policy = @import("deadline.zig");
+const lookup = @import("address_resolver/lookup.zig");
 
 const net = std.Io.net;
 
 pub const Error = std.mem.Allocator.Error || net.HostName.ValidateError ||
-    net.HostName.LookupError || std.Io.Timeout.Error;
+    net.HostName.LookupError || std.Io.Timeout.Error || std.Io.ConcurrentError;
 
 pub const Resolver = struct {
     pub const ResolveError = Error;
@@ -26,6 +28,8 @@ pub const Resolver = struct {
 
 /// Resolve every unique system address into allocator-owned storage. The
 /// optional deadline bounds the complete lookup rather than each queue read.
+/// Requires concurrency so a bounded DNS queue can always be consumed while
+/// the producer runs; unsupported admission fails before falling back inline.
 pub fn resolveSystem(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -33,12 +37,19 @@ pub fn resolveSystem(
     port: u16,
     deadline: ?std.Io.Clock.Timestamp,
 ) Error![]net.IpAddress {
-    const host_name = try net.HostName.init(host);
+    return resolveHostBefore(allocator, io, try net.HostName.init(host), port, deadline);
+}
+
+pub fn resolveHostBefore(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    host_name: net.HostName,
+    port: u16,
+    deadline: ?std.Io.Clock.Timestamp,
+) Error![]net.IpAddress {
     const absolute = deadline orelse
-        return resolveHostAddresses(allocator, io, host_name, port);
-    if (absolute.durationFromNow(io).raw.nanoseconds <= 0) {
-        return error.Timeout;
-    }
+        return lookup.all(allocator, io, host_name, port);
+    _ = try deadline_policy.usableAwake(io, absolute);
     const ResolveResult = Error![]net.IpAddress;
     const Wake = union(enum) {
         resolved: ResolveResult,
@@ -52,12 +63,12 @@ pub fn resolveSystem(
         } else |_| {},
         .timeout => {},
     };
-    select.async(
+    try select.concurrent(
         .resolved,
-        resolveHostAddresses,
+        lookup.all,
         .{ allocator, io, host_name, port },
     );
-    select.async(.timeout, waitUntil, .{ io, absolute });
+    try select.concurrent(.timeout, waitUntil, .{ io, absolute });
     return switch (select.await() catch |err| switch (err) {
         error.Canceled => return error.Canceled,
     }) {
@@ -69,43 +80,6 @@ pub fn resolveSystem(
             return error.Timeout;
         },
     };
-}
-
-fn resolveHostAddresses(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    host: net.HostName,
-    port: u16,
-) Error![]net.IpAddress {
-    var lookup_storage: [16]net.HostName.LookupResult = undefined;
-    var lookup_queue: std.Io.Queue(net.HostName.LookupResult) =
-        .init(&lookup_storage);
-    var lookup = io.async(
-        net.HostName.lookup,
-        .{ host, io, &lookup_queue, .{ .port = port } },
-    );
-    defer {
-        lookup.cancel(io) catch {};
-        while (lookup_queue.getOneUncancelable(io)) |_| {} else |err| switch (err) {
-            error.Closed => {},
-        }
-    }
-
-    var addresses: std.ArrayList(net.IpAddress) = .empty;
-    errdefer addresses.deinit(allocator);
-    while (lookup_queue.getOne(io)) |result| switch (result) {
-        .canonical_name => {},
-        .address => |address| {
-            for (addresses.items) |*existing| {
-                if (existing.eql(&address)) break;
-            } else try addresses.append(allocator, address);
-        },
-    } else |err| switch (err) {
-        error.Canceled => return error.Canceled,
-        error.Closed => try lookup.await(io),
-    }
-    if (addresses.items.len == 0) return error.NoAddressReturned;
-    return addresses.toOwnedSlice(allocator);
 }
 
 fn waitUntil(

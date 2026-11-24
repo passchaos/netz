@@ -12,7 +12,7 @@ pub fn dataReadPeerError(err: anyerror) bool {
     return err == error.InvalidContentLength or err == error.BufferTooShort;
 }
 
-pub const Error = http3.Error || quic.runtime.Error ||
+pub const Error = http3.Error || quic.runtime.Error || std.Io.ConcurrentError ||
     quic.handshake.Error || quic.one_rtt.Error || quic.stream_state.Error ||
     proxy_socks5.UdpAssociateError ||
     net.HostName.ValidateError || net.HostName.LookupError || error{

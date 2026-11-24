@@ -1,0 +1,214 @@
+[traex-zig-guard 2026-11-25 03:44:25] started Zig tree root=62842 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=1800s
+test-http3
++- run test 52 pass, 9 fail (61 total)
+error: 'http3.runtime.client.system_resolver_tests.test.HTTP3 system resolver common deadline survives zero async budget' failed:
+       expected error.Timeout, found error.UnknownHostName
+       /Users/bytedance/project-z/netz/src/internal/address_resolver.zig:64:31: 0x102d82cab in resolveSystem (test)
+               .resolved => |result| try result,
+                                     ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/client/system_resolver_tests.zig:11:5: 0x102d82647 in resolve__anon_38746 (test)
+           return switch (route) {
+           ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:72:13: 0x102d714df in expectError__anon_36646 (test)
+                   return error.TestUnexpectedError;
+                   ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/client/system_resolver_tests.zig:69:5: 0x102d8e29b in deadlineWithNoAsync__anon_39991 (test)
+           try std.testing.expectError(expected, resolve(route, io, .fromNow(io, .{ .clock = .awake, .raw = .fromMilliseconds(80) })));
+           ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/client/system_resolver_tests.zig:115:5: 0x102d8e53b in test.HTTP3 system resolver common deadline survives zero async budget (test)
+           try deadlineWithNoAsync(.common);
+           ^
+error: 'http3.runtime.client.system_resolver_tests.test.HTTP3 system resolver proxy deadline survives zero async budget' failed:
+       expected error.Timeout, found error.UnknownHostName
+       /Users/bytedance/project-z/netz/src/proxy/internal/resolve.zig:54:31: 0x102d80167 in resolveHost (test)
+               .resolved => |result| try result,
+                                     ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/client/system_resolver_tests.zig:11:5: 0x102d7fb03 in resolve__anon_38326 (test)
+           return switch (route) {
+           ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:72:13: 0x102d714df in expectError__anon_36646 (test)
+                   return error.TestUnexpectedError;
+                   ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/client/system_resolver_tests.zig:69:5: 0x102d8dda7 in deadlineWithNoAsync__anon_39984 (test)
+           try std.testing.expectError(expected, resolve(route, io, .fromNow(io, .{ .clock = .awake, .raw = .fromMilliseconds(80) })));
+           ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/client/system_resolver_tests.zig:118:5: 0x102d8e047 in test.HTTP3 system resolver proxy deadline survives zero async budget (test)
+           try deadlineWithNoAsync(.proxy);
+           ^
+error: 'http3.runtime.client.system_resolver_tests.test.HTTP3 system resolver H3 deadline survives zero async budget' failed:
+       expected error.HandshakeTimeout, found error.UnknownHostName
+       /Users/bytedance/project-z/netz/src/http3/runtime/client/uri.zig:348:31: 0x102d731af in resolveAddressesBefore (test)
+               .resolved => |result| try result,
+                                     ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/client/uri.zig:305:5: 0x102d72893 in resolveHostPortAddressesBefore (test)
+           return resolveAddressesBefore(
+           ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/client/system_resolver_tests.zig:11:5: 0x102d723d3 in resolve__anon_36645 (test)
+           return switch (route) {
+           ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:72:13: 0x102d714df in expectError__anon_36646 (test)
+                   return error.TestUnexpectedError;
+                   ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/client/system_resolver_tests.zig:69:5: 0x102d8d8b3 in deadlineWithNoAsync__anon_39972 (test)
+           try std.testing.expectError(expected, resolve(route, io, .fromNow(io, .{ .clock = .awake, .raw = .fromMilliseconds(80) })));
+           ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/client/system_resolver_tests.zig:121:5: 0x102d8db53 in test.HTTP3 system resolver H3 deadline survives zero async budget (test)
+           try deadlineWithNoAsync(.h3);
+           ^
+error: 'http3.runtime.client.system_resolver_tests.test.HTTP3 system resolver common drains more addresses than its queue with zero async budget' failed:
+       /Users/bytedance/project-z/netz/src/http3/runtime/client/system_resolver_tests.zig:94:5: 0x102d8cc37 in queueWithNoAsync__anon_39951 (test)
+           try done.waitTimeout(io, .{ .duration = .{ .clock = .awake, .raw = .fromMilliseconds(250) } });
+           ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/client/system_resolver_tests.zig:124:5: 0x102d8d323 in test.HTTP3 system resolver common drains more addresses than its queue with zero async budget (test)
+           try queueWithNoAsync(.common);
+           ^
+error: 'http3.runtime.client.system_resolver_tests.test.HTTP3 system resolver proxy drains more addresses than its queue with zero async budget' failed:
+       /Users/bytedance/project-z/netz/src/http3/runtime/client/system_resolver_tests.zig:94:5: 0x102d8bf1b in queueWithNoAsync__anon_39936 (test)
+           try done.waitTimeout(io, .{ .duration = .{ .clock = .awake, .raw = .fromMilliseconds(250) } });
+           ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/client/system_resolver_tests.zig:127:5: 0x102d8c607 in test.HTTP3 system resolver proxy drains more addresses than its queue with zero async budget (test)
+           try queueWithNoAsync(.proxy);
+           ^
+error: 'http3.runtime.client.system_resolver_tests.test.HTTP3 system resolver H3 drains more addresses than its queue with zero async budget' failed:
+       /Users/bytedance/project-z/netz/src/http3/runtime/client/system_resolver_tests.zig:94:5: 0x102d87f7b in queueWithNoAsync__anon_38888 (test)
+           try done.waitTimeout(io, .{ .duration = .{ .clock = .awake, .raw = .fromMilliseconds(250) } });
+           ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/client/system_resolver_tests.zig:130:5: 0x102d88667 in test.HTTP3 system resolver H3 drains more addresses than its queue with zero async budget (test)
+           try queueWithNoAsync(.h3);
+           ^
+error: 'http3.runtime.client.system_resolver_tests.test.HTTP3 system resolver common refuses unavailable concurrency before DNS' failed:
+       expected error.ConcurrencyUnavailable, found error.UnknownHostName
+       /Users/bytedance/project-z/netz/src/internal/address_resolver.zig:64:31: 0x102d82cab in resolveSystem (test)
+               .resolved => |result| try result,
+                                     ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/client/system_resolver_tests.zig:11:5: 0x102d82647 in resolve__anon_38746 (test)
+           return switch (route) {
+           ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:72:13: 0x102d714df in expectError__anon_36646 (test)
+                   return error.TestUnexpectedError;
+                   ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/client/system_resolver_tests.zig:110:5: 0x102d8243f in unavailable__anon_38742 (test)
+           try std.testing.expectError(error.ConcurrencyUnavailable, resolve(route, io, .fromNow(io, .{ .clock = .awake, .raw = .fromMilliseconds(80) })));
+           ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/client/system_resolver_tests.zig:133:5: 0x102d82597 in test.HTTP3 system resolver common refuses unavailable concurrency before DNS (test)
+           try unavailable(.common);
+           ^
+error: 'http3.runtime.client.system_resolver_tests.test.HTTP3 system resolver proxy refuses unavailable concurrency before DNS' failed:
+       expected error.ConcurrencyUnavailable, found error.UnknownHostName
+       /Users/bytedance/project-z/netz/src/proxy/internal/resolve.zig:54:31: 0x102d80167 in resolveHost (test)
+               .resolved => |result| try result,
+                                     ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/client/system_resolver_tests.zig:11:5: 0x102d7fb03 in resolve__anon_38326 (test)
+           return switch (route) {
+           ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:72:13: 0x102d714df in expectError__anon_36646 (test)
+                   return error.TestUnexpectedError;
+                   ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/client/system_resolver_tests.zig:110:5: 0x102d7f8fb in unavailable__anon_38322 (test)
+           try std.testing.expectError(error.ConcurrencyUnavailable, resolve(route, io, .fromNow(io, .{ .clock = .awake, .raw = .fromMilliseconds(80) })));
+           ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/client/system_resolver_tests.zig:136:5: 0x102d7fa53 in test.HTTP3 system resolver proxy refuses unavailable concurrency before DNS (test)
+           try unavailable(.proxy);
+           ^
+error: 'http3.runtime.client.system_resolver_tests.test.HTTP3 system resolver H3 refuses unavailable concurrency before DNS' failed:
+       expected error.ConcurrencyUnavailable, found error.UnknownHostName
+       /Users/bytedance/project-z/netz/src/http3/runtime/client/uri.zig:348:31: 0x102d731af in resolveAddressesBefore (test)
+               .resolved => |result| try result,
+                                     ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/client/uri.zig:305:5: 0x102d72893 in resolveHostPortAddressesBefore (test)
+           return resolveAddressesBefore(
+           ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/client/system_resolver_tests.zig:11:5: 0x102d723d3 in resolve__anon_36645 (test)
+           return switch (route) {
+           ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:72:13: 0x102d714df in expectError__anon_36646 (test)
+                   return error.TestUnexpectedError;
+                   ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/client/system_resolver_tests.zig:110:5: 0x102d71787 in unavailable__anon_36610 (test)
+           try std.testing.expectError(error.ConcurrencyUnavailable, resolve(route, io, .fromNow(io, .{ .clock = .awake, .raw = .fromMilliseconds(80) })));
+           ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/client/system_resolver_tests.zig:139:5: 0x102d718df in test.HTTP3 system resolver H3 refuses unavailable concurrency before DNS (test)
+           try unavailable(.h3);
+           ^
+failed command: ./.zig-cache/o/53423774ae424a11bdb29d1da56a0669/test --cache-dir=./.zig-cache --seed=0x688c5f93 --listen=-
+
+Build Summary: 8/10 steps succeeded (1 failed); 52/61 tests passed (9 failed)
+test-http3 transitive failure
++- run test 52 pass, 9 fail (61 total)
+   +- compile test Debug native success 5s MaxRSS:558M
+      +- WriteFile macho_0_p256_field_arm64.S cached
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 603ms MaxRSS:31M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 262ms MaxRSS:31M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options success
+      +- options cached
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/4f43002d28e7c626e498fafc36e312bb/build /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/zig /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib /Users/bytedance/project-z/netz .zig-cache /Users/bytedance/.cache/zig --seed 0x688c5f93 -Z16fb26ffd0d2bde3 test-http3 -Dtest-filter=HTTP3 system resolver -j1 --summary all
+[traex-zig-guard 2026-11-25 03:44:38] finished Zig tree root=62842 peak=517MiB result=0

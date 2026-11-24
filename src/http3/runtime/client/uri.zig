@@ -2,6 +2,9 @@ const std = @import("std");
 const http3 = @import("../../mod.zig");
 const quic = @import("../../../quic/mod.zig");
 const runtime_error = @import("../error.zig");
+const address_resolver = @import("../../../internal/address_resolver.zig");
+const system_lookup = @import("../../../internal/address_resolver/lookup.zig");
+const address_collector = @import("../../../internal/address_resolver/collector.zig");
 
 const net = std.Io.net;
 pub const Error = runtime_error.Error;
@@ -121,158 +124,12 @@ fn targetForHost(
     return .{ .{ .host = try net.HostName.init(host) }, host };
 }
 
-fn resolveHostName(
-    io: std.Io,
-    host: net.HostName,
-    port: u16,
-) Error!net.IpAddress {
-    var lookup_buffer: [16]net.HostName.LookupResult = undefined;
-    var lookup_queue: std.Io.Queue(net.HostName.LookupResult) =
-        .init(&lookup_buffer);
-    var lookup = io.async(
-        net.HostName.lookup,
-        .{ host, io, &lookup_queue, .{ .port = port } },
-    );
-    defer {
-        lookup.cancel(io) catch {};
-        drainLookupQueue(io, &lookup_queue);
-    }
-    while (lookup_queue.getOne(io)) |result| {
-        switch (result) {
-            .address => |address| return address,
-            .canonical_name => {},
-        }
-    } else |err| switch (err) {
-        error.Closed => try lookup.await(io),
-        error.Canceled => return error.Canceled,
-    }
-    return error.NoAddressReturned;
-}
-
-fn resolveHostAddresses(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    host: net.HostName,
-    port: u16,
-) Error![]net.IpAddress {
-    var lookup_buffer: [16]net.HostName.LookupResult = undefined;
-    var lookup_queue: std.Io.Queue(net.HostName.LookupResult) =
-        .init(&lookup_buffer);
-    var lookup = io.async(
-        net.HostName.lookup,
-        .{ host, io, &lookup_queue, .{ .port = port } },
-    );
-    defer {
-        lookup.cancel(io) catch {};
-        drainLookupQueue(io, &lookup_queue);
-    }
-    const addresses = try collectLookupAddresses(
-        allocator,
-        io,
-        &lookup_queue,
-    );
-    lookup.await(io) catch |err| {
-        allocator.free(addresses);
-        return err;
-    };
-    if (addresses.len == 0) {
-        allocator.free(addresses);
-        return error.NoAddressReturned;
-    }
-    return addresses;
-}
-
-fn collectLookupAddresses(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    queue: *std.Io.Queue(net.HostName.LookupResult),
-) Error![]net.IpAddress {
-    var collector = AddressCollector.init(allocator);
-    defer collector.deinit();
-    while (queue.getOne(io)) |result| {
-        switch (result) {
-            .address => |address| try collector.appendUnique(address),
-            .canonical_name => {},
-        }
-    } else |err| switch (err) {
-        error.Closed => {},
-        error.Canceled => return error.Canceled,
-    }
-    return collector.toOwnedSlice();
-}
-
-fn drainLookupQueue(
-    io: std.Io,
-    queue: *std.Io.Queue(net.HostName.LookupResult),
-) void {
-    while (queue.getOneUncancelable(io)) |_| {} else |err| switch (err) {
-        error.Closed => {},
-    }
-}
-
-const address_stack_capacity: usize = 16;
-
-const AddressCollector = struct {
-    allocator: std.mem.Allocator,
-    stack: [address_stack_capacity]net.IpAddress = undefined,
-    stack_len: usize = 0,
-    overflow: std.ArrayList(net.IpAddress) = .empty,
-
-    fn init(allocator: std.mem.Allocator) AddressCollector {
-        return .{ .allocator = allocator };
-    }
-
-    fn deinit(self: *AddressCollector) void {
-        self.overflow.deinit(self.allocator);
-        self.* = undefined;
-    }
-
-    fn items(self: *const AddressCollector) []const net.IpAddress {
-        if (self.overflow.items.len != 0) return self.overflow.items;
-        return self.stack[0..self.stack_len];
-    }
-
-    fn count(self: *const AddressCollector) usize {
-        return self.items().len;
-    }
-
-    fn appendUnique(
-        self: *AddressCollector,
-        address: net.IpAddress,
-    ) std.mem.Allocator.Error!void {
-        for (self.items()) |*existing| {
-            if (existing.eql(&address)) return;
-        }
-        if (self.overflow.items.len != 0) {
-            try self.overflow.append(self.allocator, address);
-            return;
-        }
-        if (self.stack_len < self.stack.len) {
-            self.stack[self.stack_len] = address;
-            self.stack_len += 1;
-            return;
-        }
-        var overflow = try std.ArrayList(net.IpAddress).initCapacity(
-            self.allocator,
-            self.stack.len + 1,
-        );
-        overflow.appendSliceAssumeCapacity(self.stack[0..self.stack_len]);
-        overflow.appendAssumeCapacity(address);
-        self.overflow = overflow;
-    }
-
-    fn toOwnedSlice(
-        self: *AddressCollector,
-    ) std.mem.Allocator.Error![]net.IpAddress {
-        if (self.overflow.items.len != 0) {
-            return self.overflow.toOwnedSlice(self.allocator);
-        }
-        return self.allocator.dupe(
-            net.IpAddress,
-            self.stack[0..self.stack_len],
-        );
-    }
-};
+const resolveHostName = system_lookup.first;
+const resolveHostAddresses = system_lookup.all;
+const collectLookupAddresses = system_lookup.collect;
+const drainLookupQueue = system_lookup.drain;
+const address_stack_capacity = address_collector.stack_capacity;
+const AddressCollector = address_collector.Collector;
 
 pub fn resolveEndpointBefore(
     endpoint: Endpoint,
@@ -318,48 +175,10 @@ fn resolveAddressesBefore(
     port: u16,
     deadline: ?std.Io.Clock.Timestamp,
 ) Error![]net.IpAddress {
-    const absolute = deadline orelse
-        return resolveHostAddresses(allocator, io, host, port);
-    if (absolute.durationFromNow(io).raw.nanoseconds <= 0) {
-        return error.HandshakeTimeout;
-    }
-    const ResolveResult = Error![]net.IpAddress;
-    const Wake = union(enum) {
-        resolved: ResolveResult,
-        timeout: std.Io.Cancelable!void,
+    return address_resolver.resolveHostBefore(allocator, io, host, port, deadline) catch |err| switch (err) {
+        error.Timeout => error.HandshakeTimeout,
+        else => |other| other,
     };
-    var wake_buffer: [2]Wake = undefined;
-    var select: std.Io.Select(Wake) = .init(io, &wake_buffer);
-    defer while (select.cancel()) |wake| switch (wake) {
-        .resolved => |result| if (result) |addresses| {
-            allocator.free(addresses);
-        } else |_| {},
-        .timeout => {},
-    };
-    select.async(
-        .resolved,
-        resolveHostAddresses,
-        .{ allocator, io, host, port },
-    );
-    select.async(.timeout, waitForDeadline, .{ io, absolute });
-    return switch (select.await() catch |err| switch (err) {
-        error.Canceled => return error.Canceled,
-    }) {
-        .resolved => |result| try result,
-        .timeout => |result| {
-            result catch |err| switch (err) {
-                error.Canceled => return error.Canceled,
-            };
-            return error.HandshakeTimeout;
-        },
-    };
-}
-
-fn waitForDeadline(
-    io: std.Io,
-    deadline: std.Io.Clock.Timestamp,
-) std.Io.Cancelable!void {
-    try deadline.wait(io);
 }
 
 pub fn connectDeadline(

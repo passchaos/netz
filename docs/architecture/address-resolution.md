@@ -1,0 +1,52 @@
+# Address resolution and scheduling
+
+URI identity and transport addresses have separate ownership. DNS chooses the
+addresses to attempt; the original URI continues to own TLS authentication,
+SNI, HTTP authority and pool identity. Literal IP routes bypass application
+resolution in the URI facades. Native socket interface constraints do not
+configure DNS traffic; see [local network binding](../local_network_binding.md).
+
+The unified HTTP `Options.address_resolver`, HTTP/1 runtime resolver,
+WebSocket `ConnectOptions.address_resolver`, HTTP/3
+`HandshakeClientOptions.address_resolver` and SOCKS5
+`Options.address_resolver` use the same callback contract. A resolver value
+contains a borrowed context pointer and a function accepting the caller's
+allocator, `std.Io`, hostname, port and optional absolute deadline. Independent
+routes may call it concurrently. The context must outlive the clients/pools
+storing it and their pending calls. The implementation must honor I/O cancellation
+and the deadline, and return an allocator-owned address slice. Callers free that
+slice after address scheduling completes. Authentication identity remains
+independent of those returned addresses.
+
+System full-address resolution is shared by TCP address racing, SOCKS5 relay
+resolution, proxy ACL destination resolution and HTTP/3 URI/Alt-Svc resolution.
+The DNS producer owns a separate concurrent task, while one consumer drains a
+16-entry queue and deduplicates addresses in first-seen order. The collector
+keeps its first 16 unique addresses on the stack and spills only for larger
+answers; the returned slice is owned by the caller. HTTP/3's first-address
+resolver uses the same producer ownership and cancels/drains remaining results
+after taking the first address.
+
+A bounded system lookup validates its awake-clock deadline before task
+admission and races collection against that original timestamp. Explicit
+concurrency prevents the lookup or timeout task from executing inline when an
+executor's async quota is exhausted. Zero async quota therefore still works
+when concurrent task admission is available. An executor unable to admit the
+required tasks returns `ConcurrencyUnavailable`. The common resolver error
+contract and application callback `ResolveError` both include it, so a callback
+can delegate to system resolution or compose concurrent I/O directly.
+
+Timeout, cancellation, allocation failure and partial task admission join all
+admitted tasks before queue storage disappears. Unselected owned address
+results are freed while draining the completion selector. Common TCP/proxy
+lookup timeouts return `Timeout`; native HTTP/3 maps DNS expiry to
+`HandshakeTimeout`. An earlier overall shared request deadline retains
+`Timeout`, as described in [the H3 budget evidence](../evidence/http3_acquisition_deadline/2026-11-25/README.md).
+
+The deterministic [system resolver regressions](../../src/http3/runtime/client/system_resolver_tests.zig)
+exercise the common, proxy and H3 entry points with zero async quota: a delayed
+lookup under an 80-ms deadline, 41 emitted results containing 40 unique
+addresses, unavailable concurrency before DNS entry, and rejection of a foreign
+clock. H3 literal routing retains its bypass on an executor without concurrency.
+Existing native hostname and collector/OOM checks cover transport integration
+and ownership. Results are recorded in [the resolver evidence](../evidence/system_address_resolution/2026-11-25/README.md).

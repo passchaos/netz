@@ -38,3 +38,5 @@ zig build test-http3 '-Dtest-filter=HTTP/3 shared acquisition deadline' '-Dtest-
 | Baseline connection-phase budget | 61/63 passed; both new expectations fail | [before.log](before.log) |
 | Connection and request deadline precedence after the fix | 63/63 passed | [after.log](after.log) |
 | Completion, dual-family, concurrent routes, early data and dispatcher overlap | 74/74 passed | [Debug.log](Debug.log) |
+| Native Linux acquisition deadlines, commit `ab52606c` | Passed acquisition step, 2026-11-24 19:45 UTC | [Linux job](https://github.com/passchaos/netz/actions/runs/45472629967/job/138724817312) |
+| Native Windows acquisition deadlines, commit `ab52606c` | Passed acquisition step, 2026-11-24 19:45 UTC | [Windows job](https://github.com/passchaos/netz/actions/runs/45472629967/job/138724817523) |
