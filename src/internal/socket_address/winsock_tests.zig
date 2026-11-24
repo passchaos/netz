@@ -31,6 +31,13 @@ test "Winsock peer address decodes fixed IPv4 and IPv6 vectors" {
     try std.testing.expectEqual(@as(u32, 9), b.interface.index);
 }
 
+test "Winsock connect address encoding matches fixed IPv4 and IPv6 vectors" {
+    const a = winsock.Encoded.init(winsock.decode(&ipv4).?);
+    const b = winsock.Encoded.init(winsock.decode(&ipv6).?);
+    try std.testing.expectEqualSlices(u8, &ipv4, a.bytes[0..a.len]);
+    try std.testing.expectEqualSlices(u8, &ipv6, b.bytes[0..b.len]);
+}
+
 test "Winsock peer address rejects truncated and non-IP outputs" {
     for (0..ipv4.len) |length| try std.testing.expect(winsock.decode(ipv4[0..length]) == null);
     for (0..ipv6.len) |length| try std.testing.expect(winsock.decode(ipv6[0..length]) == null);

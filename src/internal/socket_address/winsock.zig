@@ -49,6 +49,30 @@ pub fn decode(bytes: []const u8) ?net.IpAddress {
     };
 }
 
+pub const Encoded = struct {
+    bytes: [28]u8 align(4) = @splat(0),
+    len: usize,
+
+    pub fn init(address: net.IpAddress) Encoded {
+        var result: Encoded = .{ .len = if (address == .ip4) 16 else 28 };
+        switch (address) {
+            .ip4 => |ip4| {
+                std.mem.writeInt(u16, result.bytes[0..2], ws.AF.INET, .little);
+                std.mem.writeInt(u16, result.bytes[2..4], ip4.port, .big);
+                result.bytes[4..8].* = ip4.bytes;
+            },
+            .ip6 => |ip6| {
+                std.mem.writeInt(u16, result.bytes[0..2], ws.AF.INET6, .little);
+                std.mem.writeInt(u16, result.bytes[2..4], ip6.port, .big);
+                std.mem.writeInt(u32, result.bytes[4..8], ip6.flow, .little);
+                result.bytes[8..24].* = ip6.bytes;
+                std.mem.writeInt(u32, result.bytes[24..28], ip6.interface.index, .little);
+            },
+        }
+        return result;
+    }
+};
+
 test {
     _ = @import("winsock_tests.zig");
 }

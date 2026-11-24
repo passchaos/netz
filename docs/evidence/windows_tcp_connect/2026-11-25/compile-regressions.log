@@ -1,0 +1,25 @@
+[traex-zig-guard 2026-11-25 05:31:35] waiting for the global TRAE Zig build slot
+[traex-zig-guard 2026-11-25 05:32:43] started Zig tree root=87498 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=1800s
+Build Summary: 11/11 steps succeeded
+test-http1-compile success
++- compile test Debug x86_64-windows-gnu success 24s MaxRSS:2G
+   +- WriteFile cached
+   +- compile obj vort-br-record-optimal Debug x86_64-windows-gnu cached 190ms MaxRSS:31M
+   +- WriteFile cached
+   +- compile obj vort-zstd-huffman-x2 Debug x86_64-windows-gnu cached 189ms MaxRSS:31M
+   +- compile obj vort-br-record-optimal Debug x86_64-windows-gnu (reused)
+   +- compile obj vort-zstd-huffman-x2 Debug x86_64-windows-gnu (reused)
+   +- options success
+   +- options cached
+test-http2-compile success
++- compile test Debug x86_64-windows-gnu success 26s MaxRSS:3G
+   +- WriteFile (reused)
+   +- compile obj vort-br-record-optimal Debug x86_64-windows-gnu (reused)
+   +- WriteFile (reused)
+   +- compile obj vort-zstd-huffman-x2 Debug x86_64-windows-gnu (reused)
+   +- compile obj vort-br-record-optimal Debug x86_64-windows-gnu (reused)
+   +- compile obj vort-zstd-huffman-x2 Debug x86_64-windows-gnu (reused)
+   +- options success
+   +- options (reused)
+
+[traex-zig-guard 2026-11-25 05:33:35] finished Zig tree root=87498 peak=2827MiB result=0

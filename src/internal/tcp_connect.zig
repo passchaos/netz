@@ -65,7 +65,7 @@ pub fn ip(
     timeout: ?std.Io.Duration,
 ) net.IpAddress.ConnectError!net.Stream {
     const duration = timeout orelse
-        return address.connect(io, .{ .mode = .stream });
+        return connectIp(io, address);
     const deadline = (try deadline_policy.fromTimeout(io, duration)).?;
     return race(io, deadline, connectIp, .{ io, address });
 }
@@ -532,6 +532,7 @@ fn connectIp(
     io: std.Io,
     address: net.IpAddress,
 ) net.IpAddress.ConnectError!net.Stream {
+    if (@import("windows_tcp/afd.zig").nativeThreaded(io, address)) |result| return result;
     return address.connect(io, .{ .mode = .stream });
 }
 
@@ -595,4 +596,5 @@ test {
     _ = @import("tcp_connect/binding_tests.zig");
     _ = @import("tcp_connect/hostname_tests.zig");
     _ = @import("tcp_connect/hostname_binding_tests.zig");
+    _ = @import("windows_tcp/tests.zig");
 }

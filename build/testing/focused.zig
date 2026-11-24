@@ -43,6 +43,7 @@ pub fn add(
         while (imports.next()) |entry| module.addImport(entry.key_ptr.*, entry.value_ptr.*);
         module.addOptions("test_scope_options", options);
         const tests = b.addTest(.{ .root_module = module, .filters = selected_filters });
+        b.step(b.fmt("{s}-compile", .{spec[0]}), "Compile one protocol's selected tests without running them").dependOn(&tests.step);
         const run = b.addRunArtifact(tests);
         b.step(spec[0], "Compile and run one protocol; reject filters with no matching protocol tests").dependOn(&run.step);
     }

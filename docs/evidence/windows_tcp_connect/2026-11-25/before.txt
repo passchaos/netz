@@ -1,0 +1,47 @@
+error: the following build command failed with exit code 1:
+D:\a\netz\netz\.zig-cache\o\74368d7c43fcec0d53a6afb2417ac506\build.exe D:\a\_temp\d7203eb6-804c-4461-a0e5-915003ea7344\zig-x86_64-windows-0.16.0\zig.exe D:\a\_temp\d7203eb6-804c-4461-a0e5-915003ea7344\zig-x86_64-windows-0.16.0\lib D:\a\netz\netz\netz D:\a\netz\netz\.zig-cache D:\a\netz\netz\.zig-cache --seed 0x1f89e235 -Zd28b9e272411f3c3 test-http1 -j1 -Dtarget=x86_64-windows-gnu -Dtest-filter=TCP ordered hostname -Dtest-filter=HTTP/1 client connects by host name --summary all
+
+       unexpected error: .EINVAL
+       please file a bug report: https://github.com/lalinsky/zio/issues/new
+       D:\a\netz\netz\netz\zig-pkg\zio-0.19.1-xHbVVE1kLABhvcTZ2InisM3hdkwDdj0fzzAUxvw2AmGk\src\os\base.zig:36:44: 0x7ff7fe860a8f in unexpectedError__anon_68205 (test_zcu.obj)
+                   std.debug.dumpCurrentStackTrace(.{});
+                                                  ^
+       D:\a\netz\netz\netz\zig-pkg\zio-0.19.1-xHbVVE1kLABhvcTZ2InisM3hdkwDdj0fzzAUxvw2AmGk\src\os\net.zig:482:40: 0x7ff7fe8953f5 in errnoToBindError (test_zcu.obj)
+                       else => unexpectedError(err),
+                                              ^
+       D:\a\netz\netz\netz\zig-pkg\zio-0.19.1-xHbVVE1kLABhvcTZ2InisM3hdkwDdj0fzzAUxvw2AmGk\src\os\net.zig:515:40: 0x7ff7fe895298 in bind (test_zcu.obj)
+                       return errnoToBindError(err);
+                                              ^
+       D:\a\netz\netz\netz\zig-pkg\zio-0.19.1-xHbVVE1kLABhvcTZ2InisM3hdkwDdj0fzzAUxvw2AmGk\src\ev\backends\iocp.zig:1368:17: 0x7ff7fe894b86 in submitConnect (test_zcu.obj)
+           _ = net.bind(data.handle, @ptrCast(&bind_addr_buf), bind_addr_len) catch |err| {
+                       ^
+
+error: 'internal.tcp_connect.hostname_binding_tests.test.TCP ordered hostname source binding retains IPv4 and IPv6 families' failed:
+       unexpected error: .EINVAL
+       please file a bug report: https://github.com/lalinsky/zio/issues/new
+       D:\a\netz\netz\netz\zig-pkg\zio-0.19.1-xHbVVE1kLABhvcTZ2InisM3hdkwDdj0fzzAUxvw2AmGk\src\os\base.zig:36:44: 0x7ff7fe860a8f in unexpectedError__anon_68205 (test_zcu.obj)
+                   std.debug.dumpCurrentStackTrace(.{});
+                                                  ^
+       D:\a\netz\netz\netz\zig-pkg\zio-0.19.1-xHbVVE1kLABhvcTZ2InisM3hdkwDdj0fzzAUxvw2AmGk\src\os\net.zig:482:40: 0x7ff7fe8953f5 in errnoToBindError (test_zcu.obj)
+                       else => unexpectedError(err),
+                                              ^
+       D:\a\netz\netz\netz\zig-pkg\zio-0.19.1-xHbVVE1kLABhvcTZ2InisM3hdkwDdj0fzzAUxvw2AmGk\src\os\net.zig:515:40: 0x7ff7fe895298 in bind (test_zcu.obj)
+                       return errnoToBindError(err);
+                                              ^
+       D:\a\netz\netz\netz\zig-pkg\zio-0.19.1-xHbVVE1kLABhvcTZ2InisM3hdkwDdj0fzzAUxvw2AmGk\src\ev\backends\iocp.zig:1368:17: 0x7ff7fe894b86 in submitConnect (test_zcu.obj)
+           _ = net.bind(data.handle, @ptrCast(&bind_addr_buf), bind_addr_len) catch |err| {
+
+error: 'http1.runtime.client_and_continue_tests.test.HTTP/1 client connects by host name' exited with code 3 with stderr:
+       error.Unexpected NTSTATUS=0xc0000236 (CONNECTION_REFUSED)
+       D:\a\_temp\299769e7-08ee-42a0-b43a-6991a90325c3\zig-x86_64-windows-0.16.0\lib\std\Io\Threaded.zig:12121:57: 0x7ff7fe83614c in netConnectIpWindows (test_zcu.obj)
+       D:\a\_temp\299769e7-08ee-42a0-b43a-6991a90325c3\zig-x86_64-windows-0.16.0\lib\std\Io\net.zig:340:55: 0x7ff7fe96159f in connect (test_zcu.obj)
+       D:\a\netz\netz\netz\src\internal\tcp_connect.zig:534:27: 0x7ff7fe96132a in connectIp (test_zcu.obj)
+           return address.connect(io, .{ .mode = .stream });
+                                 ^
+       D:\a\netz\netz\netz\src\internal\tcp_connect.zig:575:21: 0x7ff7fe96107f in connectHostCandidate (test_zcu.obj)
+           return connectIp(io, address);
+                           ^
+       D:\a\netz\netz\netz\src\internal\tcp_connect\hostname.zig:22:27: 0x7ff7fe960ca8 in connect__anon_107300 (test_zcu.obj)
+               return connect_one(context, io, address) catch |err| {
+                                 ^
+       D:\a\netz\netz\netz\src\internal\tcp_connect.zig:563:36: 0x7ff7fe960839 in connectHost (test_zcu.obj)

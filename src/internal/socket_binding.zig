@@ -39,7 +39,11 @@ pub fn connect(io: std.Io, address: net.IpAddress, binding: Binding, timeout: zi
     if (binding.network_interface) |interface| try interfaces.apply(io, stdHandle(socket.handle), family, .stream, interface);
     socket.bind(.{ .ip = zioAddress(local_address) }) catch |err| return mapConnectError(err);
     const bound_address = stdAddress(socket.address.ip);
-    socket.connect(.{ .ip = zioAddress(address) }, .{ .timeout = timeout }) catch |err| return mapConnectError(err);
+    if (comptime @import("builtin").os.tag == .windows) {
+        try @import("windows_tcp/prebound.zig").connect(io, stdHandle(socket.handle), address, timeout);
+    } else {
+        socket.connect(.{ .ip = zioAddress(address) }, .{ .timeout = timeout }) catch |err| return mapConnectError(err);
+    }
     return .{ .socket = .{ .handle = stdHandle(socket.handle), .address = bound_address } };
 }
 
