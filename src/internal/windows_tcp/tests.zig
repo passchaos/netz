@@ -13,10 +13,13 @@ fn exercise(io: std.Io, bound: bool) !void {
         };
         const refused = listener.socket.address;
         listener.deinit(io);
+        // Windows may retry a refused loopback SYN before publishing the
+        // refusal. Keep the test's deadline above that platform delay.
+        const refusal_budget = std.Io.Duration.fromSeconds(5);
         if (bound)
-            try std.testing.expectError(error.ConnectionRefused, tcp.ipBound(io, refused, local, .fromSeconds(1)))
+            try std.testing.expectError(error.ConnectionRefused, tcp.ipBound(io, refused, local, refusal_budget))
         else
-            try std.testing.expectError(error.ConnectionRefused, tcp.ip(io, refused, .fromSeconds(1)));
+            try std.testing.expectError(error.ConnectionRefused, tcp.ip(io, refused, refusal_budget));
         families += 1;
     }
     if (families == 0) return error.SkipZigTest;
