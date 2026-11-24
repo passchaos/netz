@@ -307,7 +307,7 @@ pub const Connection = struct {
         try self.beginRequestHeadDeadline();
         defer self.request_head_deadline = null;
         var stage: RequestReadStage = .head;
-        return readRequestFromTransportBufferedWithStage(
+        var owned = readRequestFromTransportBufferedWithStage(
             self.allocator,
             self.transport(),
             self.limits,
@@ -323,6 +323,8 @@ pub const Connection = struct {
             }
             return read_err;
         };
+        owned.request.from = self.stream.socket.address;
+        return owned;
     }
 
     /// Read one request with a relative deadline for the request head. The
@@ -356,7 +358,7 @@ pub const Connection = struct {
         _ = try deadline_policy.usableAwake(self.io, deadline);
         try self.writer_state.ensureReadable();
         var stage: RequestReadStage = .head;
-        return readRequestFromTransportBufferedWithStage(
+        var owned = readRequestFromTransportBufferedWithStage(
             self.allocator,
             self.transport(),
             self.limits,
@@ -371,6 +373,8 @@ pub const Connection = struct {
             }
             return err;
         };
+        owned.request.from = self.stream.socket.address;
+        return owned;
     }
 
     /// Read and validate the RFC 9298 HTTP/1.1 Upgrade request. The returned

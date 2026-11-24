@@ -388,6 +388,9 @@ pub const Request = struct {
     /// True when safe message framing requires retiring the connection even
     /// if its Connection fields would otherwise permit persistence.
     must_close: bool = false,
+    /// Peer socket address captured for server-accepted TCP requests. Null
+    /// for client-created requests and transports without an IP peer.
+    from: ?std.Io.net.IpAddress = null,
 
     pub fn deinit(self: *Request, allocator: std.mem.Allocator) void {
         if (self.body_storage) |body| allocator.free(body);

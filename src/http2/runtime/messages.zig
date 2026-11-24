@@ -99,6 +99,9 @@ pub const OwnedRequest = struct {
     body: []u8,
     trailers: []http2.Hpack.HeaderField = &.{},
     priority: http2.ExtensiblePriority = .{},
+    /// Peer socket address captured for server-accepted TCP requests. Null
+    /// when the caller did not construct this from an accepted connection.
+    from: ?std.Io.net.IpAddress = null,
 
     pub fn deinit(self: *OwnedRequest, allocator: std.mem.Allocator) void {
         freeHeaders(allocator, self.headers);

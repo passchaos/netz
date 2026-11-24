@@ -6649,10 +6649,12 @@ pub const Connection = struct {
     }
 
     pub fn readRequest(self: *Connection) Error!OwnedRequest {
-        return self.readRequestUntil(null) catch |err| switch (err) {
+        var owned_request = self.readRequestUntil(null) catch |err| switch (err) {
             error.Timeout => unreachable,
             else => |other| return @errorCast(other),
         };
+        owned_request.from = self.stream.socket.address;
+        return owned_request;
     }
 
     /// Read one complete server request within a relative budget. A timeout
@@ -6675,7 +6677,9 @@ pub const Connection = struct {
         deadline: std.Io.Clock.Timestamp,
     ) RequestTimeoutError!OwnedRequest {
         _ = try deadline_policy.usableAwake(self.io, deadline);
-        return self.readRequestUntil(deadline);
+        var owned_request = try self.readRequestUntil(deadline);
+        owned_request.from = self.stream.socket.address;
+        return owned_request;
     }
 
     fn readRequestUntil(

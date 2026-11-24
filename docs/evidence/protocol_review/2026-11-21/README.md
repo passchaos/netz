@@ -3506,3 +3506,20 @@ their suites.
 | WebTransport suite (Debug) | 761/763 (2 skipped) | live `zig build test-webtransport --summary all` |
 | HTTP/3 suite (Debug) | 929/933 (4 skipped) | live `zig build test-http3 --summary all` |
 | Package surface (Debug) | 28/28 | live `zig build test-package --summary all` |
+
+## Hundred-and-ninety-sixth pass: buffered request peer address
+
+Buffered server requests now expose the accepted peer directly:
+`http1.Request.from` and `http2.runtime.OwnedRequest.from`, matching H3's
+`OwnedHandshakeRequest.from`. H1 fills the field from the accepted stream and
+H2 from its accepted connection; client-created requests leave it null. The
+H1 TLS server and H2 cleartext server tests assert a non-zero peer port. The
+H1 `Connection` layout guard stays at 384 bytes because the address is read
+from the stream rather than stored per connection.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| HTTP/1 runtime (Debug) | 480/480 | live `zig build test-http1 --summary all` |
+| HTTP/2 runtime (Debug) | 985/985 | live `zig build test-http2 --summary all` |
+| HTTP aggregate (Debug) | 311/311 | live `zig build test-http --summary all` |
+| Package surface (Debug) | 28/28 | live `zig build test-package --summary all` |

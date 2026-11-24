@@ -199,6 +199,8 @@ const AlpnTestServer = struct {
 
         var request = try connection.readRequest(.{});
         defer request.deinit(std.testing.allocator);
+        try std.testing.expect(request.request.from != null);
+        try std.testing.expect(request.request.from.?.getPort() != 0);
         try connection.writeResponse(.{
             .headers = &.{.{ .name = "Content-Type", .value = "text/plain" }},
             .body = self.expected_body,

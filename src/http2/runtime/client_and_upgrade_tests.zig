@@ -110,6 +110,8 @@ test "HTTP/2 client connects by host name" {
 
             var request = try connection.readRequest();
             defer request.deinit(server_ptr.allocator);
+            try std.testing.expect(request.from != null);
+            try std.testing.expect(request.from.?.getPort() != 0);
             try std.testing.expectEqualStrings("http", request.scheme);
             var expected_authority: [32]u8 = undefined;
             const rendered_authority = try std.fmt.bufPrint(&expected_authority, "localhost:{d}", .{server_ptr.address().ip4.port});

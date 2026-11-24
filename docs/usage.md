@@ -236,9 +236,10 @@ try connection.writeResponse(.{
 connections and requests per connection, applies accept/connection error
 policies, and stops when a `std.Io.Event` is set. The handler returns
 `ResponseOptions`; its body must outlive the handler call (use static or
-context-owned storage). Handlers receive only the parsed request, so use the
-manual accept/serve loop when a handler needs the connection itself, such as
-`Connection.peerAddress()` or TLS metadata. See
+context-owned storage). Buffered H1 requests expose the accepted peer through
+`Request.from`; H2 `OwnedRequest` and H3 `OwnedHandshakeRequest` expose the
+same `from` field. Use the manual accept/serve loop when a handler needs the
+connection itself, such as `Connection.peerAddress()` or TLS metadata. See
 `zig build run-http-server-serve-until`.
 
 - HTTP/2 h2c: `zig build run-http2-h2c`.
