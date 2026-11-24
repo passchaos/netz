@@ -43,6 +43,10 @@ Protocol nonce/accept-key checks, Origin checks and QUIC address-validation
 tokens have their own protocol roles. Application credentials and authorization
 are validated independently. TLS ticket/PSK resumption retains transport
 authentication context while application login policy continues to apply.
+Buffered HTTP requests (`Request.from`/`OwnedRequest.from`/
+`OwnedHandshakeRequest.from`) and the WebSocket/WebTransport pending admission
+surfaces (`peerAddress()`) expose the transport peer for IP-based policy
+alongside certificate and token checks.
 
 ## MQTT
 

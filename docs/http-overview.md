@@ -129,6 +129,9 @@ Server side, `TlsListenOptions.identity` supplies the certificate and
 `identity_provider` rotates it per handshake. `client_auth = .{ .verifier =
 ... }` requires a client certificate, and handlers read the authenticated
 chain from `Connection.peerCertificates()` (`zig build run-http-mutual-tls`).
+Buffered H1/H2 requests and H3 handshake requests expose the accepted peer as
+`Request.from`, `OwnedRequest.from` and `OwnedHandshakeRequest.from`; batch,
+streaming and pull-body shapes carry the same field.
 There is no built-in user/password HTTP authentication: applications validate
 `Authorization` themselves.
 
