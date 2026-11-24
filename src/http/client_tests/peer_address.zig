@@ -26,7 +26,7 @@ fn checkPeerAddresses(io: std.Io, address: std.Io.net.IpAddress) !void {
 
     const before = client_stream.socket.address;
     const peer = h1.peerAddress();
-    if (@import("builtin").os.tag == .windows) {
+    if (@import("builtin").os.tag == .windows and zio.Runtime.fromIo(io) == null) {
         try std.testing.expect(peer == null);
         return;
     }

@@ -3635,3 +3635,15 @@ addresses, and unified HTTP now exposes `Connection.peerAddress()` across
 H1/H2/H3. Exact-address, dual-stack, TLS, proxy, Unix and layout regressions pass
 382/382 in the focused Debug bundle. Further compile evidence and the public
 contract are recorded in [the independent peer-address evidence](../../transport_peer_addresses/2026-11-24/README.md).
+
+
+## Two-hundred-and-sixth pass: Windows zio peer address and native CI
+
+TCP peer queries now identify zio Winsock sockets through their IO owner on
+Windows, while native AFD clients retain the unavailable result. Portable
+Windows ABI vectors and live dual-stack zio/Threaded regressions pass 100/100;
+the WebSocket forwarding test passes 48/48 and Windows test binaries compile
+and link. The CI matrix now includes native Windows peer tests, and verified
+public dependency pins no longer require a custom credential before any build
+can start. [Backend and CI evidence](../../winsock_peer_addresses/2026-11-24/README.md)
+records the remaining native execution gate.

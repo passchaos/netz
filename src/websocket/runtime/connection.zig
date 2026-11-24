@@ -125,7 +125,7 @@ pub const Connection = struct {
         return if (self.role == .server)
             socket_address.accepted(self.stream)
         else
-            socket_address.connected(self.stream);
+            socket_address.connected(self.io, self.stream);
     }
 
     /// Return the authenticated peer certificate chain. Server-side WSS

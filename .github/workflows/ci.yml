@@ -36,21 +36,12 @@ jobs:
           path: netz
           persist-credentials: false
 
-      - name: Require sibling dependency credentials
-        env:
-          DEPENDENCIES_TOKEN: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
-        run: |
-          if [ -z "$DEPENDENCIES_TOKEN" ]; then
-            echo "::error::Configure NETZ_DEPENDENCIES_TOKEN with read access to passchaos/vail, passchaos/vort, passchaos/webpkiz, passchaos/regexz, passchaos/kron and passchaos/harnessz"
-            exit 1
-          fi
-
       - name: Checkout pinned vail
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: passchaos/vail
           ref: 3b772b0cccb64d84fbc760df6428bc51e0fe0761
-          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
+          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN || github.token }}
           path: vail
           persist-credentials: false
 
@@ -59,7 +50,7 @@ jobs:
         with:
           repository: passchaos/vort
           ref: a48e1151872a30a574363e994ec312969b3c7818
-          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
+          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN || github.token }}
           path: vort
           persist-credentials: false
 
@@ -76,7 +67,7 @@ jobs:
         with:
           repository: passchaos/kron
           ref: 77b9572a0256da0ece836c6b49024b3282bd1d5b
-          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
+          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN || github.token }}
           path: kron
           persist-credentials: false
 
@@ -85,7 +76,7 @@ jobs:
         with:
           repository: passchaos/webpkiz
           ref: 35c9f4bfecb51a7794670d474c01b3c6fe541e9e
-          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
+          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN || github.token }}
           path: webpkiz
           persist-credentials: false
 
@@ -94,7 +85,7 @@ jobs:
         with:
           repository: passchaos/regexz
           ref: f150767088ef11fb4435f3b42c99165333b6e51c
-          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
+          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN || github.token }}
           path: regexz
           persist-credentials: false
 
@@ -103,7 +94,7 @@ jobs:
         with:
           repository: passchaos/harnessz
           ref: e626f26b0a7ead0377254ed3a04b43b25fb2d270
-          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
+          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN || github.token }}
           path: harnessz
           persist-credentials: false
 
@@ -140,19 +131,25 @@ jobs:
 
   portable:
     if: github.event_name != 'schedule'
-    name: Cross-compile ${{ matrix.target }}
-    runs-on: ubuntu-latest
+    name: Portable ${{ matrix.target }} (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        target:
-          - aarch64-linux-gnu
-          - x86_64-linux-gnu
-          - x86_64-windows-gnu
+        include:
+          - target: aarch64-linux-gnu
+            runner: ubuntu-latest
+          - target: x86_64-linux-gnu
+            runner: ubuntu-latest
+          - target: x86_64-windows-gnu
+            runner: ubuntu-latest
+          - target: x86_64-windows-gnu
+            runner: windows-latest
     defaults:
       run:
         working-directory: netz
+        shell: bash
     steps:
       - name: Checkout netz
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -160,21 +157,12 @@ jobs:
           path: netz
           persist-credentials: false
 
-      - name: Require sibling dependency credentials
-        env:
-          DEPENDENCIES_TOKEN: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
-        run: |
-          if [ -z "$DEPENDENCIES_TOKEN" ]; then
-            echo "::error::Configure NETZ_DEPENDENCIES_TOKEN with read access to passchaos/vail, passchaos/vort, passchaos/webpkiz, passchaos/regexz, passchaos/kron and passchaos/harnessz"
-            exit 1
-          fi
-
       - name: Checkout pinned vail
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: passchaos/vail
           ref: 3b772b0cccb64d84fbc760df6428bc51e0fe0761
-          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
+          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN || github.token }}
           path: vail
           persist-credentials: false
 
@@ -183,7 +171,7 @@ jobs:
         with:
           repository: passchaos/vort
           ref: a48e1151872a30a574363e994ec312969b3c7818
-          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
+          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN || github.token }}
           path: vort
           persist-credentials: false
 
@@ -200,7 +188,7 @@ jobs:
         with:
           repository: passchaos/kron
           ref: 77b9572a0256da0ece836c6b49024b3282bd1d5b
-          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
+          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN || github.token }}
           path: kron
           persist-credentials: false
 
@@ -209,7 +197,7 @@ jobs:
         with:
           repository: passchaos/webpkiz
           ref: 35c9f4bfecb51a7794670d474c01b3c6fe541e9e
-          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
+          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN || github.token }}
           path: webpkiz
           persist-credentials: false
 
@@ -218,7 +206,7 @@ jobs:
         with:
           repository: passchaos/regexz
           ref: f150767088ef11fb4435f3b42c99165333b6e51c
-          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
+          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN || github.token }}
           path: regexz
           persist-credentials: false
 
@@ -227,7 +215,7 @@ jobs:
         with:
           repository: passchaos/harnessz
           ref: e626f26b0a7ead0377254ed3a04b43b25fb2d270
-          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
+          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN || github.token }}
           path: harnessz
           persist-credentials: false
 
@@ -239,14 +227,19 @@ jobs:
       - name: Cache Zig downloads
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
-          path: ~/.cache/zig
+          path: ${{ runner.os == 'Windows' && '~/AppData/Local/zig' || '~/.cache/zig' }}
           key: ${{ runner.os }}-zig-0.16-${{ matrix.target }}-${{ hashFiles('netz/build.zig.zon', 'vail/build.zig.zon', 'vort/build.zig.zon', 'pbz/build.zig.zon', 'kron/build.zig.zon', 'webpkiz/build.zig.zon', 'regexz/build.zig.zon', 'harnessz/build.zig.zon') }}
           restore-keys: |
             ${{ runner.os }}-zig-0.16-${{ matrix.target }}-
             ${{ runner.os }}-zig-0.16-
 
       - name: Compile library and public-package tests
+        if: runner.os != 'Windows'
         run: zig build test-compile -j1 -Dtarget=${{ matrix.target }} --summary all
+
+      - name: Run native Windows peer-address regressions
+        if: runner.os == 'Windows'
+        run: zig build test-http -Dtarget=${{ matrix.target }} '-Dtest-filter=peer address' --summary all
 
   portable-macos:
     if: github.event_name != 'schedule'
@@ -269,21 +262,12 @@ jobs:
           path: netz
           persist-credentials: false
 
-      - name: Require sibling dependency credentials
-        env:
-          DEPENDENCIES_TOKEN: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
-        run: |
-          if [ -z "$DEPENDENCIES_TOKEN" ]; then
-            echo "::error::Configure NETZ_DEPENDENCIES_TOKEN with read access to passchaos/vail, passchaos/vort, passchaos/webpkiz, passchaos/regexz, passchaos/kron and passchaos/harnessz"
-            exit 1
-          fi
-
       - name: Checkout pinned vail
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: passchaos/vail
           ref: 3b772b0cccb64d84fbc760df6428bc51e0fe0761
-          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
+          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN || github.token }}
           path: vail
           persist-credentials: false
 
@@ -292,7 +276,7 @@ jobs:
         with:
           repository: passchaos/vort
           ref: a48e1151872a30a574363e994ec312969b3c7818
-          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
+          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN || github.token }}
           path: vort
           persist-credentials: false
 
@@ -309,7 +293,7 @@ jobs:
         with:
           repository: passchaos/kron
           ref: 77b9572a0256da0ece836c6b49024b3282bd1d5b
-          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
+          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN || github.token }}
           path: kron
           persist-credentials: false
 
@@ -318,7 +302,7 @@ jobs:
         with:
           repository: passchaos/webpkiz
           ref: 35c9f4bfecb51a7794670d474c01b3c6fe541e9e
-          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
+          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN || github.token }}
           path: webpkiz
           persist-credentials: false
 
@@ -327,7 +311,7 @@ jobs:
         with:
           repository: passchaos/regexz
           ref: f150767088ef11fb4435f3b42c99165333b6e51c
-          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
+          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN || github.token }}
           path: regexz
           persist-credentials: false
 
@@ -336,7 +320,7 @@ jobs:
         with:
           repository: passchaos/harnessz
           ref: e626f26b0a7ead0377254ed3a04b43b25fb2d270
-          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
+          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN || github.token }}
           path: harnessz
           persist-credentials: false
 
@@ -443,21 +427,12 @@ jobs:
           path: netz
           persist-credentials: false
 
-      - name: Require sibling dependency credentials
-        env:
-          DEPENDENCIES_TOKEN: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
-        run: |
-          if [ -z "$DEPENDENCIES_TOKEN" ]; then
-            echo "::error::Configure NETZ_DEPENDENCIES_TOKEN with read access to passchaos/vail, passchaos/vort, passchaos/webpkiz, passchaos/regexz, passchaos/kron and passchaos/harnessz"
-            exit 1
-          fi
-
       - name: Checkout pinned vail
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: passchaos/vail
           ref: 3b772b0cccb64d84fbc760df6428bc51e0fe0761
-          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
+          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN || github.token }}
           path: vail
           persist-credentials: false
 
@@ -466,7 +441,7 @@ jobs:
         with:
           repository: passchaos/vort
           ref: a48e1151872a30a574363e994ec312969b3c7818
-          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
+          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN || github.token }}
           path: vort
           persist-credentials: false
 
@@ -483,7 +458,7 @@ jobs:
         with:
           repository: passchaos/kron
           ref: 77b9572a0256da0ece836c6b49024b3282bd1d5b
-          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
+          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN || github.token }}
           path: kron
           persist-credentials: false
 
@@ -492,7 +467,7 @@ jobs:
         with:
           repository: passchaos/webpkiz
           ref: 35c9f4bfecb51a7794670d474c01b3c6fe541e9e
-          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
+          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN || github.token }}
           path: webpkiz
           persist-credentials: false
 
@@ -501,7 +476,7 @@ jobs:
         with:
           repository: passchaos/regexz
           ref: f150767088ef11fb4435f3b42c99165333b6e51c
-          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
+          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN || github.token }}
           path: regexz
           persist-credentials: false
 
@@ -510,7 +485,7 @@ jobs:
         with:
           repository: passchaos/harnessz
           ref: e626f26b0a7ead0377254ed3a04b43b25fb2d270
-          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
+          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN || github.token }}
           path: harnessz
           persist-credentials: false
 

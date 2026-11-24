@@ -1,11 +1,14 @@
 //! IP peer metadata at the native stream boundary.
 //!
-//! Zig 0.16 records a local sockname for client connects and a remote address
-//! for accepted streams. Keep that distinction out of protocol facades without
+//! Zig 0.16 Threaded records a local sockname for client connects; zio
+//! records the selected destination. Accepted streams record a remote address.
+//! Keep that distinction out of protocol facades without
 //! changing the std socket's address or adding state to every connection.
 
 const std = @import("std");
 const builtin = @import("builtin");
+const zio = @import("zio");
+const winsock = @import("socket_address/winsock.zig");
 const net = std.Io.net;
 
 /// The address returned by accept is already the remote peer. Unix streams
@@ -17,11 +20,14 @@ pub fn accepted(stream: net.Stream) ?net.IpAddress {
 
 /// Query the connected socket's actual IP peer without allocating or touching
 /// protocol input. Returns null for non-IP streams or an unavailable query.
-/// Windows std.Io uses native AFD handles and currently has no peer query;
-/// those handles must not be passed to Winsock as if they were SOCKET values.
-pub fn connected(stream: net.Stream) ?net.IpAddress {
-    if (comptime builtin.os.tag == .windows or
-        !@hasDecl(std.posix.system, "getpeername")) return null;
+/// On Windows, only zio's Winsock sockets can use getpeername. A foreign IO
+/// backend may own native AFD handles, which must not be treated as SOCKETs.
+pub fn connected(io: std.Io, stream: net.Stream) ?net.IpAddress {
+    if (comptime builtin.os.tag == .windows) {
+        _ = zio.Runtime.fromIo(io) orelse return null;
+        return winsock.query(stream);
+    }
+    if (comptime !@hasDecl(std.posix.system, "getpeername")) return null;
 
     const Address = extern union {
         any: std.posix.sockaddr,
@@ -57,5 +63,8 @@ pub fn connected(stream: net.Stream) ?net.IpAddress {
 }
 
 test {
+    // The Windows branch is eliminated on POSIX, so import its portable ABI
+    // vectors explicitly instead of relying on a live query to reach them.
+    _ = winsock;
     _ = @import("socket_address/tests.zig");
 }

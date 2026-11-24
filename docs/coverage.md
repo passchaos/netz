@@ -165,15 +165,17 @@ counterpart to 4, the WebTransport
 endpoint target to 32
 two-session runs, the QUIC path target to 256 runs, the QUIC handshake target
 and QUIC endpoint target to 32 runs, and the in-memory targets to 10,000
-iterations. A manual `fuzz_runs` value overrides all targets. Because
-the source
-checkout currently uses sibling `../vail`, `../vort`, `../pbz`,
-`../webpkiz`, and `../harnessz` paths, repository
-administrators must configure the read-only `NETZ_DEPENDENCIES_TOKEN` secret
-for the private dependency checkouts.
-Pull requests also compile the complete library and public-package test surfaces
-for baseline AArch64/x86_64 Linux, x86_64 Windows, and AArch64/x86_64 macOS
-without attempting to execute foreign binaries.
+iterations. A manual `fuzz_runs` value overrides all targets. The source
+checkout uses sibling `../vail`, `../vort`, `../pbz`, `../kron`, `../regexz`,
+`../webpkiz`, and `../harnessz` paths. CI checks out their public pinned sources
+with the read-only `github.token`; `NETZ_DEPENDENCIES_TOKEN` is an optional
+override for dependency access. The separate release workflow requires that
+custom secret.
+Pushes and pull requests also compile the complete library and public-package
+test surfaces for baseline AArch64/x86_64 Linux, x86_64 Windows, and
+AArch64/x86_64 macOS. A native Windows runner additionally executes the focused
+HTTP peer-address tests, covering zio Winsock queries and portable address
+vectors.
 
 Use `zig build test-lib` for the complete in-process library suite without
 external interoperability and release-tool checks; `zig build test` remains

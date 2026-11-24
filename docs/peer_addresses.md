@@ -20,10 +20,15 @@ cleartext IP connections also have a peer address.
 TCP address accessors return `?std.Io.net.IpAddress`. An IP peer is available
 on accepted connections and through native client socket queries on POSIX.
 Unix-domain streams return `null`, including their HTTP request `from` fields.
-A failed or unsupported native client query also returns `null`. Zig 0.16's
-Windows `std.Io` sockets use AFD handles and do not provide a remote-address
-query, so TCP client accessors currently return `null` there. Accepted Windows
-IP connections still have the address recorded by accept.
+A failed or unsupported native client query also returns `null`. On Windows,
+Netz's zio backend owns Winsock sockets and queries their peer through
+`getpeername`. The helper checks the `std.Io` backend before calling Winsock.
+Zig 0.16's Threaded backend owns native AFD handles and has no supported peer
+query here, so its TCP client accessors return `null`. Accepted Windows IP
+connections retain the address recorded by accept for either backend.
+The portable CI matrix includes a native Windows runner that executes the
+focused HTTP peer-address tests, including zio socket queries and the Windows
+address vectors.
 
 QUIC-backed address accessors read the current peer path from their connection
 owner. They return a concrete IP address and reflect path migration. The
@@ -40,9 +45,12 @@ if (connection.peerAddress()) |peer| {
 Client accessors previously returned the local ephemeral address on HTTP/2
 and HTTP/1 WebSocket connections. Callers should handle the optional return
 value; the reported IP endpoint is now the remote peer. The socket's existing
-`stream.socket.address` is preserved: std.Io records the local endpoint for
-client connects and the remote endpoint for accepted streams. An HTTP/1 server
-`Connection` owns an accepted stream; client-created streams belong to `Client`.
+`stream.socket.address` is preserved. Threaded records the local endpoint for
+client connects, while zio's generic IP connect records the selected destination.
+Accepted IP streams record the remote endpoint. Adopted or explicitly bound
+streams can have their own recorded address, so backend identity alone cannot
+replace a native peer query. An HTTP/1 server `Connection` owns an accepted
+stream; client-created streams belong to `Client`.
 
 TCP client introspection performs one native socket query per call. Accepted
 connections use their cached address without a syscall. These operations do

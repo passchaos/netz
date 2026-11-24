@@ -265,7 +265,7 @@ pub const Client = struct {
     /// Remote transport IP peer. Unix streams and unavailable native queries
     /// return null; proxy tunnels report the connected proxy, not the origin.
     pub fn peerAddress(self: *const Client) ?net.IpAddress {
-        return socket_address.connected(self.stream);
+        return socket_address.connected(self.io, self.stream);
     }
 
     pub fn connect(allocator: std.mem.Allocator, io: std.Io, address: net.IpAddress, limits: Limits) Error!Client {
