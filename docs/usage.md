@@ -328,7 +328,7 @@ try client.sendClose(.normal_closure, "bye");
   (`peerCertificates()`, `negotiatedAlpn()`, `negotiatedCipherSuite()`,
   `negotiatedTranscriptHash()`) for HTTP/1 Upgrade, RFC 8441 and RFC 9220, so
   credentials can be checked before `accept()`. Established connections keep
-  that surface plus `exportKeyingMaterial()`; H1/H2 add
+  that surface plus `peerAddress()` and `exportKeyingMaterial()`; H1/H2 add
   `negotiatedTlsProtocol()`, `wasTlsSessionResumed()` and session-ticket
   access, while H3 is TLS 1.3-only and adds `wasTlsSessionResumed()`,
   `earlyDataStatus()` for 0-RTT checks and `keyUpdateCounts()` for the QUIC

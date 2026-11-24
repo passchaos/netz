@@ -118,6 +118,13 @@ pub const Connection = struct {
     /// that must be delivered after a bounded reply resumes to completion.
     pending_auto_control: ?PendingAutomaticControl = null,
 
+    /// Return the socket address recorded by `std.Io.net` for this transport.
+    /// Accepted server connections record the remote peer; client-created
+    /// connections record the local ephemeral endpoint.
+    pub fn peerAddress(self: *const Connection) net.IpAddress {
+        return self.stream.socket.address;
+    }
+
     /// Return the authenticated peer certificate chain. Server-side WSS
     /// returns a verified client chain when mTLS succeeded; vail-backed WSS
     /// clients return the verified server chain. Other transports return null.

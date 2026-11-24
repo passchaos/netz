@@ -3575,3 +3575,16 @@ pending-session tests assert a non-zero peer port.
 | --- | --- | --- |
 | WebTransport suite (Debug) | 761/763 (2 skipped) | live `zig build test-webtransport --summary all` |
 | Package surface (Debug) | 28/28 | live `zig build test-package --summary all` |
+
+## Two-hundred-and-first pass: WebSocket established peer address
+
+Established WebSocket connections now expose `peerAddress()` on all three
+transports: H1 reads its stream, RFC 8441 reads the parent HTTP/2 connection,
+and RFC 9220 reads the current QUIC path. The H3 metadata test asserts a
+non-zero peer port; the usage guide lists the accessor with the established
+TLS metadata.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Full WebSocket suite (Debug) | 526/527 (1 skipped) | live `zig build test-websocket --summary all` |
+| Package surface (Debug) | 28/28 | live `zig build test-package --summary all` |

@@ -552,6 +552,11 @@ pub fn Connection(comptime role: common.Role) type {
             return self.h3.negotiatedAlpn();
         }
 
+        /// Current QUIC peer path for this WebSocket stream.
+        pub fn peerAddress(self: *const Self) std.Io.net.IpAddress {
+            return self.h3.established.connection.peerAddress();
+        }
+
         pub fn peerCertificates(self: *const Self) ?[]const []const u8 {
             return self.h3.peerCertificates();
         }

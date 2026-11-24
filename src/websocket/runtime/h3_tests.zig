@@ -2680,6 +2680,7 @@ test "WebSocket over HTTP3 extended CONNECT exchanges frames" {
     defer client.deinit();
     try std.testing.expectEqualStrings("chat", client.selectedProtocol().?);
     try std.testing.expectEqualStrings("h3", client.negotiatedAlpn());
+    try std.testing.expect(client.peerAddress().getPort() != 0);
     try std.testing.expectEqual(
         tls_stream.Protocol.tls13,
         client.negotiatedTlsProtocol().?,
