@@ -9,9 +9,12 @@ const websocket = @import("mod.zig");
 const assembler = @import("message/assembler.zig");
 const deadline_policy = @import("../internal/deadline.zig");
 const MutexGuard = @import("../internal/mutex_guard.zig").Guard;
+const writes = @import("stream_connection/writes.zig");
 
 test {
     _ = @import("stream_connection_tests.zig");
+    _ = @import("stream_connection/failure_tests.zig");
+    _ = @import("stream_connection/concurrency_tests.zig");
 }
 
 pub const Role = enum { client, server };
@@ -27,6 +30,8 @@ pub const Transport = struct {
         []u8,
         std.Io.Clock.Timestamp,
     ) anyerror!usize = null,
+    /// Write the complete range on success. Any returned callback error is
+    /// terminal because the adapter cannot reconstruct its emitted prefix.
     write_fn: *const fn (?*anyopaque, []const u8) anyerror!void,
     /// Optional two-slice write used for unmasked frames. The callback must
     /// write both ranges completely or return an error; partial output is not
@@ -36,8 +41,8 @@ pub const Transport = struct {
         []const u8,
         []const u8,
     ) anyerror!void = null,
-    /// Optional deadline-aware two-slice write. Bounded sends use it only
-    /// when `write_parts_fn` is also present.
+    /// Optional deadline-aware two-slice write, selected independently of
+    /// the unbounded `write_parts_fn` callback.
     write_parts_deadline_fn: ?*const fn (
         ?*anyopaque,
         []const u8,
@@ -52,8 +57,8 @@ pub const Transport = struct {
         []const u8,
         []const []const u8,
     ) anyerror!void = null,
-    /// Optional deadline-aware arbitrary-slice write. Bounded slice sends use
-    /// it only when `write_slices_fn` is also present.
+    /// Optional deadline-aware arbitrary-slice write, selected independently
+    /// of the unbounded `write_slices_fn` callback.
     write_slices_deadline_fn: ?*const fn (
         ?*anyopaque,
         []const u8,
@@ -68,6 +73,8 @@ pub const Transport = struct {
         []const u8,
         std.Io.Clock.Timestamp,
     ) anyerror!void = null,
+    /// Release the transport promptly without emitting WebSocket frames.
+    /// Called at most once, including on terminal write failure.
     close_fn: ?*const fn (?*anyopaque) void = null,
 
     fn read(self: Transport, buffer: []u8) anyerror!usize {
@@ -82,67 +89,6 @@ pub const Transport = struct {
         const read_deadline_fn = self.read_deadline_fn orelse
             return error.DeadlineUnsupported;
         return read_deadline_fn(self.context, buffer, deadline);
-    }
-
-    fn write(self: Transport, bytes: []const u8) anyerror!void {
-        return self.write_fn(self.context, bytes);
-    }
-
-    fn writeBefore(
-        self: Transport,
-        bytes: []const u8,
-        deadline: std.Io.Clock.Timestamp,
-    ) anyerror!void {
-        const write_deadline_fn = self.write_deadline_fn orelse
-            return error.DeadlineUnsupported;
-        return write_deadline_fn(self.context, bytes, deadline);
-    }
-
-    fn writeParts(
-        self: Transport,
-        header: []const u8,
-        payload: []const u8,
-    ) anyerror!void {
-        const write_parts_fn = self.write_parts_fn orelse
-            return error.PartsUnsupported;
-        return write_parts_fn(self.context, header, payload);
-    }
-
-    fn writePartsBefore(
-        self: Transport,
-        header: []const u8,
-        payload: []const u8,
-        deadline: std.Io.Clock.Timestamp,
-    ) anyerror!void {
-        const write_parts_deadline_fn = self.write_parts_deadline_fn orelse
-            return error.DeadlineUnsupported;
-        return write_parts_deadline_fn(self.context, header, payload, deadline);
-    }
-
-    fn writeSlices(
-        self: Transport,
-        header: []const u8,
-        slices: []const []const u8,
-    ) anyerror!void {
-        const write_slices_fn = self.write_slices_fn orelse
-            return error.PartsUnsupported;
-        return write_slices_fn(self.context, header, slices);
-    }
-
-    fn writeSlicesBefore(
-        self: Transport,
-        header: []const u8,
-        slices: []const []const u8,
-        deadline: std.Io.Clock.Timestamp,
-    ) anyerror!void {
-        const write_slices_deadline_fn = self.write_slices_deadline_fn orelse
-            return error.DeadlineUnsupported;
-        return write_slices_deadline_fn(
-            self.context,
-            header,
-            slices,
-            deadline,
-        );
     }
 
     fn closeTransport(self: Transport) void {
@@ -176,6 +122,8 @@ pub const Connection = struct {
     start: usize = 0,
     write_buffer: std.ArrayList(u8) = .empty,
     write_mutex: std.Io.Mutex = .init,
+    // Access these lifecycle flags through the atomic snapshots below. One
+    // reader may publish Close while serialized writers inspect the state.
     close_sent: bool = false,
     close_received: bool = false,
     closed: bool = false,
@@ -201,11 +149,30 @@ pub const Connection = struct {
         };
     }
 
-    pub fn deinit(self: *Connection) void {
-        if (!self.closed) {
-            self.closed = true;
+    /// Lifecycle snapshots synchronize with the single reader and serialized
+    /// writers. Deinitialization still requires all active operations to finish.
+    pub fn isClosed(self: *const Connection) bool {
+        return @atomicLoad(bool, &self.closed, .acquire);
+    }
+
+    pub fn closeSent(self: *const Connection) bool {
+        return @atomicLoad(bool, &self.close_sent, .acquire);
+    }
+
+    pub fn closeReceived(self: *const Connection) bool {
+        return @atomicLoad(bool, &self.close_received, .acquire);
+    }
+
+    /// Retire the transport immediately without appending a WebSocket Close.
+    /// The caller-supplied close callback runs at most once.
+    pub fn abort(self: *Connection) void {
+        if (!@atomicRmw(bool, &self.closed, .Xchg, true, .acq_rel)) {
             self.transport.closeTransport();
         }
+    }
+
+    pub fn deinit(self: *Connection) void {
+        self.abort();
         self.buffer.deinit(self.allocator);
         self.write_buffer.deinit(self.allocator);
         self.assembler.deinit();
@@ -213,29 +180,27 @@ pub const Connection = struct {
     }
 
     pub fn close(self: *Connection) void {
-        if (self.closed) return;
-        if (!self.close_sent) {
+        if (self.isClosed()) return;
+        if (!self.closeSent()) {
             self.sendClose(.normal_closure, "") catch {};
         }
-        self.closed = true;
-        self.transport.closeTransport();
+        self.abort();
     }
 
     /// Best-effort Close under one absolute awake-clock deadline. On success
-    /// the transport is closed. An expired budget or a failed Close write
-    /// leaves the connection open so the caller can retry with a larger
-    /// budget or fall back to the unbounded `close`.
+    /// the transport is closed. Budget/capability rejection before invoking
+    /// a write leaves the connection available for retry. An invoked write
+    /// callback error retires the transport because its output is unknown.
     pub fn closeWithDeadline(
         self: *Connection,
         deadline: std.Io.Clock.Timestamp,
     ) !void {
-        if (self.closed) return;
+        if (self.isClosed()) return;
         _ = try deadline_policy.usableAwake(self.io, deadline);
-        if (!self.close_sent) {
+        if (!self.closeSent()) {
             try self.sendCloseWithDeadline(.normal_closure, "", deadline);
         }
-        self.closed = true;
-        self.transport.closeTransport();
+        self.abort();
     }
 
     /// Relative-timeout counterpart to `closeWithDeadline`. A non-positive
@@ -282,7 +247,7 @@ pub const Connection = struct {
         self: *Connection,
         deadline: ?std.Io.Clock.Timestamp,
     ) !Message {
-        if (self.close_received) return error.ConnectionClosed;
+        if (self.isClosed() or self.closeReceived()) return error.ConnectionClosed;
         while (true) {
             var frame = self.readFrameBefore(deadline) catch |err| {
                 // A malformed Close/control frame is a protocol error. Send
@@ -294,7 +259,7 @@ pub const Connection = struct {
                     error.InvalidControlFrame,
                     => {
                         self.sendCloseBefore(.protocol_error, "", deadline) catch {};
-                        self.close_received = true;
+                        @atomicStore(bool, &self.close_received, true, .release);
                     },
                     else => {},
                 }
@@ -314,7 +279,7 @@ pub const Connection = struct {
                         // An invalid Close payload is a protocol error. Reply
                         // with 1002 before surfacing the parse failure.
                         self.sendCloseBefore(.protocol_error, "", deadline) catch {};
-                        self.close_received = true;
+                        @atomicStore(bool, &self.close_received, true, .release);
                         return err;
                     };
                     if (parsed) |frame_close| {
@@ -329,7 +294,7 @@ pub const Connection = struct {
                         );
                         self.peer_close_reason_len = copy;
                     }
-                    if (!self.close_sent) {
+                    if (!self.closeSent()) {
                         // RFC 6455 5.5.1: echo the received status code when
                         // the peer supplied one.
                         if (parsed) |frame_close| {
@@ -338,7 +303,7 @@ pub const Connection = struct {
                             self.sendCloseBefore(.normal_closure, "", deadline) catch {};
                         }
                     }
-                    self.close_received = true;
+                    @atomicStore(bool, &self.close_received, true, .release);
                     return error.ConnectionClosed;
                 },
                 .text, .binary, .continuation => {
@@ -576,6 +541,7 @@ pub const Connection = struct {
     /// Peer Close metadata. The reason slice is valid until deinit or the next
     /// received Close. Returns null when no valid Close frame was received.
     pub fn peerClose(self: *const Connection) ?websocket.CloseFrame {
+        if (!self.closeReceived()) return null;
         const code = self.peer_close_code orelse return null;
         return .{
             .code = code,
@@ -623,7 +589,8 @@ pub const Connection = struct {
         reason: []const u8,
         deadline: ?std.Io.Clock.Timestamp,
     ) !void {
-        if (self.close_sent) return;
+        if (self.closeSent()) return;
+        if (self.isClosed()) return error.ConnectionClosed;
         if (reason.len > 123) return error.InvalidControlFrame;
         var payload: [125]u8 = undefined;
         var length: usize = 0;
@@ -633,10 +600,8 @@ pub const Connection = struct {
             @memcpy(payload[2..][0..reason.len], reason);
             length += reason.len;
         }
-        // Mark the close only after the frame is written so a failed write
-        // remains retryable.
+        // The writer commits Close while still holding the write mutex.
         try self.sendFrameBefore(.close, payload[0..length], deadline);
-        self.close_sent = true;
     }
 
     fn sendFrame(
@@ -647,18 +612,24 @@ pub const Connection = struct {
         return self.sendFrameBefore(opcode, payload, null);
     }
 
+    fn ensureWritable(self: *const Connection, opcode: websocket.Opcode) !void {
+        if (self.isClosed()) return error.ConnectionClosed;
+        if (opcode != .close and (self.closeSent() or self.closeReceived())) {
+            return error.ConnectionClosed;
+        }
+    }
+
+    fn frameSent(self: *Connection, opcode: websocket.Opcode) void {
+        if (opcode == .close) @atomicStore(bool, &self.close_sent, true, .release);
+    }
+
     fn sendFrameBefore(
         self: *Connection,
         opcode: websocket.Opcode,
         payload: []const u8,
         deadline: ?std.Io.Clock.Timestamp,
     ) !void {
-        if (self.closed) return error.ConnectionClosed;
-        // After either side starts the closing handshake only the Close frame
-        // itself may be written.
-        if (opcode != .close and (self.close_sent or self.close_received)) {
-            return error.ConnectionClosed;
-        }
+        try self.ensureWritable(opcode);
         // Text frames carry UTF-8; binary frames remain opaque. Validate before
         // taking the write mutex or emitting any header bytes.
         if (opcode == .text and !std.unicode.utf8ValidateSlice(payload)) {
@@ -678,6 +649,8 @@ pub const Connection = struct {
             };
         };
         defer guard.unlock();
+        try self.ensureWritable(opcode);
+        if (opcode == .close and self.closeSent()) return;
         // Unmasked frames can go out as a header plus the caller's payload
         // when the transport supports two-slice writes; masked frames still
         // need the transformed copy below.
@@ -694,17 +667,13 @@ pub const Connection = struct {
                     payload,
                     .{ .fin = true },
                 );
-                if (deadline) |absolute| {
-                    try self.transport.writePartsBefore(
-                        header,
-                        payload,
-                        absolute,
-                    );
-                } else {
-                    try self.transport.writeParts(header, payload);
-                }
+                try writes.parts(self, header, payload, deadline);
+                self.frameSent(opcode);
                 return;
             }
+        }
+        if (deadline != null and self.transport.write_deadline_fn == null) {
+            return error.DeadlineUnsupported;
         }
         self.write_buffer.clearRetainingCapacity();
         var mask_key: ?[4]u8 = null;
@@ -720,11 +689,8 @@ pub const Connection = struct {
             payload,
             .{ .fin = true, .mask_key = mask_key },
         );
-        if (deadline) |absolute| {
-            try self.transport.writeBefore(self.write_buffer.items, absolute);
-        } else {
-            try self.transport.write(self.write_buffer.items);
-        }
+        try writes.all(self, self.write_buffer.items, deadline);
+        self.frameSent(opcode);
     }
 
     fn sendFrameSlicesBefore(
@@ -736,10 +702,7 @@ pub const Connection = struct {
         if (opcode != .text and opcode != .binary) {
             return error.InvalidFrame;
         }
-        if (self.closed) return error.ConnectionClosed;
-        if (self.close_sent or self.close_received) {
-            return error.ConnectionClosed;
-        }
+        try self.ensureWritable(opcode);
         var total: usize = 0;
         for (slices) |slice| {
             total = std.math.add(usize, total, slice.len) catch
@@ -762,6 +725,7 @@ pub const Connection = struct {
             };
         };
         defer guard.unlock();
+        try self.ensureWritable(opcode);
         var header_storage: [websocket.max_frame_header_len]u8 = undefined;
         if (self.options.role == .server) {
             const slices_available = if (deadline != null)
@@ -775,36 +739,29 @@ pub const Connection = struct {
                 .{ .fin = true },
             );
             if (slices_available) {
-                if (deadline) |absolute| {
-                    try self.transport.writeSlicesBefore(
-                        header,
-                        slices,
-                        absolute,
-                    );
-                } else {
-                    try self.transport.writeSlices(header, slices);
-                }
+                try writes.slices(self, header, slices, deadline);
                 return;
+            }
+            if (deadline != null and self.transport.write_deadline_fn == null) {
+                return error.DeadlineUnsupported;
             }
             // No slice callback: the write mutex still keeps the header and
             // payload contiguous relative to other frames on this stream.
-            if (deadline) |absolute| {
-                try self.transport.writeBefore(header, absolute);
-            } else {
-                try self.transport.write(header);
-            }
+            try writes.all(self, header, deadline);
+            // Once the header is committed, even a later preflight timeout
+            // leaves an incomplete frame. No subsequent frame can repair it.
+            errdefer self.abort();
             for (slices) |slice| {
                 if (slice.len == 0) continue;
-                if (deadline) |absolute| {
-                    try self.transport.writeBefore(slice, absolute);
-                } else {
-                    try self.transport.write(slice);
-                }
+                try writes.all(self, slice, deadline);
             }
             return;
         }
         // Client-role frames are masked; stage the header and masked payload
         // once so the transport still sees one write.
+        if (deadline != null and self.transport.write_deadline_fn == null) {
+            return error.DeadlineUnsupported;
+        }
         self.write_buffer.clearRetainingCapacity();
         var mask_key: [4]u8 = undefined;
         std.Io.random(self.io, &mask_key);
@@ -833,11 +790,8 @@ pub const Connection = struct {
             websocket.applyMask(out, mask_key, offset);
             offset += slice.len;
         }
-        if (deadline) |absolute| {
-            try self.transport.writeBefore(self.write_buffer.items, absolute);
-        } else {
-            try self.transport.write(self.write_buffer.items);
-        }
+        try writes.all(self, self.write_buffer.items, deadline);
+        self.frameSent(opcode);
     }
 
     fn readFrame(self: *Connection) !websocket.Frame {
@@ -849,6 +803,7 @@ pub const Connection = struct {
         deadline: ?std.Io.Clock.Timestamp,
     ) !websocket.Frame {
         while (true) {
+            if (self.isClosed()) return error.ConnectionClosed;
             try self.ensureBefore(2, deadline);
             const header = websocket.FrameHeader.parse(
                 self.buffer.items[self.start..],

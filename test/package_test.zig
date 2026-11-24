@@ -2819,6 +2819,10 @@ test "public modules are reachable" {
         netz.websocket.stream_connection.Connection,
         "closeWithDeadline",
     ));
+    _ = &netz.websocket.stream_connection.Connection.abort;
+    _ = &netz.websocket.stream_connection.Connection.isClosed;
+    _ = &netz.websocket.stream_connection.Connection.closeSent;
+    _ = &netz.websocket.stream_connection.Connection.closeReceived;
     try std.testing.expect(@hasField(
         netz.websocket.stream_connection.Transport,
         "write_parts_fn",

@@ -4,7 +4,7 @@
 bidirectional byte stream. It is the lightweight adapter for HTTP/2 or HTTP/3
 extended CONNECT, tests and embedders that already own the transport. The
 version-specific `netz.websocket.runtime` connections own their sockets and
-add deadline, concurrency and extension machinery.
+add transport recovery and extension negotiation.
 
 ```zig
 var connection = netz.websocket.stream_connection.Connection.init(
@@ -29,20 +29,29 @@ try connection.sendClose(.normal_closure, "done");
 ## Transport contract
 
 `read_fn` returns `0` at EOF and fills at most `buffer.len` bytes. `write_fn`
-must write the complete slice or return an error. `close_fn` is optional and
-runs once from `deinit`/`close`.
+must write the complete slice or return an error. A write callback error may
+follow partial output; because this callback supplies no byte cursor, the
+adapter retires the transport and returns the original error. Later valid
+sends and receives return `error.ConnectionClosed`, including when no
+`close_fn` was supplied.
+
+`close_fn` is optional and runs at most once from `abort`, `deinit`, `close`,
+or a terminal write failure. It releases the caller-owned transport without
+appending WebSocket frames; it must return promptly so bounded failures keep
+their deadline contract. `abort()` invokes this teardown directly.
 
 `write_parts_fn` is an optional two-slice write. When supplied for a
 server-role connection, unmasked frames are sent as the encoded header plus
 the caller's payload slice without copying the payload into the adapter
-buffer; `write_parts_deadline_fn` is the bounded counterpart and is used only
-when both it and `write_parts_fn` are present. Both callbacks must write both
+buffer; `write_parts_deadline_fn` is the independently selected bounded
+counterpart. Both callbacks must write both
 ranges completely or return an error; empty payloads are valid. Client-role
 frames always take the masked copy path.
 
 `write_slices_fn` is the arbitrary-slice counterpart for unmasked frames:
 `(context, header, slices)` must write the header and every slice completely
-or return an error. `write_slices_deadline_fn` is its bounded form.
+or return an error. `write_slices_deadline_fn` is its independently selected
+bounded form.
 `sendTextSlices`, `sendBinarySlices` and `sendFrameSlices` (plus
 `WithTimeout`/`WithDeadline`) accept `[]const []const u8`; text validation
 spans slice boundaries. Without a slice callback the adapter writes the header
@@ -65,9 +74,12 @@ var message = try connection.receiveMessageWithDeadline(until);
 try connection.sendCloseWithDeadline(.normal_closure, "done", until);
 ```
 
-`closeWithDeadline`/`closeWithTimeout` are resumable: a rejected budget or a
-failed Close write leaves the connection open so the caller can retry with a
-larger budget or fall back to the unbounded `close`.
+`closeWithDeadline`/`closeWithTimeout` remain available for retry after a
+budget, capability, or encoding rejection before a write callback is invoked.
+An invoked callback error, including `Timeout` or cancellation, retires the
+transport because it may have emitted part of a Close frame. A scatter-write
+fallback that committed its header also retires the transport if a later
+slice's preflight fails. A fresh frame cannot complete that existing prefix.
 
 Client-role connections mask outgoing frames and require unmasked peer frames;
 server-role connections do the reverse. `max_frame_bytes` bounds one wire frame
@@ -76,9 +88,10 @@ message. Both are checked before allocating the frame payload.
 
 ## Close state
 
-- `sendClose` marks the close as sent only after the write succeeds, so a
-  failed write can be retried. A reason longer than 123 bytes returns
-  `error.InvalidControlFrame` instead of being silently truncated.
+- `sendClose` commits its sent state under the write lock after the callback
+  succeeds. An invoked callback error leaves that flag unset and retires the
+  transport. A reason longer than 123 bytes returns
+  `error.InvalidControlFrame` before writing.
 - After either side starts the closing handshake, only a Close frame may be
   written. Data, Ping and Pong calls return `error.ConnectionClosed`.
 - Receiving a Close stores its status code and reason, echoes the code when the
@@ -92,3 +105,17 @@ message. Both are checked before allocating the frame payload.
 `receiveMessage` returns an owned `Message`; its payload is freed by
 `Message.deinit`. Close metadata is copied into the connection, so it remains
 valid after the frame buffer is reused.
+
+## Concurrent operations
+
+One receiver may run alongside serialized senders when the transport callbacks
+support that usage. A sender rechecks lifecycle state after acquiring the write
+mutex, so a writer queued behind Close cannot emit application data and two
+queued Close calls emit one frame. Terminal failure wakes queued writers into
+`ConnectionClosed`. `isClosed()`, `closeSent()` and `closeReceived()` provide
+synchronized snapshots; `peerClose()` reads metadata after the receiver
+publishes it. Treat the connection's state fields as internal storage.
+
+`deinit` requires all active operations to finish. The adapter retains input,
+output and assembly storage until then, so a writer's failure does not free
+memory that the receiver is still using.

@@ -3648,3 +3648,16 @@ public dependency pins no longer require a custom credential before any build
 can start. [Backend and CI evidence](../../winsock_peer_addresses/2026-11-24/README.md)
 records the successful native Windows job at `03f15fbd` (3m 45s) as well as
 the local compile and runtime checks.
+
+
+## Two-hundred-and-seventh pass: generic WebSocket write lifecycle
+
+A reproduced scatter write emitted a frame header and partial payload, failed,
+and still accepted a later frame. Complete-write callback failures now retire
+the transport, while pre-callback validation/capability/encoding failures remain
+retryable. Close state commits under the mutex, queued writers recheck it,
+and atomic snapshots publish lifecycle and peer metadata. The 36-case adapter
+bundles pass in Debug and ReleaseSafe; callback-shape, public-surface and
+Windows compile checks pass. [Write lifecycle evidence](../../websocket_stream_writes/2026-11-24/README.md)
+records the red baseline, deterministic concurrency checks and a remaining
+admission-limit review.

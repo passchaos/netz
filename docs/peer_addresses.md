@@ -27,8 +27,8 @@ Zig 0.16's Threaded backend owns native AFD handles and has no supported peer
 query here, so its TCP client accessors return `null`. Accepted Windows IP
 connections retain the address recorded by accept for either backend.
 The portable CI matrix includes a native Windows runner that executes the
-focused HTTP peer-address tests, including zio socket queries and the Windows
-address vectors.
+focused HTTP peer-address and WebSocket byte-stream adapter tests, including
+zio socket queries and the Windows address vectors.
 
 QUIC-backed address accessors read the current peer path from their connection
 owner. They return a concrete IP address and reflect path migration. The

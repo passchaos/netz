@@ -167,7 +167,7 @@ test "WebSocket stream adapter rejects data after the closing handshake" {
     try std.testing.expectError(error.ConnectionClosed, connection.receiveMessage());
 }
 
-test "WebSocket stream adapter retries a failed Close write" {
+test "WebSocket stream adapter retires a failed Close write without marking it sent" {
     var peer = Peer{ .input = &.{} };
     defer peer.deinit();
     var connection = stream_connection.Connection.init(
@@ -182,12 +182,9 @@ test "WebSocket stream adapter retries a failed Close write" {
     try std.testing.expectError(error.WriteFailed, connection.sendClose(.normal_closure, "bye"));
     try std.testing.expect(!connection.close_sent);
 
-    try connection.sendClose(.normal_closure, "bye");
-    try std.testing.expect(connection.close_sent);
-    const writes = peer.writes;
-    // A completed close is not sent twice.
-    try connection.sendClose(.normal_closure, "again");
-    try std.testing.expectEqual(writes, peer.writes);
+    try std.testing.expect(connection.isClosed());
+    try std.testing.expectError(error.ConnectionClosed, connection.sendClose(.normal_closure, "bye"));
+    try std.testing.expectEqual(@as(usize, 0), peer.writes);
     try std.testing.expectError(error.ConnectionClosed, connection.sendBinary("late"));
 }
 
