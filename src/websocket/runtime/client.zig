@@ -392,7 +392,7 @@ pub const Client = struct {
         if (options.tls_identity != null or options.vail_tls != null) {
             return error.UnsupportedScheme;
         }
-        const stream = try tcp_connect.ip(io, address, options.connect_timeout);
+        const stream = try tcp_connect.ipWithOptions(io, address, options.connect_timeout, options);
         errdefer stream.close(io);
         var attempt = try connectStreamAttempt(allocator, io, stream, null, options);
         return closeRejectedAttempt(&attempt);
@@ -428,7 +428,7 @@ pub const Client = struct {
         if (options.tls_identity != null or options.vail_tls != null) {
             return error.UnsupportedScheme;
         }
-        const stream = try tcp_connect.ipWithDeadline(
+        const stream = try tcp_connect.ipWithDeadlineAndOptions(
             io,
             address,
             try deadline_policy.capTimeout(
@@ -436,6 +436,7 @@ pub const Client = struct {
                 deadline,
                 options.connect_timeout,
             ),
+            options,
         );
         errdefer stream.close(io);
         var attempt = try connectStreamAttemptBefore(
@@ -512,6 +513,7 @@ pub const Client = struct {
             return error.SocketOptionUnsupported;
         }
         if (options.host.len == 0) return error.InvalidUri;
+        try tcp_connect.validateUnixOptions(options);
         const stream = try tcp_connect.unix(io, address, options.connect_timeout);
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(io);
@@ -562,6 +564,7 @@ pub const Client = struct {
             return error.SocketOptionUnsupported;
         }
         if (options.host.len == 0) return error.InvalidUri;
+        try tcp_connect.validateUnixOptions(options);
         const stream = try tcp_connect.unixWithDeadline(
             io,
             address,
@@ -944,10 +947,11 @@ pub const Client = struct {
         tls_options: http1_runtime.TlsClientOptions,
     ) Error!ConnectAttempt {
         _ = try net.HostName.init(tls_host);
-        const stream = try tcp_connect.ip(
+        const stream = try tcp_connect.ipWithOptions(
             io,
             address,
             options.connect_timeout,
+            options,
         );
         var attempt = try connectTlsStreamAttempt(
             allocator,
@@ -993,7 +997,7 @@ pub const Client = struct {
         deadline: std.Io.Clock.Timestamp,
     ) Error!ConnectAttempt {
         _ = try net.HostName.init(tls_host);
-        const stream = try tcp_connect.ipWithDeadline(
+        const stream = try tcp_connect.ipWithDeadlineAndOptions(
             io,
             address,
             try deadline_policy.capTimeout(
@@ -1001,6 +1005,7 @@ pub const Client = struct {
                 deadline,
                 options.connect_timeout,
             ),
+            options,
         );
         var attempt = try connectTlsStreamAttemptBefore(
             allocator,
@@ -2199,6 +2204,8 @@ pub const Client = struct {
         );
         defer endpoint.deinit();
         var effective_proxy_options = proxy.options;
+        if (options.local_address) |address| effective_proxy_options.local_address = address;
+        if (options.network_interface) |interface| effective_proxy_options.network_interface = interface;
         if (effective_proxy_options.connect_timeout == null) {
             effective_proxy_options.connect_timeout = options.connect_timeout;
         }
@@ -2312,6 +2319,8 @@ pub const Client = struct {
             .response_head_timeout = options.limits.http1_handshake_timeout,
             .max_informational_responses = options.limits.max_informational_responses,
             .connect_timeout = options.connect_timeout,
+            .local_address = options.local_address,
+            .network_interface = options.network_interface,
             .tcp_nodelay = options.tcp_nodelay,
         };
         var effective_proxy_options = proxy_options;

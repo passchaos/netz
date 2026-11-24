@@ -5,6 +5,7 @@ const h3 = @import("../../http3/runtime.zig");
 const socks = @import("../../proxy/socks/server.zig");
 const tls_testing = @import("../../tls/testing.zig");
 const backend_mod = @import("../../runtime.zig");
+const binding_checks = @import("../../internal/network_interface_test_support.zig");
 const allocator = std.testing.allocator;
 
 fn deadline(io: std.Io) std.Io.Clock.Timestamp {
@@ -36,12 +37,12 @@ const Sink = struct {
     }
 };
 
-fn exercise(io: std.Io, comptime ipv6: bool, comptime policy: http.ProtocolPolicy) !void {
+fn exercise(io: std.Io, comptime ipv6: bool, comptime policy: http.ProtocolPolicy, comptime bind_interface: bool) !void {
     var certificate: [tls_testing.certificate_der_len]u8 = undefined;
     try std.base64.standard.Decoder.decode(&certificate, tls_testing.certificate_base64);
     const key = try tls_testing.serverKeyPair();
     const pin = key.public_key.toUncompressedSec1();
-    const limits: h3.Limits = .{ .quic = .{ .max_datagram_size = 4096 } };
+    const limits: h3.Limits = .{ .quic = .{ .max_datagram_size = 4096, .network_interface = if (bind_interface) binding_checks.loopback() else null } };
     var server = try h3.HandshakeServer.bind(allocator, io, if (ipv6) .{ .ip6 = .loopback(0) } else .{ .ip4 = .loopback(0) }, limits, .{
         .handshake = .{ .local_connection_id = &.{ 1, 2, 3, 4, 5, 6, 7, 8 }, .identity = .{
             .certificate_chain = &.{&certificate},
@@ -78,11 +79,14 @@ fn exercise(io: std.Io, comptime ipv6: bool, comptime policy: http.ProtocolPolic
     defer release.set(io);
     const uri = try std.fmt.allocPrint(allocator, "https://{s}:{d}/direct", .{ if (ipv6) "[::1]" else if (policy == .prefer_http3) "localhost" else "127.0.0.1", server.address().getPort() });
     defer allocator.free(uri);
-    var client = try http.Client.init(allocator, io, .{ .protocol_policy = policy, .tls = .{ .server_verifier = .{ .pinned_ecdsa_p256_public_key = pin } }, .http3 = .{ .limits = limits } });
+    var client_limits = limits;
+    if (bind_interface) client_limits.quic.network_interface = .{ .name = "netz_missing" };
+    var client = try http.Client.init(allocator, io, .{ .protocol_policy = policy, .network_interface = if (bind_interface) binding_checks.loopback() else null, .local_address = if (bind_interface) (if (ipv6) .{ .ip6 = .loopback(0) } else .{ .ip4 = .loopback(0) }) else null, .tls = .{ .server_verifier = .{ .pinned_ecdsa_p256_public_key = pin } }, .http3 = .{ .limits = client_limits, .local_address = if (bind_interface) (if (ipv6) .{ .ip4 = .unspecified(0) } else .{ .ip6 = .unspecified(0) }) else null } });
     defer client.deinit();
     var connection = try client.connectUriWithDeadline(uri, deadline(io));
     defer connection.close();
     try std.testing.expectEqual(http.Protocol.http3, connection.protocol());
+    if (bind_interface) try binding_checks.expectBound(io, connection.value.http3.client.endpoint.socket);
     try std.testing.expectEqualStrings("h3", connection.negotiatedAlpn().?);
     try std.testing.expect(connection.peerAddress().?.eql(&server.address()));
     try std.testing.expectEqual(@as(?@import("../../tls/mod.zig").stream.Protocol, .tls13), connection.negotiatedTlsProtocol());
@@ -171,23 +175,23 @@ fn exercise(io: std.Io, comptime ipv6: bool, comptime policy: http.ProtocolPolic
 test "unified HTTP direct H3 Client Connection request sources streaming metadata and reuse" {
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
     defer threaded.deinit();
-    try exercise(threaded.io(), false, .http3_only);
-    try exercise(threaded.io(), true, .http3_only);
+    try exercise(threaded.io(), false, .http3_only, false);
+    try exercise(threaded.io(), true, .http3_only, false);
     var backend = try backend_mod.Backend.initZio(allocator);
     defer backend.deinit();
-    try exercise(backend.io(), false, .http3_only);
-    try exercise(backend.io(), true, .http3_only);
+    try exercise(backend.io(), false, .http3_only, false);
+    try exercise(backend.io(), true, .http3_only, false);
 }
 
 test "unified HTTP protocol policy prefers H3 on both address families and I/O backends" {
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
     defer threaded.deinit();
-    try exercise(threaded.io(), false, .prefer_http3);
-    try exercise(threaded.io(), true, .prefer_http3);
+    try exercise(threaded.io(), false, .prefer_http3, false);
+    try exercise(threaded.io(), true, .prefer_http3, false);
     var backend = try backend_mod.Backend.initZio(allocator);
     defer backend.deinit();
-    try exercise(backend.io(), false, .prefer_http3);
-    try exercise(backend.io(), true, .prefer_http3);
+    try exercise(backend.io(), false, .prefer_http3, false);
+    try exercise(backend.io(), true, .prefer_http3, false);
 }
 
 test "unified HTTP direct H3 routes through SOCKS5 UDP ASSOCIATE" {
@@ -466,4 +470,14 @@ test "unified HTTP direct H3 timeout close sends CONNECTION_CLOSE" {
 
 test "unified HTTP direct H3 zero-budget close retires without CONNECTION_CLOSE" {
     try closeObservation(.zero_timeout);
+}
+
+test "unified HTTP network interface direct H3 and preferred H3 retain source and device constraints" {
+    if (@import("builtin").os.tag != .macos and @import("builtin").os.tag != .linux and @import("builtin").os.tag != .windows) return error.SkipZigTest;
+    var backend = try backend_mod.Backend.initZio(allocator);
+    defer backend.deinit();
+    try exercise(backend.io(), false, .http3_only, true);
+    try exercise(backend.io(), true, .http3_only, true);
+    try exercise(backend.io(), false, .prefer_http3, true);
+    try exercise(backend.io(), true, .prefer_http3, true);
 }

@@ -230,6 +230,13 @@ pub const RedirectOptions = struct {
 };
 
 pub const Options = struct {
+    /// Source IP/port for newly opened TCP sockets (and UDP in unified HTTP).
+    /// Null leaves source selection to the OS. Requires Netz's zio backend.
+    local_address: ?std.Io.net.IpAddress = null,
+    /// Constrain the socket's network interface independently of source IP.
+    /// Names are borrowed; unsupported platforms/backends fail explicitly.
+    network_interface: ?tcp_connect.NetworkInterface = null,
+
     protocol_policy: ProtocolPolicy = .prefer_http2,
     cleartext_protocol: CleartextProtocol = .http1,
     /// Permit an authenticated HTTPS peer that omits ALPN to use HTTP/1.1.

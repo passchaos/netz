@@ -1,6 +1,7 @@
 //! HTTP/2 server listeners, TLS adoption, and serve loops.
 
 const std = @import("std");
+const socket_binding = @import("../../internal/socket_binding.zig");
 const http2 = @import("../mod.zig");
 const http1_runtime = @import("../../http1/runtime.zig");
 const accept_deadline = @import("../../internal/accept.zig");
@@ -78,7 +79,7 @@ pub const Server = struct {
         return .{
             .io = io,
             .allocator = allocator,
-            .listener = try bind_address.listen(io, .{ .reuse_address = true }),
+            .listener = try socket_binding.listenTcp(io, bind_address, .{ .reuse_address = true }, limits.network_interface),
             .limits = limits,
         };
     }
@@ -846,9 +847,11 @@ pub const TlsServer = struct {
         return .{
             .allocator = allocator,
             .io = io,
-            .listener = try bind_address.listen(
+            .listener = try socket_binding.listenTcp(
                 io,
+                bind_address,
                 .{ .reuse_address = true },
+                options.limits.network_interface,
             ),
             .limits = options.limits,
             .tls = .{

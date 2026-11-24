@@ -343,9 +343,9 @@ pub const Client = struct {
         const authority = try client_authority.ipAlloc(allocator, address);
         errdefer allocator.free(authority);
         const stream = if (connect_deadline) |deadline|
-            try tcp_connect.ipWithDeadline(io, address, deadline)
+            try tcp_connect.ipWithDeadlineAndOptions(io, address, deadline, limits)
         else
-            try tcp_connect.ip(io, address, null);
+            try tcp_connect.ipWithOptions(io, address, null, limits);
         var connection = try connectStream(allocator, io, stream, limits);
         connection.default_authority = authority;
         connection.default_authority_is_ip = true;
@@ -366,10 +366,11 @@ pub const Client = struct {
         const connect_deadline = try deadline_policy.capTimeout(io, deadline, limits.connect_timeout);
         const authority = try client_authority.ipAlloc(allocator, address);
         errdefer allocator.free(authority);
-        const stream = try tcp_connect.ipWithDeadline(
+        const stream = try tcp_connect.ipWithDeadlineAndOptions(
             io,
             address,
             connect_deadline,
+            limits,
         );
         var connection = try connectStreamBefore(
             allocator,
@@ -415,6 +416,7 @@ pub const Client = struct {
         if (authority.len == 0) return error.InvalidHeader;
         const owned_authority = try allocator.dupe(u8, authority);
         errdefer allocator.free(owned_authority);
+        try tcp_connect.validateUnixOptions(limits);
         const stream = try tcp_connect.unix(io, address, limits.connect_timeout);
         var connection = try connectStreamWithoutTcpOptions(
             allocator,
@@ -439,6 +441,7 @@ pub const Client = struct {
         if (authority.len == 0) return error.InvalidHeader;
         const owned_authority = try allocator.dupe(u8, authority);
         errdefer allocator.free(owned_authority);
+        try tcp_connect.validateUnixOptions(limits);
         const stream = try tcp_connect.unixWithDeadline(
             io,
             address,
@@ -487,7 +490,7 @@ pub const Client = struct {
         limits: Limits,
     ) Error!Connection {
         try validateLocalLimits(limits);
-        const opened = try host_connect.open(allocator, io, host, port, limits.connect_timeout, null);
+        const opened = try host_connect.open(allocator, io, host, port, limits, null);
         errdefer allocator.free(opened.authority);
         var connection = try connectStream(allocator, io, opened.stream, limits);
         connection.default_authority = opened.authority;
@@ -504,7 +507,7 @@ pub const Client = struct {
         deadline: std.Io.Clock.Timestamp,
     ) Error!Connection {
         try validateLocalLimits(limits);
-        const opened = try host_connect.open(allocator, io, host, port, limits.connect_timeout, deadline);
+        const opened = try host_connect.open(allocator, io, host, port, limits, deadline);
         errdefer allocator.free(opened.authority);
         var connection = try connectStreamBefore(
             allocator,
@@ -546,7 +549,7 @@ pub const Client = struct {
         tls_options: TlsConnectOptions,
     ) Error!Connection {
         try validateLocalLimits(limits);
-        const opened = try host_connect.open(allocator, io, host, port, limits.connect_timeout, null);
+        const opened = try host_connect.open(allocator, io, host, port, limits, null);
         // connectTlsStream assumes both resources at entry and provides the
         // only cleanup path after this transfer.
         return connectTlsStream(
@@ -570,7 +573,7 @@ pub const Client = struct {
         deadline: std.Io.Clock.Timestamp,
     ) Error!Connection {
         try validateLocalLimits(limits);
-        const opened = try host_connect.open(allocator, io, host, port, limits.connect_timeout, deadline);
+        const opened = try host_connect.open(allocator, io, host, port, limits, deadline);
         return connectTlsStreamBefore(
             allocator,
             io,
@@ -621,13 +624,16 @@ pub const Client = struct {
         const authority = try parsed.authorityAlloc(allocator, port);
         var authority_owned = true;
         errdefer if (authority_owned) allocator.free(authority);
+        var proxy_limits = proxy.limits;
+        if (limits.local_address) |address| proxy_limits.local_address = address;
+        if (limits.network_interface) |interface| proxy_limits.network_interface = interface;
         const stream = try http1_runtime.Client.connectTunnelViaProxyUri(
             allocator,
             io,
             proxy.uri,
             proxy.tunnel_authority orelse authority,
             proxy.options,
-            proxy.limits,
+            proxy_limits,
         );
         authority_owned = false;
         return connectTlsStream(
@@ -659,6 +665,9 @@ pub const Client = struct {
         const authority = try parsed.authorityAlloc(allocator, port);
         var authority_owned = true;
         errdefer if (authority_owned) allocator.free(authority);
+        var proxy_limits = proxy.limits;
+        if (limits.local_address) |address| proxy_limits.local_address = address;
+        if (limits.network_interface) |interface| proxy_limits.network_interface = interface;
         const stream = try http1_runtime.Client
             .connectTunnelViaProxyUriWithDeadline(
             allocator,
@@ -666,7 +675,7 @@ pub const Client = struct {
             proxy.uri,
             proxy.tunnel_authority orelse authority,
             proxy.options,
-            proxy.limits,
+            proxy_limits,
             deadline,
         );
         authority_owned = false;
@@ -720,7 +729,7 @@ pub const Client = struct {
         try validateLocalLimits(limits);
         const identity = try endpoint_host.parse(tls_host, address.getPort());
         if (authority.len == 0) return error.InvalidHeader;
-        const stream = try tcp_connect.ip(io, address, limits.connect_timeout);
+        const stream = try tcp_connect.ipWithOptions(io, address, limits.connect_timeout, limits);
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(io);
         const owned_authority = try allocator.dupe(u8, authority);
@@ -752,7 +761,7 @@ pub const Client = struct {
         try validateLocalLimits(limits);
         const identity = try endpoint_host.parse(tls_host, address.getPort());
         if (authority.len == 0) return error.InvalidHeader;
-        const stream = try tcp_connect.ipWithDeadline(
+        const stream = try tcp_connect.ipWithDeadlineAndOptions(
             io,
             address,
             try deadline_policy.capTimeout(
@@ -760,6 +769,7 @@ pub const Client = struct {
                 deadline,
                 limits.connect_timeout,
             ),
+            limits,
         );
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(io);
@@ -926,7 +936,7 @@ pub const Client = struct {
         request_options: RequestOptions,
     ) Error!OwnedResponse {
         try validateLocalLimits(limits);
-        const stream = try tcp_connect.ip(io, address, limits.connect_timeout);
+        const stream = try tcp_connect.ipWithOptions(io, address, limits.connect_timeout, limits);
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(io);
         // connectStreamUpgrade takes ownership at entry and closes the stream
@@ -953,7 +963,7 @@ pub const Client = struct {
         deadline: std.Io.Clock.Timestamp,
     ) ResponseTimeoutError!OwnedResponse {
         try validateLocalLimits(limits);
-        const stream = try tcp_connect.ipWithDeadline(
+        const stream = try tcp_connect.ipWithDeadlineAndOptions(
             io,
             address,
             try deadline_policy.capTimeout(
@@ -961,6 +971,7 @@ pub const Client = struct {
                 deadline,
                 limits.connect_timeout,
             ),
+            limits,
         );
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(io);
@@ -1017,16 +1028,18 @@ pub const Client = struct {
 
         try validateLocalLimits(limits);
         const stream = switch (endpoint.target) {
-            .host => |host| try tcp_connect.host(
+            .host => |host| try tcp_connect.hostWithOptions(
                 io,
                 host,
                 endpoint.port,
                 limits.connect_timeout,
+                limits,
             ),
-            .ip => |address| try tcp_connect.ip(
+            .ip => |address| try tcp_connect.ipWithOptions(
                 io,
                 address,
                 limits.connect_timeout,
+                limits,
             ),
         };
         var stream_owned = true;
@@ -1072,16 +1085,18 @@ pub const Client = struct {
             limits.connect_timeout,
         );
         const stream = switch (endpoint.target) {
-            .host => |host| try tcp_connect.hostWithDeadline(
+            .host => |host| try tcp_connect.hostWithDeadlineAndOptions(
                 io,
                 host,
                 endpoint.port,
                 network_deadline,
+                limits,
             ),
-            .ip => |address| try tcp_connect.ipWithDeadline(
+            .ip => |address| try tcp_connect.ipWithDeadlineAndOptions(
                 io,
                 address,
                 network_deadline,
+                limits,
             ),
         };
         var stream_owned = true;
@@ -1862,16 +1877,18 @@ pub const Client = struct {
             ),
         } else blk: {
             const stream = switch (endpoint.target) {
-                .host => |host| try tcp_connect.host(
+                .host => |host| try tcp_connect.hostWithOptions(
                     io,
                     host,
                     endpoint.port,
                     limits.connect_timeout,
+                    limits,
                 ),
-                .ip => |address| try tcp_connect.ip(
+                .ip => |address| try tcp_connect.ipWithOptions(
                     io,
                     address,
                     limits.connect_timeout,
+                    limits,
                 ),
             };
             var stream_owned = true;

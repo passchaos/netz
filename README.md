@@ -120,6 +120,11 @@ std.debug.print("{t} {d} {d} bytes\n", .{
 });
 ```
 
+New client sockets can select a source IP/port with `local_address` and pin
+sending and reception to a named or indexed device with `network_interface`.
+See [local network binding](docs/local_network_binding.md) for common options,
+QUIC limits and platform support.
+
 `netz.http.Pool` retains negotiated connections for reuse, and
 `prefer_http3`/`http3_only` route HTTPS origins over QUIC. Version-specific
 runtimes remain available; HTTP/1 over a real TCP stream:

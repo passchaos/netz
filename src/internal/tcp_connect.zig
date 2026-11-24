@@ -12,12 +12,28 @@ const std = @import("std");
 const zio = @import("zio");
 const deadline_policy = @import("deadline.zig");
 const happy_eyeballs = @import("tcp_connect/happy_eyeballs.zig");
+const binding = @import("tcp_connect/binding.zig");
+const socket_binding = @import("socket_binding.zig");
+
+pub const NetworkInterface = socket_binding.NetworkInterface;
+pub const Binding = socket_binding.Binding;
+pub const BindingConnectError = binding.ConnectError;
+pub const BindingHostConnectError = binding.HostConnectError;
+pub const BindingResolvedConnectError = binding.ResolvedConnectError;
+pub const ipWithOptions = binding.ip;
+pub const ipWithDeadlineAndOptions = binding.ipWithDeadline;
+pub const hostWithOptions = binding.host;
+pub const hostWithDeadlineAndOptions = binding.hostWithDeadline;
+pub const resolvedWithOptions = binding.resolved;
+pub const endpointWithOptions = @import("tcp_connect/endpoint.zig").open;
+
+pub fn validateUnixOptions(options: anytype) error{OptionUnsupported}!void {
+    if (Binding.fromOptions(options).isRequested()) return error.OptionUnsupported;
+}
 
 const net = std.Io.net;
 
-pub const BoundConnectError = net.IpAddress.ConnectError || error{
-    AddressInUse,
-};
+pub const BoundConnectError = net.IpAddress.ConnectError || error{AddressInUse};
 
 pub const BoundHostConnectError = net.HostName.LookupError ||
     BoundConnectError;
@@ -353,7 +369,7 @@ fn resolvedBoundBefore(
     return last_error orelse error.NoAddressReturned;
 }
 
-fn shouldTryNextResolvedAddress(err: anyerror) bool {
+pub fn shouldTryNextResolvedAddress(err: anyerror) bool {
     return switch (err) {
         error.AddressFamilyUnsupported,
         error.AddressUnavailable,
@@ -469,99 +485,17 @@ fn connectHostBoundBefore(
     }
 }
 
-fn connectBoundZio(
-    io: std.Io,
-    address: net.IpAddress,
-    local_address: net.IpAddress,
-    timeout: zio.Timeout,
-) BoundConnectError!net.Stream {
-    _ = zio.Runtime.fromIo(io) orelse return error.OptionUnsupported;
-    if (std.meta.activeTag(address) != std.meta.activeTag(local_address)) {
-        return error.AddressFamilyUnsupported;
-    }
-    const domain: zio.os.net.Domain = switch (local_address) {
-        .ip4 => .ipv4,
-        .ip6 => .ipv6,
+fn connectBoundZio(io: std.Io, address: net.IpAddress, local_address: net.IpAddress, timeout: zio.Timeout) BoundConnectError!net.Stream {
+    return socket_binding.connect(io, address, .{ .local_address = local_address }, timeout) catch |err| switch (err) {
+        // This compatibility API never requests an interface option.
+        error.InterfaceNotFound, error.NameTooLong, error.InvalidNetworkInterface, error.SocketOptionFailed => unreachable,
+        else => |other| return other,
     };
-    var socket = zio.net.Socket.open(.stream, domain, .tcp) catch |err|
-        return mapBoundConnectError(err);
-    errdefer socket.close();
-    socket.bind(.{ .ip = zioIpAddress(local_address) }) catch |err|
-        return mapBoundConnectError(err);
-    const bound_address = stdIpAddress(socket.address.ip);
-    socket.connect(.{ .ip = zioIpAddress(address) }, .{
-        .timeout = timeout,
-    }) catch |err| return mapBoundConnectError(err);
-    return .{ .socket = .{
-        .handle = stdIoSocketHandle(socket.handle),
-        .address = bound_address,
-    } };
-}
-
-fn zioIpAddress(address: net.IpAddress) zio.net.IpAddress {
-    return switch (address) {
-        .ip4 => |ip4| .initIp4(ip4.bytes, ip4.port),
-        .ip6 => |ip6| .initIp6(
-            ip6.bytes,
-            ip6.port,
-            ip6.flow,
-            ip6.interface.index,
-        ),
-    };
-}
-
-fn stdIpAddress(address: zio.net.IpAddress) net.IpAddress {
-    return switch (address.getFamily()) {
-        .ipv4 => .{ .ip4 = .{
-            .bytes = @bitCast(address.in.addr),
-            .port = std.mem.bigToNative(u16, address.in.port),
-        } },
-        .ipv6 => .{ .ip6 = .{
-            .bytes = address.in6.addr,
-            .port = std.mem.bigToNative(u16, address.in6.port),
-            .flow = address.in6.flowinfo,
-            .interface = .{ .index = address.in6.scope_id },
-        } },
-    };
-}
-
-fn stdIoSocketHandle(
-    handle: @FieldType(zio.net.Socket, "handle"),
-) net.Socket.Handle {
-    return if (@typeInfo(net.Socket.Handle) == .pointer)
-        @ptrCast(handle)
-    else
-        @intCast(handle);
 }
 
 fn durationNanoseconds(duration: std.Io.Duration) u64 {
     if (duration.nanoseconds <= 0) return 0;
     return @intCast(@min(duration.nanoseconds, std.math.maxInt(u64)));
-}
-
-fn mapBoundConnectError(err: anyerror) BoundConnectError {
-    return switch (err) {
-        error.AccessDenied => error.AccessDenied,
-        error.AddressInUse => error.AddressInUse,
-        error.AddressUnavailable => error.AddressUnavailable,
-        error.AddressFamilyUnsupported => error.AddressFamilyUnsupported,
-        error.Canceled => error.Canceled,
-        error.ConnectionPending => error.ConnectionPending,
-        error.ConnectionRefused => error.ConnectionRefused,
-        error.ConnectionResetByPeer => error.ConnectionResetByPeer,
-        error.HostUnreachable => error.HostUnreachable,
-        error.NetworkDown => error.NetworkDown,
-        error.NetworkUnreachable => error.NetworkUnreachable,
-        error.ProcessFdQuotaExceeded => error.ProcessFdQuotaExceeded,
-        error.ProtocolUnsupportedByAddressFamily => error.ProtocolUnsupportedByAddressFamily,
-        error.ProtocolUnsupportedBySystem => error.ProtocolUnsupportedBySystem,
-        error.SocketModeUnsupported => error.SocketModeUnsupported,
-        error.SystemFdQuotaExceeded => error.SystemFdQuotaExceeded,
-        error.SystemResources => error.SystemResources,
-        error.Timeout => error.Timeout,
-        error.WouldBlock => error.WouldBlock,
-        else => error.Unexpected,
-    };
 }
 
 pub fn unix(
@@ -677,4 +611,5 @@ fn waitUntil(
 
 test {
     _ = @import("tcp_connect/tests.zig");
+    _ = @import("tcp_connect/binding_tests.zig");
 }

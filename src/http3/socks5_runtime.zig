@@ -101,6 +101,8 @@ fn connectHostBefore(
     options: runtime.HandshakeClientOptions,
     deadline: ?std.Io.Clock.Timestamp,
 ) runtime.Error!runtime.HandshakeClient {
+    var proxy_options = proxy.options;
+    if (limits.quic.network_interface) |interface| proxy_options.network_interface = interface;
     var association = if (deadline) |absolute|
         try proxy_socks5.associateUdpHostWithDeadline(
             allocator,
@@ -108,8 +110,9 @@ fn connectHostBefore(
             proxy.host,
             proxy.port,
             .{
-                .socks5 = proxy.options,
+                .socks5 = proxy_options,
                 .bind_address = local_address,
+                .network_interface = limits.quic.network_interface,
             },
             absolute,
         )
@@ -120,8 +123,9 @@ fn connectHostBefore(
             proxy.host,
             proxy.port,
             .{
-                .socks5 = proxy.options,
+                .socks5 = proxy_options,
                 .bind_address = local_address,
+                .network_interface = limits.quic.network_interface,
             },
         );
     var association_owned = true;

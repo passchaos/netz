@@ -557,6 +557,13 @@ pub fn connectionHandshakeDeadlineBefore(
 }
 
 pub const Limits = struct {
+    /// Source IP/port for newly opened TCP sockets.
+    /// Null leaves source selection to the OS. Requires Netz's zio backend.
+    local_address: ?std.Io.net.IpAddress = null,
+    /// Constrain the socket's network interface independently of source IP.
+    /// Names are borrowed; unsupported platforms/backends fail explicitly.
+    network_interface: ?tcp_connect.NetworkInterface = null,
+
     /// Local allocation/test ceiling for any inbound or outbound frame payload.
     /// `max_frame_size` below is the HTTP/2 SETTINGS_MAX_FRAME_SIZE value that
     /// can be advertised to peers and must stay within RFC 9113 bounds.

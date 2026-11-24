@@ -4,6 +4,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const zio = @import("zio");
+const interfaces = @import("../internal/network_interface.zig");
 
 const net = std.Io.net;
 
@@ -47,6 +48,8 @@ pub const InterfaceAddressError = error{
 };
 
 pub const Options = struct {
+    /// Native send/receive device constraint, applied before bind/listen.
+    network_interface: ?interfaces.NetworkInterface = null,
     kernel_backlog: u31 = std.Io.net.default_kernel_backlog,
     reuse_address: bool = false,
     /// Null leaves the platform default unchanged. False explicitly permits
@@ -116,7 +119,7 @@ pub fn listen(
     io: std.Io,
     address: net.IpAddress,
     options: Options,
-) net.IpAddress.ListenError!net.Server {
+) (net.IpAddress.ListenError || interfaces.Error)!net.Server {
     _ = zio.Runtime.fromIo(io) orelse return error.OptionUnsupported;
     if (options.ip6_only != null and address != .ip6) {
         return error.OptionUnsupported;
@@ -136,6 +139,7 @@ pub fn listen(
         socket.setReusePort(true) catch {};
     }
     if (options.ip6_only) |enabled| try setIpv6Only(socket, enabled);
+    if (options.network_interface) |interface| try interfaces.apply(io, stdIoSocketHandle(socket.handle), std.meta.activeTag(address), .stream, interface);
 
     socket.bind(.{ .ip = zioIpAddress(address) }) catch |err|
         return mapBindError(err);

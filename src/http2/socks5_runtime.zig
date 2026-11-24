@@ -27,6 +27,9 @@ pub const Client = struct {
     ) Error!runtime.Connection {
         const origin = try Origin.init(allocator, host, port);
         defer origin.deinit(allocator);
+        var proxy_options = proxy.options;
+        if (limits.local_address) |address| proxy_options.local_address = address;
+        if (limits.network_interface) |interface| proxy_options.network_interface = interface;
         const stream = try socks5.connectHost(
             allocator,
             io,
@@ -34,7 +37,7 @@ pub const Client = struct {
             proxy.port,
             origin.identity,
             port,
-            proxy.options,
+            proxy_options,
         );
         return runtime.Client.adoptTlsStream(
             allocator,
@@ -60,6 +63,9 @@ pub const Client = struct {
         _ = try deadline_policy.usableAwake(io, deadline);
         const origin = try Origin.init(allocator, host, port);
         defer origin.deinit(allocator);
+        var proxy_options = proxy.options;
+        if (limits.local_address) |address| proxy_options.local_address = address;
+        if (limits.network_interface) |interface| proxy_options.network_interface = interface;
         const stream = try socks5.connectHostWithDeadline(
             allocator,
             io,
@@ -67,7 +73,7 @@ pub const Client = struct {
             proxy.port,
             origin.identity,
             port,
-            proxy.options,
+            proxy_options,
             deadline,
         );
         return runtime.Client.adoptTlsStreamWithDeadline(

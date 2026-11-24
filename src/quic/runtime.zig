@@ -7,12 +7,13 @@ test {
 const builtin = @import("builtin");
 const quic = @import("mod.zig");
 const deadline_policy = @import("../internal/deadline.zig");
+const socket_binding = @import("../internal/socket_binding.zig");
 const socks5_proxy = @import("../proxy/socks5.zig");
 const socks5_udp = socks5_proxy.udp;
 
 const net = std.Io.net;
 
-pub const Error = quic.Error || error{
+pub const Error = socket_binding.Error || quic.Error || error{
     EmptyDatagram,
     DatagramTooLarge,
     TrailingBytes,
@@ -117,6 +118,9 @@ pub const Limits = struct {
         ) bool = null,
     };
 
+    /// Constrain every UDP socket opened for this endpoint to one interface.
+    /// Source IP/port remains the positional local bind address.
+    network_interface: ?socket_binding.NetworkInterface = null,
     max_datagram_size: usize = 65_535,
     max_frames_per_datagram: usize = 256,
     /// Best-effort SO_RCVBUF target for UDP sockets.
@@ -428,7 +432,7 @@ pub const Endpoint = struct {
         var endpoint = Endpoint{
             .io = io,
             .allocator = allocator,
-            .socket = try bind_address.bind(io, .{ .mode = .dgram, .protocol = .udp }),
+            .socket = try socket_binding.bindDatagram(io, bind_address, limits.network_interface),
             .limits = limits,
             .gso_send_enabled = limits.enable_gso_send and udpGsoSupported(),
         };
@@ -542,6 +546,9 @@ pub const Endpoint = struct {
             );
         }
         const io = association.io;
+        if (limits.network_interface) |interface| {
+            try socket_binding.applyInterface(association.io, association.socket.handle, std.meta.activeTag(association.socket.address), .dgram, interface);
+        }
         const socket = association.socket;
         const relay = association.relay;
         const control = association.control.takeStream();
@@ -3456,4 +3463,5 @@ pub const RejectMessageOversizeReceives = struct {
 
 test {
     _ = @import("runtime/tests.zig");
+    _ = @import("runtime/network_interface_tests.zig");
 }

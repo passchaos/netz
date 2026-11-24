@@ -250,6 +250,7 @@ test "TCP Happy Eyeballs staggers attempts and closes a successful loser" {
 
         delegate: std.Io,
         slow_port: u16,
+        slow_socket: ?net.Socket,
         never: std.Io.Event = .unset,
         calls: std.atomic.Value(u8) = .init(0),
         close_calls: std.atomic.Value(u8) = .init(0),
@@ -275,16 +276,9 @@ test "TCP Happy Eyeballs staggers attempts and closes a successful loser" {
                 self.never.wait(self.delegate) catch |err| switch (err) {
                     error.Canceled => {},
                 };
-                const old = std.Io.swapCancelProtection(
-                    self.delegate,
-                    .blocked,
-                );
-                defer _ = std.Io.swapCancelProtection(self.delegate, old);
-                return self.delegate.vtable.netConnectIp(
-                    self.delegate.userdata,
-                    address,
-                    options,
-                );
+                const socket = self.slow_socket.?;
+                self.slow_socket = null;
+                return socket;
             }
             return self.delegate.vtable.netConnectIp(
                 self.delegate.userdata,
@@ -302,10 +296,17 @@ test "TCP Happy Eyeballs staggers attempts and closes a successful loser" {
             self.delegate.vtable.netClose(self.delegate.userdata, handles);
         }
     };
+    // Open the successful slow socket before the cancelable task starts.
+    // Retrying a real Threaded connect after cancellation can hit Zig 0.16's
+    // EINTR -> ISCONN assertion; the race needs a delayed result, not another
+    // syscall under an already canceled worker.
+    const slow_socket = try io.vtable.netConnectIp(io.userdata, &slow_listener.socket.address, .{ .mode = .stream });
     var mock = MockIo{
         .delegate = io,
         .slow_port = slow_listener.socket.address.getPort(),
+        .slow_socket = slow_socket,
     };
+    defer if (mock.slow_socket) |socket| socket.close(io);
     MockIo.active = &mock;
     defer MockIo.active = null;
     var vtable = io.vtable.*;

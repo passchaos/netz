@@ -152,7 +152,17 @@ pub const Pool = struct {
                 effective_http3.address_resolver =
                     options.client.address_resolver;
             }
+            if (options.client.local_address) |address| {
+                effective_http3.local_address = address;
+                effective_http3.migration_local_address = null;
+                effective_http3.handshake.alternate_local_address = null;
+            }
+            if (options.client.network_interface) |interface| effective_http3.limits.quic.network_interface = interface;
             effective_http3.socks5_proxy = options.client.socks5_proxy;
+            if (effective_http3.socks5_proxy) |*proxy| {
+                if (options.client.local_address) |address| proxy.options.local_address = address;
+                if (options.client.network_interface) |interface| proxy.options.network_interface = interface;
+            }
             const trust: client_trust.ClientTlsTrust = .{
                 .server_verifier = options.client.tls.server_verifier,
                 .client_identity = options.client.tls.client_identity,

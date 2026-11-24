@@ -9,6 +9,7 @@ const address_resolver = @import("../internal/address_resolver.zig");
 const deadline_policy = @import("../internal/deadline.zig");
 const stream_io = @import("../internal/stream_io.zig");
 const tcp_connect = @import("../internal/tcp_connect.zig");
+const socket_binding = @import("../internal/socket_binding.zig");
 const udp_impl = @import("socks5/udp.zig");
 
 const net = std.Io.net;
@@ -26,6 +27,13 @@ pub const Credentials = struct {
 };
 
 pub const Options = struct {
+    /// Source IP/port for newly opened TCP sockets.
+    /// Null leaves source selection to the OS. Requires Netz's zio backend.
+    local_address: ?std.Io.net.IpAddress = null,
+    /// Constrain the socket's network interface independently of source IP.
+    /// Names are borrowed; unsupported platforms/backends fail explicitly.
+    network_interface: ?tcp_connect.NetworkInterface = null,
+
     credentials: ?Credentials = null,
     /// Permit a proxy to select no-auth even when credentials were offered.
     /// Disable this to prevent authentication downgrade.
@@ -38,7 +46,7 @@ pub const Options = struct {
 };
 
 pub const Error = address_resolver.Error ||
-    tcp_connect.ResolvedPolicyConnectError || net.IpAddress.ConnectError ||
+    tcp_connect.BindingResolvedConnectError || net.IpAddress.ConnectError ||
     net.Stream.Reader.Error || net.Stream.Writer.Error ||
     stream_io.TimedReadError || stream_io.TimedWriteError || error{
     InvalidProxyPort,
@@ -149,6 +157,7 @@ pub const Control = struct {
             options.address_resolver,
             policy,
             deadline,
+            .fromOptions(options),
         );
         errdefer stream.close(io);
         try negotiateAuthentication(
@@ -199,6 +208,8 @@ pub const UdpAssociateOptions = struct {
     /// association. Null asks the proxy to infer the client endpoint and binds
     /// an ephemeral wildcard socket matching the returned relay family.
     bind_address: ?net.IpAddress = null,
+    /// Datagram send/receive interface; null inherits the control policy.
+    network_interface: ?tcp_connect.NetworkInterface = null,
 };
 
 pub const UdpAssociation = udp.Association(Control);
@@ -267,7 +278,7 @@ fn associateUdpHostMaybeDeadline(
     errdefer control.deinit();
 
     var bound_socket: ?net.Socket = if (options.bind_address) |bind_address|
-        try bind_address.bind(io, .{ .mode = .dgram, .protocol = .udp })
+        try socket_binding.bindDatagram(io, bind_address, options.network_interface orelse options.socks5.network_interface)
     else
         null;
     errdefer if (bound_socket) |socket| socket.close(io);
@@ -310,9 +321,10 @@ fn associateUdpHostMaybeDeadline(
             .ip4 => net.IpAddress{ .ip4 = .unspecified(0) },
             .ip6 => net.IpAddress{ .ip6 = .unspecified(0) },
         };
-        bound_socket = try bind_address.bind(
+        bound_socket = try socket_binding.bindDatagram(
             io,
-            .{ .mode = .dgram, .protocol = .udp },
+            bind_address,
+            options.network_interface orelse options.socks5.network_interface,
         );
     }
     const socket = bound_socket.?;
@@ -522,48 +534,19 @@ fn connectProxy(
     resolver: ?AddressResolver,
     policy: AddressConnectPolicy,
     deadline: ?std.Io.Clock.Timestamp,
+    binding: tcp_connect.Binding,
 ) Error!net.Stream {
-    if (net.IpAddress.parse(host, port)) |address| {
-        return if (deadline) |absolute|
-            tcp_connect.ipWithDeadline(io, address, absolute)
-        else
-            tcp_connect.ip(io, address, null);
-    } else |_| {}
-
-    const addresses = if (resolver) |configured|
-        try configured.resolve(
-            configured.context,
-            allocator,
-            io,
-            host,
-            port,
-            deadline,
-        )
-    else
-        try address_resolver.resolveSystem(
-            allocator,
-            io,
-            host,
-            port,
-            deadline,
-        );
-    defer allocator.free(addresses);
-    return if (deadline) |absolute|
-        tcp_connect.resolvedWithPolicyAndDeadline(
-            allocator,
-            io,
-            addresses,
-            absolute,
-            policy,
-        )
-    else
-        tcp_connect.resolvedWithPolicy(
-            allocator,
-            io,
-            addresses,
-            null,
-            policy,
-        );
+    return tcp_connect.endpointWithOptions(
+        allocator,
+        io,
+        net.IpAddress.parse(host, port) catch null,
+        host,
+        port,
+        resolver,
+        policy,
+        deadline,
+        binding,
+    );
 }
 
 fn establishMaybeDeadline(

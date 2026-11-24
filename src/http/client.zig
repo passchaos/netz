@@ -1093,6 +1093,9 @@ pub const Client = struct {
             endpoint.port,
         );
         defer self.allocator.free(authority);
+        var proxy_limits = self.options.http1_limits;
+        proxy_limits.local_address = self.options.local_address;
+        proxy_limits.network_interface = self.options.network_interface;
         const stream = if (connect_deadline) |absolute|
             try http1_runtime.Client.connectTunnelViaProxyUriWithDeadline(
                 self.allocator,
@@ -1100,7 +1103,7 @@ pub const Client = struct {
                 proxy.uri,
                 authority,
                 proxy_options,
-                self.options.http1_limits,
+                proxy_limits,
                 absolute,
             )
         else
@@ -1110,7 +1113,7 @@ pub const Client = struct {
                 proxy.uri,
                 authority,
                 proxy_options,
-                self.options.http1_limits,
+                proxy_limits,
             );
         if (self.options.tcp_nodelay) {
             socket_options.setTcpNoDelay(stream) catch {
@@ -1141,55 +1144,20 @@ pub const Client = struct {
         policy_option: ?AddressConnectPolicy,
         deadline: ?std.Io.Clock.Timestamp,
     ) ResponseTimeoutError!std.Io.net.Stream {
-        switch (endpoint.target) {
-            .ip => |address| return if (deadline) |absolute|
-                tcp_connect.ipWithDeadline(self.io, address, absolute)
-            else
-                tcp_connect.ip(self.io, address, null),
-            .host => {},
-        }
-        const resolver = resolver_option orelse self.options.address_resolver;
-        const policy = policy_option orelse self.options.address_connect_policy;
-        if (resolver == null and policy == .ordered) {
-            return if (deadline) |absolute|
-                endpoint.connectWithDeadline(self.io, absolute)
-            else
-                endpoint.connect(self.io);
-        }
-        const addresses = if (resolver) |configured|
-            try configured.resolve(
-                configured.context,
-                self.allocator,
-                self.io,
-                endpoint.tls_host,
-                endpoint.port,
-                deadline,
-            )
-        else
-            try address_resolver.resolveSystem(
-                self.allocator,
-                self.io,
-                endpoint.tls_host,
-                endpoint.port,
-                deadline,
-            );
-        defer self.allocator.free(addresses);
-        return if (deadline) |absolute|
-            tcp_connect.resolvedWithPolicyAndDeadline(
-                self.allocator,
-                self.io,
-                addresses,
-                absolute,
-                policy,
-            )
-        else
-            tcp_connect.resolvedWithPolicy(
-                self.allocator,
-                self.io,
-                addresses,
-                null,
-                policy,
-            );
+        return tcp_connect.endpointWithOptions(
+            self.allocator,
+            self.io,
+            switch (endpoint.target) {
+                .ip => |address| address,
+                .host => null,
+            },
+            endpoint.tls_host,
+            endpoint.port,
+            resolver_option orelse self.options.address_resolver,
+            policy_option orelse self.options.address_connect_policy,
+            deadline,
+            .fromOptions(self.options),
+        );
     }
 
     fn connectEndpointViaSocks5Before(
@@ -1199,6 +1167,9 @@ pub const Client = struct {
         deadline: ?std.Io.Clock.Timestamp,
     ) ResponseTimeoutError!std.Io.net.Stream {
         var options = proxy.options;
+        // The owning client's binding governs the actual proxy socket.
+        if (self.options.local_address) |address| options.local_address = address;
+        if (self.options.network_interface) |interface| options.network_interface = interface;
         if (options.address_resolver == null) {
             options.address_resolver = self.options.address_resolver;
         }

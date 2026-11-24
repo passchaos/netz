@@ -31,8 +31,12 @@ pub const Owner = struct {
         errdefer allocator.free(hostname);
         self.* = .{ .allocator = allocator, .client = undefined, .authority = authority, .hostname = hostname };
         var config = options.http3.handshake;
-        const local_address = options.http3.local_address orelse std.Io.net.IpAddress{ .ip4 = .unspecified(0) };
-        if (options.http3.local_address == null and config.alternate_local_address == null) config.alternate_local_address = .{ .ip6 = .unspecified(0) };
+        const configured_local = options.local_address orelse options.http3.local_address;
+        var limits = options.http3.limits;
+        if (options.network_interface) |interface| limits.quic.network_interface = interface;
+        const local_address = configured_local orelse std.Io.net.IpAddress{ .ip4 = .unspecified(0) };
+        if (configured_local == null and config.alternate_local_address == null) config.alternate_local_address = .{ .ip6 = .unspecified(0) };
+        if (options.local_address != null) config.alternate_local_address = null;
         config.address_connect_policy = options.http3.address_connect_policy;
         config.handshake.server_name = self.hostname;
         if (config.handshake.original_destination_connection_id.len == 0) {
@@ -66,10 +70,13 @@ pub const Owner = struct {
         self.client = if (options.socks5_proxy) |proxy| blk: {
             // Keep the configured SOCKS5 route: the proxy resolves the origin
             // domain and relays UDP; TLS identity stays bound to the URI host.
+            var proxy_options = proxy.options;
+            if (options.local_address) |address| proxy_options.local_address = address;
+            if (options.network_interface) |interface| proxy_options.network_interface = interface;
             const socks5: socks5_runtime.Proxy = .{
                 .host = proxy.host,
                 .port = proxy.port,
-                .options = proxy.options,
+                .options = proxy_options,
             };
             break :blk if (deadline) |until|
                 try socks5_runtime.connectHostWithDeadline(
@@ -79,7 +86,7 @@ pub const Owner = struct {
                     socks5,
                     self.hostname,
                     endpoint.port,
-                    options.http3.limits,
+                    limits,
                     config,
                     until,
                 )
@@ -91,13 +98,13 @@ pub const Owner = struct {
                     socks5,
                     self.hostname,
                     endpoint.port,
-                    options.http3.limits,
+                    limits,
                     config,
                 );
         } else if (deadline) |until|
-            try native.HandshakeClient.connectUriWithDeadline(allocator, io, local_address, uri, options.http3.limits, config, until)
+            try native.HandshakeClient.connectUriWithDeadline(allocator, io, local_address, uri, limits, config, until)
         else
-            try native.HandshakeClient.connectUri(allocator, io, local_address, uri, options.http3.limits, config);
+            try native.HandshakeClient.connectUri(allocator, io, local_address, uri, limits, config);
         return self;
     }
 

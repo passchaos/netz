@@ -1,4 +1,5 @@
 const std = @import("std");
+const socket_binding = @import("../../internal/socket_binding.zig");
 const net = std.Io.net;
 const accept_deadline = @import("../../internal/accept.zig");
 const deadline_policy = @import("../../internal/deadline.zig");
@@ -642,7 +643,7 @@ pub const Server = struct {
         return initWithListener(
             allocator,
             io,
-            try bind_address.listen(io, .{ .reuse_address = true }),
+            try socket_binding.listenTcp(io, bind_address, .{ .reuse_address = true }, limits.network_interface),
             limits,
         );
     }
@@ -940,9 +941,11 @@ pub const TlsServer = struct {
         return .{
             .allocator = allocator,
             .io = io,
-            .listener = try bind_address.listen(
+            .listener = try socket_binding.listenTcp(
                 io,
+                bind_address,
                 .{ .reuse_address = true },
+                options.limits.network_interface,
             ),
             .limits = options.limits,
             .tls = .{

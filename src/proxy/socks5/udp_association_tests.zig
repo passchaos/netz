@@ -114,7 +114,9 @@ test "SOCKS5 UDP association relays domains and owns control lifetime" {
         .{ .ip = try net.IpAddress.parse("198.51.100.1", 53) },
         "forged",
     );
-    const association_address = association.address();
+    // The association may bind a wildcard address. Send the forged packet to
+    // a routable loopback destination while retaining its actual bound port.
+    const association_address = net.IpAddress{ .ip4 = .loopback(association.address().getPort()) };
     try attacker.send(io, &association_address, forged);
     var receive_storage: [256]u8 = undefined;
     try std.testing.expectError(

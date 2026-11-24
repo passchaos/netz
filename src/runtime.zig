@@ -2,6 +2,9 @@ const std = @import("std");
 const builtin = @import("builtin");
 const zio = @import("zio");
 
+pub const NetworkInterface = @import("internal/network_interface.zig").NetworkInterface;
+pub const NetworkInterfaceError = @import("internal/network_interface.zig").Error;
+
 const ip_listener = @import("runtime/ip_listener.zig");
 
 pub const TcpListenerOptions = ip_listener.Options;

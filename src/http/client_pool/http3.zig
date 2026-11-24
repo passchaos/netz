@@ -381,6 +381,7 @@ pub const State = struct {
                 .{
                     .socks5 = proxy.options,
                     .bind_address = self.options.local_address,
+                    .network_interface = self.options.limits.quic.network_interface,
                 },
                 absolute,
             )
@@ -393,6 +394,7 @@ pub const State = struct {
                 .{
                     .socks5 = proxy.options,
                     .bind_address = self.options.local_address,
+                    .network_interface = self.options.limits.quic.network_interface,
                 },
             );
         var association_owned = true;

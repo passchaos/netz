@@ -39,7 +39,7 @@ const informationalResponseToSkip = message_framing.informationalResponseToSkip;
 pub const requestShouldSendContinue = message_framing.requestShouldSendContinue;
 pub const RequestReadStage = enum { head, continue_write, body };
 
-pub const Error = http1.Error || tls_stream.Error || uri_redirect.Error || error{
+pub const Error = tcp_connect.BindingResolvedConnectError || http1.Error || tls_stream.Error || uri_redirect.Error || error{
     HeadersTooLarge,
     BodyTooLarge,
     ConnectionClosed,
@@ -252,62 +252,20 @@ fn connectProxyUriBefore(
         try deadline_policy.capTimeout(io, absolute, limits.connect_timeout)
     else
         try deadline_policy.fromTimeout(io, limits.connect_timeout);
-    const stream = switch (endpoint.target) {
-        .ip => |address| if (connect_deadline) |absolute|
-            try tcp_connect.ipWithDeadline(io, address, absolute)
-        else
-            try tcp_connect.ip(io, address, null),
-        .host => |host| blk: {
-            const policy = proxy_options.address_connect_policy orelse
-                tcp_connect.AddressConnectPolicy.ordered;
-            try tcp_connect.validateAddressConnectPolicy(policy);
-            if (proxy_options.address_resolver == null and policy == .ordered) {
-                break :blk if (connect_deadline) |absolute|
-                    try tcp_connect.hostWithDeadline(
-                        io,
-                        host,
-                        endpoint.port,
-                        absolute,
-                    )
-                else
-                    try tcp_connect.host(io, host, endpoint.port, null);
-            }
-            const addresses = if (proxy_options.address_resolver) |resolver|
-                try resolver.resolve(
-                    resolver.context,
-                    allocator,
-                    io,
-                    endpoint.tls_host,
-                    endpoint.port,
-                    connect_deadline,
-                )
-            else
-                try address_resolver.resolveSystem(
-                    allocator,
-                    io,
-                    endpoint.tls_host,
-                    endpoint.port,
-                    connect_deadline,
-                );
-            defer allocator.free(addresses);
-            break :blk if (connect_deadline) |absolute|
-                try tcp_connect.resolvedWithPolicyAndDeadline(
-                    allocator,
-                    io,
-                    addresses,
-                    absolute,
-                    policy,
-                )
-            else
-                try tcp_connect.resolvedWithPolicy(
-                    allocator,
-                    io,
-                    addresses,
-                    null,
-                    policy,
-                );
+    const stream = try tcp_connect.endpointWithOptions(
+        allocator,
+        io,
+        switch (endpoint.target) {
+            .ip => |address| address,
+            .host => null,
         },
-    };
+        endpoint.tls_host,
+        endpoint.port,
+        proxy_options.address_resolver,
+        proxy_options.address_connect_policy orelse .ordered,
+        connect_deadline,
+        .fromOptions(limits),
+    );
     return Client.adoptStream(
         allocator,
         io,
@@ -360,6 +318,13 @@ pub fn connectTunnelViaProxyBefore(
 }
 
 pub const Limits = struct {
+    /// Source IP/port for newly opened TCP sockets.
+    /// Null leaves source selection to the OS. Requires Netz's zio backend.
+    local_address: ?std.Io.net.IpAddress = null,
+    /// Constrain the socket's network interface independently of source IP.
+    /// Names are borrowed; unsupported platforms/backends fail explicitly.
+    network_interface: ?tcp_connect.NetworkInterface = null,
+
     max_head_bytes: usize = 64 * 1024,
     /// Maximum request fields accepted by connection-owning `serve*` helpers.
     /// Direct read APIs continue to use their explicit `ParseOptions`.
