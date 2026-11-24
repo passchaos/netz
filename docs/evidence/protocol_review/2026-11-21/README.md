@@ -3757,3 +3757,6 @@ strict H3 role rejection, targeted/whole events and flow overlaps pass 309/310
 in Debug and ReleaseSafe with one Linux-only GRO skip. [Target event evidence](../../stream_target_events/2026-11-24/README.md)
 records the original two distinct failures, exact reverse RESET code and
 unaffected send-side completion.
+The native Windows transport job passed at `2f2b0ab8` (4m 17s), covering the
+target and strict-role filters alongside prior owner/reader/HTTP/H3/WebSocket
+checks. The linked evidence records the matching source and public success.

@@ -39,6 +39,7 @@ timeout semantics.
 | Target receive and STOP cases (Debug) | 139/139 | [target.Debug.log](target.Debug.log) |
 | Three-protocol direction/routing/event overlap (Debug) | 309/310, 1 platform skip | [overlap.Debug.log](overlap.Debug.log) |
 | Three-protocol direction/routing/event overlap (ReleaseSafe) | 309/310, 1 platform skip | [overlap.ReleaseSafe.log](overlap.ReleaseSafe.log) |
+| Native Windows target/owner/transport job | Success at `2f2b0ab8`, 4m 17s | [native-windows.json](native-windows.json) |
 
 The overlap includes QUIC receive-target, role/direction, FIN/reset event and
 invalid unidirectional-control tests; WTP targeted, whole, incremental,
@@ -56,6 +57,14 @@ ReleaseSafe uses the overlap scope with `-Doptimize=ReleaseSafe`. Native Windows
 CI includes the new QUIC and WTP target filters plus strict H3 server-bidi
 rejection alongside the existing transport/admission bundle. Its result is
 recorded after the matching Windows job finishes.
+
+The [native Windows job at `2f2b0ab8`](https://github.com/passchaos/netz/actions/runs/45356133099/job/138314281594)
+completed successfully in 4m 17s. The public matrix identifies the native
+Windows runner and success label; the run's commit link matches this code.
+[The snapshot](native-windows.json) records those sources and the exact command,
+including QUIC receive-target rejection, WTP STOP/reverse RESET and ordinary
+H3 strict-role checks. The new target/event tests use zio with no platform skip.
+Other workflow jobs have their own status.
 
 [Targeted stream event contracts](../../../stream_target_events.md) distinguish
 receive-direction admission from sending-side control event delivery.

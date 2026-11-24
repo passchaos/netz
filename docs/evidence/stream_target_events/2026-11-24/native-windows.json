@@ -1,0 +1,22 @@
+{
+  "source": "Public GitHub Actions matrix and matching run commit link",
+  "run_id": 45356133099,
+  "head_sha": "2f2b0ab85d61d8da2d35c5b9d194523502a70632",
+  "run_url": "https://github.com/passchaos/netz/actions/runs/45356133099",
+  "matrix_url": "https://github.com/passchaos/netz/actions/runs/45356133099/graph/matrix/fC1wb3J0YWJsZS18?attempt=1&expanded=true",
+  "native_job_id": 138314281594,
+  "conclusion": "success",
+  "observed_at": "2026-11-24T08:33:26.482991+00:00",
+  "card": {
+    "url": "https://github.com/passchaos/netz/actions/runs/45356133099/job/138314281594",
+    "labels": [
+      "completed successfully:"
+    ],
+    "text": [
+      "Portable x86_64-windows-gnu (windows-latest)",
+      "4m 17s",
+      "Portable x86_64-windows-gnu (windows-latest)"
+    ]
+  },
+  "command": "zig build test-http test-http3 test-quic test-websocket test-webtransport -Dtarget=x86_64-windows-gnu '-Dtest-filter=peer address' '-Dtest-filter=HTTP/3 CONNECT DATAGRAM' '-Dtest-filter=QUIC stream receive target admission' '-Dtest-filter=HTTP/3 protected runtime rejects server-initiated bidirectional message streams' '-Dtest-filter=WebSocket stream adapter' '-Dtest-filter=WebTransport operation admission' '-Dtest-filter=WebTransport stream reader admission' '-Dtest-filter=WebTransport stream read buffer admission' '-Dtest-filter=WebTransport stream read target admission' --summary all"
+}
