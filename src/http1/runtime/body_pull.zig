@@ -18,6 +18,8 @@ pub fn Reader(comptime ConnectionType: type, comptime RuntimeError: type) type {
             body_framing: http1.BodyFraming,
             content_length: ?usize,
             must_close: bool,
+            /// Socket address recorded for this request's transport.
+            from: ?std.Io.net.IpAddress = null,
             /// False when `target` and `headers` borrow an owned request that
             /// outlives this value; `deinit` then releases nothing.
             owned: bool = true,
@@ -42,7 +44,7 @@ pub fn Reader(comptime ConnectionType: type, comptime RuntimeError: type) type {
                     offset += field.value.len;
                     copy_field.* = .{ .name = name, .value = value };
                 }
-                return .{ .allocator = allocator, .method = request_head.method, .target = target, .version = request_head.version, .headers = headers, .storage = storage, .body_framing = request_head.body_framing, .content_length = request_head.content_length, .must_close = request_head.must_close };
+                return .{ .allocator = allocator, .method = request_head.method, .target = target, .version = request_head.version, .headers = headers, .storage = storage, .body_framing = request_head.body_framing, .content_length = request_head.content_length, .must_close = request_head.must_close, .from = request_head.from };
             }
 
             /// Borrow the head slices from an owned request instead of copying

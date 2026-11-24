@@ -163,6 +163,8 @@ pub fn Reader(comptime RuntimeError: type) type {
             body_framing: http1.BodyFraming,
             content_length: ?usize,
             must_close: bool = false,
+            /// Socket address recorded for this request's transport.
+            from: ?std.Io.net.IpAddress = null,
 
             pub fn header(
                 self: RequestHead,
@@ -307,6 +309,7 @@ pub fn Reader(comptime RuntimeError: type) type {
                 .body_framing = head.body_framing,
                 .content_length = head.content_length,
                 .must_close = head.must_close,
+                .from = head.from,
             }) catch |err| {
                 return err;
             };

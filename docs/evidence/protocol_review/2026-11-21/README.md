@@ -3538,3 +3538,15 @@ pipelined batch; the H1 `Connection` layout guard remains 384 bytes.
 | HTTP/2 runtime (Debug) | 985/985 | live `zig build test-http2 --summary all` |
 | HTTP aggregate (Debug) | 311/311 | live `zig build test-http --summary all` |
 | Package surface (Debug) | 28/28 | live `zig build test-package --summary all` |
+
+## Hundred-and-ninety-eighth pass: H1 pull-body peer address
+
+The pull-style request-body reader now copies `from` from the streaming head
+into its owned `Head`, completing peer-address coverage for H1 buffered,
+batch, streaming and pull-body request shapes. The body-reader head itself
+also carries `from` through the `begin` callback.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| HTTP/1 runtime (Debug) | 480/480 | live `zig build test-http1 --summary all` |
+| Package surface (Debug) | 28/28 | live `zig build test-package --summary all` |
