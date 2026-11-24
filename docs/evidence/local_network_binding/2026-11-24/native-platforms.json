@@ -1,0 +1,36 @@
+{
+  "run_id": 45374117986,
+  "head_sha": "71a757c39e20386de2962e26ed0fa58882cb6b8b",
+  "observed_at": "2026-11-24T10:30:01.920888+00:00",
+  "cards": [
+    {
+      "labels": [
+        "completed successfully: "
+      ],
+      "text": [
+        "Portable x86_64-linux-gnu (ubuntu-latest)",
+        "5m 9s",
+        "Portable x86_64-linux-gnu (ubuntu-latest)"
+      ],
+      "links": [
+        "/passchaos/netz/actions/runs/45374117986/job/138375820874"
+      ]
+    },
+    {
+      "labels": [
+        "completed successfully: "
+      ],
+      "text": [
+        "Portable x86_64-windows-gnu (windows-latest)",
+        "5m 43s",
+        "Portable x86_64-windows-gnu (windows-latest)"
+      ],
+      "links": [
+        "/passchaos/netz/actions/runs/45374117986/job/138375820826"
+      ]
+    }
+  ],
+  "source": "Public GitHub Actions native matrix and matching commit link",
+  "run_url": "https://github.com/passchaos/netz/actions/runs/45374117986",
+  "commit_verified": true
+}

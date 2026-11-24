@@ -78,7 +78,6 @@ pub fn apply(io: std.Io, handle: net.Socket.Handle, family: net.IpAddress.Family
         _ = zio.Runtime.fromIo(io) orelse return error.OptionUnsupported;
         // Winsock has no device constraint for received TCP packets.
         if (mode != .dgram) return error.OptionUnsupported;
-
     }
     const resolved = try interface.resolve(io);
     switch (comptime builtin.os.tag) {

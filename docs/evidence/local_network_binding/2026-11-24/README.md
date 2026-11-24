@@ -20,6 +20,7 @@ explicitly because Winsock has no corresponding received-TCP constraint.
 | UDP policy before bind, Debug | 158/158 passed | [before-bind.Debug.log](before-bind.Debug.log) |
 | UDP policy before bind, ReleaseSafe | 158/158 passed | [before-bind.ReleaseSafe.log](before-bind.ReleaseSafe.log) |
 | UDP policy before bind, Windows compilation | 8/8 build steps passed | [before-bind.windows-compile.log](before-bind.windows-compile.log) |
+| Final Windows family/BOOL compilation | 8/8 build steps passed | [windows-family-compile.log](windows-family-compile.log) |
 
 ## Scope of the native checks
 
@@ -33,8 +34,26 @@ the pool test inspects its actual shared UDP socket.
 
 Cross-compilation is recorded separately from execution. The portable workflow
 runs the binding suite natively on x86_64 Linux and includes it in the native
-Windows transport suite. Native CI snapshots will identify the exact tested
-commit and jobs once those runs finish.
+Windows transport suite. The final native matrix at `71a757c3` succeeded on Linux and Windows.
+[native-platforms.json](native-platforms.json) records the exact commit and jobs,
+with the commit independently checked against the run page.
+
+## Final native execution
+
+The [final native run](https://github.com/passchaos/netz/actions/runs/45374117986)
+tested source commit `71a757c39e20386de2962e26ed0fa58882cb6b8b`:
+
+| Native job | Result | Duration |
+| --- | --- | --- |
+| [Linux interface binding](https://github.com/passchaos/netz/actions/runs/45374117986/job/138375820874) | Success | 5m 9s |
+| [Windows transport and interface binding](https://github.com/passchaos/netz/actions/runs/45374117986/job/138375820826) | Success | 5m 43s |
+
+The native probe confirmed V6ONLY returns one byte `01`, while IFLIST returns
+four bytes `01000000`. The receive list must be enabled before adding a host-
+order interface index. The exact outcomes are recorded in
+[windows-bool-probe-messages.json](windows-bool-probe-messages.json).
+The Windows protocol suite exercised constrained IPv4/IPv6 QUIC traffic and
+authenticated direct/preferred H3, with TCP interface rejection tested explicitly.
 
 ## First native Windows result
 
@@ -49,8 +68,8 @@ all interface policy before UDP bind. This prevents another interface's packet
 from entering an initially unconstrained receive queue. Explicit UDP device
 binding uses zio's native socket creation, while ordinary std.Io source binds
 retain their existing path. The native Windows probe compares enable/add and
-bind ordering plus both interface-index byte orders; its outcomes and the next
-native regression result will be recorded separately.
+bind ordering plus both interface-index byte orders; its outcomes and the final
+native regression result are recorded above.
 
 ## Windows receive list and family checks
 
@@ -61,7 +80,7 @@ failure stacks are recorded in [windows-probe-messages.json](windows-probe-messa
 IPv4 progressed through the real send/receive regression; the remaining failure
 was the V6ONLY query performed before bind.
 
-The next correction configures V6ONLY before bind and validates its actual value
+The final correction configures V6ONLY before bind and validates its actual value
 after bind, before returning the socket. Boolean query buffers are initialized
 and accept byte or DWORD results; interface indices still require DWORD. The
 native probe additionally records raw V6ONLY and IFLIST bytes. Linux native
