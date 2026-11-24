@@ -80,6 +80,17 @@ pub fn main() !void {
                         .{name},
                     );
                     try self.respond(&connection, request.request, 200, body);
+                } else if (std.mem.eql(u8, path, "/whoami")) {
+                    var storage: [64]u8 = undefined;
+                    const body = if (request.request.from) |from|
+                        try std.fmt.bufPrint(
+                            &storage,
+                            "peer-port={d}",
+                            .{from.getPort()},
+                        )
+                    else
+                        "peer=unknown";
+                    try self.respond(&connection, request.request, 200, body);
                 } else if (std.mem.eql(u8, path, "/echo")) {
                     try self.respond(
                         &connection,
@@ -147,6 +158,7 @@ pub fn main() !void {
         .{ .target = "/health", .method = "GET" },
         .{ .target = "/hello?name=netz", .method = "GET" },
         .{ .target = "/echo", .method = "POST", .body = "echo body" },
+        .{ .target = "/whoami", .method = "GET" },
         .{ .target = "/missing", .method = "GET" },
         .{ .target = "/quit", .method = "GET" },
     };

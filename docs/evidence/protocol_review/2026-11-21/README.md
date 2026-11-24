@@ -3600,3 +3600,14 @@ paths.
 | --- | --- | --- |
 | WebTransport suite (Debug) | 761/763 (2 skipped) | live `zig build test-webtransport --summary all` |
 | Package surface (Debug) | 28/28 | live `zig build test-package --summary all` |
+
+## Two-hundred-and-third pass: runnable whoami route
+
+The server-routes example now serves `/whoami` from `http1.Request.from`,
+printing the accepted peer's port. The example run shows
+`GET /whoami -> 200: peer-port=...`, demonstrating the new request
+peer-address field through the pooled client path.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| Server-routes example (Debug) | `/whoami` 200 with peer port, 9/9 steps | live `zig build run-http-server-routes --summary all` |
