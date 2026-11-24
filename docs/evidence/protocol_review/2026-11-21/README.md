@@ -3723,3 +3723,7 @@ stream/grant/termination overlap passes 199/200 with one Linux-only UDP GRO
 skip. [Stream reader evidence](../../webtransport_stream_reader_admission/2026-11-24/README.md)
 records preserved buffers, registry/credit state, poll continuation, the failed
 baseline and the native CI filter.
+The same overlap passes 199/200 in ReleaseSafe with the same GRO platform skip.
+The native Windows transport job passed at `ab2ecc73` (2m 51s), including all
+four reader-admission cases and the previous operation/HTTP/H3/WebSocket
+filters. The linked evidence records the matching native success label.

@@ -33,6 +33,8 @@ buffered CLOSE reason.
 | Four reader admission regressions | Expected failures, 104/108 passing | [admission-before.log](admission-before.log) |
 | Reader admission (Debug) | 108/108 | [reader.Debug.log](reader.Debug.log) |
 | Stream/grant/termination overlap (Debug) | 199/200, 1 platform skip | [overlap.Debug.log](overlap.Debug.log) |
+| Stream/grant/termination overlap (ReleaseSafe) | 199/200, 1 platform skip | [overlap.ReleaseSafe.log](overlap.ReleaseSafe.log) |
+| Native Windows reader/operation/transport job | Success at `ab2ecc73`, 2m 51s | [native-windows.json](native-windows.json) |
 
 ```sh
 zig build test-webtransport \
@@ -51,6 +53,14 @@ kernel-batching case. The four new owner regressions do not skip.
 Native Windows CI includes this filter alongside the prior operation admission
 and HTTP/H3 DATAGRAM/WebSocket transport checks. Native evidence is recorded
 after the matching source revision's Windows job finishes.
+
+The [native Windows job at `ab2ecc73`](https://github.com/passchaos/netz/actions/runs/45347549331/job/138285824446)
+completed successfully in 2m 51s. The public matrix reports success for the
+Windows runner, and the run's commit link matches the source revision.
+[The snapshot](native-windows.json) records both sources and the exact native
+command, which includes all four reader tests and the prior operation-admission
+bundle alongside HTTP/H3 DATAGRAM/WebSocket checks. The four reader tests use
+zio and have no platform skip. Other workflow jobs have their own status.
 
 [The operation contract](../../../webtransport_operation_admission.md)
 describes the public ownership and timeout semantics.
