@@ -143,6 +143,7 @@ test "WebTransport HTTP2 EndpointListener isolates a slow TLS handshake" {
         request.negotiatedTlsProtocol().?,
     );
     try std.testing.expect(request.wasTlsSessionResumed() != null);
+    try std.testing.expect(request.peerAddress().getPort() != 0);
     // This client authenticates the server but presents no client certificate.
     try std.testing.expect(request.peerCertificates() == null);
     var accepted = try request.acceptWithTimeout(.{}, .fromSeconds(3));

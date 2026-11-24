@@ -402,9 +402,9 @@ server address is already resolved (the address-based form shown in
   `negotiatedTranscriptHash()`, `negotiatedTlsProtocol()` and
   `wasTlsSessionResumed()`; sessions also expose `applicationProtocol()`.
   HTTP/3 handshake sessions and endpoint clients expose the same TLS metadata
-  plus `earlyDataStatus()`. Handshake-backed
-  pending admission surfaces expose the same metadata plus `sessionId()`
-  before `accept()`, so client-certificate and transcript policy can reject a
+  plus `earlyDataStatus()`. Handshake-backed pending admission surfaces expose
+  the same metadata plus `sessionId()` and `peerAddress()` before `accept()`,
+  so client-certificate, peer-address and transcript policy can reject a
   session before it becomes visible. Cleartext returns null. Endpoint
   accessors read handshake-fixed values directly and must not race with
   endpoint shutdown.

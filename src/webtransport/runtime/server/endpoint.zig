@@ -122,6 +122,11 @@ pub const EndpointPendingSession = struct {
         return self.h3.established.early_data_status;
     }
 
+    /// Current QUIC peer path for the connection carrying this CONNECT.
+    pub fn peerAddress(self: EndpointPendingSession) std.Io.net.IpAddress {
+        return self.h3.established.connection.peerAddress();
+    }
+
     pub fn authority(self: EndpointPendingSession) ?[]const u8 {
         return self.request.request.authority;
     }

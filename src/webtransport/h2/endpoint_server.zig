@@ -279,6 +279,10 @@ pub const PendingRequest = struct {
     pub fn wasTlsSessionResumed(self: PendingRequest) ?bool {
         return self.state.connection.wasTlsSessionResumed();
     }
+    /// Socket address recorded for the parent HTTP/2 connection.
+    pub fn peerAddress(self: PendingRequest) std.Io.net.IpAddress {
+        return self.state.connection.stream.socket.address;
+    }
 
     pub fn acceptWithDeadline(self: *PendingRequest, options: runtime.ServerOptions, deadline: std.Io.Clock.Timestamp) Error!Accepted {
         const server = EndpointServer{ .state = self.state };

@@ -3563,3 +3563,15 @@ lists the accessor with the other pending metadata.
 | --- | --- | --- |
 | Full WebSocket suite (Debug) | 526/527 (1 skipped) | live `zig build test-websocket --summary all` |
 | Package surface (Debug) | 28/28 | live `zig build test-package --summary all` |
+
+## Two-hundredth pass: WebTransport pending peer address
+
+H2 WebTransport pending requests and the H3 endpoint pending session now
+expose `peerAddress()` before acceptance, matching the handshake pending
+session and the WebSocket/HTTP admission surfaces. The H2 listener and H3
+pending-session tests assert a non-zero peer port.
+
+| Gate | Result | Artifact |
+| --- | --- | --- |
+| WebTransport suite (Debug) | 761/763 (2 skipped) | live `zig build test-webtransport --summary all` |
+| Package surface (Debug) | 28/28 | live `zig build test-package --summary all` |

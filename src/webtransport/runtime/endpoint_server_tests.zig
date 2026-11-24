@@ -954,6 +954,7 @@ test "WebTransport URI deadline includes Extended CONNECT response" {
             );
             try std.testing.expectEqual(false, pending.wasTlsSessionResumed().?);
             try std.testing.expectEqual(.not_offered, pending.earlyDataStatus());
+            try std.testing.expect(pending.peerAddress().getPort() != 0);
             // Receiving the CONNECT request proves QUIC/TLS completed before
             // the caller's deadline. Keep the response pending until after
             // that exact timestamp so this test cannot accidentally measure
