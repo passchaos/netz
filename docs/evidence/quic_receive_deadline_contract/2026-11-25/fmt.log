@@ -1,0 +1,2 @@
+[traex-zig-guard 2026-11-25 20:02:59] started Zig tree root=61546 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=900s
+[traex-zig-guard 2026-11-25 20:03:00] finished Zig tree root=61546 peak=0MiB result=0

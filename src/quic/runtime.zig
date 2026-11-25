@@ -1613,13 +1613,14 @@ pub const Endpoint = struct {
         buffer: []u8,
         timeout: std.Io.Timeout,
     ) ReceiveTimeoutError!ReceivedBytesView {
+        const absolute = try deadline_policy.fromIoTimeout(self.io, timeout);
         if (buffer.len == 0) return error.BufferTooShort;
         if (self.gro_receive_enabled) {
             return error.CallerBufferReceiveWithGro;
         }
-        self.socket_receive_mutex.lockUncancelable(self.io);
-        defer self.socket_receive_mutex.unlock(self.io);
-        return self.receiveKernelBytesIntoTimeout(buffer, timeout);
+        var guard = try MutexGuard.initBefore(&self.socket_receive_mutex, self.io, absolute);
+        defer guard.unlock();
+        return self.receiveKernelBytesIntoTimeout(buffer, if (absolute) |until| .{ .deadline = until } else .none);
     }
 
     pub fn receiveBytesIntoWithTimeout(
@@ -1762,11 +1763,12 @@ pub const Endpoint = struct {
         self: *Endpoint,
         timeout: std.Io.Timeout,
     ) ReceiveTimeoutError!OwnedBytes {
+        const absolute = try deadline_policy.fromIoTimeout(self.io, timeout);
         if (self.takePendingReceived()) |pending| return pending;
-        self.socket_receive_mutex.lockUncancelable(self.io);
-        defer self.socket_receive_mutex.unlock(self.io);
+        var guard = try MutexGuard.initBefore(&self.socket_receive_mutex, self.io, absolute);
+        defer guard.unlock();
         if (self.takePendingReceived()) |pending| return pending;
-        return self.receiveKernelBytesTimeout(timeout);
+        return self.receiveKernelBytesTimeout(if (absolute) |until| .{ .deadline = until } else .none);
     }
 
     pub fn receiveBytesWithTimeout(
@@ -1806,15 +1808,16 @@ pub const Endpoint = struct {
         self: *Endpoint,
         timeout: std.Io.Timeout,
     ) ReceiveTimeoutError!OwnedBytesBatch {
+        const absolute = try deadline_policy.fromIoTimeout(self.io, timeout);
         if (self.takePendingReceived()) |pending| {
             return ownedBytesAsBatch(pending);
         }
-        self.socket_receive_mutex.lockUncancelable(self.io);
-        defer self.socket_receive_mutex.unlock(self.io);
+        var guard = try MutexGuard.initBefore(&self.socket_receive_mutex, self.io, absolute);
+        defer guard.unlock();
         if (self.takePendingReceived()) |pending| {
             return ownedBytesAsBatch(pending);
         }
-        return self.receiveKernelBytesBatchTimeout(timeout);
+        return self.receiveKernelBytesBatchTimeout(if (absolute) |until| .{ .deadline = until } else .none);
     }
 
     pub fn receiveBytesBatchWithTimeout(
@@ -1874,16 +1877,17 @@ pub const Endpoint = struct {
         buffer: []u8,
         timeout: std.Io.Timeout,
     ) ReceiveTimeoutError!ReceivedBytesBatchView {
+        const absolute = try deadline_policy.fromIoTimeout(self.io, timeout);
         try self.validateBatchReceiveBuffer(buffer);
         if (try self.copyPendingReceivedIntoBatch(buffer)) |pending| {
             return pending;
         }
-        self.socket_receive_mutex.lockUncancelable(self.io);
-        defer self.socket_receive_mutex.unlock(self.io);
+        var guard = try MutexGuard.initBefore(&self.socket_receive_mutex, self.io, absolute);
+        defer guard.unlock();
         if (try self.copyPendingReceivedIntoBatch(buffer)) |pending| {
             return pending;
         }
-        return self.receiveKernelBytesBatchIntoTimeout(buffer, timeout);
+        return self.receiveKernelBytesBatchIntoTimeout(buffer, if (absolute) |until| .{ .deadline = until } else .none);
     }
 
     pub fn receiveBytesBatchIntoWithTimeout(
@@ -2014,8 +2018,10 @@ pub const Endpoint = struct {
     ) ReceiveTimeoutError!void {
         // Converting a relative timeout once prevents ignored ICMP errors from
         // renewing the caller's receive budget.
-        const deadline = timeout.toDeadline(self.io);
+        const absolute = try deadline_policy.fromIoTimeout(self.io, timeout);
+        const deadline: std.Io.Timeout = if (absolute) |until| .{ .deadline = until } else .none;
         while (true) {
+            if (absolute) |until| _ = try deadline_policy.usableAwake(self.io, until);
             prepareKernelReceive(incoming, control_buffer);
             const maybe_err, const count = (try self.io.operateTimeout(
                 .{ .net_receive = .{
@@ -2605,9 +2611,10 @@ pub const Endpoint = struct {
         supported_versions: []const u32,
         timeout: std.Io.Timeout,
     ) ReceiveTimeoutError!OwnedBytes {
+        const absolute = try deadline_policy.fromIoTimeout(self.io, timeout);
         return self.receiveBytesHandlingVersionNegotiationUntil(
             supported_versions,
-            timeout.toDeadline(self.io),
+            if (absolute) |until| .{ .deadline = until } else .none,
         );
     }
 

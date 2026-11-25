@@ -356,11 +356,22 @@ caller-buffer, GRO-batch, and receive-many paths share that rule; timed retries
 retain one absolute deadline, while an actually truncated data/control message
 still fails with `DatagramTooLarge` through `MSG_TRUNC`/`MSG_CTRUNC`.
 Raw endpoint and dispatcher receive-many timeouts also normalize one awake
-deadline before buffer, callback or timed I/O admission. Expired or incompatible
-clock bounds return `Timeout`; a live budget retains backend capability errors
-such as `ConcurrencyUnavailable`. Endpoint receive ownership waits and
-asynchronous-ICMP retries keep the same original deadline. See the
+deadline before buffer, callback or timed I/O admission. Expired bounds return
+`Timeout`; raw bounds from other clock domains are translated from their
+remaining duration. Explicit `WithDeadline` forms require the awake clock. A
+live budget retains backend capability errors such as `ConcurrencyUnavailable`.
+Endpoint receive ownership waits and asynchronous-ICMP retries keep the same
+original deadline. See the
 [batch deadline admission evidence](evidence/quic_batch_deadline_admission/2026-11-25/README.md).
+The same admission rules now cover single parsed, owned-byte, caller-buffer,
+GRO batch, Version Negotiation and dispatcher visitor receives. Expiry leaves
+queued input untouched, and clock conversion samples awake time before the
+foreign clock's remaining duration to avoid extending the budget. Actual timed
+UDP conformance uses the supported `runtime.Backend`; foreign `std.Io`
+providers may report their documented capability errors. Zig 0.16's Windows
+Threaded backend does not implement concurrent `net_receive` batches. The
+[complete receive contract evidence](evidence/quic_receive_deadline_contract/2026-11-25/README.md)
+records both real-backend timeouts and foreign-backend admission tests.
 The server's first 1-RTT application send also appends HANDSHAKE_DONE through a
 16-frame stack-first view instead of allocating a temporary `Frame` array. The
 caller frames remain first, preserving HTTP/3 application ordering; oversized

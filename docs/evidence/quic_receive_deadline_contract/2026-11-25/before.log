@@ -1,0 +1,176 @@
+[traex-zig-guard 2026-11-25 20:00:32] started Zig tree root=93621 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=240s
+1/36 test_scope.test_0...OK
+2/36 quic.mod.test_0...OK
+3/36 quic.mod.test_1...OK
+4/36 quic.mod.test_2...OK
+5/36 quic.runtime.test_0...OK
+6/36 quic.runtime.test_1...OK
+7/36 quic.protection.test_0...OK
+8/36 quic.tls_client_hello.test_0...OK
+9/36 quic.tls.mod.test_0...OK
+10/36 quic.handshake.test_0...OK
+11/36 quic.client_trust.test_0...OK
+12/36 quic.zero_rtt.mod.test_0...OK
+13/36 quic.one_rtt.test_0...OK
+14/36 quic.packet_space.test_0...OK
+15/36 quic.stream.test_0...OK
+16/36 quic.recovery.test_0...OK
+17/36 quic.endpoint_dispatcher.test_0...OK
+18/36 quic.endpoint_server.test_0...OK
+19/36 quic.connection_id.test_0...OK
+20/36 quic.congestion.test_0...OK
+21/36 quic.pacing.test_0...OK
+22/36 quic.path_validation.test_0...OK
+23/36 quic.pmtu.test_0...OK
+24/36 quic.address_validation_token.test_0...OK
+25/36 quic.observability.qlog.mod.test_0...OK
+26/36 quic.load_balancing.quic_lb.mod.test_0...OK
+27/36 quic.resumption.mod.test_0...OK
+28/36 quic.endpoint_server.tests.test_0...OK
+29/36 quic.handshake.client_authentication.test_0...OK
+30/36 quic.resumption.ticket.mod.test_0...OK
+31/36 quic.endpoint_dispatcher.tests.test_0...OK
+32/36 quic.one_rtt.tests.mod.test_0...OK
+33/36 quic.handshake.tests.test_0...OK
+34/36 quic.runtime.receive_deadline_admission_tests.test.QUIC receive caller-owned deadlines reject expiry before I/O admission...expected error.Timeout, found error.ConcurrencyUnavailable
+FAIL (TestUnexpectedError)
+/Users/bytedance/project-z/netz/src/quic/runtime/receive_deadline_admission_tests.zig:41:9: 0x1053d045b in awaitConcurrent (test)
+        return error.ConcurrencyUnavailable;
+        ^
+/Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/Io.zig:592:9: 0x1051ff7a3 in awaitConcurrent (test)
+        return io.vtable.batchAwaitConcurrent(io.userdata, batch, timeout);
+        ^
+/Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/Io.zig:463:5: 0x1053cb317 in operateTimeout (test)
+    try batch.awaitConcurrent(io, timeout);
+    ^
+/Users/bytedance/project-z/netz/src/quic/runtime.zig:2020:45: 0x1053cc82b in receiveOneKernelIntoTimeout (test)
+            const maybe_err, const count = (try self.io.operateTimeout(
+                                            ^
+/Users/bytedance/project-z/netz/src/quic/runtime.zig:2331:9: 0x1053ce0db in receiveKernelBytesTimeout (test)
+        try self.receiveOneKernelIntoTimeout(
+        ^
+/Users/bytedance/project-z/netz/src/quic/runtime.zig:1769:9: 0x1053cdd8b in receiveBytesTimeout (test)
+        return self.receiveKernelBytesTimeout(timeout);
+        ^
+/Users/bytedance/project-z/netz/src/quic/runtime.zig:1553:13: 0x1053cf133 in receiveUntil (test)
+            try self.receiveBytesTimeout(bounded)
+            ^
+/Users/bytedance/project-z/netz/src/quic/runtime.zig:1538:9: 0x1053cef87 in receiveWithTimeout (test)
+        return self.receiveUntil(timeout);
+        ^
+/Users/bytedance/project-z/netz/src/quic/runtime/receive_deadline_admission_tests.zig:54:25: 0x10521587f in receive (test)
+            var value = try endpoint.receiveWithTimeout(timeout);
+                        ^
+/Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:72:13: 0x105215f43 in expectError__anon_37178 (test)
+            return error.TestUnexpectedError;
+            ^
+/Users/bytedance/project-z/netz/src/quic/runtime/receive_deadline_admission_tests.zig:105:17: 0x1053d2de7 in test.QUIC receive caller-owned deadlines reject expiry before I/O admission (test)
+                try std.testing.expectError(error.Timeout, receive(form, &endpoint, &dispatcher, if (slots == 0) &.{} else &storage, slots, timeout));
+                ^
+35/36 quic.runtime.receive_deadline_admission_tests.test.QUIC receive caller-owned deadlines translate raw clocks without renewing budget...expected error.ConcurrencyUnavailable, found error.Timeout
+FAIL (TestUnexpectedError)
+/Users/bytedance/project-z/netz/src/internal/deadline.zig:45:9: 0x10526db23 in usableAwake (test)
+        return error.Timeout;
+        ^
+/Users/bytedance/project-z/netz/src/internal/deadline.zig:20:12: 0x10526c847 in fromIoTimeout (test)
+    return try usableAwake(io, deadline);
+           ^
+/Users/bytedance/project-z/netz/src/quic/runtime.zig:1665:26: 0x1053ca1a7 in receiveManyBytesIntoTimeout (test)
+        const absolute = try deadline_policy.fromIoTimeout(self.io, timeout);
+                         ^
+/Users/bytedance/project-z/netz/src/quic/runtime/receive_deadline_admission_tests.zig:67:18: 0x105215b37 in receive (test)
+        .many => return endpoint.receiveManyBytesIntoTimeout(storage, views[0..slots], timeout),
+                 ^
+/Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:72:13: 0x105215f43 in expectError__anon_37178 (test)
+            return error.TestUnexpectedError;
+            ^
+/Users/bytedance/project-z/netz/src/quic/runtime/receive_deadline_admission_tests.zig:187:5: 0x10521662f in test.QUIC receive caller-owned deadlines translate raw clocks without renewing budget (test)
+    try std.testing.expectError(error.ConcurrencyUnavailable, receive(.many, &endpoint, &dispatcher, &storage, 2, .{ .duration = .{ .clock = .real, .raw = .fromSeconds(1) } }));
+    ^
+36/36 quic.initial_exchange.flight.test_0...OK
+34 passed; 0 skipped; 2 failed.
+test-quic
++- run test failure
+error: process exited with error code 1
+failed command: ./.zig-cache/o/1e6cb92c90a2704a8b42622e3f3a7f53/test --cache-dir=./.zig-cache --seed=0x4b352bec
+
+Build Summary: 8/10 steps succeeded (1 failed)
+test-quic transitive failure
++- run test failure
+   +- compile test Debug native success 9s MaxRSS:817M
+      +- WriteFile macho_0_p256_field_arm64.S cached
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 418ms MaxRSS:31M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 418ms MaxRSS:31M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options cached
+      +- options cached
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/7dcc4fc9beca1427f6532c06eb1db9ae/build /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/zig /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib /Users/bytedance/project-z/netz .zig-cache /Users/bytedance/.cache/zig --seed 0x4b352bec -Z704fdb22a29d1c51 test-quic -j1 -Dtest-progress=true -Dtest-filter=QUIC receive caller-owned deadlines reject expiry -Dtest-filter=QUIC receive caller-owned deadlines translate raw clocks --summary all
+[traex-zig-guard 2026-11-25 20:00:43] finished Zig tree root=93621 peak=737MiB result=0

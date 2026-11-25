@@ -1412,7 +1412,7 @@ pub const Dispatcher = struct {
     ) ReceiveError!Event {
         return self.receiveUntil(
             supported_versions,
-            timeout.toTimestamp(self.endpoint.io),
+            try deadline_policy.fromIoTimeout(self.endpoint.io, timeout),
         );
     }
 
@@ -1479,7 +1479,7 @@ pub const Dispatcher = struct {
         return self.receiveVisitingUntil(
             supported_versions,
             storage,
-            timeout.toTimestamp(self.endpoint.io),
+            try deadline_policy.fromIoTimeout(self.endpoint.io, timeout),
             context,
             visitor,
         );

@@ -138,7 +138,13 @@ jobs:
         run: zig build test-quic-endpoint-soak --summary all
 
       - name: Run the complete test gate serially
-        run: python tools/ci/run_test_progress.py --title "Complete test progress" --log complete-tests.log -- zig build test -j1 -Dtest-progress=true --verbose --summary all
+        run: |
+          complete_status=0
+          python tools/ci/run_test_progress.py --title "Complete test progress" --log complete-tests.log -- zig build test -j1 -Dtest-progress=true --verbose --summary all || complete_status=$?
+          if [ "$complete_status" -ne 0 ]; then
+            python tools/ci/test_failure_annotations.py complete-tests.log
+          fi
+          exit "$complete_status"
 
   portable:
     if: github.event_name != 'schedule'

@@ -3118,11 +3118,11 @@ test "QUIC endpoint dispatcher caller timeout coexists with transport timers" {
 
 test "QUIC endpoint dispatcher validates caller-owned deadlines" {
     const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{
-        .async_limit = .unlimited,
-    });
-    defer threaded.deinit();
-    const io = threaded.io();
+    // The native deadline contract runs on netz's supported asynchronous
+    // backend. Foreign timed-I/O capability errors have separate coverage.
+    var backend = try @import("../../runtime.zig").Backend.initZio(allocator);
+    defer backend.deinit();
+    const io = backend.io();
     var endpoint = try runtime.Endpoint.bind(
         allocator,
         io,

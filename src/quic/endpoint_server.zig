@@ -1014,6 +1014,7 @@ pub const Server = struct {
         context: anytype,
         comptime visitor: anytype,
     ) (Error || callbackErrorSet(visitor))!usize {
+        const deadline = try deadline_policy.fromIoTimeout(self.endpoint.io, timeout);
         if (output.len == 0 or
             output.len > quic.runtime.max_receive_batch_messages)
         {
@@ -1030,7 +1031,7 @@ pub const Server = struct {
                 supported_versions,
                 storage,
                 output,
-                timeout,
+                if (deadline) |until| .{ .deadline = until } else .none,
                 context,
                 visitor,
             );
@@ -1039,7 +1040,7 @@ pub const Server = struct {
             supported_versions,
             storage,
             output,
-            timeout.toTimestamp(self.endpoint.io),
+            deadline,
             context,
             visitor,
         );

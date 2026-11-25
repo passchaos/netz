@@ -1,0 +1,32 @@
+{
+  "commit": "0a11266845509427d57c7455be2521fb9d8f3fe4",
+  "run_id": 45606143658,
+  "windows_job_id": 139177382220,
+  "windows_trust_conclusion": "failure",
+  "windows_trust_completed_at": "2026-11-25T11:48:47Z",
+  "linux_job_id": 139177382366,
+  "linux_job_conclusion": "success",
+  "public_failure_contexts": [
+    {
+      "start_line": 892,
+      "title": "Native regression: native trust",
+      "message": "99/117 quic.endpoint_dispatcher.tests.test.QUIC endpoint dispatcher validates caller-owned deadlines...expected error.Timeout, found error.ConcurrencyUnavailable\nFAIL (TestUnexpectedError)\nD:\\a\\_temp\\533659a4-ea2b-492c-9a02-27fb10f7af95\\zig-x86_64-windows-0.16.0\\lib\\std\\Io\\Threaded.zig:3199:34: 0x7ff7d50b9149 in batchDrainSubmittedWindows (test_zcu.obj)\n                if (concurrency) return error.ConcurrencyUnavailable;\n                                 ^\nD:\\a\\_temp\\533659a4-ea2b-492c-9a02-27fb10f7af95\\zig-x86_64-windows-0.16.0\\lib\\std\\Io\\Threaded.zig:2715:9: 0x7ff7d50b7049 in batchAwaitConcurrent (test_zcu.obj)\n        try batchDrainSubmittedWindows(t, b, true);\n        ^\nD:\\a\\_temp\\533659a4-ea2b-492c-9a02-27fb10f7af95\\zig-x86_64-windows-0.16.0\\lib\\std\\Io.zig:592:9: 0x7ff7d4fba336 in awaitConcurrent (test_zcu.obj)\n        return io.vtable.batchAwaitConcurrent(io.userdata, batch, timeout);\n        ^\nD:\\a\\_temp\\533659a4-ea2b-492c-9a02-27fb10f7af95\\zig-x86_64-windows-0.16.0\\lib\\std\\Io.zig:463:5: 0x7ff7d5254c56 in operateTimeout (test_zcu.obj)\n    try batch.awaitConcurrent(io, timeout);\n    ^\nD:\\a\\netz\\netz\\netz\\src\\quic\\runtime.zig:2020:45: 0x7ff7d5254877 in receiveOneKernelIntoTimeout (test_zcu.obj)"
+    },
+    {
+      "start_line": 862,
+      "title": "Native regression: native trust",
+      "message": "39/61 quic.endpoint_dispatcher.tests.test.QUIC endpoint dispatcher validates caller-owned deadlines...expected error.Timeout, found error.ConcurrencyUnavailable\nFAIL (TestUnexpectedError)\nD:\\a\\netz\\netz\\netz\\src\\internal\\deadline.zig:45:9: 0x7ff6377f8815 in usableAwake (test_zcu.obj)\n        return error.Timeout;\n        ^\nD:\\a\\netz\\netz\\netz\\src\\internal\\owned_result_deadline.zig:7:31: 0x7ff6377f8521 in checkpoint (test_zcu.obj)\n    if (deadline) |until| _ = try deadlines.usableAwake(io, until);\n                              ^\nD:\\a\\netz\\netz\\netz\\src\\internal\\owned_result_deadline.zig:27:5: 0x7ff637d6b5c7 in complete__anon_7783609 (test_zcu.obj)\n    try checkpoint(io, deadline);\n    ^\nD:\\a\\netz\\netz\\netz\\src\\internal\\testing\\trust_completion.zig:26:13: 0x7ff637d656a3 in check (test_zcu.obj)\n            return error.Canceled;\n            ^\nD:\\a\\_temp\\533659a4-ea2b-492c-9a02-27fb10f7af95\\zig-x86_64-windows-0.16.0\\lib\\std\\Io.zig:1357:5: 0x7ff6377fda69 in checkCancel (test_zcu.obj)"
+    },
+    {
+      "start_line": 832,
+      "title": "Native regression: native trust",
+      "message": "151/153 quic.endpoint_dispatcher.tests.test.QUIC endpoint dispatcher validates caller-owned deadlines...expected error.Timeout, found error.ConcurrencyUnavailable\nFAIL (TestUnexpectedError)\nD:\\a\\_temp\\533659a4-ea2b-492c-9a02-27fb10f7af95\\zig-x86_64-windows-0.16.0\\lib\\std\\Io\\Threaded.zig:3199:34: 0x7ff72f589149 in batchDrainSubmittedWindows (test_zcu.obj)\n                if (concurrency) return error.ConcurrencyUnavailable;\n                                 ^\nD:\\a\\_temp\\533659a4-ea2b-492c-9a02-27fb10f7af95\\zig-x86_64-windows-0.16.0\\lib\\std\\Io\\Threaded.zig:2715:9: 0x7ff72f587049 in batchAwaitConcurrent (test_zcu.obj)\n        try batchDrainSubmittedWindows(t, b, true);\n        ^\nD:\\a\\_temp\\533659a4-ea2b-492c-9a02-27fb10f7af95\\zig-x86_64-windows-0.16.0\\lib\\std\\Io.zig:592:9: 0x7ff72f48a336 in awaitConcurrent (test_zcu.obj)\n        return io.vtable.batchAwaitConcurrent(io.userdata, batch, timeout);\n        ^\nD:\\a\\_temp\\533659a4-ea2b-492c-9a02-27fb10f7af95\\zig-x86_64-windows-0.16.0\\lib\\std\\Io.zig:463:5: 0x7ff72f5f73f6 in operateTimeout (test_zcu.obj)\n    try batch.awaitConcurrent(io, timeout);\n    ^\nD:\\a\\netz\\netz\\netz\\src\\quic\\runtime.zig:2020:45: 0x7ff72f5f6567 in receiveOneKernelIntoTimeout (test_zcu.obj)"
+    },
+    {
+      "start_line": 802,
+      "title": "Native regression: native trust",
+      "message": "106/163 quic.endpoint_dispatcher.tests.test.QUIC endpoint dispatcher validates caller-owned deadlines...expected error.Timeout, found error.ConcurrencyUnavailable\nFAIL (TestUnexpectedError)\nD:\\a\\_temp\\533659a4-ea2b-492c-9a02-27fb10f7af95\\zig-x86_64-windows-0.16.0\\lib\\std\\Io\\Threaded.zig:3199:34: 0x7ff6c7329149 in batchDrainSubmittedWindows (test_zcu.obj)\n                if (concurrency) return error.ConcurrencyUnavailable;\n                                 ^\nD:\\a\\_temp\\533659a4-ea2b-492c-9a02-27fb10f7af95\\zig-x86_64-windows-0.16.0\\lib\\std\\Io\\Threaded.zig:2715:9: 0x7ff6c7327049 in batchAwaitConcurrent (test_zcu.obj)\n        try batchDrainSubmittedWindows(t, b, true);\n        ^\nD:\\a\\_temp\\533659a4-ea2b-492c-9a02-27fb10f7af95\\zig-x86_64-windows-0.16.0\\lib\\std\\Io.zig:592:9: 0x7ff6c722a336 in awaitConcurrent (test_zcu.obj)\n        return io.vtable.batchAwaitConcurrent(io.userdata, batch, timeout);\n        ^\nD:\\a\\_temp\\533659a4-ea2b-492c-9a02-27fb10f7af95\\zig-x86_64-windows-0.16.0\\lib\\std\\Io.zig:463:5: 0x7ff6c7e4b516 in operateTimeout (test_zcu.obj)\n    try batch.awaitConcurrent(io, timeout);\n    ^\nD:\\a\\netz\\netz\\netz\\src\\quic\\runtime.zig:2020:45: 0x7ff6c7e4b027 in receiveOneKernelIntoTimeout (test_zcu.obj)"
+    }
+  ],
+  "verified_sdk_boundary": "Windows Threaded batchDrainSubmittedWindows rejects concurrent net_receive with ConcurrencyUnavailable."
+}

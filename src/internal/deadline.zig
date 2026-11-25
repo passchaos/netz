@@ -15,9 +15,15 @@ pub fn fromTimeout(
 }
 
 /// Normalize a raw I/O timeout once and validate it before admitting work.
+/// Foreign-clock bounds use their remaining duration, sampled after the awake
+/// clock so translating epochs cannot extend the original operation budget.
 pub fn fromIoTimeout(io: std.Io, timeout: std.Io.Timeout) Error!?std.Io.Clock.Timestamp {
     const deadline = timeout.toTimestamp(io) orelse return null;
-    return try usableAwake(io, deadline);
+    if (deadline.clock == .awake) return try usableAwake(io, deadline);
+    const awake_now = std.Io.Clock.awake.now(io);
+    const remaining = deadline.durationFromNow(io).raw;
+    if (remaining.nanoseconds <= 0) return error.Timeout;
+    return try usableAwake(io, .{ .clock = .awake, .raw = awake_now.addDuration(remaining) });
 }
 
 pub fn earlier(

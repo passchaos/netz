@@ -1,0 +1,83 @@
+{
+  "observed_utc": "2026-11-25T12:10:21.220544+00:00",
+  "platform": "aarch64-macos",
+  "zig_version": "0.16.0",
+  "baseline_commit": "0a11266845509427d57c7455be2521fb9d8f3fe4",
+  "source_sha256": {
+    "src/internal/deadline.zig": "05ddf7c1faf8faf01c27dfbe3cdb414fea03a76f3f86e3142fb077fe04e878ad",
+    "src/quic/runtime.zig": "356c7d6ee16c5b9988eeb336c4f2ba4ce2a1ed03986a2de0e94ef2517958b8d8",
+    "src/quic/endpoint_dispatcher.zig": "4adebd6e5440dd53433e17f35c207190d6c8b54125e30e4d552583cae4a15f5c",
+    "src/quic/endpoint_dispatcher/tests.zig": "691b7addabd628a594edff46726fbc3a5efb673313112e59a75b45075ac5ec3c",
+    "src/quic/endpoint_server.zig": "7ccaa8c4c43d77ff78598fbb7eebba37c843e354b3077bbc2cb23a1d3af05824",
+    "src/quic/runtime/receive_deadline_admission_tests.zig": "426fe895ac2939a8ba101a2f4d572937a87167b315f1ab6fb3e6759bef344b20",
+    ".github/workflows/ci.yml": "3dc37ed73146df3015dc1469651e0f2fd8e52c645237634c57460dbfad7d2fec",
+    "docs/quicz_parity.md": "a4472ea58369cbf38295b04d9c56536d1a9357744c7c155049ea63d15da770e9"
+  },
+  "checks": {
+    "Debug": {
+      "exit_code": 0,
+      "passed": 50,
+      "skipped": 2,
+      "failed": 0,
+      "total": 52,
+      "build_steps_succeeded": 10,
+      "skipped_tests": [
+        "44/52 quic.runtime.tests.test.QUIC caller batch leaves pending GRO suffix queued on short buffer...SKIP",
+        "45/52 quic.runtime.tests.test.QUIC UDP timed receive preserves one GRO owning batch...SKIP"
+      ],
+      "log": "Debug.log",
+      "log_sha256": "3b0131f944f85202a8d621408949bb5e254f580e566415b68cabfc60ec3d89f2"
+    },
+    "ReleaseSafe": {
+      "exit_code": 0,
+      "passed": 50,
+      "skipped": 2,
+      "failed": 0,
+      "total": 52,
+      "build_steps_succeeded": 10,
+      "skipped_tests": [
+        "44/52 quic.runtime.tests.test.QUIC caller batch leaves pending GRO suffix queued on short buffer...SKIP",
+        "45/52 quic.runtime.tests.test.QUIC UDP timed receive preserves one GRO owning batch...SKIP"
+      ],
+      "log": "ReleaseSafe.log",
+      "log_sha256": "8547fc53b232e9faf53c1f5b3b9f9047334a1c27d137f5514ff6dddde5f5e496"
+    }
+  },
+  "filters": [
+    "QUIC receive caller-owned deadlines",
+    "QUIC endpoint dispatcher validates caller-owned deadlines",
+    "receives plain batch into caller storage",
+    "preserves independent ECN control messages",
+    "preserves received prefix and rearms cancellation",
+    "preserves a received batch prefix before socket error",
+    "visits a ready datagram batch without allocation",
+    "retains batch suffix after visitor error",
+    "public batch bounds due timers before receive",
+    "QUIC UDP timed receive",
+    "QUIC caller batch leaves pending GRO",
+    "endpoint server validates"
+  ],
+  "command": "zig build test-quic -j1 -Dtest-progress=true [-Doptimize=ReleaseSafe] -Dtest-filter='QUIC receive caller-owned deadlines' -Dtest-filter='QUIC endpoint dispatcher validates caller-owned deadlines' -Dtest-filter='receives plain batch into caller storage' -Dtest-filter='preserves independent ECN control messages' -Dtest-filter='preserves received prefix and rearms cancellation' -Dtest-filter='preserves a received batch prefix before socket error' -Dtest-filter='visits a ready datagram batch without allocation' -Dtest-filter='retains batch suffix after visitor error' -Dtest-filter='public batch bounds due timers before receive' -Dtest-filter='QUIC UDP timed receive' -Dtest-filter='QUIC caller batch leaves pending GRO' -Dtest-filter='endpoint server validates' --summary all",
+  "before": {
+    "exit_code": 1,
+    "observed": [
+      "Expired raw single receive reaches unsupported I/O admission",
+      "Live raw foreign-clock duration incorrectly returns Timeout"
+    ],
+    "log": "before.log"
+  },
+  "format": {
+    "exit_code": 0,
+    "log": "fmt.log"
+  },
+  "ci_shell_validation": "ci-shell-validation.json",
+  "dependency_revisions": {
+    "vail": "d93847a7e091c835406ee10c0a86fd064f1475dd",
+    "vort": "a48e1151872a30a574363e994ec312969b3c7818",
+    "kron": "77b9572a0256da0ece836c6b49024b3282bd1d5b",
+    "webpkiz": "35c9f4bfecb51a7794670d474c01b3c6fe541e9e",
+    "regexz": "188b76e1dad902e44226e105b5b68ff742975c09",
+    "harnessz": "80117591603f35b1b084b9a5eafd040810ab4b3d"
+  },
+  "native_and_complete_acceptance": "pending subsequent CI; scoped checks do not establish whole-stack acceptance"
+}

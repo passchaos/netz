@@ -1,0 +1,132 @@
+[traex-zig-guard 2026-11-25 20:03:53] started Zig tree root=86222 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=360s
+1/52 test_scope.test_0...OK
+2/52 quic.mod.test_0...OK
+3/52 quic.mod.test_1...OK
+4/52 quic.mod.test_2...OK
+5/52 quic.runtime.test_0...OK
+6/52 quic.runtime.test_1...OK
+7/52 quic.protection.test_0...OK
+8/52 quic.tls_client_hello.test_0...OK
+9/52 quic.tls.mod.test_0...OK
+10/52 quic.handshake.test_0...OK
+11/52 quic.client_trust.test_0...OK
+12/52 quic.zero_rtt.mod.test_0...OK
+13/52 quic.one_rtt.test_0...OK
+14/52 quic.packet_space.test_0...OK
+15/52 quic.stream.test_0...OK
+16/52 quic.recovery.test_0...OK
+17/52 quic.endpoint_dispatcher.test_0...OK
+18/52 quic.endpoint_server.test_0...OK
+19/52 quic.connection_id.test_0...OK
+20/52 quic.congestion.test_0...OK
+21/52 quic.pacing.test_0...OK
+22/52 quic.path_validation.test_0...OK
+23/52 quic.pmtu.test_0...OK
+24/52 quic.address_validation_token.test_0...OK
+25/52 quic.observability.qlog.mod.test_0...OK
+26/52 quic.load_balancing.quic_lb.mod.test_0...OK
+27/52 quic.resumption.mod.test_0...OK
+28/52 quic.endpoint_server.tests.test_0...OK
+29/52 quic.endpoint_server.tests.test.QUIC endpoint server validates dual-stack preferred IPv4 path...OK
+30/52 quic.endpoint_server.tests.test.QUIC endpoint server validates dual-stack preferred IPv6 path...OK
+31/52 quic.handshake.client_authentication.test_0...OK
+32/52 quic.resumption.ticket.mod.test_0...OK
+33/52 quic.initial_exchange.flight.test_0...OK
+34/52 internal.owned_result_deadline.test_0...OK
+35/52 quic.endpoint_dispatcher.tests.test_0...OK
+36/52 quic.endpoint_dispatcher.tests.test.QUIC endpoint dispatcher visits a ready datagram batch without allocation...OK
+37/52 quic.endpoint_dispatcher.tests.test.QUIC endpoint dispatcher retains batch suffix after visitor error...OK
+38/52 quic.endpoint_dispatcher.tests.test.QUIC endpoint dispatcher public batch bounds due timers before receive...OK
+39/52 quic.endpoint_dispatcher.tests.test.QUIC endpoint dispatcher validates caller-owned deadlines...OK
+40/52 quic.one_rtt.tests.mod.test_0...OK
+41/52 quic.handshake.tests.test_0...OK
+42/52 quic.runtime.tests.test.QUIC UDP endpoint receives plain batch into caller storage...OK
+43/52 quic.runtime.tests.test.QUIC UDP endpoint batch preserves independent ECN control messages...OK
+44/52 quic.runtime.tests.test.QUIC caller batch leaves pending GRO suffix queued on short buffer...SKIP
+45/52 quic.runtime.tests.test.QUIC UDP timed receive preserves one GRO owning batch...SKIP
+46/52 quic.runtime.tests.test.QUIC endpoint preserves a received batch prefix before socket error...OK
+47/52 quic.runtime.receive_deadline_admission_tests.test.QUIC receive caller-owned deadlines reject expiry before I/O admission...OK
+48/52 quic.runtime.receive_deadline_admission_tests.test.QUIC receive caller-owned deadlines preserve live-budget admission errors...OK
+49/52 quic.runtime.receive_deadline_admission_tests.test.QUIC receive caller-owned deadlines bound socket ownership admission...OK
+50/52 quic.runtime.receive_deadline_admission_tests.test.QUIC receive caller-owned deadlines retain queued input on expiry...OK
+51/52 quic.runtime.receive_deadline_admission_tests.test.QUIC receive caller-owned deadlines translate raw clocks without renewing budget...OK
+52/52 quic.runtime.receive_cancel_tests.test.QUIC UDP batch preserves received prefix and rearms cancellation...OK
+50 passed; 2 skipped; 0 failed.
+Build Summary: 10/10 steps succeeded
+test-quic success
++- run test success 1s
+   +- compile test Debug native success 29s MaxRSS:2G
+      +- WriteFile macho_0_p256_field_arm64.S cached
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 269ms MaxRSS:31M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 223ms MaxRSS:31M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options success
+      +- options cached
+
+[traex-zig-guard 2026-11-25 20:04:25] finished Zig tree root=86222 peak=2672MiB result=0
