@@ -21,6 +21,14 @@ returns cancellation there. Both old expectations fail: 7/9 baseline tests pass.
 After the change, both cases verify two sleep calls using the identical absolute
 timestamp, and preserve `Canceled` from the second wait.
 
+The next native Windows run passes the H3 expiry fixture and exposes the legacy
+`TCP connect deadline includes hostname resolution` success test's one-second
+budget. It listens only on IPv4 and resolves `localhost`, whose first Windows
+candidate can be IPv6. The confirmed native refusal delay is longer than that
+budget, so this success fixture uses five seconds on Windows and retains one
+second elsewhere. Its resolution/connect path and production deadlines remain
+the same.
+
 Scoped overlap covers stream reads and writes, listener acceptance, TCP
 connection/lookup deadlines, system DNS, connection result pooling, H3
 handshakes/zero RTT and gRPC competition. The three macOS skips are the same
@@ -32,3 +40,6 @@ Linux-only abortive TCP reset probe imported by the three protocol roots.
 | Deterministic early wake/cancellation baseline | 7/9 passed; both new expectations fail | [before.Debug.log](before.Debug.log) |
 | Shared strict wait and relevant transport overlap | 291 passed, 3 platform skips | [Debug.log](Debug.log) |
 | Relevant regression compilation for Windows | Compiled | [windows.compile.log](windows.compile.log) |
+| Native Windows localhost success-fixture budget follow-up | `Timeout` under the original one-second budget | [native-windows-hostname-before.json](native-windows-hostname-before.json) |
+| Focused hostname budget/deadline wait follow-up on the local host | 9/9 passed | [hostname-budget.Debug.log](hostname-budget.Debug.log) |
+| Focused hostname follow-up compilation for Windows | Compiled | [hostname-budget.windows.compile.log](hostname-budget.windows.compile.log) |

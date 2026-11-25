@@ -1,0 +1,43 @@
+{
+  "run_id": 45525917084,
+  "head_sha": "ddfad70b1b3389bd93b0105c1a567633f7d9b974",
+  "job_id": 138909203688,
+  "annotations": [
+    {
+      "path": ".github",
+      "blob_href": "https://github.com/passchaos/netz/blob/ddfad70b1b3389bd93b0105c1a567633f7d9b974/.github",
+      "start_line": 117,
+      "start_column": null,
+      "end_line": 117,
+      "end_column": null,
+      "annotation_level": "failure",
+      "title": "Native hostname regression",
+      "message": "error: the following build command failed with exit code 1:\nD:\\a\\netz\\netz\\.zig-cache\\o\\426a57b7bd4ff698344e5136e8e42db8\\build.exe D:\\a\\_temp\\27633d73-3dcf-44d5-8766-d88d5c7bd03c\\zig-x86_64-windows-0.16.0\\zig.exe D:\\a\\_temp\\27633d73-3dcf-44d5-8766-d88d5c7bd03c\\zig-x86_64-windows-0.16.0\\lib D:\\a\\netz\\netz\\netz D:\\a\\netz\\netz\\.zig-cache D:\\a\\netz\\netz\\.zig-cache --seed 0xc948ca1 -Zf2c5ce199ed142dd test-http1 test-http2 -j1 -Dtarget=x86_64-windows-gnu -Dtest-filter=HTTP1 native resolver policy -Dtest-filter=HTTP2 native resolver policy -Dtest-filter=connection race admission -Dtest-filter=connection race storage -Dtest-filter=connection race pool -Dtest-filter=absolute deadline wait -Dtest-filter=stream timed -Dtest-filter=listener accept deadline -Dtest-filter=TCP connect deadline --summary all",
+      "raw_details": ""
+    },
+    {
+      "path": ".github",
+      "blob_href": "https://github.com/passchaos/netz/blob/ddfad70b1b3389bd93b0105c1a567633f7d9b974/.github",
+      "start_line": 103,
+      "start_column": null,
+      "end_line": 103,
+      "end_column": null,
+      "annotation_level": "failure",
+      "title": "Native hostname regression",
+      "message": "error: 'internal.tcp_connect.tests.test.TCP connect deadline includes hostname resolution' failed:\n       race storage context_bytes=4096 candidates=1 small_bytes=0 large_bytes=0 allocations=0/0\n       race storage context_bytes=4096 candidates=8 small_bytes=0 large_bytes=0 allocations=0/0\n       race storage context_bytes=4096 candidates=9 small_bytes=0 large_bytes=0 allocations=0/0\n       race storage context_bytes=4096 candidates=64 small_bytes=0 large_bytes=0 allocations=0/0\n       race pool result_bytes=4096 candidates=1/64 max_in_flight=1 allocated_bytes=0/0 allocations=0/0\n       race pool result_bytes=4096 candidates=2/64 max_in_flight=2 allocated_bytes=0/0 allocations=0/0\n       race pool result_bytes=4096 candidates=8/64 max_in_flight=8 allocated_bytes=0/0 allocations=0/0\n       race pool result_bytes=4096 candidates=9/64 max_in_flight=9 allocated_bytes=37152/37152 allocations=1/1\n       race pool result_bytes=4096 candidates=64/64 max_in_flight=64 allocated_bytes=265248/265248 allocations=2/2\n       D:\\a\\netz\\netz\\netz\\src\\internal\\tcp_connect.zig:527:13: 0x7ff72ca689ec in race__anon_116940 (test_zcu.obj)\n                   return error.Timeout;\n                   ^\n       D:\\a\\netz\\netz\\netz\\src\\internal\\tcp_connect.zig:135:5: 0x7ff72ca67f63 in host (test_zcu.obj)",
+      "raw_details": ""
+    },
+    {
+      "path": ".github",
+      "blob_href": "https://github.com/passchaos/netz/blob/ddfad70b1b3389bd93b0105c1a567633f7d9b974/.github",
+      "start_line": 89,
+      "start_column": null,
+      "end_line": 89,
+      "end_column": null,
+      "annotation_level": "failure",
+      "title": "Native hostname regression",
+      "message": "error: 'internal.tcp_connect.tests.test.TCP connect deadline includes hostname resolution' failed:\n       race storage context_bytes=4096 candidates=1 small_bytes=0 large_bytes=0 allocations=0/0\n       race storage context_bytes=4096 candidates=8 small_bytes=0 large_bytes=0 allocations=0/0\n       race storage context_bytes=4096 candidates=9 small_bytes=0 large_bytes=0 allocations=0/0\n       race storage context_bytes=4096 candidates=64 small_bytes=0 large_bytes=0 allocations=0/0\n       race pool result_bytes=4096 candidates=1/64 max_in_flight=1 allocated_bytes=0/0 allocations=0/0\n       race pool result_bytes=4096 candidates=2/64 max_in_flight=2 allocated_bytes=0/0 allocations=0/0\n       race pool result_bytes=4096 candidates=8/64 max_in_flight=8 allocated_bytes=0/0 allocations=0/0\n       race pool result_bytes=4096 candidates=9/64 max_in_flight=9 allocated_bytes=37152/37152 allocations=1/1\n       race pool result_bytes=4096 candidates=64/64 max_in_flight=64 allocated_bytes=265248/265248 allocations=2/2\n       D:\\a\\netz\\netz\\netz\\src\\internal\\stream_io\\timed_read.zig:66:18: 0x7ff6f1339ebe in readSomeWithDeadline (test_zcu.obj)\n               .read => return task.result.?,\n                        ^\n       D:\\a\\netz\\netz\\netz\\src\\internal\\tcp_connect.zig:527:13: 0x7ff6f20f799c in race__anon_11055236 (test_zcu.obj)",
+      "raw_details": ""
+    }
+  ]
+}

@@ -608,11 +608,14 @@ test "TCP connect deadline includes hostname resolution" {
     defer listener.deinit(io);
 
     const host_name = try net.HostName.init("localhost");
+    // The listener is IPv4-only. Windows localhost can return IPv6 first,
+    // and publishing that refusal can exceed one second before IPv4 fallback.
+    const connect_budget = std.Io.Duration.fromSeconds(if (@import("builtin").os.tag == .windows) 5 else 1);
     var stream = try host(
         io,
         host_name,
         listener.socket.address.ip4.port,
-        .fromSeconds(1),
+        connect_budget,
     );
     defer stream.close(io);
     const accepted = try listener.accept(io);
