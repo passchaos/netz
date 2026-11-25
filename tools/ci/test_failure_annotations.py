@@ -10,14 +10,16 @@ def annotate(path: Path) -> None:
     failures = [
         index
         for index, line in enumerate(lines)
-        if "error:" in line or "FAIL (" in line or "panic:" in line or line.startswith(("FAIL:", "ERROR:", "Traceback"))
+        if "error:" in line or "FAIL (" in line or "panic:" in line
+        or "leaked:" in line or "leaked memory" in line or "[gpa] (err)" in line
+        or line.startswith(("FAIL:", "ERROR:", "Traceback"))
     ]
     if not failures:
         failures = [max(0, len(lines) - 40)]
     for index in failures[:12]:
         start = max(0, index - 1)
         context_lines = lines[start:index + 14]
-        if "FAIL (" in lines[index] or "panic:" in lines[index]:
+        if "FAIL (" in lines[index] or "panic:" in lines[index] or "leaked:" in lines[index] or "[gpa] (err)" in lines[index]:
             for previous in range(index, max(-1, index - 40), -1):
                 if re.match(r"^\d+/\d+\s", lines[previous]):
                     if previous < start:

@@ -337,6 +337,10 @@ fn removeAfterDrop(
         error.EndpointClosed,
         error.ConnectionClosed,
         error.SocketUnconnected,
+        // The peer deliberately closes this generation. TLS EOF/reset during
+        // its local handle cleanup is equivalent to an already-closed endpoint.
+        error.UnexpectedEof,
+        error.ConnectionResetByPeer,
         => false,
         else => return err,
     };

@@ -1,0 +1,52 @@
+[
+  {
+    "href": "/passchaos/netz/actions/runs/45684485249/job/139453354460#step:21:259",
+    "title": "Portable x86_64-linux-gnu (ubuntu-latest)",
+    "message": "Process completed with exit code 1."
+  },
+  {
+    "href": "/passchaos/netz/actions/runs/45684485249/job/139453354460#step:21:256",
+    "title": "Native regression: native protocol ci",
+    "message": "error: the following build command failed with exit code 1:\n/home/runner/work/netz/netz/.zig-cache/o/c165f218c690b47ec2045454138433ba/build /home/runner/work/_temp/be28d917-3c2a-4273-bcf6-cf8c27a84b76/zig-x86_64-linux-0.16.0/zig /home/runner/work/_temp/be28d917-3c2a-4273-bcf6-cf8c27a84b76/zig-x86_64-linux-0.16.0/lib /home/runner/work/netz/netz/netz /home/runner/work/netz/netz/.zig-cache /home/runner/work/netz/netz/.zig-cache --seed 0x3317bb04 -Zac02b6bf9f4526cc test-http2 test-webtransport -j1 -Dtest-progress=true -Dtarget=x86_64-linux-gnu -Dtest-filter=HTTP/2 connection keeps optional state compact -Dtest-filter=standalone dispatcher retains rejection through bounded cleanup -Dtest-filter=ReconnectingEndpointClient reconnects only future Sessions --summary all"
+  },
+  {
+    "href": "/passchaos/netz/actions/runs/45684485249/job/139453354460#step:21:241",
+    "title": "Native regression: native protocol ci",
+    "message": "+- run test failure\nerror: process exited with error code 1\nfailed command: /home/runner/work/netz/netz/.zig-cache/o/2469bf95776e8291b9a6bff3e623df64/test --cache-dir=/home/runner/work/netz/netz/.zig-cache --seed=0x3317bb04\n\n1/28 test_scope.test_0...OK\n2/28 http2.mod.test_0...OK\n3/28 http2.mod.test_1...OK\n4/28 internal.priority.test_0...OK\n5/28 http2.runtime.test_0...OK\n6/28 http2.runtime.tests.test_0...OK\n7/28 http2.runtime.tests.test_1...OK\n8/28 http2.runtime.tests.test_2...OK\n9/28 http2.runtime.concurrent_tests.test_0...OK\n10/28 http2.runtime.runtime_state_tests.test.HTTP/2 connection keeps optional state compact...OK\n11/28 tls.mod.test_0...OK"
+  },
+  {
+    "href": "/passchaos/netz/actions/runs/45684485249/job/139453354460#step:21:225",
+    "title": "Native regression: native protocol ci",
+    "message": "16/136 webtransport.h2.endpoint_client.reconnecting.tests.test.WebTransport HTTP2 ReconnectingEndpointClient reconnects only future Sessions...WT reconnect peer phase waiting for second generation: Canceled\nWT reconnect client phase old-generation receive/removal: UnexpectedEof\nFAIL (UnexpectedEof)\n/home/runner/work/netz/netz/netz/src/webtransport/h2/endpoint_client/reconnecting/tests.zig:222:9: 0x1499a50 in reconnectFutureSessions (test_scope.zig)\n    _ = try removeAfterDrop(client, b);\n        ^\n/home/runner/work/netz/netz/netz/src/internal/testing/native_protocol_io.zig:12:9: 0x1493978 in run__anon_42876 (test_scope.zig)\n        try test_case(threaded.io());\n        ^\n/home/runner/work/netz/netz/netz/src/webtransport/h2/endpoint_client/reconnecting/tests.zig:21:5: 0x1488697 in test.WebTransport HTTP2 ReconnectingEndpointClient reconnects only future Sessions (test_scope.zig)\n    try native_protocol_io.run(reconnectFutureSessions);\n    ^\n17/136 http2.mod.test_0...OK\n18/136 http2.mod.test_1...OK\n19/136 http2.runtime.test_0...OK\n20/136 http1.mod.test_0...OK"
+  },
+  {
+    "href": "/passchaos/netz/actions/runs/45684485249/job/139453354460#step:47:2",
+    "title": "Portable x86_64-linux-gnu (ubuntu-latest)",
+    "message": "Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262, mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/"
+  },
+  {
+    "href": "/passchaos/netz/actions/runs/45684485249/job/139453354460#step:21:224",
+    "title": "Native protocol CI progress",
+    "message": "28/28 http2.runtime.refusal_tests.test_0...OK"
+  },
+  {
+    "href": "/passchaos/netz/actions/runs/45684485249/job/139453354460#step:21:14",
+    "title": "Native protocol CI progress",
+    "message": "No test name emitted yet; build or startup is still active."
+  },
+  {
+    "href": "/passchaos/netz/actions/runs/45684485249/job/139453354460#step:19:406",
+    "title": "Native trust progress",
+    "message": "119/119 http3.origin_pool.test_0...OK"
+  },
+  {
+    "href": "/passchaos/netz/actions/runs/45684485249/job/139453354460#step:19:282",
+    "title": "Native trust progress",
+    "message": "63/63 quic.runtime.receive_deadline_admission_tests.test.QUIC receive caller-owned deadlines translate raw clocks without renewing budget...OK"
+  },
+  {
+    "href": "/passchaos/netz/actions/runs/45684485249/job/139453354460#step:19:36",
+    "title": "Native trust progress",
+    "message": "17/26 tls.stream.ca_bundle_lock_tests.test.TLS CA bundle lock caller deadline expires while the writer stays held..."
+  }
+]

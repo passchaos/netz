@@ -1,0 +1,38 @@
+{
+  "observed_utc": "2026-11-25T20:10:17.903842+00:00",
+  "source_sha256": {
+    "src/webtransport/h2/endpoint_client/reconnecting/tests.zig": "6c0cf5bf0f56f662bf76e54f4ec779a973903da921c25d01e1dada0d28f8474d",
+    "tools/ci/test_failure_annotations.py": "5c0719b76e8879f102c09678d5a1ce9cb695066b881b09f6ecd81ac829bc8deb",
+    "tools/ci/test_failure_annotations_test.py": "cad791843b8e8f068fe93006168c7af78bdc83cabac79e8ddead2add670faeeb"
+  },
+  "native_evidence": {
+    "run_id": 45684485249,
+    "linux_failure_phase": "old-generation receive/removal",
+    "linux_failure_call": "removeAfterDrop(client,b)",
+    "linux_failure_error": "UnexpectedEof",
+    "peer_phase": "waiting for second generation; Canceled by fixture teardown"
+  },
+  "change": "Treat EOF/reset as expected only during intentional old-generation cleanup; initial/future CONNECT failures remain failures",
+  "validation": {
+    "local_dual_backend_scope": {
+      "tests_passed": 135,
+      "exit_code": 0
+    },
+    "annotation_regressions": {
+      "tests_passed": 7,
+      "exit_code": 0
+    },
+    "evidence_audit": {
+      "exit_code": 0,
+      "files": 306,
+      "entries": 10951,
+      "matched": 6428,
+      "stale": 4520,
+      "unresolved": 3,
+      "invalid": 0,
+      "unreadable": 0,
+      "log": "evidence-audit.log"
+    }
+  },
+  "qualification": "Native Linux and Windows plus complete CI remain pending; no deadline budgets or dependency pins changed."
+}

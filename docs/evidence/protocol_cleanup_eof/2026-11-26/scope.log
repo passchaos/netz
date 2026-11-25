@@ -1,0 +1,3 @@
+Executing: /Users/bytedance/.local/bin/zig fmt src/internal/testing/native_protocol_io.zig src/webtransport/h2/endpoint_client/reconnecting/tests.zig src/webtransport/runtime/session_control/handshake_rejection_tests.zig
+Executing: /Users/bytedance/.local/bin/zig build test-webtransport -j1 -Dtest-progress=true -Dtest-filter=standalone dispatcher retains rejection through bounded cleanup -Dtest-filter=ReconnectingEndpointClient reconnects only future Sessions --summary all
+All 135 tests passed.

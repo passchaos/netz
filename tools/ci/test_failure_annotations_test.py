@@ -62,6 +62,16 @@ class AnnotationsTest(unittest.TestCase):
         self.assertIn("line 60", output)
         self.assertNotIn("line 0%0A", output)
 
+    def test_allocator_leak_keeps_case_and_stack_before_later_build_error(self):
+        text = "1/2 quic.test.borrowed completion...OK\n"
+        text += "[gpa] (err): memory address 0x1234 leaked:\nallocation at owner.zig:42\n"
+        text += "2/2 quic.test.other case...OK\n1 tests leaked memory.\n"
+        text += "error: process exited with error code 1\n"
+        first = self.render(text, "native-protocol-ci.log").splitlines()[0]
+        self.assertIn("quic.test.borrowed completion", first)
+        self.assertIn("memory address 0x1234 leaked", first)
+        self.assertIn("allocation at owner.zig:42", first)
+
 
 if __name__ == "__main__":
     unittest.main()
