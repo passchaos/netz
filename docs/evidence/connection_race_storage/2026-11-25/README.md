@@ -54,3 +54,4 @@ gRPC endpoint competition and owned responses; and the prior admission guards.
 | Allocation measurements | Recorded for 1, 8, 9 and 64 candidates | [metadata.json](metadata.json) |
 | Storage, ownership, admission and live TCP/H3/gRPC overlap | 189/189 passed | [Debug.log](Debug.log) |
 | Scoped regression compilation for Windows | Compiled | [windows.compile.log](windows.compile.log) |
+| Native Linux and Windows storage, lifetime and transport regressions | Passed at `dcb27147` | [native-platforms.json](native-platforms.json) |

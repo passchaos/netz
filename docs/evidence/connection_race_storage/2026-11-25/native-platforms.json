@@ -1,0 +1,103 @@
+{
+  "run_id": 45518779991,
+  "run_url": "https://github.com/passchaos/netz/actions/runs/45518779991",
+  "head_sha": "dcb27147a35d99975d1380608e8a1bcdcf6357b8",
+  "jobs": [
+    {
+      "id": 138885144700,
+      "name": "Portable x86_64-linux-gnu (ubuntu-latest)",
+      "status": "completed",
+      "conclusion": "success",
+      "steps": [
+        {
+          "name": "Run native Linux interface binding regressions",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 13,
+          "started_at": "2026-11-25T00:34:34Z",
+          "completed_at": "2026-11-25T00:35:20Z"
+        },
+        {
+          "name": "Run native Linux connection and Upgrade regressions",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 14,
+          "started_at": "2026-11-25T00:35:20Z",
+          "completed_at": "2026-11-25T00:37:37Z"
+        },
+        {
+          "name": "Run native HTTP3 resolver and acquisition regressions",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 16,
+          "started_at": "2026-11-25T00:37:37Z",
+          "completed_at": "2026-11-25T00:38:09Z"
+        },
+        {
+          "name": "Run native ordered TCP hostname regressions",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 17,
+          "started_at": "2026-11-25T00:38:09Z",
+          "completed_at": "2026-11-25T00:38:11Z"
+        },
+        {
+          "name": "Run native H1 H2 resolver policy regressions",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 18,
+          "started_at": "2026-11-25T00:38:11Z",
+          "completed_at": "2026-11-25T00:39:32Z"
+        }
+      ]
+    },
+    {
+      "id": 138885144288,
+      "name": "Portable x86_64-windows-gnu (windows-latest)",
+      "status": "completed",
+      "conclusion": "success",
+      "steps": [
+        {
+          "name": "Probe native Winsock interface option semantics",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 15,
+          "started_at": "2026-11-25T00:33:28Z",
+          "completed_at": "2026-11-25T00:33:30Z"
+        },
+        {
+          "name": "Run native HTTP3 resolver and acquisition regressions",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 16,
+          "started_at": "2026-11-25T00:33:30Z",
+          "completed_at": "2026-11-25T00:35:20Z"
+        },
+        {
+          "name": "Run native ordered TCP hostname regressions",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 17,
+          "started_at": "2026-11-25T00:35:20Z",
+          "completed_at": "2026-11-25T00:35:38Z"
+        },
+        {
+          "name": "Run native H1 H2 resolver policy regressions",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 18,
+          "started_at": "2026-11-25T00:35:38Z",
+          "completed_at": "2026-11-25T00:38:09Z"
+        },
+        {
+          "name": "Run native Windows transport regressions",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 19,
+          "started_at": "2026-11-25T00:38:09Z",
+          "completed_at": "2026-11-25T00:41:11Z"
+        }
+      ]
+    }
+  ]
+}
