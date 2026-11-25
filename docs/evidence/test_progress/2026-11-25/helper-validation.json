@@ -1,0 +1,66 @@
+{
+  "platform": "aarch64-macos",
+  "python_tests": {
+    "test_failure_annotations_test.py": {
+      "passed": 5
+    },
+    "run_test_progress_test.py": {
+      "passed": 5
+    }
+  },
+  "sources": [
+    {
+      "path": "tools/ci/test_failure_annotations.py",
+      "sha256": "2003f4f4d7fd00f9dbc0784e2d1fceb465615d8eb0048ebc480f712704ffde7d"
+    },
+    {
+      "path": "tools/ci/test_failure_annotations_test.py",
+      "sha256": "4fbed05811883d5ebdfaf1651cb8c609e313b5f18f31088452db2dc3e8d6caf8"
+    },
+    {
+      "path": "tools/ci/run_test_progress.py",
+      "sha256": "8536279eac735f1ac41e676a416d93e58ff7d5bd9cd2e5b35b52b62ae869bb1e"
+    },
+    {
+      "path": "tools/ci/run_test_progress_test.py",
+      "sha256": "310f6cc29ad7f2b6cc41aaa9553bfa7079aa9b9a1db3d6bb6985ed1ca25f0883"
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "sha256": "0c3e79ec6ecaddcc2ab206cc1224641160d7aec850e91ac29501139a63fe8f34"
+    }
+  ],
+  "notes": [
+    "Failure annotation checks cover terminal and server-mode errors, panic, test-name retention and bounded output.",
+    "Progress wrapper checks use real children for partial lines, exit status, build-phase reporting, exact large logs and split UTF-8.",
+    "All three diagnostic CI acceptance steps were canceled at the 30-minute job limit; no native or complete-suite passing conclusion was established."
+  ],
+  "diagnostic_ci": {
+    "run_id": 45586673594,
+    "commit": "8cb2f3a38de27c1e89c333d4e93b86d5e5d2a06f",
+    "job_limit_minutes": 30,
+    "jobs": [
+      {
+        "name": "verify",
+        "id": 139109927250,
+        "step": "Run the complete test gate serially",
+        "conclusion": "cancelled",
+        "completed_at": "2026-11-25T10:04:38Z"
+      },
+      {
+        "name": "windows",
+        "id": 139109927961,
+        "step": "Run native trust startup regressions",
+        "conclusion": "cancelled",
+        "completed_at": "2026-11-25T10:04:34Z"
+      },
+      {
+        "name": "linux",
+        "id": 139109927983,
+        "step": "Run native trust startup regressions",
+        "conclusion": "cancelled",
+        "completed_at": "2026-11-25T10:04:39Z"
+      }
+    ]
+  }
+}

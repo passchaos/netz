@@ -46,6 +46,13 @@ The default build-server runner remains available when the option is omitted.
 Use the progress option when a CI job times out and its last active test needs
 to be identified; a delay before the first test name is still compilation.
 
+The CI wrapper `tools/ci/run_test_progress.py` also publishes the last visible
+test name as an Actions notice every 60 seconds. It handles partial terminal
+lines, retains exact child log bytes and command exit status, and keeps its
+reader queue and progress-text buffer bounded. This makes the last visible
+runtime boundary available through annotations when detailed logs require
+login. Compiler commands remain in the full log.
+
 Runnable examples are under `examples/` and are wired into the build:
 
 ```sh

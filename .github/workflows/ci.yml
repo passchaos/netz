@@ -114,6 +114,11 @@ jobs:
       - name: Check formatting
         run: zig fmt --check build.zig build.zig.zon build src test examples benchmarks tools
 
+      - name: Validate CI log helpers
+        run: |
+          python tools/ci/test_failure_annotations_test.py
+          python tools/ci/run_test_progress_test.py
+
       - name: Audit evidence hashes
         run: zig build verify-evidence -- --max-unresolved=24
 
@@ -127,7 +132,7 @@ jobs:
         run: zig build test-quic-endpoint-soak --summary all
 
       - name: Run the complete test gate serially
-        run: zig build test -j1 -Dtest-progress=true --verbose --summary all
+        run: python tools/ci/run_test_progress.py --title "Complete test progress" --log complete-tests.log -- zig build test -j1 -Dtest-progress=true --verbose --summary all
 
   portable:
     if: github.event_name != 'schedule'
@@ -237,6 +242,12 @@ jobs:
         if: runner.os != 'Windows'
         run: zig build test-compile -j1 -Dtarget=${{ matrix.target }} --summary all
 
+      - name: Validate native CI log helpers
+        if: runner.os == 'Windows' || (runner.os == 'Linux' && matrix.target == 'x86_64-linux-gnu')
+        run: |
+          python tools/ci/test_failure_annotations_test.py
+          python tools/ci/run_test_progress_test.py
+
       - name: Run native Linux interface binding regressions
         if: runner.os == 'Linux' && matrix.target == 'x86_64-linux-gnu'
         run: zig build test-http test-quic -j1 -Dtarget=${{ matrix.target }} '-Dtest-filter=network interface' '-Dtest-filter=HTTP3 endpoint adoption' --summary all
@@ -276,7 +287,7 @@ jobs:
         run: |
           set -o pipefail
           trust_status=0
-          zig build test-quic test-tls test-http test-websocket test-webtransport -j1 -Dtest-progress=true -Dtarget=${{ matrix.target }} '-Dtest-filter=trust load' '-Dtest-filter=trust startup' '-Dtest-filter=trust completion' '-Dtest-filter=QUIC trust precedence' '-Dtest-filter=QUIC client verifies' '-Dtest-filter=effective trust' '-Dtest-filter=startup entropy' '-Dtest-filter=owned deadline' '-Dtest-filter=TLS CA bundle lock' --verbose --summary all 2>&1 | tee native-trust.log || trust_status=$?
+          python tools/ci/run_test_progress.py --title "Native trust progress" --log native-trust.log -- zig build test-quic test-tls test-http test-websocket test-webtransport -j1 -Dtest-progress=true -Dtarget=${{ matrix.target }} '-Dtest-filter=trust load' '-Dtest-filter=trust startup' '-Dtest-filter=trust completion' '-Dtest-filter=QUIC trust precedence' '-Dtest-filter=QUIC client verifies' '-Dtest-filter=effective trust' '-Dtest-filter=startup entropy' '-Dtest-filter=owned deadline' '-Dtest-filter=TLS CA bundle lock' --verbose --summary all || trust_status=$?
           if [ "$trust_status" -ne 0 ]; then
             python tools/ci/test_failure_annotations.py native-trust.log
           fi
