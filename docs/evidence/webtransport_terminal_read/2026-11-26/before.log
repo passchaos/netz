@@ -1,0 +1,393 @@
+[traex-zig-guard 2026-11-26 05:42:25] waiting for the global TRAE Zig build slot
+[traex-zig-guard 2026-11-26 05:58:49] started Zig tree root=37138 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=1200s
+Executing: /usr/bin/python3 /tmp/netz-support-test-registry-check.py
+Executing: /Users/bytedance/.local/bin/zig fmt build.zig build/testing/support.zig build/testing/support_specs.zig support_test.zig
+Executing: /Users/bytedance/.local/bin/zig build test-support -j1 -Dtest-progress=true --summary all
+1/63 support_test.test_0...OK
+2/63 tools.interop.quic_handshake_bench.test.QUIC handshake benchmark configuration and marker are stable...OK
+3/63 tools.interop.quic_handshake_bench.test.QUIC handshake benchmark prepares the fixed P-256 leaf identity...OK
+4/63 tools.interop.quic_handshake_bench.test.QUIC handshake benchmark percentile matches verifier convention...OK
+5/63 tools.interop.quic_persistent_bench.test.persistent QUIC benchmark config rejects ambiguous shapes...OK
+6/63 tools.interop.quic_persistent_bench.test.persistent QUIC echo payload is sequence distinct...OK
+7/63 tools.interop.quic_persistent_bench.test.persistent QUIC START record round trips...OK
+8/63 tools.interop.quic_datagram_bench.test.DATAGRAM benchmark config round trips window on the wire...OK
+9/63 tools.interop.quic_datagram_bench.test.DATAGRAM benchmark config rejects unsafe windows and wire byte overflow...OK
+10/63 tools.interop.quic_datagram_bench.test.DATAGRAM benchmark accepts each sequence once inside a window...OK
+11/63 tools.interop.quic_quic_go_churn.test.raw QUIC churn expected shapes are stable...OK
+12/63 tools.interop.quic_quic_go_churn.test.raw QUIC churn config and result reject reserved bytes...OK
+13/63 tools.interop.quic_quic_go_churn.test.raw QUIC churn requires one fault in each phase...OK
+14/63 tools.interop.http3_quic_go_bench.test.HTTP/3 external benchmark multi-stream checksum is index-aware...OK
+15/63 tools.interop.http3_quic_go_bench.test.HTTP/3 external benchmark version selects peer compatibility...OK
+16/63 tools.interop.http3_quic_go_bench.test.HTTP/3 external benchmark propagates netz pacing rate limit...OK
+17/63 tools.interop.http3_quic_go_bench.test.HTTP/3 external benchmark capture changes evidence scope...OK
+18/63 tools.interop.http3_quic_go_bench.test.HTTP/3 external benchmark socket traffic has a distinct evidence scope...OK
+19/63 tools.interop.http3_quic_go_bench.test.HTTP/3 external benchmark transport stats aggregate connection totals...OK
+20/63 tools.interop.http3_quic_go_bench.test.HTTP/3 external benchmark budgets aggregate DATA framing...OK
+21/63 tools.interop.websocket_h3_quic_go_bench.test.WebSocket H3 benchmark selects QUIC version explicitly...OK
+22/63 tools.interop.exact_certificate_verifier.test.interop exact certificate verifier checks DER hostname and validity...OK
+23/63 examples.support.websocket_send_shape.test.WebSocket benchmark send shapes preserve arbitrary slice layouts...OK
+24/63 examples.support.memory_limiter.test.memory limiter enforces allocations, resize, and live limit changes...OK
+25/63 examples.support.memory_limiter.test.memory limiter never admits concurrent allocations beyond the limit...OK
+26/63 examples.support.mqtt_pid_file.test.MQTT PID file owns one process and reclaims stale content...OK
+27/63 examples.support.mqtt_pid_file.test.MQTT PID file removes only its own unchanged path...OK
+28/63 examples.support.mqtt_pid_file.test.MQTT PID file disappears after normal release...OK
+29/63 examples.support.mqtt_pid_file.test.MQTT PID file rejects a final-component symbolic link...OK
+30/63 examples.support.mqtt_reloadable_security.test.reloadable MQTT security swaps atomically and rolls back failure...OK
+31/63 examples.support.mqtt_reloadable_security.test.reloadable MQTT security adds and swaps per-listener file paths...OK
+32/63 examples.support.mqtt_reloadable_security.test.reloadable MQTT security reauthorizes credentials per listener...OK
+33/63 examples.support.mqtt_reloadable_security.test.reloadable MQTT security selects unique retained source listener...OK
+34/63 examples.support.mqtt_reloadable_security.test.reloadable MQTT security rejects ambiguous retained source listener...OK
+35/63 examples.support.mqtt_reload_compatibility.test.restart-required MQTT globals reject every changed field...OK
+36/63 examples.support.mqtt_reload_compatibility.test.runtime-owned MQTT globals remain reload-compatible...OK
+37/63 examples.support.mqtt_reload_compatibility.test.persistence target reload preserves QoS 2 bridge journals...OK
+38/63 examples.support.mqtt_reloadable_identity.test.reloadable MQTT identities retain old handshakes and roll back failure...OK
+39/63 examples.support.mqtt_configured_bridges.test.configured bridge reload decision can abort a prepared generation...OK
+40/63 examples.support.mqtt_configured_bridges.test.configured bridge reload preparation rolls back allocation failure...OK
+41/63 examples.support.mqtt_configured_bridges.test.configured bridge identifiers bind identity and mappings...OK
+42/63 examples.support.mqtt_configured_bridges.test.configured bridge set owns parser configuration lifetime...OK
+43/63 examples.support.mqtt_configured_bridges.test.configured bridge set owns an independent cancellation domain...OK
+44/63 examples.support.mqtt_configured_bridges.test.configured bridge supervisor stops without listener cancellation...OK
+45/63 examples.support.mqtt_configured_bridges.test.configured bridge entries have independent cancellation...OK
+46/63 examples.support.mqtt_configured_bridges.test.configured bidirectional legacy bridges never fall back from private mode...OK
+47/63 examples.support.mqtt_configured_bridges.test.configured one-way legacy bridges fall back at the same protocol level...OK
+48/63 examples.support.mqtt_configured_bridges.test.configured bridge resumes TLS 1.2 ticket only for matching endpoint...OK
+49/63 examples.support.mqtt_configured_bridges.test.configured bridge resumes TLS 1.3 ticket only for matching endpoint...OK
+50/63 examples.support.mqtt_configured_bridges.test.configured bridge maps Mosquitto remote protocol limits...OK
+51/63 examples.support.mqtt_configured_bridges.test.configured bridge rejects an empty explicit CA file...OK
+52/63 examples.support.mqtt_configured_bridges.test.configured bridge rejects an empty CA directory...OK
+53/63 examples.support.mqtt_configured_bridges.test.configured bridge passes operating-system roots without a CA file...OK
+54/63 examples.support.mqtt_configured_bridges.test.configured bridges use Mosquitto decorrelated restart state...OK
+55/63 examples.support.mqtt_configured_bridges.test.configured outbound bridge maps local clean Session policy...OK
+56/63 examples.support.mqtt_configured_bridges.test.configured bidirectional bridge shares one private remote client...OK
+57/63 examples.support.mqtt_configured_bridges.test.configured MQTT 3.1 bidirectional bridge requires private remote mode...OK
+58/63 tools.interop.webtransport_wtransport_bench.test.WebTransport benchmark supports 256 parallel streams...OK
+59/63 tools.interop.webtransport_browser_reset.test.browser reset accepts zero, partial, and complete visible prefixes...OK
+60/63 tools.interop.webtransport_browser_reset.test.browser reset rejects invalid data events...OK
+61/63 tools.interop.webtransport_browser_reset.test.browser reset rejects mismatched identity code and final size...OK
+62/63 tools.interop.webtransport_churn_protocol.test.WebTransport churn result encodes all 256 reset bits...OK
+63/63 tools.interop.webtransport_churn_protocol.test.WebTransport churn reset selection is stable across mask words...OK
+All 63 tests passed.
+Build Summary: 9/9 steps succeeded
+test-support success
++- run test success 1s
+   +- compile test Debug native success 48s MaxRSS:3G
+      +- WriteFile macho_0_p256_field_arm64.S cached
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 220ms MaxRSS:31M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 287ms MaxRSS:31M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options cached
+
+Executing: /Users/bytedance/.local/bin/zig build test-support-compile -j1 -Dtarget=x86_64-windows-gnu --summary all
+Build Summary: 7/7 steps succeeded
+test-support-compile success
++- compile test Debug x86_64-windows-gnu success 35s MaxRSS:4G
+   +- WriteFile cached
+   +- compile obj vort-br-record-optimal Debug x86_64-windows-gnu cached 216ms MaxRSS:31M
+   +- WriteFile cached
+   +- compile obj vort-zstd-huffman-x2 Debug x86_64-windows-gnu cached 399ms MaxRSS:31M
+   +- compile obj vort-br-record-optimal Debug x86_64-windows-gnu (reused)
+   +- compile obj vort-zstd-huffman-x2 Debug x86_64-windows-gnu (reused)
+   +- options cached
+
+Executing: /usr/bin/python3 /tmp/netz-wt-terminal-output-before-check.py
+Executing: /Users/bytedance/.local/bin/zig fmt src/internal/testing/terminal_stream_probe.zig src/webtransport/h2/endpoint_client/reconnecting/tests.zig
+Executing: /Users/bytedance/.local/bin/zig build test-webtransport -j1 -Dtest-progress=true -Dtest-filter=ReconnectingEndpointClient reconnects only future Sessions --summary all
+1/132 test_scope.test_0...OK
+2/132 webtransport.mod.test_0...OK
+3/132 webtransport.mod.test_1...OK
+4/132 webtransport.h2.mod.test_0...OK
+5/132 webtransport.runtime.test_0...OK
+6/132 webtransport.flow_control.test_0...OK
+7/132 webtransport.application_protocol.test_0...OK
+8/132 webtransport.h2.capsule.test_0...OK
+9/132 webtransport.h2.reader.test_0...OK
+10/132 webtransport.h2.state.test_0...OK
+11/132 webtransport.h2.endpoint_client.test_0...OK
+12/132 webtransport.h2.endpoint_client.reconnecting.test_0...OK
+13/132 webtransport.h2.endpoint_server.test_0...OK
+14/132 webtransport.h2.endpoint_listener.test_0...OK
+15/132 webtransport.h2.endpoint_listener.runtime.test_0...OK
+16/132 webtransport.h2.endpoint_client.reconnecting.tests.test.WebTransport HTTP2 ReconnectingEndpointClient reconnects only future Sessions...expected 0, found 1
+WT reconnect peer phase waiting for second generation: Canceled
+WT reconnect client phase old-generation receive/removal: TestExpectedEqual
+FAIL (TestExpectedEqual)
+/private/var/folders/3h/rw6tyryn6ps_mw9bcstc2lfm0000gn/T/netz-h2-wake-admission-c30hyz3a/netz-h3-socket-budget/src/webtransport/h2/endpoint_client/reconnecting/tests.zig:236:5: 0x1049a8977 in reconnectFutureSessionsDrop (test)
+    try std.testing.expectEqual(@as(usize, 0), terminal_probe.late_writes.load(.acquire));
+    ^
+/private/var/folders/3h/rw6tyryn6ps_mw9bcstc2lfm0000gn/T/netz-h2-wake-admission-c30hyz3a/netz-h3-socket-budget/src/webtransport/h2/endpoint_client/reconnecting/tests.zig:27:5: 0x1049a44b3 in reconnectFutureSessions (test)
+    try reconnectFutureSessionsDrop(base_io, true);
+    ^
+/private/var/folders/3h/rw6tyryn6ps_mw9bcstc2lfm0000gn/T/netz-h2-wake-admission-c30hyz3a/netz-h3-socket-budget/src/internal/testing/native_protocol_io.zig:12:9: 0x1049a429f in run__anon_36526 (test)
+        try test_case(threaded.io());
+        ^
+/private/var/folders/3h/rw6tyryn6ps_mw9bcstc2lfm0000gn/T/netz-h2-wake-admission-c30hyz3a/netz-h3-socket-budget/src/webtransport/h2/endpoint_client/reconnecting/tests.zig:22:5: 0x1049a13f3 in test.WebTransport HTTP2 ReconnectingEndpointClient reconnects only future Sessions (test)
+    try native_protocol_io.run(reconnectFutureSessions);
+    ^
+17/132 http2.mod.test_0...OK
+18/132 http2.mod.test_1...OK
+19/132 http2.runtime.test_0...OK
+20/132 http1.mod.test_0...OK
+21/132 http1.mod.test_1...OK
+22/132 http1.mod.test_2...OK
+23/132 http1.runtime.test_0...OK
+24/132 internal.tcp_connect.test_0...OK
+25/132 tls.mod.test_0...OK
+26/132 tls.stream.mod.test_0...OK
+27/132 internal.stream_io.test_0...OK
+28/132 internal.stream_io.timed_read.test_0...OK
+29/132 tls.stream.record_stream.test_0...OK
+30/132 internal.priority.test_0...OK
+31/132 webtransport.capsule.test_0...OK
+32/132 internal.stream_io.timed_write.test_0...OK
+33/132 http.field_name.test_0...OK
+34/132 http.field_value.test_0...OK
+35/132 http.authority.mod.test_0...OK
+36/132 http.authority.host.test_0...OK
+37/132 quic.mod.test_0...OK
+38/132 quic.mod.test_1...OK
+39/132 quic.mod.test_2...OK
+40/132 http2.runtime.transport.output.test_0...OK
+41/132 http3.mod.test_0...OK
+42/132 http3.mod.test_1...OK
+43/132 http3.mod.test_2...OK
+44/132 http3.mod.test_3...OK
+45/132 http3.mod.test_4...OK
+46/132 internal.owned_result_deadline.test_0...OK
+47/132 http1.runtime.write.test_0...OK
+48/132 http3.runtime.test_0...OK
+49/132 http3.origin_pool.test_0...OK
+50/132 http3.runtime.tests.test_0...OK
+51/132 http3.runtime.tests.test_1...OK
+52/132 http3.runtime.development.tests.send.test_0...OK
+53/132 http3.runtime.datagram.test_0...OK
+54/132 http3.runtime.datagram.test_1...OK
+55/132 http3.runtime.stream.reader_tests.test_0...OK
+56/132 http3.runtime.client.happy_eyeballs_tests.test_0...OK
+57/132 http3.runtime.client.complete_request.test_0...OK
+58/132 http3.runtime.shared_handshake_client_pool.stream_command.test_0...OK
+59/132 http3.runtime.concurrent_tests.test_0...OK
+60/132 http3.runtime.receive.field_value_tests.test_0...OK
+61/132 quic.runtime.test_0...OK
+62/132 quic.runtime.test_1...OK
+63/132 quic.protection.test_0...OK
+64/132 quic.tls_client_hello.test_0...OK
+65/132 quic.tls.mod.test_0...OK
+66/132 quic.handshake.test_0...OK
+67/132 quic.client_trust.test_0...OK
+68/132 quic.zero_rtt.mod.test_0...OK
+69/132 quic.one_rtt.test_0...OK
+70/132 quic.packet_space.test_0...OK
+71/132 quic.stream.test_0...OK
+72/132 quic.recovery.test_0...OK
+73/132 quic.endpoint_dispatcher.test_0...OK
+74/132 quic.endpoint_server.test_0...OK
+75/132 quic.connection_id.test_0...OK
+76/132 quic.congestion.test_0...OK
+77/132 quic.pacing.test_0...OK
+78/132 quic.path_validation.test_0...OK
+79/132 quic.pmtu.test_0...OK
+80/132 quic.address_validation_token.test_0...OK
+81/132 quic.observability.qlog.mod.test_0...OK
+82/132 quic.load_balancing.quic_lb.mod.test_0...OK
+83/132 quic.resumption.mod.test_0...OK
+84/132 quic.endpoint_server.tests.test_0...OK
+85/132 quic.handshake.client_authentication.test_0...OK
+86/132 quic.resumption.ticket.mod.test_0...OK
+87/132 quic.endpoint_dispatcher.tests.test_0...OK
+88/132 quic.one_rtt.tests.mod.test_0...OK
+89/132 quic.one_rtt.tests.mod.test_1...OK
+90/132 quic.handshake.tests.test_0...OK
+91/132 http3.settings.test_0...OK
+92/132 tls.stream.alpn_tests.test_0...OK
+93/132 tls.server_identity_file.test_0...OK
+94/132 http1.runtime.tests.test_0...OK
+95/132 http2.runtime.tests.test_0...OK
+96/132 http2.runtime.tests.test_1...OK
+97/132 http2.runtime.tests.test_2...OK
+98/132 http2.runtime.response.allocation_failure_tests.test_0...OK
+99/132 http2.runtime.response.forbidden_body_tests.test_0...OK
+100/132 http2.runtime.request.credit_failure_tests.test_0...OK
+101/132 http2.runtime.refusal_tests.test_0...OK
+102/132 http2.runtime.concurrent_tests.test_0...OK
+103/132 webtransport.runtime.owner.test_0...OK
+104/132 webtransport.runtime.tests.test_0...OK
+105/132 webtransport.runtime.tests.test_1...OK
+106/132 webtransport.runtime.tests.test_2...OK
+107/132 webtransport.runtime.tests.test_3...OK
+108/132 webtransport.runtime.tests.test_4...OK
+109/132 webtransport.runtime.tests.test_5...OK
+110/132 webtransport.runtime.tests.test_6...OK
+111/132 webtransport.runtime.tests.test_7...OK
+112/132 webtransport.runtime.tests.test_8...OK
+113/132 webtransport.runtime.tests.test_9...OK
+114/132 webtransport.runtime.tests.test_10...OK
+115/132 webtransport.runtime.tests.test_11...OK
+116/132 webtransport.runtime.tests.test_12...OK
+117/132 webtransport.runtime.endpoint_client.flow_tests.test_0...OK
+118/132 webtransport.runtime.association.tests.discovery.test_0...OK
+119/132 webtransport.runtime.association.tests.invalid_session_id.test_0...OK
+120/132 webtransport.runtime.association.tests.truncated.test_0...OK
+121/132 webtransport.runtime.connect.application_protocol.test_0...OK
+122/132 webtransport.runtime.connect.negotiation.test_0...OK
+123/132 webtransport.runtime.stream_incremental.test_0...OK
+124/132 webtransport.runtime.stream_incremental.test_1...OK
+125/132 webtransport.runtime.flow.receive.test_0...OK
+126/132 webtransport.runtime.flow.write.test_0...OK
+127/132 webtransport.runtime.flow.send.test_0...OK
+128/132 webtransport.runtime.flow.streams.test_0...OK
+129/132 webtransport.runtime.flow.grant.test_0...OK
+130/132 webtransport.runtime.flow.datagram.test_0...OK
+131/132 webtransport.runtime.stream.reset.test_0...OK
+132/132 webtransport.runtime.flow.datagram.tests.test_0...OK
+131 passed; 0 skipped; 1 failed.
+test-webtransport
++- run test failure
+error: process exited with error code 1
+failed command: ./.zig-cache/o/95f411eda9cc34985f4d17b0ef8465f9/test --cache-dir=./.zig-cache --seed=0xa864c1eb
+
+Build Summary: 8/10 steps succeeded (1 failed)
+test-webtransport transitive failure
++- run test failure
+   +- compile test Debug native success 30s MaxRSS:3G
+      +- WriteFile macho_0_p256_field_arm64.S cached
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 212ms MaxRSS:31M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 223ms MaxRSS:31M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options success
+      +- options cached
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/3c34ebc110f4a4cfb36da2e7e0cf57c7/build /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/zig /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib /private/var/folders/3h/rw6tyryn6ps_mw9bcstc2lfm0000gn/T/netz-h2-wake-admission-c30hyz3a/netz-h3-socket-budget .zig-cache /Users/bytedance/.cache/zig --seed 0xa864c1eb -Z50dc806984bb5d8b test-webtransport -j1 -Dtest-progress=true -Dtest-filter=ReconnectingEndpointClient reconnects only future Sessions --summary all
+[traex-zig-guard 2026-11-26 06:01:02] finished Zig tree root=37138 peak=3635MiB result=0

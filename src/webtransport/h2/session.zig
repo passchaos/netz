@@ -184,6 +184,19 @@ pub const Session = struct {
         self.terminal = true;
         if (self.duplex) |*duplex| duplex.reset(.cancel) catch {} else if (self.server_duplex) |*duplex| duplex.reset(.cancel) catch {} else self.tunnel.abort(deadline);
     }
+    fn failTransportRead(self: *Session, err: anyerror, deadline: std.Io.Clock.Timestamp) void {
+        switch (err) {
+            error.UnexpectedEof, error.ConnectionResetByPeer, error.SocketUnconnected, error.ConnectionClosed => {
+                // A terminal connection cannot carry a cancellation reset.
+                // Publish that state before any Session destructor can write.
+                self.terminal = true;
+                self.connection().aggregate_timeout_unusable = true;
+                self.connection().terminal_write_failed = true;
+            },
+            else => self.fail(deadline),
+        }
+    }
+
     fn stage(self: *Session, capsule: capsules.Capsule, fin: bool) Error!void {
         if (self.terminal or self.state.local_closed) return error.SessionClosed;
         if (self.pending != null) return error.PendingWrite;
@@ -720,7 +733,7 @@ pub const Session = struct {
             self.clearInput();
             if (self.duplex) |*duplex| {
                 var transport_event = duplex.readResponseEventWithDeadline(deadline) catch |err| {
-                    if (err != error.Timeout and err != error.Canceled and err != error.ConcurrencyUnavailable and err != error.ResponseAvailable) self.fail(deadline);
+                    if (err != error.Timeout and err != error.Canceled and err != error.ConcurrencyUnavailable and err != error.ResponseAvailable) self.failTransportRead(err, deadline);
                     return err;
                 };
                 var event_owned = true;
@@ -744,7 +757,7 @@ pub const Session = struct {
                 }
             } else if (self.server_duplex) |*duplex| {
                 var transport_event = duplex.readRequestEventWithDeadline(deadline) catch |err| {
-                    if (err != error.Timeout and err != error.Canceled and err != error.ConcurrencyUnavailable and err != error.ResponseAvailable) self.fail(deadline);
+                    if (err != error.Timeout and err != error.Canceled and err != error.ConcurrencyUnavailable and err != error.ResponseAvailable) self.failTransportRead(err, deadline);
                     return err;
                 };
                 var event_owned = true;
@@ -768,7 +781,7 @@ pub const Session = struct {
                 }
             } else {
                 const input = self.tunnel.readWithDeadline(deadline) catch |err| {
-                    if (err != error.Timeout and err != error.Canceled and err != error.ConcurrencyUnavailable) self.fail(deadline);
+                    if (err != error.Timeout and err != error.Canceled and err != error.ConcurrencyUnavailable) self.failTransportRead(err, deadline);
                     return err;
                 };
                 self.input = input;

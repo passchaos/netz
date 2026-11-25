@@ -1,0 +1,11 @@
+{
+  "observed_utc": "2026-11-25T22:40:46.569921+00:00",
+  "baseline_late_writes": 1,
+  "final_scope_tests_passed": 135,
+  "native_backends": "Threaded zero async and one-executor application backend on supported native platforms",
+  "windows_compilation": "passed",
+  "native_windows_runtime": "pending",
+  "root": "Session.fail reset after terminal transport receive",
+  "observer": "lightweight atomic counts; portable integer/pointer handle keys; no trace logging",
+  "pins_and_budgets": "unchanged"
+}

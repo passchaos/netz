@@ -1,0 +1,230 @@
+[traex-zig-guard 2026-11-26 06:34:09] started Zig tree root=87884 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=600s
+Executing: /Users/bytedance/.local/bin/zig fmt src/webtransport/h2/session.zig src/webtransport/h2/endpoint_client/worker.zig src/webtransport/h2/endpoint_client/reconnecting/tests.zig src/internal/testing/terminal_stream_probe.zig
+Executing: /Users/bytedance/.local/bin/zig build test-webtransport -j1 -Dtest-progress=true -Dtest-filter=ReconnectingEndpointClient reconnects only future Sessions -Dtest-filter=WebTransport HTTP2 TLS runtime exchanges -Dtest-filter=WebTransport HTTP2 duplex Sessions -Dtest-filter=WebTransport HTTP2 encoded writes -Dtest-filter=WebTransport HTTP2 reader retains malformed --summary all
+1/135 test_scope.test_0...OK
+2/135 webtransport.mod.test_0...OK
+3/135 webtransport.mod.test_1...OK
+4/135 webtransport.h2.mod.test_0...OK
+5/135 webtransport.runtime.test_0...OK
+6/135 webtransport.flow_control.test_0...OK
+7/135 webtransport.application_protocol.test_0...OK
+8/135 webtransport.h2.capsule.test_0...OK
+9/135 webtransport.h2.reader.test_0...OK
+10/135 webtransport.h2.state.test_0...OK
+11/135 webtransport.h2.runtime_tests.test.WebTransport HTTP2 TLS runtime exchanges virtual streams datagrams reset STOP and close...OK
+12/135 webtransport.h2.runtime_tests.test.WebTransport HTTP2 duplex Sessions route rejection and sibling capsules...OK
+13/135 webtransport.h2.session_write_tests.test.WebTransport HTTP2 encoded writes retain transaction and exact suffix across deadlines...OK
+14/135 webtransport.h2.endpoint_client.test_0...OK
+15/135 webtransport.h2.endpoint_client.reconnecting.test_0...OK
+16/135 webtransport.h2.endpoint_server.test_0...OK
+17/135 webtransport.h2.endpoint_listener.test_0...OK
+18/135 webtransport.h2.endpoint_listener.runtime.test_0...OK
+19/135 webtransport.h2.endpoint_client.reconnecting.tests.test.WebTransport HTTP2 ReconnectingEndpointClient reconnects only future Sessions...OK
+20/135 http2.mod.test_0...OK
+21/135 http2.mod.test_1...OK
+22/135 http2.runtime.test_0...OK
+23/135 http1.mod.test_0...OK
+24/135 http1.mod.test_1...OK
+25/135 http1.mod.test_2...OK
+26/135 http1.runtime.test_0...OK
+27/135 internal.tcp_connect.test_0...OK
+28/135 tls.mod.test_0...OK
+29/135 tls.stream.mod.test_0...OK
+30/135 internal.stream_io.test_0...OK
+31/135 internal.stream_io.timed_read.test_0...OK
+32/135 tls.stream.record_stream.test_0...OK
+33/135 internal.priority.test_0...OK
+34/135 webtransport.capsule.test_0...OK
+35/135 internal.stream_io.timed_write.test_0...OK
+36/135 http.field_name.test_0...OK
+37/135 http.field_value.test_0...OK
+38/135 http.authority.mod.test_0...OK
+39/135 http.authority.host.test_0...OK
+40/135 quic.mod.test_0...OK
+41/135 quic.mod.test_1...OK
+42/135 quic.mod.test_2...OK
+43/135 http2.runtime.transport.output.test_0...OK
+44/135 http3.mod.test_0...OK
+45/135 http3.mod.test_1...OK
+46/135 http3.mod.test_2...OK
+47/135 http3.mod.test_3...OK
+48/135 http3.mod.test_4...OK
+49/135 internal.owned_result_deadline.test_0...OK
+50/135 http1.runtime.write.test_0...OK
+51/135 http3.runtime.test_0...OK
+52/135 http3.origin_pool.test_0...OK
+53/135 http3.runtime.tests.test_0...OK
+54/135 http3.runtime.tests.test_1...OK
+55/135 http3.runtime.development.tests.send.test_0...OK
+56/135 http3.runtime.datagram.test_0...OK
+57/135 http3.runtime.datagram.test_1...OK
+58/135 http3.runtime.stream.reader_tests.test_0...OK
+59/135 http3.runtime.client.happy_eyeballs_tests.test_0...OK
+60/135 http3.runtime.client.complete_request.test_0...OK
+61/135 http3.runtime.shared_handshake_client_pool.stream_command.test_0...OK
+62/135 http3.runtime.concurrent_tests.test_0...OK
+63/135 http3.runtime.receive.field_value_tests.test_0...OK
+64/135 quic.runtime.test_0...OK
+65/135 quic.runtime.test_1...OK
+66/135 quic.protection.test_0...OK
+67/135 quic.tls_client_hello.test_0...OK
+68/135 quic.tls.mod.test_0...OK
+69/135 quic.handshake.test_0...OK
+70/135 quic.client_trust.test_0...OK
+71/135 quic.zero_rtt.mod.test_0...OK
+72/135 quic.one_rtt.test_0...OK
+73/135 quic.packet_space.test_0...OK
+74/135 quic.stream.test_0...OK
+75/135 quic.recovery.test_0...OK
+76/135 quic.endpoint_dispatcher.test_0...OK
+77/135 quic.endpoint_server.test_0...OK
+78/135 quic.connection_id.test_0...OK
+79/135 quic.congestion.test_0...OK
+80/135 quic.pacing.test_0...OK
+81/135 quic.path_validation.test_0...OK
+82/135 quic.pmtu.test_0...OK
+83/135 quic.address_validation_token.test_0...OK
+84/135 quic.observability.qlog.mod.test_0...OK
+85/135 quic.load_balancing.quic_lb.mod.test_0...OK
+86/135 quic.resumption.mod.test_0...OK
+87/135 quic.endpoint_server.tests.test_0...OK
+88/135 quic.handshake.client_authentication.test_0...OK
+89/135 quic.resumption.ticket.mod.test_0...OK
+90/135 quic.endpoint_dispatcher.tests.test_0...OK
+91/135 quic.one_rtt.tests.mod.test_0...OK
+92/135 quic.handshake.tests.test_0...OK
+93/135 http3.settings.test_0...OK
+94/135 tls.stream.alpn_tests.test_0...OK
+95/135 tls.server_identity_file.test_0...OK
+96/135 http1.runtime.tests.test_0...OK
+97/135 http2.runtime.tests.test_0...OK
+98/135 http2.runtime.tests.test_1...OK
+99/135 http2.runtime.tests.test_2...OK
+100/135 http2.runtime.response.allocation_failure_tests.test_0...OK
+101/135 http2.runtime.response.forbidden_body_tests.test_0...OK
+102/135 http2.runtime.request.credit_failure_tests.test_0...OK
+103/135 http2.runtime.refusal_tests.test_0...OK
+104/135 http2.runtime.concurrent_tests.test_0...OK
+105/135 webtransport.h2.reader_tests.test.WebTransport HTTP2 reader retains malformed payload failure across later input and FIN...OK
+106/135 webtransport.runtime.owner.test_0...OK
+107/135 webtransport.runtime.tests.test_0...OK
+108/135 webtransport.runtime.tests.test_1...OK
+109/135 webtransport.runtime.tests.test_2...OK
+110/135 webtransport.runtime.tests.test_3...OK
+111/135 webtransport.runtime.tests.test_4...OK
+112/135 webtransport.runtime.tests.test_5...OK
+113/135 webtransport.runtime.tests.test_6...OK
+114/135 webtransport.runtime.tests.test_7...OK
+115/135 webtransport.runtime.tests.test_8...OK
+116/135 webtransport.runtime.tests.test_9...OK
+117/135 webtransport.runtime.tests.test_10...OK
+118/135 webtransport.runtime.tests.test_11...OK
+119/135 webtransport.runtime.tests.test_12...OK
+120/135 webtransport.runtime.endpoint_client.flow_tests.test_0...OK
+121/135 webtransport.runtime.association.tests.discovery.test_0...OK
+122/135 webtransport.runtime.association.tests.invalid_session_id.test_0...OK
+123/135 webtransport.runtime.association.tests.truncated.test_0...OK
+124/135 webtransport.runtime.connect.application_protocol.test_0...OK
+125/135 webtransport.runtime.connect.negotiation.test_0...OK
+126/135 webtransport.runtime.stream_incremental.test_0...OK
+127/135 webtransport.runtime.stream_incremental.test_1...OK
+128/135 webtransport.runtime.flow.receive.test_0...OK
+129/135 webtransport.runtime.flow.write.test_0...OK
+130/135 webtransport.runtime.flow.send.test_0...OK
+131/135 webtransport.runtime.flow.streams.test_0...OK
+132/135 webtransport.runtime.flow.grant.test_0...OK
+133/135 webtransport.runtime.flow.datagram.test_0...OK
+134/135 webtransport.runtime.stream.reset.test_0...OK
+135/135 webtransport.runtime.flow.datagram.tests.test_0...OK
+All 135 tests passed.
+Build Summary: 10/10 steps succeeded
+test-webtransport success
++- run test success 1s
+   +- compile test Debug native success 32s MaxRSS:3G
+      +- WriteFile macho_0_p256_field_arm64.S cached
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 185ms MaxRSS:31M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 223ms MaxRSS:31M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options cached
+      +- options cached
+
+Executing: /Users/bytedance/.local/bin/zig build test-webtransport-compile -j1 -Dtarget=x86_64-windows-gnu -Dtest-filter=ReconnectingEndpointClient reconnects only future Sessions -Dtest-filter=WebTransport HTTP2 TLS runtime exchanges -Dtest-filter=WebTransport HTTP2 duplex Sessions -Dtest-filter=WebTransport HTTP2 encoded writes -Dtest-filter=WebTransport HTTP2 reader retains malformed --summary all
+Build Summary: 8/8 steps succeeded
+test-webtransport-compile success
++- compile test Debug x86_64-windows-gnu success 29s MaxRSS:3G
+   +- WriteFile cached
+   +- compile obj vort-br-record-optimal Debug x86_64-windows-gnu cached 182ms MaxRSS:31M
+   +- WriteFile cached
+   +- compile obj vort-zstd-huffman-x2 Debug x86_64-windows-gnu cached 138ms MaxRSS:31M
+   +- compile obj vort-br-record-optimal Debug x86_64-windows-gnu (reused)
+   +- compile obj vort-zstd-huffman-x2 Debug x86_64-windows-gnu (reused)
+   +- options cached
+   +- options cached
+
+[traex-zig-guard 2026-11-26 06:35:14] finished Zig tree root=87884 peak=3161MiB result=0

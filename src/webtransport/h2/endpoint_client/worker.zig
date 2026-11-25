@@ -11,7 +11,9 @@ pub fn Worker(comptime State: type) type {
         pub fn run(state: *State) std.Io.Cancelable!void {
             var terminal: ?anyerror = null;
             defer {
-                const abortive = state.abortive_shutdown.load(.acquire);
+                // A failed transport no longer admits Session resets or TLS
+                // shutdown output. Retire it before Session deinitialization.
+                const abortive = state.abortive_shutdown.load(.acquire) or terminal != null;
                 if (abortive) {
                     state.connection.aggregate_timeout_unusable = true;
                     state.connection.terminal_write_failed = true;

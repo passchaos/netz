@@ -1,0 +1,57 @@
+{
+  "observed_utc": "2026-11-25T22:35:14.594121+00:00",
+  "checks": [
+    {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "fmt",
+        "src/webtransport/h2/session.zig",
+        "src/webtransport/h2/endpoint_client/worker.zig",
+        "src/webtransport/h2/endpoint_client/reconnecting/tests.zig",
+        "src/internal/testing/terminal_stream_probe.zig"
+      ],
+      "exit_code": 0
+    },
+    {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-webtransport",
+        "-j1",
+        "-Dtest-progress=true",
+        "-Dtest-filter=ReconnectingEndpointClient reconnects only future Sessions",
+        "-Dtest-filter=WebTransport HTTP2 TLS runtime exchanges",
+        "-Dtest-filter=WebTransport HTTP2 duplex Sessions",
+        "-Dtest-filter=WebTransport HTTP2 encoded writes",
+        "-Dtest-filter=WebTransport HTTP2 reader retains malformed",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0
+    },
+    {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-webtransport-compile",
+        "-j1",
+        "-Dtarget=x86_64-windows-gnu",
+        "-Dtest-filter=ReconnectingEndpointClient reconnects only future Sessions",
+        "-Dtest-filter=WebTransport HTTP2 TLS runtime exchanges",
+        "-Dtest-filter=WebTransport HTTP2 duplex Sessions",
+        "-Dtest-filter=WebTransport HTTP2 encoded writes",
+        "-Dtest-filter=WebTransport HTTP2 reader retains malformed",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0
+    }
+  ],
+  "source_sha256": {
+    "src/webtransport/h2/session.zig": "946302b97d2d21bca679a99018c22030eb83debc70b256f2f3fb92c93783d5da",
+    "src/webtransport/h2/endpoint_client/worker.zig": "1493acc1dba2063981877dec00928f5e77f139129ac7b883a2d7572a4c816f91",
+    "src/webtransport/h2/endpoint_client/reconnecting/tests.zig": "1ea8eda653356e5b9a0ccac0518863502ffa9e5bd333e192d5f71735f22908a6",
+    "src/internal/testing/terminal_stream_probe.zig": "32b853bd449ddcbe41861406ef5c0816f61528df4ebf57facb05fd3eb07de787"
+  },
+  "scope": "integrated native real TLS graceful/abortive and Session overlap, Windows compilation only"
+}

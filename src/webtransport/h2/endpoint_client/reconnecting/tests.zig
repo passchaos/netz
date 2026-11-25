@@ -5,6 +5,7 @@ const h2 = @import("../../mod.zig");
 const endpoint_server = @import("../../endpoint_server.zig");
 const reconnecting = @import("../reconnecting.zig");
 const native_protocol_io = @import("../../../../internal/testing/native_protocol_io.zig");
+const TerminalProbe = @import("../../../../internal/testing/terminal_stream_probe.zig").Probe;
 
 const allocator = std.testing.allocator;
 const credit: http2.WebTransportSettings = .{
@@ -21,7 +22,15 @@ test "WebTransport HTTP2 ReconnectingEndpointClient reconnects only future Sessi
     try native_protocol_io.run(reconnectFutureSessions);
 }
 
-fn reconnectFutureSessions(io: std.Io) anyerror!void {
+fn reconnectFutureSessions(base_io: std.Io) anyerror!void {
+    try reconnectFutureSessionsDrop(base_io, false);
+    try reconnectFutureSessionsDrop(base_io, true);
+}
+
+fn reconnectFutureSessionsDrop(base_io: std.Io, abortive_drop: bool) anyerror!void {
+    var terminal_probe: TerminalProbe = .{};
+    const io = terminal_probe.io(base_io);
+    defer terminal_probe.deinit();
     var client_phase: []const u8 = "initial rejected CONNECT";
     errdefer |err| std.debug.print("WT reconnect client phase {s}: {s}\n", .{ client_phase, @errorName(err) });
     var certificate: [tls.certificate_der_len]u8 = undefined;
@@ -53,6 +62,7 @@ fn reconnectFutureSessions(io: std.Io) anyerror!void {
         listener: *http2.runtime.TlsServer,
         drop_first: *std.Io.Event,
         begin_second: *std.Io.Event,
+        abortive_drop: bool,
 
         fn run(self: *@This()) anyerror!void {
             var phase: []const u8 = "first TLS accept";
@@ -105,7 +115,7 @@ fn reconnectFutureSessions(io: std.Io) anyerror!void {
                 );
             }
             try self.drop_first.wait(self.listener.io);
-            first.deinit();
+            if (self.abortive_drop) first.deinitAbortive() else first.deinit();
             first_live = false;
 
             // The next accept budget belongs to the new connection. Keep
@@ -144,7 +154,7 @@ fn reconnectFutureSessions(io: std.Io) anyerror!void {
             );
         }
     };
-    var peer = Peer{ .listener = &listener, .drop_first = &drop_first, .begin_second = &begin_second };
+    var peer = Peer{ .listener = &listener, .drop_first = &drop_first, .begin_second = &begin_second, .abortive_drop = abortive_drop };
     var peer_task = try io.concurrent(Peer.run, .{&peer});
     defer _ = peer_task.cancel(io) catch {};
 
@@ -208,6 +218,7 @@ fn reconnectFutureSessions(io: std.Io) anyerror!void {
         !std.mem.eql(u8, first_ack, second_ack),
     );
 
+    terminal_probe.tracking.store(true, .release);
     drop_first.set(io);
     client_phase = "old-generation receive/removal";
     var unexpected = client.receiveWithTimeout(a, .fromSeconds(3)) catch |err| blk: {
@@ -220,6 +231,9 @@ fn reconnectFutureSessions(io: std.Io) anyerror!void {
     }
     _ = try removeAfterDrop(client, a);
     _ = try removeAfterDrop(client, b);
+    terminal_probe.tracking.store(false, .release);
+    if (abortive_drop) try std.testing.expect(terminal_probe.terminal_count.load(.acquire) != 0);
+    try std.testing.expectEqual(@as(usize, 0), terminal_probe.late_writes.load(.acquire));
     begin_second.set(io);
     client_phase = "second CONNECT";
     const c = try client.connectWithTimeout(

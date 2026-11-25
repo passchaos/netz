@@ -63,3 +63,10 @@ removal API itself is exercised by the local UDP and authenticated tests.
 
 [The verification record](evidence/webtransport_removal/2026-10-28.json) retains
 the seven executed case names, source fingerprints and both external peer roles.
+
+
+A terminal HTTP2 connection read (EOF, reset or an already closed transport)
+retires connection output before Session cleanup. Such cleanup releases local
+ownership without sending a cancellation reset or TLS shutdown record on the
+failed transport. Message/capsule failures retain their stream reset behavior,
+and an ordinary explicit owner shutdown retains its existing contract.
