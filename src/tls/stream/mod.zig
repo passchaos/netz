@@ -61,6 +61,7 @@ pub const Error = @import("versioned_client_connection.zig").Error ||
     @import("versioned_server_connection.zig").Error;
 
 test {
+    _ = @import("trust_completion_tests.zig");
     _ = @import("ca_bundle_lock_tests.zig");
     _ = @import("trust_deadline_tests.zig");
     _ = @import("handshake_deadline.zig");

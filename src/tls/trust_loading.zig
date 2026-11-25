@@ -2,6 +2,9 @@
 const std = @import("std");
 const Store = @import("vail").x509.trust.SystemStore;
 const deadline_policy = @import("../internal/deadline.zig");
+const completion = @import("trust_completion.zig");
+pub const checkpoint = completion.checkpoint;
+pub const complete = completion.complete;
 
 pub const Error = @typeInfo(@typeInfo(@TypeOf(systemRaw)).@"fn".return_type.?).error_union.error_set || std.Io.Cancelable;
 pub const BeforeError = Error || std.Io.Timeout.Error || std.Io.ConcurrentError;
@@ -20,15 +23,13 @@ fn systemRaw(allocator: std.mem.Allocator, io: std.Io, now: std.Io.Timestamp, en
 
 pub fn system(allocator: std.mem.Allocator, io: std.Io, now: std.Io.Timestamp, environ: ?std.process.Environ) Error!Store {
     try io.checkCancel();
-    var store = try systemRaw(allocator, io, now, environ);
+    var store = systemRaw(allocator, io, now, environ) catch |err| {
+        try io.checkCancel();
+        return err;
+    };
     errdefer store.deinit();
     try io.checkCancel();
     return store;
-}
-
-pub fn checkpoint(io: std.Io, deadline: ?std.Io.Clock.Timestamp) (std.Io.Cancelable || std.Io.Timeout.Error)!void {
-    try io.checkCancel();
-    if (deadline) |until| _ = try deadline_policy.usableAwake(io, until);
 }
 
 pub fn systemBefore(allocator: std.mem.Allocator, io: std.Io, now: std.Io.Timestamp, environ: ?std.process.Environ, deadline: ?std.Io.Clock.Timestamp) BeforeError!Store {
@@ -48,13 +49,7 @@ pub fn before(io: std.Io, deadline: std.Io.Clock.Timestamp, comptime load: anyty
     const Worker = struct {
         fn run(run_io: std.Io, until: std.Io.Clock.Timestamp, run_args: @TypeOf(args)) Result {
             try checkpoint(run_io, until);
-            var store = @call(.auto, load, run_args) catch |err| {
-                try checkpoint(run_io, until);
-                return err;
-            };
-            errdefer store.deinit();
-            try checkpoint(run_io, until);
-            return store;
+            return complete(run_io, until, @call(.auto, load, run_args));
         }
     };
     var storage: [2]Wake = undefined;
@@ -66,18 +61,16 @@ pub fn before(io: std.Io, deadline: std.Io.Clock.Timestamp, comptime load: anyty
         } else |_| {},
         .timeout => {},
     };
-    try select.concurrent(.timeout, deadline_policy.waitUntil, .{ io, deadline });
-    try select.concurrent(.loaded, Worker.run, .{ io, deadline, args });
+    select.concurrent(.timeout, deadline_policy.waitUntil, .{ io, deadline }) catch |err| {
+        try checkpoint(io, deadline);
+        return err;
+    };
+    select.concurrent(.loaded, Worker.run, .{ io, deadline, args }) catch |err| {
+        try checkpoint(io, deadline);
+        return err;
+    };
     return switch (try select.await()) {
-        .loaded => |result| blk: {
-            var store = result catch |err| {
-                try checkpoint(io, deadline);
-                return err;
-            };
-            errdefer store.deinit();
-            try checkpoint(io, deadline);
-            break :blk store;
-        },
+        .loaded => |result| try complete(io, deadline, result),
         .timeout => |result| {
             try result;
             return error.Timeout;

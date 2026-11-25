@@ -16,6 +16,7 @@ pub const ClientCertificateTrustContext = @import("vail").tls.auth.TrustContext;
 pub const trust_cache = @import("trust_cache.zig");
 
 test {
+    _ = @import("trust_completion_admission_tests.zig");
     _ = @import("trust_loading_tests.zig");
     _ = stream;
     _ = server_identity_file;

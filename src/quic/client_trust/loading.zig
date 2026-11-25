@@ -6,6 +6,7 @@ const Store = @import("../mod.zig").tls.trust.SystemStore;
 pub const Error = error{ OutOfMemory, NativeTrustStoreUnavailable } || std.Io.Cancelable || std.Io.ConcurrentError;
 pub const BeforeError = Error || std.Io.Timeout.Error;
 pub const checkpoint = loading.checkpoint;
+pub const complete = loading.complete;
 pub const before = loading.before;
 
 pub fn failure(err: anyerror) Error {

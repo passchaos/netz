@@ -34,7 +34,15 @@ Commands, results and the original failure log are recorded beside this file.
 | Original held-writer deadline regressions | 8/10 passed; both timed cases fail | [before.Debug.log](before.Debug.log) |
 | Read admission/rollback/cancel handoff, TLS budgets, caller-CA HTTP1 persistence, HTTP2 TLS and WSS overlap | 150/150 passed | [Debug.log](Debug.log) |
 | CA lock regressions for Windows | Compiled | [windows.compile.log](windows.compile.log) |
+| Native Linux/Windows trust startup, CA lock and CA-file authentication | Passed at `1ff6cb48` | [native-platforms.json](native-platforms.json) |
 
 [Local metadata](local-validation.json) records the completed checks. The same
 CA lock regressions are selected by the native Linux and Windows trust-startup
 CI gate.
+
+[Run 45553631918](https://github.com/passchaos/netz/actions/runs/45553631918)
+completed the native Linux job `139000720705` and Windows job `139000720940`
+successfully. The trust-startup gate selects system-root loading guards,
+configured/caller-owned CA-file authentication, and the read-lock deadline and
+cancel/ownership regressions. Both macOS compilation jobs and the portable
+Linux/Windows compilation jobs also passed.

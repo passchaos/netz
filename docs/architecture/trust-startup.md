@@ -37,7 +37,11 @@ explicit store or environment to enable certificate verification.
 
 The deadline race surrounds system-root loading, including native file reads.
 Bundled-root construction and platform-verifier initialization check the budget
-before and after setup. Their synchronous CPU/native work must finish before
+before setup and on both successful and failed completion. The shared
+`tls/trust_completion.zig` owner retains a source failure only while the caller
+may continue, and destroys rejected successful values before returning.
+Timeout/cancellation also takes precedence over a failed watcher/load admission.
+Their synchronous CPU/native work must finish before
 its owned state can be destroyed. A caller-owned TCP CA bundle retains its
 shared-lock lifetime through certificate verification. Its admission uses
 `internal/timed_rwlock.zig` under the same handshake deadline. The helper

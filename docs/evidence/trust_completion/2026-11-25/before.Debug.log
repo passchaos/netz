@@ -1,0 +1,265 @@
+[traex-zig-guard 2026-11-25 13:34:47] waiting for the global TRAE Zig build slot
+[traex-zig-guard 2026-11-25 13:41:54] started Zig tree root=80816 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=900s
+test-quic
++- run test 34 pass, 2 fail (36 total)
+error: 'quic.handshake.trust_completion_tests.test.QUIC trust completion expired bundled-source failure returns HandshakeTimeout' failed:
+       expected error.HandshakeTimeout, found error.OutOfMemory
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/mem/Allocator.zig:300:82: 0x10278c0ff in allocBytesWithAlignment__anon_8281 (test)
+           const byte_ptr = self.rawAlloc(byte_count, alignment, return_address) orelse return error.OutOfMemory;
+                                                                                        ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/mem/Allocator.zig:286:5: 0x10278bf9b in allocWithSizeAndAlignment__anon_8260 (test)
+           return self.allocBytesWithAlignment(alignment, byte_count, return_address);
+           ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/mem/Allocator.zig:274:55: 0x1028885b3 in allocAdvancedWithRetAddr (test)
+           const ptr: [*]align(a.toByteUnits()) T = @ptrCast(try self.allocWithSizeAndAlignment(@sizeOf(T), a, n, return_address));
+                                                             ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/mem/Allocator.zig:262:5: 0x102888627 in alignedAlloc__anon_32367 (test)
+           return self.allocAdvancedWithRetAddr(T, alignment, n, @returnAddress());
+           ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/array_list.zig:1235:36: 0x102888247 in ensureTotalCapacityPrecise (test)
+                       const new_memory = try gpa.alignedAlloc(T, alignment, new_capacity);
+                                          ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/array_list.zig:1211:13: 0x102887fe7 in ensureTotalCapacity (test)
+                   return self.ensureTotalCapacityPrecise(gpa, growCapacity(new_capacity));
+                   ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/array_list.zig:1250:13: 0x102887dff in ensureUnusedCapacity (test)
+                   return self.ensureTotalCapacity(gpa, try addOrOom(self.items.len, additional_count));
+                   ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/array_list.zig:984:13: 0x1028c2a7f in appendSlice (test)
+                   try self.ensureUnusedCapacity(gpa, items.len);
+                   ^
+       /Users/bytedance/project-z/vail/src/x509/trust.zig:1271:13: 0x10289f0ef in addBundledAnchor (test)
+                   try self.bundle.bytes.appendSlice(
+                   ^
+       /Users/bytedance/project-z/vail/src/x509/trust.zig:1249:13: 0x10289f507 in initBundled (test)
+                   try result.addBundledAnchor(anchor, now_seconds);
+                   ^
+       /Users/bytedance/project-z/netz/src/trust.zig:51:5: 0x10289f5f7 in initBundledStore (test)
+           return vail.x509.trust.SystemStore.initBundled(
+           ^
+       /Users/bytedance/project-z/netz/src/quic/client_trust/loading.zig:12:5: 0x1028a1ee3 in failure (test)
+           return switch (err) {
+           ^
+       /Users/bytedance/project-z/netz/src/quic/handshake/client_authentication.zig:55:5: 0x1028a1e57 in sourceError (test)
+           return loading.failure(err);
+           ^
+       /Users/bytedance/project-z/netz/src/quic/handshake/client_authentication.zig:36:88: 0x10289fb83 in init__anon_37855 (test)
+                       self.system_store = roots.initBundledStore(allocator, now) catch |err| return sourceError(err);
+                                                                                              ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:72:13: 0x1028954ef in expectError__anon_37856 (test)
+                   return error.TestUnexpectedError;
+                   ^
+       /Users/bytedance/project-z/netz/src/quic/handshake/trust_completion_tests.zig:16:5: 0x102895bbf in bundled (test)
+           try std.testing.expectError(switch (mode) {
+           ^
+       /Users/bytedance/project-z/netz/src/quic/handshake/trust_completion_tests.zig:30:5: 0x102cacf7f in test.QUIC trust completion expired bundled-source failure returns HandshakeTimeout (test)
+           try bundled(.expired);
+           ^
+error: 'quic.handshake.trust_completion_tests.test.QUIC trust completion canceled bundled-source failure returns Canceled' failed:
+       expected error.Canceled, found error.OutOfMemory
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/mem/Allocator.zig:300:82: 0x10278c0ff in allocBytesWithAlignment__anon_8281 (test)
+           const byte_ptr = self.rawAlloc(byte_count, alignment, return_address) orelse return error.OutOfMemory;
+                                                                                        ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/mem/Allocator.zig:286:5: 0x10278bf9b in allocWithSizeAndAlignment__anon_8260 (test)
+           return self.allocBytesWithAlignment(alignment, byte_count, return_address);
+           ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/mem/Allocator.zig:274:55: 0x1028885b3 in allocAdvancedWithRetAddr (test)
+           const ptr: [*]align(a.toByteUnits()) T = @ptrCast(try self.allocWithSizeAndAlignment(@sizeOf(T), a, n, return_address));
+                                                             ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/mem/Allocator.zig:262:5: 0x102888627 in alignedAlloc__anon_32367 (test)
+           return self.allocAdvancedWithRetAddr(T, alignment, n, @returnAddress());
+           ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/array_list.zig:1235:36: 0x102888247 in ensureTotalCapacityPrecise (test)
+                       const new_memory = try gpa.alignedAlloc(T, alignment, new_capacity);
+                                          ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/array_list.zig:1211:13: 0x102887fe7 in ensureTotalCapacity (test)
+                   return self.ensureTotalCapacityPrecise(gpa, growCapacity(new_capacity));
+                   ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/array_list.zig:1250:13: 0x102887dff in ensureUnusedCapacity (test)
+                   return self.ensureTotalCapacity(gpa, try addOrOom(self.items.len, additional_count));
+                   ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/array_list.zig:984:13: 0x1028c2a7f in appendSlice (test)
+                   try self.ensureUnusedCapacity(gpa, items.len);
+                   ^
+       /Users/bytedance/project-z/vail/src/x509/trust.zig:1271:13: 0x10289f0ef in addBundledAnchor (test)
+                   try self.bundle.bytes.appendSlice(
+                   ^
+       /Users/bytedance/project-z/vail/src/x509/trust.zig:1249:13: 0x10289f507 in initBundled (test)
+                   try result.addBundledAnchor(anchor, now_seconds);
+                   ^
+       /Users/bytedance/project-z/netz/src/trust.zig:51:5: 0x10289f5f7 in initBundledStore (test)
+           return vail.x509.trust.SystemStore.initBundled(
+           ^
+       /Users/bytedance/project-z/netz/src/quic/client_trust/loading.zig:12:5: 0x1028a1ee3 in failure (test)
+           return switch (err) {
+           ^
+       /Users/bytedance/project-z/netz/src/quic/handshake/client_authentication.zig:55:5: 0x1028a1e57 in sourceError (test)
+           return loading.failure(err);
+           ^
+       /Users/bytedance/project-z/netz/src/quic/handshake/client_authentication.zig:36:88: 0x10289fb83 in init__anon_37855 (test)
+                       self.system_store = roots.initBundledStore(allocator, now) catch |err| return sourceError(err);
+                                                                                              ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:72:13: 0x1028954ef in expectError__anon_37856 (test)
+                   return error.TestUnexpectedError;
+                   ^
+       /Users/bytedance/project-z/netz/src/quic/handshake/trust_completion_tests.zig:16:5: 0x102895bbf in bundled (test)
+           try std.testing.expectError(switch (mode) {
+           ^
+       /Users/bytedance/project-z/netz/src/quic/handshake/trust_completion_tests.zig:33:5: 0x102895e3f in test.QUIC trust completion canceled bundled-source failure returns Canceled (test)
+           try bundled(.canceled);
+           ^
+failed command: ./.zig-cache/o/fb3700ab2573afa55316046828dc4059/test --cache-dir=./.zig-cache --seed=0x95afcd2 --listen=-
+
+test-tls
++- run test 10 pass, 4 fail (14 total)
+error: 'tls.trust_completion_admission_tests.test.TLS trust completion expired admission failure returns Timeout' failed:
+       expected error.Timeout, found error.ConcurrencyUnavailable
+       /Users/bytedance/project-z/netz/src/internal/testing/trust_completion.zig:36:9: 0x1030a6db7 in concurrent (test)
+               return error.ConcurrencyUnavailable;
+               ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/Io.zig:1462:13: 0x1030a6333 in concurrent__anon_36956 (test)
+                   try s.io.vtable.groupConcurrent(s.io.userdata, &s.group, @ptrCast(&context), .of(Context), Context.start);
+                   ^
+       /Users/bytedance/project-z/netz/src/tls/trust_loading.zig:69:5: 0x10309a5d7 in before__anon_36613 (test)
+           try select.concurrent(.timeout, deadline_policy.waitUntil, .{ io, deadline });
+           ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:72:13: 0x10309948b in expectError__anon_36614 (test)
+                   return error.TestUnexpectedError;
+                   ^
+       /Users/bytedance/project-z/netz/src/tls/trust_completion_admission_tests.zig:13:5: 0x10309977f in admission (test)
+           try std.testing.expectError(switch (mode) {
+           ^
+       /Users/bytedance/project-z/netz/src/tls/trust_completion_admission_tests.zig:26:5: 0x103a00ff3 in test.TLS trust completion expired admission failure returns Timeout (test)
+           try admission(.expired);
+           ^
+error: 'tls.trust_completion_admission_tests.test.TLS trust completion canceled admission failure returns Canceled' failed:
+       expected error.Canceled, found error.ConcurrencyUnavailable
+       /Users/bytedance/project-z/netz/src/internal/testing/trust_completion.zig:36:9: 0x1030a6db7 in concurrent (test)
+               return error.ConcurrencyUnavailable;
+               ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/Io.zig:1462:13: 0x1030a6333 in concurrent__anon_36956 (test)
+                   try s.io.vtable.groupConcurrent(s.io.userdata, &s.group, @ptrCast(&context), .of(Context), Context.start);
+                   ^
+       /Users/bytedance/project-z/netz/src/tls/trust_loading.zig:69:5: 0x10309a5d7 in before__anon_36613 (test)
+           try select.concurrent(.timeout, deadline_policy.waitUntil, .{ io, deadline });
+           ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:72:13: 0x10309948b in expectError__anon_36614 (test)
+                   return error.TestUnexpectedError;
+                   ^
+       /Users/bytedance/project-z/netz/src/tls/trust_completion_admission_tests.zig:13:5: 0x10309977f in admission (test)
+           try std.testing.expectError(switch (mode) {
+           ^
+       /Users/bytedance/project-z/netz/src/tls/trust_completion_admission_tests.zig:29:5: 0x1030a88e7 in test.TLS trust completion canceled admission failure returns Canceled (test)
+           try admission(.canceled);
+           ^
+error: 'tls.stream.trust_completion_tests.test.TLS trust completion expired bundled-source failure returns Timeout' failed:
+       expected error.Timeout, found error.OutOfMemory
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/mem/Allocator.zig:300:82: 0x102f9016b in allocBytesWithAlignment__anon_8281 (test)
+           const byte_ptr = self.rawAlloc(byte_count, alignment, return_address) orelse return error.OutOfMemory;
+                                                                                        ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/mem/Allocator.zig:286:5: 0x102f90007 in allocWithSizeAndAlignment__anon_8260 (test)
+           return self.allocBytesWithAlignment(alignment, byte_count, return_address);
+           ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/mem/Allocator.zig:274:55: 0x10308c61f in allocAdvancedWithRetAddr (test)
+           const ptr: [*]align(a.toByteUnits()) T = @ptrCast(try self.allocWithSizeAndAlignment(@sizeOf(T), a, n, return_address));
+                                                             ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/mem/Allocator.zig:262:5: 0x10308c693 in alignedAlloc__anon_32367 (test)
+           return self.allocAdvancedWithRetAddr(T, alignment, n, @returnAddress());
+           ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/array_list.zig:1235:36: 0x10308c2b3 in ensureTotalCapacityPrecise (test)
+                       const new_memory = try gpa.alignedAlloc(T, alignment, new_capacity);
+                                          ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/array_list.zig:1211:13: 0x10308c053 in ensureTotalCapacity (test)
+                   return self.ensureTotalCapacityPrecise(gpa, growCapacity(new_capacity));
+                   ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/array_list.zig:1250:13: 0x10308be6b in ensureUnusedCapacity (test)
+                   return self.ensureTotalCapacity(gpa, try addOrOom(self.items.len, additional_count));
+                   ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/array_list.zig:984:13: 0x1037cc597 in appendSlice (test)
+                   try self.ensureUnusedCapacity(gpa, items.len);
+                   ^
+       /Users/bytedance/project-z/vail/src/x509/trust.zig:1271:13: 0x1030b2acf in addBundledAnchor (test)
+                   try self.bundle.bytes.appendSlice(
+                   ^
+       /Users/bytedance/project-z/vail/src/x509/trust.zig:1249:13: 0x1030b2ee7 in initBundled (test)
+                   try result.addBundledAnchor(anchor, now_seconds);
+                   ^
+       /Users/bytedance/project-z/netz/src/trust.zig:51:5: 0x1030b2fd7 in initBundledStore (test)
+           return vail.x509.trust.SystemStore.initBundled(
+           ^
+       /Users/bytedance/project-z/netz/src/tls/stream/versioned_client_connection.zig:540:42: 0x10380bec7 in initVerifiedBefore (test)
+                           error.OutOfMemory => return error.OutOfMemory,
+                                                ^
+       /Users/bytedance/project-z/netz/src/tls/stream/versioned_client_connection.zig:495:9: 0x10380b333 in initVerifiedWithDeadline (test)
+               return initVerifiedBefore(
+               ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:72:13: 0x1030a8a6f in expectError__anon_40027 (test)
+                   return error.TestUnexpectedError;
+                   ^
+       /Users/bytedance/project-z/netz/src/tls/stream/trust_completion_tests.zig:9:9: 0x1030a8efb in bundled (test)
+               try std.testing.expectError(switch (mode) {
+               ^
+       /Users/bytedance/project-z/netz/src/tls/stream/trust_completion_tests.zig:22:5: 0x10399d7bb in test.TLS trust completion expired bundled-source failure returns Timeout (test)
+           try bundled(.expired);
+           ^
+error: 'tls.stream.trust_completion_tests.test.TLS trust completion canceled bundled-source failure returns Canceled' failed:
+       expected error.Canceled, found error.OutOfMemory
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/mem/Allocator.zig:300:82: 0x102f9016b in allocBytesWithAlignment__anon_8281 (test)
+           const byte_ptr = self.rawAlloc(byte_count, alignment, return_address) orelse return error.OutOfMemory;
+                                                                                        ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/mem/Allocator.zig:286:5: 0x102f90007 in allocWithSizeAndAlignment__anon_8260 (test)
+           return self.allocBytesWithAlignment(alignment, byte_count, return_address);
+           ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/mem/Allocator.zig:274:55: 0x10308c61f in allocAdvancedWithRetAddr (test)
+           const ptr: [*]align(a.toByteUnits()) T = @ptrCast(try self.allocWithSizeAndAlignment(@sizeOf(T), a, n, return_address));
+                                                             ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/mem/Allocator.zig:262:5: 0x10308c693 in alignedAlloc__anon_32367 (test)
+           return self.allocAdvancedWithRetAddr(T, alignment, n, @returnAddress());
+           ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/array_list.zig:1235:36: 0x10308c2b3 in ensureTotalCapacityPrecise (test)
+                       const new_memory = try gpa.alignedAlloc(T, alignment, new_capacity);
+                                          ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/array_list.zig:1211:13: 0x10308c053 in ensureTotalCapacity (test)
+                   return self.ensureTotalCapacityPrecise(gpa, growCapacity(new_capacity));
+                   ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/array_list.zig:1250:13: 0x10308be6b in ensureUnusedCapacity (test)
+                   return self.ensureTotalCapacity(gpa, try addOrOom(self.items.len, additional_count));
+                   ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/array_list.zig:984:13: 0x1037cc597 in appendSlice (test)
+                   try self.ensureUnusedCapacity(gpa, items.len);
+                   ^
+       /Users/bytedance/project-z/vail/src/x509/trust.zig:1271:13: 0x1030b2acf in addBundledAnchor (test)
+                   try self.bundle.bytes.appendSlice(
+                   ^
+       /Users/bytedance/project-z/vail/src/x509/trust.zig:1249:13: 0x1030b2ee7 in initBundled (test)
+                   try result.addBundledAnchor(anchor, now_seconds);
+                   ^
+       /Users/bytedance/project-z/netz/src/trust.zig:51:5: 0x1030b2fd7 in initBundledStore (test)
+           return vail.x509.trust.SystemStore.initBundled(
+           ^
+       /Users/bytedance/project-z/netz/src/tls/stream/versioned_client_connection.zig:540:42: 0x10380bec7 in initVerifiedBefore (test)
+                           error.OutOfMemory => return error.OutOfMemory,
+                                                ^
+       /Users/bytedance/project-z/netz/src/tls/stream/versioned_client_connection.zig:495:9: 0x10380b333 in initVerifiedWithDeadline (test)
+               return initVerifiedBefore(
+               ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:72:13: 0x1030a8a6f in expectError__anon_40027 (test)
+                   return error.TestUnexpectedError;
+                   ^
+       /Users/bytedance/project-z/netz/src/tls/stream/trust_completion_tests.zig:9:9: 0x1030a8efb in bundled (test)
+               try std.testing.expectError(switch (mode) {
+               ^
+       /Users/bytedance/project-z/netz/src/tls/stream/trust_completion_tests.zig:25:5: 0x1030a920f in test.TLS trust completion canceled bundled-source failure returns Canceled (test)
+           try bundled(.canceled);
+           ^
+failed command: ./.zig-cache/o/6de23f5339b1ea575034f5a3dbffdcd6/test --cache-dir=./.zig-cache --seed=0x95afcd2 --listen=-
+
+Build Summary: 10/14 steps succeeded (2 failed); 44/50 tests passed (6 failed)
+test-quic transitive failure
++- run test 34 pass, 2 fail (36 total)
+test-tls transitive failure
++- run test 10 pass, 4 fail (14 total)
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/7969d3ab30b197d80e2c8ba9aaff6d22/build /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/zig /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib /Users/bytedance/project-z/netz .zig-cache /Users/bytedance/.cache/zig --seed 0x95afcd2 -Zc706a437a2ec75ef test-quic test-tls -Dtest-filter=trust completion -j1 --summary failures
+[traex-zig-guard 2026-11-25 13:42:24] finished Zig tree root=80816 peak=3606MiB result=0

@@ -4,6 +4,10 @@ const quic = @import("../mod.zig");
 const roots = @import("../../trust.zig");
 const loading = @import("../client_trust/loading.zig");
 
+test {
+    _ = @import("trust_completion_tests.zig");
+}
+
 pub const Error = loading.Error || error{HandshakeTimeout};
 
 pub const Owner = struct {
@@ -25,11 +29,11 @@ pub const Owner = struct {
                 break :blk quic.tls.auth.ClientVerifier.fromTrustVerifier(self.bundle_verifier.?.clientVerifier());
             }
             if (options.root_source == .platform) {
-                self.platform_verifier = quic.tls.platform.Verifier.init(allocator, .{}) catch |err| return sourceError(err);
+                self.platform_verifier = loading.complete(io, deadline, quic.tls.platform.Verifier.init(allocator, .{})) catch |err| return sourceError(err);
                 break :blk quic.tls.auth.ClientVerifier.fromTrustVerifier(self.platform_verifier.?.clientVerifier());
             }
             if (options.root_source == .bundled) {
-                self.system_store = roots.initBundledStore(allocator, now) catch |err| return sourceError(err);
+                self.system_store = loading.complete(io, deadline, roots.initBundledStore(allocator, now)) catch |err| return sourceError(err);
             } else if (options.system_environ) |environ| {
                 self.system_store = loading.systemBefore(allocator, io, now, environ, deadline) catch |err| return sourceError(err);
             } else break :blk null;

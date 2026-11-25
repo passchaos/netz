@@ -49,3 +49,7 @@ a joined server task. A second mode loads the same PEM into a caller-owned
 system store, so the borrowed-store callback path can run on native Windows
 without modifying the process environment. Native CI selects both actual CA
 authentication modes alongside startup admission and cancellation checks.
+
+The [native follow-up](../../ca_bundle_lock/2026-11-25/native-platforms.json)
+at `1ff6cb48` records successful Linux and Windows trust-startup gates, including
+the Windows positional PEM preparation fix and CA bundle lock admission.

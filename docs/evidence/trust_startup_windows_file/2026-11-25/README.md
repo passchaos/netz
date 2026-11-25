@@ -25,3 +25,7 @@ beside this document.
 | Native Windows fixture before positional preparation | Failed in the trust-startup gate | [native-windows-before.json](native-windows-before.json) |
 | Both CA authentication fixture modes locally | 35/35 passed | [authentication.Debug.log](authentication.Debug.log) |
 | Both modes for Windows | Compiled | [authentication.windows.compile.log](authentication.windows.compile.log) |
+
+The subsequent [native record](../../ca_bundle_lock/2026-11-25/native-platforms.json)
+at `1ff6cb48` verifies the positional PEM preparation in the native Windows
+trust-startup gate, along with the same Linux authentication checks.

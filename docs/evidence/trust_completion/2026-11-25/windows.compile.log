@@ -1,0 +1,25 @@
+Command: ['/Users/bytedance/.local/bin/zig', 'build', 'test-quic-compile', 'test-tls-compile', '-Dtarget=x86_64-windows-gnu', '-Dtest-filter=trust completion', '-Dtest-filter=trust load', '-Dtest-filter=TLS CA bundle lock', '-Dtest-filter=QUIC client verifies', '-j1', '--summary', 'all']
+Build Summary: 11/11 steps succeeded
+test-quic-compile success
++- compile test Debug x86_64-windows-gnu success 33s MaxRSS:3G
+   +- WriteFile cached
+   +- compile obj vort-br-record-optimal Debug x86_64-windows-gnu cached 206ms MaxRSS:31M
+   +- WriteFile cached
+   +- compile obj vort-zstd-huffman-x2 Debug x86_64-windows-gnu cached 206ms MaxRSS:31M
+   +- compile obj vort-br-record-optimal Debug x86_64-windows-gnu (reused)
+   +- compile obj vort-zstd-huffman-x2 Debug x86_64-windows-gnu (reused)
+   +- options success
+   +- options cached
+test-tls-compile success
++- compile test Debug x86_64-windows-gnu success 33s MaxRSS:2G
+   +- WriteFile (reused)
+   +- compile obj vort-br-record-optimal Debug x86_64-windows-gnu (reused)
+   +- WriteFile (reused)
+   +- compile obj vort-zstd-huffman-x2 Debug x86_64-windows-gnu (reused)
+   +- compile obj vort-br-record-optimal Debug x86_64-windows-gnu (reused)
+   +- compile obj vort-zstd-huffman-x2 Debug x86_64-windows-gnu (reused)
+   +- options success
+   +- options (reused)
+
+
+Exit code: 0

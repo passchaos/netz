@@ -433,10 +433,12 @@ pub const Connection = struct {
             } else if (options.system_store) |store| {
                 bundle_verifier = store.verifier(now.toSeconds());
             } else if (options.root_source == .bundled) {
-                system_store = root_trust.initBundledStore(
+                system_store = trust_loading.complete(io, operation_deadline, root_trust.initBundledStore(
                     allocator,
                     now,
-                ) catch |err| switch (err) {
+                )) catch |err| switch (err) {
+                    error.Canceled => return error.Canceled,
+                    error.Timeout => return error.Timeout,
                     error.OutOfMemory => return error.OutOfMemory,
                     else => return error.CertificateUntrusted,
                 };
@@ -446,10 +448,12 @@ pub const Connection = struct {
                 if (options.stapled_ocsp != .ignore) {
                     return error.ConflictingOcspVerifier;
                 }
-                platform_verifier = vail.x509.platform.Verifier.init(
+                platform_verifier = trust_loading.complete(io, operation_deadline, vail.x509.platform.Verifier.init(
                     allocator,
                     .{ .verify_host = options.verify_host },
-                ) catch |err| {
+                )) catch |err| {
+                    if (err == error.Canceled) return error.Canceled;
+                    if (err == error.Timeout) return error.Timeout;
                     if (err == error.OutOfMemory) return error.OutOfMemory;
                     if (err == error.PlatformVerifierUnavailable) {
                         return error.PlatformVerifierUnavailable;

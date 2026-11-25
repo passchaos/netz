@@ -1,0 +1,22 @@
+{
+  "platform": "aarch64-macos",
+  "zig_version": "0.16.0",
+  "guarded": true,
+  "jobs": 1,
+  "checks": {
+    "fmt.log": {
+      "exit_code": 0
+    },
+    "Debug.log": {
+      "exit_code": 0,
+      "tests_passed": 71
+    },
+    "facades.Debug.log": {
+      "exit_code": 0,
+      "tests_passed": 307
+    },
+    "windows.compile.log": {
+      "exit_code": 0
+    }
+  }
+}
