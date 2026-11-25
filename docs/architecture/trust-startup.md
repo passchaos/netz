@@ -23,12 +23,22 @@ entropy cannot be accepted or replaced by an unrelated source error.
 and publishes only successfully completed IDs. Both missing IDs share one
 entropy request; caller-provided IDs remain available without entropy work.
 
-`src/tls/trust_loading.zig` owns bounded system-root loading. It validates the
+`src/tls/trust_loading.zig` selects the system-root source. The shared
+`internal/owned_result_deadline.zig` owns its bounded result lifetime. It validates the
 deadline and cancellation at admission, admits the timeout watcher before the
 load, and joins both tasks on every exit. Concurrency admission failure returns
 `ConcurrencyUnavailable` before loading begins. The result queue has two
 entries and retains every successful store until the caller accepts it or
 cleanup destroys it.
+
+The exclusive H3 pool's default connector uses the same owned-result helper
+around its complete configured `connect_timeout`. Ordinary, redirect, Alt-Svc
+and typed early-data routes share one prepared origin and one fresh-ID fill.
+The native connector receives the original timestamp; custom transports remain
+under that owner and receive only the remaining relative timeout. A late
+successful client is destroyed before return, and early-data fallback keeps
+the same budget. `handshake_client_pool/default_connector.zig` owns this policy
+while the public default-connector and transport types retain their exports.
 
 The worker checks the original deadline before loading and after either a
 success or a failure. The receiving owner checks again before transferring the

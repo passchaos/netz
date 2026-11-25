@@ -1,0 +1,11 @@
+[traex-zig-guard 2026-11-25 16:33:35] waiting for the global TRAE Zig build slot
+[traex-zig-guard 2026-11-25 16:33:53] started Zig tree root=17135 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=900s
+Running fmt
+fmt exit=0
+Running Debug
+Debug exit=0
+Running ReleaseSafe
+ReleaseSafe exit=0
+Running windows-compile
+windows-compile exit=0
+[traex-zig-guard 2026-11-25 16:41:30] finished Zig tree root=17135 peak=5360MiB result=0

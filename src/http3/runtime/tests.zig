@@ -64,6 +64,7 @@ const validateHandshakeSessionOptions = runtime.validateHandshakeSessionOptions;
 
 test {
     _ = @import("client/entropy_tests.zig");
+    _ = @import("client/pool_startup_tests.zig");
     _ = @import("client/system_resolver_tests.zig");
     _ = @import("shared_handshake_client_pool/stream_command.zig");
     _ = @import("body_streaming_tests.zig");

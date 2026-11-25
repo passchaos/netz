@@ -1,0 +1,204 @@
+[traex-zig-guard 2026-11-25 16:03:32] waiting for the global TRAE Zig build slot
+[traex-zig-guard 2026-11-25 16:10:35] started Zig tree root=77217 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=900s
+test-http3
++- run test 62 pass, 5 fail (67 total)
+error: 'http3.runtime.client.pool_startup_tests.test.HTTP3 startup entropy default pool origin starts the complete connection budget' failed:
+       expected error.ConcurrencyUnavailable, found error.EntropyUnavailable
+       /Users/bytedance/project-z/netz/src/internal/testing/startup_entropy.zig:25:9: 0x10592fa3b in random (test)
+               return error.EntropyUnavailable;
+               ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/Io.zig:2486:5: 0x1051dbfcb in randomSecure (test)
+           return io.vtable.randomSecure(io.userdata, buffer);
+           ^
+       /Users/bytedance/project-z/netz/src/internal/secure_random.zig:15:9: 0x1058c3d53 in fill (test)
+               try io.randomSecure(buffer);
+               ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/handshake_client_pool.zig:146:13: 0x1058c9663 in connect (test)
+                   try secure_random.fill(io, &original_dcid);
+                   ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:72:13: 0x104f1559b in expectError__anon_39110 (test)
+                   return error.TestUnexpectedError;
+                   ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/client/pool_startup_tests.zig:41:13: 0x10593674b in exercise__anon_7947767 (test)
+                   try std.testing.expectError(if (zero) error.HandshakeTimeout else error.ConcurrencyUnavailable, result);
+                   ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/client/pool_startup_tests.zig:49:5: 0x1059376ef in test.HTTP3 startup entropy default pool origin starts the complete connection budget (test)
+           try exercise(.origin);
+           ^
+error: 'http3.runtime.client.pool_startup_tests.test.HTTP3 startup entropy default pool redirect starts the complete connection budget' failed:
+       expected error.ConcurrencyUnavailable, found error.EntropyUnavailable
+       /Users/bytedance/project-z/netz/src/internal/testing/startup_entropy.zig:25:9: 0x10592fa3b in random (test)
+               return error.EntropyUnavailable;
+               ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/Io.zig:2486:5: 0x1051dbfcb in randomSecure (test)
+           return io.vtable.randomSecure(io.userdata, buffer);
+           ^
+       /Users/bytedance/project-z/netz/src/internal/secure_random.zig:15:9: 0x1058c3d53 in fill (test)
+               try io.randomSecure(buffer);
+               ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/handshake_client_pool.zig:202:13: 0x10505b7d3 in connectRedirect (test)
+                   try secure_random.fill(io, &original_dcid);
+                   ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:72:13: 0x104f1559b in expectError__anon_39110 (test)
+                   return error.TestUnexpectedError;
+                   ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/client/pool_startup_tests.zig:41:13: 0x105934727 in exercise__anon_7947760 (test)
+                   try std.testing.expectError(if (zero) error.HandshakeTimeout else error.ConcurrencyUnavailable, result);
+                   ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/client/pool_startup_tests.zig:52:5: 0x10593572b in test.HTTP3 startup entropy default pool redirect starts the complete connection budget (test)
+           try exercise(.redirect);
+           ^
+error: 'http3.runtime.client.pool_startup_tests.test.HTTP3 startup entropy default pool Alt-Svc starts the complete connection budget' failed:
+       expected error.ConcurrencyUnavailable, found error.EntropyUnavailable
+       /Users/bytedance/project-z/netz/src/internal/testing/startup_entropy.zig:25:9: 0x10592fa3b in random (test)
+               return error.EntropyUnavailable;
+               ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/Io.zig:2486:5: 0x1051dbfcb in randomSecure (test)
+           return io.vtable.randomSecure(io.userdata, buffer);
+           ^
+       /Users/bytedance/project-z/netz/src/internal/secure_random.zig:15:9: 0x1058c3d53 in fill (test)
+               try io.randomSecure(buffer);
+               ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/handshake_client_pool.zig:248:13: 0x1058c8ff7 in connectAltSvc (test)
+                   try secure_random.fill(io, &original_dcid);
+                   ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:72:13: 0x104f1559b in expectError__anon_39110 (test)
+                   return error.TestUnexpectedError;
+                   ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/client/pool_startup_tests.zig:41:13: 0x1059326e3 in exercise__anon_7947753 (test)
+                   try std.testing.expectError(if (zero) error.HandshakeTimeout else error.ConcurrencyUnavailable, result);
+                   ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/client/pool_startup_tests.zig:55:5: 0x1059336e7 in test.HTTP3 startup entropy default pool Alt-Svc starts the complete connection budget (test)
+           try exercise(.alt_svc);
+           ^
+error: 'http3.runtime.client.pool_startup_tests.test.HTTP3 startup entropy default pool Alt-Svc redirect starts the complete connection budget' failed:
+       expected error.ConcurrencyUnavailable, found error.EntropyUnavailable
+       /Users/bytedance/project-z/netz/src/internal/testing/startup_entropy.zig:25:9: 0x10592fa3b in random (test)
+               return error.EntropyUnavailable;
+               ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/Io.zig:2486:5: 0x1051dbfcb in randomSecure (test)
+           return io.vtable.randomSecure(io.userdata, buffer);
+           ^
+       /Users/bytedance/project-z/netz/src/internal/secure_random.zig:15:9: 0x1058c3d53 in fill (test)
+               try io.randomSecure(buffer);
+               ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/handshake_client_pool.zig:295:13: 0x10505bd9b in connectAltSvcRedirect (test)
+                   try secure_random.fill(io, &original_dcid);
+                   ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:72:13: 0x104f1559b in expectError__anon_39110 (test)
+                   return error.TestUnexpectedError;
+                   ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/client/pool_startup_tests.zig:41:13: 0x1058cac43 in exercise__anon_7903621 (test)
+                   try std.testing.expectError(if (zero) error.HandshakeTimeout else error.ConcurrencyUnavailable, result);
+                   ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/client/pool_startup_tests.zig:58:5: 0x1058cbc77 in test.HTTP3 startup entropy default pool Alt-Svc redirect starts the complete connection budget (test)
+           try exercise(.alt_svc_redirect);
+           ^
+error: 'http3.runtime.client.pool_startup_tests.test.HTTP3 startup entropy default pool early Alt-Svc starts the complete connection budget' failed:
+       expected error.ConcurrencyUnavailable, found error.EntropyUnavailable
+       /Users/bytedance/project-z/netz/src/internal/testing/startup_entropy.zig:25:9: 0x10592fa3b in random (test)
+               return error.EntropyUnavailable;
+               ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/Io.zig:2486:5: 0x1051dbfcb in randomSecure (test)
+           return io.vtable.randomSecure(io.userdata, buffer);
+           ^
+       /Users/bytedance/project-z/netz/src/internal/secure_random.zig:15:9: 0x1058c3d53 in fill (test)
+               try io.randomSecure(buffer);
+               ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/handshake_client_pool.zig:248:13: 0x1058c8ff7 in connectAltSvc (test)
+                   try secure_random.fill(io, &original_dcid);
+                   ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/handshake_client_pool.zig:364:37: 0x1058c558f in connectEarlyAltSvc (test)
+                       return .{ .client = try connectAltSvc(
+                                           ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:72:13: 0x104f1559b in expectError__anon_39110 (test)
+                   return error.TestUnexpectedError;
+                   ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/client/pool_startup_tests.zig:41:13: 0x104f16b93 in exercise__anon_36615 (test)
+                   try std.testing.expectError(if (zero) error.HandshakeTimeout else error.ConcurrencyUnavailable, result);
+                   ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/client/pool_startup_tests.zig:61:5: 0x104f17f33 in test.HTTP3 startup entropy default pool early Alt-Svc starts the complete connection budget (test)
+           try exercise(.early_alt_svc);
+           ^
+failed command: ./.zig-cache/o/bbf48189ca863db20908649a887f6d0b/test --cache-dir=./.zig-cache --seed=0x67840992 --listen=-
+
+Build Summary: 8/10 steps succeeded (1 failed); 62/67 tests passed (5 failed)
+test-http3 transitive failure
++- run test 62 pass, 5 fail (67 total)
+   +- compile test Debug native success 28s MaxRSS:2G
+      +- WriteFile macho_0_p256_field_arm64.S cached
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 244ms MaxRSS:31M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 203ms MaxRSS:31M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options success
+      +- options cached
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/7969d3ab30b197d80e2c8ba9aaff6d22/build /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/zig /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib /Users/bytedance/project-z/netz .zig-cache /Users/bytedance/.cache/zig --seed 0x67840992 -Ze2b00008b2bea80a test-http3 -Dtest-filter=HTTP3 startup entropy default pool -j1 --summary all
+[traex-zig-guard 2026-11-25 16:11:06] finished Zig tree root=77217 peak=2350MiB result=0

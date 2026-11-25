@@ -1,0 +1,64 @@
+{
+  "platform": "aarch64-macos",
+  "zig_version": "0.16.0",
+  "guarded": true,
+  "jobs": 1,
+  "baseline_head": "9bf05f194426fbea8a4555fe255242879e19979a",
+  "baseline": {
+    "tests_passed": 62,
+    "tests_total": 67,
+    "distinct_failed_regressions": 5
+  },
+  "sources": [
+    {
+      "path": "src/http3/runtime/client/pool_startup_tests.zig",
+      "sha256": "221f907bcb9740ce917d1e4cc9a912a147a02d34aecdcf13681ea83e0c4c9f86"
+    },
+    {
+      "path": "src/http3/runtime/handshake_client_pool.zig",
+      "sha256": "75865465f90fcc692e744040abcec35de3feb00cbbec0cc1db91a878c046a9c0"
+    },
+    {
+      "path": "src/http3/runtime/handshake_client_pool/default_connector.zig",
+      "sha256": "9a5afe654a0292f9775afb38288ff95f68f698a38598c78c745cf28055a30323"
+    },
+    {
+      "path": "src/http3/runtime/tests.zig",
+      "sha256": "527104994d8bcc4b341adafd1f36a11dbe1cf569d1f077dbaa0d82488d4af10b"
+    },
+    {
+      "path": "src/internal/owned_result_deadline.zig",
+      "sha256": "b07301651ef1e45b2ff857ce4de0a51932bfb066277c7980bf1aab03011d2647"
+    },
+    {
+      "path": "src/internal/owned_result_deadline_tests.zig",
+      "sha256": "d5d6a532b4987a33cbccbb8ad70f1f833c5e88665a5f590778fc80a02d500382"
+    },
+    {
+      "path": "src/tls/trust_completion.zig",
+      "sha256": "2d468521c781378a428fca934993de5c009c5ca4641361165ef2bb671b1c78ec"
+    },
+    {
+      "path": "src/tls/trust_loading.zig",
+      "sha256": "ab8d1a53203cd10f6633171f13a88c6be110ddfdf3ed962c0cf12ba0fa6fe016"
+    }
+  ],
+  "checks": {
+    "fmt": {
+      "exit_code": 0
+    },
+    "Debug": {
+      "exit_code": 0,
+      "tests_passed": 266,
+      "tests_total": 266
+    },
+    "ReleaseSafe": {
+      "exit_code": 0,
+      "tests_passed": 266,
+      "tests_total": 266
+    },
+    "windows-compile": {
+      "exit_code": 0
+    }
+  }
+}

@@ -172,6 +172,11 @@ configured H3 `connect_timeout`, before DNS and the QUIC handshake. A stricter
 caller deadline takes precedence, and later phases receive the original
 timestamp. The timeout is not restarted after preparation.
 
+The native H3 pool's default connector also applies its configured
+`connect_timeout` to preparation, custom transport callbacks and connection
+setup. Redirect, Alt-Svc and 0-RTT fallback use the same original timestamp;
+a late successful connection is closed before it can enter the pool.
+
 Admission to a caller-owned `.tls.ca_bundle` shared lock uses the same earlier
 handshake/caller deadline. `Timeout` or `Canceled` releases interrupted read
 admission; successful admission keeps the bundle protected throughout
