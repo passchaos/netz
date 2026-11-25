@@ -152,6 +152,12 @@ and 240 for Connection, with 48-byte optional write scratch. The current
 configuration, producing 608/544-byte complete owners. This preserves the
 original owner-state bound as connection policy fields evolve.
 
+HTTP/2 applies the same separation. The 64-bit Connection owner budget is
+1,696 bytes in Debug/ReleaseSafe and 1,616 in ReleaseFast/ReleaseSmall; current
+544-byte Limits storage gives total sizes of 2,240/2,160 bytes. Optional HPACK,
+peer metadata, push and priority owners retain their independent pointer/slot
+budgets. Policy growth does not relax the mutable owner-state bound.
+
 **P10 - No unmeasured performance claims.** Every accepted performance change
 records a fixed-binary A/B with alternating order and pinned CPU, or an
 external reference gate. Rejected experiments are recorded with their numbers so

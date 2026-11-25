@@ -114,11 +114,13 @@ test "HTTP/2 TLS options forward bundled root selection" {
 
 test "HTTP/2 connection keeps optional state compact" {
     if (@sizeOf(usize) == 8) {
-        const connection_size: usize = switch (builtin.mode) {
-            .Debug, .ReleaseSafe => 2_080,
-            .ReleaseFast, .ReleaseSmall => 2_000,
+        // Keep the original mutable owner budget independent of source,
+        // interface and resolver policy stored in Limits.
+        const connection_owner_size: usize = switch (builtin.mode) {
+            .Debug, .ReleaseSafe => 1_696,
+            .ReleaseFast, .ReleaseSmall => 1_616,
         };
-        try std.testing.expectEqual(connection_size, @sizeOf(Connection));
+        try std.testing.expectEqual(connection_owner_size, @sizeOf(Connection) - @sizeOf(Limits));
         try std.testing.expectEqual(@as(usize, 48), @sizeOf(OwnedFrameSlot));
         try std.testing.expectEqual(@as(usize, 56), @sizeOf(RetainedFrameSlot));
         try std.testing.expectEqual(

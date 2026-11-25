@@ -14,6 +14,7 @@ import signal
 import socket
 import ssl
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -168,6 +169,7 @@ def parse_args() -> argparse.Namespace:
     selected.add_argument("--only-config-file-lifecycle", action="store_true")
     selected.add_argument("--only-include-directory", action="store_true")
     selected.add_argument("--only-tls-identity-reload", action="store_true")
+    selected.add_argument("--only-client-ca-reload", action="store_true")
     selected.add_argument("--only-crl-listener", action="store_true")
     selected.add_argument("--only-autosave-reload", action="store_true")
     selected.add_argument("--only-persistence-restart", action="store_true")
@@ -624,9 +626,14 @@ def expect_no_packet(sock: socket.socket, label: str) -> None:
     raise AssertionError(f"{label}: unexpected packet {packet.hex()}")
 
 
-def mqtt_ping(sock: socket.socket) -> None:
-    sock.sendall(b"\xc0\x00")
-    response = read_mqtt_packet(sock)
+def mqtt_ping(sock: socket.socket, label: str | None = None) -> None:
+    try:
+        sock.sendall(b"\xc0\x00")
+        response = read_mqtt_packet(sock)
+    except (AssertionError, OSError) as error:
+        if label is not None:
+            raise AssertionError(f"{label}: {error}") from None
+        raise
     if response != b"\xd0\x00":
         raise AssertionError(f"expected PINGRESP, got {response.hex()}")
 
@@ -4520,6 +4527,7 @@ def run_client_ca_reload_case(broker: Path, directory: Path) -> None:
             first_key,
             "ca-reload-old-mqtt",
         )
+        old_mqtt_started = time.monotonic()
         clients.append(old_mqtt)
         old_capath = mqtt_connect(
             capath_port,
@@ -4535,6 +4543,11 @@ def run_client_ca_reload_case(broker: Path, directory: Path) -> None:
         expect_wss_rejected(second_client, second_key, "initial-second-ca")
         assert_openssl_mqtt_success(openssl_mqtt_client(mqtt_port, server_ca))
 
+        # Establish liveness immediately before changing trust, so a prior
+        # connection failure is not attributed to the SIGHUP transaction.
+        mqtt_ping(old_mqtt, "client CA reload MQTT before SIGHUP")
+        mqtt_ping(old_capath, "client CA reload capath before SIGHUP")
+        websocket_mqtt_ping(old_wss)
         write_config(second_ca, next_ca_directory, True)
         os.kill(process.pid, signal.SIGHUP)
         wait_process_line(
@@ -4542,8 +4555,13 @@ def run_client_ca_reload_case(broker: Path, directory: Path) -> None:
             "security reload completed: source=SIGHUP",
             "successful client CA reload",
         )
-        mqtt_ping(old_mqtt)
-        mqtt_ping(old_capath)
+        mqtt_ping(
+            old_mqtt,
+            "client CA reload retained MQTT after SIGHUP "
+            f"(age={time.monotonic() - old_mqtt_started:.3f}s, "
+            f"broker_exit={process.poll()})",
+        )
+        mqtt_ping(old_capath, "client CA reload retained capath after SIGHUP")
         websocket_mqtt_ping(old_wss)
         new_mqtt = mqtt_connect(
             mqtt_port,
@@ -7772,6 +7790,12 @@ def main() -> None:
                 f"mosquitto_process_sources={source_count} "
                 + RUNTIME
             )
+            return
+        if args.only_client_ca_reload:
+            if sys.platform != "linux":
+                raise RuntimeError("client CA reload requires Linux broker reload signals")
+            run_client_ca_reload_case(args.broker, directory)
+            print("MQTT client CA reload integration passed: " + RUNTIME)
             return
         if args.only_crl_listener:
             run_signed_crl_listener_case(args.broker, directory, "rsa")

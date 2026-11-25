@@ -1,0 +1,78 @@
+{
+  "observed_utc": "2026-11-25T17:57:58.999353+00:00",
+  "platform": "aarch64-macos",
+  "source_sha256": {
+    ".github/workflows/ci.yml": "36c6d1777a30e828397e320cdfa5e89d12ea0a1f6cf1f57152b882fdb3bcbcb9",
+    "docs/architecture.md": "092a7b9f3cd9a570893b775663992ed1291874f890397b4f2b27adb295eb1f33",
+    "src/http2/runtime/runtime_state_tests.zig": "905ed996d4b57086c57cf6fb999a2d34c8e04591538b71b09d538d97c579b91f",
+    "src/webtransport/h2/endpoint_client/reconnecting/tests.zig": "e940531cd39dbac4aa4c2183e4d17ecd9eef5defaf96f46506a015b3ea82c09c",
+    "src/webtransport/runtime/session_control/handshake_rejection_tests.zig": "7f815c42c78bedd61dafd29ec7ca791c173395fa9575a7dddb782af6e952aac6",
+    "tools/interop/mqtt_broker_config.py": "bf628422e965f8d1fe1f98d3a13c3c6a7af9ee282de3c6c4b931a4e2042226e3"
+  },
+  "local_layout": {
+    "debug_connection": 2240,
+    "limits": 544,
+    "debug_owner": 1696,
+    "release_fast_owner": 1616,
+    "release_fast_connection": 2160
+  },
+  "local_validation": {
+    "debug_webtransport": {
+      "tests_passed": 146,
+      "exit_code": 0
+    },
+    "debug_http2": {
+      "tests_passed": 38,
+      "exit_code": 0
+    },
+    "release_fast_layout": {
+      "tests_passed": 28,
+      "exit_code": 0
+    },
+    "python314_peer_and_workflow": "passed",
+    "focused_ca_selector": "passed",
+    "evidence_audit": {
+      "exit_code": 0,
+      "files": 304,
+      "entries": 10944,
+      "matched": 6425,
+      "stale": 4516,
+      "unresolved": 3,
+      "invalid": 0,
+      "unreadable": 0,
+      "max_unresolved_policy": 24,
+      "log": "evidence-audit.log"
+    },
+    "broker_compile_and_focused_cli": {
+      "exit_code": 0,
+      "steps_succeeded": 9,
+      "python": "3.14",
+      "actual_signal_case_executed": false
+    }
+  },
+  "ci_baseline": {
+    "run_id": 45661507859,
+    "preflight": "success",
+    "platform_matrix": "success",
+    "complete": "failure",
+    "known_failures": [
+      "H2 total layout expected2080 actual2240",
+      "dispatcher-bound fixture attempted raw DATAGRAM receive",
+      "HTTP2 reconnect fixture UnexpectedEof",
+      "MQTT client CA reload old connection EOF"
+    ]
+  },
+  "pending": [
+    "next native Linux/Windows protocol scopes",
+    "native Linux client CA reload before/after liveness",
+    "next pinned complete CI"
+  ],
+  "reconnecting_scope_note": "Original reconnect case passed the local before scope; Linux CI EOF was not reproduced locally. Fixture now uses explicit independent tasks with zero async capacity; native CI remains required.",
+  "signal_scope_note": "Configured broker reload signal implementation is Linux-only; local macOS SIGHUP probe cannot validate this case.",
+  "dependency_pins_changed": false,
+  "ci_complete_budget_changed": false,
+  "local_dependency_revisions": {
+    "vail": "d93847a7e091c835406ee10c0a86fd064f1475dd",
+    "vort": "a48e1151872a30a574363e994ec312969b3c7818"
+  }
+}

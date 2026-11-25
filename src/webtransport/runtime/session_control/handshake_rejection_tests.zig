@@ -162,6 +162,15 @@ test "WebTransport standalone dispatcher retains rejection through bounded clean
         try std.testing.expect(dispatcher.nextTimerDeadline() != null);
     }
     try std.testing.expectError(error.InvalidCapsule, pair.client.pollSessionEvent());
+    // Blocking raw receivers still reject dispatcher ownership even after
+    // the Session becomes terminal. Check that boundary, then hand ownership
+    // back before running the common standalone post-rejection matrix.
+    try std.testing.expectError(error.InvalidDispatcherState, pair.client.receiveDatagramWithTimeout(.fromSeconds(1)));
+    _ = dispatcher.unregisterConnection(1) catch false;
+    pair.client.dispatcher = null;
+    pair.client.dispatcher_handle = null;
+    pair.client.h3.dispatcher_bound = false;
+    pair.client.h3.owns_endpoint = true;
     try pair.expectRejected(.client, stream_id);
     try std.testing.expectEqual(@as(usize, 3), observed.calls);
 }

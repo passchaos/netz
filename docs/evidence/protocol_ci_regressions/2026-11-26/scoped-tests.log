@@ -1,0 +1,15 @@
+10/28 http2.runtime.runtime_state_tests.test.HTTP/2 connection keeps optional state compact...H2 layout: Connection=2240 Limits=544 owner=1696
+FAIL (TestExpectedEqual)
+27 passed; 0 skipped; 1 failed.
+102/136 http2.runtime.runtime_state_tests.test.HTTP/2 connection keeps optional state compact...H2 layout: Connection=2240 Limits=544 owner=1696
+FAIL (TestExpectedEqual)
+125/136 webtransport.runtime.session_control.handshake_rejection_tests.test.WebTransport standalone dispatcher retains rejection through bounded cleanup...expected error.ConnectDatagramAssociationClosed, found error.InvalidDispatcherState
+FAIL (TestUnexpectedError)
+134 passed; 0 skipped; 2 failed.
+Executing: /Users/bytedance/.local/bin/zig fmt src/http2/runtime/runtime_state_tests.zig src/webtransport/runtime/session_control/handshake_rejection_tests.zig src/webtransport/h2/endpoint_client/reconnecting/tests.zig
+Executing: /Users/bytedance/.local/bin/zig build test-http2 test-webtransport -j1 -Dtest-progress=true -Dtest-filter=HTTP/2 connection keeps optional state compact -Dtest-filter=HTTP/2 compact -Dtest-filter=HTTP/2 lazy -Dtest-filter=WebTransport standalone -Dtest-filter=ReconnectingEndpointClient reconnects only future Sessions --summary all
+All 146 tests passed.
+All 38 tests passed.
+Executing: /Users/bytedance/.local/bin/zig build test-http2 -j1 -Doptimize=ReleaseFast -Dtest-filter=HTTP/2 connection keeps optional state compact --summary all
+Build Summary: 10/10 steps succeeded; 28/28 tests passed
+Executing: /Users/bytedance/.local/bin/zig build test-compile-interop -j1 -Dinterop-filter=netz-mqtt-vector-broker --summary all

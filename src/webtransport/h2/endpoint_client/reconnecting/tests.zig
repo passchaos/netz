@@ -17,7 +17,9 @@ const credit: http2.WebTransportSettings = .{
 };
 
 test "WebTransport HTTP2 ReconnectingEndpointClient reconnects only future Sessions" {
-    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    // The peer and both CONNECTs must run independently even when
+    // opportunistic async execution would fall back to the caller.
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .nothing });
     defer threaded.deinit();
     const io = threaded.io();
     var certificate: [tls.certificate_der_len]u8 = undefined;
@@ -127,7 +129,7 @@ test "WebTransport HTTP2 ReconnectingEndpointClient reconnects only future Sessi
         }
     };
     var peer = Peer{ .listener = &listener, .drop_first = &drop_first };
-    var peer_task = io.async(Peer.run, .{&peer});
+    var peer_task = try io.concurrent(Peer.run, .{&peer});
     defer _ = peer_task.cancel(io) catch {};
 
     var client = try reconnecting.ReconnectingEndpointClient.init(
@@ -164,9 +166,9 @@ test "WebTransport HTTP2 ReconnectingEndpointClient reconnects only future Sessi
             );
         }
     };
-    var a_task = io.async(Open.run, .{ client, "/a" });
+    var a_task = try io.concurrent(Open.run, .{ client, "/a" });
     defer _ = a_task.cancel(io) catch {};
-    var b_task = io.async(Open.run, .{ client, "/b" });
+    var b_task = try io.concurrent(Open.run, .{ client, "/b" });
     defer _ = b_task.cancel(io) catch {};
     const a = try a_task.await(io);
     const b = try b_task.await(io);
