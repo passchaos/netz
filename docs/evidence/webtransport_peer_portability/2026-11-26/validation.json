@@ -1,0 +1,48 @@
+{
+  "observed_utc": "2026-11-25T17:02:47.722486+00:00",
+  "command": [
+    "/Users/bytedance/.local/bin/zig",
+    "build",
+    "interop-webtransport-socks5",
+    "interop-webtransport-wtransport",
+    "-j1",
+    "--summary",
+    "all"
+  ],
+  "exit_code": 0,
+  "source_sha256": {
+    "tools/interop/webtransport_wtransport/Cargo.toml": "6271db10aac55e501986ce8916e3d27fae09bfe2963951d4449660d3bfe29d4c",
+    "tools/interop/webtransport_wtransport/Cargo.lock": "040053b170033c9afeedff3c2d502b0ee2f82a17387a98ba67b4526e9f90f978"
+  },
+  "reference_revision": "d96cbb87c9127fcb453fb05bbb47ef93402daec2",
+  "timeout_scope": "local Python subprocess shim for script durations; actual native peer execution",
+  "platform": "aarch64-macos",
+  "lock_validation": {
+    "package_count": 149,
+    "all_package_versions_dependencies_checksums_preserved": true,
+    "changed_source_packages": [
+      "wtransport",
+      "wtransport-proto"
+    ]
+  },
+  "locked_release_build": {
+    "exit_code": 0,
+    "reference_packages": "wtransport 0.7.1 and wtransport-proto 0.7.1"
+  },
+  "previous_ci_run": {
+    "id": 45652362748,
+    "complete": "failure",
+    "known_failure": "developer-local Cargo path unavailable"
+  },
+  "pending": [
+    "next pinned complete CI"
+  ],
+  "local_dependency_revisions": {
+    "vail": "d93847a7e091c835406ee10c0a86fd064f1475dd",
+    "vort": "a48e1151872a30a574363e994ec312969b3c7818"
+  },
+  "ci_dependency_pins": {
+    "vail": "3b772b0cccb64d84fbc760df6428bc51e0fe0761",
+    "vort": "a48e1151872a30a574363e994ec312969b3c7818"
+  }
+}

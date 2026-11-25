@@ -1,0 +1,29 @@
+[traex-zig-guard 2026-11-26 00:58:41] started Zig tree root=83607 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=300s
+    Updating git repository `https://github.com/BiagioFesta/wtransport`
+   Compiling wtransport-proto v0.7.1 (https://github.com/BiagioFesta/wtransport?rev=d96cbb87c9127fcb453fb05bbb47ef93402daec2#d96cbb87)
+   Compiling wtransport v0.7.1 (https://github.com/BiagioFesta/wtransport?rev=d96cbb87c9127fcb453fb05bbb47ef93402daec2#d96cbb87)
+   Compiling netz-webtransport-wtransport v0.0.0 (/Users/bytedance/project-z/netz/tools/interop/webtransport_wtransport)
+    Finished `release` profile [optimized] target(s) in 6.61s
+[traex-zig-guard 2026-11-26 00:58:48] finished Zig tree root=83607 peak=381MiB result=0
+
+[traex-zig-guard 2026-11-26 01:01:45] started Zig tree root=67251 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=600s
+Executing: /Users/bytedance/.local/bin/zig build interop-webtransport-socks5 interop-webtransport-wtransport -j1 --summary all
+WebTransport SOCKS5 interoperability passed: associations=2 remote_dns=true rejection=404 connect=true datagram=true bidi=true uni=true reset=73 stop=74 recovery=true reuse=true peer_close=true client_io=zio-std-io server_io=wtransport-quinn-tokio
+wtransport client interop passed: CONNECT admission-headers=true DATAGRAM max_datagram_size=1287 oversized_rejected=true bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true drain-before-close=true close client_io=wtransport-quinn-tokio server_io=zio-std-io
+netz WebTransport interop server listening on 127.0.0.1:52613
+debug(zio): Spawning thread 0
+netz WebTransport interop accepted CONNECT with admission metadata
+netz WebTransport interop received DATAGRAM
+netz WebTransport interop received bidi
+netz WebTransport interop received uni
+netz WebTransport server interop passed: CONNECT DATAGRAM max_datagram_size=1170 oversized_rejected=true bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true drain-before-connection-close=true close client_io=wtransport-quinn-tokio server_io=zio-std-io
+debug(zio): Removing thread 0
+debug(zio): Spawning thread 0
+netz WebTransport client interop passed: CONNECT uri=true rejection=404 admission-headers=true DATAGRAM max_datagram_size=1170 oversized_rejected=true bidi uni reset=73 stop=74 dropped_stop_sending=1 concurrent_sibling=true reuse=true peer-close client_io=zio-std-io server_io=wtransport-quinn-tokio
+debug(zio): Removing thread 0
+WTRANSPORT_PORT=49291
+wtransport server rejected CONNECT with 404
+wtransport server interop passed: CONNECT admission-headers=true DATAGRAM max_datagram_size=1350 oversized_rejected=true bidi uni reset=73 stop=74 reuse=true client_io=zio-std-io server_io=wtransport-quinn-tokio
+Build Summary: 12/12 steps succeeded
+interop-webtransport-socks5 success
+[traex-zig-guard 2026-11-26 01:02:47] finished Zig tree root=67251 peak=2582MiB result=0

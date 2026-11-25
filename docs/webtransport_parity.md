@@ -140,8 +140,9 @@ WEBTRANSPORT_FIREFOX_STOP_SENDING=1 FIREFOX=/path/to/firefox \
   zig build interop-webtransport-firefox -Doptimize=ReleaseFast
 ```
 
-The external interoperability gate builds the audited `/nav_env/Work/wtransport`
-checkout at `d96cbb8` and exercises both directions over real TLS
+The external interoperability gate fetches the audited `wtransport` Git revision
+`d96cbb87c9127fcb453fb05bbb47ef93402daec2` through its Cargo manifest and lockfile,
+then exercises both directions over real TLS
 1.3/QUIC/HTTP/3 connections. Every netz process in the native interop,
 benchmark, loss, and reorder gates now runs on zio behind the `std.Io` protocol
 boundary. Machine-readable success records bind netz endpoints to
