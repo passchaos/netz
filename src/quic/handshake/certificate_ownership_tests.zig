@@ -33,10 +33,12 @@ fn nativeRoots(comptime use_environment: bool) !void {
 
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();
-    try temporary.dir.writeFile(io, .{
-        .sub_path = "ca.pem",
-        .data = pem,
-    });
+    {
+        const ca_file = try temporary.dir.createFile(io, "ca.pem", .{});
+        defer ca_file.close(io);
+        // Windows zio files use OVERLAPPED handles without an implicit cursor.
+        try ca_file.writePositionalAll(io, pem, 0);
+    }
     const path = try temporary.dir.realPathFileAlloc(
         io,
         "ca.pem",

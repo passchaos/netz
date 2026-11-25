@@ -1,0 +1,23 @@
+{
+  "run_id": 45549620091,
+  "head_sha": "5b83ec15eb03947b9362a6e31278f1bddd11b628",
+  "url": "https://github.com/passchaos/netz/actions/runs/45549620091",
+  "job": {
+    "id": 138987396213,
+    "name": "Portable x86_64-windows-gnu (windows-latest)",
+    "status": "completed",
+    "conclusion": "failure",
+    "html_url": "https://github.com/passchaos/netz/actions/runs/45549620091/job/138987396213"
+  },
+  "failure_step": [
+    {
+      "name": "Run native trust startup regressions",
+      "status": "completed",
+      "conclusion": "failure",
+      "number": 18,
+      "started_at": "2026-11-25T04:54:13Z",
+      "completed_at": "2026-11-25T04:57:54Z"
+    }
+  ],
+  "error": "INVALID_PARAMETER during caller-owned roots from PEM file authentication fixture"
+}
