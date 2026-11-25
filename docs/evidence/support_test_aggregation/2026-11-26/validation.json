@@ -1,0 +1,48 @@
+{
+  "observed_utc": "2026-11-25T22:17:06.790096+00:00",
+  "checks": [
+    {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "fmt",
+        "--check",
+        "build.zig",
+        "build/testing/support.zig",
+        "build/testing/support_specs.zig",
+        "support_test.zig"
+      ],
+      "exit_code": 0
+    },
+    {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-support",
+        "-j1",
+        "-Dtest-progress=true",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0
+    },
+    {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-support-compile",
+        "-j1",
+        "-Dtarget=x86_64-windows-gnu",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0
+    }
+  ],
+  "source_sha256": {
+    "build.zig": "51dd2e5c9bb9f9b259ac3c22c36ee5c85635f17814ee15aff483274d2eeaa195",
+    "build/testing/support.zig": "f654b162ad2fd0a4339f46884767c3e7bcc746fe479fe1b4224737a9c4866c32",
+    "build/testing/support_specs.zig": "8b3702d4a3b2e858b4994695f6220e12a361dd210a86a6378ec1daeb762f494e",
+    "support_test.zig": "51b481927c35980bb934d3b36fd051651ea2f1ccff5eb78d3192c54b97c5c757"
+  },
+  "scope": "integrated native auxiliary group and Windows compilation; native Windows/full gate still pending"
+}

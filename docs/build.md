@@ -968,3 +968,16 @@ Pushing a `v<SemVer>` tag whose value exactly matches `build.zig.zon` runs the
 full test gate, rebuilds and verifies these artifacts, and publishes them to an
 idempotently updateable GitHub Release; malformed or version-mismatched tags
 fail before publication.
+
+
+### Auxiliary support unit tests
+
+`zig build test-support` compiles benchmark and server-support unit tests into
+one executable. The full `zig build test` gate includes this same group while
+retaining its library, public-package, soak, fuzz, Python and interoperability
+coverage. `test-support-independent` runs the same support roots as separate
+executables for diagnosis; existing individual named steps remain available.
+`test-support-compile` provides compilation without execution for cross targets.
+The membership registry and literal import root are checked for missing,
+unregistered and duplicate entries. `-Dtest-filter` selects named cases as in
+other test steps.
