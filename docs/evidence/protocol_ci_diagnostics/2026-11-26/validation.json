@@ -1,0 +1,20 @@
+{
+  "observed_utc": "2026-11-25T20:45:08.891600+00:00",
+  "run_id": 45693092361,
+  "head": "b4ccfa3ec1dbcfa69e0fe65770937651d7278760",
+  "native_linux_protocol": "success",
+  "native_linux_client_ca_reload": "success",
+  "native_windows_protocol": "failure; first specific diagnostic absent from public annotations",
+  "complete": {
+    "status": "failure",
+    "exit_code": 137,
+    "started_at": "2026-11-25T20:15:25Z",
+    "completed_at": "2026-11-25T20:43:25Z",
+    "last_visible_phase": "WebSocket send shape checks",
+    "timing": "matches existing 28-minute command limit; no OOM cause asserted"
+  },
+  "annotation_tests_passed": 9,
+  "workflow_shell_syntax": "bash -n passed",
+  "budget_and_pins": "unchanged",
+  "scope": "improve future diagnosis; does not claim protocol root cause fixed"
+}

@@ -73,5 +73,25 @@ class AnnotationsTest(unittest.TestCase):
         self.assertIn("allocation at owner.zig:42", first)
 
 
+    def test_scoped_error_keeps_case_even_when_all_test_results_are_ok(self):
+        for diagnostic in ["[tls] (err): peer cleanup failed", "error(tls): peer cleanup failed"]:
+            with self.subTest(diagnostic=diagnostic):
+                text = "1/2 webtransport.test.cleanup...OK\n" + diagnostic + "\n"
+                text += "allocation or cleanup context\n2/2 tls.test.other...OK\n"
+                text += "error: process exited with error code 1\n"
+                first = self.render(text, "native-protocol-ci.log").splitlines()[0]
+                self.assertIn("webtransport.test.cleanup", first)
+                self.assertIn(diagnostic, first)
+                self.assertIn("cleanup context", first)
+
+    def test_logged_error_excludes_warnings_and_debug_diagnostics(self):
+        text = "1/2 quic.test.other...OK\n[tls] (warn): slow peer\nerror budget is 10\n"
+        text += "2/2 quic.test.cleanup...OK\n[default] (err): unexpected cleanup\n"
+        first = self.render(text).splitlines()[0]
+        self.assertIn("quic.test.cleanup", first)
+        self.assertIn("[default] (err): unexpected cleanup", first)
+        self.assertNotIn("quic.test.other", first)
+
+
 if __name__ == "__main__":
     unittest.main()

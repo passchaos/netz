@@ -1,0 +1,122 @@
+[
+  {
+    "href": "#annotation:21:235",
+    "title": "Run native protocol CI regressions",
+    "message": "Process completed with exit code 1."
+  },
+  {
+    "href": "#annotation:21:232",
+    "title": "Run native protocol CI regressions",
+    "message": "error: the following build command failed with exit code 1:\nD:\\a\\netz\\netz\\.zig-cache\\o\\0f66c5b9d49a9895f0fc24bf8a1a56b6\\build.exe D:\\a\\_temp\\6ac004ed-035a-4b21-88f8-efccd17491ba\\zig-x86_64-windows-0.16.0\\zig.exe D:\\a\\_temp\\6ac004ed-035a-4b21-88f8-efccd17491ba\\zig-x86_64-windows-0.16.0\\lib D:\\a\\netz\\netz\\netz D:\\a\\netz\\netz\\.zig-cache D:\\a\\netz\\netz\\.zig-cache --seed 0x685c0150 -Zb4dc846b681228a4 test-http2 test-webtransport -j1 -Dtest-progress=true -Dtarget=x86_64-windows-gnu -Dtest-filter=HTTP/2 connection keeps optional state compact -Dtest-filter=standalone dispatcher retains rejection through bounded cleanup -Dtest-filter=ReconnectingEndpointClient reconnects only future Sessions --summary all"
+  },
+  {
+    "href": "#annotation:21:217",
+    "title": "Run native protocol CI regressions",
+    "message": "+- run test failure\nerror: process exited with error code 1\nfailed command: \"D:\\\\a\\\\netz\\\\netz\\\\.zig-cache\\\\o\\\\3bdcc23fabf5bf72c71377390c67beda\\\\test.exe\" \"--cache-dir=D:\\\\a\\\\netz\\\\netz\\\\.zig-cache\" --seed=0x685c0150\n\n1/28 test_scope.test_0...OK\n2/28 http2.mod.test_0...OK\n3/28 http2.mod.test_1...OK\n4/28 internal.priority.test_0...OK\n5/28 http2.runtime.test_0...OK\n6/28 http2.runtime.tests.test_0...OK\n7/28 http2.runtime.tests.test_1...OK\n8/28 http2.runtime.tests.test_2...OK\n9/28 http2.runtime.response.allocation_failure_tests.test_0...OK\n10/28 http2.runtime.response.forbidden_body_tests.test_0...OK\n11/28 http2.runtime.request.credit_failure_tests.test_0...OK"
+  },
+  {
+    "href": "#annotation:47:2",
+    "title": "Complete job",
+    "message": "Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262, mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/"
+  },
+  {
+    "href": "#annotation:21:216",
+    "title": "Run native protocol CI regressions",
+    "message": "28/28 tls.server_identity_file.test_0...OK"
+  },
+  {
+    "href": "#annotation:21:14",
+    "title": "Run native protocol CI regressions",
+    "message": "No test name emitted yet; build or startup is still active."
+  },
+  {
+    "href": "#annotation:19:418",
+    "title": "Run native trust startup regressions",
+    "message": "119/119 http3.origin_pool.test_0...OK"
+  },
+  {
+    "href": "#annotation:19:416",
+    "title": "Run native trust startup regressions",
+    "message": "119/119 http3.origin_pool.test_0...OK"
+  },
+  {
+    "href": "#annotation:19:292",
+    "title": "Run native trust startup regressions",
+    "message": "165/165 http.cookies.syntax.test_0...OK"
+  },
+  {
+    "href": "#annotation:19:230",
+    "title": "Run native trust startup regressions",
+    "message": "108/165 quic.endpoint_dispatcher.tests.test.QUIC endpoint dispatcher validates caller-owned deadlines..."
+  },
+  {
+    "href": "#annotation:19:120",
+    "title": "Run native trust startup regressions",
+    "message": "63/63 quic.runtime.receive_deadline_admission_tests.test.QUIC receive caller-owned deadlines translate raw clocks without renewing budget...OK"
+  },
+  {
+    "href": "#annotation:19:118",
+    "title": "Run native trust startup regressions",
+    "message": "63/63 quic.runtime.receive_deadline_admission_tests.test.QUIC receive caller-owned deadlines translate raw clocks without renewing budget...OK"
+  },
+  {
+    "href": "#annotation:19:50",
+    "title": "Run native trust startup regressions",
+    "message": "26/26 internal.stream_io.timed_read.test_0...OK"
+  },
+  {
+    "href": "#annotation:19:19",
+    "title": "Run native trust startup regressions",
+    "message": "No test name emitted yet; build or startup is still active."
+  },
+  {
+    "href": "#annotation:16:17",
+    "title": "Probe native Winsock interface option semantics",
+    "message": "{\"family\": 23, \"index\": 1, \"enable_first\": true, \"byte_order\": \"=I\", \"bind_first\": true, \"v6_only_bytes\": \"01\", \"state\": 1, \"iflist_bytes\": \"01000000\", \"indices\": [1], \"result\": \"success\"}"
+  },
+  {
+    "href": "#annotation:16:16",
+    "title": "Probe native Winsock interface option semantics",
+    "message": "{\"family\": 23, \"index\": 1, \"enable_first\": true, \"byte_order\": \"=I\", \"bind_first\": false, \"v6_only_bytes\": \"01\", \"state\": 1, \"iflist_bytes\": \"01000000\", \"indices\": [1], \"result\": \"success\"}"
+  },
+  {
+    "href": "#annotation:16:15",
+    "title": "Probe native Winsock interface option semantics",
+    "message": "{\"family\": 2, \"index\": 1, \"enable_first\": false, \"byte_order\": \"!I\", \"bind_first\": true, \"step\": \"ADD_IFLIST\", \"winerror\": 10022, \"errno\": 22, \"result\": \"[WinError 10022] An invalid argument was supplied\"}"
+  },
+  {
+    "href": "#annotation:16:14",
+    "title": "Probe native Winsock interface option semantics",
+    "message": "{\"family\": 2, \"index\": 1, \"enable_first\": false, \"byte_order\": \"!I\", \"bind_first\": false, \"step\": \"ADD_IFLIST\", \"winerror\": 10022, \"errno\": 22, \"result\": \"[WinError 10022] An invalid argument was supplied\"}"
+  },
+  {
+    "href": "#annotation:16:13",
+    "title": "Probe native Winsock interface option semantics",
+    "message": "{\"family\": 2, \"index\": 1, \"enable_first\": false, \"byte_order\": \"=I\", \"bind_first\": true, \"step\": \"ADD_IFLIST\", \"winerror\": 10022, \"errno\": 22, \"result\": \"[WinError 10022] An invalid argument was supplied\"}"
+  },
+  {
+    "href": "#annotation:16:12",
+    "title": "Probe native Winsock interface option semantics",
+    "message": "{\"family\": 2, \"index\": 1, \"enable_first\": false, \"byte_order\": \"=I\", \"bind_first\": false, \"step\": \"ADD_IFLIST\", \"winerror\": 10022, \"errno\": 22, \"result\": \"[WinError 10022] An invalid argument was supplied\"}"
+  },
+  {
+    "href": "#annotation:16:11",
+    "title": "Probe native Winsock interface option semantics",
+    "message": "{\"family\": 2, \"index\": 1, \"enable_first\": true, \"byte_order\": \"!I\", \"bind_first\": true, \"step\": \"ADD_IFLIST\", \"winerror\": 10022, \"errno\": 22, \"result\": \"[WinError 10022] An invalid argument was supplied\"}"
+  },
+  {
+    "href": "#annotation:16:10",
+    "title": "Probe native Winsock interface option semantics",
+    "message": "{\"family\": 2, \"index\": 1, \"enable_first\": true, \"byte_order\": \"!I\", \"bind_first\": false, \"step\": \"ADD_IFLIST\", \"winerror\": 10022, \"errno\": 22, \"result\": \"[WinError 10022] An invalid argument was supplied\"}"
+  },
+  {
+    "href": "#annotation:16:9",
+    "title": "Probe native Winsock interface option semantics",
+    "message": "{\"family\": 2, \"index\": 1, \"enable_first\": true, \"byte_order\": \"=I\", \"bind_first\": true, \"state\": 1, \"iflist_bytes\": \"01000000\", \"indices\": [1], \"result\": \"success\"}"
+  },
+  {
+    "href": "#annotation:16:8",
+    "title": "Probe native Winsock interface option semantics",
+    "message": "{\"family\": 2, \"index\": 1, \"enable_first\": true, \"byte_order\": \"=I\", \"bind_first\": false, \"state\": 1, \"iflist_bytes\": \"01000000\", \"indices\": [1], \"result\": \"success\"}"
+  }
+]

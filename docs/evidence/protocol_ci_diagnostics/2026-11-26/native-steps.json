@@ -1,0 +1,160 @@
+{
+  "observed_utc": "2026-11-25T20:45:30.681077+00:00",
+  "run_id": 45693092361,
+  "head": "b4ccfa3ec1dbcfa69e0fe65770937651d7278760",
+  "jobs": [
+    {
+      "id": 139483371986,
+      "steps": [
+        {
+          "name": "Run the complete test gate serially",
+          "conclusion": "failure",
+          "started_at": "2026-11-25T20:15:25Z",
+          "completed_at": "2026-11-25T20:43:25Z"
+        }
+      ]
+    },
+    {
+      "id": 139483371828,
+      "steps": [
+        {
+          "name": "Validate native CI log helpers",
+          "conclusion": "success",
+          "started_at": "2026-11-25T20:17:21Z",
+          "completed_at": "2026-11-25T20:17:29Z"
+        },
+        {
+          "name": "Run native Linux interface binding regressions",
+          "conclusion": "success",
+          "started_at": "2026-11-25T20:17:29Z",
+          "completed_at": "2026-11-25T20:18:15Z"
+        },
+        {
+          "name": "Run native Linux connection and command regressions",
+          "conclusion": "success",
+          "started_at": "2026-11-25T20:18:15Z",
+          "completed_at": "2026-11-25T20:20:31Z"
+        },
+        {
+          "name": "Probe native Winsock interface option semantics",
+          "conclusion": "skipped",
+          "started_at": "2026-11-25T20:20:31Z",
+          "completed_at": "2026-11-25T20:20:31Z"
+        },
+        {
+          "name": "Run native HTTP3 resolver and acquisition regressions",
+          "conclusion": "success",
+          "started_at": "2026-11-25T20:20:31Z",
+          "completed_at": "2026-11-25T20:21:02Z"
+        },
+        {
+          "name": "Run native ordered TCP hostname regressions",
+          "conclusion": "success",
+          "started_at": "2026-11-25T20:21:02Z",
+          "completed_at": "2026-11-25T20:21:05Z"
+        },
+        {
+          "name": "Run native trust startup regressions",
+          "conclusion": "success",
+          "started_at": "2026-11-25T20:21:05Z",
+          "completed_at": "2026-11-25T20:24:18Z"
+        },
+        {
+          "name": "Run native H1 H2 resolver policy regressions",
+          "conclusion": "success",
+          "started_at": "2026-11-25T20:24:18Z",
+          "completed_at": "2026-11-25T20:25:04Z"
+        },
+        {
+          "name": "Run native protocol CI regressions",
+          "conclusion": "success",
+          "started_at": "2026-11-25T20:25:04Z",
+          "completed_at": "2026-11-25T20:25:48Z"
+        },
+        {
+          "name": "Run native client CA reload regression",
+          "conclusion": "success",
+          "started_at": "2026-11-25T20:25:48Z",
+          "completed_at": "2026-11-25T20:26:35Z"
+        },
+        {
+          "name": "Run native Windows transport regressions",
+          "conclusion": "skipped",
+          "started_at": "2026-11-25T20:26:35Z",
+          "completed_at": "2026-11-25T20:26:35Z"
+        }
+      ]
+    },
+    {
+      "id": 139483371927,
+      "steps": [
+        {
+          "name": "Validate native CI log helpers",
+          "conclusion": "success",
+          "started_at": "2026-11-25T20:16:21Z",
+          "completed_at": "2026-11-25T20:16:24Z"
+        },
+        {
+          "name": "Run native Linux interface binding regressions",
+          "conclusion": "skipped",
+          "started_at": "2026-11-25T20:16:24Z",
+          "completed_at": "2026-11-25T20:16:24Z"
+        },
+        {
+          "name": "Run native Linux connection and command regressions",
+          "conclusion": "skipped",
+          "started_at": "2026-11-25T20:16:24Z",
+          "completed_at": "2026-11-25T20:16:24Z"
+        },
+        {
+          "name": "Probe native Winsock interface option semantics",
+          "conclusion": "success",
+          "started_at": "2026-11-25T20:16:24Z",
+          "completed_at": "2026-11-25T20:16:24Z"
+        },
+        {
+          "name": "Run native HTTP3 resolver and acquisition regressions",
+          "conclusion": "success",
+          "started_at": "2026-11-25T20:16:24Z",
+          "completed_at": "2026-11-25T20:19:12Z"
+        },
+        {
+          "name": "Run native ordered TCP hostname regressions",
+          "conclusion": "success",
+          "started_at": "2026-11-25T20:19:12Z",
+          "completed_at": "2026-11-25T20:19:32Z"
+        },
+        {
+          "name": "Run native trust startup regressions",
+          "conclusion": "success",
+          "started_at": "2026-11-25T20:19:32Z",
+          "completed_at": "2026-11-25T20:27:48Z"
+        },
+        {
+          "name": "Run native H1 H2 resolver policy regressions",
+          "conclusion": "success",
+          "started_at": "2026-11-25T20:27:48Z",
+          "completed_at": "2026-11-25T20:31:53Z"
+        },
+        {
+          "name": "Run native protocol CI regressions",
+          "conclusion": "failure",
+          "started_at": "2026-11-25T20:31:53Z",
+          "completed_at": "2026-11-25T20:33:49Z"
+        },
+        {
+          "name": "Run native client CA reload regression",
+          "conclusion": "skipped",
+          "started_at": "2026-11-25T20:33:49Z",
+          "completed_at": "2026-11-25T20:33:49Z"
+        },
+        {
+          "name": "Run native Windows transport regressions",
+          "conclusion": "skipped",
+          "started_at": "2026-11-25T20:33:49Z",
+          "completed_at": "2026-11-25T20:33:49Z"
+        }
+      ]
+    }
+  ]
+}

@@ -294,10 +294,28 @@ jobs:
         timeout-minutes: 5
         run: |
           protocol_status=0
-          python tools/ci/run_test_progress.py --title "Native protocol CI progress" --log native-protocol-ci.log -- zig build test-http2 test-webtransport -j1 -Dtest-progress=true -Dtarget=${{ matrix.target }} '-Dtest-filter=HTTP/2 connection keeps optional state compact' '-Dtest-filter=standalone dispatcher retains rejection through bounded cleanup' '-Dtest-filter=ReconnectingEndpointClient reconnects only future Sessions' --summary all || protocol_status=$?
-          if [ "$protocol_status" -ne 0 ]; then
-            python tools/ci/test_failure_annotations.py native-protocol-ci.log
-          fi
+          for protocol_case in h2-layout dispatcher-rejection endpoint-reconnect; do
+            case "$protocol_case" in
+              h2-layout)
+                protocol_scope=test-http2
+                protocol_filter='HTTP/2 connection keeps optional state compact'
+                ;;
+              dispatcher-rejection)
+                protocol_scope=test-webtransport
+                protocol_filter='standalone dispatcher retains rejection through bounded cleanup'
+                ;;
+              endpoint-reconnect)
+                protocol_scope=test-webtransport
+                protocol_filter='ReconnectingEndpointClient reconnects only future Sessions'
+                ;;
+            esac
+            case_status=0
+            python tools/ci/run_test_progress.py --title "Native protocol CI: $protocol_case" --log "native-protocol-$protocol_case.log" -- zig build "$protocol_scope" -j1 -Dtest-progress=true -Dtarget=${{ matrix.target }} "-Dtest-filter=$protocol_filter" --summary all || case_status=$?
+            if [ "$case_status" -ne 0 ]; then
+              python tools/ci/test_failure_annotations.py "native-protocol-$protocol_case.log"
+              protocol_status=$case_status
+            fi
+          done
           exit "$protocol_status"
 
       - name: Run native client CA reload regression
