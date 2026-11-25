@@ -1,0 +1,241 @@
+{
+  "run_id": 45641634010,
+  "commit": "6b17e5f0a2720f841271c0df8934fa818caf6b25",
+  "complete_job_id": 139301549827,
+  "complete_conclusion": "failure",
+  "test_started_at": "2026-11-25T15:08:12Z",
+  "test_completed_at": "2026-11-25T15:29:05Z",
+  "root_abort_test": "2481/7409 HTTP/1 borrowed pipeline batch preserves bodies until consume",
+  "annotations": [
+    {
+      "title": "preflight",
+      "href": "/passchaos/netz/actions/runs/45641634010/job/139301549731#step:5:58",
+      "message": "Process completed with exit code 1."
+    },
+    {
+      "title": "Native regression: ci helper tests",
+      "href": "/passchaos/netz/actions/runs/45641634010/job/139301549731#step:5:47",
+      "message": "----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/home/runner/work/netz/netz/netz/tools/ci/run_test_progress_test.py\", line 68, in test_summary_keeps_latest_test_beyond_notice_annotation_limit\n    self.assertGreater(result.stdout.count(b\"::notice\"), 10)\n    ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: 8 not greater than 10\n\n----------------------------------------------------------------------\nRan 10 tests in 7.433s\n\nFAILED (failures=1)"
+    },
+    {
+      "title": "Native regression: ci helper tests",
+      "href": "/passchaos/netz/actions/runs/45641634010/job/139301549731#step:5:34",
+      "message": "======================================================================\nFAIL: test_summary_keeps_latest_test_beyond_notice_annotation_limit (__main__.ProgressTest.test_summary_keeps_latest_test_beyond_notice_annotation_limit)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/home/runner/work/netz/netz/netz/tools/ci/run_test_progress_test.py\", line 68, in test_summary_keeps_latest_test_beyond_notice_annotation_limit\n    self.assertGreater(result.stdout.count(b\"::notice\"), 10)\n    ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: 8 not greater than 10\n\n----------------------------------------------------------------------\nRan 10 tests in 7.433s\n\nFAILED (failures=1)"
+    },
+    {
+      "title": "Native regression: complete tests",
+      "href": "/passchaos/netz/actions/runs/45641634010/job/139301549827#step:5:5494",
+      "message": "Installed 3 packages in 1ms\nTraceback (most recent call last):\n  File \"/home/runner/work/netz/netz/netz/tools/interop/webtransport_h2/run.py\", line 99, in native_server\n    with context(ca, cert, key, False).wrap_socket(raw, server_hostname=\"origin.internal\") as tls:\n         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/lib/python3.14/ssl.py\", line 455, in wrap_socket\n    return self.sslsocket_class._create(\n           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~^\n        sock=sock,\n        ^^^^^^^^^^\n    ...<5 lines>...\n        session=session\n        ^^^^^^^^^^^^^^^\n    )\n    ^"
+    },
+    {
+      "title": "Native regression: complete tests",
+      "href": "/passchaos/netz/actions/runs/45641634010/job/139301549827#step:5:5482",
+      "message": "+- run test failure\nerror: process terminated with signal ABRT\nfailed command: /home/runner/work/netz/netz/.zig-cache/o/5670264b3cb7c16ba01515320b42259a/test --cache-dir=/home/runner/work/netz/netz/.zig-cache --seed=0xd383f1fb\n\n/home/runner/work/_temp/92b3dbdf-8bfd-456a-845d-cbba6b909566/zig-x86_64-linux-0.16.0/zig build-exe -ODebug --dep netz -Mroot=/home/runner/work/netz/netz/netz/tools/interop/http_digest/driver.zig -ODebug --dep vail --dep vort --dep zio --dep kron --dep regexz --dep webpkiz -Mnetz=/home/runner/work/netz/netz/netz/src/root.zig -ODebug --dep vort -Mvail=/home/runner/work/netz/netz/vail/src/root.zig /home/runner/work/netz/netz/.zig-cache/o/ac81a5f2c080a8bb59a8f7f83b4c622f/vort-br-record-optimal.o /home/runner/work/netz/netz/.zig-cache/o/fed3884cfa93e45c49b0508bd11799c1/vort-zstd-huffman-x2.o -ODebug -I /home/runner/work/netz/netz/.zig-cache/o/2fb5824d4233e9fe32370ab196a5b16d -I /home/runner/work/netz/netz/.zig-cache/o/2fb5824d4233e9fe32370ab196a5b16d --dep vail_archive_crypto -Mvort=/home/runner/work/netz/netz/vort/src/root.zig -ODebug --dep zio_build_options -Mzio=/home/runner/work/netz/netz/netz/zig-pkg/zio-0.19.1-xHbVVE1kLABhvcTZ2InisM3hdkwDdj0fzzAUxvw2AmGk/src/zio.zig -ODebug -Mkron=/home/runner/work/netz/netz/kron/src/root.zig -ODebug -Mregexz=/home/runner/work/netz/netz/regexz/src/root.zig -ODebug -Mwebpkiz=/home/runner/work/netz/netz/webpkiz/src/root.zig -ODebug -Mvail_archive_crypto=/home/runner/work/netz/netz/vail/archive_crypto/src/root.zig -Mzio_build_options=/home/runner/work/netz/netz/.zig-cache/c/320401b06d5c6c293b0e48afbc96afbe/options.zig -lc --cache-dir /home/runner/work/netz/netz/.zig-cache --global-cache-dir /home/runner/work/netz/netz/.zig-cache --name netz-http-digest-interop --zig-lib-dir /home/runner/work/_temp/92b3dbdf-8bfd-456a-845d-cbba6b909566/zig-x86_64-linux-0.16.0/lib/ --listen=-\n/home/runner/work/_temp/92b3dbdf-8bfd-456a-845d-cbba6b909566/zig-x86_64-linux-0.16.0/zig test -ODebug --dep netz -Mroot=/home/runner/work/netz/netz/netz/examples/support/mqtt_reload_compatibility.zig -ODebug --dep vail --dep vort --dep zio --dep kron --dep regexz --dep webpkiz -Mnetz=/home/runner/work/netz/netz/netz/src/root.zig -ODebug --dep vort -Mvail=/home/runner/work/netz/netz/vail/src/root.zig /home/runner/work/netz/netz/.zig-cache/o/ac81a5f2c080a8bb59a8f7f83b4c622f/vort-br-record-optimal.o /home/runner/work/netz/netz/.zig-cache/o/fed3884cfa93e45c49b0508bd11799c1/vort-zstd-huffman-x2.o -ODebug -I /home/runner/work/netz/netz/.zig-cache/o/2fb5824d4233e9fe32370ab196a5b16d -I /home/runner/work/netz/netz/.zig-cache/o/2fb5824d4233e9fe32370ab196a5b16d --dep vail_archive_crypto -Mvort=/home/runner/work/netz/netz/vort/src/root.zig -ODebug --dep zio_build_options -Mzio=/home/runner/work/netz/netz/netz/zig-pkg/zio-0.19.1-xHbVVE1kLABhvcTZ2InisM3hdkwDdj0fzzAUxvw2AmGk/src/zio.zig -ODebug -Mkron=/home/runner/work/netz/netz/kron/src/root.zig -ODebug -Mregexz=/home/runner/work/netz/netz/regexz/src/root.zig -ODebug -Mwebpkiz=/home/runner/work/netz/netz/webpkiz/src/root.zig -ODebug -Mvail_archive_crypto=/home/runner/work/netz/netz/vail/archive_crypto/src/root.zig -Mzio_build_options=/home/runner/work/netz/netz/.zig-cache/c/320401b06d5c6c293b0e48afbc96afbe/options.zig -lc --cache-dir /home/runner/work/netz/netz/.zig-cache --global-cache-dir /home/runner/work/netz/netz/.zig-cache --name test --zig-lib-dir /home/runner/work/_temp/92b3dbdf-8bfd-456a-845d-cbba6b909566/zig-x86_64-linux-0.16.0/lib/ --listen=-\n/home/runner/work/netz/netz/.zig-cache/o/50a2c95185d9e6ebdadb18cc90f7f554/test --cache-dir=/home/runner/work/netz/netz/.zig-cache --seed=0xd383f1fb\n1/3 mqtt_reload_compatibility.test.restart-required MQTT globals reject every changed field...OK\n2/3 mqtt_reload_compatibility.test.runtime-owned MQTT globals remain reload-compatible...OK\n3/3 mqtt_reload_compatibility.test.persistence target reload preserves QoS 2 bridge journals...OK\nAll 3 tests passed.\n/home/runner/work/_temp/92b3dbdf-8bfd-456a-845d-cbba6b909566/zig-x86_64-linux-0.16.0/zig test -ODebug --dep netz -Mroot=/home/runner/work/netz/netz/netz/tools/inter"
+    },
+    {
+      "title": "Native regression: complete tests",
+      "href": "/passchaos/netz/actions/runs/45641634010/job/139301549827#step:5:5467",
+      "message": "2480/7409 http1.runtime.message_batch_tests.test.HTTP/1 buffered reader transfers exact message buffer ownership...OK\n2481/7409 http1.runtime.message_batch_tests.test.HTTP/1 borrowed pipeline batch preserves bodies until consume...thread 4479 panic: switch on corrupt value\n/home/runner/work/_temp/92b3dbdf-8bfd-456a-845d-cbba6b909566/zig-x86_64-linux-0.16.0/lib/std/Io/net.zig:150:24: 0x1cb8dc4 in getPort (std.zig)\n        return switch (a) {\n                       ^\n/home/runner/work/netz/netz/netz/src/internal/socket_address.zig:18:31: 0x6208a68 in accepted (root.zig)\n    return if (address.getPort() != 0) address else null;\n                              ^\n/home/runner/work/netz/netz/netz/src/http1/runtime/connection.zig:95:39: 0x6207ee6 in peerAddress (root.zig)\n        return socket_address.accepted(self.stream);\n                                      ^\n/home/runner/work/netz/netz/netz/src/http1/runtime/connection.zig:925:45: 0x64e2212 in readRequestBatchInto (root.zig)\n                head.from = self.peerAddress();\n                                            ^\n/home/runner/work/netz/netz/netz/src/http1/runtime/message_batch_tests.zig:103:57: 0x679ed9d in test.HTTP/1 borrowed pipeline batch preserves bodies until consume (root.zig)"
+    },
+    {
+      "title": "Native regression: complete tests",
+      "href": "/passchaos/netz/actions/runs/45641634010/job/139301549827#step:5:5452",
+      "message": "2472/7409 http1.runtime.uri_and_serve_tests.test.HTTP/1 connections keep optional write scratch compact...expected 448, found 608\nFAIL (TestExpectedEqual)\n/home/runner/work/_temp/92b3dbdf-8bfd-456a-845d-cbba6b909566/zig-x86_64-linux-0.16.0/lib/std/testing.zig:118:17: 0x1bbfe49 in expectEqualInner__anon_45783 (std.zig)\n                return error.TestExpectedEqual;\n                ^\n/home/runner/work/_temp/92b3dbdf-8bfd-456a-845d-cbba6b909566/zig-x86_64-linux-0.16.0/lib/std/testing.zig:83:5: 0x67a9bc4 in expectEqual (root.zig)\n    return expectEqualInner(T, expected, actual);\n    ^\n/home/runner/work/netz/netz/netz/src/http1/runtime/uri_and_serve_tests.zig:56:9: 0x67a9c0b in test.HTTP/1 connections keep optional write scratch compact (root.zig)\n        try std.testing.expectEqual(@as(usize, 448), @sizeof(Client));\n        ^\n2473/7409 http1.runtime.uri_and_serve_tests.test.URI endpoint handles bracketed IPv6 literals...OK\n2474/7409 http1.runtime.uri_and_serve_tests.test.URI endpoint retains host and authority in one allocation...OK\n2475/7409 http1.runtime.uri_and_serve_tests.test.HTTP/1 serve response derives trailer capability from request...OK\n2476/7409 http1.runtime.uri_and_serve_tests.test.HTTP/1 serve loop preserves hop-by-hop Connection options...OK"
+    },
+    {
+      "title": "Native regression: complete tests",
+      "href": "/passchaos/netz/actions/runs/45641634010/job/139301549827#step:5:5437",
+      "message": "2182/7409 quic.runtime.tests.test.QUIC UDP endpoint receives GRO batch into caller storage...OK\n2183/7409 quic.runtime.tests.test.QUIC caller batch leaves pending GRO suffix queued on short buffer...FAIL (Timeout)\n/home/runner/work/netz/netz/netz/src/internal/deadline.zig:51:9: 0x1fc86a8 in usableAwake (root.zig)\n        return error.Timeout;\n        ^\n/home/runner/work/netz/netz/netz/src/internal/deadline.zig:22:42: 0x1db4741 in fromIoTimeout (root.zig)\n    if (deadline.clock == .awake) return try usableAwake(io, deadline);\n                                         ^\n/home/runner/work/netz/netz/netz/src/quic/runtime.zig:1880:26: 0x1ebf0dc in receiveBytesBatchIntoTimeout (root.zig)\n        const absolute = try deadline_policy.fromIoTimeout(self.io, timeout);\n                         ^\n/home/runner/work/netz/netz/netz/src/quic/runtime/tests.zig:1401:20: 0x59f3268 in test.QUIC caller batch leaves pending GRO suffix queued on short buffer (root.zig)\n    const second = try receiver.receiveBytesBatchIntoTimeout(&storage, .{\n                   ^\n2184/7409 quic.runtime.tests.test.QUIC UDP GSO planner requires a contiguous equal-sized prefix...OK"
+    },
+    {
+      "title": "Native regression: complete tests",
+      "href": "/passchaos/netz/actions/runs/45641634010/job/139301549827#step:5:5422",
+      "message": "2020/7409 http3.runtime.concurrent.informational_tests.test.HTTP/3 concurrent informational 304 head preserves representation length...OK\n2021/7409 http3.runtime.concurrent.informational_tests.test.HTTP/3 concurrent informational development sends retain ordered offsets...FAIL (Timeout)\n/home/runner/work/netz/netz/netz/src/internal/hpack_huffman.zig:267:13: 0x1ef609e in decodeInternal__anon_79073 (root.zig)\n            return error.InvalidEncoding;\n            ^\n/home/runner/work/netz/netz/netz/src/internal/hpack_huffman.zig:154:5: 0x1ef6667 in decodedLen (root.zig)\n    return decodeInternal(false, &.{}, encoded);\n    ^\n/home/runner/work/netz/netz/netz/src/internal/hpack_huffman.zig:607:38: 0x20fb23f in referenceDecodedLen (root.zig)\n        if (pending_code != padding) return error.InvalidEncoding;\n                                     ^\n/home/runner/work/netz/netz/netz/src/internal/hpack_huffman.zig:267:13: 0x1ef609e in decodeInternal__anon_79073 (root.zig)\n            return error.InvalidEncoding;\n            ^\n/home/runner/work/netz/netz/netz/src/internal/hpack_huffman.zig:154:5: 0x1ef6667 in decodedLen (root.zig)"
+    },
+    {
+      "title": "Native regression: complete tests",
+      "href": "/passchaos/netz/actions/runs/45641634010/job/139301549827#step:5:5409",
+      "message": "+- run tools/interop/tls12_client_auth_openssl.sh failure\nerror: process exited with error code 1\nfailed command: tools/interop/tls12_client_auth_openssl.sh /home/runner/work/netz/netz/.zig-cache/o/79855b081f3fa9f5a597c46b45ecb084/netz-tls12-client-auth-client tls12\n\n/home/runner/work/netz/netz/.zig-cache/o/1df8addd62f83d65ed505baabbf47b1a/test --cache-dir=/home/runner/work/netz/netz/.zig-cache --seed=0xd383f1fb\n/home/runner/work/_temp/92b3dbdf-8bfd-456a-845d-cbba6b909566/zig-x86_64-linux-0.16.0/zig build-exe -ODebug --dep netz -Mroot=/home/runner/work/netz/netz/netz/tools/interop/mqtt_socks5_client.zig -ODebug --dep vail --dep vort --dep zio --dep kron --dep regexz --dep webpkiz -Mnetz=/home/runner/work/netz/netz/netz/src/root.zig -ODebug --dep vort -Mvail=/home/runner/work/netz/netz/vail/src/root.zig /home/runner/work/netz/netz/.zig-cache/o/ac81a5f2c080a8bb59a8f7f83b4c622f/vort-br-record-optimal.o /home/runner/work/netz/netz/.zig-cache/o/fed3884cfa93e45c49b0508bd11799c1/vort-zstd-huffman-x2.o -ODebug -I /home/runner/work/netz/netz/.zig-cache/o/2fb5824d4233e9fe32370ab196a5b16d -I /home/runner/work/netz/netz/.zig-cache/o/2fb5824d4233e9fe32370ab196a5b16d --dep vail_archive_crypto -Mvort=/home/runner/work/netz/netz/vort/src/root.zig -ODebug --dep zio_build_options -Mzio=/home/runner/work/netz/netz/netz/zig-pkg/zio-0.19.1-xHbVVE1kLABhvcTZ2InisM3hdkwDdj0fzzAUxvw2AmGk/src/zio.zig -ODebug -Mkron=/home/runner/work/netz/netz/kron/src/root.zig -ODebug -Mregexz=/home/runner/work/netz/netz/regexz/src/root.zig -ODebug -Mwebpkiz=/home/runner/work/netz/netz/webpkiz/src/root.zig -ODebug -Mvail_archive_crypto=/home/runner/work/netz/netz/vail/archive_crypto/src/root.zig -Mzio_build_options=/home/runner/work/netz/netz/.zig-cache/c/320401b06d5c6c293b0e48afbc96afbe/options.zig -lc --cache-dir /home/runner/work/netz/netz/.zig-cache --global-cache-dir /home/runner/work/netz/netz/.zig-cache --name netz-mqtt-socks5-client --zig-lib-dir /home/runner/work/_temp/92b3dbdf-8bfd-456a-845d-cbba6b909566/zig-x86_64-linux-0.16.0/lib/ --listen=-\n1/3 quic_endpoint_fuzz_test.test.structured QUIC endpoint sequence covers capacity and socket ownership...OK\n2/3 quic_endpoint_fuzz_test.test.fuzz authenticated QUIC endpoint lifecycle...OK\n3/3 quic_endpoint_fuzz_test.test.bounded deterministic QUIC endpoint mutation smoke...OK\nAll 3 tests passed.\n1 fuzz tests found.\npython3 tools/interop/mqtt_socks5.py /home/runner/work/netz/netz/.zig-cache/o/dbf35be49189a197a0b1b464e8eb2a72/netz-mqtt-socks5-client\n/home/runner/work/_temp/92b3dbdf-8bfd-456a-845d-cbba6b909566/zig-x86_64-linux-0.16.0/zig test -fno-error-tracing -ODebug --dep netz -Mroot=/home/runner/work/netz/netz/netz/test/webtransport_endpoint_fuzz_test.zig -ODebug --dep vail --dep vort --dep zio --dep kron --dep regexz --dep webpkiz -Mnetz=/home/runner/work/netz/netz/netz/src/root.zig -ODebug --dep vort -Mvail=/home/runner/work/netz/netz/vail/src/root.zig /home/runner/work/netz/netz/.zig-cache/o/ac81a5f2c080a8bb59a8f7f83b4c622f/vort-br-record-optimal.o /home/runner/work/netz/netz/.zig-cache/o/fed3884cfa93e45c49b0508bd11799c1/vort-zstd-huffman-x2.o -ODebug -I /home/runner/work/netz/netz/.zig-cache/o/2fb5824d4233e9fe32370ab196a5b16d -I /home/runner/work/netz/netz/.zig-cache/o/2fb5824d4233e9fe32370ab196a5b16d --dep vail_archive_crypto -Mvort=/home/runner/work/netz/netz/vort/src/root.zig -ODebug --dep zio_build_options -Mzio=/home/runner/work/netz/netz/netz/zig-pkg/zio-0.19.1-xHbVVE1kLABhvcTZ2InisM3hdkwDdj0fzzAUxvw2AmGk/src/zio.zig -ODebug -Mkron=/home/runner/work/netz/netz/kron/src/root.zig -ODebug -Mregexz=/home/runner/work/netz/netz/regexz/src/root.zig -ODebug -Mwebpkiz=/home/runner/work/netz/netz/webpkiz/src/root.zig -ODebug -Mvail_archive_crypto=/home/runner/work/netz/netz/vail/archive_crypto/src/root.zig -Mzio_build_options=/home/runner/work/netz/netz/.zig-cache/c/320401b06d5c6c293b0e48afbc96afbe/options.zig -lc --cache-dir /home/runner/work/netz/netz/.zig-cache --global-cache-dir /home/runner/work/netz/netz/.zig-cache --name test --zig-lib-dir /home/runner/work/_temp/92b3dbdf-8bfd-456a-845d-cbba6b909566/zig-x"
+    },
+    {
+      "title": "Native regression: complete tests",
+      "href": "/passchaos/netz/actions/runs/45641634010/job/139301549827#step:5:5395",
+      "message": "+- run tools/interop/tls12_client_auth_openssl.sh failure\nerror: process exited with error code 1\nfailed command: tools/interop/tls12_client_auth_openssl.sh /home/runner/work/netz/netz/.zig-cache/o/79855b081f3fa9f5a597c46b45ecb084/netz-tls12-client-auth-client tls13\n\n/home/runner/work/_temp/92b3dbdf-8bfd-456a-845d-cbba6b909566/zig-x86_64-linux-0.16.0/zig test -fno-error-tracing -ODebug --dep netz -Mroot=/home/runner/work/netz/netz/netz/test/quic_endpoint_fuzz_test.zig -ODebug --dep vail --dep vort --dep zio --dep kron --dep regexz --dep webpkiz -Mnetz=/home/runner/work/netz/netz/netz/src/root.zig -ODebug --dep vort -Mvail=/home/runner/work/netz/netz/vail/src/root.zig /home/runner/work/netz/netz/.zig-cache/o/ac81a5f2c080a8bb59a8f7f83b4c622f/vort-br-record-optimal.o /home/runner/work/netz/netz/.zig-cache/o/fed3884cfa93e45c49b0508bd11799c1/vort-zstd-huffman-x2.o -ODebug -I /home/runner/work/netz/netz/.zig-cache/o/2fb5824d4233e9fe32370ab196a5b16d -I /home/runner/work/netz/netz/.zig-cache/o/2fb5824d4233e9fe32370ab196a5b16d --dep vail_archive_crypto -Mvort=/home/runner/work/netz/netz/vort/src/root.zig -ODebug --dep zio_build_options -Mzio=/home/runner/work/netz/netz/netz/zig-pkg/zio-0.19.1-xHbVVE1kLABhvcTZ2InisM3hdkwDdj0fzzAUxvw2AmGk/src/zio.zig -ODebug -Mkron=/home/runner/work/netz/netz/kron/src/root.zig -ODebug -Mregexz=/home/runner/work/netz/netz/regexz/src/root.zig -ODebug -Mwebpkiz=/home/runner/work/netz/netz/webpkiz/src/root.zig -ODebug -Mvail_archive_crypto=/home/runner/work/netz/netz/vail/archive_crypto/src/root.zig -Mzio_build_options=/home/runner/work/netz/netz/.zig-cache/c/320401b06d5c6c293b0e48afbc96afbe/options.zig -lc --cache-dir /home/runner/work/netz/netz/.zig-cache --global-cache-dir /home/runner/work/netz/netz/.zig-cache --name test --zig-lib-dir /home/runner/work/_temp/92b3dbdf-8bfd-456a-845d-cbba6b909566/zig-x86_64-linux-0.16.0/lib/ --listen=-\ntest\n+- run tools/interop/tls12_client_auth_openssl.sh failure\nerror: process exited with error code 1\nfailed command: tools/interop/tls12_client_auth_openssl.sh /home/runner/work/netz/netz/.zig-cache/o/79855b081f3fa9f5a597c46b45ecb084/netz-tls12-client-auth-client tls12\n\n/home/runner/work/netz/netz/.zig-cache/o/1df8addd62f83d65ed505baabbf47b1a/test --cache-dir=/home/runner/work/netz/netz/.zig-cache --seed=0xd383f1fb\n/home/runner/work/_temp/92b3dbdf-8bfd-456a-845d-cbba6b909566/zig-x86_64-linux-0.16.0/zig build-exe -ODebug --dep netz -Mroot=/home/runner/work/netz/netz/netz/tools/interop/mqtt_socks5_client.zig -ODebug --dep vail --dep vort --dep zio --dep kron --dep regexz --dep webpkiz -Mnetz=/home/runner/work/netz/netz/netz/src/root.zig -ODebug --dep vort -Mvail=/home/runner/work/netz/netz/vail/src/root.zig /home/runner/work/netz/netz/.zig-cache/o/ac81a5f2c080a8bb59a8f7f83b4c622f/vort-br-record-optimal.o /home/runner/work/netz/netz/.zig-cache/o/fed3884cfa93e45c49b0508bd11799c1/vort-zstd-huffman-x2.o -ODebug -I /home/runner/work/netz/netz/.zig-cache/o/2fb5824d4233e9fe32370ab196a5b16d -I /home/runner/work/netz/netz/.zig-cache/o/2fb5824d4233e9fe32370ab196a5b16d --dep vail_archive_crypto -Mvort=/home/runner/work/netz/netz/vort/src/root.zig -ODebug --dep zio_build_options -Mzio=/home/runner/work/netz/netz/netz/zig-pkg/zio-0.19.1-xHbVVE1kLABhvcTZ2InisM3hdkwDdj0fzzAUxvw2AmGk/src/zio.zig -ODebug -Mkron=/home/runner/work/netz/netz/kron/src/root.zig -ODebug -Mregexz=/home/runner/work/netz/netz/regexz/src/root.zig -ODebug -Mwebpkiz=/home/runner/work/netz/netz/webpkiz/src/root.zig -ODebug -Mvail_archive_crypto=/home/runner/work/netz/netz/vail/archive_crypto/src/root.zig -Mzio_build_options=/home/runner/work/netz/netz/.zig-cache/c/320401b06d5c6c293b0e48afbc96afbe/options.zig -lc --cache-dir /home/runner/work/netz/netz/.zig-cache --global-cache-dir /home/runner/work/netz/netz/.zig-cache --name netz-mqtt-socks5-client --zig-lib-dir /home/runner/work/_temp/92b3dbdf-8bfd-456a-845d-cbba6b909566/zig-x86_64-linux-0.16.0/lib/ --listen=-\n1/3 quic_endpoint_fuzz_test.test.structured QUIC endpoint sequence covers capacity and socket ownership...OK\n2/3 quic_endpoint_fuzz_test.test.fuzz authent"
+    },
+    {
+      "title": "Native regression: complete tests",
+      "href": "/passchaos/netz/actions/runs/45641634010/job/139301549827#step:5:5380",
+      "message": "debug(zio): Removing thread 0\nerror: InvalidVersion\n/home/runner/work/netz/netz/netz/src/http1/mod.zig:212:9: 0x12e3890 in parse (root.zig)\n        return error.InvalidVersion;\n        ^\n/home/runner/work/netz/netz/netz/src/http1/mod.zig:681:21: 0x14331db in finishResponseHead (root.zig)\n    const version = try Version.parse(status_line.version);\n                    ^\n/home/runner/work/netz/netz/netz/src/http1/mod.zig:676:5: 0x143284a in parseResponseHead (root.zig)\n    return finishResponseHead(parsed, context);\n    ^\n/home/runner/work/netz/netz/netz/src/http1/runtime/message/head.zig:50:22: 0x1431e04 in inspect (root.zig)\n        fromResponse(try http1.parseResponseHead(bytes, headers, options, .{ .request_method = request_method }));\n                     ^\n/home/runner/work/netz/netz/netz/src/http1/runtime.zig:3038:18: 0x12cbbd8 in readMessageBytesBufferedWithContext (root.zig)"
+    },
+    {
+      "title": "Native regression: complete tests",
+      "href": "/passchaos/netz/actions/runs/45641634010/job/139301549827#step:5:5365",
+      "message": "debug(zio): Removing thread 0\nerror: InvalidVersion\n/home/runner/work/netz/netz/netz/src/http1/mod.zig:212:9: 0x12e3890 in parse (root.zig)\n        return error.InvalidVersion;\n        ^\n/home/runner/work/netz/netz/netz/src/http1/mod.zig:681:21: 0x14331db in finishResponseHead (root.zig)\n    const version = try Version.parse(status_line.version);\n                    ^\n/home/runner/work/netz/netz/netz/src/http1/mod.zig:676:5: 0x143284a in parseResponseHead (root.zig)\n    return finishResponseHead(parsed, context);\n    ^\n/home/runner/work/netz/netz/netz/src/http1/runtime/message/head.zig:50:22: 0x1431e04 in inspect (root.zig)\n        fromResponse(try http1.parseResponseHead(bytes, headers, options, .{ .request_method = request_method }));\n                     ^\n/home/runner/work/netz/netz/netz/src/http1/runtime.zig:3038:18: 0x12cbbd8 in readMessageBytesBufferedWithContext (root.zig)"
+    },
+    {
+      "title": "verify",
+      "href": "/passchaos/netz/actions/runs/45641634010/job/139315942120#step:2:9",
+      "message": "Process completed with exit code 1."
+    },
+    {
+      "title": "preflight",
+      "href": "/passchaos/netz/actions/runs/45641634010/job/139301549731#step:19:2",
+      "message": "Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262, mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/"
+    },
+    {
+      "title": "Portable aarch64-linux-gnu (ubuntu-latest)",
+      "href": "/passchaos/netz/actions/runs/45641634010/job/139301549957#step:43:2",
+      "message": "Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262, mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/"
+    },
+    {
+      "title": "Cross-compile aarch64-macos-none (macOS SDK)",
+      "href": "/passchaos/netz/actions/runs/45641634010/job/139301549887#step:25:2",
+      "message": "Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262, mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/"
+    },
+    {
+      "title": "Portable x86_64-windows-gnu (windows-latest)",
+      "href": "/passchaos/netz/actions/runs/45641634010/job/139301549776#step:43:2",
+      "message": "Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262, mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/"
+    },
+    {
+      "title": "Portable x86_64-linux-gnu (ubuntu-latest)",
+      "href": "/passchaos/netz/actions/runs/45641634010/job/139301550011#step:43:2",
+      "message": "Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262, mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/"
+    },
+    {
+      "title": "Portable x86_64-windows-gnu (ubuntu-latest)",
+      "href": "/passchaos/netz/actions/runs/45641634010/job/139301549825#step:43:2",
+      "message": "Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262, mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/"
+    },
+    {
+      "title": "Cross-compile x86_64-macos-none (macOS SDK)",
+      "href": "/passchaos/netz/actions/runs/45641634010/job/139301549628#step:25:2",
+      "message": "Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262, mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/"
+    },
+    {
+      "title": "complete",
+      "href": "/passchaos/netz/actions/runs/45641634010/job/139301549827#step:11:2",
+      "message": "Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262, mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/"
+    },
+    {
+      "title": "Cross-compile aarch64-macos-none (macOS SDK)",
+      "href": "",
+      "message": "Due to capacity constraints, jobs targeting macOS arm64 runners may experience longer queue times."
+    },
+    {
+      "title": "Winsock interface probe",
+      "href": "/passchaos/netz/actions/runs/45641634010/job/139301549776#step:16:17",
+      "message": "{\"family\": 23, \"index\": 1, \"enable_first\": true, \"byte_order\": \"=I\", \"bind_first\": true, \"v6_only_bytes\": \"01\", \"state\": 1, \"iflist_bytes\": \"01000000\", \"indices\": [1], \"result\": \"success\"}"
+    },
+    {
+      "title": "Winsock interface probe",
+      "href": "/passchaos/netz/actions/runs/45641634010/job/139301549776#step:16:16",
+      "message": "{\"family\": 23, \"index\": 1, \"enable_first\": true, \"byte_order\": \"=I\", \"bind_first\": false, \"v6_only_bytes\": \"01\", \"state\": 1, \"iflist_bytes\": \"01000000\", \"indices\": [1], \"result\": \"success\"}"
+    },
+    {
+      "title": "Winsock interface probe",
+      "href": "/passchaos/netz/actions/runs/45641634010/job/139301549776#step:16:15",
+      "message": "{\"family\": 2, \"index\": 1, \"enable_first\": false, \"byte_order\": \"!I\", \"bind_first\": true, \"step\": \"ADD_IFLIST\", \"winerror\": 10022, \"errno\": 22, \"result\": \"[WinError 10022] An invalid argument was supplied\"}"
+    },
+    {
+      "title": "Winsock interface probe",
+      "href": "/passchaos/netz/actions/runs/45641634010/job/139301549776#step:16:14",
+      "message": "{\"family\": 2, \"index\": 1, \"enable_first\": false, \"byte_order\": \"!I\", \"bind_first\": false, \"step\": \"ADD_IFLIST\", \"winerror\": 10022, \"errno\": 22, \"result\": \"[WinError 10022] An invalid argument was supplied\"}"
+    },
+    {
+      "title": "Winsock interface probe",
+      "href": "/passchaos/netz/actions/runs/45641634010/job/139301549776#step:16:13",
+      "message": "{\"family\": 2, \"index\": 1, \"enable_first\": false, \"byte_order\": \"=I\", \"bind_first\": true, \"step\": \"ADD_IFLIST\", \"winerror\": 10022, \"errno\": 22, \"result\": \"[WinError 10022] An invalid argument was supplied\"}"
+    },
+    {
+      "title": "Winsock interface probe",
+      "href": "/passchaos/netz/actions/runs/45641634010/job/139301549776#step:16:12",
+      "message": "{\"family\": 2, \"index\": 1, \"enable_first\": false, \"byte_order\": \"=I\", \"bind_first\": false, \"step\": \"ADD_IFLIST\", \"winerror\": 10022, \"errno\": 22, \"result\": \"[WinError 10022] An invalid argument was supplied\"}"
+    },
+    {
+      "title": "Winsock interface probe",
+      "href": "/passchaos/netz/actions/runs/45641634010/job/139301549776#step:16:11",
+      "message": "{\"family\": 2, \"index\": 1, \"enable_first\": true, \"byte_order\": \"!I\", \"bind_first\": true, \"step\": \"ADD_IFLIST\", \"winerror\": 10022, \"errno\": 22, \"result\": \"[WinError 10022] An invalid argument was supplied\"}"
+    },
+    {
+      "title": "Winsock interface probe",
+      "href": "/passchaos/netz/actions/runs/45641634010/job/139301549776#step:16:10",
+      "message": "{\"family\": 2, \"index\": 1, \"enable_first\": true, \"byte_order\": \"!I\", \"bind_first\": false, \"step\": \"ADD_IFLIST\", \"winerror\": 10022, \"errno\": 22, \"result\": \"[WinError 10022] An invalid argument was supplied\"}"
+    },
+    {
+      "title": "Winsock interface probe",
+      "href": "/passchaos/netz/actions/runs/45641634010/job/139301549776#step:16:9",
+      "message": "{\"family\": 2, \"index\": 1, \"enable_first\": true, \"byte_order\": \"=I\", \"bind_first\": true, \"state\": 1, \"iflist_bytes\": \"01000000\", \"indices\": [1], \"result\": \"success\"}"
+    },
+    {
+      "title": "Winsock interface probe",
+      "href": "/passchaos/netz/actions/runs/45641634010/job/139301549776#step:16:8",
+      "message": "{\"family\": 2, \"index\": 1, \"enable_first\": true, \"byte_order\": \"=I\", \"bind_first\": false, \"state\": 1, \"iflist_bytes\": \"01000000\", \"indices\": [1], \"result\": \"success\"}"
+    },
+    {
+      "title": "Native trust progress",
+      "href": "/passchaos/netz/actions/runs/45641634010/job/139301550011#step:19:495",
+      "message": "26/26 internal.stream_io.timed_read.test_0...OK"
+    },
+    {
+      "title": "Native trust progress",
+      "href": "/passchaos/netz/actions/runs/45641634010/job/139301550011#step:19:297",
+      "message": "119/119 http3.origin_pool.test_0...OK"
+    },
+    {
+      "title": "Cross-compile x86_64-macos-none (macOS SDK)",
+      "href": "",
+      "message": "Due to capacity constraints, jobs targeting macOS arm64 runners may experience longer queue times."
+    },
+    {
+      "title": "Complete test progress",
+      "href": "/passchaos/netz/actions/runs/45641634010/job/139301549827#step:5:4105",
+      "message": "2/2 parser_fuzz_test.test.bounded deterministic parser mutation smoke...OK"
+    },
+    {
+      "title": "Complete test progress",
+      "href": "/passchaos/netz/actions/runs/45641634010/job/139301549827#step:5:4096",
+      "message": "2/2 parser_fuzz_test.test.bounded deterministic parser mutation smoke...OK"
+    },
+    {
+      "title": "Complete test progress",
+      "href": "/passchaos/netz/actions/runs/45641634010/job/139301549827#step:5:3978",
+      "message": "2/3 http1_tls_connection_fuzz_test.test.fuzz bounded authenticated TLS HTTP1 connection sequences.../home/runner/work/netz/netz/.zig-cache/o/e18bf893fee01b47639b05f506ea38b3/test --cache-dir=/home/runner/work/netz/netz/.zig-cache --seed=0xd383f1fb"
+    },
+    {
+      "title": "Complete test progress",
+      "href": "/passchaos/netz/actions/runs/45641634010/job/139301549827#step:5:3958",
+      "message": "3/3 quic_wire_fuzz_test.test.bounded deterministic QUIC wire mutation smoke...OK"
+    },
+    {
+      "title": "Complete test progress",
+      "href": "/passchaos/netz/actions/runs/45641634010/job/139301549827#step:5:3916",
+      "message": "3/3 mqtt_tls_bridge_fuzz_test.test.bounded deterministic TLS MQTT bridge mutation smoke...OK"
+    },
+    {
+      "title": "Complete test progress",
+      "href": "/passchaos/netz/actions/runs/45641634010/job/139301549827#step:5:3208",
+      "message": "1/1 exact_certificate_verifier.test.interop exact certificate verifier checks DER hostname and validity...OK"
+    },
+    {
+      "title": "Complete test progress",
+      "href": "/passchaos/netz/actions/runs/45641634010/job/139301549827#step:5:2248",
+      "message": "1704/7409 http3.runtime.shared_handshake_client_pool_tests.test.HTTP/3 shared pool restores the original path after migration timeout on zio..."
+    },
+    {
+      "title": "Complete test progress",
+      "href": "/passchaos/netz/actions/runs/45641634010/job/139301549827#step:5:532",
+      "message": "4/4 mqtt_tls_reconnect_fuzz_test.test.bounded deterministic TLS MQTT reconnect mutation smoke...OK"
+    },
+    {
+      "title": "Complete test progress",
+      "href": "/passchaos/netz/actions/runs/45641634010/job/139301549827#step:5:514",
+      "message": "3/3 webtransport_endpoint_fuzz_test.test.bounded deterministic WebTransport endpoint mutation smoke...OK"
+    },
+    {
+      "title": "Complete test progress",
+      "href": "/passchaos/netz/actions/runs/45641634010/job/139301549827#step:5:498",
+      "message": "2/3 quic_endpoint_fuzz_test.test.fuzz authenticated QUIC endpoint lifecycle..."
+    }
+  ]
+}

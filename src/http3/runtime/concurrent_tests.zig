@@ -1,6 +1,7 @@
 const std = @import("std");
 test {
     _ = @import("concurrent/informational_tests.zig");
+    _ = @import("concurrent/command_admission_tests.zig");
 }
 const http3 = @import("../mod.zig");
 const runtime = @import("../runtime.zig");

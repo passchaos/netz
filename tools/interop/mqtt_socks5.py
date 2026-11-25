@@ -207,6 +207,10 @@ def create_identity(
     cert = directory / "server.pem"
     extensions = directory / "server.ext"
     extensions.write_text(
+        "basicConstraints=critical,CA:FALSE\n"
+        "keyUsage=critical,digitalSignature,keyEncipherment\n"
+        "subjectKeyIdentifier=hash\n"
+        "authorityKeyIdentifier=keyid,issuer\n"
         "subjectAltName="
         + ",".join(f"DNS:{value}" for value in hosts)
         + "\n"
@@ -216,6 +220,9 @@ def create_identity(
         (
             "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
             "-subj", "/CN=Netz SOCKS Test CA", "-days", "1",
+            "-addext", "basicConstraints=critical,CA:TRUE",
+            "-addext", "keyUsage=critical,keyCertSign,cRLSign",
+            "-addext", "subjectKeyIdentifier=hash",
             "-keyout", str(ca_key), "-out", str(ca),
         ),
         (

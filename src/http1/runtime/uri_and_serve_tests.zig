@@ -53,8 +53,10 @@ const writeResponsesToTransportScratch = runtime.writeResponsesToTransportScratc
 
 test "HTTP/1 connections keep optional write scratch compact" {
     if (@sizeOf(usize) == 8) {
-        try std.testing.expectEqual(@as(usize, 448), @sizeOf(Client));
-        try std.testing.expectEqual(@as(usize, 384), @sizeOf(Connection));
+        // Connection policy storage grows with supported socket/resolver
+        // options; the non-policy owner budgets and scratch stay fixed.
+        try std.testing.expectEqual(@as(usize, 304), @sizeOf(Client) - @sizeOf(runtime.Limits));
+        try std.testing.expectEqual(@as(usize, 240), @sizeOf(Connection) - @sizeOf(runtime.Limits));
         try std.testing.expectEqual(@as(usize, 48), @sizeOf(WriteScratch));
     }
 }

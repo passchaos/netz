@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/openssl_http_response.sh"
 
 netz_server=${1:?netz server executable path}
 netz_client=${2:?netz client executable path}
@@ -119,8 +120,7 @@ grep -Fq "netz accepted OpenSSL TLS $tls_label handshake resumed=true" \
 port=$(free_port)
 # OpenSSL's generated -www status page uses HTTP/1.0. Serve a complete
 # HTTP/1.1 response so this TLS ticket gate uses the supported HTTP codec.
-printf 'HTTP/1.1 200 OK\r\nContent-Length: 9\r\nConnection: close\r\n\r\nticket-ok' \
-  >"$work/ticket-response.http"
+write_openssl_http_response "$work" ticket-ok
 (
   cd "$work"
   exec openssl s_server \

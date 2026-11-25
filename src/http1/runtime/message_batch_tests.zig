@@ -51,6 +51,9 @@ const writeRequestToStream = runtime.writeRequestToStream;
 const writeResponseToStream = runtime.writeResponseToStream;
 const writeResponsesToTransportScratch = runtime.writeResponsesToTransportScratch;
 
+// Buffered-only reads still expose transport metadata; no socket I/O occurs.
+const buffered_stream: net.Stream = .{ .socket = .{ .handle = undefined, .address = .{ .ip4 = .loopback(1234) } } };
+
 test "HTTP/1 buffered reader transfers exact message buffer ownership" {
     const allocator = std.testing.allocator;
     const raw = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello";
@@ -83,7 +86,7 @@ test "HTTP/1 borrowed pipeline batch preserves bodies until consume" {
     var connection = Connection{
         .io = undefined,
         .allocator = allocator,
-        .stream = undefined,
+        .stream = buffered_stream,
         .limits = .{ .max_head_bytes = 1024, .max_body_bytes = 16 },
     };
     defer {
@@ -153,7 +156,7 @@ test "HTTP/1 borrowed pipeline batch decodes chunked bodies in place" {
     var connection = Connection{
         .io = undefined,
         .allocator = allocator,
-        .stream = undefined,
+        .stream = buffered_stream,
         .limits = .{ .max_head_bytes = 1024, .max_body_bytes = 5 },
     };
     defer {
@@ -203,7 +206,7 @@ test "HTTP/1 borrowed chunked batch validation is transactional" {
     var connection = Connection{
         .io = undefined,
         .allocator = allocator,
-        .stream = undefined,
+        .stream = buffered_stream,
         .limits = .{ .max_head_bytes = 1024, .max_body_bytes = 16 },
     };
     defer {
@@ -371,7 +374,7 @@ test "HTTP/1 borrowed pipeline batch enforces limits before I/O" {
     var connection = Connection{
         .io = undefined,
         .allocator = allocator,
-        .stream = undefined,
+        .stream = buffered_stream,
         .limits = .{ .max_head_bytes = 24, .max_body_bytes = 2 },
     };
     defer {

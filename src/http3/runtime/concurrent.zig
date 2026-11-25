@@ -11,6 +11,7 @@
 //! session directly.
 const std = @import("std");
 const http3 = @import("../mod.zig");
+const deadline_policy = @import("../../internal/deadline.zig");
 
 /// Upper bound on the per-stream body reservation derived from a declared
 /// Content-Length. Larger bodies grow normally.
@@ -89,6 +90,7 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
         const Command = struct {
             slot: *Slot,
             kind: Kind,
+            deadline: ?std.Io.Clock.Timestamp = null,
             count: usize = 0,
             result: ?anyerror = null,
             done: std.Io.Event = .unset,
@@ -99,7 +101,6 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
             const Kind = union(enum) {
                 informational: struct {
                     response: http3.InformationalResponse,
-                    deadline: ?std.Io.Clock.Timestamp = null,
                 },
                 start_response: struct {
                     response: http3.Response,
@@ -241,7 +242,7 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
             }
 
             pub fn writeInformationalResponseWithDeadline(self: Stream, status: u16, headers: []const http3.Qpack.HeaderField, deadline: std.Io.Clock.Timestamp) anyerror!void {
-                var command = Command{ .slot = self.slot, .kind = .{ .informational = .{ .response = .{ .status = status, .headers = headers }, .deadline = deadline } } };
+                var command = Command{ .slot = self.slot, .kind = .{ .informational = .{ .response = .{ .status = status, .headers = headers } } } };
                 return self.engine.submit(&command, deadline);
             }
 
@@ -1114,6 +1115,9 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
         }
 
         fn submit(self: *Self, command: *Command, deadline: ?std.Io.Clock.Timestamp) anyerror!void {
+            if (deadline) |until| _ = try deadline_policy.usableAwake(self.io, until);
+            try self.io.checkCancel();
+            command.deadline = deadline;
             if (self.inline_active and self.inline_slot == command.slot) {
                 return self.submitInline(command);
             }
@@ -1250,11 +1254,12 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
         }
 
         fn execute(self: *Self, command: *Command) anyerror!void {
+            if (command.deadline) |until| _ = try deadline_policy.usableAwake(self.io, until);
             const slot = command.slot;
             switch (command.kind) {
                 .informational => |value| {
                     if (slot.response_started or slot.response_finished) return error.UnexpectedFrame;
-                    try Adapter.sendInformational(self.session, slot.from, slot.stream_id, value.response, value.deadline);
+                    try Adapter.sendInformational(self.session, slot.from, slot.stream_id, value.response, command.deadline);
                 },
                 .start_response => |value| {
                     var response = value.response;
@@ -1307,7 +1312,7 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                         return;
                     }
                     while (command.informational_written < value.informational.len) {
-                        try Adapter.sendInformational(self.session, slot.from, slot.stream_id, value.informational[command.informational_written], null);
+                        try Adapter.sendInformational(self.session, slot.from, slot.stream_id, value.informational[command.informational_written], command.deadline);
                         command.informational_written += 1;
                     }
                     if (slot.suppress_body) {

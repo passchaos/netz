@@ -425,6 +425,11 @@ pub fn addInterop(
         &tls12_client_auth_openssl.step,
     );
     test_step.dependOn(&tls12_client_auth_openssl.step);
+    const tls_client_certificate_check_tests = b.addSystemCommand(&.{
+        "python3",
+        "tools/interop/tls_client_certificate_check_test.py",
+    });
+    test_step.dependOn(&tls_client_certificate_check_tests.step);
 
     const tls13_client_auth_openssl = b.addSystemCommand(
         &.{"tools/interop/tls12_client_auth_openssl.sh"},

@@ -1,0 +1,27 @@
+{
+  "observed_utc": "2026-11-25T16:04:34.624808+00:00",
+  "command": [
+    "/Users/bytedance/.local/bin/zig",
+    "build",
+    "interop-tls12-client-auth-openssl",
+    "interop-tls13-client-auth-openssl",
+    "-j1",
+    "--summary",
+    "all"
+  ],
+  "exit_code": 0,
+  "source_sha256": {
+    "tools/interop/tls12_ticket_client.zig": "de5ec5d2e9b216371bdce9eb72bb8a598c6b83b501b51605044360b96587ccf8",
+    "tools/interop/tls12_ticket_openssl.sh": "0378631752573bf9453bea317b6db370b9144aa900e297cbeb937f977e160822",
+    "tools/interop/tls12_client_auth_openssl.sh": "abeadff2db43e6deb04066dbe8aa8760524fa623ab9b4727ee7bbecbedecd227",
+    "tools/interop/openssl_http_response.sh": "a6a9f6ce3af4633a1000e1f6c3b4e361d7a916412093000fba91e042037a2e51",
+    "tools/interop/tls12_client_auth_client.zig": "227dcc3e6d100ecb7b5f2787f54751283137067438222f09aa7dbd39967fcb38",
+    "tools/interop/mqtt_socks5.py": "4d83d594e354dfabe877d11c5eb5a92e41589b8aa7456c557717e60bac925c80",
+    ".github/workflows/ci.yml": "4d9e99a9f3491f1b3cbd0b68e637ce8124420f2890b7bc1ec26a4de2fe0f25ff",
+    "tools/release/source_archive_test.py": "6b29ecef8786ea4b1480939a8c91d0ddddf3f2638c92a1be1c902285b939217a",
+    "tools/ci/run_test_progress.py": "eb814deedc1583b03ddf04049b2ceed9f2be3f62e4232af1f7cbaa6923cc5960",
+    "tools/ci/run_test_progress_test.py": "2b619ff6daa528fa0e95a6d99337f5c4abc7f938e4e09f5827bdac42f7212eb0"
+  },
+  "timeout_scope": "Python subprocess duration shim for local single-process OpenSSL fixture calls; not GNU CI timeout certification",
+  "full_suite_acceptance": "pending next CI; local interop only"
+}

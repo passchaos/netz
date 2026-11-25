@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/openssl_http_response.sh"
 
 netz_client=${1:?netz client executable path}
 mode=${2:-tls12}
+certificate_checker="$(dirname "${BASH_SOURCE[0]}")/tls_client_certificate_check.py"
 case "$mode" in
   tls12)
     tls_label='1.2'
@@ -35,6 +37,7 @@ cleanup() {
   rm -rf "$work"
 }
 trap cleanup EXIT
+write_openssl_http_response "$work" client-auth-ok
 
 if ! command -v openssl >/dev/null 2>&1; then
   echo 'openssl not found' >&2
@@ -76,7 +79,9 @@ run_case() {
   local port
   port=$(free_port)
 
-  openssl s_server \
+  (
+    cd "$work"
+    exec openssl s_server \
     -accept "$port" \
     -cert "$work/cert.pem" \
     -key "$work/key.pem" \
@@ -87,9 +92,10 @@ run_case() {
     -CAfile "$client_ca" \
     -state \
     -msg \
-    -www \
-    -naccept 1 \
-    >"$work/openssl-$name.log" 2>&1 &
+    -HTTP \
+    -http_server_binmode \
+    -naccept 1
+  ) >"$work/openssl-$name.log" 2>&1 &
   server_pid=$!
 
   for _ in $(seq 1 100); do
@@ -108,8 +114,9 @@ run_case() {
   wait "$server_pid"
   server_pid=
   grep -Fq \
-    "netz TLS $tls_label client certificate selection=$expectation server=openssl client_io=zio-std-io status=200" \
+    "netz TLS $tls_label client certificate expected=$expectation server=openssl client_io=zio-std-io status=200" \
     "$work/netz-$name.log"
+  python3 "$certificate_checker" "$work/openssl-$name.log" "$mode" "$expectation" "$work/cert.pem"
 }
 
 run_case matching "$work/cert.pem" present

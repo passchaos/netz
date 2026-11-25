@@ -1,0 +1,48 @@
+{
+  "observed_utc": "2026-11-25T15:59:16.494521+00:00",
+  "checks": [
+    {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "fmt",
+        "src/http1/runtime/message_batch_tests.zig",
+        "src/http1/runtime/uri_and_serve_tests.zig",
+        "src/quic/runtime/tests.zig",
+        "src/http3/runtime/concurrent.zig",
+        "src/http3/runtime/concurrent/informational_tests.zig",
+        "src/http3/runtime/concurrent/command_admission_tests.zig",
+        "src/http3/runtime/concurrent_tests.zig",
+        "tools/interop/tls12_ticket_client.zig",
+        "tools/interop/tls12_client_auth_client.zig"
+      ],
+      "exit_code": 0
+    },
+    {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-http3",
+        "-j1",
+        "-Dtest-progress=true",
+        "-Dtest-filter=informational development sends",
+        "-Dtest-filter=inline expired commands",
+        "-Dtest-filter=concurrent command rechecks",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0
+    }
+  ],
+  "source_sha256": {
+    "src/http1/runtime/message_batch_tests.zig": "f94d3d633b31c5ae4cf7f1f7750c8aa9a27ff91c0100ccd4ae6e41143dea388d",
+    "src/http1/runtime/uri_and_serve_tests.zig": "b58066d01044115c2085c00caed69ecbb4a50612b9b6a50b2f972e303e259923",
+    "src/quic/runtime/tests.zig": "829e911eaccc40323cd611aa523c489dcdcf66c3b34b51b197c7639af1d32d1a",
+    "src/http3/runtime/concurrent.zig": "5740b4a3be3ca54cda999e7c97cb3c6b5d8e33196e516c0422ac9c92dbf2625f",
+    "src/http3/runtime/concurrent/informational_tests.zig": "86967938913b2c47efe1fbd308187f030875279165dbc8058537a4780da211aa",
+    "src/http3/runtime/concurrent/command_admission_tests.zig": "8d17708e714ebbbdcaaebcb109139e511be1c3a8e734750e3ceb0d0314ac127f",
+    "src/http3/runtime/concurrent_tests.zig": "e44a199bb8dc904ebe714a8982f4088cb696a8156edb2bac19b153688b4dceac",
+    "tools/interop/tls12_ticket_client.zig": "de5ec5d2e9b216371bdce9eb72bb8a598c6b83b501b51605044360b96587ccf8",
+    "tools/interop/tls12_client_auth_client.zig": "6414b2d9aa4685ea7223acd9a0071b59ac56339fe67f1c0bd0eadcc9d21d8385"
+  },
+  "scope": "Selected current CI failures; local GRO may skip and needs native Linux CI"
+}

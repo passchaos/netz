@@ -1,0 +1,1172 @@
+[traex-zig-guard 2026-11-25 23:54:53] waiting for the global TRAE Zig build slot
+[traex-zig-guard 2026-11-25 23:57:21] started Zig tree root=50119 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=600s
+Executing: /Users/bytedance/.local/bin/zig build interop-tls12-ticket-openssl interop-tls13-ticket-openssl interop-tls12-client-auth-openssl interop-tls13-client-auth-openssl interop-webtransport-h2-python -j1 --summary all
+Installed 3 packages in 98ms
+debug(zio): Spawning thread 0
+WebTransport HTTP2 EndpointClient dropped cleanup passed: canceled=1 slot_reused=true
+WebTransport HTTP2 EndpointClient queue passed: connect+datagram+receive owned_results=true reuse_after_error=true
+WebTransport HTTP2 client passed: rejected=429 streams=4 flow_control=true reset=42 reliable_size=6 stop=4294967295 drain=true close=17 invalid_reset=StreamStateError reuse_after_error=true client_io=zio-std-io
+debug(zio): Removing thread 0
+WebTransport HTTP2 EndpointServer pending cleanup passed: canceled=1 slot_reused=true queue=true
+WebTransport HTTP2 server passed: rejected=429 streams=4 flow_control=true reset=42 reliable_size=6 stop=4294967295 drain=true close=17 invalid_reset=StreamStateError reuse_after_error=true client_io=zio-std-io
+debug(zio): Removing thread 0
+WebTransport HTTP2 EndpointListener passed: accepted=true stream=true datagram=true close=19
+debug(zio): Removing thread 0
+{
+  "alpn": "h2",
+  "driver_sha256": "56177d90c9b201d7e65d93e8a82dcbc9f240da897e45f390f32c61f176b3872d",
+  "native_client_dropped_cleanup": {
+    "reset_code": 8,
+    "slot_reused": true
+  },
+  "native_client_endpoint_queue": {
+    "connect": true,
+    "datagram": true,
+    "owned_results": true,
+    "receive": true,
+    "reuse_after_error": true
+  },
+  "native_listener": {
+    "accepted": true,
+    "capsule_data_fragmentation": true,
+    "close_code": 19,
+    "connection_admission": {
+      "accept_workers": 1,
+      "connection_timeout_ms": 250,
+      "max_connections": 1,
+      "partial_preface_closed": true,
+      "silent_http2_closed": true,
+      "silent_tls_closed": true
+    },
+    "datagram": true,
+    "http2_stream": 1,
+    "stream": true
+  },
+  "native_server_pending_cleanup": {
+    "queue": true,
+    "reset_code": 8,
+    "slot_reused": true
+  },
+  "protocol": "draft-ietf-webtrans-http2-15",
+  "python_packages": {
+    "h2": "4.3.0",
+    "hpack": "4.1.0",
+    "hyperframe": "6.1.0"
+  },
+  "source_sha256": {
+    "driver.zig": "05cc273728458b59f36f59daccd74b7393d2371d3fe6df82116b0be3c5b477d6",
+    "peer.py": "a1017443068ddb5948a26ffa53b399cbc8a53fecc2e3002b0ef4baee82ab8afa",
+    "run.py": "7a14de0f9d4db7ad0d3a00d9d4f501c57873b0665b95a9f2a0828ff58f7d3834",
+    "wire.py": "a05b6e736b3fff89fdd497656f66b7727b30318b50f9f14578c7727f62ac9698"
+  },
+  "status": "passed",
+  "tls": "TLSv1.3",
+  "traces": [
+    {
+      "capsule_data_fragmentation": true,
+      "connect_fin": true,
+      "connect_requests": 5,
+      "dropped_connect_cleanup": true,
+      "dropped_reset_code": 8,
+      "http2_stream": 3,
+      "invalid_reset_scoped": true,
+      "reliable_size": 6,
+      "reuse_after_error": true,
+      "role": "server",
+      "steps": [
+        "bidi",
+        "credit",
+        "datagram",
+        "drain",
+        "peer-streams",
+        "reset",
+        "stop"
+      ],
+      "stop_code": 4294967295
+    },
+    {
+      "capsule_data_fragmentation": true,
+      "connect_fin": true,
+      "connect_requests": 5,
+      "dropped_pending_cleanup": true,
+      "dropped_reset_code": 8,
+      "http2_stream": 3,
+      "invalid_reset_scoped": true,
+      "reliable_size": 6,
+      "reuse_after_error": true,
+      "role": "client",
+      "steps": [
+        "bidi",
+        "credit",
+        "datagram",
+        "drain",
+        "peer-streams",
+        "reset",
+        "stop"
+      ],
+      "stop_code": 4294967295
+    }
+  ]
+}
+WebTransport HTTP2 Python interoperability passed: directions=2 rejected=429 independent_capsules=true
+OpenSSL/netz TLS 1.2 session-ticket interop passed in both endpoint roles
+OpenSSL/netz TLS 1.3 session-ticket interop passed in both endpoint roles
+--- /var/folders/3h/rw6tyryn6ps_mw9bcstc2lfm0000gn/T/tmp.D9rH0OzQIc/ca-generation.log ---
+-----
+--- /var/folders/3h/rw6tyryn6ps_mw9bcstc2lfm0000gn/T/tmp.D9rH0OzQIc/netz-matching.log ---
+debug(zio): Spawning thread 0
+netz TLS 1.3 client certificate selection=present server=openssl client_io=zio-std-io status=200
+debug(zio): Removing thread 0
+--- /var/folders/3h/rw6tyryn6ps_mw9bcstc2lfm0000gn/T/tmp.D9rH0OzQIc/netz-unmatched.log ---
+debug(zio): Spawning thread 0
+debug(zio): Removing thread 0
+error: UnexpectedClientCertificate
+/Users/bytedance/project-z/netz/tools/interop/tls12_client_auth_client.zig:97:9: 0x102864407 in main (netz-tls12-client-auth-client)
+        return error.UnexpectedClientCertificate;
+        ^
+--- /var/folders/3h/rw6tyryn6ps_mw9bcstc2lfm0000gn/T/tmp.D9rH0OzQIc/openssl-matching.log ---
+verify depth is 1
+Using default temp DH parameters
+ACCEPT
+SSL_accept:before SSL initialization
+<<< TLS 1.0, RecordHeader [length 0005]
+    16 03 01 00 e7
+SSL_accept:before SSL initialization
+<<< TLS 1.3, Handshake [length 00e7], ClientHello
+    01 00 00 e3 03 03 31 d8 0e c1 8c db 90 2c 7b 91
+    c2 f8 34 ec 08 f9 a6 f0 11 d2 b5 95 1d de b3 ed
+    a2 58 76 75 27 20 20 48 53 a1 87 20 87 23 9b ba
+    16 d0 76 66 f9 80 a2 bf 70 49 d2 33 7f 21 4e c2
+    97 a8 6c 3e 3d 6a b6 00 08 13 01 13 02 13 03 13
+    04 01 00 00 92 00 00 00 0e 00 0c 00 00 09 6c 6f
+    63 61 6c 68 6f 73 74 00 05 00 05 01 00 00 00 00
+    00 1b 00 07 06 00 02 00 03 00 01 00 0a 00 06 00
+    04 00 1d 00 17 00 0d 00 1e 00 1c 04 03 05 03 06
+    03 08 07 08 04 08 05 08 06 08 09 08 0a 08 0b 04
+    01 05 01 06 01 07 08 00 10 00 0b 00 09 08 68 74
+    74 70 2f 31 2e 31 00 2b 00 03 02 03 04 00 33 00
+    26 00 24 00 1d 00 20 11 b9 3e 3b df 04 5f 63 d5
+    ca e1 c3 ab 94 db 19 84 0d 68 c9 17 9c 70 b6 8b
+    70 7e f1 4a 1b 09 48
+SSL_accept:SSLv3/TLS read client hello
+ALPN protocols advertised by the client: http/1.1
+ALPN protocols selected: http/1.1
+>>> TLS 1.2, RecordHeader [length 0005]
+    16 03 03 00 7a
+>>> TLS 1.3, Handshake [length 007a], ServerHello
+    02 00 00 76 03 03 0e fe 33 3c bd 00 b5 da b7 b1
+    d8 e4 2b c3 73 28 b4 c1 f1 49 63 85 3d 0f 6e 71
+    04 34 00 a9 e1 38 20 48 53 a1 87 20 87 23 9b ba
+    16 d0 76 66 f9 80 a2 bf 70 49 d2 33 7f 21 4e c2
+    97 a8 6c 3e 3d 6a b6 13 01 00 00 2e 00 2b 00 02
+    03 04 00 33 00 24 00 1d 00 20 10 ff 09 83 12 c4
+    22 4d d5 fe d8 17 af 37 9f 52 25 ce 8a 5b 27 94
+    a1 6a 93 8c c0 82 d2 c1 06 6b
+SSL_accept:SSLv3/TLS write server hello
+>>> TLS 1.2, RecordHeader [length 0005]
+    14 03 03 00 01
+>>> TLS 1.3, ChangeCipherSpec [length 0001]
+    01
+SSL_accept:SSLv3/TLS write change cipher spec
+>>> TLS 1.2, RecordHeader [length 0005]
+    17 03 03 00 3c
+>>> TLS 1.2, InnerContent [length 0001]
+    16
+>>> TLS 1.3, Handshake [length 002b], EncryptedExtensions
+    08 00 00 27 00 25 00 0a 00 12 00 10 11 ec 00 1d
+    00 17 00 1e 00 18 00 19 01 00 01 01 00 10 00 0b
+    00 09 08 68 74 74 70 2f 31 2e 31
+SSL_accept:TLSv1.3 write encrypted extensions
+>>> TLS 1.2, RecordHeader [length 0005]
+    17 03 03 00 64
+>>> TLS 1.2, InnerContent [length 0001]
+    16
+>>> TLS 1.3, Handshake [length 0053], CertificateRequest
+    0d 00 00 4f 00 00 4c 00 0d 00 2a 00 28 09 05 09
+    06 09 04 04 03 05 03 06 03 08 07 08 08 08 1a 08
+    1b 08 1c 08 09 08 0a 08 0b 08 04 08 05 08 06 04
+    01 05 01 06 01 00 2f 00 1a 00 18 00 16 30 14 31
+    12 30 10 06 03 55 04 03 0c 09 6c 6f 63 61 6c 68
+    6f 73 74
+SSL_accept:SSLv3/TLS write certificate request
+>>> TLS 1.2, RecordHeader [length 0005]
+    17 03 03 01 52
+>>> TLS 1.2, InnerContent [length 0001]
+    16
+>>> TLS 1.3, Handshake [length 0141], Certificate
+    0b 00 01 3d 00 00 01 39 00 01 34 30 82 01 30 30
+    81 d6 a0 03 02 01 02 02 02 12 34 30 0a 06 08 2a
+    86 48 ce 3d 04 03 02 30 14 31 12 30 10 06 03 55
+    04 03 0c 09 6c 6f 63 61 6c 68 6f 73 74 30 1e 17
+    0d 32 36 30 31 30 31 30 30 30 30 30 30 5a 17 0d
+    33 36 30 31 30 31 30 30 30 30 30 30 5a 30 14 31
+    12 30 10 06 03 55 04 03 0c 09 6c 6f 63 61 6c 68
+    6f 73 74 30 59 30 13 06 07 2a 86 48 ce 3d 02 01
+    06 08 2a 86 48 ce 3d 03 01 07 03 42 00 04 5a c0
+    b8 ee 09 e6 57 67 bb 6c 7d 34 40 bb e1 5c b9 12
+    d4 af e1 0b 6e 1a 17 ff a1 ec d1 f2 e5 49 97 b4
+    34 d6 58 3d 4a 99 6b ae 68 60 63 0c b3 d5 1d d7
+    d4 1c fd 16 4c ce 7e 2f 66 fe 7e 11 a9 14 a3 18
+    30 16 30 14 06 03 55 1d 11 04 0d 30 0b 82 09 6c
+    6f 63 61 6c 68 6f 73 74 30 0a 06 08 2a 86 48 ce
+    3d 04 03 02 03 49 00 30 46 02 21 00 91 40 8f e5
+    25 57 f1 4e 19 a5 51 9c 1f fd 97 bc 17 81 27 ad
+    d3 39 f8 09 d8 05 21 c9 2a 0b 58 44 02 21 00 a4
+    f4 75 7c 94 f6 33 d3 d5 36 7d df c1 d6 41 6e 82
+    84 a1 6a d4 60 b5 72 ea c3 2f 6e b8 4d 8c a5 00
+    00
+SSL_accept:SSLv3/TLS write certificate
+>>> TLS 1.2, RecordHeader [length 0005]
+    17 03 03 00 61
+>>> TLS 1.2, InnerContent [length 0001]
+    16
+>>> TLS 1.3, Handshake [length 0050], CertificateVerify
+    0f 00 00 4c 04 03 00 48 30 46 02 21 00 f5 35 de
+    ef 54 a1 99 82 4a 26 17 06 ce ea 61 c1 09 bd b4
+    11 c6 71 13 b6 74 9e c2 3d 79 f4 4c ff 02 21 00
+    b5 6f 8a b1 18 23 e2 28 d4 cf c7 15 23 c3 54 89
+    21 6b 01 dc bf 0b e9 13 95 ba ef 79 1b cd df fd
+SSL_accept:TLSv1.3 write server certificate verify
+>>> TLS 1.2, RecordHeader [length 0005]
+    17 03 03 00 35
+>>> TLS 1.2, InnerContent [length 0001]
+    16
+>>> TLS 1.3, Handshake [length 0024], Finished
+    14 00 00 20 77 9d e1 69 ef 98 6e 3f 2e ac 35 5e
+    3d b2 2f 30 b2 5f 86 a0 d2 94 33 e7 f5 1f b7 81
+    0b 2d e7 af
+SSL_accept:SSLv3/TLS write finished
+SSL_accept:TLSv1.3 early data
+<<< TLS 1.2, RecordHeader [length 0005]
+    17 03 03 01 c5
+<<< TLS 1.3, InnerContent [length 0001]
+    16
+SSL_accept:TLSv1.3 early data
+<<< TLS 1.3, Handshake [length 0141], Certificate
+    0b 00 01 3d 00 00 01 39 00 01 34 30 82 01 30 30
+    81 d6 a0 03 02 01 02 02 02 12 34 30 0a 06 08 2a
+    86 48 ce 3d 04 03 02 30 14 31 12 30 10 06 03 55
+    04 03 0c 09 6c 6f 63 61 6c 68 6f 73 74 30 1e 17
+    0d 32 36 30 31 30 31 30 30 30 30 30 30 5a 17 0d
+    33 36 30 31 30 31 30 30 30 30 30 30 5a 30 14 31
+    12 30 10 06 03 55 04 03 0c 09 6c 6f 63 61 6c 68
+    6f 73 74 30 59 30 13 06 07 2a 86 48 ce 3d 02 01
+    06 08 2a 86 48 ce 3d 03 01 07 03 42 00 04 5a c0
+    b8 ee 09 e6 57 67 bb 6c 7d 34 40 bb e1 5c b9 12
+    d4 af e1 0b 6e 1a 17 ff a1 ec d1 f2 e5 49 97 b4
+    34 d6 58 3d 4a 99 6b ae 68 60 63 0c b3 d5 1d d7
+    d4 1c fd 16 4c ce 7e 2f 66 fe 7e 11 a9 14 a3 18
+    30 16 30 14 06 03 55 1d 11 04 0d 30 0b 82 09 6c
+    6f 63 61 6c 68 6f 73 74 30 0a 06 08 2a 86 48 ce
+    3d 04 03 02 03 49 00 30 46 02 21 00 91 40 8f e5
+    25 57 f1 4e 19 a5 51 9c 1f fd 97 bc 17 81 27 ad
+    d3 39 f8 09 d8 05 21 c9 2a 0b 58 44 02 21 00 a4
+    f4 75 7c 94 f6 33 d3 d5 36 7d df c1 d6 41 6e 82
+    84 a1 6a d4 60 b5 72 ea c3 2f 6e b8 4d 8c a5 00
+    00
+depth=0 CN=localhost
+verify return:1
+SSL_accept:SSLv3/TLS read client certificate
+<<< TLS 1.3, Handshake [length 004f], CertificateVerify
+    0f 00 00 4b 04 03 00 47 30 45 02 21 00 81 78 5b
+    34 fe 88 d8 87 9d 48 03 b0 51 2d 7d e3 a5 66 1a
+    13 0d e2 51 3f 2c dd bd 02 12 5c ce e5 02 20 39
+    45 82 3a e1 bb eb 90 89 d8 cf 6d 93 48 bb 5d 0b
+    df a5 14 4c 3c 03 0a 22 c1 20 e8 fc 45 97 a7
+SSL_accept:SSLv3/TLS read certificate verify
+<<< TLS 1.3, Handshake [length 0024], Finished
+    14 00 00 20 ae b5 42 8b 2e e8 8c 5e 1a 26 39 db
+    a5 ba c3 ee 5b 34 46 50 dc 66 0f 9b 78 ec 59 d7
+    40 0b 85 66
+SSL_accept:SSLv3/TLS read finished
+>>> TLS 1.2, RecordHeader [length 0005]
+    17 03 03 02 2a
+>>> TLS 1.2, InnerContent [length 0001]
+    16
+>>> TLS 1.3, Handshake [length 0219], NewSessionTicket
+    04 00 02 15 00 00 1c 20 a6 19 ff 47 08 00 00 00
+    00 00 00 00 00 02 00 a5 4a 9f 53 f4 8b fe c9 b1
+    a2 cf e7 d5 a7 e1 03 37 2c ea fe 88 4e 3e b6 94
+    ed da 88 7d ff 83 f4 bf 8b 64 3b 40 09 73 db bc
+    60 3e 01 23 4f 84 31 17 ed ff f8 f8 6f 01 0f ab
+    9a 23 e8 21 25 c0 9a f2 87 7c f7 9e d6 69 bc dd
+    38 6f 22 39 0a 53 7c 9f cd 09 4d 4e a2 50 c3 7e
+    ce 5e cf 78 85 7b d3 a9 6b 5e c8 8a 37 5a 25 ee
+    ec 27 96 5d ca cd 1a 2f 46 2b e1 88 4a 5a a1 bd
+    87 8a 80 80 ea 17 7a 1f 6e 58 e9 8b 8f 8f c4 69
+    24 89 29 2a e0 65 95 f8 1f 73 b8 a4 f6 0f 8b 3b
+    59 cf c5 b9 75 ad 19 17 81 d9 fc 4f 1c 65 69 fd
+    04 28 85 61 cd 06 17 f7 51 cc 9f 90 25 81 63 b9
+    c7 63 08 94 b1 a3 13 e3 e0 b4 36 72 5c 7f da b6
+    3b 14 fd 63 7d aa ab 6e 1e 0d 6a f7 15 59 cc 34
+    07 13 7d 5e 54 47 c0 89 73 49 b3 22 60 3b da 59
+    2e fe fd 10 89 d3 e2 68 6e 0e ea 48 ba 78 c8 04
+    85 43 60 b9 07 98 2d c3 80 3b b5 41 bd 30 24 e8
+    6f ac 00 60 19 22 d7 1d 20 ef 18 a7 d0 75 60 6b
+    6f 49 ac 6f 62 88 81 e9 89 c9 da e8 11 60 d4 9d
+    74 1c 73 c0 e6 26 16 58 22 32 10 62 7a d0 5f 21
+    29 7a 44 cc da 49 ad 74 b6 b4 15 0a 14 b3 75 a2
+    ea 7f ac 5e e0 11 08 6f f2 c8 b2 ae ad 7d e5 93
+    53 97 f8 bf a7 95 5b a5 4b 5f 29 ac 06 dc d4 10
+    c9 33 79 e8 e2 e3 36 98 b6 d7 72 7c 4f db 8f 7d
+    09 5a 61 5d 51 e6 ee 9f a1 d0 94 b7 36 0f c5 c5
+    ce 9d 7d f4 13 5c 12 2d c8 ad 27 81 b8 48 eb 5c
+    2b fb 77 84 1f 2f 83 40 89 33 9e 15 76 88 f7 26
+    a4 e1 81 bf ea 02 5b 10 d4 ff a4 aa b7 7f bf c1
+    21 df 6e e8 08 db 66 8d 59 a3 02 a6 02 31 8c 62
+    c6 89 96 a0 09 3c f3 5d 57 6a db 52 93 98 4b 99
+    93 e1 6f 21 16 c4 cf 9e d4 3b e2 34 29 8a 8b 18
+    f5 e4 b0 38 cb 7b 8f 95 1b 47 53 77 a0 97 55 8e
+    b6 01 9b 61 1d 9c a3 00 00
+SSL_accept:SSLv3/TLS write session ticket
+>>> TLS 1.2, RecordHeader [length 0005]
+    17 03 03 02 2a
+>>> TLS 1.2, InnerContent [length 0001]
+    16
+>>> TLS 1.3, Handshake [length 0219], NewSessionTicket
+    04 00 02 15 00 00 1c 20 82 f8 9b c7 08 00 00 00
+--- /var/folders/3h/rw6tyryn6ps_mw9bcstc2lfm0000gn/T/tmp.D9rH0OzQIc/openssl-unmatched.log ---
+verify depth is 1
+Using default temp DH parameters
+ACCEPT
+SSL_accept:before SSL initialization
+<<< TLS 1.0, RecordHeader [length 0005]
+    16 03 01 00 e7
+SSL_accept:before SSL initialization
+<<< TLS 1.3, Handshake [length 00e7], ClientHello
+    01 00 00 e3 03 03 82 a7 13 af 5f 5c 16 24 ec db
+    cf ce 65 ad 24 a6 b8 bc bb 84 da 6e d0 da 87 2b
+    cb c0 8e ea b1 d2 20 80 57 ea 04 01 c3 3e f7 5b
+    03 85 ae d3 93 78 e8 53 98 81 f7 dc 1a 99 28 2b
+    30 b7 c8 28 b3 b5 3b 00 08 13 01 13 02 13 03 13
+    04 01 00 00 92 00 00 00 0e 00 0c 00 00 09 6c 6f
+    63 61 6c 68 6f 73 74 00 05 00 05 01 00 00 00 00
+    00 1b 00 07 06 00 02 00 03 00 01 00 0a 00 06 00
+    04 00 1d 00 17 00 0d 00 1e 00 1c 04 03 05 03 06
+    03 08 07 08 04 08 05 08 06 08 09 08 0a 08 0b 04
+    01 05 01 06 01 07 08 00 10 00 0b 00 09 08 68 74
+    74 70 2f 31 2e 31 00 2b 00 03 02 03 04 00 33 00
+    26 00 24 00 1d 00 20 b6 fc 92 4a b3 45 8c e8 0f
+    25 2a d9 55 f4 ba c6 73 c6 85 fe a3 53 c7 a4 62
+    65 74 26 f4 f8 e4 7b
+SSL_accept:SSLv3/TLS read client hello
+ALPN protocols advertised by the client: http/1.1
+ALPN protocols selected: http/1.1
+>>> TLS 1.2, RecordHeader [length 0005]
+    16 03 03 00 7a
+>>> TLS 1.3, Handshake [length 007a], ServerHello
+    02 00 00 76 03 03 60 7c 0b 56 3d d1 d6 b0 99 c1
+    f2 e6 2c 11 c0 65 81 22 eb 87 93 54 c9 0d aa a3
+    3a 22 1d 86 54 43 20 80 57 ea 04 01 c3 3e f7 5b
+    03 85 ae d3 93 78 e8 53 98 81 f7 dc 1a 99 28 2b
+    30 b7 c8 28 b3 b5 3b 13 01 00 00 2e 00 2b 00 02
+    03 04 00 33 00 24 00 1d 00 20 93 67 6b 8d a3 2d
+    e9 3f 65 cc 28 a9 91 fe 31 a2 e3 61 50 34 ba 30
+    4b 90 c8 58 ee db 87 d2 45 15
+SSL_accept:SSLv3/TLS write server hello
+>>> TLS 1.2, RecordHeader [length 0005]
+    14 03 03 00 01
+>>> TLS 1.3, ChangeCipherSpec [length 0001]
+    01
+SSL_accept:SSLv3/TLS write change cipher spec
+>>> TLS 1.2, RecordHeader [length 0005]
+    17 03 03 00 3c
+>>> TLS 1.2, InnerContent [length 0001]
+    16
+>>> TLS 1.3, Handshake [length 002b], EncryptedExtensions
+    08 00 00 27 00 25 00 0a 00 12 00 10 11 ec 00 1d
+    00 17 00 1e 00 18 00 19 01 00 01 01 00 10 00 0b
+    00 09 08 68 74 74 70 2f 31 2e 31
+SSL_accept:TLSv1.3 write encrypted extensions
+>>> TLS 1.2, RecordHeader [length 0005]
+    17 03 03 00 70
+>>> TLS 1.2, InnerContent [length 0001]
+    16
+>>> TLS 1.3, Handshake [length 005f], CertificateRequest
+    0d 00 00 5b 00 00 58 00 0d 00 2a 00 28 09 05 09
+    06 09 04 04 03 05 03 06 03 08 07 08 08 08 1a 08
+    1b 08 1c 08 09 08 0a 08 0b 08 04 08 05 08 06 04
+    01 05 01 06 01 00 2f 00 26 00 24 00 22 30 20 31
+    1e 30 1c 06 03 55 04 03 0c 15 52 65 71 75 65 73
+    74 65 64 20 43 6c 69 65 6e 74 20 52 6f 6f 74
+SSL_accept:SSLv3/TLS write certificate request
+>>> TLS 1.2, RecordHeader [length 0005]
+    17 03 03 01 52
+>>> TLS 1.2, InnerContent [length 0001]
+    16
+>>> TLS 1.3, Handshake [length 0141], Certificate
+    0b 00 01 3d 00 00 01 39 00 01 34 30 82 01 30 30
+    81 d6 a0 03 02 01 02 02 02 12 34 30 0a 06 08 2a
+    86 48 ce 3d 04 03 02 30 14 31 12 30 10 06 03 55
+    04 03 0c 09 6c 6f 63 61 6c 68 6f 73 74 30 1e 17
+    0d 32 36 30 31 30 31 30 30 30 30 30 30 5a 17 0d
+    33 36 30 31 30 31 30 30 30 30 30 30 5a 30 14 31
+    12 30 10 06 03 55 04 03 0c 09 6c 6f 63 61 6c 68
+    6f 73 74 30 59 30 13 06 07 2a 86 48 ce 3d 02 01
+    06 08 2a 86 48 ce 3d 03 01 07 03 42 00 04 5a c0
+    b8 ee 09 e6 57 67 bb 6c 7d 34 40 bb e1 5c b9 12
+    d4 af e1 0b 6e 1a 17 ff a1 ec d1 f2 e5 49 97 b4
+    34 d6 58 3d 4a 99 6b ae 68 60 63 0c b3 d5 1d d7
+    d4 1c fd 16 4c ce 7e 2f 66 fe 7e 11 a9 14 a3 18
+    30 16 30 14 06 03 55 1d 11 04 0d 30 0b 82 09 6c
+    6f 63 61 6c 68 6f 73 74 30 0a 06 08 2a 86 48 ce
+    3d 04 03 02 03 49 00 30 46 02 21 00 91 40 8f e5
+    25 57 f1 4e 19 a5 51 9c 1f fd 97 bc 17 81 27 ad
+    d3 39 f8 09 d8 05 21 c9 2a 0b 58 44 02 21 00 a4
+    f4 75 7c 94 f6 33 d3 d5 36 7d df c1 d6 41 6e 82
+    84 a1 6a d4 60 b5 72 ea c3 2f 6e b8 4d 8c a5 00
+    00
+SSL_accept:SSLv3/TLS write certificate
+>>> TLS 1.2, RecordHeader [length 0005]
+    17 03 03 00 60
+>>> TLS 1.2, InnerContent [length 0001]
+    16
+>>> TLS 1.3, Handshake [length 004f], CertificateVerify
+    0f 00 00 4b 04 03 00 47 30 45 02 20 6a 44 a4 22
+    ba 0f 22 c6 50 6a 3a fb 95 2d 64 e2 93 db 0e 69
+    34 db fd 58 cd cb 91 ee c0 28 3c fc 02 21 00 c5
+    f5 cf cd b3 3c f8 c8 fd 17 01 24 a3 9e 0f 67 df
+    99 ef b7 9e 2b e5 ef 27 2b 7a 8c 7d ba dd 4c
+SSL_accept:TLSv1.3 write server certificate verify
+>>> TLS 1.2, RecordHeader [length 0005]
+    17 03 03 00 35
+>>> TLS 1.2, InnerContent [length 0001]
+    16
+>>> TLS 1.3, Handshake [length 0024], Finished
+    14 00 00 20 bf 33 f3 9b 89 8c 55 08 a9 48 ba c9
+    4d 42 13 fa 92 85 c8 96 67 75 20 6d 25 ad ff b6
+    c9 34 d5 f5
+SSL_accept:SSLv3/TLS write finished
+SSL_accept:TLSv1.3 early data
+<<< TLS 1.2, RecordHeader [length 0005]
+    17 03 03 00 3d
+<<< TLS 1.3, InnerContent [length 0001]
+    16
+SSL_accept:TLSv1.3 early data
+<<< TLS 1.3, Handshake [length 0008], Certificate
+    0b 00 00 04 00 00 00 00
+SSL_accept:SSLv3/TLS read client certificate
+<<< TLS 1.3, Handshake [length 0024], Finished
+    14 00 00 20 d2 2b a9 c5 3c 8a da 73 12 be 89 e9
+    a4 df 2f f0 15 24 f9 04 61 06 aa 5c 9d ed 3e 95
+    23 e4 10 65
+SSL_accept:SSLv3/TLS read finished
+>>> TLS 1.2, RecordHeader [length 0005]
+    17 03 03 00 fa
+>>> TLS 1.2, InnerContent [length 0001]
+    16
+>>> TLS 1.3, Handshake [length 00e9], NewSessionTicket
+    04 00 00 e5 00 00 1c 20 25 97 3b 0c 08 00 00 00
+    00 00 00 00 00 00 d0 fb 09 e7 4a 09 c8 a5 81 56
+    77 f7 f8 16 36 64 eb 38 34 9f 5e 4a 3e 02 02 8d
+    c5 bf 2e af 53 59 9c 2b 05 5e c8 b9 25 e2 e6 64
+    9f e3 cd 6c 66 ab 86 32 54 50 2d d5 70 b1 a6 3e
+    d3 c5 d2 4d a5 ca 2b 9c 3a f1 3f 0e 61 ec 31 c2
+    2f 85 2c 1a 90 2c 7d 28 8c 51 9a 0b 89 e7 1e 7a
+    d9 b9 ce 73 5f 12 49 7e b0 24 e8 0e 8b 0c 30 ec
+    77 59 8e 0c 9d 10 2c f3 09 68 4d 68 89 ac a0 6d
+    f0 b8 fe e2 7b 30 2d fc cf 9f 2c d4 bc 47 05 0d
+    78 d4 fa a8 4a 3a c3 8d d5 e2 79 9a ab 88 c2 88
+    b3 47 42 aa c8 c5 ec bf b9 5b ca d2 3a f6 81 08
+    9a c6 cc 67 a5 29 c4 e8 b2 dc 65 f4 98 60 e4 ee
+    cc e3 fa f6 84 6b 82 18 54 6d 98 c7 5e 87 33 bf
+    e1 49 3f 17 5e 6d df 00 00
+SSL_accept:SSLv3/TLS write session ticket
+>>> TLS 1.2, RecordHeader [length 0005]
+    17 03 03 00 fa
+>>> TLS 1.2, InnerContent [length 0001]
+    16
+>>> TLS 1.3, Handshake [length 00e9], NewSessionTicket
+    04 00 00 e5 00 00 1c 20 18 b7 8b c5 08 00 00 00
+    00 00 00 00 01 00 d0 fb 09 e7 4a 09 c8 a5 81 56
+    77 f7 f8 16 36 64 eb 81 f9 1d ff e2 84 08 f3 2c
+    9d 4a af fb e3 38 97 8f 1c 6c 8e 62 82 e0 9e a1
+    e8 97 33 d8 64 48 8a 64 d2 99 be 49 fc 7d 17 4a
+    db 7b f7 d2 06 61 b2 6e 0b ff 4b 34 31 53 20 54
+    a8 e2 7c e6 fb 64 a1 52 3c 55 c2 56 2d cf 52 39
+    9b 6c 0a c8 4e a7 11 00 98 77 12 8b 21 7e 49 3b
+    ef d1 18 cb fe 0a 08 73 76 db 16 22 cd 98 a4 ef
+    37 fe a9 9f 55 2b fd 92 ee 0b f6 23 6a 25 7b 05
+    a6 9e 94 87 0b 1e ef 46 8f 87 19 bf a7 7a 0b a4
+    27 2d be b6 45 2c e3 40 40 55 ca 56 0b fb cc 9b
+    42 55 19 a6 64 2c 43 6b 23 fb 3c 56 39 18 15 25
+    22 12 9f 4d ba ac 52 c6 c1 3e ab d8 a0 e6 da 0d
+    82 02 ec 34 91 2f fd 00 00
+SSL_accept:SSLv3/TLS write session ticket
+<<< TLS 1.2, RecordHeader [length 0005]
+    17 03 03 00 49
+<<< TLS 1.3, InnerContent [length 0001]
+    17
+FILE:interop-response.http
+>>> TLS 1.2, RecordHeader [length 0005]
+    17 03 03 00 59
+>>> TLS 1.2, InnerContent [length 0001]
+    17
+>>> TLS 1.2, RecordHeader [length 0005]
+    17 03 03 00 13
+>>> TLS 1.2, InnerContent [length 0001]
+    15
+>>> TLS 1.3, Alert [length 0002], warning close_notify
+    01 00
+SSL3 alert write:warning:close notify
+<<< TLS 1.2, RecordHeader [length 0005]
+    17 03 03 00 13
+<<< TLS 1.3, InnerContent [length 0001]
+    15
+<<< TLS 1.3, Alert [length 0002], warning close_notify
+    01 00
+SSL3 alert read:warning:close notify
+   0 items in the session cache
+   0 client connects (SSL_connect())
+   0 client renegotiates (SSL_connect())
+   0 client connects that finished
+   1 server accepts (SSL_accept())
+   0 server renegotiates (SSL_accept())
+   1 server accepts that finished
+   0 session cache hits
+   0 session cache misses
+   0 session cache timeouts
+--- /var/folders/3h/rw6tyryn6ps_mw9bcstc2lfm0000gn/T/tmp.NoxtGXDKDI/ca-generation.log ---
+-----
+--- /var/folders/3h/rw6tyryn6ps_mw9bcstc2lfm0000gn/T/tmp.NoxtGXDKDI/netz-matching.log ---
+debug(zio): Spawning thread 0
+netz TLS 1.2 client certificate selection=present server=openssl client_io=zio-std-io status=200
+debug(zio): Removing thread 0
+--- /var/folders/3h/rw6tyryn6ps_mw9bcstc2lfm0000gn/T/tmp.NoxtGXDKDI/netz-unmatched.log ---
+debug(zio): Spawning thread 0
+debug(zio): Removing thread 0
+error: UnexpectedClientCertificate
+/Users/bytedance/project-z/netz/tools/interop/tls12_client_auth_client.zig:97:9: 0x104d7c407 in main (netz-tls12-client-auth-client)
+        return error.UnexpectedClientCertificate;
+        ^
+--- /var/folders/3h/rw6tyryn6ps_mw9bcstc2lfm0000gn/T/tmp.NoxtGXDKDI/openssl-matching.log ---
+verify depth is 1
+Using default temp DH parameters
+ACCEPT
+SSL_accept:before SSL initialization
+<<< TLS 1.0, RecordHeader [length 0005]
+    16 03 01 00 a3
+SSL_accept:before SSL initialization
+<<< TLS 1.3, Handshake [length 00a3], ClientHello
+    01 00 00 9f 03 03 2c 45 5e 15 e8 0d d1 57 a9 4a
+    ab f3 ce c1 ee 14 84 22 9d b2 b3 31 16 65 d0 1d
+    c2 4f d5 00 5c d8 00 00 04 c0 2b 00 ff 01 00 00
+    72 00 00 00 0e 00 0c 00 00 09 6c 6f 63 61 6c 68
+    6f 73 74 00 05 00 05 01 00 00 00 00 00 11 00 09
+    00 07 02 00 04 00 00 00 00 00 17 00 00 00 0a 00
+    0a 00 08 00 1d 00 17 00 18 00 19 00 0d 00 1e 00
+    1c 04 03 05 03 06 03 08 07 08 04 08 05 08 06 08
+    09 08 0a 08 0b 04 01 05 01 06 01 07 08 00 10 00
+    0b 00 09 08 68 74 74 70 2f 31 2e 31 00 2b 00 03
+    02 03 03
+SSL_accept:SSLv3/TLS read client hello
+ALPN protocols advertised by the client: http/1.1
+ALPN protocols selected: http/1.1
+>>> TLS 1.2, RecordHeader [length 0005]
+    16 03 03 00 64
+>>> TLS 1.2, Handshake [length 0064], ServerHello
+    02 00 00 60 03 03 be 81 a0 b3 26 dd 4d 5b 12 89
+    fe 89 a9 e4 06 b5 04 de 48 0d 00 f6 a8 17 e3 81
+    16 f1 a3 b7 90 4d 20 1d f5 96 a0 25 e5 f9 0b c6
+    07 19 89 66 8a 71 af b7 26 f0 74 d9 b8 23 72 a6
+    26 9c b5 18 e4 28 8c c0 2b 00 00 18 ff 01 00 01
+    00 00 10 00 0b 00 09 08 68 74 74 70 2f 31 2e 31
+    00 17 00 00
+SSL_accept:SSLv3/TLS write server hello
+>>> TLS 1.2, RecordHeader [length 0005]
+    16 03 03 01 3e
+>>> TLS 1.2, Handshake [length 013e], Certificate
+    0b 00 01 3a 00 01 37 00 01 34 30 82 01 30 30 81
+    d6 a0 03 02 01 02 02 02 12 34 30 0a 06 08 2a 86
+    48 ce 3d 04 03 02 30 14 31 12 30 10 06 03 55 04
+    03 0c 09 6c 6f 63 61 6c 68 6f 73 74 30 1e 17 0d
+    32 36 30 31 30 31 30 30 30 30 30 30 5a 17 0d 33
+    36 30 31 30 31 30 30 30 30 30 30 5a 30 14 31 12
+    30 10 06 03 55 04 03 0c 09 6c 6f 63 61 6c 68 6f
+    73 74 30 59 30 13 06 07 2a 86 48 ce 3d 02 01 06
+    08 2a 86 48 ce 3d 03 01 07 03 42 00 04 5a c0 b8
+    ee 09 e6 57 67 bb 6c 7d 34 40 bb e1 5c b9 12 d4
+    af e1 0b 6e 1a 17 ff a1 ec d1 f2 e5 49 97 b4 34
+    d6 58 3d 4a 99 6b ae 68 60 63 0c b3 d5 1d d7 d4
+    1c fd 16 4c ce 7e 2f 66 fe 7e 11 a9 14 a3 18 30
+    16 30 14 06 03 55 1d 11 04 0d 30 0b 82 09 6c 6f
+    63 61 6c 68 6f 73 74 30 0a 06 08 2a 86 48 ce 3d
+    04 03 02 03 49 00 30 46 02 21 00 91 40 8f e5 25
+    57 f1 4e 19 a5 51 9c 1f fd 97 bc 17 81 27 ad d3
+    39 f8 09 d8 05 21 c9 2a 0b 58 44 02 21 00 a4 f4
+    75 7c 94 f6 33 d3 d5 36 7d df c1 d6 41 6e 82 84
+    a1 6a d4 60 b5 72 ea c3 2f 6e b8 4d 8c a5
+SSL_accept:SSLv3/TLS write certificate
+>>> TLS 1.2, RecordHeader [length 0005]
+    16 03 03 00 72
+>>> TLS 1.2, Handshake [length 0072], ServerKeyExchange
+    0c 00 00 6e 03 00 1d 20 c9 18 aa 88 7b a1 78 b6
+    e7 b2 af 04 9b 9a 7f 98 9e 62 a7 2c 2a 09 56 8f
+    e7 a4 f1 e4 73 dc ee 4a 04 03 00 46 30 44 02 20
+    74 6f 01 a6 7e 2c 72 0f 9b 88 7b dc 1a 6b 60 72
+    3a cf 8d ed e6 5d 5d 2d d8 ea 0f 58 42 c3 97 dc
+    02 20 68 c7 d7 22 8c 82 20 b2 de 31 6f 90 ed c1
+    f5 b5 bb d2 fa 83 c9 09 0c 85 b7 d0 05 f1 3f 65
+    48 e5
+SSL_accept:SSLv3/TLS write key exchange
+>>> TLS 1.2, RecordHeader [length 0005]
+    16 03 03 00 4c
+>>> TLS 1.2, Handshake [length 004c], CertificateRequest
+    0d 00 00 48 03 01 02 40 00 28 04 03 05 03 06 03
+    08 07 08 08 08 09 08 0a 08 0b 08 04 08 05 08 06
+    04 01 05 01 06 01 03 03 03 01 03 02 04 02 05 02
+    06 02 00 18 00 16 30 14 31 12 30 10 06 03 55 04
+    03 0c 09 6c 6f 63 61 6c 68 6f 73 74
+SSL_accept:SSLv3/TLS write certificate request
+>>> TLS 1.2, RecordHeader [length 0005]
+    16 03 03 00 04
+>>> TLS 1.2, Handshake [length 0004], ServerHelloDone
+    0e 00 00 00
+SSL_accept:SSLv3/TLS write server done
+<<< TLS 1.2, RecordHeader [length 0005]
+    16 03 03 01 3e
+SSL_accept:SSLv3/TLS write server done
+<<< TLS 1.2, Handshake [length 013e], Certificate
+    0b 00 01 3a 00 01 37 00 01 34 30 82 01 30 30 81
+    d6 a0 03 02 01 02 02 02 12 34 30 0a 06 08 2a 86
+    48 ce 3d 04 03 02 30 14 31 12 30 10 06 03 55 04
+    03 0c 09 6c 6f 63 61 6c 68 6f 73 74 30 1e 17 0d
+    32 36 30 31 30 31 30 30 30 30 30 30 5a 17 0d 33
+    36 30 31 30 31 30 30 30 30 30 30 5a 30 14 31 12
+    30 10 06 03 55 04 03 0c 09 6c 6f 63 61 6c 68 6f
+    73 74 30 59 30 13 06 07 2a 86 48 ce 3d 02 01 06
+    08 2a 86 48 ce 3d 03 01 07 03 42 00 04 5a c0 b8
+    ee 09 e6 57 67 bb 6c 7d 34 40 bb e1 5c b9 12 d4
+    af e1 0b 6e 1a 17 ff a1 ec d1 f2 e5 49 97 b4 34
+    d6 58 3d 4a 99 6b ae 68 60 63 0c b3 d5 1d d7 d4
+    1c fd 16 4c ce 7e 2f 66 fe 7e 11 a9 14 a3 18 30
+    16 30 14 06 03 55 1d 11 04 0d 30 0b 82 09 6c 6f
+    63 61 6c 68 6f 73 74 30 0a 06 08 2a 86 48 ce 3d
+    04 03 02 03 49 00 30 46 02 21 00 91 40 8f e5 25
+    57 f1 4e 19 a5 51 9c 1f fd 97 bc 17 81 27 ad d3
+    39 f8 09 d8 05 21 c9 2a 0b 58 44 02 21 00 a4 f4
+    75 7c 94 f6 33 d3 d5 36 7d df c1 d6 41 6e 82 84
+    a1 6a d4 60 b5 72 ea c3 2f 6e b8 4d 8c a5
+depth=0 CN=localhost
+verify return:1
+<<< TLS 1.2, RecordHeader [length 0005]
+    16 03 03 00 25
+SSL_accept:SSLv3/TLS read client certificate
+<<< TLS 1.2, Handshake [length 0025], ClientKeyExchange
+    10 00 00 21 20 0b 8e 7c d5 44 96 e4 f8 ec 68 53
+    5d 8d 48 0d ae 3b de 44 be a5 6c 6a 4e 34 1b 99
+    b8 e8 40 02 36
+<<< TLS 1.2, RecordHeader [length 0005]
+    16 03 03 00 4e
+SSL_accept:SSLv3/TLS read client key exchange
+<<< TLS 1.2, Handshake [length 004e], CertificateVerify
+    0f 00 00 4a 04 03 00 46 30 44 02 20 19 96 d3 24
+    96 f5 c1 15 fd 05 da 94 35 97 23 62 eb 65 00 07
+    2b 27 e4 e5 d8 a9 96 c5 ae d8 d7 d9 02 20 7f a0
+    58 58 0e 25 a6 7a 4b 45 e0 59 91 f8 d6 c2 5d 4f
+    b6 37 13 15 d4 64 b7 d5 1b a5 48 d7 8e 4d
+<<< TLS 1.2, RecordHeader [length 0005]
+    14 03 03 00 01
+SSL_accept:SSLv3/TLS read certificate verify
+<<< TLS 1.2, RecordHeader [length 0005]
+    16 03 03 00 28
+SSL_accept:SSLv3/TLS read change cipher spec
+<<< TLS 1.2, Handshake [length 0010], Finished
+    14 00 00 0c e7 d2 64 30 89 b3 ea b9 54 da 99 0a
+SSL_accept:SSLv3/TLS read finished
+>>> TLS 1.2, RecordHeader [length 0005]
+    14 03 03 00 01
+>>> TLS 1.2, ChangeCipherSpec [length 0001]
+    01
+SSL_accept:SSLv3/TLS write change cipher spec
+>>> TLS 1.2, RecordHeader [length 0005]
+    16 03 03 00 28
+>>> TLS 1.2, Handshake [length 0010], Finished
+    14 00 00 0c 2c 73 48 3f b8 5a 6d 25 75 78 a4 61
+SSL_accept:SSLv3/TLS write finished
+<<< TLS 1.2, RecordHeader [length 0005]
+    17 03 03 00 50
+FILE:interop-response.http
+>>> TLS 1.2, RecordHeader [length 0005]
+    17 03 03 00 60
+>>> TLS 1.2, RecordHeader [length 0005]
+    15 03 03 00 1a
+>>> TLS 1.2, Alert [length 0002], warning close_notify
+    01 00
+SSL3 alert write:warning:close notify
+<<< TLS 1.2, RecordHeader [length 0005]
+    15 03 03 00 1a
+<<< TLS 1.2, Alert [length 0002], warning close_notify
+    01 00
+SSL3 alert read:warning:close notify
+   1 items in the session cache
+   0 client connects (SSL_connect())
+   0 client renegotiates (SSL_connect())
+   0 client connects that finished
+   1 server accepts (SSL_accept())
+   0 server renegotiates (SSL_accept())
+   1 server accepts that finished
+   0 session cache hits
+   0 session cache misses
+   0 session cache timeouts
+   0 callback cache hits
+   0 cache full overflows (128 allowed)
+--- /var/folders/3h/rw6tyryn6ps_mw9bcstc2lfm0000gn/T/tmp.NoxtGXDKDI/openssl-unmatched.log ---
+verify depth is 1
+Using default temp DH parameters
+ACCEPT
+SSL_accept:before SSL initialization
+<<< TLS 1.0, RecordHeader [length 0005]
+    16 03 01 00 a3
+SSL_accept:before SSL initialization
+<<< TLS 1.3, Handshake [length 00a3], ClientHello
+    01 00 00 9f 03 03 02 46 03 3d ba d0 40 11 bd b0
+    27 01 bc 88 88 a4 74 42 ba 95 a6 6d ec eb 72 4f
+    c3 17 c4 7c a6 8b 00 00 04 c0 2b 00 ff 01 00 00
+    72 00 00 00 0e 00 0c 00 00 09 6c 6f 63 61 6c 68
+    6f 73 74 00 05 00 05 01 00 00 00 00 00 11 00 09
+    00 07 02 00 04 00 00 00 00 00 17 00 00 00 0a 00
+    0a 00 08 00 1d 00 17 00 18 00 19 00 0d 00 1e 00
+    1c 04 03 05 03 06 03 08 07 08 04 08 05 08 06 08
+    09 08 0a 08 0b 04 01 05 01 06 01 07 08 00 10 00
+    0b 00 09 08 68 74 74 70 2f 31 2e 31 00 2b 00 03
+    02 03 03
+SSL_accept:SSLv3/TLS read client hello
+ALPN protocols advertised by the client: http/1.1
+ALPN protocols selected: http/1.1
+>>> TLS 1.2, RecordHeader [length 0005]
+    16 03 03 00 64
+>>> TLS 1.2, Handshake [length 0064], ServerHello
+    02 00 00 60 03 03 02 f7 7a 85 f3 e8 bd f2 21 4f
+    a2 f3 74 47 c6 e6 77 6f 32 a6 bb a9 c6 00 ff a3
+    ef 88 19 11 79 8b 20 08 7b a7 aa 37 a2 70 70 49
+    b9 de 7b 29 56 ea e0 7a 48 7e 50 5e 92 b0 5e f9
+    60 92 b4 4c a4 ca 1f c0 2b 00 00 18 ff 01 00 01
+    00 00 10 00 0b 00 09 08 68 74 74 70 2f 31 2e 31
+    00 17 00 00
+SSL_accept:SSLv3/TLS write server hello
+>>> TLS 1.2, RecordHeader [length 0005]
+    16 03 03 01 3e
+>>> TLS 1.2, Handshake [length 013e], Certificate
+    0b 00 01 3a 00 01 37 00 01 34 30 82 01 30 30 81
+    d6 a0 03 02 01 02 02 02 12 34 30 0a 06 08 2a 86
+    48 ce 3d 04 03 02 30 14 31 12 30 10 06 03 55 04
+    03 0c 09 6c 6f 63 61 6c 68 6f 73 74 30 1e 17 0d
+    32 36 30 31 30 31 30 30 30 30 30 30 5a 17 0d 33
+    36 30 31 30 31 30 30 30 30 30 30 5a 30 14 31 12
+    30 10 06 03 55 04 03 0c 09 6c 6f 63 61 6c 68 6f
+    73 74 30 59 30 13 06 07 2a 86 48 ce 3d 02 01 06
+    08 2a 86 48 ce 3d 03 01 07 03 42 00 04 5a c0 b8
+    ee 09 e6 57 67 bb 6c 7d 34 40 bb e1 5c b9 12 d4
+    af e1 0b 6e 1a 17 ff a1 ec d1 f2 e5 49 97 b4 34
+    d6 58 3d 4a 99 6b ae 68 60 63 0c b3 d5 1d d7 d4
+    1c fd 16 4c ce 7e 2f 66 fe 7e 11 a9 14 a3 18 30
+    16 30 14 06 03 55 1d 11 04 0d 30 0b 82 09 6c 6f
+    63 61 6c 68 6f 73 74 30 0a 06 08 2a 86 48 ce 3d
+    04 03 02 03 49 00 30 46 02 21 00 91 40 8f e5 25
+    57 f1 4e 19 a5 51 9c 1f fd 97 bc 17 81 27 ad d3
+    39 f8 09 d8 05 21 c9 2a 0b 58 44 02 21 00 a4 f4
+    75 7c 94 f6 33 d3 d5 36 7d df c1 d6 41 6e 82 84
+    a1 6a d4 60 b5 72 ea c3 2f 6e b8 4d 8c a5
+SSL_accept:SSLv3/TLS write certificate
+>>> TLS 1.2, RecordHeader [length 0005]
+    16 03 03 00 72
+>>> TLS 1.2, Handshake [length 0072], ServerKeyExchange
+    0c 00 00 6e 03 00 1d 20 46 88 60 2c 0e 23 92 b3
+    4e 14 1b 5b f1 78 72 db 55 59 07 7e 32 6c 0a b3
+    d9 51 55 59 cb 3f de 4c 04 03 00 46 30 44 02 20
+    62 93 5c 77 eb 3e 0a 4d 91 ab 8d 96 a8 8c bc e8
+    fb 22 2a c2 e3 68 a0 b1 59 ce c3 39 b7 4c 64 01
+    02 20 3a ef 7b d7 06 fb fd 95 6e cd 01 da a3 3e
+    e8 29 51 99 a8 c8 be a7 e3 ac e8 62 6e 20 7b e3
+    78 98
+SSL_accept:SSLv3/TLS write key exchange
+>>> TLS 1.2, RecordHeader [length 0005]
+    16 03 03 00 58
+>>> TLS 1.2, Handshake [length 0058], CertificateRequest
+    0d 00 00 54 03 01 02 40 00 28 04 03 05 03 06 03
+    08 07 08 08 08 09 08 0a 08 0b 08 04 08 05 08 06
+    04 01 05 01 06 01 03 03 03 01 03 02 04 02 05 02
+    06 02 00 24 00 22 30 20 31 1e 30 1c 06 03 55 04
+    03 0c 15 52 65 71 75 65 73 74 65 64 20 43 6c 69
+    65 6e 74 20 52 6f 6f 74
+SSL_accept:SSLv3/TLS write certificate request
+>>> TLS 1.2, RecordHeader [length 0005]
+    16 03 03 00 04
+>>> TLS 1.2, Handshake [length 0004], ServerHelloDone
+    0e 00 00 00
+SSL_accept:SSLv3/TLS write server done
+<<< TLS 1.2, RecordHeader [length 0005]
+    16 03 03 00 07
+SSL_accept:SSLv3/TLS write server done
+<<< TLS 1.2, Handshake [length 0007], Certificate
+    0b 00 00 03 00 00 00
+<<< TLS 1.2, RecordHeader [length 0005]
+    16 03 03 00 25
+SSL_accept:SSLv3/TLS read client certificate
+<<< TLS 1.2, Handshake [length 0025], ClientKeyExchange
+    10 00 00 21 20 38 48 5e ec d0 ba 1b 43 2e 2f 76
+    3c db 8f 13 c6 50 0f 7a 2f e4 22 d7 66 bf d7 00
+    83 16 a4 b1 00
+<<< TLS 1.2, RecordHeader [length 0005]
+    14 03 03 00 01
+SSL_accept:SSLv3/TLS read client key exchange
+<<< TLS 1.2, RecordHeader [length 0005]
+    16 03 03 00 28
+SSL_accept:SSLv3/TLS read change cipher spec
+<<< TLS 1.2, Handshake [length 0010], Finished
+    14 00 00 0c 47 1b 23 f6 b6 3e ad 42 00 b3 7d 18
+SSL_accept:SSLv3/TLS read finished
+>>> TLS 1.2, RecordHeader [length 0005]
+    14 03 03 00 01
+>>> TLS 1.2, ChangeCipherSpec [length 0001]
+    01
+SSL_accept:SSLv3/TLS write change cipher spec
+>>> TLS 1.2, RecordHeader [length 0005]
+    16 03 03 00 28
+>>> TLS 1.2, Handshake [length 0010], Finished
+    14 00 00 0c 5e 51 52 12 fe d7 7d 2f 6e 51 1f bb
+SSL_accept:SSLv3/TLS write finished
+<<< TLS 1.2, RecordHeader [length 0005]
+    17 03 03 00 50
+FILE:interop-response.http
+>>> TLS 1.2, RecordHeader [length 0005]
+    17 03 03 00 60
+>>> TLS 1.2, RecordHeader [length 0005]
+    15 03 03 00 1a
+>>> TLS 1.2, Alert [length 0002], warning close_notify
+    01 00
+SSL3 alert write:warning:close notify
+<<< TLS 1.2, RecordHeader [length 0005]
+    15 03 03 00 1a
+<<< TLS 1.2, Alert [length 0002], warning close_notify
+    01 00
+SSL3 alert read:warning:close notify
+   1 items in the session cache
+   0 client connects (SSL_connect())
+   0 client renegotiates (SSL_connect())
+   0 client connects that finished
+   1 server accepts (SSL_accept())
+   0 server renegotiates (SSL_accept())
+   1 server accepts that finished
+   0 session cache hits
+   0 session cache misses
+   0 session cache timeouts
+   0 callback cache hits
+   0 cache full overflows (128 allowed)
+interop-tls13-client-auth-openssl
++- run tools/interop/tls12_client_auth_openssl.sh failure
+error: process exited with error code 1
+failed command: tools/interop/tls12_client_auth_openssl.sh ./.zig-cache/o/79ad8adde39d31c5dfb2c1a783e4e108/netz-tls12-client-auth-client tls13
+
+interop-tls12-client-auth-openssl
++- run tools/interop/tls12_client_auth_openssl.sh failure
+error: process exited with error code 1
+failed command: tools/interop/tls12_client_auth_openssl.sh ./.zig-cache/o/79ad8adde39d31c5dfb2c1a783e4e108/netz-tls12-client-auth-client tls12
+
+Build Summary: 16/20 steps succeeded (2 failed)
+interop-tls12-ticket-openssl success
++- run tools/interop/tls12_ticket_openssl.sh success 1s
+   +- compile exe netz-tls12-ticket-server Debug native success 44s MaxRSS:2G
+   |  +- WriteFile macho_0_p256_field_arm64.S cached
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile cached
+   |  +- compile obj vort-br-record-optimal Debug native cached 216ms MaxRSS:31M
+   |  +- WriteFile cached
+   |  +- compile obj vort-zstd-huffman-x2 Debug native cached 208ms MaxRSS:31M
+   |  +- compile obj vort-br-record-optimal Debug native (reused)
+   |  +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+   |  +- options cached
+   +- compile exe netz-tls12-ticket-client Debug native success 26s MaxRSS:2G
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile (reused)
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- WriteFile (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options (reused)
+interop-tls13-ticket-openssl success
++- run tools/interop/tls12_ticket_openssl.sh success 602ms
+   +- compile exe netz-tls12-ticket-server Debug native (+71 more reused dependencies)
+   +- compile exe netz-tls12-ticket-client Debug native (+71 more reused dependencies)
+interop-tls12-client-auth-openssl transitive failure
++- run tools/interop/tls12_client_auth_openssl.sh failure
+   +- compile exe netz-tls12-client-auth-client Debug native success 25s MaxRSS:2G
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile (reused)
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- WriteFile (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options (reused)
+interop-tls13-client-auth-openssl transitive failure
++- run tools/interop/tls12_client_auth_openssl.sh failure
+   +- compile exe netz-tls12-client-auth-client Debug native (+71 more reused dependencies)
+interop-webtransport-h2-python success
++- run uv success 4s
+   +- compile exe netz-webtransport-h2-interop Debug native success 48s MaxRSS:2G
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile (reused)
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- WriteFile (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options (reused)
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/8de567ba69e525c6133322e87184f9d1/build /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/zig /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib /Users/bytedance/project-z/netz .zig-cache /Users/bytedance/.cache/zig --seed 0x8b1a842b -Z588d55fc473c10f2 interop-tls12-ticket-openssl interop-tls13-ticket-openssl interop-tls12-client-auth-openssl interop-tls13-client-auth-openssl interop-webtransport-h2-python -j1 --summary all
+[traex-zig-guard 2026-11-25 23:59:08] finished Zig tree root=50119 peak=5641MiB result=0

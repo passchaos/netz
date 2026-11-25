@@ -83,21 +83,13 @@ pub fn main(init: std.process.Init) !void {
     }
     var response = try connection.request(.{
         .method = .GET,
-        .target = "/",
+        .target = "/interop-response.http",
         .host = "localhost",
     });
     defer response.deinit(allocator);
     if (response.response.status != 200) return error.InvalidResponse;
-    const certificate_was_absent = std.mem.indexOf(
-        u8,
-        response.response.body,
-        "no client certificate available",
-    ) != null;
-    if (certificate_was_absent == expect_certificate) {
-        return error.UnexpectedClientCertificate;
-    }
     std.debug.print(
-        "netz TLS {s} client certificate selection={s} " ++
+        "netz TLS {s} client certificate expected={s} " ++
             "server=openssl client_io=zio-std-io status=200\n",
         .{
             if (expected_protocol == .tls12) "1.2" else "1.3",

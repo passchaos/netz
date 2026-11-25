@@ -1,0 +1,117 @@
+{
+  "observed_utc": "2026-11-25T16:11:12.167984+00:00",
+  "platform": "aarch64-macos",
+  "source_sha256": {
+    ".github/workflows/ci.yml": "1d46e6e80725d31fcca0334e56c190e7ca0a0e8bd608c55ca5b17fb730fbefdf",
+    "build/protocols.zig": "1619e09bc8c29355b468923a27e946788f3ff51081d9f29c0652400dedcb5de3",
+    "docs/architecture.md": "fd8a08374692561258c616590422e94c707ed9b0759cc19f1f3eef82f4c34ef6",
+    "docs/http_streaming.md": "c16a4d8e52e7a28e27f7ae3d16b4f33f85584b9382b58f3a0b76004a51588743",
+    "src/http1/runtime/message_batch_tests.zig": "f94d3d633b31c5ae4cf7f1f7750c8aa9a27ff91c0100ccd4ae6e41143dea388d",
+    "src/http1/runtime/uri_and_serve_tests.zig": "b58066d01044115c2085c00caed69ecbb4a50612b9b6a50b2f972e303e259923",
+    "src/http3/runtime/concurrent.zig": "5740b4a3be3ca54cda999e7c97cb3c6b5d8e33196e516c0422ac9c92dbf2625f",
+    "src/http3/runtime/concurrent/informational_tests.zig": "86967938913b2c47efe1fbd308187f030875279165dbc8058537a4780da211aa",
+    "src/http3/runtime/concurrent/command_admission_tests.zig": "8d17708e714ebbbdcaaebcb109139e511be1c3a8e734750e3ceb0d0314ac127f",
+    "src/http3/runtime/concurrent_tests.zig": "e44a199bb8dc904ebe714a8982f4088cb696a8156edb2bac19b153688b4dceac",
+    "src/quic/runtime/tests.zig": "829e911eaccc40323cd611aa523c489dcdcf66c3b34b51b197c7639af1d32d1a",
+    "tools/interop/mqtt_socks5.py": "4d83d594e354dfabe877d11c5eb5a92e41589b8aa7456c557717e60bac925c80",
+    "tools/interop/openssl_http_response.sh": "a6a9f6ce3af4633a1000e1f6c3b4e361d7a916412093000fba91e042037a2e51",
+    "tools/interop/tls12_client_auth_client.zig": "227dcc3e6d100ecb7b5f2787f54751283137067438222f09aa7dbd39967fcb38",
+    "tools/interop/tls12_client_auth_openssl.sh": "abeadff2db43e6deb04066dbe8aa8760524fa623ab9b4727ee7bbecbedecd227",
+    "tools/interop/tls12_ticket_client.zig": "de5ec5d2e9b216371bdce9eb72bb8a598c6b83b501b51605044360b96587ccf8",
+    "tools/interop/tls12_ticket_openssl.sh": "0378631752573bf9453bea317b6db370b9144aa900e297cbeb937f977e160822",
+    "tools/interop/tls_client_certificate_check.py": "08a5ed7824d1b14b3440dfa245d8b7d97640efc272d4b77cb22be4d3ebc26d7f",
+    "tools/interop/tls_client_certificate_check_test.py": "001e4a2bb9695ed6c83016d968633ec63f209cdc2b48a894dcb9fa28555539d1"
+  },
+  "validation": {
+    "h1_layout_and_buffered_pipeline": {
+      "exit_code": 0,
+      "tests_passed": 23,
+      "non_policy_client_bytes": 304,
+      "non_policy_connection_bytes": 240,
+      "limits_bytes": 304,
+      "scratch_bytes": 48,
+      "current_owner_bytes": [
+        608,
+        544
+      ]
+    },
+    "h3_command_deadline": {
+      "exit_code": 0,
+      "tests_passed": 65,
+      "covers": [
+        "queued and inline expired command rejection",
+        "foreign clock rejection",
+        "expiry after entry admission but before execution",
+        "response reuse after rejection"
+      ]
+    },
+    "gro_raw_deadline": {
+      "local_platform_skip": true,
+      "linux_native_step_added": true,
+      "contract": "Raw zero duration rejects and preserves two queued GRO datagrams; valid budget consumes the next prefix"
+    },
+    "strict_ca_pair": {
+      "python": "3.14.8",
+      "openssl": "3.5.9",
+      "before_error_code": 92,
+      "before_message": "CA cert does not include key usage extension",
+      "after": "strict verification succeeds",
+      "verification_policy_unchanged": true
+    },
+    "webtransport_h2_python314": {
+      "both_directions": "passed",
+      "endpoint_and_listener": "passed"
+    },
+    "tls12_tls13_tickets": {
+      "both_endpoint_roles": "passed"
+    },
+    "tls12_tls13_client_certificate_selection": {
+      "matching": "single exact expected certificate and CertificateVerify observed",
+      "unmatched": "empty Certificate and no CertificateVerify observed",
+      "finished_lengths": [
+        12,
+        32
+      ],
+      "exit_code": 0
+    },
+    "certificate_checker_unit_tests": {
+      "tests_passed": 6,
+      "exit_code": 0
+    },
+    "repository_dependency_pin_test": {
+      "exit_code": 0
+    },
+    "workflow_yaml": {
+      "parsed": true
+    },
+    "whitespace": {
+      "exit_code": 0
+    },
+    "evidence_audit": {
+      "exit_code": 0,
+      "files": 302,
+      "entries": 10936,
+      "matched": 6425,
+      "stale": 4508,
+      "unresolved": 3,
+      "invalid": 0,
+      "unreadable": 0,
+      "max_unresolved_policy": 24,
+      "log": "evidence-audit.log"
+    }
+  },
+  "pending": [
+    "native Linux GRO regression",
+    "next pinned complete CI beyond previously aborting test"
+  ],
+  "scope_note": "Current admission boundary is verified. Further propagation of command deadlines through other blocking adapter writes remains ongoing optimization work.",
+  "local_dependency_revisions": {
+    "vail": "d93847a7e091c835406ee10c0a86fd064f1475dd",
+    "vort": "a48e1151872a30a574363e994ec312969b3c7818"
+  },
+  "ci_dependency_pins": {
+    "vail": "3b772b0cccb64d84fbc760df6428bc51e0fe0761",
+    "vort": "a48e1151872a30a574363e994ec312969b3c7818"
+  },
+  "local_scope_qualification": "Local Vail HEAD differs from the pinned CI revision. These scoped macOS results do not replace the next pinned native/full CI run."
+}

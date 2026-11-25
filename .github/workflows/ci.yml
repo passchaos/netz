@@ -237,9 +237,9 @@ jobs:
         if: runner.os == 'Linux' && matrix.target == 'x86_64-linux-gnu'
         run: zig build test-http test-quic -j1 -Dtarget=${{ matrix.target }} '-Dtest-filter=network interface' '-Dtest-filter=HTTP3 endpoint adoption' --summary all
 
-      - name: Run native Linux connection and Upgrade regressions
+      - name: Run native Linux connection and command regressions
         if: runner.os == 'Linux' && matrix.target == 'x86_64-linux-gnu'
-        run: zig build test-tls test-http1 test-http2 test-websocket -j1 -Dtarget=${{ matrix.target }} '-Dtest-filter=WebSocket named endpoint' '-Dtest-filter=WSS named endpoint' '-Dtest-filter=WSS common handshake budget' '-Dtest-filter=deadline expires after TCP connect' '-Dtest-filter=HTTP/2 h2c stream ownership' '-Dtest-filter=WSS vail TLS rejection closes' '-Dtest-filter=WSS vail TLS helper failure' '-Dtest-filter=versioned TLS establishment' '-Dtest-filter=HTTP1 named endpoint' '-Dtest-filter=HTTP1 TLS address endpoint' --summary failures
+        run: zig build test-tls test-http1 test-http2 test-http3 test-quic test-websocket -j1 -Dtarget=${{ matrix.target }} '-Dtest-filter=WebSocket named endpoint' '-Dtest-filter=WSS named endpoint' '-Dtest-filter=WSS common handshake budget' '-Dtest-filter=deadline expires after TCP connect' '-Dtest-filter=HTTP/2 h2c stream ownership' '-Dtest-filter=WSS vail TLS rejection closes' '-Dtest-filter=WSS vail TLS helper failure' '-Dtest-filter=versioned TLS establishment' '-Dtest-filter=HTTP1 named endpoint' '-Dtest-filter=HTTP1 TLS address endpoint' '-Dtest-filter=borrowed pipeline batch' '-Dtest-filter=optional write scratch compact' '-Dtest-filter=informational development sends' '-Dtest-filter=inline expired commands' '-Dtest-filter=concurrent command rechecks' '-Dtest-filter=QUIC caller batch leaves pending GRO' --summary failures
 
       - name: Probe native Winsock interface option semantics
         if: runner.os == 'Windows'

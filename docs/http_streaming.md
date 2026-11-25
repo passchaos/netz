@@ -342,6 +342,12 @@ Limits:
 
 ## Continuous concurrent serving
 
+Concurrent HTTP/3 stream commands validate absolute awake-clock deadlines
+before queue admission and before owner execution, including inline handlers.
+Rejection at either admission point leaves response startup, DATA, trailer and
+reset state unchanged. Compound informational writes retain the command's
+original deadline through their interim heads.
+
 Long-lived HTTP server connections use a per-connection owner loop instead of a
 fixed request batch:
 

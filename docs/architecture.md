@@ -145,6 +145,13 @@ arrays replace repeated scans; index nodes use narrow integer links; match
 results are emitted in table order through a preallocated bitmap rather than a
 per-call result vector. Cache-line behavior is a review criterion.
 
+HTTP/1 owner layout checks account for `Limits` separately from mutable owner
+state. On 64-bit targets, the non-policy budgets remain 304 bytes for Client
+and 240 for Connection, with 48-byte optional write scratch. The current
+304-byte policy storage includes source/interface binding and resolver
+configuration, producing 608/544-byte complete owners. This preserves the
+original owner-state bound as connection policy fields evolve.
+
 **P10 - No unmeasured performance claims.** Every accepted performance change
 records a fixed-binary A/B with alternating order and pinned CPU, or an
 external reference gate. Rejected experiments are recorded with their numbers so

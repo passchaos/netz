@@ -1398,8 +1398,12 @@ test "QUIC caller batch leaves pending GRO suffix queued on short buffer" {
     );
     try std.testing.expectEqual(@as(usize, 2), receiver.pendingReceivedCount());
 
-    const second = try receiver.receiveBytesBatchIntoTimeout(&storage, .{
+    try std.testing.expectError(error.Timeout, receiver.receiveBytesBatchIntoTimeout(&storage, .{
         .duration = .{ .clock = .awake, .raw = .zero },
+    }));
+    try std.testing.expectEqual(@as(usize, 2), receiver.pendingReceivedCount());
+    const second = try receiver.receiveBytesBatchIntoTimeout(&storage, .{
+        .duration = .{ .clock = .awake, .raw = .fromSeconds(1) },
     });
     try std.testing.expectEqual(@as(usize, 1), second.segment_count);
     try std.testing.expectEqualStrings("bbbb", second.datagramAt(0).?);
