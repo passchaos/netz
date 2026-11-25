@@ -1,6 +1,9 @@
 //! Secure network entropy with cancellation at the operation boundaries.
 const std = @import("std");
 
+pub const BeforeError = @import("secure_random/deadline.zig").Error;
+pub const fillBefore = @import("secure_random/deadline.zig").fill;
+
 pub fn fill(io: std.Io, buffer: []u8) std.Io.RandomSecureError!void {
     try io.checkCancel();
     {

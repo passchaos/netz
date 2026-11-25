@@ -1,0 +1,10 @@
+[traex-zig-guard 2026-11-25 15:43:57] started Zig tree root=46806 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=900s
+Running fmt
+fmt exit=0
+Running Debug
+Debug exit=0
+Running ReleaseSafe
+ReleaseSafe exit=0
+Running windows-compile
+windows-compile exit=0
+[traex-zig-guard 2026-11-25 15:52:56] finished Zig tree root=46806 peak=7348MiB result=0

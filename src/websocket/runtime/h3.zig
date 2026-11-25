@@ -23,6 +23,7 @@ const deadline_policy = @import("../../internal/deadline.zig");
 const http3 = @import("../../http3/mod.zig");
 const tls_stream = @import("../../tls/mod.zig").stream;
 const client_trust = @import("../../quic/client_trust.zig");
+const ConnectionIds = @import("../../quic/client_connection_ids.zig").Storage;
 
 test {
     _ = @import("handshake/trust_deadline_tests.zig");
@@ -4807,6 +4808,10 @@ pub const Client = struct {
     ) Error!ConnectAttempt {
         try validateClientExtraHeaders(options.extra_headers);
         try validateProtocols(options.protocols);
+        const connect_deadline = if (deadline) |until|
+            try http3.runtime.cappedConnectDeadline(io, until, options.h3.connect_timeout)
+        else
+            try http3.runtime.connectDeadline(io, options.h3.connect_timeout);
         const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
         var endpoint = try http3.runtime.uriEndpoint(allocator, uri);
         defer endpoint.deinit();
@@ -4818,23 +4823,15 @@ pub const Client = struct {
         }
 
         var h3_options = options.h3;
+        h3_options.connect_timeout = null;
         h3_options.session.local_settings.enable_connect_protocol = true;
         if (h3_options.handshake.server_name == null) {
             h3_options.handshake.server_name = endpoint.tls_host;
         }
         // URI connects own the QUIC identity, so callers only need to supply
         // IDs when they need reproducibility or resumption continuity.
-        var destination_id: [8]u8 = undefined;
-        var local_id: [8]u8 = undefined;
-        if (h3_options.handshake.original_destination_connection_id.len == 0) {
-            try secure_random.fill(io, &destination_id);
-            h3_options.handshake.original_destination_connection_id =
-                &destination_id;
-        }
-        if (h3_options.handshake.local_connection_id.len == 0) {
-            try secure_random.fill(io, &local_id);
-            h3_options.handshake.local_connection_id = &local_id;
-        }
+        var connection_ids: ConnectionIds = .{};
+        try connection_ids.prepareBefore(io, &h3_options.handshake, connect_deadline);
         // Verify WSS-over-H3 peers with platform roots by default, matching
         // WSS over TCP. The store lives for the synchronous handshake.
         var system_store: ?client_trust.SystemStore = null;
@@ -4844,10 +4841,10 @@ pub const Client = struct {
             io,
             &h3_options.handshake,
             &system_store,
-            deadline,
+            connect_deadline,
         );
         var h3_client = if (options.socks5_proxy) |proxy|
-            if (deadline) |absolute|
+            if (connect_deadline) |absolute|
                 try http3.socks5_runtime.connectHostWithDeadline(
                     allocator,
                     io,
@@ -4870,7 +4867,7 @@ pub const Client = struct {
                     options.h3_limits,
                     h3_options,
                 )
-        else if (deadline) |absolute|
+        else if (connect_deadline) |absolute|
             try http3.runtime.HandshakeClient.connectUriWithDeadline(
                 allocator,
                 io,

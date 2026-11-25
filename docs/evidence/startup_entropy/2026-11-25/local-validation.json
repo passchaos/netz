@@ -1,0 +1,76 @@
+{
+  "platform": "aarch64-macos",
+  "zig_version": "0.16.0",
+  "guarded": true,
+  "jobs": 1,
+  "baseline_head": "10103a75261ac37d2f37ab821fb0adf79c9ef6b2",
+  "baseline": {
+    "tests_passed": 272,
+    "tests_total": 275,
+    "distinct_failed_regressions": 3
+  },
+  "sources": [
+    {
+      "path": "src/http/client/http3_connection.zig",
+      "sha256": "c08df3e26b2551c9b7197ce55d1fbd6e9ddf576a8d8155773f63e90f18ff6972"
+    },
+    {
+      "path": "src/http/client_tests/trust_deadline.zig",
+      "sha256": "48ed12cc262e2432fa23099f7821bb04dc29e7edffcab5c981effc7710950c9d"
+    },
+    {
+      "path": "src/internal/secure_random.zig",
+      "sha256": "a4476a78dac45a58626c9a54ae30073895322c1e4664c2425d5c54be69b3dd22"
+    },
+    {
+      "path": "src/internal/secure_random/deadline.zig",
+      "sha256": "b81db67d406aa58dc59e0b1cb340bd2ee858552f6f65d856c436fe41c1953883"
+    },
+    {
+      "path": "src/internal/secure_random/deadline_tests.zig",
+      "sha256": "584dca7699555fe3111d14ee20dde5e6dfe45c78e66e59877447d2a947873b94"
+    },
+    {
+      "path": "src/internal/testing/startup_entropy.zig",
+      "sha256": "bb4e1a2a02f84f3d795c040dc298d3eb4b22ac0b5a9700ec626efb6f99fd911f"
+    },
+    {
+      "path": "src/quic/client_connection_ids.zig",
+      "sha256": "84fea0cdfec2e058eadaf2132a2d052343960db84b96710e6a3ee3150cac742b"
+    },
+    {
+      "path": "src/websocket/runtime/h3.zig",
+      "sha256": "51f5f5e7c4fe7d6d5e336747e252090f0f215e910323c6039aed4fbdba262034"
+    },
+    {
+      "path": "src/websocket/runtime/handshake/trust_deadline_tests.zig",
+      "sha256": "a5d39fb8c342a0d29e91bdfe98ef24beb9fbc7e2d8573d74a6d29b68f063c56b"
+    },
+    {
+      "path": "src/webtransport/runtime/endpoint_client.zig",
+      "sha256": "b23c7aaa25f441b11575b641b9bcfa0f7f1492662254c859be6f71d8b7bd26d3"
+    },
+    {
+      "path": "src/webtransport/runtime/trust_deadline_tests.zig",
+      "sha256": "4a2751a88ae99cc453e97e3542a101d5f8b1921398b74bebfcdb8bc8a8973c2f"
+    }
+  ],
+  "checks": {
+    "fmt": {
+      "exit_code": 0
+    },
+    "Debug": {
+      "exit_code": 0,
+      "tests_passed": 297,
+      "tests_total": 297
+    },
+    "ReleaseSafe": {
+      "exit_code": 0,
+      "tests_passed": 348,
+      "tests_total": 348
+    },
+    "windows-compile": {
+      "exit_code": 0
+    }
+  }
+}

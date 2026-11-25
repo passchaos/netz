@@ -1,6 +1,6 @@
 //! Exclusive QUIC connection owner behind the unified HTTP Connection.
 const std = @import("std");
-const secure_random = @import("../../internal/secure_random.zig");
+const ConnectionIds = @import("../../quic/client_connection_ids.zig").Storage;
 const quic = @import("../../quic/mod.zig");
 const native = @import("../../http3/runtime.zig");
 const socks5_runtime = @import("../../http3/socks5_runtime.zig");
@@ -17,11 +17,14 @@ pub const Owner = struct {
     client: native.HandshakeClient,
     authority: []u8,
     hostname: []u8,
-    destination_id: [8]u8 = undefined,
-    local_id: [8]u8 = undefined,
+    connection_ids: ConnectionIds = .{},
 
     pub fn connect(allocator: std.mem.Allocator, io: std.Io, uri: std.Uri, options: types.Options, deadline: ?std.Io.Clock.Timestamp) !*Owner {
         if (!std.ascii.eqlIgnoreCase(uri.scheme, "https")) return error.UnsupportedScheme;
+        const connect_deadline = if (deadline) |until|
+            try native.cappedConnectDeadline(io, until, options.http3.handshake.connect_timeout)
+        else
+            try native.connectDeadline(io, options.http3.handshake.connect_timeout);
         var endpoint = try http1.uriEndpoint(allocator, uri, 443);
         defer endpoint.deinit();
         const self = try allocator.create(Owner);
@@ -32,6 +35,7 @@ pub const Owner = struct {
         errdefer allocator.free(hostname);
         self.* = .{ .allocator = allocator, .client = undefined, .authority = authority, .hostname = hostname };
         var config = options.http3.handshake;
+        config.connect_timeout = null;
         const configured_local = options.local_address orelse options.http3.local_address;
         var limits = options.http3.limits;
         if (options.network_interface) |interface| limits.quic.network_interface = interface;
@@ -40,14 +44,7 @@ pub const Owner = struct {
         if (options.local_address != null) config.alternate_local_address = null;
         config.address_connect_policy = options.http3.address_connect_policy;
         config.handshake.server_name = self.hostname;
-        if (config.handshake.original_destination_connection_id.len == 0) {
-            try secure_random.fill(io, &self.destination_id);
-            config.handshake.original_destination_connection_id = &self.destination_id;
-        }
-        if (config.handshake.local_connection_id.len == 0) {
-            try secure_random.fill(io, &self.local_id);
-            config.handshake.local_connection_id = &self.local_id;
-        }
+        try self.connection_ids.prepareBefore(io, &config.handshake, connect_deadline);
         // Verify with the same trust policy as H1/H2 instead of silently
         // skipping server authentication when no H3-specific material is set.
         // The store only needs to live for this synchronous handshake.
@@ -66,7 +63,7 @@ pub const Owner = struct {
                 .ca_bundle_configured = options.tls.ca_bundle != null,
             },
             &system_store,
-            deadline,
+            connect_deadline,
         );
         if (config.address_resolver == null) config.address_resolver = options.address_resolver;
         self.client = if (options.socks5_proxy) |proxy| blk: {
@@ -80,7 +77,7 @@ pub const Owner = struct {
                 .port = proxy.port,
                 .options = proxy_options,
             };
-            break :blk if (deadline) |until|
+            break :blk if (connect_deadline) |until|
                 try socks5_runtime.connectHostWithDeadline(
                     allocator,
                     io,
@@ -103,7 +100,7 @@ pub const Owner = struct {
                     limits,
                     config,
                 );
-        } else if (deadline) |until|
+        } else if (connect_deadline) |until|
             try native.HandshakeClient.connectUriWithDeadline(allocator, io, local_address, uri, limits, config, until)
         else
             try native.HandshakeClient.connectUri(allocator, io, local_address, uri, limits, config);

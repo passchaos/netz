@@ -167,6 +167,11 @@ the operation joins the loader before returning; a bounded load reports
 `ConcurrencyUnavailable` when its watcher cannot be admitted. See
 [trust startup](architecture/trust-startup.md) for ownership and timing details.
 
+Owning H3 URI clients include connection-ID entropy and root loading in the
+configured H3 `connect_timeout`, before DNS and the QUIC handshake. A stricter
+caller deadline takes precedence, and later phases receive the original
+timestamp. The timeout is not restarted after preparation.
+
 Admission to a caller-owned `.tls.ca_bundle` shared lock uses the same earlier
 handshake/caller deadline. `Timeout` or `Canceled` releases interrupted read
 admission; successful admission keeps the bundle protected throughout

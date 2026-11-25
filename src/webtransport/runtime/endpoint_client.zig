@@ -5,7 +5,7 @@
 //! registry, and Capsule control state, so hash-map growth never moves QUIC.
 
 const std = @import("std");
-const secure_random = @import("../../internal/secure_random.zig");
+const ConnectionIds = @import("../../quic/client_connection_ids.zig").Storage;
 const webtransport = @import("../mod.zig");
 const http3 = @import("../../http3/mod.zig");
 const quic = @import("../../quic/mod.zig");
@@ -697,26 +697,22 @@ pub const Client = struct {
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!Client {
         if (options.max_sessions == 0) return error.InvalidSessionState;
+        const connect_deadline = if (deadline) |until|
+            try http3.runtime.cappedConnectDeadline(io, until, options.h3.connect_timeout)
+        else
+            try http3.runtime.connectDeadline(io, options.h3.connect_timeout);
         const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
         var endpoint = try http3.runtime.uriEndpoint(allocator, uri);
         defer endpoint.deinit();
         var h3_options = try resolvedH3Options(options.h3, options.initial_flow_limits, options.require_session_flow_control);
+        h3_options.connect_timeout = null;
         if (h3_options.handshake.server_name == null) {
             h3_options.handshake.server_name = endpoint.tls_host;
         }
         // URI connects own the QUIC identity, so callers only need to supply
         // IDs when they need reproducibility or resumption continuity.
-        var destination_id: [8]u8 = undefined;
-        var local_id: [8]u8 = undefined;
-        if (h3_options.handshake.original_destination_connection_id.len == 0) {
-            try secure_random.fill(io, &destination_id);
-            h3_options.handshake.original_destination_connection_id =
-                &destination_id;
-        }
-        if (h3_options.handshake.local_connection_id.len == 0) {
-            try secure_random.fill(io, &local_id);
-            h3_options.handshake.local_connection_id = &local_id;
-        }
+        var connection_ids: ConnectionIds = .{};
+        try connection_ids.prepareBefore(io, &h3_options.handshake, connect_deadline);
         // The HTTP/1, HTTP/2 and WebSocket URI clients verify servers with the
         // platform roots by default. Keep the URI WebTransport client
         // consistent instead of silently skipping authentication when no
@@ -729,10 +725,10 @@ pub const Client = struct {
             io,
             &h3_options.handshake,
             &system_store,
-            deadline,
+            connect_deadline,
         );
         const h3_client = if (options.socks5_proxy) |proxy|
-            if (deadline) |absolute|
+            if (connect_deadline) |absolute|
                 try http3.socks5_runtime.connectHostWithDeadline(
                     allocator,
                     io,
@@ -755,7 +751,7 @@ pub const Client = struct {
                     options.limits,
                     h3_options,
                 )
-        else if (deadline) |absolute|
+        else if (connect_deadline) |absolute|
             try http3.runtime.HandshakeClient.connectUriWithDeadline(
                 allocator,
                 io,

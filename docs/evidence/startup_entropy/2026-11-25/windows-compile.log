@@ -1,0 +1,31 @@
+Build Summary: 14/14 steps succeeded
+test-http-compile success
++- compile test Debug x86_64-windows-gnu success 43s MaxRSS:4G
+   +- WriteFile cached
+   +- compile obj vort-br-record-optimal Debug x86_64-windows-gnu cached 206ms MaxRSS:31M
+   +- WriteFile cached
+   +- compile obj vort-zstd-huffman-x2 Debug x86_64-windows-gnu cached 206ms MaxRSS:31M
+   +- compile obj vort-br-record-optimal Debug x86_64-windows-gnu (reused)
+   +- compile obj vort-zstd-huffman-x2 Debug x86_64-windows-gnu (reused)
+   +- options cached
+   +- options cached
+test-websocket-compile success
++- compile test Debug x86_64-windows-gnu success 40s MaxRSS:4G
+   +- WriteFile (reused)
+   +- compile obj vort-br-record-optimal Debug x86_64-windows-gnu (reused)
+   +- WriteFile (reused)
+   +- compile obj vort-zstd-huffman-x2 Debug x86_64-windows-gnu (reused)
+   +- compile obj vort-br-record-optimal Debug x86_64-windows-gnu (reused)
+   +- compile obj vort-zstd-huffman-x2 Debug x86_64-windows-gnu (reused)
+   +- options cached
+   +- options (reused)
+test-webtransport-compile success
++- compile test Debug x86_64-windows-gnu success 28s MaxRSS:3G
+   +- WriteFile (reused)
+   +- compile obj vort-br-record-optimal Debug x86_64-windows-gnu (reused)
+   +- WriteFile (reused)
+   +- compile obj vort-zstd-huffman-x2 Debug x86_64-windows-gnu (reused)
+   +- compile obj vort-br-record-optimal Debug x86_64-windows-gnu (reused)
+   +- compile obj vort-zstd-huffman-x2 Debug x86_64-windows-gnu (reused)
+   +- options cached
+   +- options (reused)
