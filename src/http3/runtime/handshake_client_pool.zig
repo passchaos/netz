@@ -6,6 +6,7 @@
 //! generation, and shared-endpoint strategy remain deployment-owned.
 
 const std = @import("std");
+const secure_random = @import("../../internal/secure_random.zig");
 const http3 = @import("../mod.zig");
 const quic = @import("../../quic/mod.zig");
 const deadline_policy = @import("../../internal/deadline.zig");
@@ -142,10 +143,8 @@ pub fn DefaultConnectorContext(comptime Runtime: type) type {
             const self: *@This() = @ptrCast(@alignCast(context));
             var original_dcid: [8]u8 = undefined;
             var local_cid: [8]u8 = undefined;
-            std.Io.randomSecure(io, &original_dcid) catch
-                return error.Unexpected;
-            std.Io.randomSecure(io, &local_cid) catch
-                return error.Unexpected;
+            try secure_random.fill(io, &original_dcid);
+            try secure_random.fill(io, &local_cid);
             var endpoint = try Runtime.uriEndpoint(allocator, uri);
             defer endpoint.deinit();
             var options = scopeAutoResumption(
@@ -200,10 +199,8 @@ pub fn DefaultConnectorContext(comptime Runtime: type) type {
             }
             var original_dcid: [8]u8 = undefined;
             var local_cid: [8]u8 = undefined;
-            std.Io.randomSecure(io, &original_dcid) catch
-                return error.Unexpected;
-            std.Io.randomSecure(io, &local_cid) catch
-                return error.Unexpected;
+            try secure_random.fill(io, &original_dcid);
+            try secure_random.fill(io, &local_cid);
             var endpoint = try Runtime.uriEndpoint(allocator, uri);
             defer endpoint.deinit();
             var options = isolateRedirectOptions(
@@ -248,10 +245,8 @@ pub fn DefaultConnectorContext(comptime Runtime: type) type {
             const self: *@This() = @ptrCast(@alignCast(context));
             var original_dcid: [8]u8 = undefined;
             var local_cid: [8]u8 = undefined;
-            std.Io.randomSecure(io, &original_dcid) catch
-                return error.Unexpected;
-            std.Io.randomSecure(io, &local_cid) catch
-                return error.Unexpected;
+            try secure_random.fill(io, &original_dcid);
+            try secure_random.fill(io, &local_cid);
             var endpoint = try Runtime.uriEndpoint(allocator, uri);
             defer endpoint.deinit();
             var options = scopeAutoResumption(
@@ -297,10 +292,8 @@ pub fn DefaultConnectorContext(comptime Runtime: type) type {
             const self: *@This() = @ptrCast(@alignCast(context));
             var original_dcid: [8]u8 = undefined;
             var local_cid: [8]u8 = undefined;
-            std.Io.randomSecure(io, &original_dcid) catch
-                return error.Unexpected;
-            std.Io.randomSecure(io, &local_cid) catch
-                return error.Unexpected;
+            try secure_random.fill(io, &original_dcid);
+            try secure_random.fill(io, &local_cid);
             var endpoint = try Runtime.uriEndpoint(allocator, uri);
             defer endpoint.deinit();
             var options = if (redirect.cross_origin) isolateRedirectOptions(
@@ -399,10 +392,8 @@ pub fn DefaultConnectorContext(comptime Runtime: type) type {
             options.handshake.resumption_server_id = automatic.server_id;
             var original_dcid: [8]u8 = undefined;
             var local_cid: [8]u8 = undefined;
-            std.Io.randomSecure(io, &original_dcid) catch
-                return error.Unexpected;
-            std.Io.randomSecure(io, &local_cid) catch
-                return error.Unexpected;
+            try secure_random.fill(io, &original_dcid);
+            try secure_random.fill(io, &local_cid);
             options.handshake.original_destination_connection_id =
                 &original_dcid;
             options.handshake.local_connection_id = &local_cid;

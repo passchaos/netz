@@ -1,4 +1,5 @@
 const std = @import("std");
+const secure_random = @import("../internal/secure_random.zig");
 const vail = @import("vail");
 
 pub const token_len: usize = 16;
@@ -134,7 +135,7 @@ pub fn encodeForConnectionIdInto(
     const prefix_len = packet_len - token_len;
     const output = storage[0..packet_len];
     const prefix = output[0..prefix_len];
-    try std.Io.randomSecure(io, prefix);
+    try secure_random.fill(io, prefix);
     prefix[0] = (prefix[0] & 0x3f) | 0x40;
     const token = tokenForConnectionId(static_key, connection_id);
     @memcpy(output[prefix_len..][0..token_len], &token);

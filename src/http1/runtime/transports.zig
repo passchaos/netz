@@ -1,4 +1,5 @@
 const std = @import("std");
+const secure_random = @import("../../internal/secure_random.zig");
 const socket_binding = @import("../../internal/socket_binding.zig");
 const net = std.Io.net;
 const accept_deadline = @import("../../internal/accept.zig");
@@ -155,7 +156,7 @@ pub const TlsClientConnection = struct {
         defer conn.timed_read_deadline = null;
 
         var entropy: [tls.Client.Options.entropy_len]u8 = undefined;
-        try std.Io.randomSecure(io, &entropy);
+        try secure_random.fill(io, &entropy);
         const now = std.Io.Timestamp.now(io, .real);
 
         // Zig's standard TLS client accepts only a certificate bundle, not a

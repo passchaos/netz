@@ -6,6 +6,7 @@
 //! stable, and only `receive*` reads either UDP socket.
 
 const std = @import("std");
+const secure_random = @import("../../internal/secure_random.zig");
 const socket_binding = @import("../../internal/socket_binding.zig");
 const http3 = @import("../mod.zig");
 const quic = @import("../../quic/mod.zig");
@@ -381,8 +382,8 @@ pub fn Pool(comptime Runtime: type) type {
                 errdefer pool.allocator.destroy(self);
                 var original_dcid: [8]u8 = undefined;
                 var local_cid: [8]u8 = undefined;
-                try std.Io.randomSecure(pool.io, &original_dcid);
-                try std.Io.randomSecure(pool.io, &local_cid);
+                try secure_random.fill(pool.io, &original_dcid);
+                try secure_random.fill(pool.io, &local_cid);
                 const inbox = try pool.allocator.create(
                     quic.handshake_inbox.Inbox,
                 );
@@ -2113,8 +2114,8 @@ pub fn Pool(comptime Runtime: type) type {
         ) !Connected {
             var original_dcid: [8]u8 = undefined;
             var local_cid: [8]u8 = undefined;
-            try std.Io.randomSecure(self.io, &original_dcid);
-            try std.Io.randomSecure(self.io, &local_cid);
+            try secure_random.fill(self.io, &original_dcid);
+            try secure_random.fill(self.io, &local_cid);
             const pending_handle = self.reserveHandle();
             const inbox = try self.allocator.create(quic.handshake_inbox.Inbox);
             var inbox_initialized = false;

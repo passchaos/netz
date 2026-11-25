@@ -1,4 +1,5 @@
 const std = @import("std");
+const secure_random = @import("../../internal/secure_random.zig");
 const websocket = @import("../mod.zig");
 const socket_options = @import("../../internal/socket_options.zig");
 
@@ -172,7 +173,7 @@ pub inline fn randomMaskKeys(
     keys: [][4]u8,
 ) std.Io.RandomSecureError!void {
     if (keys.len == 0) return;
-    try std.Io.randomSecure(io, std.mem.sliceAsBytes(keys));
+    try secure_random.fill(io, std.mem.sliceAsBytes(keys));
 }
 
 /// One automatic Pong or peer-Close echo whose encoded wire bytes must remain

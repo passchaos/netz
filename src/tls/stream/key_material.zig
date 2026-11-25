@@ -1,13 +1,14 @@
 //! Single-use classical ECDHE private material for stream TLS wrappers.
 
 const std = @import("std");
+const secure_random = @import("../../internal/secure_random.zig");
 const vail = @import("vail");
 
 pub fn randomX25519(
     io: std.Io,
 ) std.Io.RandomSecureError![vail.tls.key_exchange.secret_len]u8 {
     var secret: [vail.tls.key_exchange.secret_len]u8 = undefined;
-    try std.Io.randomSecure(io, &secret);
+    try secure_random.fill(io, &secret);
     secret[0] &= 248;
     secret[31] &= 127;
     secret[31] |= 64;
@@ -62,7 +63,7 @@ fn randomNist(
     var secret: [group.secret_len]u8 = undefined;
     var attempts: usize = 0;
     while (attempts < 16) : (attempts += 1) {
-        try std.Io.randomSecure(io, &secret);
+        try secure_random.fill(io, &secret);
         secret[0] &= high_mask;
         if (!validate(secret)) continue;
         return secret;

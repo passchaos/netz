@@ -5,6 +5,7 @@
 //! retain the RFC 9000 value of one without initializing random state.
 
 const std = @import("std");
+const secure_random = @import("../../internal/secure_random.zig");
 
 pub const Generator = struct {
     csprng: ?std.Random.DefaultCsprng = null,
@@ -17,7 +18,7 @@ pub const Generator = struct {
         var seed: [std.Random.DefaultCsprng.secret_seed_length]u8 =
             undefined;
         defer std.crypto.secureZero(u8, &seed);
-        try std.Io.randomSecure(io, &seed);
+        try secure_random.fill(io, &seed);
         return .{ .csprng = .init(seed) };
     }
 
@@ -47,7 +48,7 @@ pub fn randomValue(
 ) std.Io.RandomSecureError!bool {
     if (!peer_supports) return true;
     var byte: [1]u8 = undefined;
-    try std.Io.randomSecure(io, &byte);
+    try secure_random.fill(io, &byte);
     return (byte[0] & 1) != 0;
 }
 

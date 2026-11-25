@@ -5,6 +5,7 @@
 //! application protocol state independent.
 
 const std = @import("std");
+const secure_random = @import("../../internal/secure_random.zig");
 const vail = @import("vail");
 const handshake_deadline = @import("handshake_deadline.zig");
 const stream_io = @import("../../internal/stream_io.zig");
@@ -216,7 +217,7 @@ fn performBefore(
         vail.tls.key_exchange.secret_len
     ]u8 = undefined;
     defer std.crypto.secureZero(u8, &server_secret);
-    try std.Io.randomSecure(io, &server_secret);
+    try secure_random.fill(io, &server_secret);
     const server_public = try vail.tls.key_exchange.publicKey(
         server_secret,
     );
@@ -227,7 +228,7 @@ fn performBefore(
     defer std.crypto.secureZero(u8, &shared_secret);
     var server_random: [32]u8 = undefined;
     defer std.crypto.secureZero(u8, &server_random);
-    try std.Io.randomSecure(io, &server_random);
+    try secure_random.fill(io, &server_random);
 
     var flight: std.ArrayList(u8) = .empty;
     defer flight.deinit(allocator);
@@ -677,31 +678,31 @@ fn freshSigner(
             var noise: [
                 std.crypto.sign.Ed25519.noise_length
             ]u8 = undefined;
-            try std.Io.randomSecure(io, &noise);
+            try secure_random.fill(io, &noise);
             value.noise = noise;
         },
         .ecdsa_p256_sha256 => |*value| {
             var noise: [
                 std.crypto.sign.ecdsa.EcdsaP256Sha256.noise_length
             ]u8 = undefined;
-            try std.Io.randomSecure(io, &noise);
+            try secure_random.fill(io, &noise);
             value.noise = noise;
         },
         .ecdsa_p384_sha384 => |*value| {
             var noise: [
                 std.crypto.sign.ecdsa.EcdsaP384Sha384.noise_length
             ]u8 = undefined;
-            try std.Io.randomSecure(io, &noise);
+            try secure_random.fill(io, &noise);
             value.noise = noise;
         },
         .ecdsa_p521_sha512 => |*value| value.io = io,
         .ecdsa_p521_sha512_prepared => {},
         .sm2sig_sm3 => |*value| {
-            try std.Io.randomSecure(io, &value.nonce);
+            try secure_random.fill(io, &value.nonce);
         },
         inline .ml_dsa_44, .ml_dsa_65, .ml_dsa_87 => |*value| {
             var noise = value.noise orelse undefined;
-            try std.Io.randomSecure(io, &noise);
+            try secure_random.fill(io, &noise);
             value.noise = noise;
         },
         .rsa_pss => |*value| value.io = io,

@@ -1,6 +1,7 @@
 //! HTTP/3 client handshake session over QUIC.
 
 const std = @import("std");
+const secure_random = @import("../../internal/secure_random.zig");
 const http3 = @import("../mod.zig");
 const quic = @import("../../quic/mod.zig");
 const tls_protocol = @import("../../tls/stream/version.zig").Protocol;
@@ -1665,8 +1666,8 @@ pub const HandshakeClient = struct {
         var original_dcid: [8]u8 = undefined;
         var local_cid: [8]u8 = undefined;
         if (fresh_identity) {
-            try std.Io.randomSecure(io, &original_dcid);
-            try std.Io.randomSecure(io, &local_cid);
+            try secure_random.fill(io, &original_dcid);
+            try secure_random.fill(io, &local_cid);
             attempt_options.handshake.original_destination_connection_id =
                 &original_dcid;
             attempt_options.handshake.local_connection_id = &local_cid;
@@ -2155,8 +2156,8 @@ pub const HandshakeClient = struct {
                 hop_request.trailers = &.{};
             }
 
-            try std.Io.randomSecure(io, original_cid);
-            try std.Io.randomSecure(io, local_cid);
+            try secure_random.fill(io, original_cid);
+            try secure_random.fill(io, local_cid);
             hop_options.handshake.original_destination_connection_id = original_cid;
             hop_options.handshake.local_connection_id = local_cid;
             hop_options.handshake.retry_source_connection_id = &.{};

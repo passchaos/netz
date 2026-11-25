@@ -5,6 +5,7 @@
 //! registry, and Capsule control state, so hash-map growth never moves QUIC.
 
 const std = @import("std");
+const secure_random = @import("../../internal/secure_random.zig");
 const webtransport = @import("../mod.zig");
 const http3 = @import("../../http3/mod.zig");
 const quic = @import("../../quic/mod.zig");
@@ -708,12 +709,12 @@ pub const Client = struct {
         var destination_id: [8]u8 = undefined;
         var local_id: [8]u8 = undefined;
         if (h3_options.handshake.original_destination_connection_id.len == 0) {
-            try io.randomSecure(&destination_id);
+            try secure_random.fill(io, &destination_id);
             h3_options.handshake.original_destination_connection_id =
                 &destination_id;
         }
         if (h3_options.handshake.local_connection_id.len == 0) {
-            try io.randomSecure(&local_id);
+            try secure_random.fill(io, &local_id);
             h3_options.handshake.local_connection_id = &local_id;
         }
         // The HTTP/1, HTTP/2 and WebSocket URI clients verify servers with the

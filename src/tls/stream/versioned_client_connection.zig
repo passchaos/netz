@@ -1,6 +1,7 @@
 //! Blocking vail-backed TLS 1.2/TLS 1.3 client connection.
 
 const std = @import("std");
+const secure_random = @import("../../internal/secure_random.zig");
 const vail = @import("vail");
 const handshake_deadline = @import("handshake_deadline.zig");
 const key_material = @import("key_material.zig");
@@ -258,10 +259,10 @@ pub const Connection = struct {
 
         var client_random: [32]u8 = undefined;
         defer std.crypto.secureZero(u8, &client_random);
-        try std.Io.randomSecure(io, &client_random);
+        try secure_random.fill(io, &client_random);
         var session_id: [32]u8 = undefined;
         defer std.crypto.secureZero(u8, &session_id);
-        try std.Io.randomSecure(io, &session_id);
+        try secure_random.fill(io, &session_id);
         var tls13_key: vail.tls.key_exchange.ClientKeyMaterial =
             if (options.protocol_policy.offersTls12())
                 .{ .secp256r1 = try key_material.randomP256(io) }

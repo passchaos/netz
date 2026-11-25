@@ -6,6 +6,7 @@
 //! epoch, rather than a PRNG draw performed by the deadline getter.
 
 const std = @import("std");
+const secure_random = @import("../../internal/secure_random.zig");
 
 pub const max_percentage: u8 = 50;
 
@@ -22,7 +23,7 @@ pub const State = struct {
         if (percentage == 0) return .{};
 
         var seed_bytes: [@sizeOf(u64)]u8 = undefined;
-        try std.Io.randomSecure(io, &seed_bytes);
+        try secure_random.fill(io, &seed_bytes);
         return .{
             .percentage = percentage,
             .seed = std.mem.readInt(u64, &seed_bytes, .little),

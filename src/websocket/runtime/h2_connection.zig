@@ -1,6 +1,7 @@
 //! HTTP/2 WebSocket connection state over RFC 8441 streams.
 
 const std = @import("std");
+const secure_random = @import("../../internal/secure_random.zig");
 const websocket = @import("../mod.zig");
 const runtime = @import("../runtime.zig");
 
@@ -419,7 +420,7 @@ pub const H2Connection = struct {
         try self.ensureCanSendOpcodeLocked(.binary);
 
         var mask_key: [4]u8 = undefined;
-        try std.Io.randomSecure(self.tunnel.connection.io, &mask_key);
+        try secure_random.fill(self.tunnel.connection.io, &mask_key);
         var header_storage: [websocket.max_frame_header_len]u8 = undefined;
         const header = try websocket.writeFrameHeaderInto(
             &header_storage,
@@ -509,7 +510,7 @@ pub const H2Connection = struct {
             .payload_len = payload.len,
         };
         var key: [4]u8 = undefined;
-        try std.Io.randomSecure(self.tunnel.connection.io, &key);
+        try secure_random.fill(self.tunnel.connection.io, &key);
         pending.mask_key = key;
         const header = try websocket.writeFrameHeaderForLengthInto(
             &pending.header,
@@ -635,7 +636,7 @@ pub const H2Connection = struct {
 
         const mask_key = if (self.role == .client) blk: {
             var key: [4]u8 = undefined;
-            try std.Io.randomSecure(self.tunnel.connection.io, &key);
+            try secure_random.fill(self.tunnel.connection.io, &key);
             break :blk key;
         } else null;
         var header_storage: [websocket.max_frame_header_len]u8 = undefined;
@@ -1427,7 +1428,7 @@ pub const H2Connection = struct {
         var mask_key: ?[4]u8 = null;
         if (self.role == .client) {
             var key: [4]u8 = undefined;
-            try std.Io.randomSecure(self.tunnel.connection.io, &key);
+            try secure_random.fill(self.tunnel.connection.io, &key);
             mask_key = key;
         }
         const encoded = try websocket.writeFrameInto(
@@ -1476,7 +1477,7 @@ pub const H2Connection = struct {
         var mask_key: ?[4]u8 = null;
         if (self.role == .client) {
             var key: [4]u8 = undefined;
-            try std.Io.randomSecure(self.tunnel.connection.io, &key);
+            try secure_random.fill(self.tunnel.connection.io, &key);
             mask_key = key;
         }
         const encoded = try websocket.writeFrameInto(
@@ -1579,7 +1580,7 @@ pub const H2Connection = struct {
         }
         if (self.role == .client) {
             var key: [4]u8 = undefined;
-            try std.Io.randomSecure(self.tunnel.connection.io, &key);
+            try secure_random.fill(self.tunnel.connection.io, &key);
             pending.mask_key = key;
         }
         const header = try websocket.writeFrameHeaderForLengthInto(
@@ -1610,7 +1611,7 @@ pub const H2Connection = struct {
         };
         if (self.role == .client) {
             var key: [4]u8 = undefined;
-            try std.Io.randomSecure(self.tunnel.connection.io, &key);
+            try secure_random.fill(self.tunnel.connection.io, &key);
             pending.mask_key = key;
         }
         const header = try websocket.writeFrameHeaderForLengthInto(
@@ -1655,7 +1656,7 @@ pub const H2Connection = struct {
         }
         if (self.role == .client) {
             var key: [4]u8 = undefined;
-            try std.Io.randomSecure(self.tunnel.connection.io, &key);
+            try secure_random.fill(self.tunnel.connection.io, &key);
             pending.mask_key = key;
         }
         const header = try websocket.writeFrameHeaderForLengthInto(
@@ -2041,7 +2042,7 @@ pub const H2Connection = struct {
             .{ .start = 0, .end = fragments[index].len };
         const mask_key: ?[4]u8 = if (self.role == .client) blk: {
             var key: [4]u8 = undefined;
-            try std.Io.randomSecure(self.tunnel.connection.io, &key);
+            try secure_random.fill(self.tunnel.connection.io, &key);
             break :blk key;
         } else null;
         var header_storage: [websocket.max_frame_header_len]u8 = undefined;
@@ -2482,7 +2483,7 @@ pub const H2Connection = struct {
     ) Error!void {
         const mask_key = if (self.role == .client) blk: {
             var key: [4]u8 = undefined;
-            try std.Io.randomSecure(self.tunnel.connection.io, &key);
+            try secure_random.fill(self.tunnel.connection.io, &key);
             break :blk key;
         } else null;
         if (opcode.isControl()) {
@@ -2627,7 +2628,7 @@ pub const H2Connection = struct {
                 );
                 const payload = compressed_payload[range.start..range.end];
                 var mask_key: [4]u8 = undefined;
-                try std.Io.randomSecure(
+                try secure_random.fill(
                     self.tunnel.connection.io,
                     &mask_key,
                 );
@@ -2747,7 +2748,7 @@ pub const H2Connection = struct {
 
                 const payload = fragments[frame_index];
                 var mask_key: [4]u8 = undefined;
-                try std.Io.randomSecure(
+                try secure_random.fill(
                     self.tunnel.connection.io,
                     &mask_key,
                 );

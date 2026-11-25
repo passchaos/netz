@@ -5,6 +5,7 @@
 //! retaining the mature standard-library path for ordinary verified clients.
 
 const std = @import("std");
+const secure_random = @import("../../internal/secure_random.zig");
 const vail = @import("vail");
 const handshake_deadline = @import("handshake_deadline.zig");
 const record_io = @import("record_io.zig");
@@ -168,15 +169,15 @@ pub const Connection = struct {
 
         var client_random: [32]u8 = undefined;
         defer std.crypto.secureZero(u8, &client_random);
-        try std.Io.randomSecure(io, &client_random);
+        try secure_random.fill(io, &client_random);
         var session_id: [32]u8 = undefined;
         defer std.crypto.secureZero(u8, &session_id);
-        try std.Io.randomSecure(io, &session_id);
+        try secure_random.fill(io, &session_id);
         var x25519_secret: [
             vail.tls.key_exchange.secret_len
         ]u8 = undefined;
         defer std.crypto.secureZero(u8, &x25519_secret);
-        try std.Io.randomSecure(io, &x25519_secret);
+        try secure_random.fill(io, &x25519_secret);
         // Normalize deterministic/random material exactly once before deriving
         // both public and shared keys.
         x25519_secret[0] &= 248;

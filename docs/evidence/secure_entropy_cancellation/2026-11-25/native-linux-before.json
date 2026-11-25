@@ -1,0 +1,58 @@
+{
+  "run_id": 45533986538,
+  "url": "https://github.com/passchaos/netz/actions/runs/45533986538",
+  "head_sha": "81ea421ce587a081d23a9cab59a5005a8ce8c967",
+  "job_id": 138935963202,
+  "platform": "x86_64-linux-gnu",
+  "conclusion": "failure",
+  "annotations": [
+    {
+      "path": ".github",
+      "blob_href": "https://github.com/passchaos/netz/blob/81ea421ce587a081d23a9cab59a5005a8ce8c967/.github",
+      "start_line": 137,
+      "start_column": null,
+      "end_line": 137,
+      "end_column": null,
+      "annotation_level": "failure",
+      "title": "",
+      "message": "Process completed with exit code 1.",
+      "raw_details": ""
+    },
+    {
+      "path": ".github",
+      "blob_href": "https://github.com/passchaos/netz/blob/81ea421ce587a081d23a9cab59a5005a8ce8c967/.github",
+      "start_line": 135,
+      "start_column": null,
+      "end_line": 135,
+      "end_column": null,
+      "annotation_level": "failure",
+      "title": "Native hostname regression",
+      "message": "error: the following build command failed with exit code 1:\n/home/runner/work/netz/netz/.zig-cache/o/54b5eeff28a9e8fbfb20ccddd29d37e6/build /home/runner/work/_temp/7f28557e-320c-4a10-b0ba-01ac64ef6d20/zig-x86_64-linux-0.16.0/zig /home/runner/work/_temp/7f28557e-320c-4a10-b0ba-01ac64ef6d20/zig-x86_64-linux-0.16.0/lib /home/runner/work/netz/netz/netz /home/runner/work/netz/netz/.zig-cache /home/runner/work/netz/netz/.zig-cache --seed 0xa198fbd0 -Zd6015730ec6ef4bc test-http3 -j1 -Dtarget=x86_64-linux-gnu -Dtest-filter=HTTP3 system resolver -Dtest-filter=HTTP/3 shared synchronous acquire wakes -Dtest-filter=HTTP/3 shared synchronous acquire cancels -Dtest-filter=HTTP/3 shared acquisition deadline -Dtest-filter=HTTP3 connection race admission -Dtest-filter=HTTP3 connection race storage -Dtest-filter=HTTP3 connection race pool -Dtest-filter=HTTP3 Happy Eyeballs total deadline -Dtest-filter=HTTP3 Happy Eyeballs cancellation joins --summary all",
+      "raw_details": ""
+    },
+    {
+      "path": ".github",
+      "blob_href": "https://github.com/passchaos/netz/blob/81ea421ce587a081d23a9cab59a5005a8ce8c967/.github",
+      "start_line": 121,
+      "start_column": null,
+      "end_line": 121,
+      "end_column": null,
+      "annotation_level": "failure",
+      "title": "Native hostname regression",
+      "message": "       thread 4396 panic: attempt to unwrap error: Canceled\n       error return context:\n       /home/runner/work/netz/netz/netz/zig-pkg/zio-0.19.1-xHbVVE1kLABhvcTZ2InisM3hdkwDdj0fzzAUxvw2AmGk/src/task.zig:460:13: 0x28e76fe in checkCancel (zio.zig)\n                   return error.Canceled;\n                   ^\n       /home/runner/work/netz/netz/netz/zig-pkg/zio-0.19.1-xHbVVE1kLABhvcTZ2InisM3hdkwDdj0fzzAUxvw2AmGk/src/common.zig:643:5: 0x28e6a83 in waitForIo (zio.zig)\n           try task.checkCancel();\n           ^\n       \n       stack trace:\n       /home/runner/work/netz/netz/netz/zig-pkg/zio-0.19.1-xHbVVE1kLABhvcTZ2InisM3hdkwDdj0fzzAUxvw2AmGk/src/common.zig:1189:30: 0x29896ef in blockInPlaceImpl__anon_8014511 (zio.zig)\n           waitForIo(&work.c) catch unreachable;\n                                    ^\n       /home/runner/work/netz/netz/netz/zig-pkg/zio-0.19.1-xHbVVE1kLABhvcTZ2InisM3hdkwDdj0fzzAUxvw2AmGk/src/common.zig:1123:28: 0x29893a5 in blockInPlace__anon_8014509 (zio.zig)",
+      "raw_details": ""
+    },
+    {
+      "path": ".github",
+      "blob_href": "https://github.com/passchaos/netz/blob/81ea421ce587a081d23a9cab59a5005a8ce8c967/.github",
+      "start_line": 107,
+      "start_column": null,
+      "end_line": 107,
+      "end_column": null,
+      "annotation_level": "failure",
+      "title": "Native hostname regression",
+      "message": "error: 'http3.runtime.client.happy_eyeballs.deadline_tests.test.HTTP3 Happy Eyeballs total deadline bounds startup and pending handshakes' terminated with signal ABRT with stderr:\n       race storage context_bytes=2960 candidates=1 small_bytes=0 large_bytes=0 allocations=0/0\n       race storage context_bytes=2960 candidates=8 small_bytes=0 large_bytes=0 allocations=0/0\n       race storage context_bytes=2960 candidates=9 small_bytes=0 large_bytes=0 allocations=0/0\n       race storage context_bytes=2960 candidates=64 small_bytes=0 large_bytes=0 allocations=0/0\n       race pool result_bytes=19664 candidates=1/64 max_in_flight=1 allocated_bytes=0/0 allocations=0/0\n       race pool result_bytes=19664 candidates=2/64 max_in_flight=2 allocated_bytes=0/0 allocations=0/0\n       race pool result_bytes=19664 candidates=8/64 max_in_flight=8 allocated_bytes=0/0 allocations=0/0\n       race pool result_bytes=19664 candidates=9/64 max_in_flight=9 allocated_bytes=177552/177552 allocations=1/1\n       race pool result_bytes=19664 candidates=64/64 max_in_flight=64 allocated_bytes=1263648/1263648 allocations=2/2\n       thread 4396 panic: attempt to unwrap error: Canceled\n       error return context:\n       /home/runner/work/netz/netz/netz/zig-pkg/zio-0.19.1-xHbVVE1kLABhvcTZ2InisM3hdkwDdj0fzzAUxvw2AmGk/src/task.zig:460:13: 0x28e76fe in checkCancel (zio.zig)\n                   return error.Canceled;",
+      "raw_details": ""
+    }
+  ]
+}

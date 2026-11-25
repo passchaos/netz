@@ -1,6 +1,7 @@
 //! QUIC 1-RTT connection state, packet processing, and stream lifecycle.
 
 const std = @import("std");
+const secure_random = @import("../../internal/secure_random.zig");
 const quic = @import("../mod.zig");
 const net = std.Io.net;
 const runtime = @import("../one_rtt.zig");
@@ -12560,7 +12561,7 @@ pub const Connection = struct {
         errdefer path_validation.deinit();
 
         var challenge: [8]u8 = undefined;
-        try std.Io.randomSecure(self.endpoint.io, &challenge);
+        try secure_random.fill(self.endpoint.io, &challenge);
         var attempts: usize = 0;
         while (!try path_validation.queueChallengeForPath(
             challenge,
@@ -12570,7 +12571,7 @@ pub const Connection = struct {
             if (attempts == quic.connection_id.max_pool_size) {
                 return error.PathValidationLimit;
             }
-            try std.Io.randomSecure(self.endpoint.io, &challenge);
+            try secure_random.fill(self.endpoint.io, &challenge);
         }
         return .{ .new_path = .{
             .from = from,

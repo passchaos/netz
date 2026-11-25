@@ -5,6 +5,7 @@
 //! presents variable-length shared secrets to the handshake key schedule.
 
 const std = @import("std");
+const secure_random = @import("../../internal/secure_random.zig");
 const tls = @import("../tls_client_hello.zig");
 const tls_crypto = @import("../tls/key_exchange.zig");
 const tls_key_exchange = @import("../tls/mod.zig").key_exchange;
@@ -444,7 +445,7 @@ fn randomArray(
     io: std.Io,
 ) std.Io.RandomSecureError![len]u8 {
     var out: [len]u8 = undefined;
-    try std.Io.randomSecure(io, &out);
+    try secure_random.fill(io, &out);
     return out;
 }
 

@@ -1,5 +1,6 @@
 //! Exclusive QUIC connection owner behind the unified HTTP Connection.
 const std = @import("std");
+const secure_random = @import("../../internal/secure_random.zig");
 const quic = @import("../../quic/mod.zig");
 const native = @import("../../http3/runtime.zig");
 const socks5_runtime = @import("../../http3/socks5_runtime.zig");
@@ -40,11 +41,11 @@ pub const Owner = struct {
         config.address_connect_policy = options.http3.address_connect_policy;
         config.handshake.server_name = self.hostname;
         if (config.handshake.original_destination_connection_id.len == 0) {
-            try io.randomSecure(&self.destination_id);
+            try secure_random.fill(io, &self.destination_id);
             config.handshake.original_destination_connection_id = &self.destination_id;
         }
         if (config.handshake.local_connection_id.len == 0) {
-            try io.randomSecure(&self.local_id);
+            try secure_random.fill(io, &self.local_id);
             config.handshake.local_connection_id = &self.local_id;
         }
         // Verify with the same trust policy as H1/H2 instead of silently

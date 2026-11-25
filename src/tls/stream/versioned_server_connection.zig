@@ -1,6 +1,7 @@
 //! Blocking vail-backed TLS 1.2/TLS 1.3 server connection.
 
 const std = @import("std");
+const secure_random = @import("../../internal/secure_random.zig");
 const vail = @import("vail");
 const handshake_deadline = @import("handshake_deadline.zig");
 const key_material = @import("key_material.zig");
@@ -264,14 +265,14 @@ pub const Connection = struct {
         defer if (tls12_key_p521) |*key| std.crypto.secureZero(u8, key);
         var tls13_random: [32]u8 = undefined;
         defer std.crypto.secureZero(u8, &tls13_random);
-        try std.Io.randomSecure(io, &tls13_random);
+        try secure_random.fill(io, &tls13_random);
         var tls12_random: [32]u8 = undefined;
         defer std.crypto.secureZero(u8, &tls12_random);
-        try std.Io.randomSecure(io, &tls12_random);
+        try secure_random.fill(io, &tls12_random);
         var ticket_nonce: [vail.tls.ticket_keyring.nonce_len]u8 = undefined;
         defer std.crypto.secureZero(u8, &ticket_nonce);
         if (options.tls12_session_tickets != null) {
-            try std.Io.randomSecure(io, &ticket_nonce);
+            try secure_random.fill(io, &ticket_nonce);
         }
         var signer = try freshSigner(io, identity.signer);
         defer std.crypto.secureZero(u8, std.mem.asBytes(&signer));
@@ -614,12 +615,12 @@ fn fromEstablished(
                 var sealing_nonce: [vail.tls.ticket_keyring.nonce_len]u8 =
                     undefined;
                 defer std.crypto.secureZero(u8, &sealing_nonce);
-                try std.Io.randomSecure(io, &sealing_nonce);
+                try secure_random.fill(io, &sealing_nonce);
                 var ticket_nonce: [8]u8 = undefined;
                 defer std.crypto.secureZero(u8, &ticket_nonce);
-                try std.Io.randomSecure(io, &ticket_nonce);
+                try secure_random.fill(io, &ticket_nonce);
                 var encoded_age_add: [4]u8 = undefined;
-                try std.Io.randomSecure(io, &encoded_age_add);
+                try secure_random.fill(io, &encoded_age_add);
                 var encoded_ticket: [record_io.max_record_len]u8 = undefined;
                 const ticket_len = try value.sealNewSessionTicket(
                     allocator,
@@ -898,25 +899,25 @@ fn freshSigner(
     switch (signer) {
         .ed25519 => |*value| {
             var noise: [std.crypto.sign.Ed25519.noise_length]u8 = undefined;
-            try std.Io.randomSecure(io, &noise);
+            try secure_random.fill(io, &noise);
             value.noise = noise;
         },
         .ecdsa_p256_sha256 => |*value| {
             var noise: [std.crypto.sign.ecdsa.EcdsaP256Sha256.noise_length]u8 = undefined;
-            try std.Io.randomSecure(io, &noise);
+            try secure_random.fill(io, &noise);
             value.noise = noise;
         },
         .ecdsa_p384_sha384 => |*value| {
             var noise: [std.crypto.sign.ecdsa.EcdsaP384Sha384.noise_length]u8 = undefined;
-            try std.Io.randomSecure(io, &noise);
+            try secure_random.fill(io, &noise);
             value.noise = noise;
         },
         .ecdsa_p521_sha512 => |*value| value.io = io,
         .ecdsa_p521_sha512_prepared => {},
-        .sm2sig_sm3 => |*value| try std.Io.randomSecure(io, &value.nonce),
+        .sm2sig_sm3 => |*value| try secure_random.fill(io, &value.nonce),
         inline .ml_dsa_44, .ml_dsa_65, .ml_dsa_87 => |*value| {
             var noise = value.noise orelse undefined;
-            try std.Io.randomSecure(io, &noise);
+            try secure_random.fill(io, &noise);
             value.noise = noise;
         },
         .rsa_pss => |*value| value.io = io,

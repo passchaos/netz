@@ -1,5 +1,6 @@
 //! Automatic control preparation retains already-consumed frame ownership.
 const std = @import("std");
+const secure_random = @import("../../../internal/secure_random.zig");
 const websocket = @import("../../mod.zig");
 const common = @import("../common.zig");
 
@@ -41,7 +42,7 @@ pub fn resumeEncoding(pending: *common.PendingAutomaticControl, io: std.Io, role
 fn encode(pending: *common.PendingAutomaticControl, io: std.Io, role: common.Role, payload: []const u8) Error!void {
     const mask: ?[4]u8 = if (role == .client) blk: {
         var key: [4]u8 = undefined;
-        try std.Io.randomSecure(io, &key);
+        try secure_random.fill(io, &key);
         break :blk key;
     } else null;
     const encoded = try websocket.writeFrameInto(&pending.bytes, pending.opcode, payload, .{ .mask_key = mask });

@@ -1,4 +1,5 @@
 const std = @import("std");
+const secure_random = @import("../internal/secure_random.zig");
 const failure = @import("handshake/failure.zig");
 const quic = @import("mod.zig");
 const key_exchange = @import("handshake/key_exchange.zig");
@@ -4471,7 +4472,7 @@ fn hashParts(parts: []const []const u8) [32]u8 {
 fn random32(io: std.Io, provided: ?[32]u8) std.Io.RandomSecureError![32]u8 {
     if (provided) |value| return value;
     var out: [32]u8 = undefined;
-    try std.Io.randomSecure(io, &out);
+    try secure_random.fill(io, &out);
     return out;
 }
 

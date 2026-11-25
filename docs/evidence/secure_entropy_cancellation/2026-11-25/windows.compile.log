@@ -1,0 +1,3 @@
+Command: ['/Users/bytedance/.local/bin/zig', 'build', 'test-http3-compile', 'test-websocket-compile', 'test-tls-compile', 'test-webtransport-compile', '-Dtarget=x86_64-windows-gnu', '-Dtest-filter=HTTP3 secure entropy', '-Dtest-filter=HTTP3 Happy Eyeballs total deadline', '-Dtest-filter=HTTP3 Happy Eyeballs cancellation joins', '-Dtest-filter=versioned TLS stream negotiates', '-Dtest-filter=WebSocket real TCP automatic reply resumes entropy', '-Dtest-filter=WebTransport handshake runtime CONNECT and datagrams over QUIC handshake', '-j1', '--summary', 'failures']
+
+Exit code: 0

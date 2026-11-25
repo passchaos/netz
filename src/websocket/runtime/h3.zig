@@ -5,6 +5,7 @@
 //! share the RFC 6455 codec and transactional permessage-deflate engine.
 
 const std = @import("std");
+const secure_random = @import("../../internal/secure_random.zig");
 const io_interruption = @import("../../internal/io_interruption.zig");
 const builtin = @import("builtin");
 const websocket = @import("../mod.zig");
@@ -849,7 +850,7 @@ pub fn Connection(comptime role: common.Role) type {
             }
 
             var mask_key: [4]u8 = undefined;
-            try std.Io.randomSecure(self.io(), &mask_key);
+            try secure_random.fill(self.io(), &mask_key);
             var header_storage: [websocket.max_frame_header_len]u8 = undefined;
             const header = try websocket.writeFrameHeaderInto(
                 &header_storage,
@@ -926,7 +927,7 @@ pub fn Connection(comptime role: common.Role) type {
                 .payload_len = payload.len,
             };
             var key: [4]u8 = undefined;
-            try std.Io.randomSecure(self.io(), &key);
+            try secure_random.fill(self.io(), &key);
             pending.mask_key = key;
             const header = try websocket.writeFrameHeaderForLengthInto(
                 &pending.header,
@@ -1402,7 +1403,7 @@ pub fn Connection(comptime role: common.Role) type {
                 .{ .start = 0, .end = fragments[index].len };
             const mask_key: ?[4]u8 = if (role == .client) blk: {
                 var key: [4]u8 = undefined;
-                try std.Io.randomSecure(self.io(), &key);
+                try secure_random.fill(self.io(), &key);
                 break :blk key;
             } else null;
             var header_storage: [websocket.max_frame_header_len]u8 = undefined;
@@ -1586,7 +1587,7 @@ pub fn Connection(comptime role: common.Role) type {
             }
             if (role == .client) {
                 var key: [4]u8 = undefined;
-                try std.Io.randomSecure(self.io(), &key);
+                try secure_random.fill(self.io(), &key);
                 pending.mask_key = key;
             }
             const header = try websocket.writeFrameHeaderForLengthInto(
@@ -1617,7 +1618,7 @@ pub fn Connection(comptime role: common.Role) type {
             };
             if (role == .client) {
                 var key: [4]u8 = undefined;
-                try std.Io.randomSecure(self.io(), &key);
+                try secure_random.fill(self.io(), &key);
                 pending.mask_key = key;
             }
             const header = try websocket.writeFrameHeaderForLengthInto(
@@ -1662,7 +1663,7 @@ pub fn Connection(comptime role: common.Role) type {
             }
             if (role == .client) {
                 var key: [4]u8 = undefined;
-                try std.Io.randomSecure(self.io(), &key);
+                try secure_random.fill(self.io(), &key);
                 pending.mask_key = key;
             }
             const header = try websocket.writeFrameHeaderForLengthInto(
@@ -3505,7 +3506,7 @@ pub fn Connection(comptime role: common.Role) type {
             var mask_key: ?[4]u8 = null;
             if (role == .client) {
                 var key: [4]u8 = undefined;
-                try std.Io.randomSecure(self.io(), &key);
+                try secure_random.fill(self.io(), &key);
                 mask_key = key;
             }
             const encoded = try websocket.writeFrameInto(
@@ -3569,7 +3570,7 @@ pub fn Connection(comptime role: common.Role) type {
             var mask_key: ?[4]u8 = null;
             if (role == .client) {
                 var key: [4]u8 = undefined;
-                try std.Io.randomSecure(self.io(), &key);
+                try secure_random.fill(self.io(), &key);
                 mask_key = key;
             }
             const encoded = try websocket.writeFrameInto(
@@ -3712,7 +3713,7 @@ pub fn Connection(comptime role: common.Role) type {
             var mask_key: ?[4]u8 = null;
             if (role == .client) {
                 var key: [4]u8 = undefined;
-                try std.Io.randomSecure(self.io(), &key);
+                try secure_random.fill(self.io(), &key);
                 mask_key = key;
             }
             if (opcode.isControl()) {
@@ -3757,7 +3758,7 @@ pub fn Connection(comptime role: common.Role) type {
             var mask_key: ?[4]u8 = null;
             if (role == .client) {
                 var key: [4]u8 = undefined;
-                try std.Io.randomSecure(self.io(), &key);
+                try secure_random.fill(self.io(), &key);
                 mask_key = key;
             }
             var header_storage: [websocket.max_frame_header_len]u8 = undefined;
@@ -4822,12 +4823,12 @@ pub const Client = struct {
         var destination_id: [8]u8 = undefined;
         var local_id: [8]u8 = undefined;
         if (h3_options.handshake.original_destination_connection_id.len == 0) {
-            try io.randomSecure(&destination_id);
+            try secure_random.fill(io, &destination_id);
             h3_options.handshake.original_destination_connection_id =
                 &destination_id;
         }
         if (h3_options.handshake.local_connection_id.len == 0) {
-            try io.randomSecure(&local_id);
+            try secure_random.fill(io, &local_id);
             h3_options.handshake.local_connection_id = &local_id;
         }
         // Verify WSS-over-H3 peers with platform roots by default, matching

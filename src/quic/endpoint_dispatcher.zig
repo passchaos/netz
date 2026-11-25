@@ -7,6 +7,7 @@
 //! to read a shared UDP socket and discard one another's packets.
 
 const std = @import("std");
+const secure_random = @import("../internal/secure_random.zig");
 const builtin = @import("builtin");
 const deadline_policy = @import("../internal/deadline.zig");
 const quic = @import("mod.zig");
@@ -1060,7 +1061,7 @@ pub const Dispatcher = struct {
             // Collision probability is negligible, but lookup and the local
             // duplicate check make this a hard endpoint invariant.
             while (true) {
-                try std.Io.randomSecure(self.endpoint.io, candidate);
+                try secure_random.fill(self.endpoint.io, candidate);
                 if ((try self.router.lookup(candidate)) != null or
                     (try self.pending_router.lookup(candidate)) != null or
                     std.mem.eql(u8, candidate, initial.destination_connection_id))

@@ -8,6 +8,7 @@
 //! operations before refreshing the connection timer.
 
 const std = @import("std");
+const secure_random = @import("../internal/secure_random.zig");
 const builtin = @import("builtin");
 const deadline_policy = @import("../internal/deadline.zig");
 const quic = @import("mod.zig");
@@ -734,7 +735,7 @@ pub const Server = struct {
             }
             attempts += 1;
             for (connection_id_storage[0..needed], 0..) |*connection_id, index| {
-                try std.Io.randomSecure(self.endpoint.io, connection_id);
+                try secure_random.fill(self.endpoint.io, connection_id);
                 connection_ids[index] = connection_id;
             }
             self.dispatcher.trySendNewConnectionIdsWithDerivedTokens(

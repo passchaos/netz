@@ -1,6 +1,7 @@
 //! WebSocket connection state, framing, and message handoff.
 
 const std = @import("std");
+const secure_random = @import("../../internal/secure_random.zig");
 const websocket = @import("../mod.zig");
 const net = std.Io.net;
 const socket_address = @import("../../internal/socket_address.zig");
@@ -511,7 +512,7 @@ pub const Connection = struct {
         }
 
         var mask_key: [4]u8 = undefined;
-        try std.Io.randomSecure(self.io, &mask_key);
+        try secure_random.fill(self.io, &mask_key);
         const header = try websocket.writeFrameHeaderForLengthInto(
             &header_storage,
             opcode,
@@ -684,7 +685,7 @@ pub const Connection = struct {
         if (!self.canSendOpcodeLocked(.binary)) return error.ConnectionClosed;
 
         var mask_key: [4]u8 = undefined;
-        try std.Io.randomSecure(self.io, &mask_key);
+        try secure_random.fill(self.io, &mask_key);
         var header_storage: [websocket.max_frame_header_len]u8 = undefined;
         const header = try websocket.writeFrameHeaderInto(
             &header_storage,
@@ -764,7 +765,7 @@ pub const Connection = struct {
             .payload_len = payload.len,
         };
         var key: [4]u8 = undefined;
-        try std.Io.randomSecure(self.io, &key);
+        try secure_random.fill(self.io, &key);
         pending.mask_key = key;
         const header = try websocket.writeFrameHeaderForLengthInto(
             &pending.header,
@@ -1433,7 +1434,7 @@ pub const Connection = struct {
         var mask_key: ?[4]u8 = null;
         if (self.role == .client) {
             var key: [4]u8 = undefined;
-            try std.Io.randomSecure(self.io, &key);
+            try secure_random.fill(self.io, &key);
             mask_key = key;
         }
         const encoded = try websocket.writeFrameInto(
@@ -1600,7 +1601,7 @@ pub const Connection = struct {
         }
         if (self.role == .client) {
             var key: [4]u8 = undefined;
-            try std.Io.randomSecure(self.io, &key);
+            try secure_random.fill(self.io, &key);
             pending.mask_key = key;
         }
         const header = try websocket.writeFrameHeaderForLengthInto(
@@ -1631,7 +1632,7 @@ pub const Connection = struct {
         };
         if (self.role == .client) {
             var key: [4]u8 = undefined;
-            try std.Io.randomSecure(self.io, &key);
+            try secure_random.fill(self.io, &key);
             pending.mask_key = key;
         }
         const header = try websocket.writeFrameHeaderForLengthInto(
@@ -1676,7 +1677,7 @@ pub const Connection = struct {
         }
         if (self.role == .client) {
             var key: [4]u8 = undefined;
-            try std.Io.randomSecure(self.io, &key);
+            try secure_random.fill(self.io, &key);
             pending.mask_key = key;
         }
         const header = try websocket.writeFrameHeaderForLengthInto(
@@ -2049,7 +2050,7 @@ pub const Connection = struct {
             .{ .start = 0, .end = fragments[index].len };
         const mask_key: ?[4]u8 = if (self.role == .client) blk: {
             var key: [4]u8 = undefined;
-            try std.Io.randomSecure(self.io, &key);
+            try secure_random.fill(self.io, &key);
             break :blk key;
         } else null;
         var header_storage: [websocket.max_frame_header_len]u8 = undefined;
@@ -2495,7 +2496,7 @@ pub const Connection = struct {
     ) Error!void {
         const mask_key = if (self.role == .client) blk: {
             var key: [4]u8 = undefined;
-            try std.Io.randomSecure(self.io, &key);
+            try secure_random.fill(self.io, &key);
             break :blk key;
         } else null;
 

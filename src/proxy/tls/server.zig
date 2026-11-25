@@ -5,6 +5,7 @@
 //! stream without depending on a transport package's higher-level runtime.
 
 const std = @import("std");
+const secure_random = @import("../../internal/secure_random.zig");
 const vail = @import("vail");
 
 const io_helpers = @import("../internal/io.zig");
@@ -317,31 +318,31 @@ fn freshSigner(
     switch (signer) {
         .ed25519 => |*value| {
             var noise: [std.crypto.sign.Ed25519.noise_length]u8 = undefined;
-            try std.Io.randomSecure(io, &noise);
+            try secure_random.fill(io, &noise);
             value.noise = noise;
         },
         .ecdsa_p256_sha256 => |*value| {
             var noise: [
                 std.crypto.sign.ecdsa.EcdsaP256Sha256.noise_length
             ]u8 = undefined;
-            try std.Io.randomSecure(io, &noise);
+            try secure_random.fill(io, &noise);
             value.noise = noise;
         },
         .ecdsa_p384_sha384 => |*value| {
             var noise: [
                 std.crypto.sign.ecdsa.EcdsaP384Sha384.noise_length
             ]u8 = undefined;
-            try std.Io.randomSecure(io, &noise);
+            try secure_random.fill(io, &noise);
             value.noise = noise;
         },
         .ecdsa_p521_sha512 => |*value| value.io = io,
         .ecdsa_p521_sha512_prepared => {},
         .sm2sig_sm3 => |*value| {
-            try std.Io.randomSecure(io, &value.nonce);
+            try secure_random.fill(io, &value.nonce);
         },
         inline .ml_dsa_44, .ml_dsa_65, .ml_dsa_87 => |*value| {
             var noise = value.noise orelse undefined;
-            try std.Io.randomSecure(io, &noise);
+            try secure_random.fill(io, &noise);
             value.noise = noise;
         },
         .rsa_pss => |*value| value.io = io,

@@ -1,6 +1,7 @@
 //! WebSocket client connection establishment and handshake.
 
 const std = @import("std");
+const secure_random = @import("../../internal/secure_random.zig");
 const websocket = @import("../mod.zig");
 const net = std.Io.net;
 const runtime = @import("../runtime.zig");
@@ -2468,7 +2469,7 @@ pub const Client = struct {
         );
         if (deadline) |absolute| _ = try deadline_policy.usableAwake(io, absolute);
         var nonce: [16]u8 = undefined;
-        try std.Io.randomSecure(io, &nonce);
+        try secure_random.fill(io, &nonce);
         var key: [24]u8 = undefined;
         _ = std.base64.standard.Encoder.encode(&key, &nonce);
 

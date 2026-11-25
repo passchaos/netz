@@ -1,6 +1,7 @@
 //! Integrated post-handshake ticket issuance, caching, and server selection.
 
 const std = @import("std");
+const secure_random = @import("../../../internal/secure_random.zig");
 const quic = @import("../../mod.zig");
 const codec = @import("vail").tls.ticket;
 const keyring = @import("vail").tls.ticket_keyring;
@@ -79,12 +80,12 @@ pub fn issue(
     const cipher_suite = connection.config.send_keys.suite;
     var nonce = config.nonce orelse blk: {
         var value: [16]u8 = undefined;
-        try std.Io.randomSecure(io, &value);
+        try secure_random.fill(io, &value);
         break :blk value;
     };
     var age_add = config.age_add orelse blk: {
         var bytes: [4]u8 = undefined;
-        try std.Io.randomSecure(io, &bytes);
+        try secure_random.fill(io, &bytes);
         break :blk std.mem.readInt(u32, &bytes, .big);
     };
     // Zero is legal, but regenerating it avoids deterministic-looking wire
@@ -103,7 +104,7 @@ pub fn issue(
     const identity: []const u8 = if (config.stateless) |stateless| blk: {
         const seal_nonce = stateless.nonce orelse random: {
             var value: [keyring.nonce_len]u8 = undefined;
-            try std.Io.randomSecure(io, &value);
+            try secure_random.fill(io, &value);
             break :random value;
         };
         const sealed = try stateless.keyring.sealSecret(
@@ -123,7 +124,7 @@ pub fn issue(
     } else blk: {
         const stateful = config.identity orelse random: {
             var value: [32]u8 = undefined;
-            try std.Io.randomSecure(io, &value);
+            try secure_random.fill(io, &value);
             break :random value;
         };
         @memcpy(identity_storage[0..stateful.len], &stateful);

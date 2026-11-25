@@ -1,4 +1,5 @@
 const std = @import("std");
+const secure_random = @import("../internal/secure_random.zig");
 const cancellation = @import("../internal/cancellation.zig");
 
 test {
@@ -2998,7 +2999,7 @@ fn versionNegotiationFirstByte(io: std.Io) std.Io.RandomSecureError!u8 {
     // Mature stacks randomize them (while forcing Header Form=1) so endpoints do
     // not ossify on one fixed long-header/type-specific pattern.
     var byte: [1]u8 = undefined;
-    try std.Io.randomSecure(io, &byte);
+    try secure_random.fill(io, &byte);
     return byte[0] | 0x80;
 }
 

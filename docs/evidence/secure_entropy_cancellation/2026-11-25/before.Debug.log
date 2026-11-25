@@ -1,0 +1,46 @@
+[traex-zig-guard 2026-11-25 11:47:21] started Zig tree root=40811 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=900s
+test-http3
++- run test 20 pass, 3 fail (23 total)
+error: 'http3.runtime.client.entropy_tests.test.HTTP3 secure entropy rejects pending cancellation before backend work' failed:
+       expected 0, found 1
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:118:17: 0x100402e7b in expectEqualInner__anon_37786 (test)
+                       return error.TestExpectedEqual;
+                       ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:83:5: 0x100405563 in expectEqual (test)
+           return expectEqualInner(T, expected, actual);
+           ^
+       /Users/bytedance/project-z/netz/src/internal/secure_random/tests.zig:55:5: 0x1004055df in rejectsPending (test)
+           try std.testing.expectEqual(@as(usize, 0), probe.calls);
+           ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/client/entropy_tests.zig:5:5: 0x10040577f in test.HTTP3 secure entropy rejects pending cancellation before backend work (test)
+           try support.rejectsPending();
+           ^
+error: 'http3.runtime.client.entropy_tests.test.HTTP3 secure entropy joins protected backend work then delivers cancellation' failed:
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:615:14: 0x1003ff683 in expect (test)
+           if (!ok) return error.TestUnexpectedResult;
+                    ^
+       /Users/bytedance/project-z/netz/src/internal/secure_random/tests.zig:65:5: 0x100403133 in joinsCanceledWork (test)
+           try std.testing.expect(probe.protected_fill);
+           ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/client/entropy_tests.zig:8:5: 0x100403343 in test.HTTP3 secure entropy joins protected backend work then delivers cancellation (test)
+           try support.joinsCanceledWork();
+           ^
+error: 'http3.runtime.client.entropy_tests.test.HTTP3 secure entropy restores caller protection after success and entropy failure' failed:
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:615:14: 0x1003ff683 in expect (test)
+           if (!ok) return error.TestUnexpectedResult;
+                    ^
+       /Users/bytedance/project-z/netz/src/internal/secure_random/tests.zig:81:9: 0x1003ffc0f in restoresProtection (test)
+               try std.testing.expect(probe.protected_fill);
+               ^
+       /Users/bytedance/project-z/netz/src/http3/runtime/client/entropy_tests.zig:11:5: 0x1003ffec3 in test.HTTP3 secure entropy restores caller protection after success and entropy failure (test)
+           try support.restoresProtection();
+           ^
+failed command: ./.zig-cache/o/3f2f1b97ee525f7229809c55fb1aa0d5/test --cache-dir=./.zig-cache --seed=0x27ba849b --listen=-
+
+Build Summary: 8/10 steps succeeded (1 failed); 20/23 tests passed (3 failed)
+test-http3 transitive failure
++- run test 20 pass, 3 fail (23 total)
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/7969d3ab30b197d80e2c8ba9aaff6d22/build /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/zig /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib /Users/bytedance/project-z/netz .zig-cache /Users/bytedance/.cache/zig --seed 0x27ba849b -Z0a624dcf2e0ceec1 test-http3 -Dtest-filter=HTTP3 secure entropy rejects -Dtest-filter=HTTP3 secure entropy joins -Dtest-filter=HTTP3 secure entropy restores -j1 --summary failures
+[traex-zig-guard 2026-11-25 11:47:28] finished Zig tree root=40811 peak=487MiB result=0

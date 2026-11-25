@@ -28,3 +28,8 @@ are selected by the native H3 CI step.
 | Native Linux startup/datagram assertion failure | Timeout while reading a post-deadline Initial | [native-linux-before.json](native-linux-before.json) |
 | Short budget and observed two-handshake cancellation | 58/58 passed | [Debug.log](Debug.log) |
 | Both regressions for Windows | Compiled | [windows.compile.log](windows.compile.log) |
+
+The following native Linux run at `81ea421c` exposed a separate startup bug:
+pending cancellation reached the pinned runtime's secure-entropy offload and
+aborted in `blockInPlaceImpl`. The [entropy follow-up](../../secure_entropy_cancellation/2026-11-25/README.md)
+records that failure, the shared Netz boundary repair, and its verification.

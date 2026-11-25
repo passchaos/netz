@@ -6,6 +6,7 @@
 //! datagram through the shared Retry/token implementation.
 
 const std = @import("std");
+const secure_random = @import("../../internal/secure_random.zig");
 const quic = @import("../mod.zig");
 
 pub const Policy = struct {
@@ -178,7 +179,7 @@ pub fn prepareInto(
     }
     var nonce = policy.nonce orelse random: {
         var generated: quic.address_validation_token.Nonce = undefined;
-        try std.Io.randomSecure(io, &generated);
+        try secure_random.fill(io, &generated);
         break :random generated;
     };
     defer std.crypto.secureZero(u8, &nonce);
