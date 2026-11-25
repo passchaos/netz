@@ -1,0 +1,31 @@
+{
+  "run_id": 45528512149,
+  "head_sha": "5662a6584e2f8ec2e07ac126a85db2e8a9e13fd0",
+  "job_id": 138917830882,
+  "annotations": [
+    {
+      "path": ".github",
+      "blob_href": "https://github.com/passchaos/netz/blob/5662a6584e2f8ec2e07ac126a85db2e8a9e13fd0/.github",
+      "start_line": 93,
+      "start_column": null,
+      "end_line": 93,
+      "end_column": null,
+      "annotation_level": "failure",
+      "title": "Native hostname regression",
+      "message": "error: the following build command failed with exit code 1:\n/home/runner/work/netz/netz/.zig-cache/o/87aedb63f5cc33ca63a27de508d2224a/build /home/runner/work/_temp/20cbc918-b788-46cd-8917-7528868aeff6/zig-x86_64-linux-0.16.0/zig /home/runner/work/_temp/20cbc918-b788-46cd-8917-7528868aeff6/zig-x86_64-linux-0.16.0/lib /home/runner/work/netz/netz/netz /home/runner/work/netz/netz/.zig-cache /home/runner/work/netz/netz/.zig-cache --seed 0x9d0282bd -Zcbdc468a12351705 test-http3 -j1 -Dtarget=x86_64-linux-gnu -Dtest-filter=HTTP3 system resolver -Dtest-filter=HTTP/3 shared synchronous acquire wakes -Dtest-filter=HTTP/3 shared synchronous acquire cancels -Dtest-filter=HTTP/3 shared acquisition deadline -Dtest-filter=HTTP3 connection race admission -Dtest-filter=HTTP3 connection race storage -Dtest-filter=HTTP3 connection race pool -Dtest-filter=HTTP3 Happy Eyeballs total deadline --summary all",
+      "raw_details": ""
+    },
+    {
+      "path": ".github",
+      "blob_href": "https://github.com/passchaos/netz/blob/5662a6584e2f8ec2e07ac126a85db2e8a9e13fd0/.github",
+      "start_line": 79,
+      "start_column": null,
+      "end_line": 79,
+      "end_column": null,
+      "annotation_level": "failure",
+      "title": "Native hostname regression",
+      "message": "error: 'http3.runtime.client.happy_eyeballs_tests.test.HTTP3 Happy Eyeballs total deadline cancels every handshake' failed:\n       /home/runner/work/netz/netz/netz/zig-pkg/zio-0.19.1-xHbVVE1kLABhvcTZ2InisM3hdkwDdj0fzzAUxvw2AmGk/src/common.zig:769:17: 0x29553b2 in timedWaitForIoClock (zio.zig)\n                       return error.Timeout;\n                       ^\n       /home/runner/work/netz/netz/netz/zig-pkg/zio-0.19.1-xHbVVE1kLABhvcTZ2InisM3hdkwDdj0fzzAUxvw2AmGk/src/io.zig:2657:5: 0x29b968f in netReceiveImpl (zio.zig)\n           try timedWaitForIoClock(&op.c, timeout, clock);\n           ^\n       /home/runner/work/netz/netz/netz/zig-pkg/zio-0.19.1-xHbVVE1kLABhvcTZ2InisM3hdkwDdj0fzzAUxvw2AmGk/src/io.zig:483:42: 0x29b8166 in operateInner (zio.zig)\n                           error.Timeout => |e| return e,\n                                                ^\n       /home/runner/work/netz/netz/netz/zig-pkg/zio-0.19.1-xHbVVE1kLABhvcTZ2InisM3hdkwDdj0fzzAUxvw2AmGk/src/io.zig:656:24: 0x29ac095 in batchAwaitConcurrentImpl (zio.zig)\n               const result = try operateInner(operation, .fromStd(timeout), .fromStdTimeout(timeout));\n                              ^\n       /home/runner/work/_temp/20cbc918-b788-46cd-8917-7528868aeff6/zig-x86_64-linux-0.16.0/lib/std/Io.zig:592:9: 0x12a7726 in awaitConcurrent (std.zig)",
+      "raw_details": ""
+    }
+  ]
+}

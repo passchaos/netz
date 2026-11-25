@@ -253,7 +253,7 @@ jobs:
         if: runner.os == 'Windows' || (runner.os == 'Linux' && matrix.target == 'x86_64-linux-gnu')
         run: |
           h3_status=0
-          zig build test-http3 -j1 -Dtarget=${{ matrix.target }} '-Dtest-filter=HTTP3 system resolver' '-Dtest-filter=HTTP/3 shared synchronous acquire wakes' '-Dtest-filter=HTTP/3 shared synchronous acquire cancels' '-Dtest-filter=HTTP/3 shared acquisition deadline' '-Dtest-filter=HTTP3 connection race admission' '-Dtest-filter=HTTP3 connection race storage' '-Dtest-filter=HTTP3 connection race pool' '-Dtest-filter=HTTP3 Happy Eyeballs total deadline' --summary all > native-http3.log 2>&1 || h3_status=$?
+          zig build test-http3 -j1 -Dtarget=${{ matrix.target }} '-Dtest-filter=HTTP3 system resolver' '-Dtest-filter=HTTP/3 shared synchronous acquire wakes' '-Dtest-filter=HTTP/3 shared synchronous acquire cancels' '-Dtest-filter=HTTP/3 shared acquisition deadline' '-Dtest-filter=HTTP3 connection race admission' '-Dtest-filter=HTTP3 connection race storage' '-Dtest-filter=HTTP3 connection race pool' '-Dtest-filter=HTTP3 Happy Eyeballs total deadline' '-Dtest-filter=HTTP3 Happy Eyeballs cancellation joins' --summary all > native-http3.log 2>&1 || h3_status=$?
           cat native-http3.log
           if [ "$h3_status" -ne 0 ]; then
             python tools/ci/test_failure_annotations.py native-http3.log

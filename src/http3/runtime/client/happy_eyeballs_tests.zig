@@ -4,6 +4,10 @@ const http3 = @import("../../mod.zig");
 const quic = @import("../../../quic/mod.zig");
 const tls_testing = @import("../../../tls/testing.zig");
 
+test {
+    _ = @import("happy_eyeballs/deadline_tests.zig");
+}
+
 test "HTTP3 owning Happy Eyeballs races dual-family URI handshakes" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
@@ -199,99 +203,6 @@ test "HTTP3 Happy Eyeballs validates policy and alternate bind family" {
             same_family,
         ),
     );
-}
-
-test "HTTP3 Happy Eyeballs total deadline cancels every handshake" {
-    const allocator = std.testing.allocator;
-    var backend = try @import("zio").Runtime.init(allocator, .{});
-    defer backend.deinit();
-    const io = backend.io();
-
-    var silent_a = try quic.runtime.Endpoint.bind(
-        allocator,
-        io,
-        .{ .ip4 = .loopback(0) },
-        .{},
-    );
-    defer silent_a.deinit();
-    var silent_b = try quic.runtime.Endpoint.bind(
-        allocator,
-        io,
-        .{ .ip4 = .loopback(0) },
-        .{},
-    );
-    defer silent_b.deinit();
-
-    const Resolver = struct {
-        first: std.Io.net.IpAddress,
-        second: std.Io.net.IpAddress,
-
-        fn resolve(
-            context: *anyopaque,
-            resolve_allocator: std.mem.Allocator,
-            _: std.Io,
-            host: []const u8,
-            _: u16,
-            _: ?std.Io.Clock.Timestamp,
-        ) runtime.AddressResolver.ResolveError![]std.Io.net.IpAddress {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            if (!std.mem.eql(u8, host, "deadline.happy.test")) {
-                return error.UnknownHostName;
-            }
-            const addresses = try resolve_allocator.alloc(
-                std.Io.net.IpAddress,
-                2,
-            );
-            addresses[0] = self.first;
-            addresses[1] = self.second;
-            return addresses;
-        }
-    };
-    var resolver = Resolver{
-        .first = silent_a.address(),
-        .second = silent_b.address(),
-    };
-    const uri = try std.Uri.parse("https://deadline.happy.test/");
-    const started = std.Io.Clock.awake.now(io);
-    try std.testing.expectError(
-        error.HandshakeTimeout,
-        runtime.HandshakeClient.connectUriWithTimeout(
-            allocator,
-            io,
-            .{ .ip4 = .loopback(0) },
-            uri,
-            .{},
-            .{
-                .handshake = .{
-                    .original_destination_connection_id = "deadline-original",
-                    .local_connection_id = "deadline-client",
-                },
-                .address_attempt_timeout = .fromSeconds(5),
-                .address_connect_policy = .{ .happy_eyeballs = .{
-                    .attempt_delay = .fromMilliseconds(10),
-                    .max_in_flight = 2,
-                } },
-                .address_resolver = .{
-                    .context = &resolver,
-                    .resolve = Resolver.resolve,
-                },
-            },
-            .fromMilliseconds(100),
-        ),
-    );
-    const elapsed = started.durationTo(std.Io.Clock.awake.now(io));
-    try std.testing.expect(elapsed.nanoseconds < 500 * std.time.ns_per_ms);
-
-    var first_initial = try silent_a.receiveBytesWithTimeout(
-        .fromMilliseconds(100),
-    );
-    defer first_initial.deinit(allocator);
-    var second_initial = try silent_b.receiveBytesWithTimeout(
-        .fromMilliseconds(100),
-    );
-    defer second_initial.deinit(allocator);
-    try std.testing.expect(first_initial.bytes.len >= 1200);
-    try std.testing.expect(second_initial.bytes.len >= 1200);
 }
 
 test "HTTP3 Happy Eyeballs offers zero RTT only on the first attempt" {
