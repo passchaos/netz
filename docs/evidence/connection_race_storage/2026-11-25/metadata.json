@@ -1,0 +1,138 @@
+{
+  "target": "aarch64-macos",
+  "optimization": "Debug",
+  "measurement": "shared connection competition candidate metadata; u8 result; transport callbacks return refusal without allocating",
+  "baseline_head": "fc176395",
+  "before": [
+    {
+      "context_bytes": 2960,
+      "candidates": 1,
+      "empty_context_bytes": 0,
+      "payload_context_bytes": 0,
+      "empty_context_allocations": 0,
+      "payload_context_allocations": 0
+    },
+    {
+      "context_bytes": 2960,
+      "candidates": 8,
+      "empty_context_bytes": 0,
+      "payload_context_bytes": 0,
+      "empty_context_allocations": 0,
+      "payload_context_allocations": 0
+    },
+    {
+      "context_bytes": 2960,
+      "candidates": 9,
+      "empty_context_bytes": 1008,
+      "payload_context_bytes": 27648,
+      "empty_context_allocations": 1,
+      "payload_context_allocations": 1
+    },
+    {
+      "context_bytes": 2960,
+      "candidates": 64,
+      "empty_context_bytes": 8224,
+      "payload_context_bytes": 197664,
+      "empty_context_allocations": 2,
+      "payload_context_allocations": 2
+    },
+    {
+      "context_bytes": 4096,
+      "candidates": 1,
+      "empty_context_bytes": 0,
+      "payload_context_bytes": 0,
+      "empty_context_allocations": 0,
+      "payload_context_allocations": 0
+    },
+    {
+      "context_bytes": 4096,
+      "candidates": 8,
+      "empty_context_bytes": 0,
+      "payload_context_bytes": 0,
+      "empty_context_allocations": 0,
+      "payload_context_allocations": 0
+    },
+    {
+      "context_bytes": 4096,
+      "candidates": 9,
+      "empty_context_bytes": 1008,
+      "payload_context_bytes": 37872,
+      "empty_context_allocations": 1,
+      "payload_context_allocations": 1
+    },
+    {
+      "context_bytes": 4096,
+      "candidates": 64,
+      "empty_context_bytes": 8224,
+      "payload_context_bytes": 270368,
+      "empty_context_allocations": 2,
+      "payload_context_allocations": 2
+    }
+  ],
+  "after": [
+    {
+      "context_bytes": 2960,
+      "candidates": 1,
+      "empty_context_bytes": 0,
+      "payload_context_bytes": 0,
+      "empty_context_allocations": 0,
+      "payload_context_allocations": 0
+    },
+    {
+      "context_bytes": 2960,
+      "candidates": 8,
+      "empty_context_bytes": 0,
+      "payload_context_bytes": 0,
+      "empty_context_allocations": 0,
+      "payload_context_allocations": 0
+    },
+    {
+      "context_bytes": 2960,
+      "candidates": 9,
+      "empty_context_bytes": 288,
+      "payload_context_bytes": 288,
+      "empty_context_allocations": 1,
+      "payload_context_allocations": 1
+    },
+    {
+      "context_bytes": 2960,
+      "candidates": 64,
+      "empty_context_bytes": 3104,
+      "payload_context_bytes": 3104,
+      "empty_context_allocations": 2,
+      "payload_context_allocations": 2
+    },
+    {
+      "context_bytes": 4096,
+      "candidates": 1,
+      "empty_context_bytes": 0,
+      "payload_context_bytes": 0,
+      "empty_context_allocations": 0,
+      "payload_context_allocations": 0
+    },
+    {
+      "context_bytes": 4096,
+      "candidates": 8,
+      "empty_context_bytes": 0,
+      "payload_context_bytes": 0,
+      "empty_context_allocations": 0,
+      "payload_context_allocations": 0
+    },
+    {
+      "context_bytes": 4096,
+      "candidates": 9,
+      "empty_context_bytes": 288,
+      "payload_context_bytes": 288,
+      "empty_context_allocations": 1,
+      "payload_context_allocations": 1
+    },
+    {
+      "context_bytes": 4096,
+      "candidates": 64,
+      "empty_context_bytes": 3104,
+      "payload_context_bytes": 3104,
+      "empty_context_allocations": 2,
+      "payload_context_allocations": 2
+    }
+  ]
+}

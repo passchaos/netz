@@ -45,24 +45,38 @@ pub fn race(
     try checkAdmission(ConnectError, io, deadline, deadline_error, options.cancel_event);
     const Result = ConnectError!Connected;
     const Context = @TypeOf(context);
-    const Slot = struct {
+    const Shared = struct {
         io: std.Io,
-        target: std.meta.Elem(@TypeOf(targets)),
         context: Context,
-        index: usize,
         deadline: ?std.Io.Clock.Timestamp,
         deadline_error: ?ConnectError,
         cancel_event: ?*std.Io.Event,
+    };
+    // Parameters remain alive through selector draining and result cleanup.
+    // Only the admitted callback takes its own context value; waiting
+    // candidates never duplicate the transport's handshake configuration.
+    const shared: Shared = .{
+        .io = io,
+        .context = context,
+        .deadline = deadline,
+        .deadline_error = deadline_error,
+        .cancel_event = options.cancel_event,
+    };
+    const Slot = struct {
+        shared: *const Shared,
+        target: std.meta.Elem(@TypeOf(targets)),
+        index: usize,
         result: ?Result = null,
 
         fn run(self: *@This()) usize {
-            checkAdmission(ConnectError, self.io, self.deadline, self.deadline_error, self.cancel_event) catch |err| {
+            const parameters = self.shared;
+            checkAdmission(ConnectError, parameters.io, parameters.deadline, parameters.deadline_error, parameters.cancel_event) catch |err| {
                 self.result = err;
                 return self.index;
             };
             self.result = connect_one(
-                self.context,
-                self.io,
+                parameters.context,
+                parameters.io,
                 self.target,
                 self.index,
             );
@@ -80,7 +94,7 @@ pub fn race(
             self.result = null;
             if (result) |value| {
                 var owned = value;
-                deinit_connected(self.context, &owned);
+                deinit_connected(self.shared.context, &owned);
             } else |_| {}
         }
     };
@@ -100,13 +114,9 @@ pub fn race(
     const slots = slot_heap orelse slot_stack[0..targets.len];
     for (slots, targets, 0..) |*slot, target, index| {
         slot.* = .{
-            .io = io,
+            .shared = &shared,
             .target = target,
-            .context = context,
             .index = index,
-            .deadline = deadline,
-            .deadline_error = deadline_error,
-            .cancel_event = options.cancel_event,
         };
     }
     defer for (slots) |*slot| slot.deinit();

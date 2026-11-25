@@ -111,3 +111,15 @@ before generating a fresh QUIC identity. The
 [admission evidence](../evidence/connection_race_admission/2026-11-25/README.md)
 records rejection before allocation, cancellation at worker admission, and live
 TCP/H3 connection and ownership checks.
+
+The competition owner stores its I/O, caller context, deadline and cancellation
+event in one immutable frame. Candidate slots keep a reference to that frame,
+their target/index and their owned result. A transport callback receives its
+context value when it enters execution; waiting candidates do not duplicate
+handshake configuration. Selector draining joins all workers before result
+cleanup or destruction of the shared frame. Candidate metadata allocations
+therefore depend on the target/result layout and candidate count, independently
+of the caller context's size. The
+[storage evidence](../evidence/connection_race_storage/2026-11-25/README.md)
+compares empty, 4-KiB and actual H3 configuration contexts and verifies that
+canceled successful results can still read their context during cleanup.
