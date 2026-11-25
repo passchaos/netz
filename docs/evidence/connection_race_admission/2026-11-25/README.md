@@ -44,3 +44,4 @@ zig build test-http1 test-http3 test-grpc '-Dtest-filter=connection race admissi
 | Initial rejected-admission baseline | 101/105 passed; all four new expectations fail | [before.Debug.log](before.Debug.log) |
 | Rejection, worker cancellation and live TCP/H3/gRPC overlap | 183/183 passed | [Debug.log](Debug.log) |
 | Scoped TCP/H3/gRPC regression compilation for Windows | Compiled | [windows.compile.log](windows.compile.log) |
+| Native Linux and Windows admission, H3 deadline and transport regressions | Passed at `8c0a8244` | [native-platforms.json](native-platforms.json) |
