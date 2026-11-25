@@ -1,6 +1,7 @@
 //! Independently compiled protocol roots with a real matching-test guard.
 
 const std = @import("std");
+const test_run = @import("run.zig");
 
 const Scope = enum { proxy, proxy_queues, http, http1, http2, http3, quic, grpc, mqtt, websocket, webtransport, tls, vpn, mesh };
 
@@ -10,6 +11,7 @@ pub fn add(
     optimize: std.builtin.OptimizeMode,
     prototype: *std.Build.Module,
     filters: []const []const u8,
+    progress: bool,
 ) void {
     const specs = .{
         .{ "test-proxy", Scope.proxy },
@@ -44,7 +46,7 @@ pub fn add(
         module.addOptions("test_scope_options", options);
         const tests = b.addTest(.{ .root_module = module, .filters = selected_filters });
         b.step(b.fmt("{s}-compile", .{spec[0]}), "Compile one protocol's selected tests without running them").dependOn(&tests.step);
-        const run = b.addRunArtifact(tests);
+        const run = test_run.add(b, tests, progress);
         b.step(spec[0], "Compile and run one protocol; reject filters with no matching protocol tests").dependOn(&run.step);
     }
 }

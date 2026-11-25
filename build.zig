@@ -25,6 +25,7 @@ pub fn build(b: *std.Build) void {
 
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const test_progress = b.option(bool, "test-progress", "Print each library, package and focused test name using Zig's standard terminal runner") orelse false;
     const test_filters = b.option(
         []const []const u8,
         "test-filter",
@@ -137,13 +138,13 @@ pub fn build(b: *std.Build) void {
         .root_module = netz_mod,
         .filters = test_filters,
     });
-    const run_lib_tests = b.addRunArtifact(lib_tests);
+    const run_lib_tests = @import("build/testing/run.zig").add(b, lib_tests, test_progress);
     const test_lib_step = b.step(
         "test-lib",
         "Compile and run the Netz library unit tests",
     );
     test_lib_step.dependOn(&run_lib_tests.step);
-    focused_tests.add(b, target, optimize, netz_mod, test_filters);
+    focused_tests.add(b, target, optimize, netz_mod, test_filters, test_progress);
 
     const package_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -154,7 +155,7 @@ pub fn build(b: *std.Build) void {
         }),
         .filters = test_filters,
     });
-    const run_package_tests = b.addRunArtifact(package_tests);
+    const run_package_tests = @import("build/testing/run.zig").add(b, package_tests, test_progress);
     const test_package_step = b.step(
         "test-package",
         "Compile and test the public Netz package surface",

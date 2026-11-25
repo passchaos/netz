@@ -39,6 +39,13 @@ The corresponding roots are `test-http`, `test-http1`, `test-http2`,
 roots for iteration and retain `test-lib`, `test-package`, `test-compile` and
 the complete `test` gate for their documented repository-wide scopes.
 
+Add `-Dtest-progress=true` to print each library, package or focused test name
+as it runs. This uses Zig's standard terminal runner and retains the selected
+random seed, cache arguments, leak checks and nonzero failure exit status.
+The default build-server runner remains available when the option is omitted.
+Use the progress option when a CI job times out and its last active test needs
+to be identified; a delay before the first test name is still compilation.
+
 Runnable examples are under `examples/` and are wired into the build:
 
 ```sh

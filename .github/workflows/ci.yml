@@ -127,7 +127,7 @@ jobs:
         run: zig build test-quic-endpoint-soak --summary all
 
       - name: Run the complete test gate serially
-        run: zig build test -j1 --summary all
+        run: zig build test -j1 -Dtest-progress=true --verbose --summary all
 
   portable:
     if: github.event_name != 'schedule'
@@ -276,7 +276,7 @@ jobs:
         run: |
           set -o pipefail
           trust_status=0
-          zig build test-quic test-tls test-http test-websocket test-webtransport -j1 -Dtarget=${{ matrix.target }} '-Dtest-filter=trust load' '-Dtest-filter=trust startup' '-Dtest-filter=trust completion' '-Dtest-filter=QUIC trust precedence' '-Dtest-filter=QUIC client verifies' '-Dtest-filter=effective trust' '-Dtest-filter=startup entropy' '-Dtest-filter=owned deadline' '-Dtest-filter=TLS CA bundle lock' --summary all 2>&1 | tee native-trust.log || trust_status=$?
+          zig build test-quic test-tls test-http test-websocket test-webtransport -j1 -Dtest-progress=true -Dtarget=${{ matrix.target }} '-Dtest-filter=trust load' '-Dtest-filter=trust startup' '-Dtest-filter=trust completion' '-Dtest-filter=QUIC trust precedence' '-Dtest-filter=QUIC client verifies' '-Dtest-filter=effective trust' '-Dtest-filter=startup entropy' '-Dtest-filter=owned deadline' '-Dtest-filter=TLS CA bundle lock' --verbose --summary all 2>&1 | tee native-trust.log || trust_status=$?
           if [ "$trust_status" -ne 0 ]; then
             python tools/ci/test_failure_annotations.py native-trust.log
           fi

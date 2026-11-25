@@ -1,0 +1,885 @@
+[traex-zig-guard 2026-11-25 17:18:53] started Zig tree root=95679 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=900s
+1/58 test_scope.test_0...OK
+2/58 quic.mod.test_0...OK
+3/58 quic.mod.test_1...OK
+4/58 quic.mod.test_2...OK
+5/58 quic.runtime.test_0...OK
+6/58 quic.runtime.test_1...OK
+7/58 quic.protection.test_0...OK
+8/58 quic.tls_client_hello.test_0...OK
+9/58 quic.tls.mod.test_0...OK
+10/58 quic.handshake.test_0...OK
+11/58 quic.client_trust.test_0...OK
+12/58 quic.zero_rtt.mod.test_0...OK
+13/58 quic.one_rtt.test_0...OK
+14/58 quic.packet_space.test_0...OK
+15/58 quic.stream.test_0...OK
+16/58 quic.recovery.test_0...OK
+17/58 quic.endpoint_dispatcher.test_0...OK
+18/58 quic.endpoint_server.test_0...OK
+19/58 quic.connection_id.test_0...OK
+20/58 quic.congestion.test_0...OK
+21/58 quic.pacing.test_0...OK
+22/58 quic.path_validation.test_0...OK
+23/58 quic.pmtu.test_0...OK
+24/58 quic.address_validation_token.test_0...OK
+25/58 quic.observability.qlog.mod.test_0...OK
+26/58 quic.load_balancing.quic_lb.mod.test_0...OK
+27/58 quic.resumption.mod.test_0...OK
+28/58 quic.endpoint_server.tests.test_0...OK
+29/58 quic.handshake.client_authentication.test_0...OK
+30/58 quic.resumption.ticket.mod.test_0...OK
+31/58 quic.handshake.trust_completion_tests.test.QUIC trust completion preserves allocation failure within budget...OK
+32/58 quic.handshake.trust_completion_tests.test.QUIC trust completion expired bundled-source failure returns HandshakeTimeout...OK
+33/58 quic.handshake.trust_completion_tests.test.QUIC trust completion canceled bundled-source failure returns Canceled...OK
+34/58 internal.owned_result_deadline.test_0...OK
+35/58 internal.owned_result_deadline_tests.test.owned deadline completion transfers timely success and destroys interrupted success once...OK
+36/58 internal.owned_result_deadline_tests.test.owned deadline completion preserves only timely source failures...OK
+37/58 internal.owned_result_deadline_tests.test.owned deadline admission preserves cancellation and expiry before work...OK
+38/58 quic.endpoint_dispatcher.tests.test_0...OK
+39/58 quic.endpoint_dispatcher.tests.test.QUIC endpoint dispatcher validates caller-owned deadlines...OK
+40/58 quic.initial_exchange.flight.test_0...OK
+41/58 quic.one_rtt.tests.mod.test_0...OK
+42/58 quic.client_trust.effective_policy_tests.test.QUIC effective trust inherits TCP verifier despite an inactive CA bundle...OK
+43/58 quic.client_trust.effective_policy_tests.test.QUIC effective trust still rejects an active TCP CA bundle...OK
+44/58 quic.client_trust.precedence_tests.test.QUIC trust precedence explicit verifier isolates TCP trust defaults...OK
+45/58 quic.client_trust.precedence_tests.test.QUIC trust precedence explicit store isolates TCP trust defaults...OK
+46/58 quic.client_trust.precedence_tests.test.QUIC trust precedence explicit environment isolates TCP trust defaults...OK
+47/58 quic.client_trust.precedence_tests.test.QUIC trust precedence bundled roots isolate TCP trust defaults...OK
+48/58 quic.client_trust.precedence_tests.test.QUIC trust precedence platform roots isolate TCP trust defaults...OK
+49/58 quic.client_trust.precedence_tests.test.QUIC trust precedence client identity inherits independently of explicit peer trust...OK
+50/58 quic.client_trust.loading_tests.test.QUIC trust load preserves cancellation while opening configured roots...OK
+51/58 quic.client_trust.loading_tests.test.QUIC trust load rejects pending cancellation before default roots...OK
+52/58 quic.client_trust.loading_tests.test.QUIC trust load deadline cancels and joins blocked loading...OK
+53/58 quic.handshake.certificate_ownership_tests.test.QUIC client verifies native roots from SSL_CERT_FILE...OK
+54/58 quic.handshake.certificate_ownership_tests.test.QUIC client verifies caller-owned roots from PEM file...OK
+55/58 quic.handshake.certificate_ownership_tests.test.QUIC trust precedence caller-owned CA survives conflicting TCP verifier...OK
+56/58 quic.handshake.certificate_ownership_tests.test.QUIC trust precedence SSL_CERT_FILE survives conflicting TCP verifier...OK
+57/58 quic.handshake.certificate_ownership_tests.test.QUIC effective trust authenticates with inherited TCP verifier over inactive CA bundle...OK
+58/58 quic.handshake.tests.test_0...OK
+All 58 tests passed.
+1/149 test_scope.test_0...OK
+2/149 webtransport.mod.test_0...OK
+3/149 webtransport.mod.test_1...OK
+4/149 webtransport.h2.mod.test_0...OK
+5/149 webtransport.runtime.test_0...OK
+6/149 webtransport.flow_control.test_0...OK
+7/149 webtransport.application_protocol.test_0...OK
+8/149 webtransport.h2.capsule.test_0...OK
+9/149 webtransport.h2.reader.test_0...OK
+10/149 webtransport.h2.state.test_0...OK
+11/149 webtransport.h2.endpoint_client.test_0...OK
+12/149 webtransport.h2.endpoint_client.reconnecting.test_0...OK
+13/149 webtransport.h2.endpoint_server.test_0...OK
+14/149 webtransport.h2.endpoint_listener.test_0...OK
+15/149 webtransport.h2.endpoint_listener.runtime.test_0...OK
+16/149 webtransport.runtime.owner.test_0...OK
+17/149 webtransport.runtime.tests.test_0...OK
+18/149 webtransport.runtime.tests.test_1...OK
+19/149 webtransport.runtime.tests.test_2...OK
+20/149 webtransport.runtime.tests.test_3...OK
+21/149 webtransport.runtime.tests.test_4...OK
+22/149 webtransport.runtime.tests.test_5...OK
+23/149 webtransport.runtime.tests.test_6...OK
+24/149 webtransport.runtime.tests.test_7...OK
+25/149 webtransport.runtime.tests.test_8...OK
+26/149 webtransport.runtime.tests.test_9...OK
+27/149 webtransport.runtime.tests.test_10...OK
+28/149 webtransport.runtime.tests.test_11...OK
+29/149 webtransport.runtime.tests.test_12...OK
+30/149 webtransport.runtime.endpoint_client.flow_tests.test_0...OK
+31/149 webtransport.runtime.association.tests.discovery.test_0...OK
+32/149 webtransport.runtime.association.tests.invalid_session_id.test_0...OK
+33/149 webtransport.runtime.association.tests.truncated.test_0...OK
+34/149 webtransport.runtime.connect.application_protocol.test_0...OK
+35/149 webtransport.runtime.connect.negotiation.test_0...OK
+36/149 webtransport.runtime.stream_incremental.test_0...OK
+37/149 webtransport.runtime.stream_incremental.test_1...OK
+38/149 webtransport.runtime.flow.receive.test_0...OK
+39/149 webtransport.runtime.flow.write.test_0...OK
+40/149 webtransport.runtime.flow.send.test_0...OK
+41/149 webtransport.runtime.flow.streams.test_0...OK
+42/149 webtransport.runtime.flow.grant.test_0...OK
+43/149 webtransport.runtime.flow.datagram.test_0...OK
+44/149 webtransport.runtime.stream.reset.test_0...OK
+45/149 webtransport.runtime.flow.datagram.tests.test_0...OK
+46/149 webtransport.runtime.trust_deadline_tests.test.WebTransport H3 trust startup deadline admits a timer before loading roots...OK
+47/149 webtransport.runtime.trust_deadline_tests.test.WebTransport H3 startup entropy includes preparation in the configured connect timeout...OK
+48/149 webtransport.runtime.trust_deadline_tests.test.WebTransport H3 startup entropy URI authenticates with generated connection IDs...OK
+49/149 webtransport.runtime.endpoint_client.test_0...OK
+50/149 http3.mod.test_0...OK
+51/149 http3.mod.test_1...OK
+52/149 http3.mod.test_2...OK
+53/149 http3.mod.test_3...OK
+54/149 http3.mod.test_4...OK
+55/149 http3.runtime.test_0...OK
+56/149 http3.socks5_runtime.test_0...OK
+57/149 quic.mod.test_0...OK
+58/149 quic.mod.test_1...OK
+59/149 quic.mod.test_2...OK
+60/149 quic.runtime.test_0...OK
+61/149 quic.runtime.test_1...OK
+62/149 quic.handshake.test_0...OK
+63/149 quic.tls.mod.test_0...OK
+64/149 quic.tls_client_hello.test_0...OK
+65/149 quic.resumption.mod.test_0...OK
+66/149 quic.resumption.ticket.mod.test_0...OK
+67/149 quic.zero_rtt.mod.test_0...OK
+68/149 quic.protection.test_0...OK
+69/149 quic.congestion.test_0...OK
+70/149 quic.one_rtt.test_0...OK
+71/149 http3.settings.test_0...OK
+72/149 http3.runtime.datagram.test_0...OK
+73/149 http3.runtime.datagram.test_1...OK
+74/149 internal.tcp_connect.test_0...OK
+75/149 quic.path_validation.test_0...OK
+76/149 quic.pacing.test_0...OK
+77/149 quic.packet_space.test_0...OK
+78/149 quic.handshake.client_authentication.test_0...OK
+79/149 quic.recovery.test_0...OK
+80/149 quic.connection_id.test_0...OK
+81/149 quic.load_balancing.quic_lb.mod.test_0...OK
+82/149 quic.stream.test_0...OK
+83/149 internal.stream_io.test_0...OK
+84/149 internal.stream_io.timed_read.test_0...OK
+85/149 http3.runtime.qpack.encoder.test_0...OK
+86/149 quic.pmtu.test_0...OK
+87/149 quic.observability.qlog.mod.test_0...OK
+88/149 http3.runtime.body_batch.test_0...OK
+89/149 quic.client_connection_ids.test.startup entropy connection IDs preserve configured IDs and share one fill...OK
+90/149 quic.client_connection_ids.test.startup entropy connection ID failure retains the caller's options...OK
+91/149 internal.secure_random.deadline.test_0...OK
+92/149 quic.client_trust.test_0...OK
+93/149 quic.initial_exchange.flight.test_0...OK
+94/149 quic.address_validation_token.test_0...OK
+95/149 internal.owned_result_deadline.test_0...OK
+96/149 internal.stream_io.timed_write.test_0...OK
+97/149 internal.owned_result_deadline_tests.test.owned deadline completion transfers timely success and destroys interrupted success once...OK
+98/149 internal.owned_result_deadline_tests.test.owned deadline completion preserves only timely source failures...OK
+99/149 internal.owned_result_deadline_tests.test.owned deadline admission preserves cancellation and expiry before work...OK
+100/149 internal.secure_random.deadline_tests.test.startup entropy deadline rejects expired budgets and missing timer admission...OK
+101/149 internal.secure_random.deadline_tests.test.startup entropy deadline completion preserves timely errors and rejects late or canceled results...OK
+102/149 internal.secure_random.deadline_tests.test.startup entropy deadline joins its timer when worker admission fails...OK
+103/149 internal.secure_random.deadline_tests.test.startup entropy timer joins a protected writer before returning its borrowed buffer...OK
+104/149 quic.client_trust.effective_policy_tests.test.QUIC effective trust inherits TCP verifier despite an inactive CA bundle...OK
+105/149 quic.client_trust.effective_policy_tests.test.QUIC effective trust still rejects an active TCP CA bundle...OK
+106/149 quic.client_trust.precedence_tests.test.QUIC trust precedence explicit verifier isolates TCP trust defaults...OK
+107/149 quic.client_trust.precedence_tests.test.QUIC trust precedence explicit store isolates TCP trust defaults...OK
+108/149 quic.client_trust.precedence_tests.test.QUIC trust precedence explicit environment isolates TCP trust defaults...OK
+109/149 quic.client_trust.precedence_tests.test.QUIC trust precedence bundled roots isolate TCP trust defaults...OK
+110/149 quic.client_trust.precedence_tests.test.QUIC trust precedence platform roots isolate TCP trust defaults...OK
+111/149 quic.client_trust.precedence_tests.test.QUIC trust precedence client identity inherits independently of explicit peer trust...OK
+112/149 quic.client_trust.loading_tests.test.QUIC trust load preserves cancellation while opening configured roots...OK
+113/149 quic.client_trust.loading_tests.test.QUIC trust load rejects pending cancellation before default roots...OK
+114/149 quic.client_trust.loading_tests.test.QUIC trust load deadline cancels and joins blocked loading...OK
+115/149 quic.handshake.trust_completion_tests.test.QUIC trust completion preserves allocation failure within budget...OK
+116/149 quic.handshake.trust_completion_tests.test.QUIC trust completion expired bundled-source failure returns HandshakeTimeout...OK
+117/149 quic.handshake.trust_completion_tests.test.QUIC trust completion canceled bundled-source failure returns Canceled...OK
+118/149 quic.one_rtt.tests.mod.test_0...OK
+119/149 quic.handshake.certificate_ownership_tests.test.QUIC client verifies native roots from SSL_CERT_FILE...OK
+120/149 quic.handshake.certificate_ownership_tests.test.QUIC client verifies caller-owned roots from PEM file...OK
+121/149 quic.handshake.certificate_ownership_tests.test.QUIC trust precedence caller-owned CA survives conflicting TCP verifier...OK
+122/149 quic.handshake.certificate_ownership_tests.test.QUIC trust precedence SSL_CERT_FILE survives conflicting TCP verifier...OK
+123/149 quic.handshake.certificate_ownership_tests.test.QUIC effective trust authenticates with inherited TCP verifier over inactive CA bundle...OK
+124/149 quic.handshake.tests.test_0...OK
+125/149 quic.endpoint_dispatcher.test_0...OK
+126/149 quic.endpoint_server.test_0...OK
+127/149 quic.endpoint_server.tests.test_0...OK
+128/149 quic.endpoint_dispatcher.tests.test_0...OK
+129/149 quic.endpoint_dispatcher.tests.test.QUIC endpoint dispatcher validates caller-owned deadlines...OK
+130/149 http3.runtime.tests.test_0...OK
+131/149 http3.runtime.tests.test_1...OK
+132/149 http3.runtime.development.tests.send.test_0...OK
+133/149 http3.runtime.stream.reader_tests.test_0...OK
+134/149 http3.runtime.client.happy_eyeballs_tests.test_0...OK
+135/149 http3.runtime.client.complete_request.test_0...OK
+136/149 http3.runtime.client.pool_startup_tests.test.HTTP3 startup entropy default pool origin starts the complete connection budget...OK
+137/149 http3.runtime.client.pool_startup_tests.test.HTTP3 startup entropy default pool redirect starts the complete connection budget...OK
+138/149 http3.runtime.client.pool_startup_tests.test.HTTP3 startup entropy default pool Alt-Svc starts the complete connection budget...OK
+139/149 http3.runtime.client.pool_startup_tests.test.HTTP3 startup entropy default pool Alt-Svc redirect starts the complete connection budget...OK
+140/149 http3.runtime.client.pool_startup_tests.test.HTTP3 startup entropy default pool early Alt-Svc starts the complete connection budget...OK
+141/149 http3.runtime.client.pool_startup_tests.test.HTTP3 startup entropy default pool custom transport keeps only timely failures...OK
+142/149 http3.runtime.shared_handshake_client_pool.stream_command.test_0...OK
+143/149 http3.runtime.concurrent_tests.test_0...OK
+144/149 http3.runtime.receive.field_value_tests.test_0...OK
+145/149 http.field_name.test_0...OK
+146/149 http.field_value.test_0...OK
+147/149 http.authority.mod.test_0...OK
+148/149 http.authority.host.test_0...OK
+149/149 http3.origin_pool.test_0...OK
+All 149 tests passed.
+1/113 test_scope.test_0...OK
+2/113 websocket.mod.test_0...OK
+3/113 websocket.mod.test_1...OK
+4/113 websocket.stream_connection.test_0...OK
+5/113 websocket.runtime.test_0...OK
+6/113 websocket.runtime.tests.test_0...OK
+7/113 websocket.runtime.h3.test_0...OK
+8/113 websocket.runtime.cookie_h2_tests.test_0...OK
+9/113 websocket.runtime.mutex_deadline_tests.test_0...OK
+10/113 websocket.runtime.handshake.trust_deadline_tests.test.WebSocket H3 trust startup deadline admits a timer before loading roots...OK
+11/113 websocket.runtime.handshake.trust_deadline_tests.test.WebSocket H3 startup entropy includes preparation in the configured connect timeout...OK
+12/113 http3.mod.test_0...OK
+13/113 http3.mod.test_1...OK
+14/113 http3.mod.test_2...OK
+15/113 http3.mod.test_3...OK
+16/113 http3.mod.test_4...OK
+17/113 http3.runtime.test_0...OK
+18/113 http3.socks5_runtime.test_0...OK
+19/113 http.cookies.mod.test_0...OK
+20/113 quic.mod.test_0...OK
+21/113 quic.mod.test_1...OK
+22/113 quic.mod.test_2...OK
+23/113 quic.runtime.test_0...OK
+24/113 quic.runtime.test_1...OK
+25/113 quic.handshake.test_0...OK
+26/113 quic.tls.mod.test_0...OK
+27/113 quic.tls_client_hello.test_0...OK
+28/113 quic.resumption.mod.test_0...OK
+29/113 quic.resumption.ticket.mod.test_0...OK
+30/113 quic.zero_rtt.mod.test_0...OK
+31/113 quic.protection.test_0...OK
+32/113 quic.congestion.test_0...OK
+33/113 quic.one_rtt.test_0...OK
+34/113 http3.settings.test_0...OK
+35/113 http3.runtime.datagram.test_0...OK
+36/113 http3.runtime.datagram.test_1...OK
+37/113 internal.tcp_connect.test_0...OK
+38/113 quic.path_validation.test_0...OK
+39/113 quic.pacing.test_0...OK
+40/113 quic.packet_space.test_0...OK
+41/113 quic.handshake.client_authentication.test_0...OK
+42/113 quic.recovery.test_0...OK
+43/113 quic.connection_id.test_0...OK
+44/113 quic.load_balancing.quic_lb.mod.test_0...OK
+45/113 quic.stream.test_0...OK
+46/113 internal.stream_io.test_0...OK
+47/113 internal.stream_io.timed_read.test_0...OK
+48/113 http3.runtime.qpack.encoder.test_0...OK
+49/113 quic.pmtu.test_0...OK
+50/113 quic.observability.qlog.mod.test_0...OK
+51/113 http3.runtime.body_batch.test_0...OK
+52/113 quic.client_connection_ids.test.startup entropy connection IDs preserve configured IDs and share one fill...OK
+53/113 quic.client_connection_ids.test.startup entropy connection ID failure retains the caller's options...OK
+54/113 internal.secure_random.deadline.test_0...OK
+55/113 quic.client_trust.test_0...OK
+56/113 http.authority.mod.test_0...OK
+57/113 http.authority.host.test_0...OK
+58/113 http.field_name.test_0...OK
+59/113 http.field_value.test_0...OK
+60/113 http.cookies.syntax.test_0...OK
+61/113 quic.initial_exchange.flight.test_0...OK
+62/113 quic.address_validation_token.test_0...OK
+63/113 internal.owned_result_deadline.test_0...OK
+64/113 internal.stream_io.timed_write.test_0...OK
+65/113 internal.owned_result_deadline_tests.test.owned deadline completion transfers timely success and destroys interrupted success once...OK
+66/113 internal.owned_result_deadline_tests.test.owned deadline completion preserves only timely source failures...OK
+67/113 internal.owned_result_deadline_tests.test.owned deadline admission preserves cancellation and expiry before work...OK
+68/113 quic.client_trust.effective_policy_tests.test.QUIC effective trust inherits TCP verifier despite an inactive CA bundle...OK
+69/113 quic.client_trust.effective_policy_tests.test.QUIC effective trust still rejects an active TCP CA bundle...OK
+70/113 quic.client_trust.precedence_tests.test.QUIC trust precedence explicit verifier isolates TCP trust defaults...OK
+71/113 quic.client_trust.precedence_tests.test.QUIC trust precedence explicit store isolates TCP trust defaults...OK
+72/113 quic.client_trust.precedence_tests.test.QUIC trust precedence explicit environment isolates TCP trust defaults...OK
+73/113 quic.client_trust.precedence_tests.test.QUIC trust precedence bundled roots isolate TCP trust defaults...OK
+74/113 quic.client_trust.precedence_tests.test.QUIC trust precedence platform roots isolate TCP trust defaults...OK
+75/113 quic.client_trust.precedence_tests.test.QUIC trust precedence client identity inherits independently of explicit peer trust...OK
+76/113 quic.client_trust.loading_tests.test.QUIC trust load preserves cancellation while opening configured roots...OK
+77/113 quic.client_trust.loading_tests.test.QUIC trust load rejects pending cancellation before default roots...OK
+78/113 quic.client_trust.loading_tests.test.QUIC trust load deadline cancels and joins blocked loading...OK
+79/113 internal.secure_random.deadline_tests.test.startup entropy deadline rejects expired budgets and missing timer admission...OK
+80/113 internal.secure_random.deadline_tests.test.startup entropy deadline completion preserves timely errors and rejects late or canceled results...OK
+81/113 internal.secure_random.deadline_tests.test.startup entropy deadline joins its timer when worker admission fails...OK
+82/113 internal.secure_random.deadline_tests.test.startup entropy timer joins a protected writer before returning its borrowed buffer...OK
+83/113 quic.handshake.trust_completion_tests.test.QUIC trust completion preserves allocation failure within budget...OK
+84/113 quic.handshake.trust_completion_tests.test.QUIC trust completion expired bundled-source failure returns HandshakeTimeout...OK
+85/113 quic.handshake.trust_completion_tests.test.QUIC trust completion canceled bundled-source failure returns Canceled...OK
+86/113 quic.one_rtt.tests.mod.test_0...OK
+87/113 quic.handshake.certificate_ownership_tests.test.QUIC client verifies native roots from SSL_CERT_FILE...OK
+88/113 quic.handshake.certificate_ownership_tests.test.QUIC client verifies caller-owned roots from PEM file...OK
+89/113 quic.handshake.certificate_ownership_tests.test.QUIC trust precedence caller-owned CA survives conflicting TCP verifier...OK
+90/113 quic.handshake.certificate_ownership_tests.test.QUIC trust precedence SSL_CERT_FILE survives conflicting TCP verifier...OK
+91/113 quic.handshake.certificate_ownership_tests.test.QUIC effective trust authenticates with inherited TCP verifier over inactive CA bundle...OK
+92/113 quic.handshake.tests.test_0...OK
+93/113 quic.endpoint_dispatcher.test_0...OK
+94/113 quic.endpoint_server.test_0...OK
+95/113 quic.endpoint_server.tests.test_0...OK
+96/113 quic.endpoint_dispatcher.tests.test_0...OK
+97/113 quic.endpoint_dispatcher.tests.test.QUIC endpoint dispatcher validates caller-owned deadlines...OK
+98/113 http3.runtime.tests.test_0...OK
+99/113 http3.runtime.tests.test_1...OK
+100/113 http3.runtime.development.tests.send.test_0...OK
+101/113 http3.runtime.stream.reader_tests.test_0...OK
+102/113 http3.runtime.client.happy_eyeballs_tests.test_0...OK
+103/113 http3.runtime.client.complete_request.test_0...OK
+104/113 http3.runtime.client.pool_startup_tests.test.HTTP3 startup entropy default pool origin starts the complete connection budget...OK
+105/113 http3.runtime.client.pool_startup_tests.test.HTTP3 startup entropy default pool redirect starts the complete connection budget...OK
+106/113 http3.runtime.client.pool_startup_tests.test.HTTP3 startup entropy default pool Alt-Svc starts the complete connection budget...OK
+107/113 http3.runtime.client.pool_startup_tests.test.HTTP3 startup entropy default pool Alt-Svc redirect starts the complete connection budget...OK
+108/113 http3.runtime.client.pool_startup_tests.test.HTTP3 startup entropy default pool early Alt-Svc starts the complete connection budget...OK
+109/113 http3.runtime.client.pool_startup_tests.test.HTTP3 startup entropy default pool custom transport keeps only timely failures...OK
+110/113 http3.runtime.shared_handshake_client_pool.stream_command.test_0...OK
+111/113 http3.runtime.concurrent_tests.test_0...OK
+112/113 http3.runtime.receive.field_value_tests.test_0...OK
+113/113 http3.origin_pool.test_0...OK
+All 113 tests passed.
+1/155 test_scope.test_0...OK
+2/155 http.mod.test_0...OK
+3/155 http.digest.test_0...OK
+4/155 http.multipart.test_0...OK
+5/155 http.authority.mod.test_0...OK
+6/155 http.cookies.mod.test_0...OK
+7/155 quic.client_trust.test_0...OK
+8/155 http.client.test_0...OK
+9/155 http.client_pool.test_0...OK
+10/155 http.client_tests.test_0...OK
+11/155 http.client_tests.effective_trust.test.HTTP effective trust H3-only accepts a verifier over an inactive CA bundle...OK
+12/155 http.client_tests.effective_trust.test.HTTP effective trust H3 preference attempts verifier policy before TCP fallback...OK
+13/155 http.client_tests.effective_trust.test.HTTP effective trust Alt-Svc pool accepts a verifier over an inactive CA bundle...OK
+14/155 http.client_tests.effective_trust.test.HTTP effective trust H3-only and Alt-Svc pool reject an active TCP CA bundle...OK
+15/155 http.client_tests.trust_deadline.test.HTTP H3 trust startup deadline admits a timer before loading roots...OK
+16/155 http.client_tests.trust_deadline.test.HTTP H3 startup entropy includes preparation in the configured connect timeout...OK
+17/155 internal.tcp_connect.test_0...OK
+18/155 http1.runtime.test_0...OK
+19/155 http2.runtime.test_0...OK
+20/155 http1.mod.test_0...OK
+21/155 http1.mod.test_1...OK
+22/155 http1.mod.test_2...OK
+23/155 http2.mod.test_0...OK
+24/155 http2.mod.test_1...OK
+25/155 tls.mod.test_0...OK
+26/155 tls.stream.mod.test_0...OK
+27/155 http3.runtime.test_0...OK
+28/155 quic.mod.test_0...OK
+29/155 quic.mod.test_1...OK
+30/155 quic.mod.test_2...OK
+31/155 quic.runtime.test_0...OK
+32/155 quic.runtime.test_1...OK
+33/155 quic.handshake.test_0...OK
+34/155 quic.tls.mod.test_0...OK
+35/155 quic.tls_client_hello.test_0...OK
+36/155 quic.resumption.mod.test_0...OK
+37/155 quic.resumption.ticket.mod.test_0...OK
+38/155 quic.zero_rtt.mod.test_0...OK
+39/155 quic.protection.test_0...OK
+40/155 quic.congestion.test_0...OK
+41/155 quic.one_rtt.test_0...OK
+42/155 http3.mod.test_0...OK
+43/155 http3.mod.test_1...OK
+44/155 http3.mod.test_2...OK
+45/155 http3.mod.test_3...OK
+46/155 http3.mod.test_4...OK
+47/155 http3.settings.test_0...OK
+48/155 http3.runtime.datagram.test_0...OK
+49/155 http3.runtime.datagram.test_1...OK
+50/155 quic.path_validation.test_0...OK
+51/155 quic.pacing.test_0...OK
+52/155 quic.packet_space.test_0...OK
+53/155 quic.handshake.client_authentication.test_0...OK
+54/155 quic.recovery.test_0...OK
+55/155 quic.connection_id.test_0...OK
+56/155 quic.load_balancing.quic_lb.mod.test_0...OK
+57/155 quic.stream.test_0...OK
+58/155 internal.stream_io.test_0...OK
+59/155 internal.stream_io.timed_read.test_0...OK
+60/155 tls.stream.record_stream.test_0...OK
+61/155 quic.client_connection_ids.test.startup entropy connection IDs preserve configured IDs and share one fill...OK
+62/155 quic.client_connection_ids.test.startup entropy connection ID failure retains the caller's options...OK
+63/155 http3.runtime.qpack.encoder.test_0...OK
+64/155 quic.pmtu.test_0...OK
+65/155 quic.observability.qlog.mod.test_0...OK
+66/155 http3.runtime.body_batch.test_0...OK
+67/155 internal.secure_random.deadline.test_0...OK
+68/155 http3.socks5_runtime.test_0...OK
+69/155 quic.initial_exchange.flight.test_0...OK
+70/155 quic.address_validation_token.test_0...OK
+71/155 internal.owned_result_deadline.test_0...OK
+72/155 internal.stream_io.timed_write.test_0...OK
+73/155 internal.owned_result_deadline_tests.test.owned deadline completion transfers timely success and destroys interrupted success once...OK
+74/155 internal.owned_result_deadline_tests.test.owned deadline completion preserves only timely source failures...OK
+75/155 internal.owned_result_deadline_tests.test.owned deadline admission preserves cancellation and expiry before work...OK
+76/155 internal.secure_random.deadline_tests.test.startup entropy deadline rejects expired budgets and missing timer admission...OK
+77/155 internal.secure_random.deadline_tests.test.startup entropy deadline completion preserves timely errors and rejects late or canceled results...OK
+78/155 internal.secure_random.deadline_tests.test.startup entropy deadline joins its timer when worker admission fails...OK
+79/155 internal.secure_random.deadline_tests.test.startup entropy timer joins a protected writer before returning its borrowed buffer...OK
+80/155 quic.one_rtt.tests.mod.test_0...OK
+81/155 quic.handshake.certificate_ownership_tests.test.QUIC client verifies native roots from SSL_CERT_FILE...OK
+82/155 quic.handshake.certificate_ownership_tests.test.QUIC client verifies caller-owned roots from PEM file...OK
+83/155 quic.handshake.certificate_ownership_tests.test.QUIC trust precedence caller-owned CA survives conflicting TCP verifier...OK
+84/155 quic.handshake.certificate_ownership_tests.test.QUIC trust precedence SSL_CERT_FILE survives conflicting TCP verifier...OK
+85/155 quic.handshake.certificate_ownership_tests.test.QUIC effective trust authenticates with inherited TCP verifier over inactive CA bundle...OK
+86/155 quic.handshake.tests.test_0...OK
+87/155 quic.endpoint_dispatcher.test_0...OK
+88/155 quic.endpoint_server.test_0...OK
+89/155 quic.endpoint_server.tests.test_0...OK
+90/155 quic.endpoint_dispatcher.tests.test_0...OK
+91/155 quic.endpoint_dispatcher.tests.test.QUIC endpoint dispatcher validates caller-owned deadlines...OK
+92/155 http3.runtime.tests.test_0...OK
+93/155 http3.runtime.tests.test_1...OK
+94/155 http3.runtime.development.tests.send.test_0...OK
+95/155 http3.runtime.stream.reader_tests.test_0...OK
+96/155 http3.runtime.client.happy_eyeballs_tests.test_0...OK
+97/155 http3.runtime.client.complete_request.test_0...OK
+98/155 http3.runtime.client.pool_startup_tests.test.HTTP3 startup entropy default pool origin starts the complete connection budget...OK
+99/155 http3.runtime.client.pool_startup_tests.test.HTTP3 startup entropy default pool redirect starts the complete connection budget...OK
+100/155 http3.runtime.client.pool_startup_tests.test.HTTP3 startup entropy default pool Alt-Svc starts the complete connection budget...OK
+101/155 http3.runtime.client.pool_startup_tests.test.HTTP3 startup entropy default pool Alt-Svc redirect starts the complete connection budget...OK
+102/155 http3.runtime.client.pool_startup_tests.test.HTTP3 startup entropy default pool early Alt-Svc starts the complete connection budget...OK
+103/155 http3.runtime.client.pool_startup_tests.test.HTTP3 startup entropy default pool custom transport keeps only timely failures...OK
+104/155 http3.runtime.shared_handshake_client_pool.stream_command.test_0...OK
+105/155 http3.runtime.concurrent_tests.test_0...OK
+106/155 http3.runtime.receive.field_value_tests.test_0...OK
+107/155 http.field_name.test_0...OK
+108/155 http.field_value.test_0...OK
+109/155 http.authority.host.test_0...OK
+110/155 quic.handshake.trust_completion_tests.test.QUIC trust completion preserves allocation failure within budget...OK
+111/155 quic.handshake.trust_completion_tests.test.QUIC trust completion expired bundled-source failure returns HandshakeTimeout...OK
+112/155 quic.handshake.trust_completion_tests.test.QUIC trust completion canceled bundled-source failure returns Canceled...OK
+113/155 tls.stream.trust_completion_tests.test.TLS trust completion preserves allocation failure within budget...OK
+114/155 tls.stream.trust_completion_tests.test.TLS trust completion expired bundled-source failure returns Timeout...OK
+115/155 tls.stream.trust_completion_tests.test.TLS trust completion canceled bundled-source failure returns Canceled...OK
+116/155 tls.stream.ca_bundle_lock_tests.test.TLS CA bundle lock caller deadline expires while the writer stays held...OK
+117/155 tls.stream.ca_bundle_lock_tests.test.TLS CA bundle lock handshake timeout expires while the writer stays held...OK
+118/155 tls.stream.ca_bundle_lock_tests.test.TLS CA bundle lock interrupted fast-path admission releases the reader...OK
+119/155 tls.stream.ca_bundle_lock_tests.test.TLS CA bundle lock canceled waiter preserves the next reader...OK
+120/155 tls.stream.trust_deadline_tests.test.TLS trust startup deadline admits a timer before loading roots...OK
+121/155 tls.stream.trust_deadline_tests.test.TLS trust startup handshake timeout begins before loading roots...OK
+122/155 tls.stream.alpn_tests.test_0...OK
+123/155 tls.trust_completion_admission_tests.test.TLS trust completion preserves admission failure within budget...OK
+124/155 tls.trust_completion_admission_tests.test.TLS trust completion expired admission failure returns Timeout...OK
+125/155 tls.trust_completion_admission_tests.test.TLS trust completion canceled admission failure returns Canceled...OK
+126/155 tls.trust_loading_tests.test.TLS trust load rejects late success and failure and destroys owned results...OK
+127/155 tls.trust_loading_tests.test.TLS trust load caller cancellation joins the active loader...OK
+128/155 tls.server_identity_file.test_0...OK
+129/155 internal.priority.test_0...OK
+130/155 http3.origin_pool.test_0...OK
+131/155 http2.runtime.tests.test_0...OK
+132/155 http2.runtime.tests.test_1...OK
+133/155 http2.runtime.tests.test_2...OK
+134/155 http1.runtime.tests.test_0...OK
+135/155 http1.runtime.write.test_0...OK
+136/155 http2.runtime.response.allocation_failure_tests.test_0...OK
+137/155 http2.runtime.response.forbidden_body_tests.test_0...OK
+138/155 http2.runtime.request.credit_failure_tests.test_0...OK
+139/155 http2.runtime.refusal_tests.test_0...OK
+140/155 http2.runtime.concurrent_tests.test_0...OK
+141/155 internal.pool_returns.test_0...OK
+142/155 internal.retired_capacity.test_0...OK
+143/155 internal.owned_fifo_admission.test_0...OK
+144/155 quic.client_trust.effective_policy_tests.test.QUIC effective trust inherits TCP verifier despite an inactive CA bundle...OK
+145/155 quic.client_trust.effective_policy_tests.test.QUIC effective trust still rejects an active TCP CA bundle...OK
+146/155 quic.client_trust.precedence_tests.test.QUIC trust precedence explicit verifier isolates TCP trust defaults...OK
+147/155 quic.client_trust.precedence_tests.test.QUIC trust precedence explicit store isolates TCP trust defaults...OK
+148/155 quic.client_trust.precedence_tests.test.QUIC trust precedence explicit environment isolates TCP trust defaults...OK
+149/155 quic.client_trust.precedence_tests.test.QUIC trust precedence bundled roots isolate TCP trust defaults...OK
+150/155 quic.client_trust.precedence_tests.test.QUIC trust precedence platform roots isolate TCP trust defaults...OK
+151/155 quic.client_trust.precedence_tests.test.QUIC trust precedence client identity inherits independently of explicit peer trust...OK
+152/155 quic.client_trust.loading_tests.test.QUIC trust load preserves cancellation while opening configured roots...OK
+153/155 quic.client_trust.loading_tests.test.QUIC trust load rejects pending cancellation before default roots...OK
+154/155 quic.client_trust.loading_tests.test.QUIC trust load deadline cancels and joins blocked loading...OK
+155/155 http.cookies.syntax.test_0...OK
+All 155 tests passed.
+1/26 test_scope.test_0...OK
+2/26 tls.mod.test_0...OK
+3/26 tls.trust_completion_admission_tests.test.TLS trust completion preserves admission failure within budget...OK
+4/26 tls.trust_completion_admission_tests.test.TLS trust completion expired admission failure returns Timeout...OK
+5/26 tls.trust_completion_admission_tests.test.TLS trust completion canceled admission failure returns Canceled...OK
+6/26 tls.trust_loading_tests.test.TLS trust load rejects late success and failure and destroys owned results...OK
+7/26 tls.trust_loading_tests.test.TLS trust load caller cancellation joins the active loader...OK
+8/26 tls.stream.mod.test_0...OK
+9/26 tls.server_identity_file.test_0...OK
+10/26 internal.owned_result_deadline.test_0...OK
+11/26 internal.owned_result_deadline_tests.test.owned deadline completion transfers timely success and destroys interrupted success once...OK
+12/26 internal.owned_result_deadline_tests.test.owned deadline completion preserves only timely source failures...OK
+13/26 internal.owned_result_deadline_tests.test.owned deadline admission preserves cancellation and expiry before work...OK
+14/26 tls.stream.trust_completion_tests.test.TLS trust completion preserves allocation failure within budget...OK
+15/26 tls.stream.trust_completion_tests.test.TLS trust completion expired bundled-source failure returns Timeout...OK
+16/26 tls.stream.trust_completion_tests.test.TLS trust completion canceled bundled-source failure returns Canceled...OK
+17/26 tls.stream.ca_bundle_lock_tests.test.TLS CA bundle lock caller deadline expires while the writer stays held...OK
+18/26 tls.stream.ca_bundle_lock_tests.test.TLS CA bundle lock handshake timeout expires while the writer stays held...OK
+19/26 tls.stream.ca_bundle_lock_tests.test.TLS CA bundle lock interrupted fast-path admission releases the reader...OK
+20/26 tls.stream.ca_bundle_lock_tests.test.TLS CA bundle lock canceled waiter preserves the next reader...OK
+21/26 tls.stream.trust_deadline_tests.test.TLS trust startup deadline admits a timer before loading roots...OK
+22/26 tls.stream.trust_deadline_tests.test.TLS trust startup handshake timeout begins before loading roots...OK
+23/26 tls.stream.record_stream.test_0...OK
+24/26 tls.stream.alpn_tests.test_0...OK
+25/26 internal.stream_io.test_0...OK
+26/26 internal.stream_io.timed_read.test_0...OK
+All 26 tests passed.
+Build Summary: 26/26 steps succeeded
+test-quic success
++- run test-quic with test progress success 1s
+   +- compile test Debug native success 32s MaxRSS:3G
+      +- WriteFile macho_0_p256_field_arm64.S cached
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 186ms MaxRSS:31M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 188ms MaxRSS:31M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options success
+      +- options cached
+test-tls success
++- run test-tls with test progress success 4s
+   +- compile test Debug native success 27s MaxRSS:2G
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile (reused)
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- WriteFile (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options success
+      +- options (reused)
+test-http success
++- run test-http with test progress success 5s
+   +- compile test Debug native success 38s MaxRSS:4G
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile (reused)
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- WriteFile (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options success
+      +- options (reused)
+test-websocket success
++- run test-websocket with test progress success 923ms
+   +- compile test Debug native success 31s MaxRSS:3G
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile (reused)
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- WriteFile (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options success
+      +- options (reused)
+test-webtransport success
++- run test-webtransport with test progress success 973ms
+   +- compile test Debug native success 29s MaxRSS:2G
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile (reused)
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- WriteFile (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options success
+      +- options (reused)
+
+[traex-zig-guard 2026-11-25 17:21:52] finished Zig tree root=95679 peak=4016MiB result=0

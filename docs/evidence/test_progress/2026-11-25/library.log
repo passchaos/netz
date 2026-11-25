@@ -1,0 +1,310 @@
+1/234 stream.test_0...OK
+2/234 tls.mod.test_0...OK
+3/234 proxy.mod.test_0...OK
+4/234 vpn.mod.test_0...OK
+5/234 mesh.mod.test_0...OK
+6/234 http.mod.test_0...OK
+7/234 http1.mod.test_0...OK
+8/234 http1.mod.test_1...OK
+9/234 http1.mod.test_2...OK
+10/234 http2.mod.test_0...OK
+11/234 http2.mod.test_1...OK
+12/234 http3.mod.test_0...OK
+13/234 http3.mod.test_1...OK
+14/234 http3.mod.test_2...OK
+15/234 http3.mod.test_3...OK
+16/234 http3.mod.test_4...OK
+17/234 grpc.mod.test_0...OK
+18/234 quic.mod.test_0...OK
+19/234 quic.mod.test_1...OK
+20/234 quic.mod.test_2...OK
+21/234 websocket.mod.test_0...OK
+22/234 websocket.mod.test_1...OK
+23/234 mqtt.mod.test_0...OK
+24/234 mqtt.mod.test_1...OK
+25/234 mqtt.mod.test_2...OK
+26/234 webtransport.mod.test_0...OK
+27/234 webtransport.mod.test_1...OK
+28/234 webtransport.h2.mod.test_0...OK
+29/234 webtransport.runtime.test_0...OK
+30/234 webtransport.flow_control.test_0...OK
+31/234 webtransport.application_protocol.test_0...OK
+32/234 webtransport.runtime.owner.test_0...OK
+33/234 webtransport.runtime.tests.test_0...OK
+34/234 webtransport.runtime.tests.test_1...OK
+35/234 webtransport.runtime.tests.test_2...OK
+36/234 webtransport.runtime.tests.test_3...OK
+37/234 webtransport.runtime.tests.test_4...OK
+38/234 webtransport.runtime.tests.test_5...OK
+39/234 webtransport.runtime.tests.test_6...OK
+40/234 webtransport.runtime.tests.test_7...OK
+41/234 webtransport.runtime.tests.test_8...OK
+42/234 webtransport.runtime.tests.test_9...OK
+43/234 webtransport.runtime.tests.test_10...OK
+44/234 webtransport.runtime.tests.test_11...OK
+45/234 webtransport.runtime.tests.test_12...OK
+46/234 webtransport.h2.capsule.test_0...OK
+47/234 webtransport.h2.reader.test_0...OK
+48/234 webtransport.h2.state.test_0...OK
+49/234 webtransport.h2.endpoint_client.test_0...OK
+50/234 webtransport.h2.endpoint_client.reconnecting.test_0...OK
+51/234 webtransport.h2.endpoint_server.test_0...OK
+52/234 webtransport.h2.endpoint_listener.test_0...OK
+53/234 webtransport.h2.endpoint_listener.runtime.test_0...OK
+54/234 webtransport.runtime.endpoint_client.flow_tests.test_0...OK
+55/234 webtransport.runtime.association.tests.discovery.test_0...OK
+56/234 webtransport.runtime.association.tests.invalid_session_id.test_0...OK
+57/234 webtransport.runtime.association.tests.truncated.test_0...OK
+58/234 webtransport.runtime.connect.application_protocol.test_0...OK
+59/234 webtransport.runtime.connect.negotiation.test_0...OK
+60/234 webtransport.runtime.stream_incremental.test_0...OK
+61/234 webtransport.runtime.stream_incremental.test_1...OK
+62/234 webtransport.runtime.flow.receive.test_0...OK
+63/234 webtransport.runtime.flow.write.test_0...OK
+64/234 webtransport.runtime.flow.send.test_0...OK
+65/234 webtransport.runtime.flow.streams.test_0...OK
+66/234 webtransport.runtime.flow.grant.test_0...OK
+67/234 webtransport.runtime.flow.datagram.test_0...OK
+68/234 webtransport.runtime.stream.reset.test_0...OK
+69/234 webtransport.runtime.flow.datagram.tests.test_0...OK
+70/234 mqtt.runtime.test_0...OK
+71/234 mqtt.reconnect.test_0...OK
+72/234 mqtt.reconnect.test_1...OK
+73/234 mqtt.broker.test_0...OK
+74/234 mqtt.bridge.test_0...OK
+75/234 mqtt.router.test_0...OK
+76/234 mqtt.router.test_1...OK
+77/234 mqtt.retained.mod.test_0...OK
+78/234 mqtt.session.mod.test_0...OK
+79/234 mqtt.will.mod.test_0...OK
+80/234 mqtt.runtime.packet_transport.test_0...OK
+81/234 mqtt.runtime.packet_transport.test_1...OK
+82/234 mqtt.runtime.auth_tests.test_0...OK
+83/234 mqtt.runtime.reconnect_tests.test.MQTT reconnect poll accepts one caller-owned deadline...OK
+84/234 mqtt.reconnect.command_queue.test_0...OK
+85/234 mqtt.persistence.mod.test_0...OK
+86/234 mqtt.broker_config.test_0...OK
+87/234 websocket.runtime.test_0...OK
+88/234 http1.runtime.test_0...OK
+89/234 internal.tcp_connect.test_0...OK
+90/234 tls.stream.mod.test_0...OK
+91/234 internal.stream_io.test_0...OK
+92/234 internal.stream_io.timed_read.test_0...OK
+93/234 tls.stream.record_stream.test_0...OK
+94/234 http.cookies.mod.test_0...OK
+95/234 http2.runtime.test_0...OK
+96/234 mqtt.runtime.acknowledgement.pending.test_0...OK
+97/234 internal.stream_io.timed_write.test_0...OK
+98/234 http.cookies.syntax.test_0...OK
+99/234 tls.stream.alpn_tests.test_0...OK
+100/234 http1.runtime.tests.test_0...OK
+101/234 http2.runtime.tests.test_0...OK
+102/234 http2.runtime.tests.test_1...OK
+103/234 http2.runtime.tests.test_2...OK
+104/234 http1.runtime.write.test_0...OK
+105/234 http2.runtime.response.allocation_failure_tests.test_0...OK
+106/234 http2.runtime.response.forbidden_body_tests.test_0...OK
+107/234 http2.runtime.request.credit_failure_tests.test_0...OK
+108/234 http2.runtime.refusal_tests.test_0...OK
+109/234 http2.runtime.concurrent_tests.test_0...OK
+110/234 websocket.runtime.tests.test_0...OK
+111/234 websocket.runtime.h3.test_0...OK
+112/234 websocket.runtime.cookie_h2_tests.test_0...OK
+113/234 websocket.runtime.mutex_deadline_tests.test_0...OK
+114/234 mqtt.bridge.outbound.test_0...OK
+115/234 mqtt.broker.tests.test_0...OK
+116/234 mqtt.broker.tests.test_1...OK
+117/234 mqtt.bridge.outbound_engine.test_0...OK
+118/234 mqtt.bridge.local_source.test_0...OK
+119/234 mqtt.broker_tests.test_0...OK
+120/234 mqtt.broker.local_consumer_tests.test_0...OK
+121/234 mqtt.broker.registration_persistence_tests.test_0...OK
+122/234 mqtt.runtime.tests.test_0...OK
+123/234 mqtt.runtime.transport.parts_deadline_tests.test_0...OK
+124/234 mqtt.runtime.acknowledgement.publish_deadline_tests.test_0...OK
+125/234 websocket.stream_connection.test_0...OK
+126/234 quic.runtime.test_0...OK
+127/234 quic.runtime.test_1...OK
+128/234 quic.protection.test_0...OK
+129/234 quic.tls_client_hello.test_0...OK
+130/234 quic.tls.mod.test_0...OK
+131/234 quic.handshake.test_0...OK
+132/234 quic.client_trust.test_0...OK
+133/234 quic.zero_rtt.mod.test_0...OK
+134/234 quic.one_rtt.test_0...OK
+135/234 quic.packet_space.test_0...OK
+136/234 quic.stream.test_0...OK
+137/234 quic.recovery.test_0...OK
+138/234 quic.endpoint_dispatcher.test_0...OK
+139/234 quic.endpoint_server.test_0...OK
+140/234 quic.connection_id.test_0...OK
+141/234 quic.congestion.test_0...OK
+142/234 quic.pacing.test_0...OK
+143/234 quic.path_validation.test_0...OK
+144/234 quic.pmtu.test_0...OK
+145/234 quic.address_validation_token.test_0...OK
+146/234 quic.observability.qlog.mod.test_0...OK
+147/234 quic.load_balancing.quic_lb.mod.test_0...OK
+148/234 quic.resumption.mod.test_0...OK
+149/234 quic.endpoint_server.tests.test_0...OK
+150/234 quic.handshake.client_authentication.test_0...OK
+151/234 quic.resumption.ticket.mod.test_0...OK
+152/234 quic.endpoint_dispatcher.tests.test_0...OK
+153/234 quic.endpoint_dispatcher.tests.test.QUIC endpoint dispatcher validates caller-owned deadlines...OK
+154/234 quic.initial_exchange.flight.test_0...OK
+155/234 quic.one_rtt.tests.mod.test_0...OK
+156/234 quic.handshake.tests.test_0...OK
+157/234 grpc.xds.mod.test_0...OK
+158/234 grpc.channel.connectivity.test_0...OK
+159/234 grpc.channel.shared.test_0...OK
+160/234 grpc.compression.test_0...OK
+161/234 grpc.status_details.test_0...OK
+162/234 grpc.orca.test_0...OK
+163/234 grpc.orca.oob.test_0...OK
+164/234 grpc.response_metadata.test_0...OK
+165/234 grpc.web.test_0...OK
+166/234 grpc.runtime_tests.test_0...OK
+167/234 grpc.channel.health_gate.test_0...OK
+168/234 grpc.channel.locality.test_0...OK
+169/234 grpc.stream.mod.test_0...OK
+170/234 grpc.health.test_0...OK
+171/234 grpc.health.reconnecting.test_0...OK
+172/234 grpc.web.cors.mod.test_0...OK
+173/234 grpc.web.http1.mod.test_0...OK
+174/234 grpc.web.http2.mod.test_0...OK
+175/234 grpc.response_metadata.tests.test_0...OK
+176/234 grpc.channel.shared.update.tests.test_0...OK
+177/234 grpc.channel.shared.retention.tests.test_0...OK
+178/234 grpc.channel.shared.resolution.tests.test_0...OK
+179/234 grpc.channel.shared.stream.tests.test_0...OK
+180/234 grpc.xds.ads.test_0...OK
+181/234 grpc.xds.tls_material.test_0...OK
+182/234 grpc.xds.eds.test_0...OK
+183/234 grpc.xds.cds.test_0...OK
+184/234 grpc.xds.routing.mod.test_0...OK
+185/234 grpc.xds.rds.test_0...OK
+186/234 grpc.xds.lds.test_0...OK
+187/234 grpc.xds.client_target.test_0...OK
+188/234 grpc.xds.lrs.test_0...OK
+189/234 grpc.xds.sds.test_0...OK
+190/234 grpc.xds.runtime.test_0...OK
+191/234 http3.settings.test_0...OK
+192/234 grpc.xds.lds.rbac.test_0...OK
+193/234 grpc.xds.routing.template.test_0...OK
+194/234 grpc.xds.ads.delta.test_0...OK
+195/234 http3.runtime.test_0...OK
+196/234 http3.origin_pool.test_0...OK
+197/234 http3.runtime.tests.test_0...OK
+198/234 http3.runtime.tests.test_1...OK
+199/234 http3.runtime.development.tests.send.test_0...OK
+200/234 http3.runtime.datagram.test_0...OK
+201/234 http3.runtime.datagram.test_1...OK
+202/234 http3.runtime.stream.reader_tests.test_0...OK
+203/234 http3.runtime.client.happy_eyeballs_tests.test_0...OK
+204/234 http3.runtime.client.complete_request.test_0...OK
+205/234 http3.runtime.shared_handshake_client_pool.stream_command.test_0...OK
+206/234 http3.runtime.concurrent_tests.test_0...OK
+207/234 http3.runtime.receive.field_value_tests.test_0...OK
+208/234 internal.priority.test_0...OK
+209/234 http.digest.test_0...OK
+210/234 http.multipart.test_0...OK
+211/234 http.authority.mod.test_0...OK
+212/234 http.client.test_0...OK
+213/234 http.client_pool.test_0...OK
+214/234 http.client_tests.test_0...OK
+215/234 mesh.disco.mod.test_0...OK
+216/234 mesh.derp.mod.test_0...OK
+217/234 http.authority.host.test_0...OK
+218/234 vpn.wireguard.mod.test_0...OK
+219/234 proxy.socks.mod.test_0...OK
+220/234 proxy.http_connect.mod.test_0...OK
+221/234 proxy.shadowsocks.mod.test_0...OK
+222/234 proxy.trojan.mod.test_0...OK
+223/234 proxy.vless.mod.test_0...OK
+224/234 proxy.vmess.mod.test_0...OK
+225/234 proxy.tuic.mod.test_0...OK
+226/234 proxy.hysteria.mod.test_0...OK
+227/234 proxy.tls.mod.test_0...OK
+228/234 proxy.transport.mod.test_0...OK
+229/234 proxy.internal.mod.test_0...OK
+230/234 proxy.internal.byte_bucket.test_0...OK
+231/234 proxy.internal.byte_bucket.stream.test_0...OK
+232/234 proxy.internal.relay_queue.test_0...OK
+233/234 proxy.internal.relay_queue.pending_input.test_0...OK
+234/234 tls.server_identity_file.test_0...OK
+All 234 tests passed.
+Build Summary: 9/9 steps succeeded
+test-lib success
++- run test success 631ms
+   +- compile test Debug native success 7s MaxRSS:1G
+      +- WriteFile macho_0_p256_field_arm64.S cached
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 185ms MaxRSS:31M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 179ms MaxRSS:31M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options cached

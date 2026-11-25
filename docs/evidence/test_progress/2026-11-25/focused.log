@@ -1,0 +1,151 @@
+1/74 test_scope.test_0...OK
+2/74 http3.mod.test_0...OK
+3/74 http3.mod.test_1...OK
+4/74 http3.mod.test_2...OK
+5/74 http3.mod.test_3...OK
+6/74 http3.mod.test_4...OK
+7/74 http3.settings.test_0...OK
+8/74 http3.runtime.test_0...OK
+9/74 http3.origin_pool.test_0...OK
+10/74 http3.runtime.tests.test_0...OK
+11/74 http3.runtime.tests.test_1...OK
+12/74 http3.runtime.development.tests.send.test_0...OK
+13/74 http3.runtime.datagram.test_0...OK
+14/74 http3.runtime.datagram.test_1...OK
+15/74 http3.runtime.stream.reader_tests.test_0...OK
+16/74 http3.runtime.client.happy_eyeballs_tests.test_0...OK
+17/74 http3.runtime.client.complete_request.test_0...OK
+18/74 http3.runtime.client.pool_startup_tests.test.HTTP3 startup entropy default pool origin starts the complete connection budget...OK
+19/74 http3.runtime.client.pool_startup_tests.test.HTTP3 startup entropy default pool redirect starts the complete connection budget...OK
+20/74 http3.runtime.client.pool_startup_tests.test.HTTP3 startup entropy default pool Alt-Svc starts the complete connection budget...OK
+21/74 http3.runtime.client.pool_startup_tests.test.HTTP3 startup entropy default pool Alt-Svc redirect starts the complete connection budget...OK
+22/74 http3.runtime.client.pool_startup_tests.test.HTTP3 startup entropy default pool early Alt-Svc starts the complete connection budget...OK
+23/74 http3.runtime.client.pool_startup_tests.test.HTTP3 startup entropy default pool custom transport keeps only timely failures...OK
+24/74 http3.runtime.shared_handshake_client_pool.stream_command.test_0...OK
+25/74 http3.runtime.concurrent_tests.test_0...OK
+26/74 http3.runtime.receive.field_value_tests.test_0...OK
+27/74 quic.mod.test_0...OK
+28/74 quic.mod.test_1...OK
+29/74 quic.mod.test_2...OK
+30/74 quic.handshake.test_0...OK
+31/74 quic.tls.mod.test_0...OK
+32/74 quic.tls_client_hello.test_0...OK
+33/74 quic.resumption.mod.test_0...OK
+34/74 quic.resumption.ticket.mod.test_0...OK
+35/74 quic.zero_rtt.mod.test_0...OK
+36/74 quic.protection.test_0...OK
+37/74 quic.congestion.test_0...OK
+38/74 quic.one_rtt.test_0...OK
+39/74 quic.runtime.test_0...OK
+40/74 quic.runtime.test_1...OK
+41/74 quic.handshake.client_authentication.test_0...OK
+42/74 quic.packet_space.test_0...OK
+43/74 quic.recovery.test_0...OK
+44/74 quic.path_validation.test_0...OK
+45/74 quic.connection_id.test_0...OK
+46/74 quic.load_balancing.quic_lb.mod.test_0...OK
+47/74 quic.stream.test_0...OK
+48/74 internal.tcp_connect.test_0...OK
+49/74 internal.stream_io.test_0...OK
+50/74 internal.stream_io.timed_read.test_0...OK
+51/74 quic.pacing.test_0...OK
+52/74 http3.runtime.qpack.encoder.test_0...OK
+53/74 quic.pmtu.test_0...OK
+54/74 quic.observability.qlog.mod.test_0...OK
+55/74 http3.runtime.body_batch.test_0...OK
+56/74 internal.owned_result_deadline.test_0...OK
+57/74 quic.initial_exchange.flight.test_0...OK
+58/74 quic.address_validation_token.test_0...OK
+59/74 internal.secure_random.deadline.test_0...OK
+60/74 http.field_name.test_0...OK
+61/74 http.field_value.test_0...OK
+62/74 http.authority.mod.test_0...OK
+63/74 http.authority.host.test_0...OK
+64/74 internal.owned_result_deadline_tests.test.owned deadline completion transfers timely success and destroys interrupted success once...OK
+65/74 internal.owned_result_deadline_tests.test.owned deadline completion preserves only timely source failures...OK
+66/74 internal.owned_result_deadline_tests.test.owned deadline admission preserves cancellation and expiry before work...OK
+67/74 quic.one_rtt.tests.mod.test_0...OK
+68/74 quic.handshake.tests.test_0...OK
+69/74 quic.client_trust.test_0...OK
+70/74 quic.endpoint_dispatcher.test_0...OK
+71/74 quic.endpoint_server.test_0...OK
+72/74 quic.endpoint_server.tests.test_0...OK
+73/74 quic.endpoint_dispatcher.tests.test_0...OK
+74/74 quic.endpoint_dispatcher.tests.test.QUIC endpoint dispatcher validates caller-owned deadlines...OK
+All 74 tests passed.
+Build Summary: 10/10 steps succeeded
+test-http3 success
++- run test success 642ms
+   +- compile test Debug native success 29s MaxRSS:2G
+      +- WriteFile macho_0_p256_field_arm64.S cached
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 288ms MaxRSS:31M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 180ms MaxRSS:31M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options success
+      +- options cached

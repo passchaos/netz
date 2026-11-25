@@ -1,0 +1,56 @@
+{
+  "baseline_head": "22a293fad45549bd77dd75a413b9632bfe39c1ab",
+  "platform": "aarch64-macos",
+  "guarded": true,
+  "jobs": 1,
+  "native_scoped_tests": {
+    "executables": [
+      58,
+      149,
+      113,
+      155,
+      26
+    ],
+    "total_passed": 501
+  },
+  "checks": {
+    "fmt": {
+      "passed": true,
+      "expected_failure": false
+    },
+    "focused": {
+      "passed": true,
+      "expected_failure": false
+    },
+    "default": {
+      "passed": true,
+      "expected_failure": false
+    },
+    "library": {
+      "passed": true,
+      "expected_failure": false
+    },
+    "no-match": {
+      "passed": true,
+      "expected_failure": true
+    }
+  },
+  "sources": [
+    {
+      "path": "build.zig",
+      "sha256": "766ed89bbfe584938c4b85825f501b1289bd88d8ae4960dbee96bcac3ecb27a5"
+    },
+    {
+      "path": "build/testing/focused.zig",
+      "sha256": "d9eecfa3ef2c3c043cf733e5b228d653e15426ff1d527216c7f2ae4a11411362"
+    },
+    {
+      "path": "build/testing/run.zig",
+      "sha256": "d9f9f7d697923e0cf52e7bf9f50cbb811d836388f1531ea4bd56abe4b08d11b4"
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "sha256": "2190cd129a4f9729813f76814eadb0dfd455603f6ee3c4d85ba960ba3c87bfde"
+    }
+  ]
+}
