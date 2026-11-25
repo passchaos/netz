@@ -1,0 +1,19 @@
+{
+  "observed_utc": "2026-11-25T15:19:31.978808+00:00",
+  "baseline_ci": {
+    "run_id": 45641634010,
+    "commit": "6b17e5f0a2720f841271c0df8934fa818caf6b25",
+    "preflight_job_id": 139301549731,
+    "failure": "timing-based assertion expected more than ten notices; observed eight"
+  },
+  "candidate": {
+    "source_sha256": {
+      "tools/ci/run_test_progress_test.py": "2b619ff6daa528fa0e95a6d99337f5c4abc7f938e4e09f5827bdac42f7212eb0"
+    },
+    "command": "python3 tools/ci/run_test_progress_test.py",
+    "exit_code": 0,
+    "tests_passed": 10,
+    "publication_contract": "Each child test marker waits for its matching escaped summary before advancing; final test and compiler output remain checked"
+  },
+  "delivery": "local correction; defer push until verified live complete job 139301549827 finishes"
+}

@@ -62,8 +62,10 @@ class ProgressTest(unittest.TestCase):
             summary = root / "summary.md"
             env = os.environ.copy()
             env["GITHUB_STEP_SUMMARY"] = str(summary)
-            source = "import time;\nfor n in range(1,15):\n print(str(n)+'/14 http.test<&>...OK',flush=True); time.sleep(0.015)\nprint('compiling <next & artifact>',flush=True)"
-            result = subprocess.run([sys.executable, str(Path(__file__).with_name("run_test_progress.py")), "--log", str(root / "log"), "--interval", "0.01", "--", sys.executable, "-c", source], env=env, capture_output=True, timeout=5)
+            # Each child line waits for its own published summary before the
+            # next one, ensuring notice count without assuming scheduler speed.
+            source = "import html,os,time; from pathlib import Path;\nsummary=Path(os.environ['GITHUB_STEP_SUMMARY']); until=time.monotonic()+4\nfor n in range(1,15):\n marker=str(n)+'/14 http.test<&>...OK'; print(marker,flush=True)\n while not summary.exists() or marker not in html.unescape(summary.read_text()):\n  if time.monotonic()>=until: raise TimeoutError('summary did not publish '+marker)\n  time.sleep(0.001)\nprint('compiling <next & artifact>',flush=True)"
+            result = subprocess.run([sys.executable, str(Path(__file__).with_name("run_test_progress.py")), "--log", str(root / "log"), "--interval", "0.01", "--", sys.executable, "-c", source], env=env, capture_output=True, timeout=8)
             self.assertEqual(0, result.returncode)
             self.assertGreater(result.stdout.count(b"::notice"), 10)
             text = summary.read_text()
