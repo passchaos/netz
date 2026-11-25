@@ -2,14 +2,25 @@
 """Stream command logs and expose the last visible test in bounded annotations."""
 import argparse
 import codecs
+import html
 import os
 from pathlib import Path
 import queue
 import re
+import signal
 import subprocess
 import sys
 import threading
 import time
+
+
+class Interrupted(BaseException):
+    def __init__(self, signum):
+        self.signum = signum
+
+
+def interrupt(signum, _):
+    raise Interrupted(signum)
 
 
 def escape(text):
@@ -43,7 +54,14 @@ def stream(command, output, title, interval):
     decoder = codecs.getincrementaldecoder("utf-8")("replace")
     last_test = "No test name emitted yet; build or startup is still active."
 
+    def summary():
+        path = os.environ.get("GITHUB_STEP_SUMMARY")
+        if path:
+            last_output = recent.splitlines()[-1][-2000:] if recent else "No command output yet."
+            Path(path).write_text("### " + html.escape(title) + "\n\n<pre>" + html.escape(last_test) + "\n\nLast command output:\n" + html.escape(last_output) + "</pre>\n", encoding="utf-8")
+
     def notice():
+        summary()
         property_title = escape(title).replace(",", "%2C").replace(":", "%3A")
         # Test names are printed before their result without a newline. Actions
         # commands must begin a new line to become annotations.
@@ -75,7 +93,7 @@ def stream(command, output, title, interval):
             if time.monotonic() >= deadline:
                 notice()
                 deadline = time.monotonic() + interval
-    except BaseException:
+    except BaseException as err:
         if process.poll() is None:
             try:
                 process.terminate()
@@ -95,12 +113,21 @@ def stream(command, output, title, interval):
                 pass
         reader.join()
         process.stdout.close()
+        # Child cleanup must finish even if the optional summary/console fails.
+        summary()
+        if isinstance(err, Interrupted):
+            property_title = escape(title).replace(",", "%2C").replace(":", "%3A")
+            last_output = recent.splitlines()[-1][-2000:] if recent else "No command output yet."
+            line = "\n::error title=" + property_title + "::Interrupted command; last visible test: " + escape(last_test) + "; last output: " + escape(last_output) + "\n"
+            sys.stdout.buffer.write(line.encode("utf-8"))
+            sys.stdout.buffer.flush()
         raise
     reader.join()
     process.stdout.close()
     sys.stdout.buffer.write(decoder.decode(b"", final=True).encode("utf-8"))
     sys.stdout.buffer.flush()
     status = process.wait()
+    summary()
     if status:
         notice()
     return status if status >= 0 else 128 - status
@@ -116,7 +143,12 @@ def main():
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     if not command or args.interval <= 0:
         parser.error("a command and positive annotation interval are required")
-    return run(command, args.log, args.title, args.interval)
+    signal.signal(signal.SIGINT, interrupt)
+    signal.signal(signal.SIGTERM, interrupt)
+    try:
+        return run(command, args.log, args.title, args.interval)
+    except Interrupted as err:
+        return 128 + err.signum
 
 
 if __name__ == "__main__":

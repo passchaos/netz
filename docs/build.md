@@ -52,15 +52,23 @@ test name as an Actions notice every 60 seconds. It handles partial terminal
 lines, retains exact child log bytes and command exit status, and keeps its
 reader queue and progress-text buffer bounded. This makes the last visible
 runtime boundary available through annotations when detailed logs require
-login. Compiler commands remain in the full log. Custom runners retain their
-own output policy.
+login. It also replaces its `GITHUB_STEP_SUMMARY` content with the latest test
+and command output at each interval and on completion. The summary preserves
+the current boundary even when only earlier notices appear in the annotations
+list. SIGINT and SIGTERM stop the child, publish an error with the latest
+visible test and output, and return 130 and 143 respectively. Compiler commands
+remain in the full log. Custom runners retain their own output policy.
 
 CI runs the complete `zig build test -j1` gate in its own 30-minute job, in
 parallel with the formatting/evidence/source-release and bounded fuzz/soak
 preflight job. Both use the same pinned dependency/toolchain setup action.
 The existing `verify` check requires both jobs to succeed, so a failed,
 canceled or skipped gate cannot pass the combined check. This gives the
-complete gate its own budget without trimming either test scope.
+complete gate its own budget without trimming either test scope. On Ubuntu,
+GNU `timeout` interrupts the complete command after 28 minutes and allows 10
+seconds for termination before killing it. This reserves time within the job
+limit for the final progress report and failure context; a timeout still fails
+the gate.
 
 Runnable examples are under `examples/` and are wired into the build:
 

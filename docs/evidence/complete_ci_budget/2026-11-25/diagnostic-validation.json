@@ -1,0 +1,75 @@
+{
+  "observed_utc": "2026-11-25T13:53:36.624349+00:00",
+  "baseline_commit": "e7d7a0b55b4841667211af62ddd3166250421692",
+  "platform": "aarch64-macos",
+  "source_sha256": {
+    ".github/workflows/ci.yml": "533c7afa4059c753d08b9b70dc90b03a12cd0c872275309b9e501127c4ac403f",
+    "tools/ci/run_test_progress.py": "ca9f3c904324b4ce50ff9650a702aa56ffd2043b82674c0d9a4bd5b2e89ee4dd",
+    "tools/ci/run_test_progress_test.py": "e5f11550cd0caab30891c6cd7d20f1acfb0b741f6782ef0846a7ab10b8a4ea1c",
+    "docs/build.md": "992e0b9faeb3a9b39e4fb474946278b1343663b8951491033a2cfc92e0c2e0f4"
+  },
+  "checks": {
+    "progress_helper": {
+      "command": "python3 tools/ci/run_test_progress_test.py",
+      "exit_code": 0,
+      "tests_passed": 9,
+      "covers": [
+        "latest state beyond ten notices",
+        "HTML and annotation escaping",
+        "SIGINT returns 130 and stops child",
+        "summary write failure stops child with buffered output",
+        "partial names, UTF-8, exact bytes and command failure status"
+      ]
+    },
+    "failure_formatter": {
+      "command": "python3 tools/ci/test_failure_annotations_test.py",
+      "exit_code": 0,
+      "tests_passed": 6
+    },
+    "workflow_yaml": {
+      "workflow_and_composite_action_parsed": true
+    },
+    "complete_shell": {
+      "baseline_failure_exit": 7,
+      "candidate_failure_exit": 7,
+      "candidate_success_exit": 0,
+      "failure_context_preserved": true,
+      "latest_summaries_verified": true,
+      "success_has_no_error_annotation": true,
+      "timeout_scope": "exec-only shim; GNU deadline not exercised"
+    },
+    "diff_check": {
+      "exit_code": 0
+    }
+  },
+  "previous_ci": {
+    "run_id": 45619498483,
+    "commit": "e7d7a0b55b4841667211af62ddd3166250421692",
+    "native_jobs": {
+      "windows": {
+        "job_id": 139223545001,
+        "conclusion": "success"
+      },
+      "linux": {
+        "job_id": 139223545129,
+        "conclusion": "success"
+      }
+    },
+    "preflight": {
+      "job_id": 139223544954,
+      "conclusion": "success"
+    },
+    "complete": {
+      "job_id": 139223544851,
+      "conclusion": "cancelled",
+      "test_started_at": "2026-11-25T13:02:33Z",
+      "test_cancelled_at": "2026-11-25T13:32:11Z",
+      "actual_last_boundary": "unknown; public notices contain only early completed tests"
+    }
+  },
+  "pending": [
+    "actual Ubuntu GNU timeout deadline",
+    "GitHub step summary upload",
+    "complete-suite acceptance"
+  ]
+}

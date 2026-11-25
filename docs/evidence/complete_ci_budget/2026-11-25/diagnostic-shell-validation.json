@@ -1,0 +1,26 @@
+{
+  "baseline_revision": "e7d7a0b55b4841667211af62ddd3166250421692",
+  "timeout_scope": "exec-only shim; GNU deadline not exercised",
+  "baseline_failure": {
+    "exit_code": 7,
+    "stdout": "1/1 http.test.full_gate_fixture...FAIL (FixtureFailure)\nerror: full gate fixture at 50%\n\n::notice title=Complete test progress::1/1 http.test.full_gate_fixture...FAIL (FixtureFailure)\n::error title=Native regression: complete tests::1/1 http.test.full_gate_fixture...FAIL (FixtureFailure)%0Aerror: full gate fixture at 50%25\n::error title=Native regression: complete tests::1/1 http.test.full_gate_fixture...FAIL (FixtureFailure)%0Aerror: full gate fixture at 50%25\n",
+    "stderr": "",
+    "log": "1/1 http.test.full_gate_fixture...FAIL (FixtureFailure)\nerror: full gate fixture at 50%\n",
+    "summary": "### Complete test progress\n\n<pre>1/1 http.test.full_gate_fixture...FAIL (FixtureFailure)\n\nLast command output:\nerror: full gate fixture at 50%</pre>\n"
+  },
+  "candidate_failure": {
+    "exit_code": 7,
+    "stdout": "1/1 http.test.full_gate_fixture...FAIL (FixtureFailure)\nerror: full gate fixture at 50%\n\n::notice title=Complete test progress::1/1 http.test.full_gate_fixture...FAIL (FixtureFailure)\n::error title=Native regression: complete tests::1/1 http.test.full_gate_fixture...FAIL (FixtureFailure)%0Aerror: full gate fixture at 50%25\n::error title=Native regression: complete tests::1/1 http.test.full_gate_fixture...FAIL (FixtureFailure)%0Aerror: full gate fixture at 50%25\n",
+    "stderr": "",
+    "log": "1/1 http.test.full_gate_fixture...FAIL (FixtureFailure)\nerror: full gate fixture at 50%\n",
+    "summary": "### Complete test progress\n\n<pre>1/1 http.test.full_gate_fixture...FAIL (FixtureFailure)\n\nLast command output:\nerror: full gate fixture at 50%</pre>\n"
+  },
+  "candidate_success": {
+    "exit_code": 0,
+    "stdout": "1/1 http.test.full_gate_fixture...OK\n",
+    "stderr": "",
+    "log": "1/1 http.test.full_gate_fixture...OK\n",
+    "summary": "### Complete test progress\n\n<pre>1/1 http.test.full_gate_fixture...OK\n\nLast command output:\n1/1 http.test.full_gate_fixture...OK</pre>\n"
+  },
+  "candidate_command": "complete_status=0\ntimeout --signal=INT --kill-after=10s 28m python tools/ci/run_test_progress.py --title \"Complete test progress\" --log complete-tests.log -- zig build test -j1 -Dtest-progress=true --verbose --summary all || complete_status=$?\nif [ \"$complete_status\" -ne 0 ]; then\n  python tools/ci/test_failure_annotations.py complete-tests.log\nfi\nexit \"$complete_status\""
+}

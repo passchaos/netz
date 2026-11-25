@@ -90,7 +90,7 @@ jobs:
       - name: Run the complete test gate serially
         run: |
           complete_status=0
-          python tools/ci/run_test_progress.py --title "Complete test progress" --log complete-tests.log -- zig build test -j1 -Dtest-progress=true --verbose --summary all || complete_status=$?
+          timeout --signal=INT --kill-after=10s 28m python tools/ci/run_test_progress.py --title "Complete test progress" --log complete-tests.log -- zig build test -j1 -Dtest-progress=true --verbose --summary all || complete_status=$?
           if [ "$complete_status" -ne 0 ]; then
             python tools/ci/test_failure_annotations.py complete-tests.log
           fi

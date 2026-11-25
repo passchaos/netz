@@ -1,13 +1,73 @@
 #!/usr/bin/env python3
 """Exercise real child processes, partial progress and command exit status."""
 from pathlib import Path
+import os
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 
 class ProgressTest(unittest.TestCase):
+    def test_summary_keeps_latest_test_beyond_notice_annotation_limit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            summary = root / "summary.md"
+            env = os.environ.copy()
+            env["GITHUB_STEP_SUMMARY"] = str(summary)
+            source = "import time;\nfor n in range(1,15):\n print(str(n)+'/14 http.test<&>...OK',flush=True); time.sleep(0.015)\nprint('compiling <next & artifact>',flush=True)"
+            result = subprocess.run([sys.executable, str(Path(__file__).with_name("run_test_progress.py")), "--log", str(root / "log"), "--interval", "0.01", "--", sys.executable, "-c", source], env=env, capture_output=True, timeout=5)
+            self.assertEqual(0, result.returncode)
+            self.assertGreater(result.stdout.count(b"::notice"), 10)
+            text = summary.read_text()
+            self.assertIn("14/14 http.test&lt;&amp;&gt;...OK", text)
+            self.assertIn("compiling &lt;next &amp; artifact&gt;", text)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX process liveness check")
+    def test_summary_write_failure_stops_child_with_buffered_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            child_pid = root / "child.pid"
+            env = os.environ.copy()
+            env["GITHUB_STEP_SUMMARY"] = str(root)
+            source = "import os,time; from pathlib import Path; Path(" + repr(str(child_pid)) + ").write_text(str(os.getpid())); os.write(1,b'x' * (256 * 1024)); time.sleep(10)"
+            result = subprocess.run([sys.executable, str(Path(__file__).with_name("run_test_progress.py")), "--log", str(root / "log"), "--interval", "1", "--", sys.executable, "-c", source], env=env, capture_output=True, timeout=8)
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn(b"IsADirectoryError", result.stderr)
+            with self.assertRaises(ProcessLookupError):
+                os.kill(int(child_pid.read_text()), 0)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX command interruption")
+    def test_interruption_reports_latest_progress_and_stops_child(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            summary = root / "summary.md"
+            child_pid = root / "child.pid"
+            env = os.environ.copy()
+            env["GITHUB_STEP_SUMMARY"] = str(summary)
+            source = "import os,time; from pathlib import Path; Path(" + repr(str(child_pid)) + ").write_text(str(os.getpid())); print('1/1 http.test.interrupted...',flush=True); time.sleep(10)"
+            process = subprocess.Popen([sys.executable, str(Path(__file__).with_name("run_test_progress.py")), "--log", str(root / "log"), "--title", "CI: 50%, <HTTP & QUIC>", "--interval", "0.01", "--", sys.executable, "-c", source], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            try:
+                until = time.monotonic() + 3
+                while not summary.exists() or "http.test.interrupted" not in summary.read_text():
+                    if time.monotonic() >= until:
+                        self.fail("child test progress was not published")
+                    time.sleep(0.005)
+                process.send_signal(signal.SIGINT)
+                stdout, stderr = process.communicate(timeout=5)
+                self.assertEqual(130, process.returncode, stderr.decode())
+                self.assertIn(b"::error title=CI%3A 50%25%2C <HTTP & QUIC>::Interrupted command", stdout)
+                self.assertIn("CI: 50%, &lt;HTTP &amp; QUIC&gt;", summary.read_text())
+                self.assertIn("http.test.interrupted", summary.read_text())
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(int(child_pid.read_text()), 0)
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.communicate()
+
     def launch(self, source, title="Test progress"):
         with tempfile.TemporaryDirectory() as directory:
             log = Path(directory) / "progress.log"
