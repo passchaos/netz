@@ -1,0 +1,213 @@
+{
+  "run_id": 45543653123,
+  "url": "https://github.com/passchaos/netz/actions/runs/45543653123",
+  "head_sha": "bef71120dce275f49c1ce54d6197a5609e5b63b9",
+  "checked_at": "2026-11-25T04:12:19.827860+00:00",
+  "scope": "Native regression jobs and portable compilation; the complete verify job was still running at capture.",
+  "jobs": [
+    {
+      "id": 138967947447,
+      "name": "Cross-compile aarch64-macos-none (macOS SDK)",
+      "html_url": "https://github.com/passchaos/netz/actions/runs/45543653123/job/138967947447",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-11-25T03:59:10Z",
+      "completed_at": "2026-11-25T04:08:20Z",
+      "steps": []
+    },
+    {
+      "id": 138967947467,
+      "name": "Cross-compile x86_64-macos-none (macOS SDK)",
+      "html_url": "https://github.com/passchaos/netz/actions/runs/45543653123/job/138967947467",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-11-25T03:59:10Z",
+      "completed_at": "2026-11-25T04:07:18Z",
+      "steps": []
+    },
+    {
+      "id": 138967947552,
+      "name": "Portable x86_64-windows-gnu (ubuntu-latest)",
+      "html_url": "https://github.com/passchaos/netz/actions/runs/45543653123/job/138967947552",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-11-25T03:59:10Z",
+      "completed_at": "2026-11-25T04:06:54Z",
+      "steps": [
+        {
+          "name": "Run native Linux interface binding regressions",
+          "status": "completed",
+          "conclusion": "skipped"
+        },
+        {
+          "name": "Run native Linux connection and Upgrade regressions",
+          "status": "completed",
+          "conclusion": "skipped"
+        },
+        {
+          "name": "Probe native Winsock interface option semantics",
+          "status": "completed",
+          "conclusion": "skipped"
+        },
+        {
+          "name": "Run native HTTP3 resolver and acquisition regressions",
+          "status": "completed",
+          "conclusion": "skipped"
+        },
+        {
+          "name": "Run native ordered TCP hostname regressions",
+          "status": "completed",
+          "conclusion": "skipped"
+        },
+        {
+          "name": "Run native H1 H2 resolver policy regressions",
+          "status": "completed",
+          "conclusion": "skipped"
+        },
+        {
+          "name": "Run native Windows transport regressions",
+          "status": "completed",
+          "conclusion": "skipped"
+        }
+      ]
+    },
+    {
+      "id": 138967947558,
+      "name": "Portable aarch64-linux-gnu (ubuntu-latest)",
+      "html_url": "https://github.com/passchaos/netz/actions/runs/45543653123/job/138967947558",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-11-25T03:59:10Z",
+      "completed_at": "2026-11-25T04:05:01Z",
+      "steps": [
+        {
+          "name": "Run native Linux interface binding regressions",
+          "status": "completed",
+          "conclusion": "skipped"
+        },
+        {
+          "name": "Run native Linux connection and Upgrade regressions",
+          "status": "completed",
+          "conclusion": "skipped"
+        },
+        {
+          "name": "Probe native Winsock interface option semantics",
+          "status": "completed",
+          "conclusion": "skipped"
+        },
+        {
+          "name": "Run native HTTP3 resolver and acquisition regressions",
+          "status": "completed",
+          "conclusion": "skipped"
+        },
+        {
+          "name": "Run native ordered TCP hostname regressions",
+          "status": "completed",
+          "conclusion": "skipped"
+        },
+        {
+          "name": "Run native H1 H2 resolver policy regressions",
+          "status": "completed",
+          "conclusion": "skipped"
+        },
+        {
+          "name": "Run native Windows transport regressions",
+          "status": "completed",
+          "conclusion": "skipped"
+        }
+      ]
+    },
+    {
+      "id": 138967947574,
+      "name": "Portable x86_64-windows-gnu (windows-latest)",
+      "html_url": "https://github.com/passchaos/netz/actions/runs/45543653123/job/138967947574",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-11-25T03:59:10Z",
+      "completed_at": "2026-11-25T04:09:04Z",
+      "steps": [
+        {
+          "name": "Run native Linux interface binding regressions",
+          "status": "completed",
+          "conclusion": "skipped"
+        },
+        {
+          "name": "Run native Linux connection and Upgrade regressions",
+          "status": "completed",
+          "conclusion": "skipped"
+        },
+        {
+          "name": "Probe native Winsock interface option semantics",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Run native HTTP3 resolver and acquisition regressions",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Run native ordered TCP hostname regressions",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Run native H1 H2 resolver policy regressions",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Run native Windows transport regressions",
+          "status": "completed",
+          "conclusion": "success"
+        }
+      ]
+    },
+    {
+      "id": 138967947706,
+      "name": "Portable x86_64-linux-gnu (ubuntu-latest)",
+      "html_url": "https://github.com/passchaos/netz/actions/runs/45543653123/job/138967947706",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-11-25T03:59:10Z",
+      "completed_at": "2026-11-25T04:06:42Z",
+      "steps": [
+        {
+          "name": "Run native Linux interface binding regressions",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Run native Linux connection and Upgrade regressions",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Probe native Winsock interface option semantics",
+          "status": "completed",
+          "conclusion": "skipped"
+        },
+        {
+          "name": "Run native HTTP3 resolver and acquisition regressions",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Run native ordered TCP hostname regressions",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Run native H1 H2 resolver policy regressions",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Run native Windows transport regressions",
+          "status": "completed",
+          "conclusion": "skipped"
+        }
+      ]
+    }
+  ]
+}

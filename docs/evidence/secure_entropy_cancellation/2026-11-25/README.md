@@ -38,7 +38,17 @@ both Initials before cancellation remain selected.
 | TLS, QUIC, H1/H2/H3 masking and WebTransport handshake overlap | Passed | [overlap.Debug.log](overlap.Debug.log) |
 | Selected H3, TLS, WebSocket and WebTransport regressions for Windows | Compiled | [windows.compile.log](windows.compile.log) |
 | Unified HTTP H3/real interface binding and shared WebTransport constructors | 215/215 passed | [constructors.Debug.log](constructors.Debug.log) |
+| Native Linux and Windows H3 entropy/startup/cancellation and acquisition regressions | Passed at `bef71120` | [native-platforms.json](native-platforms.json) |
+| Native Linux interface binding and native Windows transport overlap | Passed at `bef71120` | [native-platforms.json](native-platforms.json) |
+| Linux ARM64/x86-64, Windows x86-64 and macOS ARM64/x86-64 compilation | Passed at `bef71120` | [native-platforms.json](native-platforms.json) |
 
 [Local validation metadata](local-validation.json) records zero exit status for
 each completed check. Commands are in the logs; Zig ran under the shared tree
 guard, serially with `-j1`.
+
+The native record covers the portable and macOS jobs from
+[run 45543653123](https://github.com/passchaos/netz/actions/runs/45543653123).
+Linux job `138967947706` and Windows job `138967947574` both completed
+successfully, including the H3 step that selects all six new entropy checks and
+the two real deadline/cancellation tests. The complete `verify` job was still
+running when this scoped evidence was captured.
