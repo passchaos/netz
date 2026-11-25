@@ -1,0 +1,423 @@
+{
+  "commit": "2a3a663d7e73c728d13f12e0673c890420d49614",
+  "run_id": 45593409742,
+  "observed_utc": "2026-11-25T10:57:22.331934+00:00",
+  "jobs": [
+    {
+      "id": 139133671127,
+      "name": "verify",
+      "status": "completed",
+      "conclusion": "cancelled",
+      "started_at": "2026-11-25T10:17:32Z",
+      "completed_at": "2026-11-25T10:47:50Z",
+      "steps": [
+        {
+          "name": "Replay bounded fuzz corpora",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-11-25T10:22:07Z",
+          "completed_at": "2026-11-25T10:34:52Z"
+        },
+        {
+          "name": "Run bounded QUIC endpoint soak",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-11-25T10:34:52Z",
+          "completed_at": "2026-11-25T10:35:38Z"
+        },
+        {
+          "name": "Run the complete test gate serially",
+          "status": "completed",
+          "conclusion": "cancelled",
+          "started_at": "2026-11-25T10:35:38Z",
+          "completed_at": "2026-11-25T10:47:45Z"
+        }
+      ]
+    },
+    {
+      "id": 139133671571,
+      "name": "Cross-compile x86_64-macos-none (macOS SDK)",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-11-25T10:17:34Z",
+      "completed_at": "2026-11-25T10:19:31Z",
+      "steps": []
+    },
+    {
+      "id": 139133671642,
+      "name": "Cross-compile aarch64-macos-none (macOS SDK)",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-11-25T10:17:33Z",
+      "completed_at": "2026-11-25T10:22:48Z",
+      "steps": []
+    },
+    {
+      "id": 139133671686,
+      "name": "Portable x86_64-windows-gnu (ubuntu-latest)",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-11-25T10:17:32Z",
+      "completed_at": "2026-11-25T10:25:28Z",
+      "steps": [
+        {
+          "name": "Validate native CI log helpers",
+          "status": "completed",
+          "conclusion": "skipped",
+          "started_at": "2026-11-25T10:25:22Z",
+          "completed_at": "2026-11-25T10:25:22Z"
+        },
+        {
+          "name": "Run native trust startup regressions",
+          "status": "completed",
+          "conclusion": "skipped",
+          "started_at": "2026-11-25T10:25:22Z",
+          "completed_at": "2026-11-25T10:25:22Z"
+        }
+      ]
+    },
+    {
+      "id": 139133671868,
+      "name": "Portable x86_64-linux-gnu (ubuntu-latest)",
+      "status": "completed",
+      "conclusion": "cancelled",
+      "started_at": "2026-11-25T10:17:33Z",
+      "completed_at": "2026-11-25T10:47:51Z",
+      "steps": [
+        {
+          "name": "Validate native CI log helpers",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-11-25T10:18:58Z",
+          "completed_at": "2026-11-25T10:18:59Z"
+        },
+        {
+          "name": "Run native trust startup regressions",
+          "status": "completed",
+          "conclusion": "cancelled",
+          "started_at": "2026-11-25T10:21:41Z",
+          "completed_at": "2026-11-25T10:47:45Z"
+        }
+      ]
+    },
+    {
+      "id": 139133671882,
+      "name": "Portable x86_64-windows-gnu (windows-latest)",
+      "status": "completed",
+      "conclusion": "cancelled",
+      "started_at": "2026-11-25T10:17:33Z",
+      "completed_at": "2026-11-25T10:48:13Z",
+      "steps": [
+        {
+          "name": "Validate native CI log helpers",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-11-25T10:18:56Z",
+          "completed_at": "2026-11-25T10:18:58Z"
+        },
+        {
+          "name": "Run native trust startup regressions",
+          "status": "completed",
+          "conclusion": "cancelled",
+          "started_at": "2026-11-25T10:19:12Z",
+          "completed_at": "2026-11-25T10:47:40Z"
+        }
+      ]
+    },
+    {
+      "id": 139133671970,
+      "name": "Portable aarch64-linux-gnu (ubuntu-latest)",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-11-25T10:17:33Z",
+      "completed_at": "2026-11-25T10:18:18Z",
+      "steps": [
+        {
+          "name": "Validate native CI log helpers",
+          "status": "completed",
+          "conclusion": "skipped",
+          "started_at": "2026-11-25T10:18:09Z",
+          "completed_at": "2026-11-25T10:18:09Z"
+        },
+        {
+          "name": "Run native trust startup regressions",
+          "status": "completed",
+          "conclusion": "skipped",
+          "started_at": "2026-11-25T10:18:09Z",
+          "completed_at": "2026-11-25T10:18:09Z"
+        }
+      ]
+    }
+  ],
+  "annotations": {
+    "windows": [
+      {
+        "start_line": 1,
+        "annotation_level": "failure",
+        "title": "",
+        "message": "The job has exceeded the maximum execution time of 30m0s"
+      },
+      {
+        "start_line": 302,
+        "annotation_level": "notice",
+        "title": "Native trust progress",
+        "message": "13/156 http.client_tests.effective_trust.test.HTTP effective trust Alt-Svc pool accepts a verifier over an inactive CA bundle..."
+      },
+      {
+        "start_line": 304,
+        "annotation_level": "notice",
+        "title": "Native trust progress",
+        "message": "13/156 http.client_tests.effective_trust.test.HTTP effective trust Alt-Svc pool accepts a verifier over an inactive CA bundle..."
+      },
+      {
+        "start_line": 306,
+        "annotation_level": "notice",
+        "title": "Native trust progress",
+        "message": "13/156 http.client_tests.effective_trust.test.HTTP effective trust Alt-Svc pool accepts a verifier over an inactive CA bundle..."
+      },
+      {
+        "start_line": 308,
+        "annotation_level": "notice",
+        "title": "Native trust progress",
+        "message": "13/156 http.client_tests.effective_trust.test.HTTP effective trust Alt-Svc pool accepts a verifier over an inactive CA bundle..."
+      },
+      {
+        "start_line": 310,
+        "annotation_level": "notice",
+        "title": "Native trust progress",
+        "message": "13/156 http.client_tests.effective_trust.test.HTTP effective trust Alt-Svc pool accepts a verifier over an inactive CA bundle..."
+      },
+      {
+        "start_line": 312,
+        "annotation_level": "notice",
+        "title": "Native trust progress",
+        "message": "13/156 http.client_tests.effective_trust.test.HTTP effective trust Alt-Svc pool accepts a verifier over an inactive CA bundle..."
+      },
+      {
+        "start_line": 314,
+        "annotation_level": "notice",
+        "title": "Native trust progress",
+        "message": "13/156 http.client_tests.effective_trust.test.HTTP effective trust Alt-Svc pool accepts a verifier over an inactive CA bundle..."
+      },
+      {
+        "start_line": 316,
+        "annotation_level": "notice",
+        "title": "Native trust progress",
+        "message": "13/156 http.client_tests.effective_trust.test.HTTP effective trust Alt-Svc pool accepts a verifier over an inactive CA bundle..."
+      },
+      {
+        "start_line": 318,
+        "annotation_level": "notice",
+        "title": "Native trust progress",
+        "message": "13/156 http.client_tests.effective_trust.test.HTTP effective trust Alt-Svc pool accepts a verifier over an inactive CA bundle..."
+      },
+      {
+        "start_line": 320,
+        "annotation_level": "notice",
+        "title": "Native trust progress",
+        "message": "13/156 http.client_tests.effective_trust.test.HTTP effective trust Alt-Svc pool accepts a verifier over an inactive CA bundle..."
+      }
+    ],
+    "linux": [
+      {
+        "start_line": 1,
+        "annotation_level": "failure",
+        "title": "",
+        "message": "The job has exceeded the maximum execution time of 30m0s"
+      },
+      {
+        "start_line": 108,
+        "annotation_level": "notice",
+        "title": "Native trust progress",
+        "message": "26/26 internal.stream_io.timed_read.test_0...OK"
+      },
+      {
+        "start_line": 275,
+        "annotation_level": "notice",
+        "title": "Native trust progress",
+        "message": "13/155 http.client_tests.effective_trust.test.HTTP effective trust Alt-Svc pool accepts a verifier over an inactive CA bundle..."
+      },
+      {
+        "start_line": 277,
+        "annotation_level": "notice",
+        "title": "Native trust progress",
+        "message": "13/155 http.client_tests.effective_trust.test.HTTP effective trust Alt-Svc pool accepts a verifier over an inactive CA bundle..."
+      },
+      {
+        "start_line": 279,
+        "annotation_level": "notice",
+        "title": "Native trust progress",
+        "message": "13/155 http.client_tests.effective_trust.test.HTTP effective trust Alt-Svc pool accepts a verifier over an inactive CA bundle..."
+      },
+      {
+        "start_line": 281,
+        "annotation_level": "notice",
+        "title": "Native trust progress",
+        "message": "13/155 http.client_tests.effective_trust.test.HTTP effective trust Alt-Svc pool accepts a verifier over an inactive CA bundle..."
+      },
+      {
+        "start_line": 283,
+        "annotation_level": "notice",
+        "title": "Native trust progress",
+        "message": "13/155 http.client_tests.effective_trust.test.HTTP effective trust Alt-Svc pool accepts a verifier over an inactive CA bundle..."
+      },
+      {
+        "start_line": 285,
+        "annotation_level": "notice",
+        "title": "Native trust progress",
+        "message": "13/155 http.client_tests.effective_trust.test.HTTP effective trust Alt-Svc pool accepts a verifier over an inactive CA bundle..."
+      },
+      {
+        "start_line": 287,
+        "annotation_level": "notice",
+        "title": "Native trust progress",
+        "message": "13/155 http.client_tests.effective_trust.test.HTTP effective trust Alt-Svc pool accepts a verifier over an inactive CA bundle..."
+      },
+      {
+        "start_line": 289,
+        "annotation_level": "notice",
+        "title": "Native trust progress",
+        "message": "13/155 http.client_tests.effective_trust.test.HTTP effective trust Alt-Svc pool accepts a verifier over an inactive CA bundle..."
+      },
+      {
+        "start_line": 291,
+        "annotation_level": "notice",
+        "title": "Native trust progress",
+        "message": "13/155 http.client_tests.effective_trust.test.HTTP effective trust Alt-Svc pool accepts a verifier over an inactive CA bundle..."
+      }
+    ],
+    "verify": [
+      {
+        "start_line": 1,
+        "annotation_level": "failure",
+        "title": "",
+        "message": "The job has exceeded the maximum execution time of 30m0s"
+      },
+      {
+        "start_line": 314,
+        "annotation_level": "notice",
+        "title": "Complete test progress",
+        "message": "No test name emitted yet; build or startup is still active."
+      },
+      {
+        "start_line": 319,
+        "annotation_level": "notice",
+        "title": "Complete test progress",
+        "message": "No test name emitted yet; build or startup is still active."
+      },
+      {
+        "start_line": 321,
+        "annotation_level": "notice",
+        "title": "Complete test progress",
+        "message": "No test name emitted yet; build or startup is still active."
+      },
+      {
+        "start_line": 323,
+        "annotation_level": "notice",
+        "title": "Complete test progress",
+        "message": "No test name emitted yet; build or startup is still active."
+      },
+      {
+        "start_line": 329,
+        "annotation_level": "notice",
+        "title": "Complete test progress",
+        "message": "No test name emitted yet; build or startup is still active."
+      },
+      {
+        "start_line": 366,
+        "annotation_level": "notice",
+        "title": "Complete test progress",
+        "message": "28/28 http_request_content_coding_test.test.HTTP request types expose shared content decoding...OK"
+      },
+      {
+        "start_line": 397,
+        "annotation_level": "notice",
+        "title": "Complete test progress",
+        "message": "28/28 http_request_content_coding_test.test.HTTP request types expose shared content decoding...OK"
+      },
+      {
+        "start_line": 402,
+        "annotation_level": "notice",
+        "title": "Complete test progress",
+        "message": "28/28 http_request_content_coding_test.test.HTTP request types expose shared content decoding...OK"
+      },
+      {
+        "start_line": 867,
+        "annotation_level": "notice",
+        "title": "Complete test progress",
+        "message": "28/28 http_request_content_coding_test.test.HTTP request types expose shared content decoding...OK"
+      },
+      {
+        "start_line": 878,
+        "annotation_level": "notice",
+        "title": "Complete test progress",
+        "message": "28/28 http_request_content_coding_test.test.HTTP request types expose shared content decoding...OK"
+      }
+    ]
+  },
+  "native_acceptance": "not achieved: native trust steps canceled at 30 minute job limit",
+  "complete_acceptance": "not achieved: complete test step canceled at 30 minute job limit",
+  "log_access": "Public API returns 403: Must have admin rights to Repository",
+  "dependencies": {
+    "vail": {
+      "local_head": "d93847a7e091c835406ee10c0a86fd064f1475dd",
+      "ci_pin": "3b772b0cccb64d84fbc760df6428bc51e0fe0761",
+      "changed_files_count": 1,
+      "changes": [
+        "src/crypto/hash/keccak4.zig"
+      ]
+    },
+    "vort": {
+      "local_head": "a48e1151872a30a574363e994ec312969b3c7818",
+      "ci_pin": "a48e1151872a30a574363e994ec312969b3c7818",
+      "changed_files_count": 0,
+      "changes": []
+    },
+    "pbz": {
+      "local_head": "a6f96bba53dfc57206ae812ffaa54dd748573cf8",
+      "ci_pin": "6513ef1f8b130b308bd86ba0bd02f6acc2be64e8",
+      "changed_files_count": 109,
+      "changes": [
+        ".github/workflows/ci.yml",
+        ".gitignore",
+        "CHANGELOG.md",
+        "README.md",
+        "bench/COVERAGE.md"
+      ]
+    },
+    "kron": {
+      "local_head": "77b9572a0256da0ece836c6b49024b3282bd1d5b",
+      "ci_pin": "77b9572a0256da0ece836c6b49024b3282bd1d5b",
+      "changed_files_count": 0,
+      "changes": []
+    },
+    "webpkiz": {
+      "local_head": "35c9f4bfecb51a7794670d474c01b3c6fe541e9e",
+      "ci_pin": "35c9f4bfecb51a7794670d474c01b3c6fe541e9e",
+      "changed_files_count": 0,
+      "changes": []
+    },
+    "regexz": {
+      "local_head": "188b76e1dad902e44226e105b5b68ff742975c09",
+      "ci_pin": "f150767088ef11fb4435f3b42c99165333b6e51c",
+      "changed_files_count": 328,
+      "changes": [
+        ".github/workflows/ci.yml",
+        ".gitignore",
+        "README.md",
+        "build.zig",
+        "build.zig.zon"
+      ]
+    },
+    "harnessz": {
+      "local_head": "80117591603f35b1b084b9a5eafd040810ab4b3d",
+      "ci_pin": "e626f26b0a7ead0377254ed3a04b43b25fb2d270",
+      "changed_files_count": 3,
+      "changes": [
+        "LICENSE",
+        "README.md",
+        "build.zig.zon"
+      ]
+    }
+  }
+}

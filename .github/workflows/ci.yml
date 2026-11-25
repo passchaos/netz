@@ -299,7 +299,7 @@ jobs:
         run: |
           set -o pipefail
           trust_status=0
-          python tools/ci/run_test_progress.py --title "Native trust progress" --log native-trust.log -- zig build test-quic test-tls test-http test-websocket test-webtransport -j1 -Dtest-progress=true -Dtarget=${{ matrix.target }} '-Dtest-filter=trust load' '-Dtest-filter=trust startup' '-Dtest-filter=trust completion' '-Dtest-filter=QUIC trust precedence' '-Dtest-filter=QUIC client verifies' '-Dtest-filter=effective trust' '-Dtest-filter=startup entropy' '-Dtest-filter=owned deadline' '-Dtest-filter=TLS CA bundle lock' --verbose --summary all || trust_status=$?
+          python tools/ci/run_test_progress.py --title "Native trust progress" --log native-trust.log -- zig build test-quic test-tls test-http test-websocket test-webtransport -j1 -Dtest-progress=true -Dtarget=${{ matrix.target }} '-Dtest-filter=trust load' '-Dtest-filter=trust startup' '-Dtest-filter=trust completion' '-Dtest-filter=QUIC trust precedence' '-Dtest-filter=QUIC client verifies' '-Dtest-filter=effective trust' '-Dtest-filter=HTTP H3 pool driver admission' '-Dtest-filter=startup entropy' '-Dtest-filter=owned deadline' '-Dtest-filter=TLS CA bundle lock' --verbose --summary all || trust_status=$?
           if [ "$trust_status" -ne 0 ]; then
             python tools/ci/test_failure_annotations.py native-trust.log
           fi

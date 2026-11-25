@@ -312,6 +312,10 @@ pub const State = struct {
         );
         errdefer self.dispatcher.deinit();
         self.driver = .{};
+        // These owners wait for requests indefinitely; async may run them
+        // inline when its capacity is exhausted and block pool construction.
+        self.driver.future = try std.Io.concurrent(io, Driver.run, .{self});
+        errdefer self.driver.future.cancel(io);
         if (options.shared_endpoint and options.socks5_proxy == null) {
             self.shared_pool = try .init(allocator, io, .{
                 .local_address = options.local_address,
@@ -346,10 +350,7 @@ pub const State = struct {
                 self.shared_dispatcher = null;
             }
             self.shared_driver = .{};
-        }
-        self.driver.future = io.async(Driver.run, .{self});
-        if (self.shared_driver) |*driver| {
-            driver.future = io.async(SharedDriver.run, .{self});
+            self.shared_driver.?.future = try std.Io.concurrent(io, SharedDriver.run, .{self});
         }
         return self;
     }
@@ -460,7 +461,8 @@ pub const State = struct {
             self.shared_dispatcher = null;
         }
         self.shared_driver = .{};
-        self.shared_driver.?.future = self.io.async(SharedDriver.run, .{self});
+        errdefer self.shared_driver = null;
+        self.shared_driver.?.future = try std.Io.concurrent(self.io, SharedDriver.run, .{self});
     }
 
     pub fn deinit(self: *State) void {

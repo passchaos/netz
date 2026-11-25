@@ -1,0 +1,197 @@
+[traex-zig-guard 2026-11-25 19:01:35] started Zig tree root=85646 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=600s
+1/117 test_scope.test_0...OK
+2/117 http.mod.test_0...OK
+3/117 http.digest.test_0...OK
+4/117 http.multipart.test_0...OK
+5/117 http.authority.mod.test_0...OK
+6/117 http.cookies.mod.test_0...OK
+7/117 quic.client_trust.test_0...OK
+8/117 http.client.test_0...OK
+9/117 http.client_pool.test_0...OK
+10/117 http.client_tests.test_0...OK
+11/117 http.client_pool.close_tests.test.unified HTTP3 deadline close releases initialized drivers and remains idempotent...OK
+12/117 http.client_pool.close_tests.test.unified HTTP3 deadline close retains initialized backend cleanup across cancellation...OK
+13/117 http.client_pool_http3_tests.test.unified HTTP pool upgrades to Alt-Svc H3 through SOCKS5...OK
+14/117 http1.runtime.test_0...OK
+15/117 tls.mod.test_0...OK
+16/117 tls.stream.mod.test_0...OK
+17/117 internal.tcp_connect.test_0...OK
+18/117 http3.runtime.test_0...OK
+19/117 quic.mod.test_0...OK
+20/117 quic.mod.test_1...OK
+21/117 quic.mod.test_2...OK
+22/117 quic.runtime.test_0...OK
+23/117 quic.runtime.test_1...OK
+24/117 http3.mod.test_0...OK
+25/117 http3.mod.test_1...OK
+26/117 http3.mod.test_2...OK
+27/117 http3.mod.test_3...OK
+28/117 http3.mod.test_4...OK
+29/117 quic.handshake.test_0...OK
+30/117 quic.handshake.client_authentication.test_0...OK
+31/117 quic.protection.test_0...OK
+32/117 quic.tls_client_hello.test_0...OK
+33/117 quic.resumption.mod.test_0...OK
+34/117 quic.tls.mod.test_0...OK
+35/117 quic.one_rtt.test_0...OK
+36/117 quic.packet_space.test_0...OK
+37/117 quic.recovery.test_0...OK
+38/117 quic.congestion.test_0...OK
+39/117 quic.path_validation.test_0...OK
+40/117 quic.connection_id.test_0...OK
+41/117 quic.load_balancing.quic_lb.mod.test_0...OK
+42/117 quic.stream.test_0...OK
+43/117 quic.zero_rtt.mod.test_0...OK
+44/117 quic.resumption.ticket.mod.test_0...OK
+45/117 internal.stream_io.test_0...OK
+46/117 internal.stream_io.timed_read.test_0...OK
+47/117 quic.address_validation_token.test_0...OK
+48/117 http3.settings.test_0...OK
+49/117 http3.runtime.datagram.test_0...OK
+50/117 http3.runtime.datagram.test_1...OK
+51/117 quic.pacing.test_0...OK
+52/117 http2.runtime.test_0...OK
+53/117 http2.mod.test_0...OK
+54/117 http2.mod.test_1...OK
+55/117 http1.mod.test_0...OK
+56/117 http1.mod.test_1...OK
+57/117 http1.mod.test_2...OK
+58/117 tls.stream.record_stream.test_0...OK
+59/117 internal.priority.test_0...OK
+60/117 http3.runtime.qpack.encoder.test_0...OK
+61/117 quic.pmtu.test_0...OK
+62/117 quic.observability.qlog.mod.test_0...OK
+63/117 http3.runtime.body_batch.test_0...OK
+64/117 quic.endpoint_dispatcher.test_0...OK
+65/117 http3.origin_pool.test_0...OK
+66/117 internal.pool_returns.test_0...OK
+67/117 internal.retired_capacity.test_0...OK
+68/117 internal.owned_fifo_admission.test_0...OK
+69/117 http.client.reader_io.test_0...OK
+70/117 http3.runtime.shared_handshake_client_pool.stream_command.test_0...OK
+71/117 http1.runtime.write.test_0...OK
+72/117 http.client.reader_upload.test_0...OK
+73/117 http2.runtime.transport.output.test_0...OK
+74/117 internal.stream_io.timed_write.test_0...OK
+75/117 http.field_name.test_0...OK
+76/117 http.field_value.test_0...OK
+77/117 http.authority.host.test_0...OK
+78/117 internal.secure_random.deadline.test_0...OK
+79/117 http3.socks5_runtime.test_0...OK
+80/117 internal.owned_result_deadline.test_0...OK
+81/117 quic.initial_exchange.flight.test_0...OK
+82/117 http3.runtime.client.complete_request.test_0...OK
+83/117 internal.socket_address.test_0...OK
+84/117 internal.socket_address.winsock.test_0...OK
+85/117 quic.endpoint_dispatcher.tests.test_0...OK
+86/117 http2.runtime.tests.test_0...OK
+87/117 http2.runtime.tests.test_1...OK
+88/117 http2.runtime.tests.test_2...OK
+89/117 http2.runtime.response.allocation_failure_tests.test_0...OK
+90/117 http2.runtime.response.forbidden_body_tests.test_0...OK
+91/117 http2.runtime.request.credit_failure_tests.test_0...OK
+92/117 http2.runtime.refusal_tests.test_0...OK
+93/117 http2.runtime.concurrent_tests.test_0...OK
+94/117 quic.one_rtt.tests.mod.test_0...OK
+95/117 quic.handshake.tests.test_0...OK
+96/117 quic.endpoint_server.test_0...OK
+97/117 quic.endpoint_server.tests.test_0...OK
+98/117 http3.runtime.tests.test_0...OK
+99/117 http3.runtime.tests.test_1...OK
+100/117 http3.runtime.development.tests.send.test_0...OK
+101/117 http3.runtime.stream.reader_tests.test_0...OK
+102/117 http3.runtime.client.happy_eyeballs_tests.test_0...OK
+103/117 http3.runtime.handshake_client_pool.shared_tests.test.HTTP/3 cloneable senders coalesce requests through one pool driver...OK
+104/117 http3.runtime.concurrent_tests.test_0...OK
+105/117 http3.runtime.receive.field_value_tests.test_0...OK
+106/117 tls.stream.alpn_tests.test_0...OK
+107/117 tls.server_identity_file.test_0...OK
+108/117 http1.runtime.tests.test_0...OK
+109/117 http.client_tests.effective_trust.test.HTTP effective trust H3-only accepts a verifier over an inactive CA bundle...OK
+110/117 http.client_tests.effective_trust.test.HTTP effective trust H3 preference attempts verifier policy before TCP fallback...OK
+111/117 http.client_tests.effective_trust.test.HTTP effective trust Alt-Svc pool accepts a verifier over an inactive CA bundle...OK
+112/117 http.client_tests.effective_trust.test.HTTP effective trust H3-only and Alt-Svc pool reject an active TCP CA bundle...OK
+113/117 http.client_pool.driver_admission_tests.test.HTTP H3 pool driver admission starts independently with zero async capacity...OK
+114/117 http.client_pool.driver_admission_tests.test.HTTP H3 pool driver admission rejects missing owners and joins an admitted owner...OK
+115/117 http.client_pool.driver_admission_tests.test.HTTP H3 pool driver admission retries a rejected lazy SOCKS5 owner...OK
+116/117 http.client_pool.driver_admission_tests.test.HTTP H3 pool driver admission joins a partially admitted route group...OK
+117/117 http.cookies.syntax.test_0...OK
+All 117 tests passed.
+Build Summary: 10/10 steps succeeded
+test-http success
++- run test success 1s
+   +- compile test ReleaseSafe native success 1m MaxRSS:5G
+      +- WriteFile macho_0_p256_field_arm64.S cached
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal ReleaseSafe native cached 314ms MaxRSS:31M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 ReleaseSafe native cached 305ms MaxRSS:31M
+      +- compile obj vort-br-record-optimal ReleaseSafe native (reused)
+      +- compile obj vort-zstd-huffman-x2 ReleaseSafe native (reused)
+      +- options cached
+      +- options cached
+
+[traex-zig-guard 2026-11-25 19:03:31] finished Zig tree root=85646 peak=5053MiB result=0

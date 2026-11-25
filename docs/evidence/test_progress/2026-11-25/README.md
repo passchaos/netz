@@ -51,3 +51,13 @@ text-output test requires the log to retain CRLF exactly. Both log helpers now
 have six passing local tests. CI captures both helper transcripts and annotates
 unittest FAIL/ERROR/Traceback contexts, so subsequent native validation failures
 remain reviewable. The Windows native result is still pending.
+
+Run `45593409742` on `2a3a663d` passed both native helper checks, all four
+cross-compilation jobs, bounded fuzz replay and QUIC soak. Native trust and
+the complete gate were canceled at their 30-minute job limits. The periodic
+notices became publicly queryable when the checks finished. Both native
+platforms repeatedly identified the same Alt-Svc pool construction test;
+the complete gate's last visible named test had already completed and did not
+identify its remaining boundary. The resulting independently reproduced driver
+admission defect and scoped correction are recorded in
+[HTTP3 pool driver admission](../../http3_pool_driver_admission/2026-11-25/README.md).

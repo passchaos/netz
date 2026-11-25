@@ -35,6 +35,7 @@ const client_trust = @import("../quic/client_trust.zig");
 const tls_stream = @import("../tls/mod.zig").stream;
 
 pub const Error = client.Error || http3_runtime.Error ||
+    std.Io.ConcurrentError ||
     http3_runtime.HandshakeClientPoolError ||
     http3_runtime.HandshakeClientPoolSharedError ||
     http3_runtime.SharedHandshakeClientPoolRequestError ||
@@ -1130,6 +1131,7 @@ test "unified HTTP pool isolates explicit TLS and QUIC tickets across origins" {
 }
 
 test {
+    _ = @import("client_pool/driver_admission_tests.zig");
     _ = @import("client_pool/shared_tcp/tests.zig");
     _ = @import("client_pool/shared_tcp/fallback_tests.zig");
 }

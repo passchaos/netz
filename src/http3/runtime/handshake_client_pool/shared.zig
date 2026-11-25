@@ -539,19 +539,24 @@ pub fn Dispatcher(comptime PoolType: type, comptime Runtime: type) type {
             guard.unlock();
         }
 
-        pub fn run(self: *Self) (Error || std.Io.Cancelable)!void {
+        pub fn run(self: *Self) (Error || std.Io.Cancelable || std.Io.ConcurrentError)!void {
             const state = self.state;
             if (state.running.swap(true, .acq_rel)) {
                 return error.SharedDriverAlreadyRunning;
             }
             defer state.running.store(false, .release);
             var workers: std.Io.Group = .init;
+            defer workers.cancel(state.io);
             var start: std.Io.Event = .unset;
+            errdefer {
+                closeState(state);
+                start.set(state.io);
+            }
             // Prevent an already-closed dispatcher from letting the first
             // worker finish the group before the remaining members are
             // registered. The stack event remains valid until group await.
             for (0..state.options.max_connection_drivers) |_| {
-                workers.async(state.io, Worker.run, .{ state, &start });
+                try workers.concurrent(state.io, Worker.run, .{ state, &start });
             }
             start.set(state.io);
             workers.await(state.io) catch |err| {

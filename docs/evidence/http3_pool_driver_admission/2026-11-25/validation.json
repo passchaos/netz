@@ -1,0 +1,60 @@
+{
+  "observed_utc": "2026-11-25T11:05:08.159043+00:00",
+  "platform": "aarch64-macos",
+  "zig_version": "0.16.0",
+  "baseline_commit": "2a3a663d7e73c728d13f12e0673c890420d49614",
+  "source_sha256": {
+    "src/http/client_pool.zig": "2ab7cbf2eddd957a0086185edc147f0ff073f595abdbd83c6bc2cca326349268",
+    "src/http/client_pool/http3.zig": "cd9d8ebca9aaa449de46f82e6ab1e4f935a2f15acc2050d747c7417b5d34861e",
+    "src/http3/runtime/handshake_client_pool/shared.zig": "23eda3100f46b1bd4aed5a5aa3ab41f0105e3b5f695b3f194e7b10464439476b",
+    "src/http/client_pool/driver_admission_tests.zig": "b53534e22466347e0c05c03907f5ecb14cc9653b44cc9213f4a8cdfca36f99a7",
+    ".github/workflows/ci.yml": "b8e2c6c2010730e99849652468c114811510c0fd80bfc05194fbf116cb7b6516",
+    "docs/http_client_pool.md": "9255bdfd8f40c8ac41659cdec730cc85e9eba4ed8b2eed5696c1978403778bc0"
+  },
+  "dependency_revisions": {
+    "vail": "d93847a7e091c835406ee10c0a86fd064f1475dd",
+    "vort": "a48e1151872a30a574363e994ec312969b3c7818",
+    "kron": "77b9572a0256da0ece836c6b49024b3282bd1d5b",
+    "webpkiz": "35c9f4bfecb51a7794670d474c01b3c6fe541e9e",
+    "regexz": "188b76e1dad902e44226e105b5b68ff742975c09",
+    "harnessz": "80117591603f35b1b084b9a5eafd040810ab4b3d",
+    "pbz": "a6f96bba53dfc57206ae812ffaa54dd748573cf8"
+  },
+  "before": {
+    "exit_code": 137,
+    "guard_timeout_seconds": 60,
+    "last_active_test": "HTTP H3 pool driver admission starts independently with zero async capacity",
+    "log": "before.log",
+    "log_sha256": "02258a1914632477dc97b59aac04c0de746fb2b01026f2905c40fb241effc000"
+  },
+  "checks": {
+    "Debug": {
+      "exit_code": 0,
+      "passed": 117,
+      "build_steps_succeeded": 10,
+      "log": "Debug.log",
+      "log_sha256": "7abf4de25f291c2e619712508fc7e762f5eac0556be3c79acc69bae89b7fc820"
+    },
+    "ReleaseSafe": {
+      "exit_code": 0,
+      "passed": 117,
+      "build_steps_succeeded": 10,
+      "log": "ReleaseSafe.log",
+      "log_sha256": "d8e7b05e64f50f8329e9d45fe68f92cdb4620ceecff37a0da0136630305f65bb"
+    }
+  },
+  "filters": [
+    "HTTP H3 pool driver admission",
+    "HTTP effective trust",
+    "unified HTTP3 deadline close",
+    "upgrades to Alt-Svc H3 through SOCKS5",
+    "HTTP/3 cloneable"
+  ],
+  "command": "zig build test-http -j1 -Dtest-progress=true [-Doptimize=ReleaseSafe] -Dtest-filter='HTTP H3 pool driver admission' -Dtest-filter='HTTP effective trust' -Dtest-filter='unified HTTP3 deadline close' -Dtest-filter='upgrades to Alt-Svc H3 through SOCKS5' -Dtest-filter='HTTP/3 cloneable' --summary all",
+  "format": {
+    "exit_code": 0,
+    "log": "fmt.log"
+  },
+  "native_platform_acceptance": "pending next CI run",
+  "complete_suite_acceptance": "pending next CI run"
+}

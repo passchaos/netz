@@ -16,6 +16,17 @@ ticket caches and idle-return accounting. Negotiated HTTP/1.1 returns to the
 exclusive request path. Public `acquireUri` leases remain exclusive and never
 share a frame reader with ordinary requests.
 
+Enabling `Options.http3` admits the Alt-Svc backend's independent request
+owners through `std.Io.concurrent`. `Pool.init` returns
+`error.ConcurrencyUnavailable` when an owner cannot be started and joins any
+already admitted owner before releasing its state. A backend with no async
+capacity remains usable when it supports concurrency; construction never runs
+an indefinite owner inline. Keeping `http3 = null` requires no background H3
+owner. The exclusive H3 dispatcher also admits its route workers independently
+and closes and joins a partially admitted group on failure. Lazy SOCKS5 shared
+endpoint admission releases the association and incomplete driver state on
+failure, allowing a later request to retry.
+
 ## HTTP proxy routing
 
 `client.http_proxy` selects one cleartext HTTP/1.1 proxy for the pool.

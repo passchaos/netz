@@ -1,0 +1,14 @@
+[traex-zig-guard 2026-11-25 18:50:48] waiting for the global TRAE Zig build slot
+[traex-zig-guard 2026-11-25 18:50:54] started Zig tree root=44396 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=60s
+1/101 test_scope.test_0...OK
+2/101 http.mod.test_0...OK
+3/101 http.digest.test_0...OK
+4/101 http.multipart.test_0...OK
+5/101 http.authority.mod.test_0...OK
+6/101 http.cookies.mod.test_0...OK
+7/101 quic.client_trust.test_0...OK
+8/101 http.client.test_0...OK
+9/101 http.client_pool.test_0...OK
+10/101 http.client_tests.test_0...OK
+11/101 http.client_pool.driver_admission_tests.test.HTTP H3 pool driver admission starts independently with zero async capacity...[traex-zig-guard 2026-11-25 18:51:54] terminating Zig tree: reason=wall-clock-timeout footprint=35MiB processes=3 largest=build[44521]:22MiB
+[traex-zig-guard 2026-11-25 18:51:54] finished Zig tree root=44396 peak=2408MiB result=137
