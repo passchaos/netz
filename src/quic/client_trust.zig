@@ -6,9 +6,10 @@
 //! unified TLS policy onto the QUIC handshake so one client configuration
 //! authenticates the same peer identity over both transports.
 //!
-//! Precedence matches `src/trust.zig`: an explicit QUIC verifier or store
-//! wins; otherwise the handshake inherits the TCP verifier, client identity,
-//! native store, environment, and root source. A TCP CA bundle has no QUIC
+//! An explicit QUIC verifier, store, environment or root source selects the
+//! complete peer-authentication policy. Otherwise the handshake inherits the
+//! TCP trust policy. Client identity is inherited independently when unset.
+//! A TCP CA bundle has no QUIC
 //! equivalent, so QUIC refuses to run unverified when only a bundle is set.
 
 const std = @import("std");
@@ -82,12 +83,14 @@ pub fn applyClientTrustBefore(
 
 fn inherit(options_value: quic.handshake.ClientOptions, tls: ClientTlsTrust) Error!quic.handshake.ClientOptions {
     var options = options_value;
-    if (!hasExplicitTrust(&options) and tls.ca_bundle_configured) return error.UnsupportedH3TrustConfiguration;
-    if (options.server_auth == null) options.server_auth = tls.server_verifier;
     if (options.client_identity == null) options.client_identity = tls.client_identity;
-    if (options.system_environ == null) options.system_environ = tls.environ;
-    if (options.system_store == null) options.system_store = tls.system_store;
-    if (options.root_source == .system) options.root_source = tls.root_source;
+    if (!hasExplicitTrust(&options)) {
+        if (tls.ca_bundle_configured) return error.UnsupportedH3TrustConfiguration;
+        options.server_auth = tls.server_verifier;
+        options.system_environ = tls.environ;
+        options.system_store = tls.system_store;
+        options.root_source = tls.root_source;
+    }
     return options;
 }
 
@@ -131,6 +134,7 @@ pub fn applyPlatformRootDefaultBefore(
 const testing = std.testing;
 
 test {
+    _ = @import("client_trust/precedence_tests.zig");
     _ = @import("client_trust/loading_tests.zig");
 }
 
@@ -161,7 +165,7 @@ test "explicit H3 trust wins over the TCP policy" {
 
     try testing.expectEqual(pinned.?, options.server_auth.?);
     try testing.expect(store == null);
-    try testing.expectEqual(root_trust.RootSource.bundled, options.root_source);
+    try testing.expectEqual(root_trust.RootSource.system, options.root_source);
 }
 
 test "TCP trust material is inherited when H3 leaves it unset" {

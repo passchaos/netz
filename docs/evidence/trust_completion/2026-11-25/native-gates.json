@@ -1,0 +1,41 @@
+{
+  "run_id": 45557646221,
+  "head_sha": "4f633cc892c58e6d077df276f1e593f56c84587e",
+  "url": "https://github.com/passchaos/netz/actions/runs/45557646221",
+  "checked_at": "2026-11-25T06:41:28.725901+00:00",
+  "scope": "Native trust-startup gate only; Windows gate succeeded before its containing job was canceled.",
+  "native_gates": [
+    {
+      "job": {
+        "id": 139013463521,
+        "name": "Portable x86_64-linux-gnu (ubuntu-latest)",
+        "html_url": "https://github.com/passchaos/netz/actions/runs/45557646221/job/139013463521",
+        "status": "completed",
+        "conclusion": "success"
+      },
+      "trust_gate": {
+        "name": "Run native trust startup regressions",
+        "status": "completed",
+        "conclusion": "success",
+        "started_at": "2026-11-25T06:06:02Z",
+        "completed_at": "2026-11-25T06:08:19Z"
+      }
+    },
+    {
+      "job": {
+        "id": 139013463661,
+        "name": "Portable x86_64-windows-gnu (windows-latest)",
+        "html_url": "https://github.com/passchaos/netz/actions/runs/45557646221/job/139013463661",
+        "status": "completed",
+        "conclusion": "cancelled"
+      },
+      "trust_gate": {
+        "name": "Run native trust startup regressions",
+        "status": "completed",
+        "conclusion": "success",
+        "started_at": "2026-11-25T06:07:21Z",
+        "completed_at": "2026-11-25T06:15:20Z"
+      }
+    }
+  ]
+}

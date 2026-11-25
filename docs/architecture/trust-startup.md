@@ -35,6 +35,12 @@ context and must remain in the owner's stable storage. Explicit verifiers and ca
 existing precedence; the low-level QUIC `.system` default still requires an
 explicit store or environment to enable certificate verification.
 
+Cross-transport inheritance treats peer trust as one policy. An explicit H3
+verifier, store, environment or non-default root source prevents TCP trust
+defaults from changing that policy. This includes higher-precedence TCP
+verifiers that would otherwise bypass an H3 private-CA store. Client identity
+is inherited independently when it is not configured on H3.
+
 The deadline race surrounds system-root loading, including native file reads.
 Bundled-root construction and platform-verifier initialization check the budget
 before setup and on both successful and failed completion. The shared

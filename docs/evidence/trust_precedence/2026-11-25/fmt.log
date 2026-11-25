@@ -1,0 +1,3 @@
+Command: ['/Users/bytedance/.local/bin/zig', 'fmt', 'src/quic/client_trust.zig', 'src/quic/handshake/certificate_ownership_tests.zig', 'src/quic/client_trust/precedence_tests.zig']
+
+Exit code: 0

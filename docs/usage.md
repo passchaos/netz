@@ -129,6 +129,12 @@ platform roots, and the H3 route installs the same platform-root verifier when
 no explicit trust material is configured. Set `.tls.server_verifier` to pin a
 key; `http3.handshake.handshake.server_auth` configures H3 directly.
 
+Any explicit H3 peer-trust choice (`server_auth`, `system_store`,
+`system_environ`, or a non-default `root_source`) keeps that H3 authentication
+policy intact. TCP trust fields are inherited together only when H3 has no
+explicit peer policy. Client certificates remain independent:
+`client_identity` inherits the TCP identity when H3 leaves it unset.
+
 The pool's Alt-Svc H3 backend follows the same rule: unset
 `Pool.Options.http3.handshake.handshake` trust fields inherit
 `Pool.Options.client.tls`, then fall back to platform roots. A TCP

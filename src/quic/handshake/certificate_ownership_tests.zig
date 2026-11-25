@@ -10,14 +10,23 @@ test "QUIC compressed Certificate remains owned after the client handshake" {
 
 test "QUIC client verifies native roots from SSL_CERT_FILE" {
     if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
-    try nativeRoots(true);
+    try nativeRoots(true, false);
 }
 
 test "QUIC client verifies caller-owned roots from PEM file" {
-    try nativeRoots(false);
+    try nativeRoots(false, false);
 }
 
-fn nativeRoots(comptime use_environment: bool) !void {
+test "QUIC trust precedence caller-owned CA survives conflicting TCP verifier" {
+    try nativeRoots(false, true);
+}
+
+test "QUIC trust precedence SSL_CERT_FILE survives conflicting TCP verifier" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+    try nativeRoots(true, true);
+}
+
+fn nativeRoots(comptime use_environment: bool, comptime conflicting_tcp: bool) !void {
     const allocator = std.testing.allocator;
     var backend = try @import("zio").Runtime.init(allocator, .{});
     defer backend.deinit();
@@ -103,18 +112,23 @@ fn nativeRoots(comptime use_environment: bool) !void {
         .{},
     );
     defer endpoint.deinit();
-    var connection = try handshake.connectWithTimeout(
-        &endpoint,
-        server.address(),
-        .{
-            .original_destination_connection_id = "native-root-origin",
-            .local_connection_id = "native-root-client",
-            .server_name = "localhost",
-            .system_environ = environ,
-            .system_store = if (owned_store) |*store| store else null,
-        },
-        .fromSeconds(3),
-    );
+    var client_options: handshake.ClientOptions = .{
+        .original_destination_connection_id = "native-root-origin",
+        .local_connection_id = "native-root-client",
+        .server_name = "localhost",
+        .system_environ = environ,
+        .system_store = if (owned_store) |*store| store else null,
+    };
+    var inherited_store: ?quic.tls.trust.SystemStore = null;
+    defer if (inherited_store) |*store| store.deinit();
+    if (conflicting_tcp) {
+        try quic.client_trust.applyClientTrustBefore(allocator, io, &client_options, .{
+            .server_verifier = .{ .pinned_ecdsa_p256_public_key = @splat(9) },
+            .root_source = .bundled,
+        }, &inherited_store, .fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(3) }));
+        try std.testing.expect(inherited_store == null);
+    }
+    var connection = try handshake.connectWithTimeout(&endpoint, server.address(), client_options, .fromSeconds(3));
     defer connection.deinit();
     try std.testing.expect(connection.peerCertificates() != null);
     peer_future.await(io);

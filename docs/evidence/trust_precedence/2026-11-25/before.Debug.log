@@ -1,0 +1,83 @@
+[traex-zig-guard 2026-11-25 14:07:40] waiting for the global TRAE Zig build slot
+[traex-zig-guard 2026-11-25 14:09:19] started Zig tree root=56125 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=900s
+test-quic
++- run test 33 pass, 5 fail (38 total)
+error: 'quic.client_trust.precedence_tests.test.QUIC trust precedence explicit verifier isolates TCP trust defaults' failed:
+       expected null, found .{ .allocator = .{ .ptr = anyopaque@104edb3a8, .vtable = .{ .alloc = fn (*anyopaque, usize, mem.Alignment, usize) ?[*]u8@104d2e338, .resize = fn (*anyopaque, []u8, mem.Alignment, usize, usize) bool@104d2d904, .remap = fn (*anyopaque, []u8, mem.Alignment, usize, usize) ?[*]u8@104d2c6e4, .free = fn (*anyopaque, []u8, mem.Alignment, usize) void@104d28e84 } }, .bundle = .{ .map = .{ .metadata = null, .size = 0, .available = 0, .pointer_stability = .{ ... } }, .bytes = .{ .items = { ... }, .capacity = 0 } }, .compatible_trust_anchors = .{ .items = {  }, .capacity = 0 }, .anchor_constraints = .{ .items = {  }, .capacity = 0 } }
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:197:21: 0x104d356d7 in expectEqualInner__anon_38017 (test)
+                           return error.TestExpectedEqual;
+                           ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:83:5: 0x104dc957f in expectEqual (test)
+           return expectEqualInner(T, expected, actual);
+           ^
+       /Users/bytedance/project-z/netz/src/quic/client_trust/precedence_tests.zig:41:9: 0x104dc9693 in exercise__anon_61278 (test)
+               try std.testing.expectEqual(expected.system_store, options.system_store);
+               ^
+       /Users/bytedance/project-z/netz/src/quic/client_trust/precedence_tests.zig:49:5: 0x104dca0bf in test.QUIC trust precedence explicit verifier isolates TCP trust defaults (test)
+           try exercise(.verifier);
+           ^
+error: 'quic.client_trust.precedence_tests.test.QUIC trust precedence explicit store isolates TCP trust defaults' failed:
+       expected null, found .{ .verify_trust = null, .context = null, .pinned_ed25519_public_key = null, .pinned_ecdsa_p256_public_key = { 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9 }, .pinned_ecdsa_p384_public_key = null, .pinned_ecdsa_p521_public_key = null, .pinned_sm2_public_key = null, .pinned_rsa_public_key = null, .pinned_raw_public_key = null, .prepared_ed25519_verifier = null, .prepared_p256_verifier = null, .prepared_p521_verifier = null, .prepared_mldsa44_verifier = null, .prepared_mldsa65_verifier = null, .prepared_mldsa87_verifier = null, .prepared_rsa_verifier = null }
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:890:21: 0x104d67123 in expectEqualDeepInner__anon_38002 (test)
+                           return error.TestExpectedEqual;
+                           ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:741:5: 0x104dc7aff in expectEqualDeep (test)
+           return expectEqualDeepInner(T, expected, actual);
+           ^
+       /Users/bytedance/project-z/netz/src/quic/client_trust/precedence_tests.zig:40:9: 0x104dc7bcf in exercise__anon_61272 (test)
+               try std.testing.expectEqualDeep(expected.server_auth, options.server_auth);
+               ^
+       /Users/bytedance/project-z/netz/src/quic/client_trust/precedence_tests.zig:52:5: 0x104dc873f in test.QUIC trust precedence explicit store isolates TCP trust defaults (test)
+           try exercise(.store);
+           ^
+error: 'quic.client_trust.precedence_tests.test.QUIC trust precedence explicit environment isolates TCP trust defaults' failed:
+       expected null, found .{ .verify_trust = null, .context = null, .pinned_ed25519_public_key = null, .pinned_ecdsa_p256_public_key = { 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9 }, .pinned_ecdsa_p384_public_key = null, .pinned_ecdsa_p521_public_key = null, .pinned_sm2_public_key = null, .pinned_rsa_public_key = null, .pinned_raw_public_key = null, .prepared_ed25519_verifier = null, .prepared_p256_verifier = null, .prepared_p521_verifier = null, .prepared_mldsa44_verifier = null, .prepared_mldsa65_verifier = null, .prepared_mldsa87_verifier = null, .prepared_rsa_verifier = null }
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:890:21: 0x104d67123 in expectEqualDeepInner__anon_38002 (test)
+                           return error.TestExpectedEqual;
+                           ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:741:5: 0x104dc62eb in expectEqualDeep (test)
+           return expectEqualDeepInner(T, expected, actual);
+           ^
+       /Users/bytedance/project-z/netz/src/quic/client_trust/precedence_tests.zig:40:9: 0x104dc63bb in exercise__anon_61266 (test)
+               try std.testing.expectEqualDeep(expected.server_auth, options.server_auth);
+               ^
+       /Users/bytedance/project-z/netz/src/quic/client_trust/precedence_tests.zig:55:5: 0x104dc6f2b in test.QUIC trust precedence explicit environment isolates TCP trust defaults (test)
+           try exercise(.environment);
+           ^
+error: 'quic.client_trust.precedence_tests.test.QUIC trust precedence bundled roots isolate TCP trust defaults' failed:
+       expected null, found .{ .verify_trust = null, .context = null, .pinned_ed25519_public_key = null, .pinned_ecdsa_p256_public_key = { 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9 }, .pinned_ecdsa_p384_public_key = null, .pinned_ecdsa_p521_public_key = null, .pinned_sm2_public_key = null, .pinned_rsa_public_key = null, .pinned_raw_public_key = null, .prepared_ed25519_verifier = null, .prepared_p256_verifier = null, .prepared_p521_verifier = null, .prepared_mldsa44_verifier = null, .prepared_mldsa65_verifier = null, .prepared_mldsa87_verifier = null, .prepared_rsa_verifier = null }
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:890:21: 0x104d67123 in expectEqualDeepInner__anon_38002 (test)
+                           return error.TestExpectedEqual;
+                           ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:741:5: 0x104dc4abb in expectEqualDeep (test)
+           return expectEqualDeepInner(T, expected, actual);
+           ^
+       /Users/bytedance/project-z/netz/src/quic/client_trust/precedence_tests.zig:40:9: 0x104dc4b8b in exercise__anon_61260 (test)
+               try std.testing.expectEqualDeep(expected.server_auth, options.server_auth);
+               ^
+       /Users/bytedance/project-z/netz/src/quic/client_trust/precedence_tests.zig:58:5: 0x104dc56fb in test.QUIC trust precedence bundled roots isolate TCP trust defaults (test)
+           try exercise(.bundled);
+           ^
+error: 'quic.client_trust.precedence_tests.test.QUIC trust precedence platform roots isolate TCP trust defaults' failed:
+       expected null, found .{ .verify_trust = null, .context = null, .pinned_ed25519_public_key = null, .pinned_ecdsa_p256_public_key = { 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9 }, .pinned_ecdsa_p384_public_key = null, .pinned_ecdsa_p521_public_key = null, .pinned_sm2_public_key = null, .pinned_rsa_public_key = null, .pinned_raw_public_key = null, .prepared_ed25519_verifier = null, .prepared_p256_verifier = null, .prepared_p521_verifier = null, .prepared_mldsa44_verifier = null, .prepared_mldsa65_verifier = null, .prepared_mldsa87_verifier = null, .prepared_rsa_verifier = null }
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:890:21: 0x104d67123 in expectEqualDeepInner__anon_38002 (test)
+                           return error.TestExpectedEqual;
+                           ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:741:5: 0x104d3652f in expectEqualDeep (test)
+           return expectEqualDeepInner(T, expected, actual);
+           ^
+       /Users/bytedance/project-z/netz/src/quic/client_trust/precedence_tests.zig:40:9: 0x104d365ff in exercise__anon_36991 (test)
+               try std.testing.expectEqualDeep(expected.server_auth, options.server_auth);
+               ^
+       /Users/bytedance/project-z/netz/src/quic/client_trust/precedence_tests.zig:61:5: 0x104d3716f in test.QUIC trust precedence platform roots isolate TCP trust defaults (test)
+           try exercise(.platform);
+           ^
+failed command: ./.zig-cache/o/752e45fb55e2c75a044d872fa07ae1e7/test --cache-dir=./.zig-cache --seed=0xdef626bf --listen=-
+
+Build Summary: 8/10 steps succeeded (1 failed); 33/38 tests passed (5 failed)
+test-quic transitive failure
++- run test 33 pass, 5 fail (38 total)
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/7969d3ab30b197d80e2c8ba9aaff6d22/build /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/zig /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib /Users/bytedance/project-z/netz .zig-cache /Users/bytedance/.cache/zig --seed 0xdef626bf -Z441bcf1fcb2441ae test-quic -Dtest-filter=QUIC trust precedence -j1 --summary failures
+[traex-zig-guard 2026-11-25 14:09:25] finished Zig tree root=56125 peak=533MiB result=0

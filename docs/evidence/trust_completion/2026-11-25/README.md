@@ -37,6 +37,11 @@ beside this document.
 | Owned completion, resource cleanup, CA authentication, bundle/native availability, CA lock and TLS negotiation | 71/71 passed | [Debug.log](Debug.log) |
 | Unified HTTP H3, H3 WebSocket and shared WebTransport constructors | 307/307 passed | [facades.Debug.log](facades.Debug.log) |
 | Completion, root-load, CA-lock and CA-file fixtures for Windows | Compiled | [windows.compile.log](windows.compile.log) |
+| Native Linux and Windows trust-startup completion regressions at `4f633cc8` | Gate passed | [native-gates.json](native-gates.json) |
 
 [Local metadata](local-validation.json) records each completed exit status.
 All Zig commands ran under the shared tree guard and used `-j1` for builds.
+
+The native record covers the exact completed trust-startup steps. The Windows
+step passed before its containing job was canceled; this record does not claim
+that the entire Windows job or complete workflow succeeded.
