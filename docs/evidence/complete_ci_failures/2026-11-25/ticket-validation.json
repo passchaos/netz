@@ -1,0 +1,23 @@
+{
+  "observed_utc": "2026-11-25T14:56:02.598207+00:00",
+  "command": [
+    "/Users/bytedance/.local/bin/zig",
+    "build",
+    "interop-tls12-ticket-openssl",
+    "interop-tls13-ticket-openssl",
+    "-j1",
+    "--summary",
+    "all"
+  ],
+  "exit_code": 0,
+  "source_sha256": {
+    "tools/interop/tls12_ticket_client.zig": "859087348e980326ae73eaf3614414cc7c595847c65ece9cc08c53d012e53a80",
+    "tools/interop/tls12_ticket_openssl.sh": "5d44beec532d23f91a6569c549df632154bacc66bdc4a74a8c40e19260df0baf",
+    ".github/workflows/ci.yml": "4d9e99a9f3491f1b3cbd0b68e637ce8124420f2890b7bc1ec26a4de2fe0f25ff",
+    "tools/release/source_archive_test.py": "6b29ecef8786ea4b1480939a8c91d0ddddf3f2638c92a1be1c902285b939217a",
+    "tools/ci/run_test_progress.py": "eb814deedc1583b03ddf04049b2ceed9f2be3f62e4232af1f7cbaa6923cc5960",
+    "tools/ci/run_test_progress_test.py": "2ba5b0a060794d66ed9a0915755f5c69ebe5003fc7275233f699bb6ad93f8d0a"
+  },
+  "timeout_scope": "Python subprocess duration shim for local single-process OpenSSL fixture calls; not GNU CI timeout certification",
+  "full_suite_acceptance": "pending next CI; local interop only"
+}

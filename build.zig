@@ -1066,5 +1066,6 @@ pub fn build(b: *std.Build) void {
     );
     websocket_mostly_idle_step.dependOn(&websocket_mostly_idle.step);
 
+    @import("build/testing/interop_compile.zig").add(b);
     if (test_progress) @import("build/testing/run.zig").enableAll(b);
 }

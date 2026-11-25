@@ -1,0 +1,348 @@
+[traex-zig-guard 2026-11-25 22:47:47] waiting for the global TRAE Zig build slot
+[traex-zig-guard 2026-11-25 22:48:04] started Zig tree root=89987 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=600s
+Executing: /Users/bytedance/.local/bin/zig build interop-tls12-ticket-openssl interop-tls13-ticket-openssl interop-webtransport-h2-python -j1 --summary all
+Installed 3 packages in 11ms
+debug(zio): Spawning thread 0
+WebTransport HTTP2 EndpointClient dropped cleanup passed: canceled=1 slot_reused=true
+WebTransport HTTP2 EndpointClient queue passed: connect+datagram+receive owned_results=true reuse_after_error=true
+WebTransport HTTP2 client passed: rejected=429 streams=4 flow_control=true reset=42 reliable_size=6 stop=4294967295 drain=true close=17 invalid_reset=StreamStateError reuse_after_error=true client_io=zio-std-io
+debug(zio): Removing thread 0
+WebTransport HTTP2 EndpointServer pending cleanup passed: canceled=1 slot_reused=true queue=true
+WebTransport HTTP2 server passed: rejected=429 streams=4 flow_control=true reset=42 reliable_size=6 stop=4294967295 drain=true close=17 invalid_reset=StreamStateError reuse_after_error=true client_io=zio-std-io
+debug(zio): Removing thread 0
+WebTransport HTTP2 EndpointListener passed: accepted=true stream=true datagram=true close=19
+debug(zio): Removing thread 0
+{
+  "alpn": "h2",
+  "driver_sha256": "058b57902f5a079ec2ee900a3a3cca47c9fbb8ac9b384927884645b378bf4ee7",
+  "native_client_dropped_cleanup": {
+    "reset_code": 8,
+    "slot_reused": true
+  },
+  "native_client_endpoint_queue": {
+    "connect": true,
+    "datagram": true,
+    "owned_results": true,
+    "receive": true,
+    "reuse_after_error": true
+  },
+  "native_listener": {
+    "accepted": true,
+    "capsule_data_fragmentation": true,
+    "close_code": 19,
+    "connection_admission": {
+      "accept_workers": 1,
+      "connection_timeout_ms": 250,
+      "max_connections": 1,
+      "partial_preface_closed": true,
+      "silent_http2_closed": true,
+      "silent_tls_closed": true
+    },
+    "datagram": true,
+    "http2_stream": 1,
+    "stream": true
+  },
+  "native_server_pending_cleanup": {
+    "queue": true,
+    "reset_code": 8,
+    "slot_reused": true
+  },
+  "protocol": "draft-ietf-webtrans-http2-15",
+  "python_packages": {
+    "h2": "4.3.0",
+    "hpack": "4.1.0",
+    "hyperframe": "6.1.0"
+  },
+  "source_sha256": {
+    "driver.zig": "05cc273728458b59f36f59daccd74b7393d2371d3fe6df82116b0be3c5b477d6",
+    "peer.py": "a1017443068ddb5948a26ffa53b399cbc8a53fecc2e3002b0ef4baee82ab8afa",
+    "run.py": "7a14de0f9d4db7ad0d3a00d9d4f501c57873b0665b95a9f2a0828ff58f7d3834",
+    "wire.py": "a05b6e736b3fff89fdd497656f66b7727b30318b50f9f14578c7727f62ac9698"
+  },
+  "status": "passed",
+  "tls": "TLSv1.3",
+  "traces": [
+    {
+      "capsule_data_fragmentation": true,
+      "connect_fin": true,
+      "connect_requests": 5,
+      "dropped_connect_cleanup": true,
+      "dropped_reset_code": 8,
+      "http2_stream": 3,
+      "invalid_reset_scoped": true,
+      "reliable_size": 6,
+      "reuse_after_error": true,
+      "role": "server",
+      "steps": [
+        "bidi",
+        "credit",
+        "datagram",
+        "drain",
+        "peer-streams",
+        "reset",
+        "stop"
+      ],
+      "stop_code": 4294967295
+    },
+    {
+      "capsule_data_fragmentation": true,
+      "connect_fin": true,
+      "connect_requests": 5,
+      "dropped_pending_cleanup": true,
+      "dropped_reset_code": 8,
+      "http2_stream": 3,
+      "invalid_reset_scoped": true,
+      "reliable_size": 6,
+      "reuse_after_error": true,
+      "role": "client",
+      "steps": [
+        "bidi",
+        "credit",
+        "datagram",
+        "drain",
+        "peer-streams",
+        "reset",
+        "stop"
+      ],
+      "stop_code": 4294967295
+    }
+  ]
+}
+WebTransport HTTP2 Python interoperability passed: directions=2 rejected=429 independent_capsules=true
+tools/interop/tls12_ticket_openssl.sh: line 103: binary_mode[@]: unbound variable
+cat: /var/folders/3h/rw6tyryn6ps_mw9bcstc2lfm0000gn/T/tmp.zBk5fWZiCI/netz-server.log: No such file or directory
+OpenSSL/netz TLS 1.3 session-ticket interop passed in both endpoint roles
+interop-tls12-ticket-openssl
++- run tools/interop/tls12_ticket_openssl.sh failure
+error: process exited with error code 1
+failed command: tools/interop/tls12_ticket_openssl.sh ./.zig-cache/o/816a87b709d97f7f4cc805f21a1da7ad/netz-tls12-ticket-server ./.zig-cache/o/a1f182d030b7cc221d885274fa113713/netz-tls12-ticket-client
+
+Build Summary: 13/15 steps succeeded (1 failed)
+interop-tls12-ticket-openssl transitive failure
++- run tools/interop/tls12_ticket_openssl.sh failure
+   +- compile exe netz-tls12-ticket-server Debug native success 31s MaxRSS:3G
+   |  +- WriteFile macho_0_p256_field_arm64.S cached
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile macho_0_p256_field_arm64.S (reused)
+   |  +- WriteFile cached
+   |  +- compile obj vort-br-record-optimal Debug native cached 184ms MaxRSS:31M
+   |  +- WriteFile cached
+   |  +- compile obj vort-zstd-huffman-x2 Debug native cached 232ms MaxRSS:31M
+   |  +- compile obj vort-br-record-optimal Debug native (reused)
+   |  +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+   |  +- options cached
+   +- compile exe netz-tls12-ticket-client Debug native success 30s MaxRSS:2G
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile (reused)
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- WriteFile (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options (reused)
+interop-tls13-ticket-openssl success
++- run tools/interop/tls12_ticket_openssl.sh success 2s
+   +- compile exe netz-tls12-ticket-server Debug native (+71 more reused dependencies)
+   +- compile exe netz-tls12-ticket-client Debug native (+71 more reused dependencies)
+interop-webtransport-h2-python success
++- run uv success 4s
+   +- compile exe netz-webtransport-h2-interop Debug native success 37s MaxRSS:2G
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile (reused)
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- WriteFile (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options (reused)
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/8de567ba69e525c6133322e87184f9d1/build /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/zig /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib /Users/bytedance/project-z/netz .zig-cache /Users/bytedance/.cache/zig --seed 0xdfd2ed9 -Zeee9a57c2de3d947 interop-tls12-ticket-openssl interop-tls13-ticket-openssl interop-webtransport-h2-python -j1 --summary all
+[traex-zig-guard 2026-11-25 22:49:10] finished Zig tree root=89987 peak=5627MiB result=0

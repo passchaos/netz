@@ -83,7 +83,7 @@ fn runClient(
                 .original_destination_connection_id = &original_dcid,
                 .local_connection_id = &client_cid,
                 .server_name = "localhost",
-                .server_auth = verifier.clientVerifier(),
+                .server_auth = netz.quic.tls.auth.ClientVerifier.fromTrustVerifier(verifier.clientVerifier()),
                 .key_exchange_groups = &.{.x25519},
                 .max_crypto_buffer = 64 * 1024,
             },

@@ -1,0 +1,17 @@
+[traex-zig-guard 2026-11-25 22:59:25] waiting for the global TRAE Zig build slot
+[traex-zig-guard 2026-11-25 23:04:37] started Zig tree root=50931 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=180s
+stale: grpc_ordinary_health_gate/2026-11-02-lifecycle.json: src/grpc/channel.zig (recorded 85e24804254cf9a6a4fb3307a2a0807f64d532df6f6943c1eed433af24881161, actual 477623de629c32cd6e6c74def7b18a31b377aeb1bf87852e190c50471f796f35)
+stale: grpc_ordinary_health_gate/2026-11-02-lifecycle.json: src/grpc/channel/health_gate.zig (recorded 659b24d86724749b7c16bf2b3bc1692033a406df23ff48b389c623605f4f34a4, actual 59a77c070b00ab61a4703b32eb3e024e7b3f745543f1249c470c92739ccbae04)
+stale: grpc_ordinary_health_gate/2026-11-02-lifecycle.json: src/grpc/channel/health_gate/retry_tests.zig (recorded 749410ccc2f277df3188266660c50703bc05c428b5722e268dee7b55e4bb8af8, actual 1e79de3ca1c6633766500dbb440634046531c7631e83c26c8f33869f4f7085c3)
+stale: grpc_ordinary_health_gate/2026-11-02-lifecycle.json: src/grpc/health/reconnecting.zig (recorded 7abc21e91de6a55f0ac08aff34a76c6757b752285c1d8ab65dd6bceccb41d1c1, actual 01e06af1555a125fd3e7bc8331bcc361b9bc08e09ec07d05854f646d4f48e2ec)
+stale: grpc_ordinary_health_gate/2026-11-02-lifecycle.json: tools/interop/grpc_response/health_gate.js (recorded 68d20e4bb32508db2a975b837eb9d8f76e3f48567038b03b9e1fbf71a25391e8, actual b6507a81b9c91e1a03f00edd003830e4e10c04b94c28fd969e72e9425a897502)
+stale: grpc_ordinary_health_gate/2026-11-02-lifecycle.json: tools/interop/grpc_response/health_gate.zig (recorded aca141b0287f3350ccffc3928548b163628e42f7a3fd848ebfd29e089e17985e, actual d5b94d07e88ac6a04cc568f21ebc43ece0763f229f413bdf408e4d75f17e08a9)
+stale: grpc_ordinary_health_gate/2026-11-02-lifecycle.json: tools/interop/grpc_response/client.js (recorded 3897dfe8de5938adc1346fb2d56ebd8b686b02db7aa7634472aad77c2bd7f8e0, actual 179dc13ecc704853908965c5b12968a35cce5936815fb38f10cc4e8fd48a00d9)
+stale: grpc_ordinary_health_gate/2026-11-02-lifecycle.json: tools/interop/grpc_response_client.zig (recorded a5232b447530cba7462da5f9c1c433fb7ff4c82084c0a3e8e038ce1e8794b40f, actual 52d974235c67f58e6a4d1887bda45f7dcdc1112eb09b57656ac22eae471ddfda)
+stale: grpc_ordinary_health_gate/2026-11-02-resources.json: src/grpc/mod.zig (recorded 9a45863e7dc8e005270799e8ac917237cb7e406ed83704f9842907dd36802e66, actual d58b88a041e308add87d2e9ca5bd7b6becd9024ab388113cde87f8be971c8a5a)
+stale: grpc_ordinary_health_gate/2026-11-02-resources.json: src/grpc/channel.zig (recorded 85e24804254cf9a6a4fb3307a2a0807f64d532df6f6943c1eed433af24881161, actual 477623de629c32cd6e6c74def7b18a31b377aeb1bf87852e190c50471f796f35)
+unresolved: webtransport_protocol/2026-11-07/interop.Debug.json: src/http3/runtime/shared_handshake_client_pool/dispatcher/receive.zig
+unresolved: webtransport_protocol/2026-11-07/interop.ReleaseSafe.json: src/http3/runtime/shared_handshake_client_pool/dispatcher/receive.zig
+unresolved: webtransport_protocol/2026-11-07/interop.Debug.corrected.json: src/http3/runtime/shared_handshake_client_pool/dispatcher/receive.zig
+evidence audit: files=299 entries=10898 matched=6399 stale=4496 unresolved=3 invalid=0 unreadable=0
+[traex-zig-guard 2026-11-25 23:04:43] finished Zig tree root=50931 peak=254MiB result=0

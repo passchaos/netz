@@ -9,13 +9,11 @@ case "$mode" in
     tls_label='1.2'
     openssl_client_tls=(-tls1_2 -cipher ECDHE-ECDSA-AES128-GCM-SHA256)
     openssl_server_tls=(-tls1_2 -cipher ECDHE-ECDSA-AES128-GCM-SHA256)
-    binary_mode=()
     ;;
   tls13)
     tls_label='1.3'
     openssl_client_tls=(-tls1_3 -ciphersuites TLS_AES_128_GCM_SHA256)
     openssl_server_tls=(-tls1_3 -ciphersuites TLS_AES_128_GCM_SHA256 -num_tickets 1)
-    binary_mode=(tls13)
     ;;
   *)
     echo "unsupported TLS ticket mode: $mode" >&2
@@ -100,7 +98,9 @@ run_openssl_client() {
 }
 
 port=$(free_port)
-"$netz_server" "$port" "${binary_mode[@]}" >"$work/netz-server.log" 2>&1 &
+netz_server_args=("$netz_server" "$port")
+if [[ "$mode" == tls13 ]]; then netz_server_args+=(tls13); fi
+"${netz_server_args[@]}" >"$work/netz-server.log" 2>&1 &
 server_pid=$!
 wait_for_log "$work/netz-server.log" \
   "netz TLS $tls_label ticket server listening server_io=zio-std-io"
@@ -117,7 +117,13 @@ grep -Fq "netz accepted OpenSSL TLS $tls_label handshake resumed=true" \
   "$work/netz-server.log"
 
 port=$(free_port)
-openssl s_server \
+# OpenSSL's generated -www status page uses HTTP/1.0. Serve a complete
+# HTTP/1.1 response so this TLS ticket gate uses the supported HTTP codec.
+printf 'HTTP/1.1 200 OK\r\nContent-Length: 9\r\nConnection: close\r\n\r\nticket-ok' \
+  >"$work/ticket-response.http"
+(
+  cd "$work"
+  exec openssl s_server \
   -accept "$port" \
   -cert "$work/cert.pem" \
   -key "$work/key.pem" \
@@ -125,12 +131,15 @@ openssl s_server \
   -alpn http/1.1 \
   -state \
   -msg \
-  -www \
-  -naccept 2 >"$work/openssl-server.log" 2>&1 &
+  -HTTP \
+  -http_server_binmode \
+  -naccept 2
+) >"$work/openssl-server.log" 2>&1 &
 server_pid=$!
 wait_for_log "$work/openssl-server.log" ACCEPT
-"$netz_client" "$port" "$work/cert.pem" "${binary_mode[@]}" \
-  >"$work/netz-client.log" 2>&1
+netz_client_args=("$netz_client" "$port" "$work/cert.pem")
+if [[ "$mode" == tls13 ]]; then netz_client_args+=(tls13); fi
+"${netz_client_args[@]}" >"$work/netz-client.log" 2>&1
 wait "$server_pid"
 server_pid=
 grep -Fq "netz connected to OpenSSL TLS $tls_label server resumed=false status=200" \

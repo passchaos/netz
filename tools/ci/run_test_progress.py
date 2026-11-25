@@ -94,6 +94,11 @@ def stream(command, output, title, interval):
                 notice()
                 deadline = time.monotonic() + interval
     except BaseException as err:
+        # A second CLI interrupt must not unwind child cleanup. Preserve the
+        # first failure/signal while this command wrapper finishes teardown.
+        if threading.current_thread() is threading.main_thread():
+            signal.signal(signal.SIGINT, signal.SIG_IGN)
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
         if process.poll() is None:
             try:
                 process.terminate()

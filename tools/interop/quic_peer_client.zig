@@ -136,7 +136,9 @@ pub fn main(init: std.process.Init) !void {
     const server_verifier = if (peer == .quic_go) blk: {
         exact_verifier = try .init(&ca_bundle, now.toSeconds());
         break :blk exact_verifier.clientVerifier();
-    } else bundle_verifier.clientVerifier();
+    } else netz.quic.tls.auth.ClientVerifier.fromTrustVerifier(
+        bundle_verifier.clientVerifier(),
+    );
 
     var cancellation_reorder = OneShotReorder{};
     var churn_loss = PhasedFault.init(.loss);

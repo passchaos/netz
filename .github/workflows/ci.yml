@@ -87,6 +87,9 @@ jobs:
         with:
           dependency-token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN || github.token }}
 
+      - name: Install the pinned interop Python runner
+        run: python -m pip install --disable-pip-version-check uv==0.13.0
+
       - name: Run the complete test gate serially
         run: |
           complete_status=0

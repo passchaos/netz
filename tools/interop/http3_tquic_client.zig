@@ -52,7 +52,7 @@ pub fn main(init: std.process.Init) !void {
                 .original_destination_connection_id = &original_dcid,
                 .local_connection_id = &client_cid,
                 .server_name = "localhost",
-                .server_auth = verifier.clientVerifier(),
+                .server_auth = netz.quic.tls.auth.ClientVerifier.fromTrustVerifier(verifier.clientVerifier()),
                 // Keep the retry flight in one Initial. The tquic endpoint
                 // routes each Initial datagram before connection state exists,
                 // so a multi-datagram post-quantum ClientHello would be split

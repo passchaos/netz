@@ -57,7 +57,7 @@ pub fn main(init: std.process.Init) !void {
             .server_name = "localhost",
             .alpn_protocols = &.{benchmark.alpn},
             .key_exchange_groups = &.{.x25519},
-            .server_auth = verifier.clientVerifier(),
+            .server_auth = netz.quic.tls.auth.ClientVerifier.fromTrustVerifier(verifier.clientVerifier()),
             .local_transport_parameters = config.transportParameters(),
             .max_crypto_buffer = 64 * 1024,
             .initial_one_rtt_config = config.oneRttConfig(),

@@ -1,0 +1,68 @@
+{
+  "observed_utc": "2026-11-25T14:45:53.279011+00:00",
+  "checks": [
+    {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "fmt",
+        "build.zig",
+        "build/testing/interop_compile.zig",
+        "tools/interop/tls12_ticket_client.zig",
+        "tools/interop/websocket_h3_quic_go_client.zig",
+        "tools/interop/connect_udp_h3_peer.zig",
+        "tools/interop/quic_datagram_bench_client.zig",
+        "tools/interop/connect_ip_h3_peer.zig",
+        "tools/interop/http_digest/h3/client.zig",
+        "tools/interop/quic_quic_go_churn_client.zig",
+        "tools/interop/http3_tquic_client.zig"
+      ],
+      "exit_code": 0,
+      "expected_nonzero": false
+    },
+    {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-compile-interop",
+        "-j1",
+        "-Dinterop-filter=websocket_h3_quic_go_client.zig",
+        "-Dinterop-filter=connect_udp_h3_peer.zig",
+        "-Dinterop-filter=quic_datagram_bench_client.zig",
+        "-Dinterop-filter=connect_ip_h3_peer.zig",
+        "-Dinterop-filter=http_digest/h3/client.zig",
+        "-Dinterop-filter=quic_quic_go_churn_client.zig",
+        "-Dinterop-filter=http3_tquic_client.zig",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "expected_nonzero": false
+    },
+    {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-compile-interop",
+        "-j1",
+        "-Dinterop-filter=no-such-interop-program-26731",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 1,
+      "expected_nonzero": true
+    }
+  ],
+  "source_sha256": {
+    "build.zig": "7283c008d1c298a1f8ca12e9b21913c3c5a063e2d21489e52f438ce1683f934a",
+    "build/testing/interop_compile.zig": "dd858991666556bb605cd356e8fb2b85262adb24ec3f2c474cd50c79ece679e0",
+    "tools/interop/tls12_ticket_client.zig": "859087348e980326ae73eaf3614414cc7c595847c65ece9cc08c53d012e53a80",
+    "tools/interop/websocket_h3_quic_go_client.zig": "91f168c1d1a55a4a445732cd5bba700739dac46935fcd8253e22121ec173d468",
+    "tools/interop/connect_udp_h3_peer.zig": "a854425b07fb30521cbc312f10bbce31c2414edb8d3dae7c908eac9ff45c31cb",
+    "tools/interop/quic_datagram_bench_client.zig": "27e76cb1dcb7217158af71743d7cbf87e4fd03cbb982672324736a669bf0581b",
+    "tools/interop/connect_ip_h3_peer.zig": "f0dd117b1840e3549d3e50751172cb5eed77ca9dd5a5a996f102ff4fab73b2d9",
+    "tools/interop/http_digest/h3/client.zig": "25a6bcf39e882e502f29cda953b6da1525bb0975ff70e2898d00d965c8414efa",
+    "tools/interop/quic_quic_go_churn_client.zig": "b9b81696a1b54212e82edf331c4fdc919965441cfe7aadf0a9cc5843684ddf1a",
+    "tools/interop/http3_tquic_client.zig": "73d3f1474852f4df8cfb8c0d2405f65abb9a3d74f5dd14938ad317a18cbc00fc"
+  },
+  "scope": "Changed interop clients compile; no external peer or full-suite claim"
+}

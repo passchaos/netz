@@ -80,7 +80,9 @@ pub fn main(init: std.process.Init) !void {
             allocator,
             io,
             port,
-            verifier.clientVerifier(),
+            netz.quic.tls.auth.ClientVerifier.fromTrustVerifier(
+                verifier.clientVerifier(),
+            ),
             config,
             selected_sender,
             @intCast(round_index),

@@ -19,7 +19,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, port: u16, version: netz.qu
             .version = version,
             .available_versions = if (version == .version_1) &.{.version_1} else &.{.version_2},
             .server_name = "localhost",
-            .server_auth = verifier.clientVerifier(),
+            .server_auth = netz.quic.tls.auth.ClientVerifier.fromTrustVerifier(verifier.clientVerifier()),
             .local_transport_parameters = common.parameters(),
             .initial_one_rtt_config = .{ .key_update_profile = if (version == .version_2) .quic_go_v0_59 else .rfc, .receive_window = 8192, .max_receive_window = 8192, .stream_receive_window = 2048, .max_stream_receive_window = 2048, .max_datagram_size = 1200 },
         },

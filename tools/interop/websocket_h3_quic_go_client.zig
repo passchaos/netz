@@ -73,7 +73,9 @@ pub fn main(init: std.process.Init) !void {
             .version = version,
             .available_versions = availableVersions(version),
             .server_name = "localhost",
-            .server_auth = verifier.clientVerifier(),
+            .server_auth = netz.quic.tls.auth.ClientVerifier.fromTrustVerifier(
+                verifier.clientVerifier(),
+            ),
             .max_crypto_buffer = 64 * 1024,
             .initial_one_rtt_config = .{
                 .key_update_profile = if (version == .version_2)
@@ -329,7 +331,9 @@ fn runBenchmarkWithAllocator(
                 .version = config.version,
                 .available_versions = config.availableVersions(),
                 .server_name = "localhost",
-                .server_auth = verifier.clientVerifier(),
+                .server_auth = netz.quic.tls.auth.ClientVerifier.fromTrustVerifier(
+                    verifier.clientVerifier(),
+                ),
                 .local_transport_parameters = config.transportParameters(),
                 .initial_one_rtt_config = config.oneRttConfig(),
                 .max_crypto_buffer = 64 * 1024,

@@ -60,7 +60,9 @@ pub fn main(init: std.process.Init) !void {
             .handshake = .{ .handshake = .{
                 .original_destination_connection_id = &.{},
                 .local_connection_id = &.{},
-                .server_auth = bundle_verifier.clientVerifier(),
+                .server_auth = netz.quic.tls.auth.ClientVerifier.fromTrustVerifier(
+                    bundle_verifier.clientVerifier(),
+                ),
             } },
             .idle = .{ .max_idle_per_origin = 1, .max_idle_total = 2 },
             .max_connections = 2,

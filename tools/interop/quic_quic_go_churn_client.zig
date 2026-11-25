@@ -61,7 +61,7 @@ pub fn run(_: std.process.Init, args: []const []const u8) !void {
             .available_versions = &.{.version_1},
             .server_name = "localhost",
             .alpn_protocols = &.{churn.alpn},
-            .server_auth = verifier.clientVerifier(),
+            .server_auth = netz.quic.tls.auth.ClientVerifier.fromTrustVerifier(verifier.clientVerifier()),
             .local_transport_parameters = try config.transportParameters(),
             .max_crypto_buffer = 64 * 1024,
             .initial_one_rtt_config = try config.oneRttConfig(),

@@ -1,0 +1,35 @@
+{
+  "observed_utc": "2026-11-25T14:58:01.360643+00:00",
+  "checks": [
+    {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "fmt",
+        "tools/interop/quic_quic_go_bench_client.zig",
+        "tools/interop/http3_socks5_pool_client.zig",
+        "tools/interop/quic_peer_client.zig"
+      ],
+      "exit_code": 0
+    },
+    {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-compile-interop",
+        "-j1",
+        "-Dinterop-filter=quic_quic_go_bench_client.zig",
+        "-Dinterop-filter=http3_socks5_pool_client.zig",
+        "-Dinterop-filter=quic_peer_client.zig",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0
+    }
+  ],
+  "source_sha256": {
+    "tools/interop/quic_quic_go_bench_client.zig": "6ac0ed07a39b774da05f0f01603f511ab72c44a037660838ce689e01964c135b",
+    "tools/interop/http3_socks5_pool_client.zig": "bb7f1eb4033a12150bebaf33ecd8ae46ef8375c8b58b2dc28dbf125e6cfce90a",
+    "tools/interop/quic_peer_client.zig": "d77b4237249d5b1d4c5354ffa8588d3f50154030fb40e236f3927fa9f990e460"
+  },
+  "scope": "Final BundleVerifier callback adapters and the importing benchmark client"
+}

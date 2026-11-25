@@ -4,6 +4,7 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import re
 import subprocess
 import tarfile
 import tempfile
@@ -388,6 +389,27 @@ class SourceArchiveTest(unittest.TestCase):
 
 
 class RepositoryDependencyPinTest(unittest.TestCase):
+    @staticmethod
+    def checkouts(source: str) -> list[dict[str, str]]:
+        lines = source.splitlines()
+        result = []
+        for index, line in enumerate(lines):
+            match = re.match(r"(\s*)repository: passchaos/(\S+)\s*$", line)
+            if match is None:
+                continue
+            indent = len(match.group(1))
+            fields = {"repository": match.group(2)}
+            for following in lines[index + 1:]:
+                if not following.strip():
+                    continue
+                if len(following) - len(following.lstrip()) < indent:
+                    break
+                key, separator, value = following.strip().partition(":")
+                if separator and key in ("ref", "path", "token"):
+                    fields[key] = value.strip()
+            result.append(fields)
+        return result
+
     def test_workflows_and_release_generator_use_the_same_dependencies(self) -> None:
         manifest = (REPOSITORY_ROOT / "build.zig.zon").read_text(encoding="utf-8")
         self.assertIn(f'.url = "{SOURCE_ARCHIVE.ZIO_SOURCE}"', manifest)
@@ -402,6 +424,11 @@ class RepositoryDependencyPinTest(unittest.TestCase):
         release = (REPOSITORY_ROOT / ".github/workflows/release.yml").read_text(
             encoding="utf-8"
         )
+        setup = (REPOSITORY_ROOT / ".github/actions/setup-build/action.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(2, ci.count("uses: ./netz/.github/actions/setup-build"))
+        self.assertEqual(2, ci.count("dependency-token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN || github.token }}"))
         sibling_pins = {
             "harnessz": SOURCE_ARCHIVE.HARNESSZ_REVISION,
             "vail": SOURCE_ARCHIVE.VAIL_REVISION,
@@ -412,35 +439,31 @@ class RepositoryDependencyPinTest(unittest.TestCase):
             "regexz": SOURCE_ARCHIVE.REGEXZ_REVISION,
         }
         for name, revision in sibling_pins.items():
-            checkout_lines = [
-                f"repository: passchaos/{name}",
-                f"          ref: {revision}",
-            ]
-            if name in (
-                "harnessz",
-                "vail",
-                "vort",
-                "kron",
-                "webpkiz",
-                "regexz",
+            for source, count, tokens in (
+                (ci, 3, {"${{ secrets.NETZ_DEPENDENCIES_TOKEN }}", "${{ secrets.NETZ_DEPENDENCIES_TOKEN || github.token }}"}),
+                (setup, 1, {"${{ inputs.dependency-token }}"}),
+                (release, 1, {"${{ secrets.NETZ_DEPENDENCIES_TOKEN }}"}),
             ):
-                checkout_lines.append(
-                    "          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}"
-                )
-            checkout_lines.append(f"          path: {name}")
-            checkout = "\n".join(checkout_lines)
-            self.assertEqual(4, ci.count(checkout), name)
-            self.assertEqual(1, release.count(checkout), name)
+                checkouts = [checkout for checkout in self.checkouts(source) if checkout["repository"] == name]
+                self.assertEqual(count, len(checkouts), name)
+                for checkout in checkouts:
+                    self.assertEqual(revision, checkout.get("ref"), name)
+                    self.assertEqual(name, checkout.get("path"), name)
+                    if name != "pbz":
+                        self.assertIn(checkout.get("token"), tokens, name)
 
         self.assertIn("'vort/build.zig.zon'", ci)
-        for target in (
-            "aarch64-linux-gnu",
-            "x86_64-linux-gnu",
-            "x86_64-windows-gnu",
-            "aarch64-macos-none",
-            "x86_64-macos-none",
+        # Count matrix declarations rather than incidental target mentions in
+        # platform-specific conditions and scoped regression commands.
+        for target, count in (
+            ("aarch64-linux-gnu", 1),
+            ("x86_64-linux-gnu", 1),
+            ("x86_64-windows-gnu", 2),
+            ("aarch64-macos-none", 1),
+            ("x86_64-macos-none", 1),
         ):
-            self.assertEqual(1, ci.count(target), target)
+            pattern = rf"^\s+- (?:target: )?{re.escape(target)}\s*$"
+            self.assertEqual(count, len(re.findall(pattern, ci, re.MULTILINE)), target)
         self.assertIn(
             "zig build test-compile -j1 -Dtarget=${{ matrix.target }} --summary all",
             ci,

@@ -11,6 +11,51 @@ import unittest
 
 
 class ProgressTest(unittest.TestCase):
+    @unittest.skipUnless(os.name == "posix", "POSIX repeated command interruption")
+    def test_repeated_interrupts_cannot_unwind_owned_child_cleanup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            summary = root / "summary.md"
+            child_pid = root / "child.pid"
+            terminating = root / "terminating"
+            env = os.environ.copy()
+            env["GITHUB_STEP_SUMMARY"] = str(summary)
+            source = "import os,signal,time; from pathlib import Path; Path(" + repr(str(child_pid)) + ").write_text(str(os.getpid())); signal.signal(signal.SIGTERM,lambda *_: Path(" + repr(str(terminating)) + ").write_text('seen')); print('1/1 http.test.repeated_interrupt...',flush=True); time.sleep(30)"
+            process = subprocess.Popen([sys.executable, str(Path(__file__).with_name("run_test_progress.py")), "--log", str(root / "log"), "--interval", "0.01", "--", sys.executable, "-c", source], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+            child_stopped = False
+            try:
+                until = time.monotonic() + 3
+                while not summary.exists() or "http.test.repeated_interrupt" not in summary.read_text():
+                    if time.monotonic() >= until:
+                        self.fail("child progress was not published")
+                    time.sleep(0.005)
+                process.send_signal(signal.SIGINT)
+                until = time.monotonic() + 2
+                while not terminating.exists():
+                    if time.monotonic() >= until:
+                        self.fail("owned child cleanup did not start")
+                    time.sleep(0.005)
+                process.send_signal(signal.SIGINT)
+                process.send_signal(signal.SIGTERM)
+                stdout, stderr = process.communicate(timeout=8)
+                try:
+                    os.kill(int(child_pid.read_text()), 0)
+                except ProcessLookupError:
+                    child_stopped = True
+                self.assertTrue(child_stopped, "owned child survived cleanup")
+                self.assertEqual(130, process.returncode, stderr.decode())
+                self.assertIn(b"::error title=Test progress::Interrupted command", stdout)
+                self.assertIn("http.test.repeated_interrupt", summary.read_text())
+            finally:
+                if not child_stopped:
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                if process.poll() is None:
+                    process.kill()
+                process.communicate()
+
     def test_summary_keeps_latest_test_beyond_notice_annotation_limit(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

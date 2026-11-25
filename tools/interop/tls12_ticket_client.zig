@@ -76,7 +76,7 @@ fn runTls12(
         }
         var response = try client.request(.{
             .method = .GET,
-            .target = "/",
+            .target = "/ticket-response.http",
             .host = "localhost",
         });
         defer response.deinit(allocator);
@@ -134,7 +134,7 @@ fn runTls13(
         }
         var response = try client.request(.{
             .method = .GET,
-            .target = "/",
+            .target = "/ticket-response.http",
             .host = "localhost",
         });
         defer response.deinit(allocator);

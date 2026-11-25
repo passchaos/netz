@@ -58,6 +58,13 @@ the current boundary even when only earlier notices appear in the annotations
 list. SIGINT and SIGTERM stop the child, publish an error with the latest
 visible test and output, and return 130 and 143 respectively. Compiler commands
 remain in the full log. Custom runners retain their own output policy.
+Repeated interrupts cannot unwind child teardown or replace the first failure.
+
+`zig build test-compile-interop -j1` compiles registered interop executables
+without starting their peer processes. Repeat `-Dinterop-filter=<name-or-root-source-path>`
+to select specific programs, for example `-Dinterop-filter=websocket_h3_quic_go_client.zig`.
+An unmatched filter fails with `NoMatchingInteropPrograms`. The normal complete
+test gate still runs its configured external interoperability checks.
 
 CI runs the complete `zig build test -j1` gate in its own 30-minute job, in
 parallel with the formatting/evidence/source-release and bounded fuzz/soak
@@ -69,6 +76,9 @@ GNU `timeout` interrupts the complete command after 28 minutes and allows 10
 seconds for termination before killing it. This reserves time within the job
 limit for the final progress report and failure context; a timeout still fails
 the gate.
+The complete job installs pinned `uv` 0.13.0 for the Python interop scripts;
+their script metadata pins the peer libraries. Local complete runs also need
+`uv` on `PATH`.
 
 Runnable examples are under `examples/` and are wired into the build:
 
