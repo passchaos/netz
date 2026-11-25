@@ -8,6 +8,7 @@ test {
 const builtin = @import("builtin");
 const quic = @import("mod.zig");
 const deadline_policy = @import("../internal/deadline.zig");
+const MutexGuard = @import("../internal/mutex_guard.zig").Guard;
 const socket_binding = @import("../internal/socket_binding.zig");
 const socks5_proxy = @import("../proxy/socks5.zig");
 const socks5_udp = socks5_proxy.udp;
@@ -1661,6 +1662,7 @@ pub const Endpoint = struct {
         out: []ReceivedBytesView,
         timeout: std.Io.Timeout,
     ) ReceiveTimeoutError!usize {
+        const absolute = try deadline_policy.fromIoTimeout(self.io, timeout);
         try self.validateManyReceiveBuffers(buffer, out);
         var messages: [max_receive_batch_messages]net.IncomingMessage =
             undefined;
@@ -1668,10 +1670,11 @@ pub const Endpoint = struct {
             receive_control_buffer_len
         ]u8 align(@alignOf(EcnCmsgHdr)) = undefined;
 
-        self.socket_receive_mutex.lockUncancelable(self.io);
-        defer self.socket_receive_mutex.unlock(self.io);
-        const deadline = timeout.toDeadline(self.io);
+        var guard = try MutexGuard.initBefore(&self.socket_receive_mutex, self.io, absolute);
+        defer guard.unlock();
+        const deadline: std.Io.Timeout = if (absolute) |until| .{ .deadline = until } else .none;
         while (true) {
+            if (absolute) |until| _ = try deadline_policy.usableAwake(self.io, until);
             for (
                 messages[0..out.len],
                 controls[0..out.len],
@@ -3466,6 +3469,7 @@ pub const RejectMessageOversizeReceives = struct {
 
 test {
     _ = @import("runtime/tests.zig");
+    _ = @import("runtime/receive_deadline_admission_tests.zig");
     _ = @import("runtime/network_interface_tests.zig");
     _ = @import("runtime/interface_adoption_tests.zig");
 }

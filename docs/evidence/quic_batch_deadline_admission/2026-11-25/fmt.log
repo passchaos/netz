@@ -1,0 +1,3 @@
+[traex-zig-guard 2026-11-25 19:27:05] waiting for the global TRAE Zig build slot
+[traex-zig-guard 2026-11-25 19:28:05] started Zig tree root=73596 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=900s
+[traex-zig-guard 2026-11-25 19:28:05] finished Zig tree root=73596 peak=0MiB result=0

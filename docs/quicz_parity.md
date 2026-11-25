@@ -355,6 +355,12 @@ hint and retry the socket, matching Quinn's DPLPMTUD policy. Owned,
 caller-buffer, GRO-batch, and receive-many paths share that rule; timed retries
 retain one absolute deadline, while an actually truncated data/control message
 still fails with `DatagramTooLarge` through `MSG_TRUNC`/`MSG_CTRUNC`.
+Raw endpoint and dispatcher receive-many timeouts also normalize one awake
+deadline before buffer, callback or timed I/O admission. Expired or incompatible
+clock bounds return `Timeout`; a live budget retains backend capability errors
+such as `ConcurrencyUnavailable`. Endpoint receive ownership waits and
+asynchronous-ICMP retries keep the same original deadline. See the
+[batch deadline admission evidence](evidence/quic_batch_deadline_admission/2026-11-25/README.md).
 The server's first 1-RTT application send also appends HANDSHAKE_DONE through a
 16-frame stack-first view instead of allocating a temporary `Frame` array. The
 caller frames remain first, preserving HTTP/3 application ordering; oversized

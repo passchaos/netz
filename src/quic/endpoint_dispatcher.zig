@@ -1542,6 +1542,7 @@ pub const Dispatcher = struct {
         context: anytype,
         comptime visitor: anytype,
     ) (ReceiveError || callbackErrorSet(visitor))!usize {
+        const deadline = try deadline_policy.fromIoTimeout(self.endpoint.io, timeout);
         if (output.len == 0 or
             output.len > runtime.max_receive_batch_messages)
         {
@@ -1551,7 +1552,7 @@ pub const Dispatcher = struct {
             supported_versions,
             storage,
             output,
-            timeout.toTimestamp(self.endpoint.io),
+            deadline,
             context,
             visitor,
         );

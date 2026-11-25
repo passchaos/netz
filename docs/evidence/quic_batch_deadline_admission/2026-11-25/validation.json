@@ -1,0 +1,61 @@
+{
+  "observed_utc": "2026-11-25T11:35:58.413769+00:00",
+  "platform": "aarch64-macos",
+  "zig_version": "0.16.0",
+  "baseline_commit": "40f9c9da47f172876365f0dd9cdd045312e83f41",
+  "source_sha256": {
+    "src/internal/deadline.zig": "5914386f1c14f246ae8f42faae2ea8634bbc74731daceacafc50269c7614f083",
+    "src/quic/runtime.zig": "7380db97e8fe7466ca9ed03579d618b34ef049aded5373e99961e87dd45b1cd7",
+    "src/quic/endpoint_dispatcher.zig": "ff0d64a3146802f7cd40fa2226c88e81a6f48bce1166df7e1d640c766326be9a",
+    "src/quic/runtime/receive_deadline_admission_tests.zig": "7a0274f0d447b158a3e2523891080d9952e6ce50998580ad708b2f15274b2381",
+    "docs/quicz_parity.md": "fbb2d14bd1461b67645d70878c6ba33f0945292c6a265c58d136804ce41db2eb"
+  },
+  "checks": {
+    "Debug": {
+      "passed": 45,
+      "build_steps_succeeded": 10,
+      "exit_code": 0,
+      "log": "Debug.log",
+      "log_sha256": "e3796977473170c6c3ea83cacf265aec7764af0fd84778699ebc09a90a4250ff"
+    },
+    "ReleaseSafe": {
+      "passed": 45,
+      "build_steps_succeeded": 10,
+      "exit_code": 0,
+      "log": "ReleaseSafe.log",
+      "log_sha256": "2dee1f966df5aea6956bbdbfda625e68eb64720425371f9ea6f2e3317407edde"
+    }
+  },
+  "before": {
+    "exit_code": 1,
+    "observed": "expected Timeout, found ConcurrencyUnavailable for an expired raw timeout; live-budget control passed",
+    "log": "before.log",
+    "log_sha256": "2d4b20ef72eb479db2d8efcccf8fa71ac9bb193a01bcfdd11af92aff2ea74de6"
+  },
+  "filters": [
+    "QUIC batch receive caller-owned deadlines",
+    "QUIC endpoint dispatcher validates caller-owned deadlines",
+    "receives plain batch into caller storage",
+    "preserves independent ECN control messages",
+    "preserves received prefix and rearms cancellation",
+    "preserves a received batch prefix before socket error",
+    "visits a ready datagram batch without allocation",
+    "retains batch suffix after visitor error",
+    "public batch bounds due timers before receive"
+  ],
+  "command": "zig build test-quic -j1 -Dtest-progress=true [-Doptimize=ReleaseSafe] -Dtest-filter='QUIC batch receive caller-owned deadlines' -Dtest-filter='QUIC endpoint dispatcher validates caller-owned deadlines' -Dtest-filter='receives plain batch into caller storage' -Dtest-filter='preserves independent ECN control messages' -Dtest-filter='preserves received prefix and rearms cancellation' -Dtest-filter='preserves a received batch prefix before socket error' -Dtest-filter='visits a ready datagram batch without allocation' -Dtest-filter='retains batch suffix after visitor error' -Dtest-filter='public batch bounds due timers before receive' --summary all",
+  "format": {
+    "exit_code": 0,
+    "log": "fmt.log"
+  },
+  "dependency_revisions": {
+    "vail": "d93847a7e091c835406ee10c0a86fd064f1475dd",
+    "vort": "a48e1151872a30a574363e994ec312969b3c7818",
+    "kron": "77b9572a0256da0ece836c6b49024b3282bd1d5b",
+    "webpkiz": "35c9f4bfecb51a7794670d474c01b3c6fe541e9e",
+    "regexz": "188b76e1dad902e44226e105b5b68ff742975c09",
+    "harnessz": "80117591603f35b1b084b9a5eafd040810ab4b3d"
+  },
+  "native_windows_acceptance": "pending next CI run",
+  "complete_suite_acceptance": "pending next CI run"
+}

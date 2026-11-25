@@ -14,6 +14,12 @@ pub fn fromTimeout(
     return .fromNow(io, .{ .raw = duration, .clock = .awake });
 }
 
+/// Normalize a raw I/O timeout once and validate it before admitting work.
+pub fn fromIoTimeout(io: std.Io, timeout: std.Io.Timeout) Error!?std.Io.Clock.Timestamp {
+    const deadline = timeout.toTimestamp(io) orelse return null;
+    return try usableAwake(io, deadline);
+}
+
 pub fn earlier(
     a: ?std.Io.Clock.Timestamp,
     b: ?std.Io.Clock.Timestamp,
