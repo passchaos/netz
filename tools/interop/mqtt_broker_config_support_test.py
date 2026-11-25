@@ -12,6 +12,7 @@ import mqtt_broker_config
 from mqtt_broker_config_include import connack_policy
 from mqtt_scenarios import subscription_lifecycle
 from mqtt_scenarios.will_delay_test import QuietDeadlineOracleTest
+from mqtt_broker_config_probes_test import PeerObservationTest
 from mqtt_broker_config import wait_process_line
 
 

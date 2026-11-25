@@ -1,0 +1,27 @@
+{
+  "status": "prepared; shell syntax and three failure-preservation cases passed; production unchanged",
+  "reason": "preserve original combined same-process protocol scope; isolated cases only diagnose original failure",
+  "original_failure_status": "retained through successful diagnostics",
+  "budget_minutes": 5,
+  "pins": "unchanged",
+  "control_flow_checks": [
+    {
+      "combined": 0,
+      "isolated": 0,
+      "returned": 0,
+      "runner_calls": 1
+    },
+    {
+      "combined": 1,
+      "isolated": 0,
+      "returned": 1,
+      "runner_calls": 4
+    },
+    {
+      "combined": 99,
+      "isolated": 7,
+      "returned": 99,
+      "runner_calls": 4
+    }
+  ]
+}

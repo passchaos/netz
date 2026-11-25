@@ -278,11 +278,11 @@ jobs:
           fi
           exit "$trust_status"
 
-      - name: Run native H1 H2 resolver policy regressions
+      - name: Run native H1 H2 resolver and pull reader regressions
         if: runner.os == 'Windows' || (runner.os == 'Linux' && matrix.target == 'x86_64-linux-gnu')
         run: |
           resolver_status=0
-          zig build test-http1 test-http2 -j1 -Dtarget=${{ matrix.target }} '-Dtest-filter=HTTP1 native resolver policy' '-Dtest-filter=HTTP2 native resolver policy' '-Dtest-filter=connection race admission' '-Dtest-filter=connection race storage' '-Dtest-filter=connection race pool' '-Dtest-filter=absolute deadline wait' '-Dtest-filter=stream timed' '-Dtest-filter=listener accept deadline' '-Dtest-filter=TCP connect deadline' --summary all > native-resolver.log 2>&1 || resolver_status=$?
+          zig build test-http1 test-http2 -j1 -Dtarget=${{ matrix.target }} '-Dtest-filter=HTTP/1 pull' '-Dtest-filter=HTTP1 native resolver policy' '-Dtest-filter=HTTP2 native resolver policy' '-Dtest-filter=connection race admission' '-Dtest-filter=connection race storage' '-Dtest-filter=connection race pool' '-Dtest-filter=absolute deadline wait' '-Dtest-filter=stream timed' '-Dtest-filter=listener accept deadline' '-Dtest-filter=TCP connect deadline' --summary all > native-resolver.log 2>&1 || resolver_status=$?
           cat native-resolver.log
           if [ "$resolver_status" -ne 0 ]; then
             python tools/ci/test_failure_annotations.py native-resolver.log
@@ -294,28 +294,31 @@ jobs:
         timeout-minutes: 5
         run: |
           protocol_status=0
-          for protocol_case in h2-layout dispatcher-rejection endpoint-reconnect; do
-            case "$protocol_case" in
-              h2-layout)
-                protocol_scope=test-http2
-                protocol_filter='HTTP/2 connection keeps optional state compact'
-                ;;
-              dispatcher-rejection)
-                protocol_scope=test-webtransport
-                protocol_filter='standalone dispatcher retains rejection through bounded cleanup'
-                ;;
-              endpoint-reconnect)
-                protocol_scope=test-webtransport
-                protocol_filter='ReconnectingEndpointClient reconnects only future Sessions'
-                ;;
-            esac
-            case_status=0
-            python tools/ci/run_test_progress.py --title "Native protocol CI: $protocol_case" --log "native-protocol-$protocol_case.log" -- zig build "$protocol_scope" -j1 -Dtest-progress=true -Dtarget=${{ matrix.target }} "-Dtest-filter=$protocol_filter" --summary all || case_status=$?
-            if [ "$case_status" -ne 0 ]; then
-              python tools/ci/test_failure_annotations.py "native-protocol-$protocol_case.log"
-              protocol_status=$case_status
-            fi
-          done
+          python tools/ci/run_test_progress.py --title "Native protocol combined CI" --log native-protocol-ci.log -- zig build test-http2 test-webtransport -j1 -Dtest-progress=true -Dtarget=${{ matrix.target }} '-Dtest-filter=HTTP/2 connection keeps optional state compact' '-Dtest-filter=standalone dispatcher retains rejection through bounded cleanup' '-Dtest-filter=ReconnectingEndpointClient reconnects only future Sessions' --summary all || protocol_status=$?
+          if [ "$protocol_status" -ne 0 ]; then
+            python tools/ci/test_failure_annotations.py native-protocol-ci.log
+            for protocol_case in h2-layout dispatcher-rejection endpoint-reconnect; do
+              case "$protocol_case" in
+                h2-layout)
+                  protocol_scope=test-http2
+                  protocol_filter='HTTP/2 connection keeps optional state compact'
+                  ;;
+                dispatcher-rejection)
+                  protocol_scope=test-webtransport
+                  protocol_filter='standalone dispatcher retains rejection through bounded cleanup'
+                  ;;
+                endpoint-reconnect)
+                  protocol_scope=test-webtransport
+                  protocol_filter='ReconnectingEndpointClient reconnects only future Sessions'
+                  ;;
+              esac
+              case_status=0
+              python tools/ci/run_test_progress.py --title "Native protocol CI: $protocol_case" --log "native-protocol-$protocol_case.log" -- zig build "$protocol_scope" -j1 -Dtest-progress=true -Dtarget=${{ matrix.target }} "-Dtest-filter=$protocol_filter" --summary all || case_status=$?
+              if [ "$case_status" -ne 0 ]; then
+                python tools/ci/test_failure_annotations.py "native-protocol-$protocol_case.log"
+              fi
+            done
+          fi
           exit "$protocol_status"
 
       - name: Run native client CA reload regression

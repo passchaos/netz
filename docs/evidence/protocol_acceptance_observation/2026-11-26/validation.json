@@ -1,0 +1,17 @@
+{
+  "observed_utc": "2026-11-25T21:40:07.236847+00:00",
+  "base": "344d9205bc3e01b7aeb8fb2730e3aeaf3968c5b8",
+  "broker_helper_tests_passed": 16,
+  "annotation_tests_passed": 9,
+  "shell_syntax": "passed on exact main workflow block",
+  "control_flow_cases_passed": 3,
+  "ca_observation": "socket mode, handle ownership and queued bytes preserved; no extra PING",
+  "native_h1_filter": "included before protocol step",
+  "scope": "diagnosis and original scope preservation; native protocol root causes remain open",
+  "source_sha256": {
+    ".github/workflows/ci.yml": "6686a809321a1c83f93999fa330b79f2970c3d9416af587f05e499564f3eff83",
+    "tools/interop/mqtt_broker_config.py": "c66fde024add1cf11643013eca632c5fa99dca96562bd275514bf99017d9a0a4",
+    "tools/interop/mqtt_broker_config_probes.py": "0492b775f8323a1b08390f4f409394eeb6fe2369c907a243402886f87c08ac97",
+    "tools/interop/mqtt_broker_config_probes_test.py": "fc59538fe032626dac6a4de8133c0e9728216d12cf70a2f14140546b8792ff1e"
+  }
+}

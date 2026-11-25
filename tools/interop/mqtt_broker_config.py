@@ -18,6 +18,7 @@ import sys
 import tempfile
 import time
 
+from mqtt_broker_config_probes import buffered_process_output, tls_peer_state
 from mqtt_broker_config_inflight import run_max_inflight_messages_case
 from mqtt_broker_config_include import (
     run_include_directory_case, run_include_directory_reload_case,
@@ -4529,6 +4530,11 @@ def run_client_ca_reload_case(broker: Path, directory: Path) -> None:
         )
         old_mqtt_started = time.monotonic()
         clients.append(old_mqtt)
+        observations = [tls_peer_state(old_mqtt, "old MQTT connected", old_mqtt_started)]
+
+        def observe(phase):
+            observations.append(tls_peer_state(old_mqtt, phase, old_mqtt_started))
+
         old_capath = mqtt_connect(
             capath_port,
             first_client,
@@ -4536,32 +4542,29 @@ def run_client_ca_reload_case(broker: Path, directory: Path) -> None:
             "ca-reload-old-capath",
         )
         clients.append(old_capath)
+        observe("old capath connected")
         old_wss = wss_connect(first_client, first_key, "ca-reload-old-wss")
         clients.append(old_wss)
+        observe("old WSS connected")
         expect_mqtt_rejected(second_client, second_key, "initial second CA")
+        observe("second CA MQTT rejected")
         expect_capath_rejected(second_client, second_key, "initial second CA")
+        observe("second CA capath rejected")
         expect_wss_rejected(second_client, second_key, "initial-second-ca")
+        observe("second CA WSS rejected")
         assert_openssl_mqtt_success(openssl_mqtt_client(mqtt_port, server_ca))
+        observe("anonymous OpenSSL exchange")
 
         # Establish liveness immediately before changing trust, so a prior
         # connection failure is not attributed to the SIGHUP transaction.
         try:
             mqtt_ping(old_mqtt, "client CA reload MQTT before SIGHUP")
         except (AssertionError, OSError) as error:
-            descriptor = process.stdout.fileno()
-            was_blocking = os.get_blocking(descriptor)
-            tail = ""
-            os.set_blocking(descriptor, False)
-            try:
-                tail = process.stdout.read(1024) or ""
-            except (BlockingIOError, OSError, TypeError):
-                pass
-            finally:
-                os.set_blocking(descriptor, was_blocking)
+            tail = buffered_process_output(process)
             raise AssertionError(
                 "client CA reload MQTT failed before SIGHUP: "
                 f"{error}; age={time.monotonic() - old_mqtt_started:.3f}s; "
-                f"broker_exit={process.poll()}; broker_output={tail!r}"
+                f"broker_exit={process.poll()}; broker_output={tail!r}; observations={observations!r}"
             ) from None
         mqtt_ping(old_capath, "client CA reload capath before SIGHUP")
         websocket_mqtt_ping(old_wss)
