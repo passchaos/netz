@@ -41,6 +41,14 @@ pub fn usableAwake(
     return deadline;
 }
 
+/// Wait for the original timestamp, rechecking early native timer wakes.
+/// Keep cancellation as a wait result and never replace the absolute budget.
+pub fn waitUntil(io: std.Io, deadline: std.Io.Clock.Timestamp) std.Io.Cancelable!void {
+    while (deadline.durationFromNow(io).raw.nanoseconds > 0) {
+        try deadline.wait(io);
+    }
+}
+
 /// Keep the original absolute timestamp while applying a stricter phase
 /// timeout. This prevents time spent in an earlier phase from being regained.
 pub fn capTimeout(

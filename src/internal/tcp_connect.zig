@@ -11,6 +11,7 @@
 const std = @import("std");
 const zio = @import("zio");
 const deadline_policy = @import("deadline.zig");
+const waitUntil = deadline_policy.waitUntil;
 const happy_eyeballs = @import("tcp_connect/happy_eyeballs.zig");
 const binding = @import("tcp_connect/binding.zig");
 const socket_binding = @import("socket_binding.zig");
@@ -582,13 +583,6 @@ fn connectUnix(
     address: net.UnixAddress,
 ) (net.UnixAddress.ConnectError || std.Io.Timeout.Error)!net.Stream {
     return address.connect(io);
-}
-
-fn waitUntil(
-    io: std.Io,
-    deadline: std.Io.Clock.Timestamp,
-) std.Io.Cancelable!void {
-    try deadline.wait(io);
 }
 
 test {

@@ -1,0 +1,106 @@
+[traex-zig-guard 2026-11-25 09:15:51] started Zig tree root=94332 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=1800s
+test-http1
++- run test 7 pass, 2 fail (9 total)
+error: 'http1.runtime.client.deadline_wait_tests.test.HTTP1 absolute deadline wait rechecks early sleep completion' failed:
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:615:14: 0x103129313 in expect (test)
+           if (!ok) return error.TestUnexpectedResult;
+                    ^
+       /Users/bytedance/project-z/netz/src/internal/testing/deadline_wait.zig:43:9: 0x1031295fb in exercise__anon_36535 (test)
+               try std.testing.expect(deadline.durationFromNow(io).raw.nanoseconds <= 0);
+               ^
+       /Users/bytedance/project-z/netz/src/http1/runtime/client/deadline_wait_tests.zig:4:5: 0x103129787 in test.HTTP1 absolute deadline wait rechecks early sleep completion (test)
+           try shared.exercise(false);
+           ^
+error: 'http1.runtime.client.deadline_wait_tests.test.HTTP1 absolute deadline wait preserves cancellation after an early wake' failed:
+       expected error.Canceled, found void
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:65:9: 0x10312bd17 in expectError__anon_36993 (test)
+               return error.TestExpectedError;
+               ^
+       /Users/bytedance/project-z/netz/src/internal/testing/deadline_wait.zig:40:9: 0x10312bf67 in exercise__anon_36974 (test)
+               try std.testing.expectError(error.Canceled, waiting(io, deadline));
+               ^
+       /Users/bytedance/project-z/netz/src/http1/runtime/client/deadline_wait_tests.zig:8:5: 0x10312c0f3 in test.HTTP1 absolute deadline wait preserves cancellation after an early wake (test)
+           try shared.exercise(true);
+           ^
+failed command: ./.zig-cache/o/07cfa16d72e4f307e6f40d329127931c/test --cache-dir=./.zig-cache --seed=0xb5c572fb --listen=-
+
+Build Summary: 8/10 steps succeeded (1 failed); 7/9 tests passed (2 failed)
+test-http1 transitive failure
++- run test 7 pass, 2 fail (9 total)
+   +- compile test Debug native success 5s MaxRSS:543M
+      +- WriteFile macho_0_p256_field_arm64.S cached
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 209ms MaxRSS:31M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 197ms MaxRSS:31M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options success
+      +- options cached
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/7969d3ab30b197d80e2c8ba9aaff6d22/build /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/zig /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib /Users/bytedance/project-z/netz .zig-cache /Users/bytedance/.cache/zig --seed 0xb5c572fb -Z9c40bc6ac62bfa45 test-http1 -Dtest-filter=absolute deadline wait -j1 --summary all
+[traex-zig-guard 2026-11-25 09:15:59] finished Zig tree root=94332 peak=501MiB result=0

@@ -1,5 +1,6 @@
 //! Owned-result connection competition over caller-ordered targets.
 const std = @import("std");
+const waitUntil = @import("deadline.zig").waitUntil;
 const stack_target_capacity: usize = 8;
 
 pub const Error = std.mem.Allocator.Error || std.Io.ConcurrentError || error{
@@ -289,9 +290,6 @@ pub fn race(
     }
 }
 
-fn waitUntil(io: std.Io, deadline: std.Io.Clock.Timestamp) std.Io.Cancelable!void {
-    try deadline.wait(io);
-}
 fn waitForCancellation(io: std.Io, event: *std.Io.Event) std.Io.Cancelable!void {
     try event.wait(io);
 }

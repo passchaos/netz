@@ -136,3 +136,12 @@ admission failure still join all workers before unselected results are closed.
 The [result-pool evidence](../evidence/connection_race_pool/2026-11-25/README.md)
 records bounded allocation sizes, stable candidate identities and successful
 result cleanup after repeated slot reuse.
+
+Absolute timer waits recheck the original timestamp after every native sleep
+completion. The shared deadline helper is used by connection competition, TCP,
+DNS collection, listener acceptance and generic timed stream reads/writes.
+An early wake cannot publish timeout or launch a staggered attempt prematurely;
+cancellation during another wait is propagated with the same absolute budget.
+The [strict-wait evidence](../evidence/deadline_wait/2026-11-25/README.md)
+records deterministic early-wake/cancellation regressions and the native Windows
+deadline boundary that exposed the need for a shared wait.

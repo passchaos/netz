@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const deadline_policy = @import("deadline.zig");
+const waitUntil = deadline_policy.waitUntil;
 const lookup = @import("address_resolver/lookup.zig");
 
 const net = std.Io.net;
@@ -80,13 +81,6 @@ pub fn resolveHostBefore(
             return error.Timeout;
         },
     };
-}
-
-fn waitUntil(
-    io: std.Io,
-    deadline: std.Io.Clock.Timestamp,
-) std.Io.Cancelable!void {
-    try deadline.wait(io);
 }
 
 test "system address resolver returns allocator-owned unique addresses" {

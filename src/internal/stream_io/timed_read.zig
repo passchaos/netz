@@ -35,11 +35,7 @@ pub fn readSomeWithDeadline(io: std.Io, stream: net.Stream, buffer: []u8, deadli
             self.result = self.io.vtable.netRead(self.io.userdata, self.stream.socket.handle, &bufs);
         }
 
-        fn waitUntil(task_io: std.Io, absolute: std.Io.Clock.Timestamp) std.Io.Cancelable!void {
-            while (absolute.durationFromNow(task_io).raw.nanoseconds > 0) {
-                try absolute.wait(task_io);
-            }
-        }
+        const waitUntil = @import("../deadline.zig").waitUntil;
     };
     const Wake = union(enum) { read: void, timeout: std.Io.Cancelable!void };
     var task = Task{ .io = io, .stream = stream, .buffer = buffer, .deadline = deadline };

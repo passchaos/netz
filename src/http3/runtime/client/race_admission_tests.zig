@@ -21,7 +21,7 @@ test "HTTP3 connection race admission rejects a resolver result at the expired d
             const addresses = try allocator.alloc(std.Io.net.IpAddress, 9);
             errdefer allocator.free(addresses);
             @memset(addresses, .{ .ip4 = .loopback(1) });
-            try deadline.?.wait(active_io);
+            try @import("../../../internal/deadline.zig").waitUntil(active_io, deadline.?);
             // Any allocation after the late result obscures the phase timeout.
             self.allocator.fail_index = self.allocator.alloc_index;
             return addresses;

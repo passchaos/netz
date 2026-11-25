@@ -57,6 +57,7 @@ test {
     _ = @import("client/race_admission_tests.zig");
     _ = @import("client/race_storage_tests.zig");
     _ = @import("client/race_pool_tests.zig");
+    _ = @import("client/deadline_wait_tests.zig");
     _ = @import("client_and_continue_tests.zig");
     _ = @import("tunnel_tests.zig");
     _ = @import("write_strategy_tests.zig");

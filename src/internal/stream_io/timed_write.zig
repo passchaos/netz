@@ -57,9 +57,7 @@ fn writeSomeUntil(
             self.result = if (count == 0) error.SocketUnconnected else count;
         }
 
-        fn waitUntil(task_io: std.Io, task_deadline: std.Io.Clock.Timestamp) std.Io.Cancelable!void {
-            try task_deadline.wait(task_io);
-        }
+        const waitUntil = @import("../deadline.zig").waitUntil;
     };
     const Wake = union(enum) { write: void, timeout: std.Io.Cancelable!void };
     var task = Task{ .io = io, .stream = stream, .header = header, .data = data, .deadline = deadline };

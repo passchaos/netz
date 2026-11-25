@@ -275,7 +275,7 @@ jobs:
         if: runner.os == 'Windows' || (runner.os == 'Linux' && matrix.target == 'x86_64-linux-gnu')
         run: |
           resolver_status=0
-          zig build test-http1 test-http2 -j1 -Dtarget=${{ matrix.target }} '-Dtest-filter=HTTP1 native resolver policy' '-Dtest-filter=HTTP2 native resolver policy' '-Dtest-filter=connection race admission' '-Dtest-filter=connection race storage' '-Dtest-filter=connection race pool' --summary all > native-resolver.log 2>&1 || resolver_status=$?
+          zig build test-http1 test-http2 -j1 -Dtarget=${{ matrix.target }} '-Dtest-filter=HTTP1 native resolver policy' '-Dtest-filter=HTTP2 native resolver policy' '-Dtest-filter=connection race admission' '-Dtest-filter=connection race storage' '-Dtest-filter=connection race pool' '-Dtest-filter=absolute deadline wait' '-Dtest-filter=stream timed' '-Dtest-filter=listener accept deadline' '-Dtest-filter=TCP connect deadline' --summary all > native-resolver.log 2>&1 || resolver_status=$?
           cat native-resolver.log
           if [ "$resolver_status" -ne 0 ]; then
             python tools/ci/test_failure_annotations.py native-resolver.log

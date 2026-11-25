@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const deadline_policy = @import("deadline.zig");
+const waitUntil = deadline_policy.waitUntil;
 
 const net = std.Io.net;
 
@@ -40,11 +41,4 @@ pub fn withDeadline(
             return error.Timeout;
         },
     };
-}
-
-fn waitUntil(
-    io: std.Io,
-    deadline: std.Io.Clock.Timestamp,
-) std.Io.Cancelable!void {
-    try deadline.wait(io);
 }

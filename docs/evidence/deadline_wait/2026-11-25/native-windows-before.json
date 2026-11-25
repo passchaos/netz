@@ -1,0 +1,31 @@
+{
+  "run_id": 45523345025,
+  "head_sha": "1778a5af5cf699bed884927de4e067d6fc388658",
+  "job_id": 138900597964,
+  "annotations": [
+    {
+      "path": ".github",
+      "blob_href": "https://github.com/passchaos/netz/blob/1778a5af5cf699bed884927de4e067d6fc388658/.github",
+      "start_line": 403,
+      "start_column": null,
+      "end_line": 403,
+      "end_column": null,
+      "annotation_level": "failure",
+      "title": "Native hostname regression",
+      "message": "error: the following build command failed with exit code 1:\nD:\\a\\netz\\netz\\.zig-cache\\o\\738ceec97816e07ddd8640b6b4c22900\\build.exe D:\\a\\_temp\\7825e0fc-9625-4e91-b1d6-d245ca163977\\zig-x86_64-windows-0.16.0\\zig.exe D:\\a\\_temp\\7825e0fc-9625-4e91-b1d6-d245ca163977\\zig-x86_64-windows-0.16.0\\lib D:\\a\\netz\\netz\\netz D:\\a\\netz\\netz\\.zig-cache D:\\a\\netz\\netz\\.zig-cache --seed 0x86d9e -Z7d27455b320a54e0 test-http3 -j1 -Dtarget=x86_64-windows-gnu -Dtest-filter=HTTP3 system resolver -Dtest-filter=HTTP/3 shared synchronous acquire wakes -Dtest-filter=HTTP/3 shared synchronous acquire cancels -Dtest-filter=HTTP/3 shared acquisition deadline -Dtest-filter=HTTP3 connection race admission -Dtest-filter=HTTP3 connection race storage -Dtest-filter=HTTP3 connection race pool -Dtest-filter=HTTP3 Happy Eyeballs total deadline --summary all",
+      "raw_details": ""
+    },
+    {
+      "path": ".github",
+      "blob_href": "https://github.com/passchaos/netz/blob/1778a5af5cf699bed884927de4e067d6fc388658/.github",
+      "start_line": 389,
+      "start_column": null,
+      "end_line": 389,
+      "end_column": null,
+      "annotation_level": "failure",
+      "title": "Native hostname regression",
+      "message": "error: 'http3.runtime.client.race_admission_tests.test.HTTP3 connection race admission rejects a resolver result at the expired deadline' failed:\n       expected error.HandshakeTimeout, found error.OutOfMemory\n       D:\\a\\_temp\\7825e0fc-9625-4e91-b1d6-d245ca163977\\zig-x86_64-windows-0.16.0\\lib\\std\\mem\\Allocator.zig:300:82: 0x7ff6871cb78e in allocBytesWithAlignment__anon_36452 (test_zcu.obj)\n           const byte_ptr = self.rawAlloc(byte_count, alignment, return_address) orelse return error.OutOfMemory;\n                                                                                        ^\n       D:\\a\\_temp\\7825e0fc-9625-4e91-b1d6-d245ca163977\\zig-x86_64-windows-0.16.0\\lib\\std\\mem\\Allocator.zig:286:5: 0x7ff6875310ba in allocWithSizeAndAlignment__anon_194083 (test_zcu.obj)\n           return self.allocBytesWithAlignment(alignment, byte_count, return_address);\n           ^\n       D:\\a\\_temp\\7825e0fc-9625-4e91-b1d6-d245ca163977\\zig-x86_64-windows-0.16.0\\lib\\std\\mem\\Allocator.zig:274: 0x7ff687533672 in allocAdvancedWithRetAddr (test_zcu.obj)\n           const ptr: [*]align(a.toByteUnits()) T = @ptrCast(try self.allocWithSizeAndAlignment(@sizeOf(T), a, n, return_address));\n       \n       D:\\a\\_temp\\7825e0fc-9625-4e91-b1d6-d245ca163977\\zig-x86_64-windows-0.16.0\\lib\\std\\mem\\Allocator.zig:274: 0x7ff687533672 in allocAdvancedWithRetAddr (test_zcu.obj)\n           const ptr: [*]align(a.toByteUnits()) T = @ptrCast(try self.allocWithSizeAndAlignment(@sizeOf(T), a, n, return_address));\n       ",
+      "raw_details": ""
+    }
+  ]
+}
