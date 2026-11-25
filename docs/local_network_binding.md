@@ -5,20 +5,16 @@ the actual socket's sending and receiving interface. They are independent:
 selecting a source address does not pin the socket to a device, and selecting
 a device lets the OS choose an address on it.
 
-The common interface selector is `netz.runtime.NetworkInterface`:
+The common interface selector is `netz.runtime.NetworkInterface`. Use a device
+name in application configuration:
 
 ```zig
 const interface: netz.runtime.NetworkInterface = .{ .name = "en0" };
-// Or use a known nonzero native interface index:
-const indexed: netz.runtime.NetworkInterface = .{ .index = 4 };
 ```
 
 Names are borrowed for the client/pool lifetime. POSIX names are the native
 names (`en0`, `eth0`, `lo`). Windows accepts an adapter alias (`Ethernet`) or
-its canonical interface name. `interface.resolve(io)` returns the native
-`std.Io.net.Interface`, so applications can resolve a name once and reuse its
-index. Indices are local to the operating system and can change after device
-removal.
+its canonical interface name. The socket setup resolves the name automatically.
 
 ## HTTP and WebSocket
 
@@ -106,6 +102,24 @@ address migration. A unified HTTP `local_address` overrides the legacy
 H3-specific local address and disables alternate-family binds; every candidate
 must use that source family. With no source address, each candidate uses its
 own family's wildcard bind on the selected interface.
+
+## Advanced: native interface indices
+
+`NetworkInterface.index` accepts a nonzero native OS interface index. This is
+useful when an application already has an index from interface enumeration or
+a route query, or needs to reuse a resolved `std.Io.net.Interface`. Ordinary
+named-interface configuration does not require this extra step.
+
+`interface.resolve(io)` returns the native `std.Io.net.Interface`:
+
+```zig
+const native = try interface.resolve(io);
+const selected: netz.runtime.NetworkInterface = .{ .index = native.index };
+```
+
+Keep indices as runtime data. They are local to the operating system and can
+change after device removal or system reconfiguration; a hardcoded number is
+not a stable device identity for stored application configuration.
 
 ## Native behavior and errors
 
