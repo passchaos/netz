@@ -129,6 +129,7 @@ test {
     _ = @import("client/happy_eyeballs_tests.zig");
     _ = @import("client/race_admission_tests.zig");
     _ = @import("client/race_storage_tests.zig");
+    _ = @import("client/race_pool_tests.zig");
     _ = @import("client/owned_head_tests.zig");
     _ = @import("client/complete_request.zig");
     _ = @import("qpack/tests/cancellation.zig");

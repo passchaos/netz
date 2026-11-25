@@ -63,35 +63,41 @@ pub fn race(
         .cancel_event = options.cancel_event,
     };
     const Slot = struct {
+        const Self = @This();
+        const State = union(enum) {
+            available: ?*Self,
+            working,
+            finished: Result,
+        };
         shared: *const Shared,
         target: std.meta.Elem(@TypeOf(targets)),
         index: usize,
-        result: ?Result = null,
+        state: State,
 
-        fn run(self: *@This()) usize {
+        fn run(self: *Self) *Self {
+            std.debug.assert(self.state == .working);
             const parameters = self.shared;
             checkAdmission(ConnectError, parameters.io, parameters.deadline, parameters.deadline_error, parameters.cancel_event) catch |err| {
-                self.result = err;
-                return self.index;
+                self.state = .{ .finished = err };
+                return self;
             };
-            self.result = connect_one(
+            self.state = .{ .finished = connect_one(
                 parameters.context,
                 parameters.io,
                 self.target,
                 self.index,
-            );
-            return self.index;
+            ) };
+            // Select publishes this reference only after run returns. No old
+            // worker reads the assignment after its completion is consumed.
+            return self;
         }
 
-        fn take(self: *@This()) Result {
-            const result = self.result orelse unreachable;
-            self.result = null;
-            return result;
-        }
-
-        fn deinit(self: *@This()) void {
-            const result = self.result orelse return;
-            self.result = null;
+        fn deinit(self: *Self) void {
+            const result = switch (self.state) {
+                .finished => |value| value,
+                else => return,
+            };
+            self.state = .{ .available = null };
             if (result) |value| {
                 var owned = value;
                 deinit_connected(self.shared.context, &owned);
@@ -99,29 +105,59 @@ pub fn race(
         }
     };
     const Wake = union(enum) {
-        attempt: usize,
+        attempt: *Slot,
         launch: std.Io.Cancelable!void,
         deadline: std.Io.Cancelable!void,
         canceled: std.Io.Cancelable!void,
     };
+    const Pool = struct {
+        slots: []Slot,
+        available: ?*Slot,
+        active: usize = 0,
+        next_index: usize = 0,
 
+        fn launch(self: *@This(), selector: *std.Io.Select(Wake), target: std.meta.Elem(@TypeOf(targets))) std.Io.ConcurrentError!void {
+            std.debug.assert(self.active < self.slots.len);
+            const slot = self.available orelse unreachable;
+            self.available = slot.state.available;
+            slot.target = target;
+            slot.index = self.next_index;
+            slot.state = .working;
+            try selector.concurrent(.attempt, Slot.run, .{slot});
+            self.next_index += 1;
+            self.active += 1;
+        }
+
+        fn take(self: *@This(), slot: *Slot) Result {
+            std.debug.assert(self.active != 0);
+            const result = slot.state.finished;
+            slot.state = .{ .available = self.available };
+            self.available = slot;
+            self.active -= 1;
+            return result;
+        }
+    };
+
+    const slot_count = @min(targets.len, options.max_in_flight);
     var slot_stack: [stack_target_capacity]Slot = undefined;
-    const slot_heap: ?[]Slot = if (targets.len > slot_stack.len)
-        try allocator.alloc(Slot, targets.len)
+    const slot_heap: ?[]Slot = if (slot_count > slot_stack.len)
+        try allocator.alloc(Slot, slot_count)
     else
         null;
     defer if (slot_heap) |storage| allocator.free(storage);
-    const slots = slot_heap orelse slot_stack[0..targets.len];
-    for (slots, targets, 0..) |*slot, target, index| {
+    const slots = slot_heap orelse slot_stack[0..slot_count];
+    for (slots, 0..) |*slot, index| {
         slot.* = .{
             .shared = &shared,
-            .target = target,
-            .index = index,
+            .target = undefined,
+            .index = undefined,
+            .state = .{ .available = if (index + 1 < slots.len) &slots[index + 1] else null },
         };
     }
     defer for (slots) |*slot| slot.deinit();
+    var pool: Pool = .{ .slots = slots, .available = &slots[0] };
 
-    const wake_capacity = std.math.add(usize, targets.len, if (options.cancel_event != null) 3 else 2) catch
+    const wake_capacity = std.math.add(usize, slot_count, if (options.cancel_event != null) 3 else 2) catch
         return error.OutOfMemory;
     var wake_stack: [stack_target_capacity + 3]Wake = undefined;
     const wake_heap: ?[]Wake = if (wake_capacity > wake_stack.len)
@@ -141,16 +177,14 @@ pub fn race(
         try select.concurrent(.canceled, waitForCancellation, .{ io, event });
     }
 
-    var next_index: usize = 1;
-    var active: usize = 1;
     var timer_pending = false;
     var next_launch_at = std.Io.Clock.Timestamp.fromNow(io, .{
         .raw = options.attempt_delay,
         .clock = .awake,
     });
     var last_error: ?ConnectError = null;
-    try select.concurrent(.attempt, Slot.run, .{&slots[0]});
-    if (next_index < slots.len and active < options.max_in_flight) {
+    try pool.launch(&select, targets[pool.next_index]);
+    if (pool.next_index < targets.len and pool.active < slots.len) {
         try select.concurrent(.launch, waitUntil, .{ io, next_launch_at });
         timer_pending = true;
     }
@@ -161,50 +195,36 @@ pub fn race(
             error.Canceled => return error.Canceled,
         };
         switch (wake) {
-            .attempt => |index| {
-                std.debug.assert(active != 0);
-                active -= 1;
-                const connected = slots[index].take() catch |err| {
+            .attempt => |slot| {
+                const connected = pool.take(slot) catch |err| {
                     if (!should_try_next(err)) return err;
                     last_error = err;
-                    if (active == 0 and next_index < slots.len) {
-                        try select.concurrent(
-                            .attempt,
-                            Slot.run,
-                            .{&slots[next_index]},
-                        );
-                        next_index += 1;
-                        active += 1;
+                    if (pool.active == 0 and pool.next_index < targets.len) {
+                        try pool.launch(&select, targets[pool.next_index]);
                         next_launch_at = .fromNow(io, .{
                             .raw = options.attempt_delay,
                             .clock = .awake,
                         });
                     }
-                    if (next_index == slots.len and active == 0) {
+                    if (pool.next_index == targets.len and pool.active == 0) {
                         return last_error.?;
                     }
-                    if (next_index < slots.len and
-                        active < options.max_in_flight and
+                    if (pool.next_index < targets.len and
+                        pool.active < slots.len and
                         !timer_pending)
                     {
-                        if (active == 0 or
+                        if (pool.active == 0 or
                             next_launch_at.durationFromNow(io)
                                 .raw.nanoseconds <= 0)
                         {
-                            try select.concurrent(
-                                .attempt,
-                                Slot.run,
-                                .{&slots[next_index]},
-                            );
-                            next_index += 1;
-                            active += 1;
+                            try pool.launch(&select, targets[pool.next_index]);
                             next_launch_at = .fromNow(io, .{
                                 .raw = options.attempt_delay,
                                 .clock = .awake,
                             });
                         }
-                        if (next_index < slots.len and
-                            active < options.max_in_flight)
+                        if (pool.next_index < targets.len and
+                            pool.active < slots.len)
                         {
                             try select.concurrent(
                                 .launch,
@@ -223,12 +243,12 @@ pub fn race(
                     error.Canceled => return error.Canceled,
                 };
                 timer_pending = false;
-                if (next_index >= slots.len or
-                    active >= options.max_in_flight)
+                if (pool.next_index >= targets.len or
+                    pool.active >= slots.len)
                 {
                     continue;
                 }
-                if (active != 0 and
+                if (pool.active != 0 and
                     next_launch_at.durationFromNow(io).raw.nanoseconds > 0)
                 {
                     try select.concurrent(
@@ -239,15 +259,13 @@ pub fn race(
                     timer_pending = true;
                     continue;
                 }
-                try select.concurrent(.attempt, Slot.run, .{&slots[next_index]});
-                next_index += 1;
-                active += 1;
+                try pool.launch(&select, targets[pool.next_index]);
                 next_launch_at = .fromNow(io, .{
                     .raw = options.attempt_delay,
                     .clock = .awake,
                 });
-                if (next_index < slots.len and
-                    active < options.max_in_flight)
+                if (pool.next_index < targets.len and
+                    pool.active < slots.len)
                 {
                     try select.concurrent(
                         .launch,

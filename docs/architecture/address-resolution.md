@@ -118,8 +118,21 @@ their target/index and their owned result. A transport callback receives its
 context value when it enters execution; waiting candidates do not duplicate
 handshake configuration. Selector draining joins all workers before result
 cleanup or destruction of the shared frame. Candidate metadata allocations
-therefore depend on the target/result layout and candidate count, independently
+therefore depend on the target/result layout and concurrent attempt limit, independently
 of the caller context's size. The
 [storage evidence](../evidence/connection_race_storage/2026-11-25/README.md)
 compares empty, 4-KiB and actual H3 configuration contexts and verifies that
 canceled successful results can still read their context during cleanup.
+
+The result pool reserves `min(candidate_count, max_in_flight)` stable slots.
+Available slots form a free list; execution assigns the original candidate
+index, and completion publishes the slot reference. Consuming that completion
+releases the slot for another candidate. A worker finishes reading its
+assignment before Select publishes its reference, so reuse can precede that
+worker's group retirement without changing its target or producing a stale
+candidate index. The wake queue is sized for the slots plus the launch,
+deadline and optional cancellation notifications. Timeout, cancellation and
+admission failure still join all workers before unselected results are closed.
+The [result-pool evidence](../evidence/connection_race_pool/2026-11-25/README.md)
+records bounded allocation sizes, stable candidate identities and successful
+result cleanup after repeated slot reuse.

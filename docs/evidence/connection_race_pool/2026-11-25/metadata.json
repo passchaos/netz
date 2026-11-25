@@ -1,0 +1,210 @@
+{
+  "target": "aarch64-macos",
+  "optimization": "Debug",
+  "measurement": "shared competition result slots and wake queue; refusal callbacks; input targets and executor allocations excluded",
+  "baseline_head": "86d62b8e",
+  "before": [
+    {
+      "result_bytes": 4096,
+      "reference_candidates": 1,
+      "many_candidates": 64,
+      "max_in_flight": 1,
+      "reference_allocated_bytes": 0,
+      "many_allocated_bytes": 265248,
+      "reference_allocations": 0,
+      "many_allocations": 2
+    },
+    {
+      "result_bytes": 4096,
+      "reference_candidates": 2,
+      "many_candidates": 64,
+      "max_in_flight": 2,
+      "reference_allocated_bytes": 0,
+      "many_allocated_bytes": 265248,
+      "reference_allocations": 0,
+      "many_allocations": 2
+    },
+    {
+      "result_bytes": 4096,
+      "reference_candidates": 8,
+      "many_candidates": 64,
+      "max_in_flight": 8,
+      "reference_allocated_bytes": 0,
+      "many_allocated_bytes": 265248,
+      "reference_allocations": 0,
+      "many_allocations": 2
+    },
+    {
+      "result_bytes": 4096,
+      "reference_candidates": 9,
+      "many_candidates": 64,
+      "max_in_flight": 9,
+      "reference_allocated_bytes": 37152,
+      "many_allocated_bytes": 265248,
+      "reference_allocations": 1,
+      "many_allocations": 2
+    },
+    {
+      "result_bytes": 4096,
+      "reference_candidates": 64,
+      "many_candidates": 64,
+      "max_in_flight": 64,
+      "reference_allocated_bytes": 265248,
+      "many_allocated_bytes": 265248,
+      "reference_allocations": 2,
+      "many_allocations": 2
+    },
+    {
+      "result_bytes": 19664,
+      "reference_candidates": 1,
+      "many_candidates": 64,
+      "max_in_flight": 1,
+      "reference_allocated_bytes": 0,
+      "many_allocated_bytes": 1263648,
+      "reference_allocations": 0,
+      "many_allocations": 2
+    },
+    {
+      "result_bytes": 19664,
+      "reference_candidates": 2,
+      "many_candidates": 64,
+      "max_in_flight": 2,
+      "reference_allocated_bytes": 0,
+      "many_allocated_bytes": 1263648,
+      "reference_allocations": 0,
+      "many_allocations": 2
+    },
+    {
+      "result_bytes": 19664,
+      "reference_candidates": 8,
+      "many_candidates": 64,
+      "max_in_flight": 8,
+      "reference_allocated_bytes": 0,
+      "many_allocated_bytes": 1263648,
+      "reference_allocations": 0,
+      "many_allocations": 2
+    },
+    {
+      "result_bytes": 19664,
+      "reference_candidates": 9,
+      "many_candidates": 64,
+      "max_in_flight": 9,
+      "reference_allocated_bytes": 177552,
+      "many_allocated_bytes": 1263648,
+      "reference_allocations": 1,
+      "many_allocations": 2
+    },
+    {
+      "result_bytes": 19664,
+      "reference_candidates": 64,
+      "many_candidates": 64,
+      "max_in_flight": 64,
+      "reference_allocated_bytes": 1263648,
+      "many_allocated_bytes": 1263648,
+      "reference_allocations": 2,
+      "many_allocations": 2
+    }
+  ],
+  "after": [
+    {
+      "result_bytes": 4096,
+      "reference_candidates": 1,
+      "many_candidates": 64,
+      "max_in_flight": 1,
+      "reference_allocated_bytes": 0,
+      "many_allocated_bytes": 0,
+      "reference_allocations": 0,
+      "many_allocations": 0
+    },
+    {
+      "result_bytes": 4096,
+      "reference_candidates": 2,
+      "many_candidates": 64,
+      "max_in_flight": 2,
+      "reference_allocated_bytes": 0,
+      "many_allocated_bytes": 0,
+      "reference_allocations": 0,
+      "many_allocations": 0
+    },
+    {
+      "result_bytes": 4096,
+      "reference_candidates": 8,
+      "many_candidates": 64,
+      "max_in_flight": 8,
+      "reference_allocated_bytes": 0,
+      "many_allocated_bytes": 0,
+      "reference_allocations": 0,
+      "many_allocations": 0
+    },
+    {
+      "result_bytes": 4096,
+      "reference_candidates": 9,
+      "many_candidates": 64,
+      "max_in_flight": 9,
+      "reference_allocated_bytes": 37152,
+      "many_allocated_bytes": 37152,
+      "reference_allocations": 1,
+      "many_allocations": 1
+    },
+    {
+      "result_bytes": 4096,
+      "reference_candidates": 64,
+      "many_candidates": 64,
+      "max_in_flight": 64,
+      "reference_allocated_bytes": 265248,
+      "many_allocated_bytes": 265248,
+      "reference_allocations": 2,
+      "many_allocations": 2
+    },
+    {
+      "result_bytes": 19664,
+      "reference_candidates": 1,
+      "many_candidates": 64,
+      "max_in_flight": 1,
+      "reference_allocated_bytes": 0,
+      "many_allocated_bytes": 0,
+      "reference_allocations": 0,
+      "many_allocations": 0
+    },
+    {
+      "result_bytes": 19664,
+      "reference_candidates": 2,
+      "many_candidates": 64,
+      "max_in_flight": 2,
+      "reference_allocated_bytes": 0,
+      "many_allocated_bytes": 0,
+      "reference_allocations": 0,
+      "many_allocations": 0
+    },
+    {
+      "result_bytes": 19664,
+      "reference_candidates": 8,
+      "many_candidates": 64,
+      "max_in_flight": 8,
+      "reference_allocated_bytes": 0,
+      "many_allocated_bytes": 0,
+      "reference_allocations": 0,
+      "many_allocations": 0
+    },
+    {
+      "result_bytes": 19664,
+      "reference_candidates": 9,
+      "many_candidates": 64,
+      "max_in_flight": 9,
+      "reference_allocated_bytes": 177552,
+      "many_allocated_bytes": 177552,
+      "reference_allocations": 1,
+      "many_allocations": 1
+    },
+    {
+      "result_bytes": 19664,
+      "reference_candidates": 64,
+      "many_candidates": 64,
+      "max_in_flight": 64,
+      "reference_allocated_bytes": 1263648,
+      "many_allocated_bytes": 1263648,
+      "reference_allocations": 2,
+      "many_allocations": 2
+    }
+  ]
+}
