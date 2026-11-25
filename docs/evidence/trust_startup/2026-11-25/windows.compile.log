@@ -1,0 +1,55 @@
+Command: ['/Users/bytedance/.local/bin/zig', 'build', 'test-quic-compile', 'test-tls-compile', 'test-http-compile', 'test-websocket-compile', 'test-webtransport-compile', '-Dtarget=x86_64-windows-gnu', '-Dtest-filter=trust load', '-Dtest-filter=trust startup', '-j1', '--summary', 'all']
+Build Summary: 20/20 steps succeeded
+test-quic-compile success
++- compile test Debug x86_64-windows-gnu success 4s MaxRSS:672M
+   +- WriteFile cached
+   +- compile obj vort-br-record-optimal Debug x86_64-windows-gnu success 985ms MaxRSS:250M
+   +- WriteFile cached
+   +- compile obj vort-zstd-huffman-x2 Debug x86_64-windows-gnu success 1s MaxRSS:257M
+   +- compile obj vort-br-record-optimal Debug x86_64-windows-gnu (reused)
+   +- compile obj vort-zstd-huffman-x2 Debug x86_64-windows-gnu (reused)
+   +- options cached
+   +- options cached
+test-tls-compile success
++- compile test Debug x86_64-windows-gnu success 26s MaxRSS:2G
+   +- WriteFile (reused)
+   +- compile obj vort-br-record-optimal Debug x86_64-windows-gnu (reused)
+   +- WriteFile (reused)
+   +- compile obj vort-zstd-huffman-x2 Debug x86_64-windows-gnu (reused)
+   +- compile obj vort-br-record-optimal Debug x86_64-windows-gnu (reused)
+   +- compile obj vort-zstd-huffman-x2 Debug x86_64-windows-gnu (reused)
+   +- options cached
+   +- options (reused)
+test-http-compile success
++- compile test Debug x86_64-windows-gnu success 28s MaxRSS:3G
+   +- WriteFile (reused)
+   +- compile obj vort-br-record-optimal Debug x86_64-windows-gnu (reused)
+   +- WriteFile (reused)
+   +- compile obj vort-zstd-huffman-x2 Debug x86_64-windows-gnu (reused)
+   +- compile obj vort-br-record-optimal Debug x86_64-windows-gnu (reused)
+   +- compile obj vort-zstd-huffman-x2 Debug x86_64-windows-gnu (reused)
+   +- options cached
+   +- options (reused)
+test-websocket-compile success
++- compile test Debug x86_64-windows-gnu success 22s MaxRSS:2G
+   +- WriteFile (reused)
+   +- compile obj vort-br-record-optimal Debug x86_64-windows-gnu (reused)
+   +- WriteFile (reused)
+   +- compile obj vort-zstd-huffman-x2 Debug x86_64-windows-gnu (reused)
+   +- compile obj vort-br-record-optimal Debug x86_64-windows-gnu (reused)
+   +- compile obj vort-zstd-huffman-x2 Debug x86_64-windows-gnu (reused)
+   +- options cached
+   +- options (reused)
+test-webtransport-compile success
++- compile test Debug x86_64-windows-gnu success 21s MaxRSS:2G
+   +- WriteFile (reused)
+   +- compile obj vort-br-record-optimal Debug x86_64-windows-gnu (reused)
+   +- WriteFile (reused)
+   +- compile obj vort-zstd-huffman-x2 Debug x86_64-windows-gnu (reused)
+   +- compile obj vort-br-record-optimal Debug x86_64-windows-gnu (reused)
+   +- compile obj vort-zstd-huffman-x2 Debug x86_64-windows-gnu (reused)
+   +- options cached
+   +- options (reused)
+
+
+Exit code: 0

@@ -1,0 +1,83 @@
+[traex-zig-guard 2026-11-25 12:22:36] started Zig tree root=71143 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=900s
+test-quic
++- run test 33 pass, 3 fail (36 total)
+error: 'quic.client_trust.loading_tests.test.QUIC trust load preserves cancellation while opening configured roots' failed:
+       expected error.Canceled, found error.NativeTrustStoreUnavailable
+       /Users/bytedance/project-z/netz/src/quic/client_trust/loading_tests.zig:21:9: 0x103068973 in open (test)
+               return error.Canceled;
+               ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/Io/Dir.zig:578:5: 0x1025c2823 in openFile (test)
+           return io.vtable.dirOpenFile(io.userdata, dir, sub_path, options);
+           ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/Io/Dir.zig:583:5: 0x102eb4c33 in openFileAbsolute (test)
+           return openFile(.cwd(), io, absolute_path, options);
+           ^
+       /Users/bytedance/project-z/vail/src/x509/trust.zig:1646:24: 0x102880fcf in addPemFile (test)
+                   var file = try std.Io.Dir.openFileAbsolute(io, path, .{});
+                              ^
+       /Users/bytedance/project-z/vail/src/x509/trust.zig:1438:32: 0x102881d37 in initWithEnviron (test)
+                   if (path.len != 0) try result.addPemFile(io, path, now.toSeconds());
+                                      ^
+       /Users/bytedance/project-z/netz/src/quic/handshake.zig:1196:25: 0x102882b63 in connectAttempt (test)
+                       else => return error.NativeTrustStoreUnavailable,
+                               ^
+       /Users/bytedance/project-z/netz/src/quic/handshake.zig:1063:5: 0x102878627 in connectFrom (test)
+           return connectAttempt(
+           ^
+       /Users/bytedance/project-z/netz/src/quic/handshake.zig:981:5: 0x102877fdf in connect (test)
+           return connectFrom(
+           ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:72:13: 0x1027a3c0f in expectError__anon_61594 (test)
+                   return error.TestUnexpectedError;
+                   ^
+       /Users/bytedance/project-z/netz/src/quic/client_trust/loading_tests.zig:46:5: 0x1027a42b7 in test.QUIC trust load preserves cancellation while opening configured roots (test)
+           try std.testing.expectError(error.Canceled, quic.handshake.connect(&endpoint, .{ .ip4 = .loopback(443) }, .{
+           ^
+error: 'quic.client_trust.loading_tests.test.QUIC trust load rejects pending cancellation before default roots' failed:
+       expected error.Canceled, found error.NativeTrustStoreUnavailable
+       /Users/bytedance/project-z/netz/src/quic/client_trust/loading_tests.zig:21:9: 0x103068973 in open (test)
+               return error.Canceled;
+               ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/Io/Dir.zig:578:5: 0x1025c2823 in openFile (test)
+           return io.vtable.dirOpenFile(io.userdata, dir, sub_path, options);
+           ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/Io/Dir.zig:1360:16: 0x1027a2b53 in readFileAllocOptions__anon_61042 (test)
+           var file = try dir.openFile(io, sub_path, .{
+                      ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/Io/Dir.zig:1338:5: 0x1027a28fb in readFileAlloc (test)
+           return readFileAllocOptions(dir, io, sub_path, gpa, limit, .of(u8), null);
+           ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/crypto/Certificate/Bundle/macos.zig:23:25: 0x1027990ff in rescanMac (test)
+                   else => |e| return e,
+                               ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/crypto/Certificate/Bundle.zig:78:33: 0x102797c3f in rescan (test)
+               .maccatalyst, .macos => return rescanMac(cb, gpa, io, now),
+                                       ^
+       /Users/bytedance/project-z/vail/src/x509/trust.zig:1334:9: 0x1027978af in initPlatformRescan (test)
+               try result.bundle.rescan(allocator, io, now);
+               ^
+       /Users/bytedance/project-z/vail/src/x509/trust.zig:1321:9: 0x10279743b in init (test)
+               return switch (builtin.os.tag) {
+               ^
+       /Users/bytedance/project-z/netz/src/quic/client_trust.zig:96:17: 0x1027975c7 in applyPlatformRootDefault (test)
+               else => return error.NativeTrustStoreUnavailable,
+                       ^
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:72:13: 0x1027962af in expectError__anon_58227 (test)
+                   return error.TestUnexpectedError;
+                   ^
+       /Users/bytedance/project-z/netz/src/quic/client_trust/loading_tests.zig:59:5: 0x1027967d7 in test.QUIC trust load rejects pending cancellation before default roots (test)
+           try std.testing.expectError(error.Canceled, trust.applyPlatformRootDefault(std.testing.allocator, probe.io(), &options, &store));
+           ^
+error: 'quic.client_trust.loading_tests.test.QUIC trust load deadline cancels and joins blocked loading' failed:
+       /Users/bytedance/project-z/netz/src/quic/client_trust/loading_tests.zig:81:9: 0x1026e03c3 in test.QUIC trust load deadline cancels and joins blocked loading (test)
+               return error.TestExpectedError;
+               ^
+failed command: ./.zig-cache/o/fd086789e56d0790f5a94f4880344c0d/test --cache-dir=./.zig-cache --seed=0xaeb5644e --listen=-
+
+Build Summary: 8/10 steps succeeded (1 failed); 33/36 tests passed (3 failed)
+test-quic transitive failure
++- run test 33 pass, 3 fail (36 total)
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/7969d3ab30b197d80e2c8ba9aaff6d22/build /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/zig /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib /Users/bytedance/project-z/netz .zig-cache /Users/bytedance/.cache/zig --seed 0xaeb5644e -Z230d3e9e553c03c0 test-quic -Dtest-filter=QUIC trust load -j1 --summary failures
+[traex-zig-guard 2026-11-25 12:23:03] finished Zig tree root=71143 peak=2379MiB result=0

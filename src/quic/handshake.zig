@@ -10,6 +10,7 @@ const datagram_reader = @import("handshake/datagram_reader.zig");
 const handshake_transcript = @import("handshake/transcript.zig");
 const established_promotion = @import("handshake/established_promotion.zig");
 const fixed_bit = @import("one_rtt/fixed_bit.zig");
+const client_authentication = @import("handshake/client_authentication.zig");
 const root_trust = @import("../trust.zig");
 
 const net = std.Io.net;
@@ -24,7 +25,7 @@ pub const ServerRetryPolicy = retry.Policy;
 /// matching the unified TCP/TLS handshake budget. Storage grows on demand.
 pub const default_max_crypto_buffer: usize = 256 * 1024;
 
-pub const Error = quic.runtime.Error || quic.protection.Error || quic.crypto_stream.Error || quic.tls_client_hello.Error || quic.tls.auth.Error || quic.tls.client_auth.Error || quic.one_rtt.Error || quic.zero_rtt.handshake.Error || quic.zero_rtt.replay_filter.Error || quic.resumption.tls_psk.Error || quic.resumption.ticket.handshake.Error || quic.Error || std.Io.RandomSecureError || std.Io.Writer.Error || error{
+pub const Error = client_authentication.Error || quic.runtime.Error || quic.protection.Error || quic.crypto_stream.Error || quic.tls_client_hello.Error || quic.tls.auth.Error || quic.tls.client_auth.Error || quic.one_rtt.Error || quic.zero_rtt.handshake.Error || quic.zero_rtt.replay_filter.Error || quic.resumption.tls_psk.Error || quic.resumption.ticket.handshake.Error || quic.Error || std.Io.RandomSecureError || std.Io.Writer.Error || error{
     DiscardedInitialPacket,
     InvalidHandshakeFlight,
     MissingCryptoFrame,
@@ -1148,61 +1149,11 @@ fn connectAttempt(
 ) Error!EstablishedConnection {
     const source = reader.datagramSource();
     try validateConfiguredVersions(options.version, options.available_versions);
-    const auth_now = std.Io.Timestamp.now(endpoint.io, .real);
-    var system_store: ?quic.tls.trust.SystemStore = null;
-    defer if (system_store) |*store| store.deinit();
-    var platform_verifier: ?quic.tls.platform.Verifier = null;
-    defer if (platform_verifier) |*verifier| verifier.deinit();
-    const server_auth = options.server_auth orelse blk: {
-        if (options.system_store) |store| {
-            break :blk quic.tls.auth.ClientVerifier.fromTrustVerifier(
-                store.verifier(auth_now.toSeconds()).clientVerifier(),
-            );
-        }
-        if (options.root_source == .platform) {
-            platform_verifier = quic.tls.platform.Verifier.init(
-                endpoint.allocator,
-                .{},
-            ) catch |err| switch (@as(anyerror, err)) {
-                error.OutOfMemory => return error.OutOfMemory,
-                else => return error.NativeTrustStoreUnavailable,
-            };
-            break :blk quic.tls.auth.ClientVerifier.fromTrustVerifier(
-                platform_verifier.?.clientVerifier(),
-            );
-        }
-        if (options.root_source == .bundled) {
-            system_store = root_trust.initBundledStore(
-                endpoint.allocator,
-                auth_now,
-            ) catch |err| switch (@as(anyerror, err)) {
-                error.OutOfMemory => return error.OutOfMemory,
-                else => return error.NativeTrustStoreUnavailable,
-            };
-            break :blk quic.tls.auth.ClientVerifier.fromTrustVerifier(
-                system_store.?.verifier(
-                    auth_now.toSeconds(),
-                ).clientVerifier(),
-            );
-        }
-        if (options.system_environ) |environ| {
-            system_store = quic.tls.trust.SystemStore.initWithEnviron(
-                endpoint.allocator,
-                endpoint.io,
-                auth_now,
-                environ,
-            ) catch |err| switch (@as(anyerror, err)) {
-                error.OutOfMemory => return error.OutOfMemory,
-                else => return error.NativeTrustStoreUnavailable,
-            };
-            break :blk quic.tls.auth.ClientVerifier.fromTrustVerifier(
-                system_store.?.verifier(
-                    auth_now.toSeconds(),
-                ).clientVerifier(),
-            );
-        }
-        break :blk null;
-    };
+    try options.handshake_recovery.validate();
+    var authentication: client_authentication.Owner = .{};
+    try authentication.init(endpoint.allocator, endpoint.io, options);
+    defer authentication.deinit();
+    const server_auth = authentication.verifier;
     if (options.retry_source_connection_id.len != 0 and options.address_validation_token.len == 0) {
         return error.InvalidPacket;
     }
@@ -1220,7 +1171,6 @@ fn connectAttempt(
         },
     );
     defer client_key_shares.deinit();
-    try options.handshake_recovery.validate();
     const legacy_x25519_public = switch (client_key_shares.shares[0]) {
         .x25519 => |key| key,
         else => [_]u8{0} ** 32,

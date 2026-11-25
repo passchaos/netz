@@ -271,6 +271,17 @@ jobs:
           fi
           exit "$hostname_status"
 
+      - name: Run native trust startup regressions
+        if: runner.os == 'Windows' || (runner.os == 'Linux' && matrix.target == 'x86_64-linux-gnu')
+        run: |
+          trust_status=0
+          zig build test-quic test-tls test-http test-websocket test-webtransport -j1 -Dtarget=${{ matrix.target }} '-Dtest-filter=trust load' '-Dtest-filter=trust startup' '-Dtest-filter=QUIC client verifies' --summary all > native-trust.log 2>&1 || trust_status=$?
+          cat native-trust.log
+          if [ "$trust_status" -ne 0 ]; then
+            python tools/ci/test_failure_annotations.py native-trust.log
+          fi
+          exit "$trust_status"
+
       - name: Run native H1 H2 resolver policy regressions
         if: runner.os == 'Windows' || (runner.os == 'Linux' && matrix.target == 'x86_64-linux-gnu')
         run: |

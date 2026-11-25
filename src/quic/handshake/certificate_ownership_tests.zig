@@ -10,10 +10,18 @@ test "QUIC compressed Certificate remains owned after the client handshake" {
 
 test "QUIC client verifies native roots from SSL_CERT_FILE" {
     if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+    try nativeRoots(true);
+}
+
+test "QUIC client verifies caller-owned roots from PEM file" {
+    try nativeRoots(false);
+}
+
+fn nativeRoots(comptime use_environment: bool) !void {
     const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try @import("zio").Runtime.init(allocator, .{});
+    defer backend.deinit();
+    const io = backend.io();
     var certificate: [tls_testing.certificate_der_len]u8 = undefined;
     try std.base64.standard.Decoder.decode(
         &certificate,
@@ -43,10 +51,15 @@ test "QUIC client verifies native roots from SSL_CERT_FILE" {
     );
     defer allocator.free(file_entry);
     var entries = [_]?[*:0]const u8{ file_entry.ptr, null };
-    const block: std.process.Environ.PosixBlock = .{
-        .slice = entries[0..1 :null],
-    };
-    const environ: std.process.Environ = .{ .block = block };
+    const environ: ?std.process.Environ = if (use_environment)
+        .{ .block = .{ .slice = entries[0..1 :null] } }
+    else
+        null;
+    var owned_store: ?quic.tls.trust.SystemStore = if (use_environment)
+        null
+    else
+        try quic.tls.trust.SystemStore.initWithPaths(allocator, io, std.Io.Timestamp.now(io, .real), .{ .file = path });
+    defer if (owned_store) |*store| store.deinit();
 
     var server = try quic.runtime.Endpoint.bind(
         allocator,
@@ -78,9 +91,9 @@ test "QUIC client verifies native roots from SSL_CERT_FILE" {
             .signer = .{ .ecdsa_p256_sha256 = .{ .key_pair = key_pair } },
         },
     } };
-    const thread = try std.Thread.spawn(.{}, Peer.run, .{&peer});
+    var peer_future = try std.Io.concurrent(io, Peer.run, .{&peer});
     var joined = false;
-    defer if (!joined) thread.join();
+    defer if (!joined) peer_future.cancel(io);
     var endpoint = try quic.runtime.Endpoint.bind(
         allocator,
         io,
@@ -96,12 +109,13 @@ test "QUIC client verifies native roots from SSL_CERT_FILE" {
             .local_connection_id = "native-root-client",
             .server_name = "localhost",
             .system_environ = environ,
+            .system_store = if (owned_store) |*store| store else null,
         },
         .fromSeconds(3),
     );
     defer connection.deinit();
     try std.testing.expect(connection.peerCertificates() != null);
-    thread.join();
+    peer_future.await(io);
     joined = true;
     if (peer.err) |err| return err;
 }

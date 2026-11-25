@@ -150,6 +150,13 @@ one `SystemStore` and assign `.tls.system_store`, or use `Pool`, which keeps a
 single store for its lifetime. A caller-provided `system_store` is borrowed:
 keep it alive for every Client/Pool that inherits it.
 
+Default system-root loading is included in the connection's existing deadline
+for TCP TLS, unified H3, H3 WebSocket and WebTransport URI connects. A TLS
+`handshake_timeout` also starts before verified-client root loading. Canceling
+the operation joins the loader before returning; a bounded load reports
+`ConcurrencyUnavailable` when its watcher cannot be admitted. See
+[trust startup](architecture/trust-startup.md) for ownership and timing details.
+
 Proxy routes (mutually exclusive):
 
 | Option | TCP | HTTP/3 | Notes |
@@ -461,7 +468,9 @@ without external fixtures.
   automatically; raw `quic.handshake` callers and the low-level
   `http3.runtime.HandshakeClient.connectUri*`/`requestUri*` helpers require
   explicit trust, or can call
-  `netz.quic.client_trust.applyPlatformRootDefault` before connecting.
+  `netz.quic.client_trust.applyPlatformRootDefault` before connecting. Use
+  `applyPlatformRootDefaultBefore(..., deadline)` to include that setup in the
+  same caller-owned deadline.
 - One owner drives each connection; ACKs, timers and loss recovery are
   serviced by the receive path.
 

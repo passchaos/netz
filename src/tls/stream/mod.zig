@@ -61,6 +61,7 @@ pub const Error = @import("versioned_client_connection.zig").Error ||
     @import("versioned_server_connection.zig").Error;
 
 test {
+    _ = @import("trust_deadline_tests.zig");
     _ = @import("handshake_deadline.zig");
     _ = @import("record_io.zig");
     _ = @import("record_stream.zig");

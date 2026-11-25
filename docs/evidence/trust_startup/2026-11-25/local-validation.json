@@ -1,0 +1,32 @@
+{
+  "platform": "aarch64-macos",
+  "zig_version": "0.16.0",
+  "guarded": true,
+  "jobs": 1,
+  "checks": {
+    "fmt.log": {
+      "exit_code": 0
+    },
+    "Debug.log": {
+      "exit_code": 0,
+      "tests_passed": 408
+    },
+    "h3-overlap.Debug.log": {
+      "exit_code": 0,
+      "tests_passed": 65
+    },
+    "windows.compile.log": {
+      "exit_code": 0
+    },
+    "authentication.fmt.log": {
+      "exit_code": 0
+    },
+    "authentication.Debug.log": {
+      "exit_code": 0,
+      "tests_passed": 35
+    },
+    "authentication.windows.compile.log": {
+      "exit_code": 0
+    }
+  }
+}

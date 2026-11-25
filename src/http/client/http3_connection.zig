@@ -53,7 +53,7 @@ pub const Owner = struct {
         // The store only needs to live for this synchronous handshake.
         var system_store: ?quic.tls.trust.SystemStore = null;
         defer if (system_store) |*store| store.deinit();
-        try client_trust.applyClientTrust(
+        try client_trust.applyClientTrustBefore(
             allocator,
             io,
             &config.handshake,
@@ -66,6 +66,7 @@ pub const Owner = struct {
                 .ca_bundle_configured = options.tls.ca_bundle != null,
             },
             &system_store,
+            deadline,
         );
         if (config.address_resolver == null) config.address_resolver = options.address_resolver;
         self.client = if (options.socks5_proxy) |proxy| blk: {

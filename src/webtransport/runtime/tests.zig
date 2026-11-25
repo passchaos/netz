@@ -1,6 +1,10 @@
 //! Tests moved out of the WebTransport runtime root.
 
 const std = @import("std");
+
+test {
+    _ = @import("trust_deadline_tests.zig");
+}
 const webtransport = @import("../mod.zig");
 const http3 = @import("../../http3/mod.zig");
 const quic = @import("../../quic/mod.zig");

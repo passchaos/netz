@@ -14,6 +14,7 @@
 const std = @import("std");
 const quic = @import("mod.zig");
 const root_trust = @import("../trust.zig");
+const loading = @import("client_trust/loading.zig");
 
 pub const SystemStore = quic.tls.trust.SystemStore;
 
@@ -28,16 +29,12 @@ pub const ClientTlsTrust = struct {
     ca_bundle_configured: bool = false,
 };
 
-pub const Error = error{
-    OutOfMemory,
-    NativeTrustStoreUnavailable,
+pub const Error = loading.Error || error{
     UnsupportedH3TrustConfiguration,
 };
 
-pub const DefaultRootError = error{
-    OutOfMemory,
-    NativeTrustStoreUnavailable,
-};
+pub const DefaultRootError = loading.Error;
+pub const BeforeError = Error || loading.BeforeError;
 
 /// True when the caller configured H3-specific trust material. The default
 /// `.system` root source is not explicit: it is the QUIC low-level "unset"
@@ -62,15 +59,36 @@ pub fn applyClientTrust(
     tls: ClientTlsTrust,
     store_out: *?quic.tls.trust.SystemStore,
 ) Error!void {
-    if (!hasExplicitTrust(options) and tls.ca_bundle_configured) {
-        return error.UnsupportedH3TrustConfiguration;
-    }
+    var resolved = try inherit(options.*, tls);
+    try applyPlatformRootDefault(allocator, io, &resolved, store_out);
+    options.* = resolved;
+}
+
+/// Apply trust under the connection's original optional awake deadline.
+/// Failed loading retains the caller's option value and output store slot.
+pub fn applyClientTrustBefore(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    options: *quic.handshake.ClientOptions,
+    tls: ClientTlsTrust,
+    store_out: *?SystemStore,
+    deadline: ?std.Io.Clock.Timestamp,
+) BeforeError!void {
+    try loading.checkpoint(io, deadline);
+    var resolved = try inherit(options.*, tls);
+    try applyPlatformRootDefaultBefore(allocator, io, &resolved, store_out, deadline);
+    options.* = resolved;
+}
+
+fn inherit(options_value: quic.handshake.ClientOptions, tls: ClientTlsTrust) Error!quic.handshake.ClientOptions {
+    var options = options_value;
+    if (!hasExplicitTrust(&options) and tls.ca_bundle_configured) return error.UnsupportedH3TrustConfiguration;
     if (options.server_auth == null) options.server_auth = tls.server_verifier;
     if (options.client_identity == null) options.client_identity = tls.client_identity;
     if (options.system_environ == null) options.system_environ = tls.environ;
     if (options.system_store == null) options.system_store = tls.system_store;
     if (options.root_source == .system) options.root_source = tls.root_source;
-    try applyPlatformRootDefault(allocator, io, options, store_out);
+    return options;
 }
 
 /// Install a platform-root store when the QUIC handshake still has no trust
@@ -87,18 +105,34 @@ pub fn applyPlatformRootDefault(
     // `.system` is the QUIC low-level "no verifier" default. Load the native
     // root files once, matching the TCP TLS default, instead of silently
     // accepting any certificate.
-    store_out.* = quic.tls.trust.SystemStore.init(
+    store_out.* = try loading.system(
         allocator,
         io,
         std.Io.Timestamp.now(io, .real),
-    ) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return error.NativeTrustStoreUnavailable,
-    };
+        null,
+    );
+    options.system_store = &store_out.*.?;
+}
+
+/// URI facades include default root loading in their complete connect budget.
+pub fn applyPlatformRootDefaultBefore(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    options: *quic.handshake.ClientOptions,
+    store_out: *?SystemStore,
+    deadline: ?std.Io.Clock.Timestamp,
+) loading.BeforeError!void {
+    try loading.checkpoint(io, deadline);
+    if (hasExplicitTrust(options)) return;
+    store_out.* = try loading.systemBefore(allocator, io, std.Io.Timestamp.now(io, .real), null, deadline);
     options.system_store = &store_out.*.?;
 }
 
 const testing = std.testing;
+
+test {
+    _ = @import("client_trust/loading_tests.zig");
+}
 
 fn baseOptions() quic.handshake.ClientOptions {
     return .{

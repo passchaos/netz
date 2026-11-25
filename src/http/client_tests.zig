@@ -13,6 +13,7 @@ test {
     _ = @import("client_tests/duplex.zig");
     _ = @import("client_tests/peer_address.zig");
     _ = @import("client_tests/network_interface.zig");
+    _ = @import("client_tests/trust_deadline.zig");
     _ = @import("client_tests/direct_h3.zig");
     _ = @import("client_tests/protocol_policy.zig");
     _ = @import("client_tests/trailers.zig");

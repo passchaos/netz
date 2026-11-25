@@ -23,6 +23,10 @@ const deadline_policy = @import("../../internal/deadline.zig");
 const http3 = @import("../../http3/mod.zig");
 const tls_stream = @import("../../tls/mod.zig").stream;
 const client_trust = @import("../../quic/client_trust.zig");
+
+test {
+    _ = @import("handshake/trust_deadline_tests.zig");
+}
 const rejection_drain_timeout: std.Io.Duration = .fromSeconds(5);
 const max_payload_read_chunk: usize = 16 * 1024;
 const fragmented_write_scratch_len: usize = 16 * 1024;
@@ -4835,11 +4839,12 @@ pub const Client = struct {
         // WSS over TCP. The store lives for the synchronous handshake.
         var system_store: ?client_trust.SystemStore = null;
         defer if (system_store) |*store| store.deinit();
-        try client_trust.applyPlatformRootDefault(
+        try client_trust.applyPlatformRootDefaultBefore(
             allocator,
             io,
             &h3_options.handshake,
             &system_store,
+            deadline,
         );
         var h3_client = if (options.socks5_proxy) |proxy|
             if (deadline) |absolute|

@@ -724,11 +724,12 @@ pub const Client = struct {
         // only for the synchronous handshake.
         var system_store: ?quic.tls.trust.SystemStore = null;
         defer if (system_store) |*store| store.deinit();
-        try client_trust.applyPlatformRootDefault(
+        try client_trust.applyPlatformRootDefaultBefore(
             allocator,
             io,
             &h3_options.handshake,
             &system_store,
+            deadline,
         );
         const h3_client = if (options.socks5_proxy) |proxy|
             if (deadline) |absolute|

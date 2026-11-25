@@ -10,6 +10,7 @@ const record_stream = @import("record_stream.zig");
 const tls12_record_stream = @import("tls12_record_stream.zig");
 const version = @import("version.zig");
 const root_trust = @import("../../trust.zig");
+const trust_loading = @import("../trust_loading.zig");
 
 const net = std.Io.net;
 const CertificateBundle = std.crypto.Certificate.Bundle;
@@ -507,6 +508,11 @@ pub const Connection = struct {
         outer_deadline: ?std.Io.Clock.Timestamp,
     ) Error!*Connection {
         try validateVerifiedOptions(options);
+        const operation_deadline = if (outer_deadline) |deadline|
+            try handshake_deadline.capTimeout(io, deadline, options.handshake_timeout)
+        else
+            try handshake_deadline.fromTimeout(io, options.handshake_timeout);
+        try trust_loading.checkpoint(io, operation_deadline);
         var system_store: ?vail.x509.trust.SystemStore = null;
         defer if (system_store) |*store| store.deinit();
         var platform_verifier: ?vail.x509.platform.Verifier = null;
@@ -552,10 +558,7 @@ pub const Connection = struct {
                     platform_verifier.?.clientVerifier(),
                 );
             } else {
-                system_store = if (options.system_environ) |environ|
-                    try .initWithEnviron(allocator, io, now, environ)
-                else
-                    try .init(allocator, io, now);
+                system_store = try trust_loading.systemBefore(allocator, io, now, options.system_environ, operation_deadline);
                 bundle_verifier = system_store.?.verifier(now.toSeconds());
             }
             bundle_verifier.stapled_ocsp = options.stapled_ocsp;
@@ -566,6 +569,7 @@ pub const Connection = struct {
                     bundle_verifier.serverChainVerifier(),
             );
         };
+        try trust_loading.checkpoint(io, operation_deadline);
         const mapped = Options{
             .server_name = options.server_name,
             .server_verifier = verifier,
@@ -584,7 +588,7 @@ pub const Connection = struct {
             .max_server_handshake_size = options.max_server_handshake_size,
             .handshake_timeout = options.handshake_timeout,
         };
-        return if (outer_deadline) |deadline|
+        return if (operation_deadline) |deadline|
             initWithDeadline(allocator, io, stream, mapped, deadline)
         else
             init(allocator, io, stream, mapped);
