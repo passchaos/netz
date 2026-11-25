@@ -39,7 +39,14 @@ The deadline race surrounds system-root loading, including native file reads.
 Bundled-root construction and platform-verifier initialization check the budget
 before and after setup. Their synchronous CPU/native work must finish before
 its owned state can be destroyed. A caller-owned TCP CA bundle retains its
-existing shared-lock lifetime through certificate verification.
+shared-lock lifetime through certificate verification. Its admission uses
+`internal/timed_rwlock.zig` under the same handshake deadline. The helper
+validates before and after installing reader ownership, releasing a newly
+acquired reader on interruption. Contention waits through the RwLock's existing
+mutex with the shared timed-mutex policy, then retries its public shared-lock
+method. It introduces no worker, allocation or additional concurrency
+requirement. Reader/writer accounting remains in `std.Io.RwLock`; canceled
+mutex waiters preserve the unlock handoff.
 
 See [the startup evidence](../evidence/trust_startup/2026-11-25/README.md) for
 the original cancellation failures, deadline admission checks, late-result

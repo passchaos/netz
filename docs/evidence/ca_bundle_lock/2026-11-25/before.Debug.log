@@ -1,0 +1,44 @@
+[traex-zig-guard 2026-11-25 13:04:11] started Zig tree root=31480 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=900s
+test-tls
++- run test 8 pass, 2 fail (10 total)
+error: 'tls.stream.ca_bundle_lock_tests.test.TLS CA bundle lock caller deadline expires while the writer stays held' failed:
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/Io.zig:1843:25: 0x104db41f7 in waitTimeout (test)
+                   .waiting => return error.Timeout,
+                               ^
+       /Users/bytedance/project-z/netz/src/internal/deadline.zig:39:9: 0x1054ebf9f in usableAwake (test)
+               return error.Timeout;
+               ^
+       /Users/bytedance/project-z/netz/src/tls/stream/ca_bundle_lock_tests.zig:12:21: 0x104dcc3ff in waitBefore (test)
+                       _ = try deadline_policy.usableAwake(io, deadline);
+                           ^
+       /Users/bytedance/project-z/netz/src/tls/stream/ca_bundle_lock_tests.zig:70:5: 0x105695a4f in heldWriter__anon_10744257 (test)
+           try waitBefore(&worker.done, io, .fromSeconds(3));
+           ^
+       /Users/bytedance/project-z/netz/src/tls/stream/ca_bundle_lock_tests.zig:77:88: 0x1056966cf in test.TLS CA bundle lock caller deadline expires while the writer stays held (test)
+           inline for (.{ clients.ClientConnection, clients.Tls13ClientConnection }) |Client| try heldWriter(Client, false);
+                                                                                              ^
+error: 'tls.stream.ca_bundle_lock_tests.test.TLS CA bundle lock handshake timeout expires while the writer stays held' failed:
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/Io.zig:1843:25: 0x104db41f7 in waitTimeout (test)
+                   .waiting => return error.Timeout,
+                               ^
+       /Users/bytedance/project-z/netz/src/internal/deadline.zig:39:9: 0x1054ebf9f in usableAwake (test)
+               return error.Timeout;
+               ^
+       /Users/bytedance/project-z/netz/src/tls/stream/ca_bundle_lock_tests.zig:12:21: 0x104dcc3ff in waitBefore (test)
+                       _ = try deadline_policy.usableAwake(io, deadline);
+                           ^
+       /Users/bytedance/project-z/netz/src/tls/stream/ca_bundle_lock_tests.zig:70:5: 0x104dccc4f in heldWriter__anon_36531 (test)
+           try waitBefore(&worker.done, io, .fromSeconds(3));
+           ^
+       /Users/bytedance/project-z/netz/src/tls/stream/ca_bundle_lock_tests.zig:81:88: 0x104dcd8cf in test.TLS CA bundle lock handshake timeout expires while the writer stays held (test)
+           inline for (.{ clients.ClientConnection, clients.Tls13ClientConnection }) |Client| try heldWriter(Client, true);
+                                                                                              ^
+failed command: ./.zig-cache/o/a64e80e2e7f7859970250cd7274658f8/test --cache-dir=./.zig-cache --seed=0x7c6d578b --listen=-
+
+Build Summary: 8/10 steps succeeded (1 failed); 8/10 tests passed (2 failed)
+test-tls transitive failure
++- run test 8 pass, 2 fail (10 total)
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/7969d3ab30b197d80e2c8ba9aaff6d22/build /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/zig /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib /Users/bytedance/project-z/netz .zig-cache /Users/bytedance/.cache/zig --seed 0x7c6d578b -Z5d9493f495b75c5d test-tls -Dtest-filter=TLS CA bundle lock -j1 --summary failures
+[traex-zig-guard 2026-11-25 13:04:46] finished Zig tree root=31480 peak=2787MiB result=0

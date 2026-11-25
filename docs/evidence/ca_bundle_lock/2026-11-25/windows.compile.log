@@ -1,0 +1,15 @@
+Command: ['/Users/bytedance/.local/bin/zig', 'build', 'test-tls-compile', '-Dtarget=x86_64-windows-gnu', '-Dtest-filter=TLS CA bundle lock', '-j1', '--summary', 'all']
+Build Summary: 8/8 steps succeeded
+test-tls-compile cached
++- compile test Debug x86_64-windows-gnu cached 1s MaxRSS:35M
+   +- WriteFile cached
+   +- compile obj vort-br-record-optimal Debug x86_64-windows-gnu cached 220ms MaxRSS:31M
+   +- WriteFile cached
+   +- compile obj vort-zstd-huffman-x2 Debug x86_64-windows-gnu cached 244ms MaxRSS:31M
+   +- compile obj vort-br-record-optimal Debug x86_64-windows-gnu (reused)
+   +- compile obj vort-zstd-huffman-x2 Debug x86_64-windows-gnu (reused)
+   +- options cached
+   +- options cached
+
+
+Exit code: 0

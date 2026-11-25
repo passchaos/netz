@@ -157,6 +157,12 @@ the operation joins the loader before returning; a bounded load reports
 `ConcurrencyUnavailable` when its watcher cannot be admitted. See
 [trust startup](architecture/trust-startup.md) for ownership and timing details.
 
+Admission to a caller-owned `.tls.ca_bundle` shared lock uses the same earlier
+handshake/caller deadline. `Timeout` or `Canceled` releases interrupted read
+admission; successful admission keeps the bundle protected throughout
+certificate verification. Applications can retain their normal writer-lock
+protocol when refreshing the bundle.
+
 Proxy routes (mutually exclusive):
 
 | Option | TCP | HTTP/3 | Notes |

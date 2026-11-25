@@ -1,0 +1,3 @@
+Command: ['/Users/bytedance/.local/bin/zig', 'fmt', 'src/tls/stream/client_connection.zig', 'src/tls/stream/mod.zig', 'src/tls/stream/versioned_client_connection.zig', 'src/internal/testing/timed_rwlock.zig', 'src/internal/timed_rwlock.zig', 'src/tls/stream/ca_bundle_lock_tests.zig']
+
+Exit code: 0

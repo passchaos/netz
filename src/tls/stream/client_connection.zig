@@ -13,6 +13,7 @@ const record_stream = @import("record_stream.zig");
 const stream_io = @import("../../internal/stream_io.zig");
 const root_trust = @import("../../trust.zig");
 const trust_loading = @import("../trust_loading.zig");
+const timed_rwlock = @import("../../internal/timed_rwlock.zig");
 
 const net = std.Io.net;
 const tls_record = vail.tls.record;
@@ -423,7 +424,7 @@ pub const Connection = struct {
         const verifier = options.server_verifier orelse blk: {
             const now = std.Io.Timestamp.now(io, .real);
             if (options.ca_bundle) |ca_bundle| {
-                try ca_bundle.lock.lockShared(io);
+                try timed_rwlock.lockShared(ca_bundle.lock, io, operation_deadline);
                 caller_bundle_locked = true;
                 bundle_verifier = .{
                     .bundle = ca_bundle.bundle,
