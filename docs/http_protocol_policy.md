@@ -55,10 +55,13 @@ is configured or TLS 1.3 is disabled, so a preference policy uses the
 configured TCP route. SOCKS5 stays eligible: TCP uses CONNECT and H3 uses UDP
 ASSOCIATE with proxy-side domain resolution. The strict H3 policy rejects an
 HTTP CONNECT proxy and TLS 1.2-only policy. A TCP
-`tls.ca_bundle` has no QUIC representation: `prefer_http3` stays on TCP unless
+`tls.ca_bundle` has no QUIC representation. When it is the active TCP trust
+policy, `prefer_http3` stays on TCP unless
 explicit H3 trust (`server_auth`, a native store, an environment, or a
 non-default root source) is configured, and `http3_only` rejects the
 configuration at `Client.init` with `error.UnsupportedH3TrustConfiguration`.
+If `tls.server_verifier` is also configured, it takes precedence over the TCP
+bundle and H3 can inherit that verifier without a separate trust choice.
 
 Selection ends before sending an application request. This allows POST and
 single-pass Reader requests to select TCP safely after an H3 connection failure.

@@ -133,13 +133,16 @@ described in [the protocol API map](protocol_api_map.md).
 | Skip hostname match | `.tls.verify_host = false` | TCP TLS only; CA path, validity, EKU and revocation checks still run. H3 routes keep the configured verifier's own hostname policy. Intended for tunnels. |
 | Client certificate (mTLS) | `.tls.client_identity = .{ .certificate_chain = ..., .signer = ... }` | H1/H2/H3 and WebTransport share the same shape. |
 
-The direct H3 route and the Alt-Svc pool backend copy `.tls.server_verifier`,
-`.tls.system_store`, `.tls.environ`, `.tls.root_source` and `.tls.verify_host`
-into the QUIC handshake when no explicit `http3.handshake.handshake` trust is
-configured; `server_auth` and `client_identity` there override the inherited
-policy. A TCP `ca_bundle` cannot be translated to QUIC, so Alt-Svc H3 fails
+The direct H3 route and the Alt-Svc pool backend inherit `.tls.server_verifier`,
+`.tls.system_store`, `.tls.environ` and `.tls.root_source` together when no
+explicit `http3.handshake.handshake` peer-trust policy is configured. An explicit
+H3 verifier, store, environment or non-default root source selects the whole
+H3 peer policy. `client_identity` inherits the TCP identity independently when
+unset. An active TCP `ca_bundle` cannot be translated to QUIC, so Alt-Svc H3 fails
 `Pool.init` with `error.UnsupportedH3TrustConfiguration` instead of connecting
 unverified, while `prefer_http3` keeps that request on TCP.
+TCP `server_verifier` takes precedence over its `ca_bundle`; an inactive bundle
+does not block H3 from inheriting the verifier.
 
 HTTP-level credentials are ordinary fields. `Authorization`, `Cookie` and
 application headers travel in the request head; `http_proxy.headers` are sent

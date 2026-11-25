@@ -1,0 +1,11 @@
+[traex-zig-guard 2026-11-25 15:09:42] waiting for the global TRAE Zig build slot
+[traex-zig-guard 2026-11-25 15:12:26] started Zig tree root=37676 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=900s
+Running fmt: /tmp/netz-effective-trust-final.fmt.log
+fmt exit=0
+Running Debug: /tmp/netz-effective-trust-final.Debug.log
+Debug exit=0
+Running ReleaseSafe: /tmp/netz-effective-trust-final.ReleaseSafe.log
+ReleaseSafe exit=0
+Running windows-compile: /tmp/netz-effective-trust-final.windows-compile.log
+windows-compile exit=0
+[traex-zig-guard 2026-11-25 15:18:19] finished Zig tree root=37676 peak=6335MiB result=0

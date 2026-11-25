@@ -9,8 +9,8 @@
 //! An explicit QUIC verifier, store, environment or root source selects the
 //! complete peer-authentication policy. Otherwise the handshake inherits the
 //! TCP trust policy. Client identity is inherited independently when unset.
-//! A TCP CA bundle has no QUIC
-//! equivalent, so QUIC refuses to run unverified when only a bundle is set.
+//! An active TCP CA bundle has no QUIC equivalent, so it requires explicit
+//! H3 trust. A custom TCP verifier takes precedence over its CA bundle.
 
 const std = @import("std");
 const quic = @import("mod.zig");
@@ -45,6 +45,12 @@ pub fn hasExplicitTrust(options: *const quic.handshake.ClientOptions) bool {
         options.system_store != null or
         options.system_environ != null or
         options.root_source != .system;
+}
+
+/// A custom TCP verifier outranks its CA bundle. Only an active bundle needs
+/// a separate H3 representation when the QUIC policy is otherwise unset.
+pub fn requiresExplicitH3Trust(options: *const quic.handshake.ClientOptions, tls: ClientTlsTrust) bool {
+    return !hasExplicitTrust(options) and tls.ca_bundle_configured and tls.server_verifier == null;
 }
 
 /// Apply the unified client's TCP TLS trust policy to a QUIC handshake.
@@ -83,9 +89,9 @@ pub fn applyClientTrustBefore(
 
 fn inherit(options_value: quic.handshake.ClientOptions, tls: ClientTlsTrust) Error!quic.handshake.ClientOptions {
     var options = options_value;
+    if (requiresExplicitH3Trust(&options, tls)) return error.UnsupportedH3TrustConfiguration;
     if (options.client_identity == null) options.client_identity = tls.client_identity;
     if (!hasExplicitTrust(&options)) {
-        if (tls.ca_bundle_configured) return error.UnsupportedH3TrustConfiguration;
         options.server_auth = tls.server_verifier;
         options.system_environ = tls.environ;
         options.system_store = tls.system_store;
@@ -134,6 +140,7 @@ pub fn applyPlatformRootDefaultBefore(
 const testing = std.testing;
 
 test {
+    _ = @import("client_trust/effective_policy_tests.zig");
     _ = @import("client_trust/precedence_tests.zig");
     _ = @import("client_trust/loading_tests.zig");
 }

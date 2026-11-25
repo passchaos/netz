@@ -88,8 +88,8 @@ native store, then the selected root source.
 | Transport | Field | Default behavior |
 | --- | --- | --- |
 | Unified HTTP (H1/H2) | `Client.Options.tls.server_verifier` / `ca_bundle` / `environ` / `system_store` / `root_source` | Platform roots verify the server. |
-| Unified HTTP (H3, direct) | Same `tls.*` fields, copied into `http3.handshake.handshake`; `server_auth` and `system_store` may also be set directly under `http3.handshake`. | `tls.server_verifier` is copied to H3; with no explicit trust material the client installs a platform-root verifier, matching H1/H2. |
-| Unified HTTP Pool (Alt-Svc H3) | `Pool.Options.http3.handshake.handshake`; unset fields inherit `Pool.Options.client.tls` | Same inheritance and platform-root default as the direct H3 route; empty connection IDs are generated per connection, so `.http3 = .{}` enables the backend. `Pool.Options.client.tls.ca_bundle` has no QUIC representation, so Alt-Svc H3 reports `error.UnsupportedH3TrustConfiguration` at `Pool.init` unless H3 trust is explicit. |
+| Unified HTTP (H3, direct) | Same `tls.*` fields, inherited by an unset `http3.handshake.handshake` peer policy; explicit H3 trust is set under `http3.handshake.handshake`. | `tls.server_verifier` is inherited when H3 has no explicit peer policy; with no explicit trust material the client installs a platform-root verifier, matching H1/H2. |
+| Unified HTTP Pool (Alt-Svc H3) | `Pool.Options.http3.handshake.handshake`; an unset peer policy inherits `Pool.Options.client.tls` | Same inheritance and platform-root default as the direct H3 route; empty connection IDs are generated per connection, so `.http3 = .{}` enables the backend. An active `Pool.Options.client.tls.ca_bundle` has no QUIC representation, so Alt-Svc H3 reports `error.UnsupportedH3TrustConfiguration` at `Pool.init` unless H3 trust is explicit. |
 | WebSocket WSS | `ConnectOptions.vail_tls.server_verifier`, or `connectUriTls(..., TlsClientOptions.ca_bundle)` | Platform roots verify the server unless a verifier/CA bundle is supplied. |
 | WebSocket over H3 | `websocket.runtime.h3.UriConnectOptions.h3.handshake.server_auth` / `system_store` / `system_environ` / `root_source` | URI connects install platform roots when no explicit QUIC trust material is set; low-level session connects keep the explicit-configuration contract. |
 | WebTransport / direct QUIC | `HandshakeClientOptions.handshake.server_auth` (`pinned_ecdsa_p256_public_key`, `verify_trust`), `system_store`, `system_environ`, `root_source` | The low-level QUIC handshake verifies only when one of these is set. `webtransport.runtime.EndpointClient` URI connects install platform roots by default; the lower-level session and address helpers, and `http3.runtime.HandshakeClient.connectUri*`/`requestUri*`, require explicit configuration. The unified `netz.http.Client` H3 route also installs platform roots automatically. |
@@ -102,11 +102,13 @@ certificate identity, so supply an explicit `server_auth` verifier when a
 custom QUIC policy is required.
 
 A TCP `ca_bundle` cannot be converted into the QUIC trust representation. When
-it is set without explicit H3 trust material, `prefer_http3` keeps the request
-on TCP and `http3_only` fails at `Client.init` with
+it is the active TCP policy without explicit H3 trust, `prefer_http3` keeps the
+request on TCP and `http3_only` fails at `Client.init` with
 `error.UnsupportedH3TrustConfiguration`; set `http3.handshake.handshake`
 (`server_auth`, `system_store`, `system_environ`, or `root_source`) to enable
 H3 for private CAs.
+TCP `server_verifier` takes precedence over `ca_bundle`; H3 inherits that
+verifier when its peer policy is unset even if an inactive bundle is present.
 
 ## Bounded resources
 

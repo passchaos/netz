@@ -32,8 +32,8 @@ pub const Error = http1_runtime.Error || http2_runtime.Error || http3_runtime.Er
     InvalidAddressConnectPolicy,
     InvalidClientOptions,
     StreamingBodyUnsupported,
-    /// A TCP CA bundle was configured without explicit H3 trust; QUIC cannot
-    /// consume the TCP bundle representation.
+    /// An active TCP CA bundle was configured without explicit H3 trust;
+    /// QUIC cannot consume the TCP bundle representation.
     UnsupportedH3TrustConfiguration,
     /// A request source failed, independently of the connection transport.
     RequestBodyReadFailed,
@@ -758,8 +758,10 @@ pub const Client = struct {
             const handshake = options.http3.handshake;
             if (handshake.handshake.alpn_protocols.len != 1 or !std.mem.eql(u8, handshake.handshake.alpn_protocols[0], "h3") or handshake.handshake.early_data != null) return error.InvalidClientOptions;
             if (options.protocol_policy == .http3_only and
-                options.tls.ca_bundle != null and
-                !client_trust.hasExplicitTrust(&handshake.handshake))
+                client_trust.requiresExplicitH3Trust(&handshake.handshake, .{
+                    .server_verifier = options.tls.server_verifier,
+                    .ca_bundle_configured = options.tls.ca_bundle != null,
+                }))
             {
                 return error.UnsupportedH3TrustConfiguration;
             }

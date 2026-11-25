@@ -1,0 +1,37 @@
+{
+  "run_id": 45562766721,
+  "head_sha": "2cba735ea9cab0b9c6f41717ed64dec353b8c776",
+  "source": "GitHub public native job pages",
+  "jobs": [
+    {
+      "platform": "linux",
+      "id": 139030191299,
+      "url": "https://github.com/passchaos/netz/actions/runs/45562766721/job/139030191299",
+      "trust_steps": [
+        {
+          "data-name": "Run native trust startup regressions",
+          "data-number": "18",
+          "data-conclusion": "success",
+          "data-started-at": "2026-11-25T06:51:11Z",
+          "data-completed-at": "2026-11-25T06:55:41Z",
+          "data-log-url": "/passchaos/netz/commit/2cba735ea9cab0b9c6f41717ed64dec353b8c776/checks/139030191299/logs/18"
+        }
+      ]
+    },
+    {
+      "platform": "windows",
+      "id": 139030191141,
+      "url": "https://github.com/passchaos/netz/actions/runs/45562766721/job/139030191141",
+      "trust_steps": [
+        {
+          "data-name": "Run native trust startup regressions",
+          "data-number": "18",
+          "data-conclusion": "success",
+          "data-started-at": "2026-11-25T06:47:25Z",
+          "data-completed-at": "2026-11-25T06:51:43Z",
+          "data-log-url": "/passchaos/netz/commit/2cba735ea9cab0b9c6f41717ed64dec353b8c776/checks/139030191141/logs/18"
+        }
+      ]
+    }
+  ]
+}

@@ -12,12 +12,13 @@ pub fn selectHttp3(allocator: std.mem.Allocator, io: std.Io, uri: std.Uri, optio
         return null;
     }
     if (options.protocol_policy == .http3_only) return try Owner.connect(allocator, io, uri, options, deadline);
-    // A TCP CA bundle has no QUIC representation. `http3_only` rejects this
-    // configuration at init; opportunistic H3 stays on TCP rather than running
-    // an unauthenticated QUIC handshake.
-    if (options.tls.ca_bundle != null and
-        !client_trust.hasExplicitTrust(&options.http3.handshake.handshake))
-    {
+    // An active TCP CA bundle has no QUIC representation. `http3_only` rejects
+    // this configuration at init; opportunistic H3 stays on TCP rather than
+    // running an unauthenticated QUIC handshake.
+    if (client_trust.requiresExplicitH3Trust(&options.http3.handshake.handshake, .{
+        .server_verifier = options.tls.server_verifier,
+        .ca_bundle_configured = options.tls.ca_bundle != null,
+    })) {
         return null;
     }
     // Preserve the configured route and TLS version constraints. A cleartext

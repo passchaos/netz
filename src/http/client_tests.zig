@@ -10,6 +10,7 @@ const tls_testing = @import("../tls/testing.zig");
 const vort = @import("vort");
 
 test {
+    _ = @import("client_tests/effective_trust.zig");
     _ = @import("client_tests/duplex.zig");
     _ = @import("client_tests/peer_address.zig");
     _ = @import("client_tests/network_interface.zig");

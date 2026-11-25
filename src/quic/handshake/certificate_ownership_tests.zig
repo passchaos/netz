@@ -10,23 +10,29 @@ test "QUIC compressed Certificate remains owned after the client handshake" {
 
 test "QUIC client verifies native roots from SSL_CERT_FILE" {
     if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
-    try nativeRoots(true, false);
+    try nativeRoots(true, .native);
 }
 
 test "QUIC client verifies caller-owned roots from PEM file" {
-    try nativeRoots(false, false);
+    try nativeRoots(false, .native);
 }
 
 test "QUIC trust precedence caller-owned CA survives conflicting TCP verifier" {
-    try nativeRoots(false, true);
+    try nativeRoots(false, .conflicting_tcp);
 }
 
 test "QUIC trust precedence SSL_CERT_FILE survives conflicting TCP verifier" {
     if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
-    try nativeRoots(true, true);
+    try nativeRoots(true, .conflicting_tcp);
 }
 
-fn nativeRoots(comptime use_environment: bool, comptime conflicting_tcp: bool) !void {
+test "QUIC effective trust authenticates with inherited TCP verifier over inactive CA bundle" {
+    try nativeRoots(false, .inherited_tcp);
+}
+
+const TrustFlow = enum { native, conflicting_tcp, inherited_tcp };
+
+fn nativeRoots(comptime use_environment: bool, comptime flow: TrustFlow) !void {
     const allocator = std.testing.allocator;
     var backend = try @import("zio").Runtime.init(allocator, .{});
     defer backend.deinit();
@@ -66,7 +72,7 @@ fn nativeRoots(comptime use_environment: bool, comptime conflicting_tcp: bool) !
         .{ .block = .{ .slice = entries[0..1 :null] } }
     else
         null;
-    var owned_store: ?quic.tls.trust.SystemStore = if (use_environment)
+    var owned_store: ?quic.tls.trust.SystemStore = if (use_environment or flow == .inherited_tcp)
         null
     else
         try quic.tls.trust.SystemStore.initWithPaths(allocator, io, std.Io.Timestamp.now(io, .real), .{ .file = path });
@@ -121,11 +127,22 @@ fn nativeRoots(comptime use_environment: bool, comptime conflicting_tcp: bool) !
     };
     var inherited_store: ?quic.tls.trust.SystemStore = null;
     defer if (inherited_store) |*store| store.deinit();
-    if (conflicting_tcp) {
+    if (flow == .conflicting_tcp) {
         try quic.client_trust.applyClientTrustBefore(allocator, io, &client_options, .{
             .server_verifier = .{ .pinned_ecdsa_p256_public_key = @splat(9) },
             .root_source = .bundled,
         }, &inherited_store, .fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(3) }));
+        try std.testing.expect(inherited_store == null);
+    }
+    if (flow == .inherited_tcp) {
+        const verifier: quic.tls.auth.ClientVerifier = .{
+            .pinned_ecdsa_p256_public_key = key_pair.public_key.toUncompressedSec1(),
+        };
+        try quic.client_trust.applyClientTrustBefore(allocator, io, &client_options, .{
+            .server_verifier = verifier,
+            .ca_bundle_configured = true,
+        }, &inherited_store, .fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(3) }));
+        try std.testing.expectEqualDeep(verifier, client_options.server_auth.?);
         try std.testing.expect(inherited_store == null);
     }
     var connection = try handshake.connectWithTimeout(&endpoint, server.address(), client_options, .fromSeconds(3));

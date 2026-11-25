@@ -32,3 +32,13 @@ document. The native trust-startup gate selects the precedence regressions.
 
 [Local metadata](local-validation.json) records the completed checks. Builds
 ran under the shared tree guard with `-j1`.
+
+The native trust-startup gate also passed on source commit
+`2cba735ea9cab0b9c6f41717ed64dec353b8c776` in
+[run 45562766721](https://github.com/passchaos/netz/actions/runs/45562766721).
+The [Linux job](https://github.com/passchaos/netz/actions/runs/45562766721/job/139030191299)
+completed the gate at 06:55:41 UTC; the
+[Windows job](https://github.com/passchaos/netz/actions/runs/45562766721/job/139030191141)
+completed it at 06:51:43 UTC. Both gate conclusions were `success`.
+[Native gate metadata](native-gates.json) records the source commit, exact jobs
+and step timestamps from the public job pages.

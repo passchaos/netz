@@ -138,11 +138,15 @@ explicit peer policy. Client certificates remain independent:
 The pool's Alt-Svc H3 backend follows the same rule: unset
 `Pool.Options.http3.handshake.handshake` trust fields inherit
 `Pool.Options.client.tls`, then fall back to platform roots. A TCP
-`client.tls.ca_bundle` has no QUIC equivalent, so Alt-Svc H3 requires explicit
-H3 trust in that case and `Pool.init` returns
+`client.tls.ca_bundle` has no QUIC equivalent. When it is the active TCP trust
+policy, Alt-Svc H3 requires explicit H3 trust and `Pool.init` returns
 `error.UnsupportedH3TrustConfiguration` instead of connecting unverified.
 `prefer_http3` on the direct client keeps the request on TCP in the same
 situation; `http3_only` fails at `Client.init`.
+
+TCP `.tls.server_verifier` takes precedence over `.tls.ca_bundle`. When both
+are configured, H3 inherits the verifier if its own peer policy is unset;
+the inactive bundle does not block H3 initialization or selection.
 
 For a private CA that must cover both H1/H2 and H3, load a reusable native
 store with `netz.tls.trust.SystemStore.initWithPaths` and assign

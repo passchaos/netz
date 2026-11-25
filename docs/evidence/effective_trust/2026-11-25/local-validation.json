@@ -1,0 +1,30 @@
+{
+  "platform": "aarch64-macos",
+  "zig_version": "0.16.0",
+  "guarded": true,
+  "jobs": 1,
+  "baseline_head": "2cba735ea9cab0b9c6f41717ed64dec353b8c776",
+  "baseline": {
+    "tests_passed": 128,
+    "tests_total": 132,
+    "distinct_failed_regressions": 3
+  },
+  "checks": {
+    "fmt": {
+      "exit_code": 0
+    },
+    "Debug": {
+      "exit_code": 0,
+      "tests_passed": 182,
+      "tests_total": 182
+    },
+    "ReleaseSafe": {
+      "exit_code": 0,
+      "tests_passed": 182,
+      "tests_total": 182
+    },
+    "windows-compile": {
+      "exit_code": 0
+    }
+  }
+}

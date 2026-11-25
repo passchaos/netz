@@ -43,8 +43,8 @@ pub const Error = client.Error || http3_runtime.Error ||
     ConnectionLimitReached,
     InvalidPoolOptions,
     H3StreamingUnsupported,
-    /// A TCP CA bundle was configured without explicit H3 trust; QUIC cannot
-    /// consume the TCP bundle representation.
+    /// An active TCP CA bundle was configured without explicit H3 trust;
+    /// QUIC cannot consume the TCP bundle representation.
     UnsupportedH3TrustConfiguration,
 } || shared_tcp.Error;
 pub const OperationError = Error || std.Io.Timeout.Error ||
@@ -73,8 +73,8 @@ pub const Options = struct {
     /// Enable Alt-Svc-driven HTTP/3 with an explicit QUIC/TLS policy. Null
     /// uses only the primary Client backend and its protocol policy. Unset
     /// trust fields in `http3.handshake.handshake` inherit `client.tls`, then
-    /// fall back to platform roots; `client.tls.ca_bundle` has no QUIC
-    /// representation and requires explicit H3 trust.
+    /// fall back to platform roots. An active `client.tls.ca_bundle` requires
+    /// explicit H3 trust; `server_verifier` takes precedence over the bundle.
     http3: ?h3_support.Options = null,
 };
 

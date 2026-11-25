@@ -1,0 +1,54 @@
+[traex-zig-guard 2026-11-25 14:55:18] waiting for the global TRAE Zig build slot
+[traex-zig-guard 2026-11-25 14:57:14] started Zig tree root=83263 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=900s
+test-quic
++- run test 34 pass, 1 fail (35 total)
+error: 'quic.client_trust.effective_policy_tests.test.QUIC effective trust inherits TCP verifier despite an inactive CA bundle' failed:
+       /Users/bytedance/project-z/netz/src/quic/client_trust.zig:88:39: 0x10480d333 in inherit (test)
+               if (tls.ca_bundle_configured) return error.UnsupportedH3TrustConfiguration;
+                                             ^
+       /Users/bytedance/project-z/netz/src/quic/client_trust.zig:63:20: 0x1047eb1c3 in applyClientTrust (test)
+           var resolved = try inherit(options.*, tls);
+                          ^
+       /Users/bytedance/project-z/netz/src/quic/client_trust/effective_policy_tests.zig:10:5: 0x10480d7cb in test.QUIC effective trust inherits TCP verifier despite an inactive CA bundle (test)
+           try trust.applyClientTrust(std.testing.allocator, std.testing.io, &options, .{ .server_verifier = verifier, .ca_bundle_configured = true }, &owned);
+           ^
+failed command: ./.zig-cache/o/87e75c05a8e1dd82b1199983784b1493/test --cache-dir=./.zig-cache --seed=0x7cdd1757 --listen=-
+
+test-http
++- run test 94 pass, 3 fail (97 total)
+error: 'http.client_tests.effective_trust.test.HTTP effective trust H3-only accepts a verifier over an inactive CA bundle' failed:
+       /Users/bytedance/project-z/netz/src/http/client.zig:764:17: 0x101bd644f in init (test)
+                       return error.UnsupportedH3TrustConfiguration;
+                       ^
+       /Users/bytedance/project-z/netz/src/http/client_tests/effective_trust.zig:9:18: 0x101bd607b in test.HTTP effective trust H3-only accepts a verifier over an inactive CA bundle (test)
+           var client = try http.Client.init(std.testing.allocator, std.testing.io, .{
+                        ^
+error: 'http.client_tests.effective_trust.test.HTTP effective trust H3 preference attempts verifier policy before TCP fallback' failed:
+       expected error.OutOfMemory, found null
+       /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:65:9: 0x10120f733 in expectError__anon_37975 (test)
+               return error.TestExpectedError;
+               ^
+       /Users/bytedance/project-z/netz/src/http/client_tests/effective_trust.zig:33:5: 0x10120fe37 in test.HTTP effective trust H3 preference attempts verifier policy before TCP fallback (test)
+           try std.testing.expectError(error.OutOfMemory, selection.selectHttp3(failed.allocator(), std.testing.io, try std.Uri.parse("https://effective-trust.test/"), options, null));
+           ^
+error: 'quic.client_trust.effective_policy_tests.test.QUIC effective trust inherits TCP verifier despite an inactive CA bundle' failed:
+       /Users/bytedance/project-z/netz/src/quic/client_trust.zig:88:39: 0x101bd015f in inherit (test)
+               if (tls.ca_bundle_configured) return error.UnsupportedH3TrustConfiguration;
+                                             ^
+       /Users/bytedance/project-z/netz/src/quic/client_trust.zig:63:20: 0x101c38493 in applyClientTrust (test)
+           var resolved = try inherit(options.*, tls);
+                          ^
+       /Users/bytedance/project-z/netz/src/quic/client_trust/effective_policy_tests.zig:10:5: 0x101c390f3 in test.QUIC effective trust inherits TCP verifier despite an inactive CA bundle (test)
+           try trust.applyClientTrust(std.testing.allocator, std.testing.io, &options, .{ .server_verifier = verifier, .ca_bundle_configured = true }, &owned);
+           ^
+failed command: ./.zig-cache/o/d4fbc913dedf541a61539c71ad15b9c3/test --cache-dir=./.zig-cache --seed=0x7cdd1757 --listen=-
+
+Build Summary: 10/14 steps succeeded (2 failed); 128/132 tests passed (4 failed)
+test-quic transitive failure
++- run test 34 pass, 1 fail (35 total)
+test-http transitive failure
++- run test 94 pass, 3 fail (97 total)
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/7969d3ab30b197d80e2c8ba9aaff6d22/build /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/zig /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib /Users/bytedance/project-z/netz .zig-cache /Users/bytedance/.cache/zig --seed 0x7cdd1757 -Zcda83ca02c5daa58 test-quic test-http -Dtest-filter=effective trust -j1 --summary failures
+[traex-zig-guard 2026-11-25 14:57:56] finished Zig tree root=83263 peak=2447MiB result=0
