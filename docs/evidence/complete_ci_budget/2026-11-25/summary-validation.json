@@ -1,0 +1,82 @@
+[
+  {
+    "preflight": "success",
+    "complete": "success",
+    "exit_code": 0
+  },
+  {
+    "preflight": "success",
+    "complete": "failure",
+    "exit_code": 1
+  },
+  {
+    "preflight": "success",
+    "complete": "cancelled",
+    "exit_code": 1
+  },
+  {
+    "preflight": "success",
+    "complete": "skipped",
+    "exit_code": 1
+  },
+  {
+    "preflight": "failure",
+    "complete": "success",
+    "exit_code": 1
+  },
+  {
+    "preflight": "failure",
+    "complete": "failure",
+    "exit_code": 1
+  },
+  {
+    "preflight": "failure",
+    "complete": "cancelled",
+    "exit_code": 1
+  },
+  {
+    "preflight": "failure",
+    "complete": "skipped",
+    "exit_code": 1
+  },
+  {
+    "preflight": "cancelled",
+    "complete": "success",
+    "exit_code": 1
+  },
+  {
+    "preflight": "cancelled",
+    "complete": "failure",
+    "exit_code": 1
+  },
+  {
+    "preflight": "cancelled",
+    "complete": "cancelled",
+    "exit_code": 1
+  },
+  {
+    "preflight": "cancelled",
+    "complete": "skipped",
+    "exit_code": 1
+  },
+  {
+    "preflight": "skipped",
+    "complete": "success",
+    "exit_code": 1
+  },
+  {
+    "preflight": "skipped",
+    "complete": "failure",
+    "exit_code": 1
+  },
+  {
+    "preflight": "skipped",
+    "complete": "cancelled",
+    "exit_code": 1
+  },
+  {
+    "preflight": "skipped",
+    "complete": "skipped",
+    "exit_code": 1
+  }
+]

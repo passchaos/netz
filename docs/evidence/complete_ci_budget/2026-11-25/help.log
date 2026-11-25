@@ -1,0 +1,454 @@
+[traex-zig-guard 2026-11-25 20:58:56] started Zig tree root=76982 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=180s
+Usage: /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/zig build [steps] [options]
+
+Steps:
+  install (default)            Copy build artifacts to prefix path
+  uninstall                    Remove build artifacts from prefix path
+  test-lib                     Compile and run the Netz library unit tests
+  test-proxy-compile           Compile one protocol's selected tests without running them
+  test-proxy                   Compile and run one protocol; reject filters with no matching protocol tests
+  test-proxy-queues-compile    Compile one protocol's selected tests without running them
+  test-proxy-queues            Compile and run one protocol; reject filters with no matching protocol tests
+  test-http-compile            Compile one protocol's selected tests without running them
+  test-http                    Compile and run one protocol; reject filters with no matching protocol tests
+  test-http1-compile           Compile one protocol's selected tests without running them
+  test-http1                   Compile and run one protocol; reject filters with no matching protocol tests
+  test-http2-compile           Compile one protocol's selected tests without running them
+  test-http2                   Compile and run one protocol; reject filters with no matching protocol tests
+  test-http3-compile           Compile one protocol's selected tests without running them
+  test-http3                   Compile and run one protocol; reject filters with no matching protocol tests
+  test-quic-compile            Compile one protocol's selected tests without running them
+  test-quic                    Compile and run one protocol; reject filters with no matching protocol tests
+  test-grpc-compile            Compile one protocol's selected tests without running them
+  test-grpc                    Compile and run one protocol; reject filters with no matching protocol tests
+  test-mqtt-compile            Compile one protocol's selected tests without running them
+  test-mqtt                    Compile and run one protocol; reject filters with no matching protocol tests
+  test-websocket-compile       Compile one protocol's selected tests without running them
+  test-websocket               Compile and run one protocol; reject filters with no matching protocol tests
+  test-webtransport-compile    Compile one protocol's selected tests without running them
+  test-webtransport            Compile and run one protocol; reject filters with no matching protocol tests
+  test-tls-compile             Compile one protocol's selected tests without running them
+  test-tls                     Compile and run one protocol; reject filters with no matching protocol tests
+  test-vpn-compile             Compile one protocol's selected tests without running them
+  test-vpn                     Compile and run one protocol; reject filters with no matching protocol tests
+  test-mesh-compile            Compile one protocol's selected tests without running them
+  test-mesh                    Compile and run one protocol; reject filters with no matching protocol tests
+  test-package                 Compile and test the public Netz package surface
+  test-compile                 Compile library and public-package tests without running them
+  test                         Run all tests
+  fuzz-parsers                 Fuzz bounded HTTP/WebSocket/WebTransport/MQTT parsers
+  fuzz-stateful                Fuzz bounded HTTP/WebSocket/WebTransport/MQTT state sequences
+  fuzz-mqtt-live-broker        Fuzz live MQTT broker ordering and retained routing
+  fuzz-mqtt-tls-live-broker    Fuzz authenticated TLS MQTT broker ordering and routing
+  fuzz-mqtt-reconnect          Fuzz live MQTT reconnect and Session recovery ordering
+  fuzz-mqtt-tls-reconnect      Fuzz authenticated TLS MQTT reconnect and Session recovery
+  fuzz-mqtt-wss-reconnect      Fuzz authenticated WSS MQTT reconnect and Session recovery
+  fuzz-mqtt-bridge             Fuzz live inbound MQTT bridge routing and reconnects
+  fuzz-mqtt-tls-bridge         Fuzz authenticated TLS MQTT inbound bridge routing
+  fuzz-mqtt-bridge-qos2        Fuzz durable inbound MQTT bridge QoS 2 recovery
+  fuzz-mqtt-tls-bridge-qos2    Fuzz durable inbound MQTT bridge QoS 2 over authenticated TLS
+  fuzz-mqtt-outbound-bridge    Fuzz outbound MQTT bridge routing and reconnects
+  fuzz-mqtt-tls-outbound-bridge Fuzz outbound MQTT bridge routing across authenticated TLS peers
+  fuzz-mqtt-outbound-bridge-qos2 Fuzz durable outbound MQTT bridge QoS 2 recovery
+  fuzz-mqtt-tls-outbound-bridge-qos2 Fuzz durable outbound MQTT bridge QoS 2 across authenticated TLS peers
+  fuzz-http1-connection        Fuzz live HTTP/1 connection reuse and framing
+  fuzz-http1-tls-connection    Fuzz authenticated HTTP/1 TLS connection state
+  fuzz-http2-connection        Fuzz live HTTP/2 h2c connection state
+  fuzz-http2-tls-connection    Fuzz authenticated HTTP/2 TLS connection state
+  fuzz-http3-connection        Fuzz authenticated HTTP/3 connection state
+  fuzz-webtransport-endpoint   Fuzz authenticated WebTransport shared-endpoint routing
+  fuzz-websocket-compression   Fuzz bounded WebSocket permessage-deflate codecs
+  fuzz-http-content-coding     Fuzz bounded HTTP Content-Encoding parsing and decode
+  fuzz-websocket-context       Fuzz bounded WebSocket compression context sequences
+  fuzz-websocket-h1-context    Fuzz WebSocket context takeover over live HTTP/1 connections
+  fuzz-websocket-h1-tls-context Fuzz WebSocket context takeover over authenticated WSS
+  fuzz-websocket-h2-context    Fuzz WebSocket context takeover over live HTTP/2 connections
+  fuzz-websocket-h2-tls-context Fuzz RFC 8441 context takeover over authenticated TLS
+  fuzz-websocket-h3-context    Fuzz WebSocket context takeover over live HTTP/3 connections
+  fuzz-quic-wire               Fuzz bounded QUIC frames, parameters, packets, and TLS messages
+  fuzz-quic-protection         Fuzz bounded QUIC packet and header protection
+  fuzz-quic-connection         Fuzz bounded stateful QUIC connection sequences
+  fuzz-quic-path               Fuzz authenticated QUIC migration and rebinding state
+  fuzz-quic-handshake          Fuzz authenticated QUIC/TLS handshake recovery
+  fuzz-quic-endpoint           Fuzz authenticated QUIC endpoint capacity and ownership
+  fuzz-proxy                   Fuzz bounded application-proxy wire codecs
+  fuzz-wireguard-mesh          Fuzz bounded WireGuard and mesh wire codecs
+  test-quic-endpoint-soak      Soak authenticated QUIC endpoint connection reclamation
+  test-quic-persistent-bench   Test persistent QUIC benchmark payload and config helpers
+  test-mqtt-memory-limiter     Test the MQTT broker hard heap-allocation limit
+  test-mqtt-pid-file           Test configured MQTT broker PID-file ownership
+  test-mqtt-reloadable-security Test atomic MQTT password, ACL, and CRL file reloads
+  test-mqtt-reload-compatibility Test exhaustive MQTT SIGHUP field classification
+  test-mqtt-reloadable-identity Test atomic MQTT TLS identity, key password, client CA, and CRL reloads
+  test-mqtt-configured-bridges Test production MQTT bridge configuration adapters
+  test-grpc-benchmark-checker  Verify shared gRPC benchmark completion and timing records
+  build-shadowsocks-server     Build the standalone Shadowsocks AEAD TCP server
+  interop-shadowsocks-sing-box Verify the netz Shadowsocks AEAD server against a sing-box client
+  build-trojan-server          Build the standalone Trojan TLS server
+  interop-trojan-sing-box      Verify the netz Trojan TLS server against a sing-box client
+  build-vless-server           Build the standalone VLESS TLS server
+  interop-vless-sing-box       Verify the netz VLESS TLS server against a sing-box client
+  build-vmess-server           Build the standalone VMess AEAD TLS server
+  interop-vmess-sing-box       Verify the netz VMess AEAD TLS server against a sing-box client
+  build-tuic-server            Build the standalone TUIC v5 QUIC server
+  interop-tuic-sing-box        Verify the netz TUIC v5 server against a sing-box client
+  interop-mqtt-mtls-openssl    Exercise TLS 1.2/1.3 required and optional MQTT mTLS with OpenSSL
+  build-mqtt-vector-broker     Build the standalone MQTT wire-vector broker
+  interop-mqtt-mosquitto-vectors Run selected Mosquitto MQTT 5 wire vectors against netz
+  interop-mqtt-mosquitto-packet-sequences Run hash-locked Mosquitto sequences with audited exact expectations
+  interop-mqtt-live-autosave   Verify periodic MQTT checkpoints survive a broker crash
+  build-mqtt-bench             Build the standalone MQTT broker benchmark driver
+  compare-mqtt-mosquitto       Run a same-client MQTT QoS1 comparison against local Mosquitto
+  compare-mqtt-mosquitto-matrix Capture a fixed-shape MQTT QoS1 latency, throughput, allocation, and RSS matrix
+  bench-mqtt-broker-allocator-matrix Capture fixed-shape MQTT broker allocation diagnostics
+  interop-mqtt-mosquitto-clients Run real Mosquitto CLI clients against the netz MQTT broker
+  interop-mqtt-publish-mosquitto Run netz synchronous QoS completion and self-delivery against Mosquitto
+  interop-mqtt-rumqttc         Run real rumqttc clients against the netz MQTT broker
+  interop-mqtt-rumqttc-crash   Verify rumqttc Sessions survive netz broker SIGKILL and restart
+  interop-mqtt-outbound-bridge-mosquitto Bridge and recover two real Mosquitto brokers through netz
+  interop-mqtt-commit-log      Verify MQTT per-transaction journal recovery after SIGKILL
+  interop-mqtt-websocket-mosquitto Run Mosquitto-derived MQTT WS/WSS peers against netz
+  interop-mqtt-listener-mount-mosquitto Run Mosquitto-derived MQTT listener mount-point vectors
+  interop-mqtt-socks5          Verify native MQTT and TLS through independent SOCKS5 peers
+  interop-http-websocket-socks5 Verify HTTP(S), WebSocket, and MQTT-WS through SOCKS5
+  interop-websocket-socks5-redirect Verify redirects and reconnects through fresh SOCKS5 tunnels
+  interop-webtransport-h2-python Verify draft-15 WebTransport HTTP2 against an independent Python peer in both directions
+  interop-http-digest-python   Verify RFC9530 HTTP digests, trailers and streaming against independent Python HTTPS peers
+  interop-http-digest-quic-go  Verify HTTP3 integrity digests against pinned quic-go in both roles and QUIC versions
+  interop-http-digest          Verify HTTP integrity digests over HTTP1, HTTP2 and HTTP3
+  interop-http-socks5          Verify HTTP1, HTTP2, redirects, and pooling through SOCKS5
+  interop-socks5-udp           Verify RFC 1928 UDP ASSOCIATE against an independent relay
+  interop-http3-socks5-pool    Verify unified HTTP/3 pool reuse through SOCKS5 UDP ASSOCIATE
+  interop-mqtt-broker-config   Exercise strict broker config across TCP/TLS/WS/WSS listeners
+  interop-mqtt-connect-property-linear Verify source-locked linear MQTT CONNECT User Property processing
+  interop-mqtt-will-lifecycle  Verify source-locked QoS0 Wills and publication-time ACL reload policy
+  interop-mqtt-will-delay      Verify source-locked Will Delay, Session expiry and replacement lifecycle
+  interop-mqtt-session-expiry-restart Verify persisted Session expiry with shared queues, retained data and resubscription
+  interop-mqtt-shared-properties Verify shared Session metadata across publisher teardown and process recovery
+  test-mqtt-shared-properties-benchmark Check complete shared MQTT metadata benchmark samples and accounting
+  test-mqtt-deadline-benchmark Validate complete MQTT deadline-delivery benchmark records
+  interop-mqtt-broker-includes Verify ordered include_dir startup, live reload, rollback, and file changes
+  interop-mqtt-broker-tls12-ticket Verify configured MQTT TLS 1.2 ticket resumption with OpenSSL
+  interop-mqtt-broker-tls13-ticket Verify configured MQTT TLS 1.3 ticket resumption with OpenSSL
+  interop-mqtt-websocket-origin Run Mosquitto-derived MQTT WebSocket Origin policy checks
+  build-websocket-autobahn-client Build the Autobahn fuzzing-server echo testee
+  interop-websocket-autobahn   Run external Autobahn against netz (pass --tls for WSS)
+  interop-websocket-autobahn-smoke Run real-socket cleartext/TLS smoke for the Autobahn adapter
+  interop-websocket-chrome     Exercise HTTP/1 WebSocket interoperability with Chrome (pass --tls for WSS)
+  interop-grpc-web-chrome      Verify gRPC-Web/CORS with the official JS SDK in Chromium (--tls for HTTPS; --tls --http2 for HTTP/2)
+  interop-grpc-response        Verify native gRPC response fallback with an independent HTTP/2 peer and official grpc-js
+  interop-grpc-ip-literals     Verify numeric gRPC targets, HTTP/2 authority, TLS SNI and IP SAN identity with grpc-js/OpenSSL
+  interop-grpc-connection-race Verify gRPC staggered endpoint selection and stalled handshake cleanup with grpc-js over h2c/TLS
+  interop-grpc-locality        Verify xDS locality generation with official grpc-js-xds and ordinary/shared routing with grpc-js
+  interop-grpc-cluster-manager Verify per-RPC cluster picking, failed-child isolation and config updates with official grpc-js-xds/grpc-js
+  interop-grpc-ads             Verify v3 ADS ACK/NACK subscriptions and stream reconnect with official discovery protobufs and grpc-js
+  interop-grpc-xds-regex       Compare bounded native xDS safe-regex full matching against official RE2 WASM
+  interop-grpc-xds-runtime     Verify automatic LDS/RDS/CDS/EDS discovery and isolated cluster RPC admission
+  interop-grpc-delta-ads       Verify delta ADS envelopes, diffs, NACK and reconnect against official Envoy protobuf schemas
+  interop-grpc-delta-runtime   Verify typed delta LDS/RDS/CDS/EDS publication and explicit removals with real RPCs
+  interop-grpc-lrs             Verify Load Reporting Service envelopes and counters against official Envoy schemas
+  interop-grpc-lrs-automatic   Verify managed CDS LRS source provenance, migration and nonblocking reporting transport
+  build-grpc-client-target     Build the bootstrap-derived xDS target emitter
+  interop-grpc-client-target   Verify xDS target templates and data authority with pinned C-Core (-- --reference-python PATH)
+  build-grpc-federation        Build the managed federated xDS client
+  interop-grpc-federation      Verify managed cross-authority discovery, publication and LRS with independent peers
+  interop-grpc-channelz        Verify Channelz channels, subchannels, servers, sockets and traces with the official grpc-js client
+  interop-grpc-cluster-impl    Verify selected-cluster drop/circuit isolation with official grpc-js-xds and ordinary/shared RPCs
+  interop-grpc-lds             Verify official client LDS/HCM through inline/dynamic RDS and immutable RPC timeout/routing publication
+  interop-grpc-hedging-commit  Verify A6 response-head commitment, immediate hedge cancellation and call-wide transparent recovery
+  interop-grpc-rds             Verify official RDS resources through ADS, immutable selectors and automatic unary/stream cluster dispatch
+  interop-grpc-csds            Decode a netz CSDS ClientStatusResponse with the official Envoy schema
+  interop-grpc-cds             Verify official CDS policy/circuit decoding and transactional CDS/EDS ADS publication with grpc-js-xds/grpc-js
+  interop-grpc-eds             Verify official EDS resources from ADS through typed validation, dynamic publication and priority/locality RPC routing
+  interop-grpc-eds-drop        Verify EDS drop fractions, pre-wire RPC rejection, retry/hedging suppression and dynamic updates with official grpc-js-xds/grpc-js
+  interop-grpc-circuit         Verify shared cluster/EDS circuit budgets, changed limits and RPC permits against official grpc-js-xds/grpc-js
+  interop-http2-h2spec         Run strict h2spec against h2c, TLS 1.3, or TLS 1.2 (--tls/--tls12)
+  interop-http-external-clients Run independent curl/nghttp2 peers against Netz HTTP endpoints
+  interop-http-cookie-curl     Compare Netz CookieJar path/order behavior with curl
+  interop-http2-hyper-client   Run bidirectional netz HTTP/2 interop with audited Hyper fixtures
+  interop-connect-udp-hyper    Run HTTP/1 and HTTP/2 CONNECT-UDP interop with Hyper
+  interop-connect-udp-h3       Run bidirectional HTTP/3 CONNECT-UDP interop with h3/quinn
+  interop-connect-ip-h3        Run bidirectional HTTP/3 CONNECT-IP interop with h3/quinn
+  interop-http-unified-hyper   Run unified netz HTTP pool ALPN/reuse interop with Hyper
+  interop-grpc-cpp             Run netz gRPC h2c/TLS client against upstream gRPC C++
+  interop-grpc-cpp-client      Run upstream gRPC C++ client against netz gRPC h2c/TLS server
+  interop-grpc-h2-ping-abuse   Verify gRPC server PING abuse GOAWAY with Rust h2
+  interop-grpc-reflection      Run upstream grpc_cli against netz reflection
+  release-source               Build a deterministic source archive with vendored path dependencies
+  verify-release-source        Build and test the source archive outside the workspace layout
+  interop-grpc-pbz             Generate pbz bindings and exercise all four gRPC RPC shapes
+  interop-http2-h2-push        Run HTTP/2 push and informational interop with audited h2
+  interop-http3-quic-go        Run bidirectional HTTP/3 body, trailer, cancellation, and informational interop with quic-go
+  interop-http3-quic-go-handlers Run bounded HTTP/3 handler supervisor interop with concurrent quic-go clients
+  bench-http3-quic-go          Compare verified HTTP/3 upload/download against quic-go, with optional kernel capture
+  bench-http3-quic-go-multistream Compare verified 4/16-stream HTTP/3 transfers against quic-go
+  interop-websocket-h3-quic-go Run bidirectional RFC 9220 interoperability with quic-go
+  interop-websocket-h3-socks5  Run RFC 9220 through an independent SOCKS5 UDP relay
+  bench-websocket-h3-quic-go   Compare persistent RFC 9220 echo against quic-go
+  interop-http3-tquic          Run bidirectional HTTP/3 interoperability with tquic
+  interop-http3-qpack-quic-zig Decode speculative netz QPACK with quic-zig
+  interop-websocket-hyper-h2   Run netz RFC 8441 WebSocket interop with an audited Hyper server
+  bench-websocket-hyper-h2     Compare persistent RFC 8441 echo against Hyper
+  interop-http1-hyper          Run bidirectional HTTP/1 body, trailer, and Expect interop with Hyper
+  interop-http1-ocsp           Require good OpenSSL TLS 1.2/1.3 OCSP staples from the HTTP/1 client
+  interop-tls12-ticket-openssl Verify bidirectional TLS 1.2 RFC 5077 resumption with OpenSSL
+  interop-tls12-client-auth-openssl Verify matching/unmatched TLS 1.2 client identity selection against OpenSSL
+  interop-tls13-client-auth-openssl Verify matching/unmatched TLS 1.3 client identity selection against OpenSSL
+  interop-tls13-ticket-openssl Verify bidirectional TLS 1.3 session-ticket resumption with OpenSSL
+  interop-quic-quic-go         Run verified QUIC lifecycle, migration, flow-control, and loss interop with local quic-go fixtures
+  interop-quic-handshake-fault Verify bidirectional QUIC v1/v2 quic-go handshake recovery after deterministic loss/corruption
+  bench-quic-quic-go           Compare verified raw QUIC STREAM transfer against quic-go
+  bench-quic-persistent-external Compare persistent QUIC echo latency and aggregate multi-connection throughput against quic-go
+  bench-quic-handshake-external Compare fresh certificate-verified QUIC handshakes across netz/quic-go role pairs
+  bench-quic-handshake-quinn   Compare fresh certificate-verified QUIC handshakes with Quinn
+  interop-quic-quic-go-churn   Exercise raw QUIC mixed FIN/reset recovery with quic-go under loss/reordering
+  interop-quic-s2n             Run verified QUIC stream, DATAGRAM, cancellation, and close interop with local s2n-quic
+  interop-quic-quinn           Run verified native QUIC DATAGRAM and fault interop with local Quinn
+  bench-quic-datagram-quinn    Compare zio-backed single/windowed QUIC DATAGRAM latency with Quinn
+  interop-webtransport-wtransport Exercise WebTransport admission, datagrams, streams, cancellation, reuse, and close with wtransport
+  interop-webtransport-socks5  Run WebTransport through independent SOCKS5 UDP relays
+  bench-webtransport-wtransport Compare verified WebTransport stream upload and DATAGRAM ping-pong with wtransport
+  interop-webtransport-stream-churn Repeat mixed WebTransport FIN/reset traffic under loss/reordering
+  interop-webtransport-wtransport-churn Exercise bidirectional-role WebTransport FIN/reset recovery with wtransport
+  interop-webtransport-wtransport-churn-long Run multi-minute heterogeneous WebTransport churn with wtransport
+  interop-webtransport-chrome  Exercise WebTransport CONNECT, datagrams, streams, cancellation, and close with Chrome
+  interop-webtransport-firefox Exercise WebTransport Origin, datagrams, streams, cancellation, reuse, and close with Firefox
+  build-webtransport-protocol  Build native application-protocol negotiation peers
+  interop-webtransport-protocol Verify WebTransport application-protocol negotiation and scoped rejection with independent peers
+  examples                     Build all examples
+  h3-multipath-probe           Build the cross-host HTTP/3 multipath serve/probe tool
+  bench                        Run all native protocol benchmarks
+  run-logging                  Run the process-wide kron logging example
+  run-http1-hello              Run the HTTP/1 local client/server example
+  run-http-unified-client      Run the unified HTTP client and pool against a local HTTP/1 server
+  run-http-client-forms        Build query strings, POST URL-encoded forms, and send HEAD requests
+  run-http-client-auth         Send Bearer and Basic Authorization headers and handle 401 challenges
+  run-http-client-json         Send and parse JSON request and response bodies
+  run-http-download            Stream a chunked response body into a file
+  run-http-large-body-stream   Stream a 20 MiB response above the buffered body cap
+  run-http-upload-multipart    Stream a multipart form upload and parse it on the server
+  run-http-cookie-session      Persist server cookies across pooled requests
+  run-http-redirects           Follow relative redirects and report the final URI
+  run-http-https-client        HTTPS with an explicit pinned server verifier
+  run-http-custom-resolver     Map a hostname to a local origin with a custom resolver
+  run-http-proxy-client        HTTPS through a local HTTP/1.1 CONNECT proxy
+  run-http-h2-tls              HTTP/2 over TLS with the unified client
+  run-http-alpn-server         Serve HTTP/2 and HTTP/1.1 on one TLS port via ALPN
+  run-http-mutual-tls          Require and present a client certificate over HTTPS
+  run-http-custom-ca           Trust a private CA through an in-memory system store
+  run-http-content-coding      Request and decode a gzip response like curl --compressed
+  run-http-timeouts            Bound a complete request with a timeout or absolute deadline
+  run-http-unix-socket         Serve and call HTTP/1.1 over a Unix domain socket
+  run-http-h3-prefer           prefer_http3 selection against a local QUIC/TLS origin
+  run-http-pool-alt-svc-h3     Upgrade a pooled origin from H2 to Alt-Svc HTTP/3
+  run-http-server-routes       Route several HTTP/1.1 paths with a graceful shutdown route
+  run-http-server-serve-until  Run the managed HTTP/1.1 serve loop with graceful shutdown
+  run-http-upload-reader       Stream a request body from a Reader
+  run-http2-h2c                Run the HTTP/2 h2c local client/server example
+  run-http-duplex              Stream a request body and response through the unified HTTP duplex handle
+  run-http-streaming           Stream HTTP/1.1 request and response bodies incrementally
+  run-http-chunked             Upload and download chunked HTTP/1.1 bodies with trailers
+  run-http3-multipath          Carry concurrent HTTP/3 requests over two independent QUIC paths
+  run-grpc-h2c                 Run a local gRPC unary call over HTTP/2 h2c
+  run-http3-handshake          Run the local HTTP/3 client/server handshake example
+  run-websocket-echo           Run the WebSocket local echo example
+  run-websocket-auth           Reject an unauthenticated Upgrade and accept a Bearer token
+  run-websocket-wss-echo       Run the WSS echo example with a pinned server key
+  run-websocket-h2-echo        Run the RFC 8441 WebSocket-over-HTTP/2 echo example
+  run-websocket-h3-echo        Run the RFC 9220 WebSocket-over-HTTP/3 echo example
+  run-webtransport-datagram-echo Run the WebTransport DATAGRAM echo example
+  run-webtransport-h2-capsule-echo Echo one virtual stream over HTTP/2 WebTransport capsules
+  bench-websocket-frame        Benchmark WebSocket caller-buffer and streaming frame encoding
+  bench-websocket-receive-buffer Benchmark eager versus amortized WebSocket receive-buffer consumption
+  bench-websocket-echo         Benchmark persistent WebSocket 4 KiB binary echo
+  bench-websocket-h2-echo      Benchmark RFC 8441 WebSocket 4 KiB binary echo
+  bench-websocket-h3-echo      Benchmark RFC 9220 WebSocket 4 KiB binary echo
+  bench-mqtt-router            Benchmark MQTT router trie matching against a linear scan
+  bench-mqtt-router-match      Sample MQTT router match and shared-selection latency with harnessz
+  run-mqtt-broker              Run the bounded MQTT 5 TCP broker
+  bench-mqtt-broker            Run the external MQTT 5 TCP broker fanout workload
+  bench-mqtt-websocket         Benchmark MQTT-over-WebSocket QoS 1 publish/PUBACK round trips
+  bench-mqtt-tls               Benchmark MQTT-over-TLS QoS 1 publish/PUBACK round trips
+  bench-mqtt-retained          Benchmark MQTT retained-message exact and wildcard lookup
+  bench-mqtt-acl               Benchmark MQTT ACL-file authorization across many rules
+  bench-mqtt-shared-properties Benchmark shared MQTT Session metadata allocations and logical ownership
+  bench-mqtt-commit-log        Measure MQTT snapshot serialization, journal append and fsync costs
+  bench-mqtt-session           Benchmark MQTT persistent-session resume, queue and drain
+  bench-mqtt-deadline          Benchmark complete QoS 1/2 delivery through deadline Session replay
+  bench-mqtt-will              Benchmark MQTT Will Delay scheduling and polling
+  bench-http1-parse            Benchmark HTTP/1 borrowed head parsing against owned parsing
+  bench-http-content-coding    Benchmark bounded HTTP Content-Encoding decode
+  bench-http1-pipeline         Benchmark HTTP/1 persistent 16-request pipelines
+  bench-http1-body             Benchmark HTTP/1 fixed or chunked streaming bodies
+  bench-http2-hpack            Benchmark HTTP/2 HPACK stateful compression against stateless helpers
+  bench-http2-h2c              Benchmark HTTP/2 h2c persistent request/response round trips
+  bench-grpc-shared            Benchmark shared gRPC persistent ping-pong and RPC creation
+  bench-grpc-unary             Benchmark ordinary gRPC unary persistent round trips
+  bench-http2-flow             Benchmark flow-controlled parallel HTTP/2 responses
+  bench-http3-dev              Benchmark HTTP/3 cleartext development request/response round trips
+  bench-http3-handshake-transfer Benchmark HTTP/3 real-handshake paced transfer throughput
+  run-http3-fetch              Fetch the default public endpoint over HTTP/3
+  run-quic-echo                Run a local preconfigured-key QUIC echo smoke test
+  run-quic-handshake-echo      Run a local real-handshake QUIC STREAM echo smoke test
+  run-quic-datagram-echo       Run a local QUIC DATAGRAM echo smoke test
+  bench-quic-datagram          Benchmark raw QUIC DATAGRAM throughput
+  bench-quic-handshake-stream  Benchmark real-handshake raw QUIC STREAM throughput
+  bench-quic-stream-ids        Benchmark active QUIC receive-stream ID enumeration
+  bench-quic-endpoint-cid-sync Benchmark shared-endpoint CID route synchronization
+  bench-quic-connection-router Benchmark shared-endpoint CID routing
+  bench-quic-endpoint-timers   Benchmark shared-endpoint timer scheduler scaling
+  bench-io-deadline            Benchmark zio-backed timed I/O deadline overhead
+  bench-quic-endpoint-pending  Benchmark shared-endpoint pending packet lookup scaling
+  run-quic-close               Run a local QUIC application-close smoke test
+  bench-http3-capsule          Benchmark HTTP/3 Capsule Protocol parsing and caller-buffer encoding
+  bench-connect-udp-capsule    Benchmark CONNECT-UDP Capsule Session send and receive paths
+  bench-http3-qpack            Benchmark HTTP/3 QPACK dynamic field-section encoding
+  bench-webtransport-datagram  Benchmark WebTransport datagram round trips over HTTP/3
+  bench-webtransport-stream    Benchmark incremental WebTransport stream transfer
+  bench-webtransport-stream-batch Benchmark WebTransport steady stream-batch staging
+  run-webtransport-handshake-stream Run real-handshake WebTransport bidi/uni stream echo
+  bench-quic-short-packet      Benchmark QUIC short packet in-place sealing against allocating sealing
+  bench-quic-padding-parse     Benchmark long QUIC PADDING frame parsing
+  bench-quic-lb                Benchmark draft-21 QUIC-LB encrypted server routing
+  bench-quic-udp-batch         Benchmark QUIC UDP_SEGMENT batches against sendmmsg
+  bench-quic-one-rtt-send      Benchmark QUIC 1-RTT batched protection and send
+  bench-quic-one-rtt-receive   Benchmark QUIC 1-RTT UDP_GRO batch receive
+  bench-quic-ack-ranges        Benchmark QUIC ACK range generation with caller storage
+  bench-quic-stream-window     Benchmark bounded QUIC receive stream compaction
+  bench-quic-ticket-keyring    Benchmark stateless QUIC session ticket seal/open
+  bench-record                 Record harnessz baselines for sampler-backed microbenchmarks (use -Doptimize=ReleaseFast)
+  bench-gate                   Gate sampler-backed microbenchmarks against recorded baselines (use -Doptimize=ReleaseFast)
+  verify-evidence              Audit docs/evidence source hashes (report-only unless --strict)
+  bench-grpc-cpp               Compare shared gRPC with official grpc-cpp TCP ping-pong workloads
+  bench-http1-hyper            Compare zio-backed HTTP/1 pipeline and body workloads with Hyper
+  bench-http2-cancel-hyper     Compare HTTP/2 cancellation recovery against Hyper
+  interop-http3-public         Verify public HTTP/3 endpoints with system trust
+  bench-websocket-slices-ab    Compare caller-joined and direct-slice WebSocket sends over H1/H2/H3
+  bench-websocket-mostly-idle  Compare mostly-idle WebSocket memory with pinned websocket.zig
+
+Project-Specific Options:
+  -Dtarget=[string]            The CPU architecture, OS, and ABI to build for
+  -Dcpu=[string]               Target CPU features to add or subtract
+  -Dofmt=[string]              Target object format
+  -Ddynamic-linker=[string]    Path to interpreter on the target system
+  -Doptimize=[enum]            Prioritize performance, safety, or binary size
+                                 Supported Values:
+                                   Debug
+                                   ReleaseSafe
+                                   ReleaseFast
+                                   ReleaseSmall
+  -Dtest-progress=[bool]       Print every standard test artifact's names using Zig's terminal runner
+  -Dtest-filter=[list]         Run only tests whose name contains one of these substrings
+  -Dmacos-sdk=[string]         macOS SDK root for cross-compiled framework links
+  -Dscheduling=[string]        zio scheduling discipline: single_executor, pinned, or work_stealing
+  -Dzio-backend=[string]       zio event loop backend: poll, linux, epoll, kqueue, io_uring, or iocp
+
+System Integration Options:
+  --search-prefix [path]       Add a path to look for binaries, libraries, headers
+  --sysroot [path]             Set the system root directory (usually /)
+  --libc [file]                Provide a file which specifies libc paths
+
+  --system [pkgdir]            Disable package fetching; enable all integrations
+  -fsys=[name]                 Enable a system integration
+  -fno-sys=[name]              Disable a system integration
+
+  -fdarling,  -fno-darling     Integration with system-installed Darling to
+                               execute macOS programs on Linux hosts
+                               (default: no)
+  -fqemu,     -fno-qemu        Integration with system-installed QEMU to execute
+                               foreign-architecture programs on Linux hosts
+                               (default: no)
+  --libc-runtimes [path]       Enhances QEMU integration by providing dynamic libc
+                               (e.g. glibc or musl) built for multiple foreign
+                               architectures, allowing execution of non-native
+                               programs that link with libc.
+  -frosetta,  -fno-rosetta     Rely on Rosetta to execute x86_64 programs on
+                               ARM64 macOS hosts. (default: no)
+  -fwasmtime, -fno-wasmtime    Integration with system-installed wasmtime to
+                               execute WASI binaries. (default: no)
+  -fwine,     -fno-wine        Integration with system-installed Wine to execute
+                               Windows programs on Linux hosts. (default: no)
+
+  Available System Integrations:                Enabled:
+  (none)                                        -
+
+General Options:
+  -h, --help                   Print this help and exit
+  -l, --list-steps             Print available steps
+
+  -p, --prefix [path]          Where to install files (default: zig-out)
+  --prefix-lib-dir [path]      Where to install libraries
+  --prefix-exe-dir [path]      Where to install executables
+  --prefix-include-dir [path]  Where to install C header files
+  --release[=mode]             Request release mode, optionally specifying a
+                               preferred optimization mode: fast, safe, small
+
+  --verbose                    Print commands before executing them
+  --color [auto|off|on]        Enable or disable colored error messages
+  --error-style [style]        Control how build errors are printed
+    verbose                    (Default) Report errors with full context
+    minimal                    Report errors after summary, excluding context like command lines
+    verbose_clear              Like 'verbose', but clear the terminal at the start of each update
+    minimal_clear              Like 'minimal', but clear the terminal at the start of each update
+  --multiline-errors [style]   Control how multi-line error messages are printed
+    indent                     (Default) Indent non-initial lines to align with initial line
+    newline                    Include a leading newline so that the error message is on its own lines
+    none                       Print as usual so the first line is misaligned
+  --summary [mode]             Control the printing of the build summary
+    all                        Print the build summary in its entirety
+    new                        Omit cached steps
+    failures                   (Default if short-lived) Only print failed steps
+    line                       (Default if long-lived) Only print the single-line summary
+    none                       Do not print the build summary
+  -j<N>                        Limit concurrent jobs (default is to use all CPU cores)
+  --maxrss <bytes>             Limit memory usage (default is to use available memory)
+  --skip-oom-steps             Instead of failing, skip steps that would exceed --maxrss
+  --test-timeout <timeout>     Limit execution time of unit tests, terminating if exceeded.
+                               The timeout must include a unit: ns, us, ms, s, m, h
+  --watch                      Continuously rebuild when source files are modified
+  --debounce <ms>              Delay before rebuilding after changed file detected
+  --webui[=ip]                 Enable the web interface on the given IP address
+  --fuzz[=limit]               Continuously search for unit test failures with an optional 
+                               limit to the max number of iterations. The argument supports
+                               an optional 'K', 'M', or 'G' suffix (e.g. '10K'). Implies
+                               '--webui' when no limit is specified.
+  --time-report                Force full rebuild and provide detailed information on
+                               compilation time of Zig source code (implies '--webui')
+     -fincremental             Enable incremental compilation
+  -fno-incremental             Disable incremental compilation
+
+Package Management Options:
+  --fetch[=mode]               Fetch dependency tree (optionally choose laziness) and exit
+    needed                     (Default) Lazy dependencies are fetched as needed
+    all                        Lazy dependencies are always fetched
+  --fork=[path]                Override one or more projects from dependency tree
+
+Advanced Options:
+  -freference-trace[=num]      How many lines of reference trace should be shown per compile error
+  -fno-reference-trace         Disable reference trace
+  -fallow-so-scripts           Allows .so files to be GNU ld scripts
+  -fno-allow-so-scripts        (default) .so files must be ELF files
+  --build-file [file]          Override path to build.zig
+  --cache-dir [path]           Override path to local Zig cache directory
+  --global-cache-dir [path]    Override path to global Zig cache directory
+  --zig-lib-dir [arg]          Override path to Zig lib directory
+  --build-runner [file]        Override path to build runner
+  --seed [integer]             For shuffling dependency traversal order (default: random)
+  --build-id[=style]           At a minor link-time expense, embeds a build ID in binaries
+      fast                     8-byte non-cryptographic hash (COFF, ELF, WASM)
+      sha1, tree               20-byte cryptographic hash (ELF, WASM)
+      md5                      16-byte cryptographic hash (ELF)
+      uuid                     16-byte random UUID (ELF, WASM)
+      0x[hexstring]            Constant ID, maximum 32 bytes (ELF, WASM)
+      none                     (default) No build ID
+  --debug-log [scope]          Enable debugging the compiler
+  --debug-pkg-config           Fail if unknown pkg-config flags encountered
+  --debug-rt                   Debug compiler runtime libraries
+  --verbose-link               Enable compiler debug output for linking
+  --verbose-air                Enable compiler debug output for Zig AIR
+  --verbose-llvm-ir[=file]     Enable compiler debug output for LLVM IR
+  --verbose-llvm-bc=[file]     Enable compiler debug output for LLVM BC
+  --verbose-cimport            Enable compiler debug output for C imports
+  --verbose-cc                 Enable compiler debug output for C compilation
+  --verbose-llvm-cpu-features  Enable compiler debug output for LLVM CPU features
+[traex-zig-guard 2026-11-25 20:59:05] finished Zig tree root=76982 peak=580MiB result=0

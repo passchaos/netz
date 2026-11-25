@@ -39,8 +39,9 @@ The corresponding roots are `test-http`, `test-http1`, `test-http2`,
 roots for iteration and retain `test-lib`, `test-package`, `test-compile` and
 the complete `test` gate for their documented repository-wide scopes.
 
-Add `-Dtest-progress=true` to print each library, package or focused test name
-as it runs. This uses Zig's standard terminal runner and retains the selected
+Add `-Dtest-progress=true` to print each standard test name as it runs,
+including library, package, focused, fuzz and auxiliary test artifacts. This
+uses Zig's standard terminal runner and retains the selected
 random seed, cache arguments, leak checks and nonzero failure exit status.
 The default build-server runner remains available when the option is omitted.
 Use the progress option when a CI job times out and its last active test needs
@@ -51,7 +52,15 @@ test name as an Actions notice every 60 seconds. It handles partial terminal
 lines, retains exact child log bytes and command exit status, and keeps its
 reader queue and progress-text buffer bounded. This makes the last visible
 runtime boundary available through annotations when detailed logs require
-login. Compiler commands remain in the full log.
+login. Compiler commands remain in the full log. Custom runners retain their
+own output policy.
+
+CI runs the complete `zig build test -j1` gate in its own 30-minute job, in
+parallel with the formatting/evidence/source-release and bounded fuzz/soak
+preflight job. Both use the same pinned dependency/toolchain setup action.
+The existing `verify` check requires both jobs to succeed, so a failed,
+canceled or skipped gate cannot pass the combined check. This gives the
+complete gate its own budget without trimming either test scope.
 
 Runnable examples are under `examples/` and are wired into the build:
 

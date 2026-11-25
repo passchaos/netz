@@ -1,0 +1,423 @@
+{
+  "commit": "3eeba20fbbacb36a965efc3adcd3ed49a87a8478",
+  "run_id": 45611671652,
+  "verify_job_id": 139196510364,
+  "steps": [
+    {
+      "name": "Replay bounded fuzz corpora",
+      "conclusion": "success",
+      "started-at": "2026-11-25T12:17:28Z",
+      "completed-at": "2026-11-25T12:27:04Z"
+    },
+    {
+      "name": "Run bounded QUIC endpoint soak",
+      "conclusion": "success",
+      "started-at": "2026-11-25T12:27:04Z",
+      "completed-at": "2026-11-25T12:27:39Z"
+    },
+    {
+      "name": "Run the complete test gate serially",
+      "conclusion": "cancelled",
+      "started-at": "2026-11-25T12:27:39Z",
+      "completed-at": "2026-11-25T12:43:31Z"
+    }
+  ],
+  "native_jobs": {
+    "windows": {
+      "job_id": 139196510461,
+      "conclusion": "success",
+      "steps": [
+        {
+          "name": "Set up job",
+          "conclusion": "success",
+          "started-at": "2026-11-25T12:13:20Z",
+          "completed-at": "2026-11-25T12:13:25Z"
+        },
+        {
+          "name": "Checkout netz",
+          "conclusion": "success",
+          "started-at": "2026-11-25T12:13:25Z",
+          "completed-at": "2026-11-25T12:13:35Z"
+        },
+        {
+          "name": "Checkout pinned vail",
+          "conclusion": "success",
+          "started-at": "2026-11-25T12:13:35Z",
+          "completed-at": "2026-11-25T12:13:40Z"
+        },
+        {
+          "name": "Checkout pinned vort",
+          "conclusion": "success",
+          "started-at": "2026-11-25T12:13:40Z",
+          "completed-at": "2026-11-25T12:14:00Z"
+        },
+        {
+          "name": "Checkout pinned pbz",
+          "conclusion": "success",
+          "started-at": "2026-11-25T12:14:00Z",
+          "completed-at": "2026-11-25T12:14:05Z"
+        },
+        {
+          "name": "Checkout pinned kron",
+          "conclusion": "success",
+          "started-at": "2026-11-25T12:14:05Z",
+          "completed-at": "2026-11-25T12:14:11Z"
+        },
+        {
+          "name": "Checkout pinned webpkiz",
+          "conclusion": "success",
+          "started-at": "2026-11-25T12:14:11Z",
+          "completed-at": "2026-11-25T12:14:16Z"
+        },
+        {
+          "name": "Checkout pinned regexz",
+          "conclusion": "success",
+          "started-at": "2026-11-25T12:14:16Z",
+          "completed-at": "2026-11-25T12:14:20Z"
+        },
+        {
+          "name": "Checkout pinned harnessz",
+          "conclusion": "success",
+          "started-at": "2026-11-25T12:14:20Z",
+          "completed-at": "2026-11-25T12:14:25Z"
+        },
+        {
+          "name": "Install Zig 0.16.0",
+          "conclusion": "success",
+          "started-at": "2026-11-25T12:14:25Z",
+          "completed-at": "2026-11-25T12:14:40Z"
+        },
+        {
+          "name": "Cache Zig downloads",
+          "conclusion": "success",
+          "started-at": "2026-11-25T12:14:40Z",
+          "completed-at": "2026-11-25T12:14:41Z"
+        },
+        {
+          "name": "Compile library and public-package tests",
+          "conclusion": "skipped",
+          "started-at": "2026-11-25T12:14:41Z",
+          "completed-at": "2026-11-25T12:14:41Z"
+        },
+        {
+          "name": "Validate native CI log helpers",
+          "conclusion": "success",
+          "started-at": "2026-11-25T12:14:41Z",
+          "completed-at": "2026-11-25T12:14:43Z"
+        },
+        {
+          "name": "Run native Linux interface binding regressions",
+          "conclusion": "skipped",
+          "started-at": "2026-11-25T12:14:43Z",
+          "completed-at": "2026-11-25T12:14:43Z"
+        },
+        {
+          "name": "Run native Linux connection and Upgrade regressions",
+          "conclusion": "skipped",
+          "started-at": "2026-11-25T12:14:43Z",
+          "completed-at": "2026-11-25T12:14:43Z"
+        },
+        {
+          "name": "Probe native Winsock interface option semantics",
+          "conclusion": "success",
+          "started-at": "2026-11-25T12:14:43Z",
+          "completed-at": "2026-11-25T12:14:43Z"
+        },
+        {
+          "name": "Run native HTTP3 resolver and acquisition regressions",
+          "conclusion": "success",
+          "started-at": "2026-11-25T12:14:43Z",
+          "completed-at": "2026-11-25T12:17:40Z"
+        },
+        {
+          "name": "Run native ordered TCP hostname regressions",
+          "conclusion": "success",
+          "started-at": "2026-11-25T12:17:40Z",
+          "completed-at": "2026-11-25T12:18:00Z"
+        },
+        {
+          "name": "Run native trust startup regressions",
+          "conclusion": "success",
+          "started-at": "2026-11-25T12:18:00Z",
+          "completed-at": "2026-11-25T12:23:30Z"
+        },
+        {
+          "name": "Run native H1 H2 resolver policy regressions",
+          "conclusion": "success",
+          "started-at": "2026-11-25T12:23:30Z",
+          "completed-at": "2026-11-25T12:25:24Z"
+        },
+        {
+          "name": "Run native Windows transport regressions",
+          "conclusion": "success",
+          "started-at": "2026-11-25T12:25:24Z",
+          "completed-at": "2026-11-25T12:28:50Z"
+        },
+        {
+          "name": "Post Cache Zig downloads",
+          "conclusion": "success",
+          "started-at": "2026-11-25T12:28:50Z",
+          "completed-at": "2026-11-25T12:28:50Z"
+        },
+        {
+          "name": "Post Install Zig 0.16.0",
+          "conclusion": "success",
+          "started-at": "2026-11-25T12:28:50Z",
+          "completed-at": "2026-11-25T12:28:53Z"
+        },
+        {
+          "name": "Post Checkout pinned harnessz",
+          "conclusion": "success",
+          "started-at": "2026-11-25T12:28:53Z",
+          "completed-at": "2026-11-25T12:28:55Z"
+        },
+        {
+          "name": "Post Checkout pinned regexz",
+          "conclusion": "success",
+          "started-at": "2026-11-25T12:28:55Z",
+          "completed-at": "2026-11-25T12:28:57Z"
+        },
+        {
+          "name": "Post Checkout pinned webpkiz",
+          "conclusion": "success",
+          "started-at": "2026-11-25T12:28:57Z",
+          "completed-at": "2026-11-25T12:28:59Z"
+        },
+        {
+          "name": "Post Checkout pinned kron",
+          "conclusion": "success",
+          "started-at": "2026-11-25T12:28:59Z",
+          "completed-at": "2026-11-25T12:29:01Z"
+        },
+        {
+          "name": "Post Checkout pinned pbz",
+          "conclusion": "success",
+          "started-at": "2026-11-25T12:29:01Z",
+          "completed-at": "2026-11-25T12:29:03Z"
+        },
+        {
+          "name": "Post Checkout pinned vort",
+          "conclusion": "success",
+          "started-at": "2026-11-25T12:29:03Z",
+          "completed-at": "2026-11-25T12:29:05Z"
+        },
+        {
+          "name": "Post Checkout pinned vail",
+          "conclusion": "success",
+          "started-at": "2026-11-25T12:29:05Z",
+          "completed-at": "2026-11-25T12:29:07Z"
+        },
+        {
+          "name": "Post Checkout netz",
+          "conclusion": "success",
+          "started-at": "2026-11-25T12:29:07Z",
+          "completed-at": "2026-11-25T12:29:09Z"
+        },
+        {
+          "name": "Complete job",
+          "conclusion": "success",
+          "started-at": "2026-11-25T12:29:09Z",
+          "completed-at": "2026-11-25T12:29:09Z"
+        }
+      ]
+    },
+    "linux": {
+      "job_id": 139196510936,
+      "conclusion": "success",
+      "steps": [
+        {
+          "name": "Set up job",
+          "conclusion": "success",
+          "started-at": "2026-11-25T12:13:19Z",
+          "completed-at": "2026-11-25T12:13:21Z"
+        },
+        {
+          "name": "Checkout netz",
+          "conclusion": "success",
+          "started-at": "2026-11-25T12:13:21Z",
+          "completed-at": "2026-11-25T12:13:24Z"
+        },
+        {
+          "name": "Checkout pinned vail",
+          "conclusion": "success",
+          "started-at": "2026-11-25T12:13:24Z",
+          "completed-at": "2026-11-25T12:13:25Z"
+        },
+        {
+          "name": "Checkout pinned vort",
+          "conclusion": "success",
+          "started-at": "2026-11-25T12:13:25Z",
+          "completed-at": "2026-11-25T12:13:37Z"
+        },
+        {
+          "name": "Checkout pinned pbz",
+          "conclusion": "success",
+          "started-at": "2026-11-25T12:13:37Z",
+          "completed-at": "2026-11-25T12:13:38Z"
+        },
+        {
+          "name": "Checkout pinned kron",
+          "conclusion": "success",
+          "started-at": "2026-11-25T12:13:38Z",
+          "completed-at": "2026-11-25T12:13:38Z"
+        },
+        {
+          "name": "Checkout pinned webpkiz",
+          "conclusion": "success",
+          "started-at": "2026-11-25T12:13:38Z",
+          "completed-at": "2026-11-25T12:13:39Z"
+        },
+        {
+          "name": "Checkout pinned regexz",
+          "conclusion": "success",
+          "started-at": "2026-11-25T12:13:39Z",
+          "completed-at": "2026-11-25T12:13:39Z"
+        },
+        {
+          "name": "Checkout pinned harnessz",
+          "conclusion": "success",
+          "started-at": "2026-11-25T12:13:39Z",
+          "completed-at": "2026-11-25T12:13:40Z"
+        },
+        {
+          "name": "Install Zig 0.16.0",
+          "conclusion": "success",
+          "started-at": "2026-11-25T12:13:40Z",
+          "completed-at": "2026-11-25T12:13:44Z"
+        },
+        {
+          "name": "Cache Zig downloads",
+          "conclusion": "success",
+          "started-at": "2026-11-25T12:13:44Z",
+          "completed-at": "2026-11-25T12:13:44Z"
+        },
+        {
+          "name": "Compile library and public-package tests",
+          "conclusion": "success",
+          "started-at": "2026-11-25T12:13:44Z",
+          "completed-at": "2026-11-25T12:15:27Z"
+        },
+        {
+          "name": "Validate native CI log helpers",
+          "conclusion": "success",
+          "started-at": "2026-11-25T12:15:27Z",
+          "completed-at": "2026-11-25T12:15:28Z"
+        },
+        {
+          "name": "Run native Linux interface binding regressions",
+          "conclusion": "success",
+          "started-at": "2026-11-25T12:15:28Z",
+          "completed-at": "2026-11-25T12:16:34Z"
+        },
+        {
+          "name": "Run native Linux connection and Upgrade regressions",
+          "conclusion": "success",
+          "started-at": "2026-11-25T12:16:34Z",
+          "completed-at": "2026-11-25T12:19:52Z"
+        },
+        {
+          "name": "Probe native Winsock interface option semantics",
+          "conclusion": "skipped",
+          "started-at": "2026-11-25T12:19:52Z",
+          "completed-at": "2026-11-25T12:19:52Z"
+        },
+        {
+          "name": "Run native HTTP3 resolver and acquisition regressions",
+          "conclusion": "success",
+          "started-at": "2026-11-25T12:19:52Z",
+          "completed-at": "2026-11-25T12:20:36Z"
+        },
+        {
+          "name": "Run native ordered TCP hostname regressions",
+          "conclusion": "success",
+          "started-at": "2026-11-25T12:20:36Z",
+          "completed-at": "2026-11-25T12:20:38Z"
+        },
+        {
+          "name": "Run native trust startup regressions",
+          "conclusion": "success",
+          "started-at": "2026-11-25T12:20:38Z",
+          "completed-at": "2026-11-25T12:25:06Z"
+        },
+        {
+          "name": "Run native H1 H2 resolver policy regressions",
+          "conclusion": "success",
+          "started-at": "2026-11-25T12:25:06Z",
+          "completed-at": "2026-11-25T12:27:08Z"
+        },
+        {
+          "name": "Run native Windows transport regressions",
+          "conclusion": "skipped",
+          "started-at": "2026-11-25T12:27:08Z",
+          "completed-at": "2026-11-25T12:27:08Z"
+        },
+        {
+          "name": "Post Cache Zig downloads",
+          "conclusion": "success",
+          "started-at": "2026-11-25T12:27:08Z",
+          "completed-at": "2026-11-25T12:27:09Z"
+        },
+        {
+          "name": "Post Install Zig 0.16.0",
+          "conclusion": "success",
+          "started-at": "2026-11-25T12:27:09Z",
+          "completed-at": "2026-11-25T12:27:10Z"
+        },
+        {
+          "name": "Post Checkout pinned harnessz",
+          "conclusion": "success",
+          "started-at": "2026-11-25T12:27:10Z",
+          "completed-at": "2026-11-25T12:27:10Z"
+        },
+        {
+          "name": "Post Checkout pinned regexz",
+          "conclusion": "success",
+          "started-at": "2026-11-25T12:27:10Z",
+          "completed-at": "2026-11-25T12:27:10Z"
+        },
+        {
+          "name": "Post Checkout pinned webpkiz",
+          "conclusion": "success",
+          "started-at": "2026-11-25T12:27:10Z",
+          "completed-at": "2026-11-25T12:27:10Z"
+        },
+        {
+          "name": "Post Checkout pinned kron",
+          "conclusion": "success",
+          "started-at": "2026-11-25T12:27:10Z",
+          "completed-at": "2026-11-25T12:27:10Z"
+        },
+        {
+          "name": "Post Checkout pinned pbz",
+          "conclusion": "success",
+          "started-at": "2026-11-25T12:27:10Z",
+          "completed-at": "2026-11-25T12:27:11Z"
+        },
+        {
+          "name": "Post Checkout pinned vort",
+          "conclusion": "success",
+          "started-at": "2026-11-25T12:27:11Z",
+          "completed-at": "2026-11-25T12:27:11Z"
+        },
+        {
+          "name": "Post Checkout pinned vail",
+          "conclusion": "success",
+          "started-at": "2026-11-25T12:27:11Z",
+          "completed-at": "2026-11-25T12:27:11Z"
+        },
+        {
+          "name": "Post Checkout netz",
+          "conclusion": "success",
+          "started-at": "2026-11-25T12:27:11Z",
+          "completed-at": "2026-11-25T12:27:11Z"
+        },
+        {
+          "name": "Complete job",
+          "conclusion": "success",
+          "started-at": "2026-11-25T12:27:11Z",
+          "completed-at": "2026-11-25T12:27:11Z"
+        }
+      ]
+    }
+  }
+}

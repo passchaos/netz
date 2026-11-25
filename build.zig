@@ -25,7 +25,7 @@ pub fn build(b: *std.Build) void {
 
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const test_progress = b.option(bool, "test-progress", "Print each library, package and focused test name using Zig's standard terminal runner") orelse false;
+    const test_progress = b.option(bool, "test-progress", "Print every standard test artifact's names using Zig's terminal runner") orelse false;
     const test_filters = b.option(
         []const []const u8,
         "test-filter",
@@ -1065,4 +1065,6 @@ pub fn build(b: *std.Build) void {
         "Compare mostly-idle WebSocket memory with pinned websocket.zig",
     );
     websocket_mostly_idle_step.dependOn(&websocket_mostly_idle.step);
+
+    if (test_progress) @import("build/testing/run.zig").enableAll(b);
 }

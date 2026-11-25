@@ -1,0 +1,47 @@
+{
+  "observed_utc": "2026-11-25T12:58:04.398813+00:00",
+  "platform": "aarch64-macos",
+  "source_sha256": {
+    ".github/workflows/ci.yml": "8a43d97e9bca08d669988f2a5531dc98c7f21f202bdcf9871236149eb0ebc8fa",
+    ".github/actions/setup-build/action.yml": "dfcfa4231910dd78dc5a29fd65c883656bfacc77114444d1e1688ed35d7824b5",
+    "build.zig": "3546b34c1dad869653fafe7d276b9fdf8c5a8a8d9e11d36649e23ef2260f592a",
+    "build/testing/run.zig": "c2a5d6efa133e03ece9f673f0b8ead241510b710cdd4b12e81314c1c49bec089",
+    "docs/build.md": "dcc1ec7a0b5fd200348c19ba73d45fc628440776dd9b287168396e575ebd118f"
+  },
+  "runner_checks": {
+    "default": {
+      "exit_code": 0,
+      "log": "default.log",
+      "test_progress": false
+    },
+    "progress": {
+      "exit_code": 0,
+      "log": "progress.log",
+      "test_progress": true
+    },
+    "focused": {
+      "exit_code": 0,
+      "log": "focused.log",
+      "test_progress": true
+    },
+    "no-match": {
+      "exit_code": 1,
+      "log": "no-match.log",
+      "test_progress": true
+    }
+  },
+  "workflow_checks": {
+    "yaml_parsed": true,
+    "setup_steps_preserved": 9,
+    "preflight_commands_preserved": 6,
+    "complete_command_preserved": true,
+    "other_platform_jobs_preserved": true,
+    "job_budget_minutes": 30,
+    "required_verify_truth_table_cases": 16
+  },
+  "full_acceptance": "pending independent complete job in next CI run",
+  "build_help_check": {
+    "exit_code": 0,
+    "log": "help.log"
+  }
+}
