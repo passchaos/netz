@@ -19,7 +19,10 @@ Two stable shapes are available.
 ### Pull body reader
 
 `Connection.readRequestBody*` returns `netz.streaming.http1.BodyReader`. It
-starts a background producer that drives the existing push parser and exposes:
+starts an independently admitted producer that drives the existing push parser.
+Construction returns `error.ConcurrencyUnavailable` if the backend cannot admit
+that producer; the reader allocation is released and parsing has not started.
+The reader exposes:
 
 ```zig
 var reader = try connection.readRequestBody(.{});

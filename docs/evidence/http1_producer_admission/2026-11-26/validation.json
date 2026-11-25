@@ -1,0 +1,45 @@
+{
+  "observed_utc": "2026-11-25T21:35:24.739285+00:00",
+  "checks": [
+    {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "fmt",
+        "src/http1/runtime/body_pull.zig",
+        "src/http1/runtime/body_pull_tests.zig"
+      ],
+      "exit_code": 0
+    },
+    {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-http1",
+        "-j1",
+        "-Dtest-progress=true",
+        "-Dtest-filter=HTTP/1 pull",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0
+    },
+    {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-http1-compile",
+        "-j1",
+        "-Dtarget=x86_64-windows-gnu",
+        "-Dtest-filter=HTTP/1 pull",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0
+    }
+  ],
+  "source_sha256": {
+    "src/http1/runtime/body_pull.zig": "d90e0c57303765007f70a695336d3695b09cdaf7e34e24069c9fc0bb0a4ca2c2",
+    "src/http1/runtime/body_pull_tests.zig": "8ac9ae7aca73250f43e6a594a45b225aa56e5a0e7fdd3c34c5ab2945b9e3095e"
+  },
+  "scope": "native dual backend producer/admission/real200KiB100-continue/reuse; Windows compilation only"
+}

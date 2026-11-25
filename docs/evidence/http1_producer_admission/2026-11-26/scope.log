@@ -1,0 +1,123 @@
+src/http1/runtime/body_pull_tests.zig
+waiting for the global TRAE Zig build slot
+[traex-zig-guard 2026-11-26 05:35:04] started Zig tree root=89853 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=900s
+Executing: /Users/bytedance/.local/bin/zig fmt src/http1/runtime/body_pull.zig src/http1/runtime/body_pull_tests.zig
+Executing: /Users/bytedance/.local/bin/zig build test-http1 -j1 -Dtest-progress=true -Dtest-filter=HTTP/1 pull --summary all
+1/26 test_scope.test_0...OK
+2/26 http1.mod.test_0...OK
+3/26 http1.mod.test_1...OK
+4/26 http1.mod.test_2...OK
+5/26 http1.runtime.test_0...OK
+6/26 http1.runtime.tests.test_0...OK
+7/26 http1.runtime.write.test_0...OK
+8/26 http1.runtime.body_pull_tests.test.HTTP/1 pull body reader exposes chunked trailers...OK
+9/26 http1.runtime.body_pull_tests.test.HTTP/1 pull body reader cancellation closes the connection...OK
+10/26 http1.runtime.body_pull_tests.test.HTTP/1 pull body reader enforces max_body_bytes...OK
+11/26 http1.runtime.body_pull_tests.test.HTTP/1 pull body head exposes a content decoder...OK
+12/26 http1.runtime.body_pull_tests.test.HTTP/1 pull body reader streams keeps alive and handles 100-continue...OK
+13/26 http1.runtime.body_pull_tests.test.HTTP/1 pull reader construction requires independent producer...OK
+14/26 http1.runtime.body_pull_tests.test.HTTP/1 pull producer rejected admission releases allocation...OK
+15/26 internal.tcp_connect.test_0...OK
+16/26 tls.mod.test_0...OK
+17/26 tls.stream.mod.test_0...OK
+18/26 internal.stream_io.test_0...OK
+19/26 internal.stream_io.timed_read.test_0...OK
+20/26 tls.stream.record_stream.test_0...OK
+21/26 http.field_value.test_0...OK
+22/26 internal.stream_io.timed_write.test_0...OK
+23/26 internal.socket_address.test_0...OK
+24/26 internal.socket_address.winsock.test_0...OK
+25/26 tls.stream.alpn_tests.test_0...OK
+26/26 tls.server_identity_file.test_0...OK
+All 26 tests passed.
+Build Summary: 10/10 steps succeeded
+test-http1 success
++- run test success 505ms
+   +- compile test Debug native success 10s MaxRSS:989M
+      +- WriteFile macho_0_p256_field_arm64.S cached
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 204ms MaxRSS:31M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 185ms MaxRSS:31M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options success
+      +- options cached
+
+Executing: /Users/bytedance/.local/bin/zig build test-http1-compile -j1 -Dtarget=x86_64-windows-gnu -Dtest-filter=HTTP/1 pull --summary all
+Build Summary: 8/8 steps succeeded
+test-http1-compile success
++- compile test Debug x86_64-windows-gnu success 6s MaxRSS:1G
+   +- WriteFile cached
+   +- compile obj vort-br-record-optimal Debug x86_64-windows-gnu success 1s MaxRSS:250M
+   +- WriteFile cached
+   +- compile obj vort-zstd-huffman-x2 Debug x86_64-windows-gnu success 1s MaxRSS:259M
+   +- compile obj vort-br-record-optimal Debug x86_64-windows-gnu (reused)
+   +- compile obj vort-zstd-huffman-x2 Debug x86_64-windows-gnu (reused)
+   +- options cached
+   +- options cached
+
+[traex-zig-guard 2026-11-26 05:35:24] finished Zig tree root=89853 peak=900MiB result=0

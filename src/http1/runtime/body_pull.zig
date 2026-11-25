@@ -124,6 +124,7 @@ pub fn Reader(comptime ConnectionType: type, comptime RuntimeError: type) type {
 
         pub fn init(allocator: std.mem.Allocator, connection: *ConnectionType, options: http1.ParseOptions, max_buffered_bytes: usize) !*Self {
             const self = try allocator.create(Self);
+            errdefer allocator.destroy(self);
             self.* = .{
                 .allocator = allocator,
                 .io = connection.io,
@@ -131,7 +132,7 @@ pub fn Reader(comptime ConnectionType: type, comptime RuntimeError: type) type {
                 .options = options,
                 .max_buffered_bytes = @max(max_buffered_bytes, 1),
             };
-            self.producer = self.io.async(Self.produce, .{self});
+            self.producer = try std.Io.concurrent(self.io, Self.produce, .{self});
             return self;
         }
 

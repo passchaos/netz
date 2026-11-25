@@ -168,9 +168,10 @@ test "HTTP/1 pull body head exposes a content decoder" {
 }
 
 test "HTTP/1 pull body reader streams keeps alive and handles 100-continue" {
-    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
-    defer threaded.deinit();
-    const io = threaded.io();
+    try @import("../../internal/testing/native_protocol_io.zig").run(pullReaderRoundTrip);
+}
+
+fn pullReaderRoundTrip(io: std.Io) anyerror!void {
     var server = try runtime.Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, limits);
     defer server.deinit();
     const body = try allocator.alloc(u8, 200 * 1024);
@@ -224,4 +225,69 @@ test "HTTP/1 pull body reader streams keeps alive and handles 100-continue" {
     defer second.deinit(allocator);
     try std.testing.expectEqualStrings("next", second.response.body);
     try task.await(io);
+}
+
+test "HTTP/1 pull reader construction requires independent producer" {
+    const Request = @import("body_reader.zig").Reader(error{FixtureEnd}).Request;
+    const Connection = struct {
+        io: std.Io,
+        closed: bool = false,
+        pub fn close(self: *@This()) void {
+            self.closed = true;
+        }
+        pub fn readRequestStreamingWithOptionsAndHead(_: *@This(), _: http1.ParseOptions, context: anytype, comptime _: anytype, comptime consume: anytype) anyerror!Request {
+            try consume(context, "a");
+            try consume(context, "b");
+            return error.FixtureEnd;
+        }
+    };
+    const Pull = @import("body_pull.zig").Reader(Connection, error{FixtureEnd});
+    var backend = std.Io.Threaded.init(allocator, .{ .async_limit = .nothing });
+    defer backend.deinit();
+    const io = backend.io();
+    var connection: Connection = .{ .io = io };
+    const Worker = struct {
+        connection: *Connection,
+        done: std.Io.Event = .unset,
+        err: ?anyerror = null,
+        fn run(self: *@This()) void {
+            defer self.done.set(self.connection.io);
+            const reader = Pull.init(allocator, self.connection, .{}, 1) catch |err| {
+                self.err = err;
+                return;
+            };
+            reader.deinit();
+        }
+    };
+    var worker: Worker = .{ .connection = &connection };
+    var future = try std.Io.concurrent(io, Worker.run, .{&worker});
+    defer future.cancel(io);
+    try worker.done.waitTimeout(io, .{ .deadline = .fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(2) }) });
+    future.await(io);
+    if (worker.err) |err| return err;
+}
+
+test "HTTP/1 pull producer rejected admission releases allocation" {
+    const Request = @import("body_reader.zig").Reader(error{FixtureEnd}).Request;
+    const Connection = struct {
+        io: std.Io,
+        calls: usize = 0,
+        closed: bool = false,
+        pub fn close(self: *@This()) void {
+            self.closed = true;
+        }
+        pub fn readRequestStreamingWithOptionsAndHead(self: *@This(), _: http1.ParseOptions, _: anytype, comptime _: anytype, comptime _: anytype) anyerror!Request {
+            self.calls += 1;
+            return error.FixtureEnd;
+        }
+    };
+    const Pull = @import("body_pull.zig").Reader(Connection, error{FixtureEnd});
+    var backend = std.Io.Threaded.init(allocator, .{ .async_limit = .nothing, .concurrent_limit = .nothing });
+    defer backend.deinit();
+    var allocations = std.testing.FailingAllocator.init(allocator, .{});
+    var connection: Connection = .{ .io = backend.io() };
+    try std.testing.expectError(error.ConcurrencyUnavailable, Pull.init(allocations.allocator(), &connection, .{}, 1));
+    try std.testing.expectEqual(allocations.allocated_bytes, allocations.freed_bytes);
+    try std.testing.expectEqual(@as(usize, 0), connection.calls);
+    try std.testing.expect(!connection.closed);
 }
