@@ -186,6 +186,27 @@ owns the received requests and one error slot per input; handlers must not
 deinitialize the borrowed request or retain its slices after the result is
 deinitialized. The same single-reader/one-writer rules as HTTP/2 apply.
 
+For concurrent HTTP/3 streams, `writeDataWithProgress*` reports
+`DataWriteProgress` on success and error. `committed_bytes` counts bytes from
+the input of that call, `fin_committed` records the final stream marker, and
+`retryable` indicates whether the same stream can accept a safe suffix. After
+an interrupted write, submit `data[progress.committed_bytes..]` only when
+`retryable` is true, and request FIN only if it was not committed. Each call
+resets the output; progress is not a cumulative stream offset. The deadline
+and relative-timeout forms are `writeDataWithProgressAndDeadline` and
+`writeDataWithProgressAndTimeout`.
+
+Finite HTTP/3 sends carry one absolute budget through command admission,
+pacing, the endpoint send mutex and cooperative socket submission. A timed
+operation cancels and joins its submission worker before releasing borrowed
+payloads. A complete socket commit remains successful if the timer races it;
+an incomplete batch retains its confirmed prefix before returning the error.
+Failure to admit the deadline watcher returns `error.ConcurrencyUnavailable`.
+Actual network errors retain their error tag. The cleartext development path
+has the same socket budget, but its multi-packet head/body ownership remains
+conservative: an attempted partial submission requires the owner's terminal
+cleanup rather than a retry of the complete input.
+
 ## Client duplex requests (HTTP/1, HTTP/2, HTTP/3)
 
 `netz.http.RequestHandle` is the connection-level streaming client shape shared
@@ -435,6 +456,24 @@ Concurrency contract:
   `*WithTimeout`). The deadline bounds the handler's wait for the owner to
   commit the command; a non-positive timeout is rejected before the command is
   queued. The unbounded forms keep the owner's normal flow-control waiting.
+- HTTP/3 retains the original timestamp through command admission, execution
+  and socket submission. If a handler wait expires or is canceled, it waits
+  for the owner to release the borrowed command before returning. A command
+  that fully completes during that race returns success; a skipped or partial
+  command retains the wait error. Cleanup can therefore finish after the
+  timestamp.
+- HTTP/3 `writeDataWithProgress`, `writeDataWithProgressAndDeadline` and
+  `writeDataWithProgressAndTimeout` accept `*Stream.DataWriteProgress`.
+  Both byte and FIN progress are reset before admission and published on every
+  return path, including timeout and cancellation. The owner retains progress
+  across flow-control, congestion and pacing retries, so it sends each prefix
+  once. Continue after an error only when `progress.retryable` is true, using
+  the suffix described above. The development runtime reports false after a
+  failed submission with an unknown visible prefix and closes that send
+  direction. Native QUIC reports its exact prefix, allowing a caller to resume
+  the suffix under its chosen remaining budget. Simple `writeData*` forms
+  discard this metadata; applications that need recovery should use the
+  progress forms.
 - A handler that returns without finishing its response has that stream reset
   (`INTERNAL_ERROR`/`cancel`) instead of leaking it. A peer reset/cancel is
   delivered to `nextBody` as `error.StreamReset` and does not poison siblings.

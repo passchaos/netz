@@ -116,6 +116,26 @@ pub fn streamingHeadAtOffset(
     bodies: *outbound_body.Set,
     send_attempted: ?*bool,
 ) Error!void {
+    return streamingHeadAtOffsetUntil(endpoint, to, scratch, stream_id, initial_offset, expected_length, body_allowed, max_stream_frame_data, bodies, send_attempted, null) catch |err| switch (err) {
+        error.Timeout, error.ConcurrencyUnavailable => unreachable,
+        else => |other| return @errorCast(other),
+    };
+}
+
+pub fn streamingHeadAtOffsetUntil(
+    endpoint: *quic.runtime.Endpoint,
+    to: net.IpAddress,
+    scratch: *send_scratch.Message,
+    stream_id: u62,
+    initial_offset: u64,
+    expected_length: ?usize,
+    body_allowed: bool,
+    max_stream_frame_data: usize,
+    bodies: *outbound_body.Set,
+    send_attempted: ?*bool,
+    deadline: ?std.Io.Clock.Timestamp,
+) runtime_error.ReceiveTimeoutError!void {
+    if (deadline) |until| _ = try deadline_policy.usableAwake(endpoint.io, until);
     const body_open = body_allowed and
         (expected_length == null or expected_length.? != 0);
     try bodies.reserveOpen(stream_id);
@@ -144,13 +164,14 @@ pub fn streamingHeadAtOffset(
     defer if (send_attempted) |attempted| {
         attempted.* = packet_send_attempted;
     };
-    try packetizer.sendEndpoint(
+    try packetizer.sendEndpointUntil(
         endpoint.allocator,
         endpoint,
         to,
         scratch.frames.items,
         1,
         &packet_send_attempted,
+        deadline,
     );
 }
 
@@ -216,6 +237,23 @@ pub fn requestCancellation(
     local_final_size: u64,
     send_reset: bool,
 ) Error!void {
+    return requestCancellationUntil(endpoint, to, stream_id, application_error_code, local_final_size, send_reset, null, null) catch |err| switch (err) {
+        error.Timeout, error.ConcurrencyUnavailable => unreachable,
+        else => |other| return @errorCast(other),
+    };
+}
+
+pub fn requestCancellationUntil(
+    endpoint: *quic.runtime.Endpoint,
+    to: net.IpAddress,
+    stream_id: u62,
+    application_error_code: u64,
+    local_final_size: u64,
+    send_reset: bool,
+    deadline: ?std.Io.Clock.Timestamp,
+    send_attempted: ?*bool,
+) runtime_error.ReceiveTimeoutError!void {
+    if (deadline) |until| _ = try deadline_policy.usableAwake(endpoint.io, until);
     const reset: quic.Frame = .{ .reset_stream = .{
         .stream_id = stream_id,
         .application_error_code = application_error_code,
@@ -226,9 +264,9 @@ pub fn requestCancellation(
         .application_error_code = application_error_code,
     } };
     if (send_reset) {
-        try endpoint.sendFrames(to, &.{ reset, stop });
+        try packetizer.sendEndpointUntil(endpoint.allocator, endpoint, to, &.{ reset, stop }, 2, send_attempted, deadline);
     } else {
-        try endpoint.sendFrames(to, &.{stop});
+        try packetizer.sendEndpointUntil(endpoint.allocator, endpoint, to, &.{stop}, 2, send_attempted, deadline);
     }
 }
 

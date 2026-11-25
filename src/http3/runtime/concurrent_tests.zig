@@ -2,6 +2,10 @@ const std = @import("std");
 test {
     _ = @import("concurrent/informational_tests.zig");
     _ = @import("concurrent/command_admission_tests.zig");
+    _ = @import("concurrent/command_completion_tests.zig");
+    _ = @import("concurrent/body_retry_tests.zig");
+    _ = @import("concurrent/body_write_tests.zig");
+    _ = @import("concurrent/data_progress_tests.zig");
 }
 const http3 = @import("../mod.zig");
 const runtime = @import("../runtime.zig");

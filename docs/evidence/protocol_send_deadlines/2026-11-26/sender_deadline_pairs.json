@@ -1,0 +1,130 @@
+{
+  "observed_utc": "2026-11-25T20:43:27.665921+00:00",
+  "binary_sha256": "652d1546a55d3d8d0675abe3f700b868746c23a99d9303ce53e9801865ff2cd4",
+  "source_sha256": "646b78d7c2650d411c457b8a4eafe9ff585564263ffd9e51361fb8bd9e70578c",
+  "iterations": 1000,
+  "warmup": 100,
+  "samples": [
+    {
+      "pair": 0,
+      "bounded": false,
+      "metrics": {
+        "sequential_ns_per_packet": 12292,
+        "batch_ns_per_packet": 12507
+      },
+      "output": "QUIC 1-RTT send benchmark\n  io backend: zio-std-io\n  finite send deadline: false\n  iterations: 1000, packets/batch: 32, STREAM descriptors/packet: 1, payload bytes/packet: 1024\n  stateful batch GSO available after run: false\n  stateful sequential: 393347 ns/batch, 12292 ns/packet\n  stateful batched:    400230 ns/batch, 12507 ns/packet\n  stateful batch relative packet throughput: 0.98x\n  total packets/path: 32000\n",
+      "exit_code": 0
+    },
+    {
+      "pair": 0,
+      "bounded": true,
+      "metrics": {
+        "sequential_ns_per_packet": 13809,
+        "batch_ns_per_packet": 12153
+      },
+      "output": "QUIC 1-RTT send benchmark\n  io backend: zio-std-io\n  finite send deadline: true\n  iterations: 1000, packets/batch: 32, STREAM descriptors/packet: 1, payload bytes/packet: 1024\n  stateful batch GSO available after run: false\n  stateful sequential: 441903 ns/batch, 13809 ns/packet\n  stateful batched:    388904 ns/batch, 12153 ns/packet\n  stateful batch relative packet throughput: 1.13x\n  total packets/path: 32000\n",
+      "exit_code": 0
+    },
+    {
+      "pair": 1,
+      "bounded": true,
+      "metrics": {
+        "sequential_ns_per_packet": 13024,
+        "batch_ns_per_packet": 12145
+      },
+      "output": "QUIC 1-RTT send benchmark\n  io backend: zio-std-io\n  finite send deadline: true\n  iterations: 1000, packets/batch: 32, STREAM descriptors/packet: 1, payload bytes/packet: 1024\n  stateful batch GSO available after run: false\n  stateful sequential: 416784 ns/batch, 13024 ns/packet\n  stateful batched:    388659 ns/batch, 12145 ns/packet\n  stateful batch relative packet throughput: 1.07x\n  total packets/path: 32000\n",
+      "exit_code": 0
+    },
+    {
+      "pair": 1,
+      "bounded": false,
+      "metrics": {
+        "sequential_ns_per_packet": 12748,
+        "batch_ns_per_packet": 13022
+      },
+      "output": "QUIC 1-RTT send benchmark\n  io backend: zio-std-io\n  finite send deadline: false\n  iterations: 1000, packets/batch: 32, STREAM descriptors/packet: 1, payload bytes/packet: 1024\n  stateful batch GSO available after run: false\n  stateful sequential: 407942 ns/batch, 12748 ns/packet\n  stateful batched:    416708 ns/batch, 13022 ns/packet\n  stateful batch relative packet throughput: 0.97x\n  total packets/path: 32000\n",
+      "exit_code": 0
+    },
+    {
+      "pair": 2,
+      "bounded": false,
+      "metrics": {
+        "sequential_ns_per_packet": 12166,
+        "batch_ns_per_packet": 12097
+      },
+      "output": "QUIC 1-RTT send benchmark\n  io backend: zio-std-io\n  finite send deadline: false\n  iterations: 1000, packets/batch: 32, STREAM descriptors/packet: 1, payload bytes/packet: 1024\n  stateful batch GSO available after run: false\n  stateful sequential: 389335 ns/batch, 12166 ns/packet\n  stateful batched:    387108 ns/batch, 12097 ns/packet\n  stateful batch relative packet throughput: 1.00x\n  total packets/path: 32000\n",
+      "exit_code": 0
+    },
+    {
+      "pair": 2,
+      "bounded": true,
+      "metrics": {
+        "sequential_ns_per_packet": 12828,
+        "batch_ns_per_packet": 12446
+      },
+      "output": "QUIC 1-RTT send benchmark\n  io backend: zio-std-io\n  finite send deadline: true\n  iterations: 1000, packets/batch: 32, STREAM descriptors/packet: 1, payload bytes/packet: 1024\n  stateful batch GSO available after run: false\n  stateful sequential: 410523 ns/batch, 12828 ns/packet\n  stateful batched:    398272 ns/batch, 12446 ns/packet\n  stateful batch relative packet throughput: 1.03x\n  total packets/path: 32000\n",
+      "exit_code": 0
+    },
+    {
+      "pair": 3,
+      "bounded": true,
+      "metrics": {
+        "sequential_ns_per_packet": 13674,
+        "batch_ns_per_packet": 12069
+      },
+      "output": "QUIC 1-RTT send benchmark\n  io backend: zio-std-io\n  finite send deadline: true\n  iterations: 1000, packets/batch: 32, STREAM descriptors/packet: 1, payload bytes/packet: 1024\n  stateful batch GSO available after run: false\n  stateful sequential: 437592 ns/batch, 13674 ns/packet\n  stateful batched:    386219 ns/batch, 12069 ns/packet\n  stateful batch relative packet throughput: 1.13x\n  total packets/path: 32000\n",
+      "exit_code": 0
+    },
+    {
+      "pair": 3,
+      "bounded": false,
+      "metrics": {
+        "sequential_ns_per_packet": 12016,
+        "batch_ns_per_packet": 11815
+      },
+      "output": "QUIC 1-RTT send benchmark\n  io backend: zio-std-io\n  finite send deadline: false\n  iterations: 1000, packets/batch: 32, STREAM descriptors/packet: 1, payload bytes/packet: 1024\n  stateful batch GSO available after run: false\n  stateful sequential: 384517 ns/batch, 12016 ns/packet\n  stateful batched:    378088 ns/batch, 11815 ns/packet\n  stateful batch relative packet throughput: 1.01x\n  total packets/path: 32000\n",
+      "exit_code": 0
+    },
+    {
+      "pair": 4,
+      "bounded": false,
+      "metrics": {
+        "sequential_ns_per_packet": 12544,
+        "batch_ns_per_packet": 12183
+      },
+      "output": "QUIC 1-RTT send benchmark\n  io backend: zio-std-io\n  finite send deadline: false\n  iterations: 1000, packets/batch: 32, STREAM descriptors/packet: 1, payload bytes/packet: 1024\n  stateful batch GSO available after run: false\n  stateful sequential: 401412 ns/batch, 12544 ns/packet\n  stateful batched:    389881 ns/batch, 12183 ns/packet\n  stateful batch relative packet throughput: 1.02x\n  total packets/path: 32000\n",
+      "exit_code": 0
+    },
+    {
+      "pair": 4,
+      "bounded": true,
+      "metrics": {
+        "sequential_ns_per_packet": 13022,
+        "batch_ns_per_packet": 11845
+      },
+      "output": "QUIC 1-RTT send benchmark\n  io backend: zio-std-io\n  finite send deadline: true\n  iterations: 1000, packets/batch: 32, STREAM descriptors/packet: 1, payload bytes/packet: 1024\n  stateful batch GSO available after run: false\n  stateful sequential: 416735 ns/batch, 13022 ns/packet\n  stateful batched:    379041 ns/batch, 11845 ns/packet\n  stateful batch relative packet throughput: 1.09x\n  total packets/path: 32000\n",
+      "exit_code": 0
+    }
+  ],
+  "paired_ratios": {
+    "sequential_ns_per_packet": [
+      1.1234136023429873,
+      1.0216504549733292,
+      1.0544139404898898,
+      1.137982689747004,
+      1.0381058673469388
+    ],
+    "batch_ns_per_packet": [
+      0.9716958503238187,
+      0.9326524343418829,
+      1.0288501281309415,
+      1.0214980956411341,
+      0.972256422884347
+    ]
+  },
+  "paired_ratio_medians": {
+    "sequential_ns_per_packet": 1.0544139404898898,
+    "batch_ns_per_packet": 0.972256422884347
+  },
+  "scope": "sender-only macOS zio ReleaseFast smoke; receiver not drained, same binary, order alternated; no end-to-end throughput or cross-peer superiority claim"
+}

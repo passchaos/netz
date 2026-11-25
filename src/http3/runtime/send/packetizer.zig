@@ -1,6 +1,7 @@
 const std = @import("std");
 const pending_ack = @import("pending_ack.zig");
 const deadline_policy = @import("../../../internal/deadline.zig");
+const bounded = @import("../../../internal/progress_deadline.zig");
 const http3 = @import("../../mod.zig");
 const quic = @import("../../../quic/mod.zig");
 const runtime_error = @import("../error.zig");
@@ -36,7 +37,7 @@ pub fn send(
 }
 
 /// Deadline-bounded stateful packetization. The timestamp is checked before
-/// every socket attempt and bounds pacing waits between packet batches.
+/// every socket attempt and bounds both socket submission and pacing waits.
 pub fn sendWithDeadline(
     allocator: std.mem.Allocator,
     connection: *quic.one_rtt.Connection,
@@ -376,14 +377,13 @@ const ConnectionBackend = struct {
                     deadline,
                 );
             }
-            if (offset == 0 and try pending_ack.trySend(self.connection, packets[0], self.frame_limit)) {
+            if (offset == 0 and try pending_ack.trySendUntil(self.connection, packets[0], self.frame_limit, self.deadline)) {
                 self.visible_packet_sent = true;
                 offset += 1;
                 continue;
             }
-            const result = self.connection.sendManyProgress(
-                packets[offset..],
-            ) catch |err| switch (err) {
+            var result: quic.one_rtt.ConnectionBatchSendResult = .{ .sent_count = 0, .protected_count = 0 };
+            self.sendProgress(packets[offset..], &result) catch |err| switch (err) {
                 error.PacingLimited => {
                     if (self.deadline) |deadline| {
                         try self.connection
@@ -403,6 +403,14 @@ const ConnectionBackend = struct {
                 return error.Unexpected;
             }
         }
+    }
+
+    fn sendProgress(self: *ConnectionBackend, packets: []const []const quic.Frame, progress: *quic.one_rtt.ConnectionBatchSendResult) runtime_error.ReceiveTimeoutError!void {
+        defer if (progress.sent_count != 0) {
+            self.visible_packet_sent = true;
+        };
+        if (self.deadline) |until| return self.connection.sendManyProgressWithDeadline(packets, progress, until);
+        progress.* = try self.connection.sendManyProgress(packets);
     }
 };
 
@@ -433,13 +441,27 @@ const EndpointBackend = struct {
         self: *EndpointBackend,
         packets: []const []const quic.Frame,
     ) runtime_error.ReceiveTimeoutError!void {
+        if (self.deadline) |until| {
+            // One watcher covers this bounded packet window, including its
+            // serialization and send mutex, rather than spawning per packet.
+            const outcome = bounded.before(self.endpoint.io, until, EndpointBackend.sendWindow, .{ self, packets });
+            const result = outcome.result orelse return outcome.wait_error orelse error.Unexpected;
+            result catch |err| {
+                if (err == error.Canceled) if (outcome.wait_error) |wait_error| return wait_error;
+                return err;
+            };
+            // All datagrams were consumed. A racing timer cannot undo that
+            // commit; the next window still uses the original deadline.
+        } else {
+            try self.sendWindow(packets);
+        }
+    }
+
+    fn sendWindow(self: *EndpointBackend, packets: []const []const quic.Frame) runtime_error.ReceiveTimeoutError!void {
         for (packets) |frames| {
-            if (self.deadline) |deadline| {
-                _ = try deadline_policy.usableAwake(
-                    self.endpoint.io,
-                    deadline,
-                );
-            }
+            if (self.deadline) |until| _ = try deadline_policy.usableAwake(self.endpoint.io, until);
+            // Admission precedes publication so development owners can roll
+            // back a head/body that never entered the submission worker.
             if (self.send_attempted) |attempted| attempted.* = true;
             try self.endpoint.sendFrames(self.to, frames);
         }

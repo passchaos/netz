@@ -51,6 +51,7 @@ const request_routing = @import("runtime/receive/routing/request.zig");
 pub const response_routing = @import("runtime/receive/routing/response.zig");
 pub const response_scheduler = @import("runtime/response_scheduler/core.zig");
 pub const concurrent = @import("runtime/concurrent.zig");
+const concurrent_body_writer = @import("runtime/concurrent/body_write.zig");
 const control_receive = @import("runtime/control/receive.zig");
 const control_sender = @import("runtime/control/send.zig");
 pub const stream_lifecycle = @import("runtime/stream/lifecycle.zig");
@@ -2895,6 +2896,7 @@ pub fn cancelHandshakeRequestWithDeadline(
 pub const HandshakeServerSession = @import("runtime/handshake_server_session.zig").HandshakeServerSession;
 
 const HandshakeConcurrentAdapter = struct {
+    pub const bounded_complete = true;
     pub fn peerSettings(session: *HandshakeServerSession) http3.Settings {
         return session.control.settings.peer;
     }
@@ -2941,8 +2943,10 @@ const HandshakeConcurrentAdapter = struct {
         stream_id: u62,
         response: http3.Response,
         body_length: ?usize,
-    ) Error!void {
+        deadline: ?std.Io.Clock.Timestamp,
+    ) anyerror!void {
         _ = from;
+        if (deadline) |until| return session.startResponseWithDeadline(stream_id, response, body_length, until);
         return session.startResponse(stream_id, response, body_length);
     }
     pub fn sendBody(
@@ -2951,9 +2955,17 @@ const HandshakeConcurrentAdapter = struct {
         stream_id: u62,
         data: []const u8,
         fin: bool,
-    ) Error!void {
+        progress: *concurrent_body_writer.Progress,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) anyerror!void {
         _ = from;
-        return session.sendResponseBodyPaced(stream_id, data, fin);
+        var native_progress: BodyWriteProgress = .{};
+        defer {
+            progress.committed_bytes = native_progress.committed_bytes;
+            progress.fin_committed = native_progress.fin_committed;
+        }
+        if (deadline) |until| return session.sendResponseBodyPacedWithDeadline(stream_id, data, fin, &native_progress, until);
+        return session.sendResponseBodyPacedWithProgress(stream_id, data, fin, &native_progress);
     }
     /// Emit a complete buffered response (head, body and FIN) in one QUIC
     /// packet. Used by the concurrent engine when the handler supplies the
@@ -2966,7 +2978,8 @@ const HandshakeConcurrentAdapter = struct {
         body_length: ?usize,
         data: []const u8,
         request_method: ?[]const u8,
-    ) Error!void {
+        deadline: ?std.Io.Clock.Timestamp,
+    ) anyerror!void {
         _ = from;
         var headers_stack: [server_response.header_stack_capacity]http3.Qpack.HeaderField = undefined;
         var length_buffer: [20]u8 = undefined;
@@ -2980,6 +2993,7 @@ const HandshakeConcurrentAdapter = struct {
             &length_buffer,
         );
         defer prepared.deinit(session.established.connection.endpoint.allocator);
+        if (deadline) |until| return session.sendResponseWithDeadline(stream_id, prepared.value, until);
         return session.trySendResponseLiteral(stream_id, prepared.value);
     }
 
@@ -2992,7 +3006,8 @@ const HandshakeConcurrentAdapter = struct {
         body_length: ?usize,
         data: []const u8,
         request_method: ?[]const u8,
-    ) Error!void {
+        deadline: ?std.Io.Clock.Timestamp,
+    ) anyerror!void {
         _ = from;
         var headers_stack: [server_response.header_stack_capacity]http3.Qpack.HeaderField = undefined;
         var length_buffer: [20]u8 = undefined;
@@ -3006,6 +3021,7 @@ const HandshakeConcurrentAdapter = struct {
             &length_buffer,
         );
         defer prepared.deinit(session.established.connection.endpoint.allocator);
+        if (deadline) |until| return session.sendResponseWithInformationalAndDeadline(stream_id, informational, prepared.value, until);
         return session.sendResponseWithInformational(stream_id, informational, prepared.value);
     }
 
@@ -3014,8 +3030,10 @@ const HandshakeConcurrentAdapter = struct {
         from: net.IpAddress,
         stream_id: u62,
         trailers: []const http3.Qpack.HeaderField,
-    ) Error!void {
+        deadline: ?std.Io.Clock.Timestamp,
+    ) anyerror!void {
         _ = from;
+        if (deadline) |until| return session.finishResponseTrailersPacedWithDeadline(stream_id, trailers, until);
         return session.finishResponseTrailersPaced(stream_id, trailers);
     }
     pub fn cancel(
@@ -3023,8 +3041,10 @@ const HandshakeConcurrentAdapter = struct {
         from: net.IpAddress,
         stream_id: u62,
         code: u64,
-    ) Error!void {
+        deadline: ?std.Io.Clock.Timestamp,
+    ) anyerror!void {
         _ = from;
+        if (deadline) |until| return session.cancelRequestWithDeadline(stream_id, code, until);
         return session.cancelRequest(stream_id, code);
     }
     pub fn goaway(

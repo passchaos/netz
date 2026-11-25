@@ -628,12 +628,16 @@ def expect_no_packet(sock: socket.socket, label: str) -> None:
 
 
 def mqtt_ping(sock: socket.socket, label: str | None = None) -> None:
+    phase = "send PINGREQ"
     try:
         sock.sendall(b"\xc0\x00")
+        phase = "read PINGRESP"
         response = read_mqtt_packet(sock)
     except (AssertionError, OSError) as error:
         if label is not None:
-            raise AssertionError(f"{label}: {error}") from None
+            raise AssertionError(
+                f"{label}: {phase}: {type(error).__name__}: {error}"
+            ) from None
         raise
     if response != b"\xd0\x00":
         raise AssertionError(f"expected PINGRESP, got {response.hex()}")
@@ -4560,6 +4564,7 @@ def run_client_ca_reload_case(broker: Path, directory: Path) -> None:
         try:
             mqtt_ping(old_mqtt, "client CA reload MQTT before SIGHUP")
         except (AssertionError, OSError) as error:
+            observe("failed MQTT ping before SIGHUP")
             tail = buffered_process_output(process)
             raise AssertionError(
                 "client CA reload MQTT failed before SIGHUP: "

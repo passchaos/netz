@@ -15,3 +15,6 @@ test {
     _ = @import("scratch.zig");
     _ = @import("stateless_reset_receive.zig");
 }
+test {
+    _ = @import("send_deadline_tests.zig");
+}

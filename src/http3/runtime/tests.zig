@@ -110,6 +110,8 @@ test {
     _ = @import("send/tests/paced_body.zig");
     _ = @import("send/tests/message.zig");
     _ = @import("send/tests/partial_send.zig");
+    _ = @import("send/tests/protected_batch_deadline.zig");
+    _ = @import("send/tests/development_deadline.zig");
     _ = @import("stream/reader_tests.zig");
     _ = @import("stream/set_tests.zig");
     _ = @import("stream/push/state_tests.zig");

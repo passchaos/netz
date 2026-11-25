@@ -514,6 +514,13 @@ pub fn trySendConnectionBodyChunk(
     fin: bool,
     options: anytype,
 ) Error!void {
+    return trySendConnectionBodyChunkUntil(connection, bodies, stream_id, data, fin, options, null) catch |err| switch (err) {
+        error.Timeout, error.ConcurrencyUnavailable => unreachable,
+        else => |other| return @errorCast(other),
+    };
+}
+
+pub fn trySendConnectionBodyChunkUntil(connection: *quic.one_rtt.Connection, bodies: *OutboundBodySet, stream_id: u62, data: []const u8, fin: bool, options: anytype, deadline: ?std.Io.Clock.Timestamp) runtime_error.ReceiveTimeoutError!void {
     const entry = bodies.find(stream_id) orelse return error.UnexpectedStream;
     var staged = entry.*;
     try bodies.prepareChunkForEntry(&staged, data.len, fin);
@@ -552,7 +559,7 @@ pub fn trySendConnectionBodyChunk(
     {
         return error.DatagramTooLarge;
     }
-    try connection.trySend(bodies.frame_scratch.items);
+    if (deadline) |until| try connection.trySendWithDeadline(bodies.frame_scratch.items, until) else try connection.trySend(bodies.frame_scratch.items);
     entry.* = staged;
     if (fin) _ = bodies.finish(stream_id);
 }
@@ -568,19 +575,27 @@ pub fn trySendConnectionBodyParts(
     fin: bool,
     options: anytype,
 ) Error!void {
+    return trySendConnectionBodyPartsUntil(connection, bodies, stream_id, parts, fin, options, null) catch |err| switch (err) {
+        error.Timeout, error.ConcurrencyUnavailable => unreachable,
+        else => |other| return @errorCast(other),
+    };
+}
+
+pub fn trySendConnectionBodyPartsUntil(connection: *quic.one_rtt.Connection, bodies: *OutboundBodySet, stream_id: u62, parts: []const []const u8, fin: bool, options: anytype, deadline: ?std.Io.Clock.Timestamp) runtime_error.ReceiveTimeoutError!void {
     var data_len: usize = 0;
     for (parts) |part| {
         data_len = std.math.add(usize, data_len, part.len) catch
             return error.InvalidContentLength;
     }
     if (data_len == 0) {
-        return trySendConnectionBodyChunk(
+        return trySendConnectionBodyChunkUntil(
             connection,
             bodies,
             stream_id,
             &.{},
             fin,
             options,
+            deadline,
         );
     }
 
@@ -606,7 +621,7 @@ pub fn trySendConnectionBodyParts(
     {
         return error.DatagramTooLarge;
     }
-    try connection.trySend(bodies.frame_scratch.items);
+    if (deadline) |until| try connection.trySendWithDeadline(bodies.frame_scratch.items, until) else try connection.trySend(bodies.frame_scratch.items);
     entry.* = staged;
     if (fin) _ = bodies.finish(stream_id);
 }
@@ -666,13 +681,16 @@ pub fn sendConnectionBodyBatchPacedWithDeadline(
     try validateConnectionBodyBatch(bodies, chunks, options);
     while (committed_chunks.* < chunks.len) {
         _ = try deadline_policy.usableAwake(connection.endpoint.io, deadline);
-        const progress = sendConnectionBodyBatchPacedProgress(
+        var send_failure: ?runtime_error.ReceiveTimeoutError = null;
+        const progress = sendConnectionBodyBatchPacedProgressUntil(
             connection,
             bodies,
             chunks[committed_chunks.*..],
             options,
             context,
             finish_stream,
+            deadline,
+            &send_failure,
         ) catch |err| switch (err) {
             error.FlowControlBlocked, error.CongestionLimited => {
                 try receive_progress(context, deadline);
@@ -685,6 +703,7 @@ pub fn sendConnectionBodyBatchPacedWithDeadline(
             else => return err,
         };
         committed_chunks.* += progress.sent_count;
+        if (send_failure) |err| return err;
         if (progress.send_error) |err| return err;
     }
 }
@@ -727,6 +746,15 @@ pub fn sendConnectionBodyBatchPacedProgress(
     context: anytype,
     comptime finish_stream: anytype,
 ) Error!ConnectionBodyBatchProgress {
+    var send_failure: ?runtime_error.ReceiveTimeoutError = null;
+    return sendConnectionBodyBatchPacedProgressUntil(connection, bodies, chunks, options, context, finish_stream, null, &send_failure) catch |err| switch (err) {
+        error.Timeout, error.ConcurrencyUnavailable => unreachable,
+        else => |other| return @errorCast(other),
+    };
+}
+
+fn sendConnectionBodyBatchPacedProgressUntil(connection: *quic.one_rtt.Connection, bodies: *OutboundBodySet, chunks: []const BodyChunk, options: anytype, context: anytype, comptime finish_stream: anytype, deadline: ?std.Io.Clock.Timestamp, send_failure: *?runtime_error.ReceiveTimeoutError) runtime_error.ReceiveTimeoutError!ConnectionBodyBatchProgress {
+    send_failure.* = null;
     if (chunks.len == 0) return .{ .sent_count = 0 };
     for (chunks, 0..) |chunk, i| {
         if (chunk.data.len > pacedBodyChunkLimit(options)) {
@@ -808,7 +836,13 @@ pub fn sendConnectionBodyBatchPacedProgress(
     // numbers, or touching the socket. Avoid walking every STREAM frame a
     // second time here; staged HTTP/3 body state is committed only for the
     // socket-visible prefix returned below.
-    const result = try connection.sendManyProgress(packets[0..count]);
+    var result: quic.one_rtt.ConnectionBatchSendResult = .{ .sent_count = 0, .protected_count = 0 };
+    if (deadline) |until| {
+        connection.sendManyProgressWithDeadline(packets[0..count], &result, until) catch |err| {
+            if (result.protected_count == 0) return err;
+            send_failure.* = err;
+        };
+    } else result = try connection.sendManyProgress(packets[0..count]);
     if (!batchProgressIsValid(
         result.sent_count,
         result.protected_count,
@@ -829,9 +863,9 @@ pub fn sendConnectionBodyBatchPacedProgress(
         }
     }
     if (result.sent_count != result.protected_count) {
-        if (result.send_error == null) return error.Unexpected;
+        if (result.send_error == null and send_failure.* == null) return error.Unexpected;
     }
-    if (result.sent_count == 0 and result.send_error == null) {
+    if (result.sent_count == 0 and result.send_error == null and send_failure.* == null) {
         return error.Unexpected;
     }
     return .{
@@ -894,6 +928,7 @@ pub fn sendProtectedBodyBatchPacedWithDeadline(
     try validateProtectedBodyBatch(bodies, chunks, config);
     while (committed_chunks.* < chunks.len) {
         _ = try deadline_policy.usableAwake(endpoint.io, deadline);
+        var send_failure: ?runtime_error.ReceiveTimeoutError = null;
         const progress = sendProtectedBodyBatchProgressUntil(
             endpoint,
             to,
@@ -905,6 +940,7 @@ pub fn sendProtectedBodyBatchPacedWithDeadline(
             context,
             finish_stream,
             deadline,
+            &send_failure,
         ) catch |err| switch (err) {
             error.FlowControlBlocked, error.CongestionLimited => {
                 try receive_progress(context, deadline);
@@ -913,6 +949,7 @@ pub fn sendProtectedBodyBatchPacedWithDeadline(
             else => return err,
         };
         committed_chunks.* += progress.sent_count;
+        if (send_failure) |err| return err;
         if (progress.send_error) |err| return err;
     }
 }
@@ -953,6 +990,7 @@ pub fn sendProtectedBodyBatchProgress(
     context: anytype,
     comptime finish_stream: anytype,
 ) Error!usize {
+    var send_failure: ?runtime_error.ReceiveTimeoutError = null;
     const progress = sendProtectedBodyBatchProgressUntil(
         endpoint,
         to,
@@ -964,6 +1002,7 @@ pub fn sendProtectedBodyBatchProgress(
         context,
         finish_stream,
         null,
+        &send_failure,
     ) catch |err| switch (err) {
         error.Timeout, error.ConcurrencyUnavailable => unreachable,
         else => |other| return @errorCast(other),
@@ -983,7 +1022,9 @@ fn sendProtectedBodyBatchProgressUntil(
     context: anytype,
     comptime finish_stream: anytype,
     deadline: ?std.Io.Clock.Timestamp,
+    send_failure: *?runtime_error.ReceiveTimeoutError,
 ) runtime_error.ReceiveTimeoutError!ConnectionBodyBatchProgress {
+    send_failure.* = null;
     if (chunks.len == 0) return .{ .sent_count = 0 };
     for (chunks, 0..) |chunk, i| {
         if (chunk.data.len > pacedProtectedBodyChunkLimit(config)) {
@@ -1062,25 +1103,29 @@ fn sendProtectedBodyBatchProgressUntil(
     for (bodies.batch_scratch.frame_ranges.items[0..count], 0..) |range, i| {
         packets[i] = bodies.batch_scratch.frames.items[range.start .. range.start + range.len];
     }
-    const result = if (deadline) |absolute|
-        try protected_send.sendPacketBatchProgressWithDeadline(
+    var result: quic.one_rtt.BatchSendResult = .{ .sent_count = 0, .sent_bytes = 0, .protected_count = 0 };
+    if (deadline) |absolute| {
+        protected_send.sendPacketBatchWithProgressAndDeadline(
             endpoint,
             to,
             config.send_keys,
             config.peer_connection_id,
             next_packet_number,
             packets[0..count],
+            &result,
             absolute,
-        )
-    else
-        try protected_send.sendPacketBatchProgress(
-            endpoint,
-            to,
-            config.send_keys,
-            config.peer_connection_id,
-            next_packet_number,
-            packets[0..count],
-        );
+        ) catch |err| {
+            if (result.protected_count == 0) return err;
+            send_failure.* = err;
+        };
+    } else result = try protected_send.sendPacketBatchProgress(
+        endpoint,
+        to,
+        config.send_keys,
+        config.peer_connection_id,
+        next_packet_number,
+        packets[0..count],
+    );
     if (!batchProgressIsValid(
         result.sent_count,
         result.protected_count,
@@ -1100,6 +1145,7 @@ fn sendProtectedBodyBatchProgressUntil(
         }
     }
     if (result.sent_count == 0) {
+        if (send_failure.* != null) return .{ .sent_count = 0, .send_error = result.send_error };
         if (result.send_error) |err| return err;
         return error.Unexpected;
     }

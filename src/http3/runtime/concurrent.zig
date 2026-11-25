@@ -12,6 +12,7 @@
 const std = @import("std");
 const http3 = @import("../mod.zig");
 const deadline_policy = @import("../../internal/deadline.zig");
+const body_writer = @import("concurrent/body_write.zig");
 
 /// Upper bound on the per-stream body reservation derived from a declared
 /// Content-Length. Larger bodies grow normally.
@@ -76,10 +77,10 @@ pub const Summary = struct {
 ///   receive(session, deadline) Error!StreamingRequestEvent
 ///   availableBody(session, from, stream_id) Error!usize
 ///   readBody(session, from, stream_id, out) Error!usize
-///   startResponse(session, from, stream_id, response, body_length) Error!void
-///   sendBody(session, from, stream_id, data, fin) Error!void
-///   finishTrailers(session, from, stream_id, trailers) Error!void
-///   cancel(session, from, stream_id, code) Error!void
+///   startResponse(session, from, stream_id, response, body_length, deadline) Error!void
+///   sendBody(session, from, stream_id, data, fin, progress, deadline) Error!void
+///   finishTrailers(session, from, stream_id, trailers, deadline) Error!void
+///   cancel(session, from, stream_id, code, deadline) Error!void
 ///   goaway(session, last_stream_id) Error!void
 ///   maxStreams(session) usize
 ///   maxBodyBuffer(session) usize
@@ -93,10 +94,14 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
             deadline: ?std.Io.Clock.Timestamp = null,
             count: usize = 0,
             result: ?anyerror = null,
+            /// Published before done; abandoned commands that were skipped
+            /// must not look like successful writes.
+            succeeded: bool = false,
             done: std.Io.Event = .unset,
             abandoned: std.atomic.Value(bool) = .init(false),
             informational_written: usize = 0,
             response_started: bool = false,
+            body_write: body_writer.State = .{},
 
             const Kind = union(enum) {
                 informational: struct {
@@ -176,6 +181,8 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
         pub const Stream = struct {
             engine: *Self,
             slot: *Slot,
+
+            pub const DataWriteProgress = body_writer.Progress;
 
             /// True when this handler runs on the QUIC owner. Handlers that
             /// cannot finish without blocking must return
@@ -433,11 +440,37 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                 fin: bool,
                 deadline: ?std.Io.Clock.Timestamp,
             ) anyerror!void {
+                var progress: DataWriteProgress = .{};
+                return self.writeDataWithProgressAndDeadline(data, fin, &progress, deadline);
+            }
+
+            /// Report the exact confirmed DATA prefix on every return path.
+            /// After an error, retry data[progress.committed_bytes..] only if
+            /// retryable is true, and request FIN only if it was not committed.
+            pub fn writeDataWithProgress(self: Stream, data: []const u8, fin: bool, progress: *DataWriteProgress) anyerror!void {
+                return self.writeDataWithProgressAndDeadline(data, fin, progress, null);
+            }
+
+            pub fn writeDataWithProgressAndDeadline(
+                self: Stream,
+                data: []const u8,
+                fin: bool,
+                progress: *DataWriteProgress,
+                deadline: ?std.Io.Clock.Timestamp,
+            ) anyerror!void {
+                progress.* = .{};
                 var command = Command{ .slot = self.slot, .kind = .{ .write_body = .{
                     .data = data,
                     .fin = fin,
                 } } };
+                defer progress.* = command.body_write.progress;
                 return self.engine.submit(&command, deadline);
+            }
+
+            pub fn writeDataWithProgressAndTimeout(self: Stream, data: []const u8, fin: bool, progress: *DataWriteProgress, timeout: std.Io.Duration) anyerror!void {
+                progress.* = .{};
+                if (timeout.nanoseconds <= 0) return error.Timeout;
+                return self.writeDataWithProgressAndDeadline(data, fin, progress, .fromNow(self.engine.io, .{ .raw = timeout, .clock = .awake }));
             }
 
             pub fn writeDataWithTimeout(
@@ -1130,10 +1163,16 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
             self.wake.set(self.io);
             waitForEvent(self.io, &command.done, deadline) catch |err| {
                 command.abandoned.store(true, .release);
+                self.wake.set(self.io);
                 // The handler's stack owns the command and its payload. Wait
                 // for the owner to observe abandonment or finish execution
                 // before unwinding that stack.
-                command.done.wait(self.io) catch {};
+                command.done.waitUncancelable(self.io);
+                // A complete mutation can race the caller's wait failure.
+                // Report its committed outcome so the caller does not retry
+                // an already-written response. Partial and skipped commands
+                // retain the original wait error.
+                if (command.succeeded) return;
                 return err;
             };
             if (command.result) |failure| return failure;
@@ -1247,8 +1286,13 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                         self.commands_blocked = true;
                         return;
                     },
-                    else => command.result = err,
+                    else => {
+                        command.result = err;
+                        command.done.set(self.io);
+                        continue;
+                    },
                 };
+                command.succeeded = true;
                 command.done.set(self.io);
             }
         }
@@ -1270,6 +1314,7 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                         slot.stream_id,
                         response,
                         value.body_length,
+                        command.deadline,
                     );
                     slot.response_started = true;
                     slot.suppress_body = response.suppressesBody();
@@ -1296,7 +1341,7 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                         for (value.informational) |info| try info.validate(self.allocator, Adapter.peerSettings(self.session));
                     }
                     slot.suppress_body = response.suppressesBody();
-                    if (value.informational.len != 0 and value.fin and !slot.suppress_body) {
+                    if (value.informational.len != 0 and value.fin and !slot.suppress_body and (command.deadline == null or (@hasDecl(Adapter, "bounded_complete") and Adapter.bounded_complete))) {
                         try Adapter.sendCompleteResponseWithInformational(
                             self.session,
                             slot.from,
@@ -1306,6 +1351,7 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                             value.body_length,
                             value.data,
                             slot.head.method,
+                            command.deadline,
                         );
                         slot.response_started = true;
                         slot.response_finished = true;
@@ -1316,7 +1362,7 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                         command.informational_written += 1;
                     }
                     if (slot.suppress_body) {
-                        try Adapter.startResponse(self.session, slot.from, slot.stream_id, response, value.body_length);
+                        try Adapter.startResponse(self.session, slot.from, slot.stream_id, response, value.body_length, command.deadline);
                         slot.response_started = true;
                         slot.response_finished = true;
                         return;
@@ -1330,6 +1376,7 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                         value.fin and
                         value.data.len != 0 and
                         value.response.trailers.len == 0 and
+                        (command.deadline == null or (@hasDecl(Adapter, "bounded_complete") and Adapter.bounded_complete)) and
                         (value.body_length == null or
                             value.body_length.? == value.data.len))
                     {
@@ -1341,6 +1388,7 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                             value.body_length,
                             value.data,
                             slot.head.method,
+                            command.deadline,
                         )) |_| {
                             slot.response_started = true;
                             slot.response_finished = true;
@@ -1351,33 +1399,23 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                         }
                     }
                     if (!command.response_started) {
-                        try Adapter.startResponse(self.session, slot.from, slot.stream_id, response, value.body_length);
+                        try Adapter.startResponse(self.session, slot.from, slot.stream_id, response, value.body_length, command.deadline);
                         command.response_started = true;
                         slot.response_started = true;
                     }
-                    try Adapter.sendBody(
-                        self.session,
-                        slot.from,
-                        slot.stream_id,
-                        value.data,
-                        value.fin and response.trailers.len == 0,
-                    );
-                    if (value.fin and response.trailers.len != 0) try Adapter.finishTrailers(self.session, slot.from, slot.stream_id, response.trailers);
+                    try self.writeCommandBody(command, value.data, value.fin and response.trailers.len == 0);
+                    if (value.fin and response.trailers.len != 0) try Adapter.finishTrailers(self.session, slot.from, slot.stream_id, response.trailers, command.deadline);
                     if (value.fin) slot.response_finished = true;
                 },
                 .write_body => |value| {
                     if (slot.suppress_body) {
                         if (value.data.len != 0) return error.InvalidContentLength;
+                        command.body_write.completed = true;
+                        command.body_write.progress.fin_committed = value.fin;
                         if (value.fin) slot.response_finished = true;
                         return;
                     }
-                    try Adapter.sendBody(
-                        self.session,
-                        slot.from,
-                        slot.stream_id,
-                        value.data,
-                        value.fin,
-                    );
+                    try self.writeCommandBody(command, value.data, value.fin);
                     if (value.fin) slot.response_finished = true;
                 },
                 .finish_trailers => |trailers| {
@@ -1386,6 +1424,7 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                         slot.from,
                         slot.stream_id,
                         trailers,
+                        command.deadline,
                     );
                     slot.response_finished = true;
                 },
@@ -1395,6 +1434,7 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                         slot.from,
                         slot.stream_id,
                         code,
+                        command.deadline,
                     );
                     slot.response_finished = true;
                 },
@@ -1418,12 +1458,27 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
             }
         }
 
+        fn writeCommandBody(self: *Self, command: *Command, data: []const u8, fin: bool) anyerror!void {
+            const Context = struct {
+                engine: *Self,
+                slot: *Slot,
+                fn send(ctx: *@This(), suffix: []const u8, final: bool, progress: *body_writer.Progress, deadline: ?std.Io.Clock.Timestamp) anyerror!void {
+                    return Adapter.sendBody(ctx.engine.session, ctx.slot.from, ctx.slot.stream_id, suffix, final, progress, deadline);
+                }
+            };
+            var context = Context{ .engine = self, .slot = command.slot };
+            defer if (command.body_write.progress.fin_committed) {
+                command.slot.response_finished = true;
+            };
+            return command.body_write.write(data, fin, command.deadline, &context, Context.send);
+        }
+
         /// Retire one completed slot. Inline handlers call this directly so a
         /// batch of N owner-run requests does not rescan every live slot after
         /// each handler.
         fn reapSlot(self: *Self, slot: *Slot) void {
             if (!slot.response_finished and slot.reset_code == null) {
-                Adapter.cancel(self.session, slot.from, slot.stream_id, 0) catch {};
+                Adapter.cancel(self.session, slot.from, slot.stream_id, 0, null) catch {};
             }
             if (slot.handler_error != null) {
                 self.summary.failed += 1;
@@ -1470,7 +1525,7 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
             self.task_queue.clearRetainingCapacity();
             self.task_mutex.unlock(self.io);
             for (self.slots.items) |slot| {
-                Adapter.cancel(self.session, slot.from, slot.stream_id, 0) catch {};
+                Adapter.cancel(self.session, slot.from, slot.stream_id, 0, null) catch {};
             }
             for (self.slots.items) |slot| {
                 slot.deinit(self.allocator);
@@ -1549,7 +1604,7 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                 if (value.raw.nanoseconds < poll_deadline.raw.nanoseconds) value else poll_deadline
             else
                 poll_deadline;
-            return self.receiveOrWake(use_deadline);
+            return self.receiveOrWake(deadline, use_deadline);
         }
 
         /// Race one receive against the command wake. A wake that wins cancels
@@ -1559,13 +1614,14 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
         /// remain queued in the session, so no packet is dropped.
         fn receiveOrWake(
             self: *Self,
-            deadline: std.Io.Clock.Timestamp,
+            receive_deadline: ?std.Io.Clock.Timestamp,
+            poll_deadline: std.Io.Clock.Timestamp,
         ) anyerror!?StreamingRequestEvent {
             if (self.workers.items.len == 0) {
                 // Commands and body progress only come from handler workers.
                 // With none alive, receive on the owner task instead of
                 // spawning a wake arm that would be canceled immediately.
-                return Adapter.receive(self.session, deadline) catch |err| switch (err) {
+                return Adapter.receive(self.session, poll_deadline) catch |err| switch (err) {
                     error.Timeout => null,
                     else => |other| return other,
                 };
@@ -1585,8 +1641,10 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                 },
                 .wake => |result| result catch {},
             };
-            try select.concurrent(.event, Adapter.receive, .{ self.session, deadline });
-            try select.concurrent(.wake, std.Io.Event.wait, .{ &self.wake, self.io });
+            // A periodic owner wake must not become an already-expired
+            // admission budget before the receive task can be scheduled.
+            try select.concurrent(.event, Adapter.receive, .{ self.session, receive_deadline });
+            try select.concurrent(.wake, waitForCommandOrPoll, .{ self.io, &self.wake, poll_deadline });
             switch (try select.await()) {
                 .event => |result| return result catch |err| switch (err) {
                     error.Timeout => null,
@@ -1604,6 +1662,16 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
                 self.pending_event_error = error.OutOfMemory;
             };
         }
+    };
+}
+
+/// One wake arm observes commands or an idle poll boundary. The actual
+/// receive keeps its independent caller deadline and can enter after scheduling.
+fn waitForCommandOrPoll(io: std.Io, event: *std.Io.Event, poll_deadline: std.Io.Clock.Timestamp) std.Io.Cancelable!void {
+    waitForEvent(io, event, poll_deadline) catch |err| switch (err) {
+        error.Timeout => {},
+        error.Canceled => return error.Canceled,
+        else => unreachable,
     };
 }
 

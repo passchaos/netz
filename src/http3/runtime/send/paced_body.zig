@@ -40,7 +40,7 @@ pub fn write(connection: *quic.one_rtt.Connection, bodies: *outbound.Set, option
         }
         while (true) {
             const last = count == remaining;
-            sender.trySendConnectionBodyChunk(connection, bodies, id, data[progress.committed_bytes..][0..count], fin and last, options) catch |err| switch (err) {
+            sender.trySendConnectionBodyChunkUntil(connection, bodies, id, data[progress.committed_bytes..][0..count], fin and last, options, deadline) catch |err| switch (err) {
                 error.DatagramTooLarge => {
                     if (count <= 1) return err;
                     count = @max(@as(usize, 1), count / 2);
@@ -106,7 +106,7 @@ pub fn writeParts(connection: *quic.one_rtt.Connection, bodies: *outbound.Set, o
             var staged = cursor;
             const chunk = staged.next(&descriptors, count, options.max_stream_frame_data);
             const last = staged.done();
-            sender.trySendConnectionBodyParts(connection, bodies, id, chunk, fin and last, options) catch |err| switch (err) {
+            sender.trySendConnectionBodyPartsUntil(connection, bodies, id, chunk, fin and last, options, deadline) catch |err| switch (err) {
                 error.DatagramTooLarge => {
                     if (count <= 1) return err;
                     count = @max(@as(usize, 1), count / 2);

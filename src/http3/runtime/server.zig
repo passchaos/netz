@@ -11,6 +11,7 @@ const Limits = runtime.Limits;
 const Response = http3.Response;
 const Qpack = http3.Qpack;
 const concurrent = @import("concurrent.zig");
+const concurrent_body_writer = @import("concurrent/body_write.zig");
 const development_message = @import("development/message.zig");
 const development_request_buffer = @import("development/request_buffer.zig");
 const DevelopmentRequestStreamSet = development_request_buffer.Set;
@@ -39,6 +40,7 @@ const runtime_error = @import("error.zig");
 const deadline_policy = @import("../../internal/deadline.zig");
 const development_data_error = @import("development/data_error.zig");
 const server_response = @import("server/response.zig");
+const bounded_response = @import("server/development_response.zig");
 const OwnedRequestBatch = runtime.OwnedRequestBatch;
 const ConcurrentServeResult = runtime.ConcurrentServeResult;
 const messageStreamDisposition = runtime.messageStreamDisposition;
@@ -1606,84 +1608,20 @@ pub const Server = struct {
         };
     }
 
-    pub fn startResponse(
-        self: *Server,
-        to: net.IpAddress,
-        stream_id: u62,
-        response: http3.Response,
-        body_length: ?usize,
-    ) Error!void {
-        self.peer_state_mutex.lockUncancelable(
-            self.quic_server.endpoint.io,
-        );
-        defer self.peer_state_mutex.unlock(
-            self.quic_server.endpoint.io,
-        );
-        const peer = self.streaming_peers.find(to) orelse
-            return error.UnexpectedStream;
-        const response_context = try peer.prepareResponseHead(
-            stream_id,
-            self.streaming_mode,
-        );
-        self.response_send_mutex.lockUncancelable(
-            self.quic_server.endpoint.io,
-        );
-        defer self.response_send_mutex.unlock(self.quic_server.endpoint.io);
-        var response_headers_stack: [server_response.header_stack_capacity]http3.Qpack.HeaderField =
-            undefined;
-        var prepared = try server_response.prepare(
-            self.quic_server.endpoint.allocator,
-            response,
-            server_response.automaticDate(
-                self.limits.auto_date_header,
-                self.quic_server.endpoint.io,
-                response,
-            ),
-            &response_headers_stack,
-        );
-        defer prepared.deinit(self.quic_server.endpoint.allocator);
-        const streaming = try prepared.value.writeStreamingHeadDynamic(
-            &response_context.scratch.encoded,
-            self.quic_server.endpoint.allocator,
-            development_settings,
-            stream_id,
-            body_length,
-            response_context.qpack_encode,
-        );
-        // Successful Extended CONNECT keeps HTTP/3 DATA enabled even though
-        // it intentionally has no Content-Length and remains open until the
-        // adapted protocol closes it.
-        const keep_extended_connect_open = prepared.value.extended_connect and
-            prepared.value.status >= 200 and prepared.value.status < 300;
-        const body_allowed = streaming.body_allowed or
-            keep_extended_connect_open;
-        const expected_length = if (keep_extended_connect_open)
-            null
-        else
-            streaming.expected_length;
-        const response_prefix_offset = peer.responsePrefixOffset(stream_id);
-        errdefer peer.abandonEncodedResponse(stream_id);
-        var send_attempted = false;
-        sendRuntimeStreamingHeadAtOffset(
-            &self.quic_server.endpoint,
-            to,
-            response_context.scratch,
-            stream_id,
-            response_prefix_offset,
-            expected_length,
-            body_allowed,
-            self.limits.max_stream_frame_data,
-            response_context.outbound_bodies,
-            &send_attempted,
-        ) catch |err| {
-            if (send_attempted) {
-                peer.markSendFailed();
-            } else {
-                peer.discardResponseBody(stream_id);
-            }
-            return err;
+    pub fn startResponse(self: *Server, to: net.IpAddress, stream_id: u62, response: http3.Response, body_length: ?usize) Error!void {
+        return bounded_response.start(self, to, stream_id, response, body_length, null) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
         };
-        peer.commitResponseHead(stream_id, body_allowed, expected_length);
+    }
+
+    pub fn startResponseWithDeadline(self: *Server, to: net.IpAddress, stream_id: u62, response: http3.Response, body_length: ?usize, deadline: std.Io.Clock.Timestamp) ReceiveTimeoutError!void {
+        return bounded_response.start(self, to, stream_id, response, body_length, deadline) catch |err| return @errorCast(err);
+    }
+
+    pub fn startResponseWithTimeout(self: *Server, to: net.IpAddress, stream_id: u62, response: http3.Response, body_length: ?usize, timeout: std.Io.Duration) ReceiveTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.startResponseWithDeadline(to, stream_id, response, body_length, .fromNow(self.quic_server.endpoint.io, .{ .clock = .awake, .raw = timeout }));
     }
 
     pub fn sendResponseBody(
@@ -1693,6 +1631,13 @@ pub const Server = struct {
         data: []const u8,
         fin: bool,
     ) Error!void {
+        var progress: DevelopmentBodyWriteProgress = .{};
+        return self.sendResponseBodyWithProgress(to, stream_id, data, fin, &progress);
+    }
+
+    /// Retain the submission/completion distinction on unbounded DATA errors.
+    pub fn sendResponseBodyWithProgress(self: *Server, to: net.IpAddress, stream_id: u62, data: []const u8, fin: bool, progress: *DevelopmentBodyWriteProgress) Error!void {
+        progress.* = .{};
         self.peer_state_mutex.lockUncancelable(
             self.quic_server.endpoint.io,
         );
@@ -1706,7 +1651,6 @@ pub const Server = struct {
             self.quic_server.endpoint.io,
         );
         defer self.response_send_mutex.unlock(self.quic_server.endpoint.io);
-        var send_attempted = false;
         sendRuntimeBodyChunk(
             &self.quic_server.endpoint,
             to,
@@ -1715,12 +1659,13 @@ pub const Server = struct {
             data,
             fin,
             self.limits.max_stream_frame_data,
-            &send_attempted,
+            &progress.send_attempted,
         ) catch |err| {
-            if (send_attempted) peer.markSendFailed();
+            if (progress.send_attempted) peer.markSendFailed();
             return err;
         };
         peer.commitResponseBody(stream_id, fin);
+        progress.completed = true;
     }
 
     pub fn sendResponseBodyWithTimeout(
@@ -1807,54 +1752,20 @@ pub const Server = struct {
 
     /// Emit response trailers on an admitted streaming request and finish the
     /// response. The next stream offset continues after all DATA contributions.
-    pub fn finishResponseTrailers(
-        self: *Server,
-        to: net.IpAddress,
-        stream_id: u62,
-        trailers: []const http3.Qpack.HeaderField,
-    ) Error!void {
-        self.peer_state_mutex.lockUncancelable(
-            self.quic_server.endpoint.io,
-        );
-        defer self.peer_state_mutex.unlock(
-            self.quic_server.endpoint.io,
-        );
-        const peer = self.streaming_peers.find(to) orelse
-            return error.UnexpectedStream;
-        const bodies = try peer.prepareResponseBody(stream_id);
-        const body_entry = try bodies.prepareTrailers(stream_id);
-        const response_context = peer.responseContext();
-        try response_context.response_send_offsets.put(
-            self.quic_server.endpoint.allocator,
-            stream_id,
-            body_entry.send.next_offset,
-        );
-        self.response_send_mutex.lockUncancelable(
-            self.quic_server.endpoint.io,
-        );
-        defer self.response_send_mutex.unlock(self.quic_server.endpoint.io);
-        response_context.scratch.encoded.clearRetainingCapacity();
-        try http3.writeTrailersDynamic(
-            &response_context.scratch.encoded,
-            self.quic_server.endpoint.allocator,
-            trailers,
-            development_settings,
-            stream_id,
-            response_context.qpack_encode,
-        );
-        sendRuntimeResponsePrefix(
-            &self.quic_server.endpoint,
-            to,
-            response_context.scratch,
-            stream_id,
-            self.limits.max_stream_frame_data,
-            response_context.response_send_offsets,
-            true,
-        ) catch |err| {
-            peer.markSendFailed();
-            return err;
+    pub fn finishResponseTrailers(self: *Server, to: net.IpAddress, stream_id: u62, trailers: []const http3.Qpack.HeaderField) Error!void {
+        return bounded_response.trailers(self, to, stream_id, trailers, null) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
         };
-        peer.commitResponseTrailers(stream_id);
+    }
+
+    pub fn finishResponseTrailersWithDeadline(self: *Server, to: net.IpAddress, stream_id: u62, trailers: []const http3.Qpack.HeaderField, deadline: std.Io.Clock.Timestamp) ReceiveTimeoutError!void {
+        return bounded_response.trailers(self, to, stream_id, trailers, deadline) catch |err| return @errorCast(err);
+    }
+
+    pub fn finishResponseTrailersWithTimeout(self: *Server, to: net.IpAddress, stream_id: u62, trailers: []const http3.Qpack.HeaderField, timeout: std.Io.Duration) ReceiveTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.finishResponseTrailersWithDeadline(to, stream_id, trailers, .fromNow(self.quic_server.endpoint.io, .{ .clock = .awake, .raw = timeout }));
     }
 
     /// Abort both directions of a development request stream. If no response
@@ -1875,6 +1786,15 @@ pub const Server = struct {
             self.quic_server.endpoint.io,
         );
         return self.cancelRequestUnlocked(to, stream_id, application_error_code);
+    }
+
+    pub fn cancelRequestWithDeadline(self: *Server, to: net.IpAddress, stream_id: u62, application_error_code: u64, deadline: std.Io.Clock.Timestamp) ReceiveTimeoutError!void {
+        return bounded_response.cancel(self, to, stream_id, application_error_code, deadline, retireDevelopmentPeerIfInactive) catch |err| return @errorCast(err);
+    }
+
+    pub fn cancelRequestWithTimeout(self: *Server, to: net.IpAddress, stream_id: u62, application_error_code: u64, timeout: std.Io.Duration) ReceiveTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.cancelRequestWithDeadline(to, stream_id, application_error_code, .fromNow(self.quic_server.endpoint.io, .{ .clock = .awake, .raw = timeout }));
     }
 
     fn cancelRequestUnlocked(
@@ -1991,7 +1911,9 @@ const DevelopmentConcurrentAdapter = struct {
         stream_id: u62,
         response: http3.Response,
         body_length: ?usize,
-    ) Error!void {
+        deadline: ?std.Io.Clock.Timestamp,
+    ) anyerror!void {
+        if (deadline) |until| return session.startResponseWithDeadline(from, stream_id, response, body_length, until);
         return session.startResponse(from, stream_id, response, body_length);
     }
     pub fn sendBody(
@@ -2000,8 +1922,19 @@ const DevelopmentConcurrentAdapter = struct {
         stream_id: u62,
         data: []const u8,
         fin: bool,
-    ) Error!void {
-        return session.sendResponseBody(from, stream_id, data, fin);
+        progress: *concurrent_body_writer.Progress,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) anyerror!void {
+        var development_progress: DevelopmentBodyWriteProgress = .{};
+        defer {
+            if (development_progress.completed) {
+                progress.committed_bytes = data.len;
+                progress.fin_committed = fin;
+            }
+            progress.retryable = development_progress.completed or !development_progress.send_attempted;
+        }
+        if (deadline) |until| return session.sendResponseBodyWithDeadline(from, stream_id, data, fin, &development_progress, until);
+        return session.sendResponseBodyWithProgress(from, stream_id, data, fin, &development_progress);
     }
     /// The cleartext development runtime keeps the two-step path.
     pub fn sendCompleteResponse(
@@ -2012,9 +1945,15 @@ const DevelopmentConcurrentAdapter = struct {
         body_length: ?usize,
         data: []const u8,
         request_method: ?[]const u8,
-    ) Error!void {
+        deadline: ?std.Io.Clock.Timestamp,
+    ) anyerror!void {
         var value = response;
         value.request_method = request_method;
+        if (deadline) |until| {
+            try session.startResponseWithDeadline(from, stream_id, value, body_length, until);
+            var progress: DevelopmentBodyWriteProgress = .{};
+            return session.sendResponseBodyWithDeadline(from, stream_id, data, true, &progress, until);
+        }
         try session.startResponse(from, stream_id, value, body_length);
         return session.sendResponseBody(from, stream_id, data, true);
     }
@@ -2027,11 +1966,17 @@ const DevelopmentConcurrentAdapter = struct {
         body_length: ?usize,
         data: []const u8,
         request_method: ?[]const u8,
-    ) Error!void {
-        _ = body_length;
+        deadline: ?std.Io.Clock.Timestamp,
+    ) anyerror!void {
         var value = response;
         value.body = data;
         value.request_method = request_method;
+        if (deadline) |until| {
+            for (informational) |info| try session.sendInformationalResponseWithDeadline(from, stream_id, info, until);
+            try session.startResponseWithDeadline(from, stream_id, value, body_length, until);
+            var progress: DevelopmentBodyWriteProgress = .{};
+            return session.sendResponseBodyWithDeadline(from, stream_id, data, true, &progress, until);
+        }
         return session.sendResponseWithInformational(
             from,
             stream_id,
@@ -2044,7 +1989,9 @@ const DevelopmentConcurrentAdapter = struct {
         from: net.IpAddress,
         stream_id: u62,
         trailers: []const http3.Qpack.HeaderField,
-    ) Error!void {
+        deadline: ?std.Io.Clock.Timestamp,
+    ) anyerror!void {
+        if (deadline) |until| return session.finishResponseTrailersWithDeadline(from, stream_id, trailers, until);
         return session.finishResponseTrailers(from, stream_id, trailers);
     }
     pub fn cancel(
@@ -2052,7 +1999,9 @@ const DevelopmentConcurrentAdapter = struct {
         from: net.IpAddress,
         stream_id: u62,
         code: u64,
-    ) Error!void {
+        deadline: ?std.Io.Clock.Timestamp,
+    ) anyerror!void {
+        if (deadline) |until| return session.cancelRequestWithDeadline(from, stream_id, code, until);
         return session.cancelRequest(from, stream_id, code);
     }
     pub fn goaway(

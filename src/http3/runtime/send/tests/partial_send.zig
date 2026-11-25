@@ -38,54 +38,13 @@ const FailOnCall = struct {
     }
 };
 
-const FixedClockSend = struct {
-    delegate: std.Io,
-    now_ns: i96,
-    send_calls: usize = 0,
-    sleep_calls: usize = 0,
-    advance_after_send_ns: i96 = 0,
-
-    fn now(
-        userdata: ?*anyopaque,
-        _: std.Io.Clock,
-    ) std.Io.Timestamp {
-        const self: *@This() = @ptrCast(@alignCast(userdata.?));
-        return .fromNanoseconds(self.now_ns);
-    }
-
-    fn sleep(
-        userdata: ?*anyopaque,
-        _: std.Io.Timeout,
-    ) std.Io.Cancelable!void {
-        const self: *@This() = @ptrCast(@alignCast(userdata.?));
-        self.sleep_calls += 1;
-        return error.Canceled;
-    }
-
-    fn netSend(
-        userdata: ?*anyopaque,
-        socket_handle: net.Socket.Handle,
-        messages: []net.OutgoingMessage,
-        flags: net.SendFlags,
-    ) struct { ?net.Socket.SendError, usize } {
-        const self: *@This() = @ptrCast(@alignCast(userdata.?));
-        self.send_calls += 1;
-        const result = self.delegate.vtable.netSend(
-            self.delegate.userdata,
-            socket_handle,
-            messages,
-            flags,
-        );
-        if (result[1] != 0) self.now_ns += self.advance_after_send_ns;
-        return result;
-    }
-};
+const NativeSendIo = @import("../../../../internal/testing/deadline_send_io.zig").Native;
 
 test "HTTP/3 stateful packetizer fails closed after a visible prefix" {
     const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var native: NativeSendIo = .{ .backend = .init(allocator, .{}), .fixed_clock = false };
+    defer native.backend.deinit();
+    const io = native.backend.io();
     var receiver = try quic.runtime.Endpoint.bind(
         allocator,
         io,
@@ -118,10 +77,10 @@ test "HTTP/3 stateful packetizer fails closed after a visible prefix" {
         .delegate = sender.io,
         .fail_after_prefix = 1,
     };
-    var vtable = sender.io.vtable.*;
-    vtable.netSend = ObservedBatchSend.netSend;
-    sender.io = .{ .userdata = &partial, .vtable = &vtable };
-    defer sender.io = partial.delegate;
+    native.send_context = &partial;
+    native.send_override = ObservedBatchSend.netSend;
+    sender.io = native.io();
+    defer sender.io = io;
 
     const frames = [_]quic.Frame{
         .{ .stream = .{ .stream_id = 0, .data = "first" } },
@@ -142,9 +101,9 @@ test "HTTP/3 stateful packetizer fails closed after a visible prefix" {
 
 test "HTTP/3 stateful packetizer deadline preserves zero progress and closes after visible prefix" {
     const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var fixed: NativeSendIo = .{ .backend = .init(allocator, .{}), .now_ns = .init(1_000_000), .advance_after_send_ns = 0 };
+    defer fixed.backend.deinit();
+    const io = fixed.backend.io();
     var receiver = try quic.runtime.Endpoint.bind(
         allocator,
         io,
@@ -163,16 +122,8 @@ test "HTTP/3 stateful packetizer deadline preserves zero progress and closes aft
         [_]u8{0x9a} ** quic.protection.secret_len,
     );
 
-    var fixed = FixedClockSend{
-        .delegate = sender.io,
-        .now_ns = 1_000_000,
-    };
-    var vtable = sender.io.vtable.*;
-    vtable.now = FixedClockSend.now;
-    vtable.sleep = FixedClockSend.sleep;
-    vtable.netSend = FixedClockSend.netSend;
-    sender.io = .{ .userdata = &fixed, .vtable = &vtable };
-    defer sender.io = fixed.delegate;
+    sender.io = fixed.io();
+    defer sender.io = io;
 
     var zero_progress = try quic.one_rtt.Connection.init(&sender, .{
         .peer = receiver.address(),
@@ -186,7 +137,7 @@ test "HTTP/3 stateful packetizer deadline preserves zero progress and closes aft
     defer zero_progress.deinit();
     quic.one_rtt.testing.exhaustPacingAt(
         &zero_progress,
-        @intCast(fixed.now_ns),
+        @intCast(fixed.now_ns.load(.acquire)),
     );
     const ping = [_]quic.Frame{.{ .ping = {} }};
     try std.testing.expectError(
@@ -198,12 +149,11 @@ test "HTTP/3 stateful packetizer deadline preserves zero progress and closes aft
             1,
             .{
                 .clock = .awake,
-                .raw = .fromNanoseconds(fixed.now_ns + 1),
+                .raw = .fromNanoseconds(fixed.now_ns.load(.acquire) + 1),
             },
         ),
     );
-    try std.testing.expectEqual(@as(usize, 0), fixed.send_calls);
-    try std.testing.expectEqual(@as(usize, 0), fixed.sleep_calls);
+    try std.testing.expectEqual(@as(usize, 0), fixed.send_calls.load(.acquire));
     try std.testing.expectEqual(@as(u64, 0), zero_progress.next_packet_number);
     try std.testing.expect(!zero_progress.closed());
 
@@ -217,7 +167,7 @@ test "HTTP/3 stateful packetizer deadline preserves zero progress and closes aft
         .tls_handshake_complete = true,
     });
     defer partial.deinit();
-    fixed.send_calls = 0;
+    fixed.send_calls.store(0, .release);
     var first: [1000]u8 = .{0xa1} ** 1000;
     var second: [1000]u8 = .{0xa2} ** 1000;
     const frames = [_]quic.Frame{
@@ -233,12 +183,11 @@ test "HTTP/3 stateful packetizer deadline preserves zero progress and closes aft
             1,
             .{
                 .clock = .awake,
-                .raw = .fromNanoseconds(fixed.now_ns + 1),
+                .raw = .fromNanoseconds(fixed.now_ns.load(.acquire) + 1),
             },
         ),
     );
-    try std.testing.expectEqual(@as(usize, 1), fixed.send_calls);
-    try std.testing.expectEqual(@as(usize, 0), fixed.sleep_calls);
+    try std.testing.expectEqual(@as(usize, 1), fixed.send_calls.load(.acquire));
     try std.testing.expect(partial.closed());
     const close = quic.one_rtt.testing.localCloseInfo(&partial) orelse
         return error.TestUnexpectedResult;
@@ -251,9 +200,9 @@ test "HTTP/3 stateful packetizer deadline preserves zero progress and closes aft
 
 test "HTTP/3 protected sender rejects reuse after a visible prefix" {
     const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var native: NativeSendIo = .{ .backend = .init(allocator, .{}), .fixed_clock = false };
+    defer native.backend.deinit();
+    const io = native.backend.io();
     var receiver = try quic.runtime.Endpoint.bind(
         allocator,
         io,
@@ -279,10 +228,10 @@ test "HTTP/3 protected sender rejects reuse after a visible prefix" {
         .delegate = sender.io,
         .fail_after_prefix = 1,
     };
-    var vtable = sender.io.vtable.*;
-    vtable.netSend = ObservedBatchSend.netSend;
-    sender.io = .{ .userdata = &partial, .vtable = &vtable };
-    defer sender.io = partial.delegate;
+    native.send_context = &partial;
+    native.send_override = ObservedBatchSend.netSend;
+    sender.io = native.io();
+    defer sender.io = io;
 
     const frames = [_]quic.Frame{
         .{ .stream = .{ .stream_id = 0, .data = "first" } },
@@ -319,9 +268,9 @@ test "HTTP/3 protected sender rejects reuse after a visible prefix" {
 
 test "HTTP/3 protected sender deadline rejects reuse after a completed batch" {
     const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var fixed: NativeSendIo = .{ .backend = .init(allocator, .{}), .now_ns = .init(1_000_000), .advance_after_send_ns = std.time.ns_per_s };
+    defer fixed.backend.deinit();
+    const io = fixed.backend.io();
     var receiver = try quic.runtime.Endpoint.bind(
         allocator,
         io,
@@ -343,16 +292,8 @@ test "HTTP/3 protected sender deadline rejects reuse after a completed batch" {
     defer send.deinit();
     var next_packet_number: u64 = 0;
 
-    var fixed = FixedClockSend{
-        .delegate = sender.io,
-        .now_ns = 1_000_000,
-        .advance_after_send_ns = std.time.ns_per_s,
-    };
-    var vtable = sender.io.vtable.*;
-    vtable.now = FixedClockSend.now;
-    vtable.netSend = FixedClockSend.netSend;
-    sender.io = .{ .userdata = &fixed, .vtable = &vtable };
-    defer sender.io = fixed.delegate;
+    sender.io = fixed.io();
+    defer sender.io = io;
 
     var frames: [quic.one_rtt.max_batch_packets + 1]quic.Frame = undefined;
     for (&frames, 0..) |*frame, index| {
@@ -374,11 +315,11 @@ test "HTTP/3 protected sender deadline rejects reuse after a completed batch" {
             1,
             .{
                 .clock = .awake,
-                .raw = .fromNanoseconds(fixed.now_ns + 1),
+                .raw = .fromNanoseconds(fixed.now_ns.load(.acquire) + 1),
             },
         ),
     );
-    try std.testing.expectEqual(@as(usize, 1), fixed.send_calls);
+    try std.testing.expectEqual(@as(usize, 1), fixed.send_calls.load(.acquire));
     try std.testing.expectEqual(
         @as(u64, quic.one_rtt.max_batch_packets),
         next_packet_number,
@@ -400,9 +341,9 @@ test "HTTP/3 protected sender deadline rejects reuse after a completed batch" {
 
 test "HTTP/3 protected sender detects a prior completed packet batch" {
     const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var native: NativeSendIo = .{ .backend = .init(allocator, .{}), .fixed_clock = false };
+    defer native.backend.deinit();
+    const io = native.backend.io();
     var receiver = try quic.runtime.Endpoint.bind(
         allocator,
         io,
@@ -428,10 +369,10 @@ test "HTTP/3 protected sender detects a prior completed packet batch" {
         .delegate = sender.io,
         .fail_on_call = 2,
     };
-    var vtable = sender.io.vtable.*;
-    vtable.netSend = FailOnCall.netSend;
-    sender.io = .{ .userdata = &fail_second_call, .vtable = &vtable };
-    defer sender.io = fail_second_call.delegate;
+    native.send_context = &fail_second_call;
+    native.send_override = FailOnCall.netSend;
+    sender.io = native.io();
+    defer sender.io = io;
 
     var frames: [quic.one_rtt.max_batch_packets + 1]quic.Frame = undefined;
     for (&frames, 0..) |*frame, index| {
@@ -463,9 +404,9 @@ test "HTTP/3 protected sender detects a prior completed packet batch" {
 
 test "HTTP/3 zero-progress send failure remains retryable" {
     const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var native: NativeSendIo = .{ .backend = .init(allocator, .{}), .fixed_clock = false };
+    defer native.backend.deinit();
+    const io = native.backend.io();
     var receiver = try quic.runtime.Endpoint.bind(
         allocator,
         io,
@@ -488,10 +429,10 @@ test "HTTP/3 zero-progress send failure remains retryable" {
         .delegate = sender.io,
         .fail_after_prefix = 0,
     };
-    var vtable = sender.io.vtable.*;
-    vtable.netSend = ObservedBatchSend.netSend;
-    sender.io = .{ .userdata = &partial, .vtable = &vtable };
-    defer sender.io = partial.delegate;
+    native.send_context = &partial;
+    native.send_override = ObservedBatchSend.netSend;
+    sender.io = native.io();
+    defer sender.io = io;
 
     const frames = [_]quic.Frame{
         .{ .stream = .{ .stream_id = 0, .data = "first" } },
@@ -622,9 +563,9 @@ test "HTTP/3 protected sender retires sealed packets after interceptor allocatio
 
 test "HTTP/3 protected body batch commits only a visible prefix" {
     const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var native: NativeSendIo = .{ .backend = .init(allocator, .{}), .fixed_clock = false };
+    defer native.backend.deinit();
+    const io = native.backend.io();
     var receiver = try quic.runtime.Endpoint.bind(
         allocator,
         io,
@@ -665,10 +606,10 @@ test "HTTP/3 protected body batch commits only a visible prefix" {
         .delegate = sender.io,
         .fail_after_prefix = 1,
     };
-    var vtable = sender.io.vtable.*;
-    vtable.netSend = ObservedBatchSend.netSend;
-    sender.io = .{ .userdata = &partial, .vtable = &vtable };
-    defer sender.io = partial.delegate;
+    native.send_context = &partial;
+    native.send_override = ObservedBatchSend.netSend;
+    sender.io = native.io();
+    defer sender.io = io;
 
     const Context = struct {
         finished: ?u62 = null,
@@ -707,9 +648,9 @@ test "HTTP/3 protected body batch commits only a visible prefix" {
 
 test "HTTP/3 protected body deadline resumes after a complete packet batch" {
     const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var fixed: NativeSendIo = .{ .backend = .init(allocator, .{}), .now_ns = .init(1_000_000), .advance_after_send_ns = std.time.ns_per_s };
+    defer fixed.backend.deinit();
+    const io = fixed.backend.io();
     var receiver = try quic.runtime.Endpoint.bind(
         allocator,
         io,
@@ -750,16 +691,8 @@ test "HTTP/3 protected body deadline resumes after a complete packet batch" {
         chunk.* = .{ .stream_id = stream_id, .data = "x", .fin = true };
     }
     var next_packet_number: u64 = 0;
-    var fixed = FixedClockSend{
-        .delegate = sender.io,
-        .now_ns = 1_000_000,
-        .advance_after_send_ns = std.time.ns_per_s,
-    };
-    var vtable = sender.io.vtable.*;
-    vtable.now = FixedClockSend.now;
-    vtable.netSend = FixedClockSend.netSend;
-    sender.io = .{ .userdata = &fixed, .vtable = &vtable };
-    defer sender.io = fixed.delegate;
+    sender.io = fixed.io();
+    defer sender.io = io;
 
     const Context = struct {
         finished: usize = 0,
@@ -790,7 +723,7 @@ test "HTTP/3 protected body deadline resumes after a complete packet batch" {
             &committed,
             .{
                 .clock = .awake,
-                .raw = .fromNanoseconds(fixed.now_ns + 1),
+                .raw = .fromNanoseconds(fixed.now_ns.load(.acquire) + 1),
             },
         ),
     );
@@ -799,7 +732,7 @@ test "HTTP/3 protected body deadline resumes after a complete packet batch" {
         committed,
     );
     try std.testing.expectEqual(committed, context.finished);
-    try std.testing.expectEqual(@as(usize, 1), fixed.send_calls);
+    try std.testing.expectEqual(@as(usize, 1), fixed.send_calls.load(.acquire));
     try std.testing.expectEqual(@as(u64, @intCast(committed)), next_packet_number);
     try std.testing.expect(send.isUsable());
     for (chunks[0..committed]) |chunk| {
@@ -810,7 +743,7 @@ test "HTTP/3 protected body deadline resumes after a complete packet batch" {
         bodies.find(chunks[committed].stream_id).?.send.next_offset,
     );
 
-    sender.io = fixed.delegate;
+    sender.io = io;
     var suffix_committed: usize = 99;
     try body_sender.sendProtectedBodyBatchPacedWithDeadline(
         &sender,
@@ -833,9 +766,9 @@ test "HTTP/3 protected body deadline resumes after a complete packet batch" {
 
 test "HTTP/3 stateful body batch returns socket-visible error prefix" {
     const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var native: NativeSendIo = .{ .backend = .init(allocator, .{}), .fixed_clock = false };
+    defer native.backend.deinit();
+    const io = native.backend.io();
     var receiver = try quic.runtime.Endpoint.bind(
         allocator,
         io,
@@ -878,10 +811,10 @@ test "HTTP/3 stateful body batch returns socket-visible error prefix" {
         .delegate = sender.io,
         .fail_after_prefix = 1,
     };
-    var vtable = sender.io.vtable.*;
-    vtable.netSend = ObservedBatchSend.netSend;
-    sender.io = .{ .userdata = &partial, .vtable = &vtable };
-    defer sender.io = partial.delegate;
+    native.send_context = &partial;
+    native.send_override = ObservedBatchSend.netSend;
+    sender.io = native.io();
+    defer sender.io = io;
 
     const Context = struct {
         finished: [2]u62 = undefined,
@@ -1025,9 +958,9 @@ test "HTTP/3 stateful body batch preflights later oversized packet" {
 
 test "HTTP/3 deadline body batch retains socket-visible error prefix" {
     const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var native: NativeSendIo = .{ .backend = .init(allocator, .{}), .fixed_clock = false };
+    defer native.backend.deinit();
+    const io = native.backend.io();
     var receiver = try quic.runtime.Endpoint.bind(
         allocator,
         io,
@@ -1070,10 +1003,10 @@ test "HTTP/3 deadline body batch retains socket-visible error prefix" {
         .delegate = sender.io,
         .fail_after_prefix = 1,
     };
-    var vtable = sender.io.vtable.*;
-    vtable.netSend = ObservedBatchSend.netSend;
-    sender.io = .{ .userdata = &partial, .vtable = &vtable };
-    defer sender.io = partial.delegate;
+    native.send_context = &partial;
+    native.send_override = ObservedBatchSend.netSend;
+    sender.io = native.io();
+    defer sender.io = io;
 
     const Context = struct {
         fn receive(_: *@This(), _: std.Io.Clock.Timestamp) !void {

@@ -65,6 +65,18 @@ write retries.
   `none` or an absolute deadline for supervisor loops.
 - Reader-backed HTTP uploads compose source reads and network writes under one
   deadline. A canceled source read joins before borrowed storage is released.
+- Bounded QUIC/H3 submission includes the endpoint send mutex and cooperative
+  socket operation. Cancellation joins before borrowed packet storage is
+  released. A completed send remains successful when its timer races it;
+  progress forms retain a partial prefix before exposing the timeout/error.
+  The [streaming guide](http_streaming.md) describes concurrent H3 DATA suffix
+  retries and the development-path ownership contract.
+- QUIC `trySendWithDeadline` / `trySendWithTimeout` bound one transactional
+  submission. `sendManyProgressWithDeadline` / `sendManyProgressWithTimeout`
+  report the protected and socket-visible packet prefix through caller-owned
+  progress, including an error return. These entry points expose transport
+  stalls to the owner; `sendWithDeadline` / `sendWithTimeout` also drive peer
+  and timer progress while waiting for flow-control or congestion credit.
 - HTTP/3 handshake selection uses `http3.preference_timeout` for the H3 probe
   under `prefer_http3`; TCP fallback keeps the original request deadline.
 - `websocket.stream_connection` exposes deadline and relative-timeout forms

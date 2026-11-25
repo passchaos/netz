@@ -1,5 +1,6 @@
 const std = @import("std");
 const deadline_policy = @import("../../../internal/deadline.zig");
+const bounded = @import("../../../internal/progress_deadline.zig");
 const quic = @import("../../../quic/mod.zig");
 const runtime_error = @import("../error.zig");
 const packetizer = @import("packetizer.zig");
@@ -86,6 +87,7 @@ pub const State = struct {
             next_packet_number,
             &packets,
             null,
+            null,
         ) catch |err| switch (err) {
             error.Timeout, error.ConcurrencyUnavailable => unreachable,
             else => |other| return @errorCast(other),
@@ -168,6 +170,7 @@ pub const State = struct {
             next_packet_number,
             packets,
             null,
+            null,
         ) catch |err| switch (err) {
             error.Timeout, error.ConcurrencyUnavailable => unreachable,
             else => |other| return @errorCast(other),
@@ -193,7 +196,17 @@ pub const State = struct {
             next_packet_number,
             packets,
             deadline,
+            null,
         );
+    }
+
+    /// Keep the exact protected/socket prefix on timeout and transport error.
+    /// A tracked batch remains retryable because its caller owns the suffix.
+    pub fn sendPacketBatchWithProgressAndDeadline(self: *State, endpoint: *quic.runtime.Endpoint, to: net.IpAddress, keys: quic.protection.PacketProtectionKeys, destination_connection_id: []const u8, next_packet_number: *u64, packets: []const []const quic.Frame, progress: *quic.one_rtt.BatchSendResult, deadline: std.Io.Clock.Timestamp) ReceiveTimeoutError!void {
+        progress.* = .{ .sent_count = 0, .sent_bytes = 0, .protected_count = 0 };
+        _ = try deadline_policy.usableAwake(endpoint.io, deadline);
+        _ = try self.sendPacketBatchProgressUntil(endpoint, to, keys, destination_connection_id, next_packet_number, packets, deadline, progress);
+        if (progress.send_error) |err| return err;
     }
 
     fn sendPacketBatchProgressUntil(
@@ -205,7 +218,9 @@ pub const State = struct {
         next_packet_number: *u64,
         packets: []const []const quic.Frame,
         deadline: ?std.Io.Clock.Timestamp,
+        progress_out: ?*quic.one_rtt.BatchSendResult,
     ) ReceiveTimeoutError!quic.one_rtt.BatchSendResult {
+        if (progress_out) |progress| progress.* = .{ .sent_count = 0, .sent_bytes = 0, .protected_count = 0 };
         if (self.unusable) return error.ConnectionUnusable;
         if (deadline) |absolute| {
             _ = try deadline_policy.usableAwake(endpoint.io, absolute);
@@ -229,19 +244,33 @@ pub const State = struct {
         self.packet_scratch.items.len = sizes.packet;
         defer self.packet_scratch.items.len = 0;
 
-        const result = try quic.one_rtt.sendFramesBatchIntoProgress(
-            endpoint,
-            to,
-            keys,
-            options,
-            self.payload_scratch.items,
-            self.packet_scratch.items,
-        );
+        var wait_failure: ?bounded.BudgetError = null;
+        const result = if (deadline) |until| result: {
+            const outcome = bounded.before(endpoint.io, until, quic.one_rtt.sendFramesBatchIntoProgress, .{ endpoint, to, keys, options, self.payload_scratch.items, self.packet_scratch.items });
+            wait_failure = outcome.wait_error;
+            const operation = outcome.result orelse return wait_failure orelse error.Unexpected;
+            break :result try operation;
+        } else try quic.one_rtt.sendFramesBatchIntoProgress(endpoint, to, keys, options, self.payload_scratch.items, self.packet_scratch.items);
+        if (progress_out) |progress| progress.* = result;
         next_packet_number.* = std.math.add(
             u64,
             next_packet_number.*,
             result.protected_count,
         ) catch return error.InvalidPacketNumber;
+        if (result.send_error) |send_error| if (send_error == error.Canceled and wait_failure != null) {
+            if (result.protected_count != 0 and result.sent_count == result.protected_count) {
+                var completed = result;
+                completed.send_error = null;
+                if (progress_out) |progress| progress.* = completed;
+                return completed;
+            }
+            if (progress_out == null and result.sent_count != 0) self.unusable = true;
+            return wait_failure.?;
+        };
+        if (wait_failure != null and result.sent_count != result.protected_count and result.send_error == null) {
+            if (progress_out == null and result.sent_count != 0) self.unusable = true;
+            return wait_failure.?;
+        }
         return result;
     }
 

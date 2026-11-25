@@ -118,11 +118,13 @@ pub fn main(init: std.process.Init) !void {
         &sequential,
         &packets,
         options.warmup_iterations,
+        options.send_timeout_ms,
     );
     try runBatch(
         &batched,
         &packets,
         options.warmup_iterations,
+        options.send_timeout_ms,
     );
 
     const sequential_started = nowNs(io);
@@ -130,6 +132,7 @@ pub fn main(init: std.process.Init) !void {
         &sequential,
         &packets,
         options.measured_iterations,
+        options.send_timeout_ms,
     );
     const sequential_ns = nowNs(io) -| sequential_started;
 
@@ -138,6 +141,7 @@ pub fn main(init: std.process.Init) !void {
         &batched,
         &packets,
         options.measured_iterations,
+        options.send_timeout_ms,
     );
     const batch_ns = nowNs(io) -| batch_started;
 
@@ -146,6 +150,7 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print(
         \\QUIC 1-RTT send benchmark
         \\  io backend: zio-std-io
+        \\  finite send deadline: {}
         \\  iterations: {d}, packets/batch: {d}, STREAM descriptors/packet: {d}, payload bytes/packet: {d}
         \\  stateful batch GSO available after run: {}
         \\  stateful sequential: {d} ns/batch, {d} ns/packet
@@ -154,6 +159,7 @@ pub fn main(init: std.process.Init) !void {
         \\  total packets/path: {d}
         \\
     , .{
+        options.send_timeout_ms != null,
         options.measured_iterations,
         batch_size,
         stream_fragments_per_packet,
@@ -306,13 +312,16 @@ fn runSequential(
     connection: *netz.quic.one_rtt.Connection,
     packets: []const []const netz.quic.Frame,
     iterations: usize,
+    send_timeout_ms: ?i64,
 ) !void {
     // The receiver is intentionally not drained: this benchmark isolates
     // protection, allocation, and sender syscall overhead. UDP queue overflow
     // can drop loopback datagrams without changing sender-side work.
     for (0..iterations) |_| {
         for (packets) |frames| {
-            try connection.send(frames);
+            if (send_timeout_ms) |milliseconds| {
+                try connection.sendWithDeadline(frames, .fromNow(connection.endpoint.io, .{ .clock = .awake, .raw = .fromMilliseconds(milliseconds) }));
+            } else try connection.send(frames);
         }
     }
 }
@@ -321,9 +330,14 @@ fn runBatch(
     connection: *netz.quic.one_rtt.Connection,
     packets: []const []const netz.quic.Frame,
     iterations: usize,
+    send_timeout_ms: ?i64,
 ) !void {
     for (0..iterations) |_| {
-        try connection.sendMany(packets);
+        if (send_timeout_ms) |milliseconds| {
+            var progress: netz.quic.one_rtt.ConnectionBatchSendResult = .{ .sent_count = 0, .protected_count = 0 };
+            try connection.sendManyProgressWithDeadline(packets, &progress, .fromNow(connection.endpoint.io, .{ .clock = .awake, .raw = .fromMilliseconds(milliseconds) }));
+            if (progress.sent_count != packets.len) return error.IncompletePacketBatch;
+        } else try connection.sendMany(packets);
     }
 }
 
@@ -338,6 +352,7 @@ const Options = struct {
     datagram_payload_bytes: usize = default_datagram_payload_bytes,
     warmup_iterations: usize = default_warmup_iterations,
     measured_iterations: usize = default_measured_iterations,
+    send_timeout_ms: ?i64 = null,
 };
 
 fn parseOptions(
@@ -352,7 +367,9 @@ fn parseOptions(
     _ = args.next();
     var options: Options = .{};
     while (args.next()) |arg| {
-        if (std.mem.startsWith(u8, arg, "--scenario=")) {
+        if (std.mem.startsWith(u8, arg, "--send-timeout-ms=")) {
+            options.send_timeout_ms = try std.fmt.parseInt(i64, arg["--send-timeout-ms=".len..], 10);
+        } else if (std.mem.startsWith(u8, arg, "--scenario=")) {
             options.scenario = std.meta.stringToEnum(
                 Scenario,
                 arg["--scenario=".len..],
@@ -390,6 +407,9 @@ fn parseOptions(
         options.measured_iterations == 0)
     {
         return error.InvalidArgument;
+    }
+    if (options.send_timeout_ms) |milliseconds| {
+        if (milliseconds <= 0 or options.scenario != .stream) return error.InvalidArgument;
     }
     return options;
 }

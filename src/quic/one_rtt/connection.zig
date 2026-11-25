@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const secure_random = @import("../../internal/secure_random.zig");
+const send_deadline = @import("send_deadline.zig");
 const quic = @import("../mod.zig");
 const net = std.Io.net;
 const runtime = @import("../one_rtt.zig");
@@ -756,7 +757,7 @@ pub const Connection = struct {
         while (true) {
             const now_ns = self.monotonicNowNs();
             if (callerDeadlineExpired(deadline, now_ns)) return error.Timeout;
-            self.sendAutomaticallyAt(frames, now_ns) catch |err| switch (err) {
+            self.trySendWithDeadline(frames, deadline) catch |err| switch (err) {
                 error.FlowControlBlocked, error.CongestionLimited => {
                     self.servicePacketServicingTimersDeadline(deadline) catch |progress_err|
                         switch (progress_err) {
@@ -1482,6 +1483,32 @@ pub const Connection = struct {
         packets: []const []const quic.Frame,
     ) Error!ConnectionBatchSendResult {
         return self.sendManyProgressAt(packets, self.monotonicNowNs());
+    }
+
+    /// Bound the actual send task and publish its protected/visible prefix on
+    /// every return path. Packet numbers and recovery state are settled before
+    /// a timeout/cancellation error is returned to the caller.
+    pub fn sendManyProgressWithDeadline(self: *Connection, packets: []const []const quic.Frame, progress: *ConnectionBatchSendResult, deadline: std.Io.Clock.Timestamp) send_deadline.Error!void {
+        return send_deadline.many(self, packets, progress, deadline);
+    }
+
+    /// Relative-budget counterpart with the same prefix and packet-number
+    /// contract. Reject a non-positive timeout before any protection or send.
+    pub fn sendManyProgressWithTimeout(self: *Connection, packets: []const []const quic.Frame, progress: *ConnectionBatchSendResult, timeout: std.Io.Duration) send_deadline.Error!void {
+        progress.* = .{ .sent_count = 0, .protected_count = 0 };
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendManyProgressWithDeadline(packets, progress, .fromNow(self.endpoint.io, .{ .clock = .awake, .raw = timeout }));
+    }
+
+    /// One transactional packet under an absolute awake deadline. A complete
+    /// socket commit that races expiry succeeds; canceled unsent work expires.
+    pub fn trySendWithDeadline(self: *Connection, frames: []const quic.Frame, deadline: std.Io.Clock.Timestamp) send_deadline.Error!void {
+        return send_deadline.one(self, frames, deadline);
+    }
+
+    pub fn trySendWithTimeout(self: *Connection, frames: []const quic.Frame, timeout: std.Io.Duration) send_deadline.Error!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.trySendWithDeadline(frames, .fromNow(self.endpoint.io, .{ .clock = .awake, .raw = timeout }));
     }
 
     /// Protect and submit one stateful packet batch with explicit progress.

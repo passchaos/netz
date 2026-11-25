@@ -195,7 +195,7 @@ pub const Set = struct {
             _ = self.outbound_bodies.finish(stream_id);
         }
 
-        pub fn cancelRequest(self: *Peer, stream_id: u62) Error!Cancellation {
+        pub fn prepareCancellation(self: *Peer, stream_id: u62) Error!Cancellation {
             const body = self.outbound_bodies.find(stream_id);
             if (body == null and !self.lifecycle.contains(stream_id) and
                 !self.request_streams.contains(stream_id) and
@@ -204,7 +204,7 @@ pub const Set = struct {
             {
                 return error.UnexpectedStream;
             }
-            const result: Cancellation = .{
+            return .{
                 .local_final_size = if (body) |entry|
                     entry.send.next_offset
                 else
@@ -214,6 +214,10 @@ pub const Set = struct {
                 else
                     self.lifecycle.contains(stream_id),
             };
+        }
+
+        pub fn cancelRequest(self: *Peer, stream_id: u62) Error!Cancellation {
+            const result = try self.prepareCancellation(stream_id);
             self.request_streams.remove(stream_id);
             self.streaming_requests.remove(stream_id);
             _ = self.response_send_offsets.remove(stream_id);

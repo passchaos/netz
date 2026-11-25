@@ -2,6 +2,7 @@ const std = @import("std");
 const quic = @import("../../../../quic/mod.zig");
 const paced = @import("../paced_body.zig");
 const bodies_module = @import("../../stream/outbound_body.zig");
+const NativeSendIo = @import("../../../../internal/testing/deadline_send_io.zig").Native;
 const Error = @import("../../error.zig").ReceiveTimeoutError;
 
 test "HTTP/3 paced DATA deadline keeps complete committed prefix and connection usable" {
@@ -11,32 +12,14 @@ test "HTTP/3 paced DATA deadline keeps complete committed prefix and connection 
 
 fn checkPrefix(comptime sliced: bool) !void {
     const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var timed: NativeSendIo = .{ .backend = .init(allocator, .{}), .advance_after_send_ns = std.time.ns_per_s };
+    defer timed.backend.deinit();
+    const io = timed.backend.io();
     var receiver = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{});
     defer receiver.deinit();
     var sender = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{});
     defer sender.deinit();
-    const Timed = struct {
-        delegate: std.Io,
-        now_ns: i96 = 0,
-        fn now(context: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
-            const self: *@This() = @ptrCast(@alignCast(context.?));
-            return .fromNanoseconds(self.now_ns);
-        }
-        fn send(context: ?*anyopaque, socket: std.Io.net.Socket.Handle, messages: []std.Io.net.OutgoingMessage, flags: std.Io.net.SendFlags) struct { ?std.Io.net.Socket.SendError, usize } {
-            const self: *@This() = @ptrCast(@alignCast(context.?));
-            const result = self.delegate.vtable.netSend(self.delegate.userdata, socket, messages, flags);
-            if (result[1] != 0) self.now_ns += std.time.ns_per_s;
-            return result;
-        }
-    };
-    var timed = Timed{ .delegate = io };
-    var vtable = io.vtable.*;
-    vtable.now = Timed.now;
-    vtable.netSend = Timed.send;
-    sender.io = .{ .userdata = &timed, .vtable = &vtable };
+    sender.io = timed.io();
     defer sender.io = io;
     const keys = quic.protection.deriveAes128Keys([_]u8{0x87} ** quic.protection.secret_len);
     var connection = try quic.one_rtt.Connection.init(&sender, .{

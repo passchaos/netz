@@ -784,7 +784,7 @@ pub const Endpoint = struct {
     /// reject non-Not-ECT marks instead of silently pretending ECN validation
     /// can run.
     pub fn sendBytesWithEcn(self: *Endpoint, to: net.IpAddress, bytes: []const u8, ecn: quic.packet_space.EcnCodepoint) Error!void {
-        self.send_mutex.lockUncancelable(self.io);
+        try self.send_mutex.lock(self.io);
         defer self.send_mutex.unlock(self.io);
         return self.sendBytesWithEcnLocked(to, bytes, ecn);
     }
@@ -949,7 +949,10 @@ pub const Endpoint = struct {
         datagrams: []const []const u8,
         ecn: quic.packet_space.EcnCodepoint,
     ) Error!SendManyBytesResult {
-        self.send_mutex.lockUncancelable(self.io);
+        // A canceled lock owns no visible prefix. Return that progress through
+        // the normal result so a stateful packetizer can roll back its staged
+        // flow/recovery state after protection already consumed packet numbers.
+        self.send_mutex.lock(self.io) catch |err| return .{ .sent_count = 0, .send_error = err };
         defer self.send_mutex.unlock(self.io);
         return self.sendManyBytesProgressLocked(to, datagrams, ecn);
     }
@@ -1113,7 +1116,7 @@ pub const Endpoint = struct {
         datagrams: []const AddressedDatagram,
         ecn: quic.packet_space.EcnCodepoint,
     ) Error!SendManyBytesResult {
-        self.send_mutex.lockUncancelable(self.io);
+        self.send_mutex.lock(self.io) catch |err| return .{ .sent_count = 0, .send_error = err };
         defer self.send_mutex.unlock(self.io);
         return self.sendManyAddressedBytesProgressWithEcnLocked(
             datagrams,

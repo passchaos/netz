@@ -3792,6 +3792,17 @@ pub const HandshakeServerSession = struct {
         };
     }
 
+    /// Send DATA without a caller deadline while retaining its exact prefix
+    /// on transport errors. The caller owns progress until this call returns.
+    pub fn sendResponseBodyPacedWithProgress(self: *HandshakeServerSession, stream_id: u62, data: []const u8, fin: bool, progress: *BodyWriteProgress) Error!void {
+        progress.* = .{};
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        _ = paced_body.write(&self.established.connection, &self.outbound_bodies, self.options, self, stream_id, data, fin, null, progress, paced_response_hooks) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
     pub fn sendResponseBodyPacedWithTimeout(
         self: *HandshakeServerSession,
         stream_id: u62,

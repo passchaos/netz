@@ -1,0 +1,21 @@
+{
+  "source_sha256": "d361ea1c8747ee7ed3b3db6704eaf9bb53af97e901cc3e1e47661b09ba8c95c8",
+  "original_protocol_combined_unchanged": true,
+  "dependency_pins_unchanged": true,
+  "new_step_timeout_minutes": 5,
+  "bash_syntax_exit": 0,
+  "checks": [
+    {
+      "child_exit": 0,
+      "step_exit": 0,
+      "failure_annotation": false
+    },
+    {
+      "child_exit": 7,
+      "step_exit": 7,
+      "failure_annotation": true
+    }
+  ],
+  "scope": "simulated child exit/status control flow; native protocol behavior is validated separately",
+  "original_timeout_values_preserved": true
+}
