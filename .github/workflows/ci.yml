@@ -251,7 +251,14 @@ jobs:
 
       - name: Run native HTTP3 resolver and acquisition regressions
         if: runner.os == 'Windows' || (runner.os == 'Linux' && matrix.target == 'x86_64-linux-gnu')
-        run: zig build test-http3 -j1 -Dtarget=${{ matrix.target }} '-Dtest-filter=HTTP3 system resolver' '-Dtest-filter=HTTP/3 shared synchronous acquire wakes' '-Dtest-filter=HTTP/3 shared synchronous acquire cancels' '-Dtest-filter=HTTP/3 shared acquisition deadline' --summary all
+        run: |
+          h3_status=0
+          zig build test-http3 -j1 -Dtarget=${{ matrix.target }} '-Dtest-filter=HTTP3 system resolver' '-Dtest-filter=HTTP/3 shared synchronous acquire wakes' '-Dtest-filter=HTTP/3 shared synchronous acquire cancels' '-Dtest-filter=HTTP/3 shared acquisition deadline' '-Dtest-filter=HTTP3 connection race admission' '-Dtest-filter=HTTP3 Happy Eyeballs total deadline' --summary all > native-http3.log 2>&1 || h3_status=$?
+          cat native-http3.log
+          if [ "$h3_status" -ne 0 ]; then
+            python tools/ci/test_failure_annotations.py native-http3.log
+          fi
+          exit "$h3_status"
 
       - name: Run native ordered TCP hostname regressions
         if: runner.os == 'Windows' || (runner.os == 'Linux' && matrix.target == 'x86_64-linux-gnu')
@@ -268,7 +275,7 @@ jobs:
         if: runner.os == 'Windows' || (runner.os == 'Linux' && matrix.target == 'x86_64-linux-gnu')
         run: |
           resolver_status=0
-          zig build test-http1 test-http2 -j1 -Dtarget=${{ matrix.target }} '-Dtest-filter=HTTP1 native resolver policy' '-Dtest-filter=HTTP2 native resolver policy' --summary all > native-resolver.log 2>&1 || resolver_status=$?
+          zig build test-http1 test-http2 -j1 -Dtarget=${{ matrix.target }} '-Dtest-filter=HTTP1 native resolver policy' '-Dtest-filter=HTTP2 native resolver policy' '-Dtest-filter=connection race admission' --summary all > native-resolver.log 2>&1 || resolver_status=$?
           cat native-resolver.log
           if [ "$resolver_status" -ne 0 ]; then
             python tools/ci/test_failure_annotations.py native-resolver.log

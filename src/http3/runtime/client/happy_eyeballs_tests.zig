@@ -203,11 +203,9 @@ test "HTTP3 Happy Eyeballs validates policy and alternate bind family" {
 
 test "HTTP3 Happy Eyeballs total deadline cancels every handshake" {
     const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{
-        .async_limit = .unlimited,
-    });
-    defer threaded.deinit();
-    const io = threaded.io();
+    var backend = try @import("zio").Runtime.init(allocator, .{});
+    defer backend.deinit();
+    const io = backend.io();
 
     var silent_a = try quic.runtime.Endpoint.bind(
         allocator,

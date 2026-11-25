@@ -12,6 +12,16 @@ pub const Options = struct {
     cancel_event: ?*std.Io.Event = null,
 };
 
+/// Reject settled admission before planning, task entry or transport work.
+/// The caller retains its phase's timeout error and original awake deadline.
+pub fn checkAdmission(comptime ConnectError: type, io: std.Io, deadline: ?std.Io.Clock.Timestamp, deadline_error: ?ConnectError, canceled: ?*std.Io.Event) ConnectError!void {
+    std.debug.assert((deadline == null) == (deadline_error == null));
+    if (canceled) |event| if (event.isSet()) return error.Canceled;
+    if (deadline) |absolute| {
+        if (absolute.clock != .awake or absolute.durationFromNow(io).raw.nanoseconds <= 0) return deadline_error.?;
+    }
+}
+
 /// Workers publish into stable slots before waking the selector. Cancellation
 /// joins every admitted worker before closing unselected successful results.
 /// Explicit concurrency prevents a blocked connect from running inline when
@@ -32,7 +42,7 @@ pub fn race(
 ) (ConnectError || Error)!Connected {
     if (targets.len == 0) return error.NoAddressReturned;
     if (options.attempt_delay.nanoseconds <= 0 or options.max_in_flight == 0) return error.InvalidAddressConnectPolicy;
-    std.debug.assert((deadline == null) == (deadline_error == null));
+    try checkAdmission(ConnectError, io, deadline, deadline_error, options.cancel_event);
     const Result = ConnectError!Connected;
     const Context = @TypeOf(context);
     const Slot = struct {
@@ -40,9 +50,16 @@ pub fn race(
         target: std.meta.Elem(@TypeOf(targets)),
         context: Context,
         index: usize,
+        deadline: ?std.Io.Clock.Timestamp,
+        deadline_error: ?ConnectError,
+        cancel_event: ?*std.Io.Event,
         result: ?Result = null,
 
         fn run(self: *@This()) usize {
+            checkAdmission(ConnectError, self.io, self.deadline, self.deadline_error, self.cancel_event) catch |err| {
+                self.result = err;
+                return self.index;
+            };
             self.result = connect_one(
                 self.context,
                 self.io,
@@ -75,7 +92,7 @@ pub fn race(
     };
 
     var slot_stack: [stack_target_capacity]Slot = undefined;
-    const slot_heap = if (targets.len > slot_stack.len)
+    const slot_heap: ?[]Slot = if (targets.len > slot_stack.len)
         try allocator.alloc(Slot, targets.len)
     else
         null;
@@ -87,6 +104,9 @@ pub fn race(
             .target = target,
             .context = context,
             .index = index,
+            .deadline = deadline,
+            .deadline_error = deadline_error,
+            .cancel_event = options.cancel_event,
         };
     }
     defer for (slots) |*slot| slot.deinit();
@@ -94,7 +114,7 @@ pub fn race(
     const wake_capacity = std.math.add(usize, targets.len, if (options.cancel_event != null) 3 else 2) catch
         return error.OutOfMemory;
     var wake_stack: [stack_target_capacity + 3]Wake = undefined;
-    const wake_heap = if (wake_capacity > wake_stack.len)
+    const wake_heap: ?[]Wake = if (wake_capacity > wake_stack.len)
         try allocator.alloc(Wake, wake_capacity)
     else
         null;
@@ -102,6 +122,7 @@ pub fn race(
     const wake_storage = wake_heap orelse wake_stack[0..wake_capacity];
     var select: std.Io.Select(Wake) = .init(io, wake_storage);
     defer while (select.cancel()) |_| {};
+    try checkAdmission(ConnectError, io, deadline, deadline_error, options.cancel_event);
     if (deadline) |absolute| {
         try select.concurrent(.deadline, waitUntil, .{ io, absolute });
     }
@@ -125,6 +146,7 @@ pub fn race(
     }
 
     while (true) {
+        try checkAdmission(ConnectError, io, deadline, deadline_error, options.cancel_event);
         const wake = select.await() catch |err| switch (err) {
             error.Canceled => return error.Canceled,
         };

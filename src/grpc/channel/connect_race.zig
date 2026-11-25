@@ -7,6 +7,7 @@ const stack_capacity = 8;
 /// A result is an original endpoint index. The caller's stable endpoint slot
 /// owns the HTTP/2 connection, so selector storage never copies large values.
 pub fn connect(comptime Error: type, allocator: std.mem.Allocator, io: std.Io, context: anytype, start: usize, delay: std.Io.Duration, deadline: ?std.Io.Clock.Timestamp, canceled: *std.Io.Event) (Error || competition.Error)!?usize {
+    try competition.checkAdmission(Error, io, deadline, if (deadline != null) error.Timeout else null, canceled);
     const count = context.count();
     var input_stack: [stack_capacity]usize = undefined;
     const input_heap = if (count > input_stack.len) try allocator.alloc(usize, count) else null;
@@ -90,4 +91,48 @@ test "gRPC connection competition preserves indices and stable family order" {
     const mixed = [_]?Family{ .ip6, null, .ip4 };
     interleave(Context{ .families = &mixed }, out[0..3], &.{ 0, 1, 2 });
     try std.testing.expectEqualSlices(usize, &.{ 0, 1, 2 }, out[0..3]);
+}
+
+test "gRPC connection race admission rejects settled budgets before endpoint planning" {
+    const ConnectError = error{ Timeout, Canceled, Unexpected };
+    const Probe = struct {
+        starts: *usize,
+        calls: *usize,
+        fn count(_: @This()) usize {
+            return 9;
+        }
+        fn eligible(_: @This(), _: usize) bool {
+            return true;
+        }
+        fn family(_: @This(), _: usize) ?Family {
+            return null;
+        }
+        fn start(self: @This()) void {
+            self.starts.* += 1;
+        }
+        fn connect(self: @This(), _: std.Io, _: usize, _: usize) ConnectError!usize {
+            self.calls.* += 1;
+            return error.Unexpected;
+        }
+        fn deinitConnected(_: @This(), _: *usize) void {
+            unreachable;
+        }
+        fn tryNext(_: ConnectError) bool {
+            return true;
+        }
+    };
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .concurrent_limit = .nothing });
+    defer threaded.deinit();
+    inline for (.{ false, true }) |already_canceled| {
+        var event: std.Io.Event = if (already_canceled) .is_set else .unset;
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+        var starts: usize = 0;
+        var calls: usize = 0;
+        const probe: Probe = .{ .starts = &starts, .calls = &calls };
+        const deadline: ?std.Io.Clock.Timestamp = if (already_canceled) null else .{ .clock = .awake, .raw = .zero };
+        try std.testing.expectError(if (already_canceled) error.Canceled else error.Timeout, connect(ConnectError, failing.allocator(), threaded.io(), probe, 0, .fromMilliseconds(1), deadline, &event));
+        try std.testing.expectEqual(@as(usize, 0), starts);
+        try std.testing.expectEqual(@as(usize, 0), calls);
+        try std.testing.expect(!failing.has_induced_failure);
+    }
 }

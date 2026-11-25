@@ -94,3 +94,20 @@ addresses, unavailable concurrency before DNS entry, and rejection of a foreign
 clock. H3 literal routing retains its bypass on an executor without concurrency.
 Existing native hostname and collector/OOM checks cover transport integration
 and ownership. Results are recorded in [the resolver evidence](../evidence/system_address_resolution/2026-11-25/README.md).
+
+Connection competition validates its original awake deadline and an optional
+settled cancellation event before allocating address/endpoint plans or admitting
+tasks. Each worker rechecks them immediately before entering its transport
+callback, so cancellation or expiry between admission and execution cannot start
+a new connection. An already-set cancellation event returns `Canceled`; timeout
+uses the caller's phase error (`Timeout` for TCP, `HandshakeTimeout` for H3).
+Cleanup still joins admitted workers and destroys every unselected owned result.
+
+H3 owning address races pass their overall connection deadline to that same
+competition layer. Per-address handshake deadlines can still trigger fallback
+while the overall budget remains usable. Expiry after a resolver result rejects
+the address plan before allocation, and each attempt establishes its budget
+before generating a fresh QUIC identity. The
+[admission evidence](../evidence/connection_race_admission/2026-11-25/README.md)
+records rejection before allocation, cancellation at worker admission, and live
+TCP/H3 connection and ownership checks.

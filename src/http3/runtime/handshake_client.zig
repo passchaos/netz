@@ -1470,6 +1470,7 @@ pub const HandshakeClient = struct {
     ) Error!ResolvedConnectResult {
         if (servers.len == 0) return error.NoAddressReturned;
         try validateResolvedAddressPolicy(local_address, options);
+        if (deadline) |absolute| _ = try cappedConnectDeadline(io, absolute, null);
         return switch (options.address_connect_policy) {
             .ordered => connectResolvedAddressesOrdered(
                 allocator,
@@ -1627,8 +1628,8 @@ pub const HandshakeClient = struct {
             io,
             eligible,
             policy,
-            null,
-            null,
+            deadline,
+            if (deadline != null) @as(?Error, error.HandshakeTimeout) else null,
             RaceContext{
                 .allocator = allocator,
                 .primary_local_address = primary_local_address,
@@ -1655,6 +1656,11 @@ pub const HandshakeClient = struct {
         fallback_from_early: bool,
         fresh_identity: bool,
     ) Error!ResolvedConnectResult {
+        const attempt_deadline = try addressAttemptDeadline(
+            io,
+            deadline,
+            options.address_attempt_timeout,
+        );
         var attempt_options = options;
         var original_dcid: [8]u8 = undefined;
         var local_cid: [8]u8 = undefined;
@@ -1678,11 +1684,6 @@ pub const HandshakeClient = struct {
             attempt_options.handshake.nist_hybrid_key_material = .{};
             attempt_options.handshake.early_data = null;
         }
-        const attempt_deadline = try addressAttemptDeadline(
-            io,
-            deadline,
-            options.address_attempt_timeout,
-        );
         if (attempt_deadline) |absolute| {
             attempt_options.handshake.handshake_recovery =
                 try handshakeRecoveryBefore(

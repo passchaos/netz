@@ -90,7 +90,7 @@ pub fn race(
 ) (ConnectError || Error)!Connected {
     if (addresses.len == 0) return error.NoAddressReturned;
     try validate(options);
-    std.debug.assert((deadline == null) == (deadline_error == null));
+    try connection_race.checkAdmission(ConnectError, io, deadline, deadline_error, null);
 
     var ordered_stack: [stack_address_capacity]net.IpAddress = undefined;
     const ordered_heap = if (addresses.len > ordered_stack.len)
