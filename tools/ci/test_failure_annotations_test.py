@@ -48,6 +48,13 @@ class AnnotationsTest(unittest.TestCase):
         text = "\n".join("error: 'case %d' failed" % index for index in range(20))
         self.assertEqual(12, len(self.render(text).splitlines()))
 
+    def test_python_helper_failure_keeps_its_test_and_assertion(self):
+        text = "FAIL: test_windows_text_output (ProgressTest)\nTraceback (most recent call last):\n  File 'test.py', line 12\nAssertionError: CRLF differs from LF\n"
+        output = self.render(text, "ci-helper-tests.log")
+        self.assertIn("test_windows_text_output", output.splitlines()[0])
+        self.assertIn("AssertionError: CRLF differs from LF", output)
+        self.assertIn("Native regression: ci helper tests", output)
+
     def test_unclassified_exit_retains_bounded_tail(self):
         text = "\n".join("line %d" % index for index in range(100))
         output = self.render(text, "native-resolver.log")

@@ -10,7 +10,7 @@ def annotate(path: Path) -> None:
     failures = [
         index
         for index, line in enumerate(lines)
-        if "error:" in line or "FAIL (" in line or "panic:" in line
+        if "error:" in line or "FAIL (" in line or "panic:" in line or line.startswith(("FAIL:", "ERROR:", "Traceback"))
     ]
     if not failures:
         failures = [max(0, len(lines) - 40)]

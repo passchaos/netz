@@ -20,7 +20,7 @@ class ProgressTest(unittest.TestCase):
             return result, log.read_bytes()
 
     def test_partial_name_is_reported_before_command_finishes(self):
-        result, log = self.launch("import sys,time; sys.stdout.write('1/1 http.test.wait...'); sys.stdout.flush(); time.sleep(0.15); print('OK')")
+        result, log = self.launch("import os,time; os.write(1,b'1/1 http.test.wait...'); time.sleep(0.15); os.write(1,b'OK'+bytes([10]))")
         self.assertEqual(0, result.returncode)
         self.assertEqual(b"1/1 http.test.wait...OK\n", log)
         output = result.stdout.decode()
@@ -45,6 +45,11 @@ class ProgressTest(unittest.TestCase):
         result, log = self.launch("import sys; sys.stdout.buffer.write(b'x' * (256 * 1024))")
         self.assertEqual(0, result.returncode)
         self.assertEqual(b"x" * (256 * 1024), log)
+
+    def test_text_output_crlf_is_retained_exactly(self):
+        result, log = self.launch("import sys; sys.stdout.reconfigure(newline=chr(13)+chr(10)); print('1/1 http.test.crlf...OK')")
+        self.assertEqual(0, result.returncode)
+        self.assertEqual(b"1/1 http.test.crlf...OK\r\n", log)
 
     def test_fragmented_utf8_test_name_is_not_corrupted(self):
         source = "import os,time; data='1/1 http.test.请求...'.encode(); pos=data.index(bytes([0xe8])); os.write(1,data[:pos+1]); time.sleep(0.03); os.write(1,data[pos+1:]); time.sleep(0.1); os.write(1,b'OK\\n')"

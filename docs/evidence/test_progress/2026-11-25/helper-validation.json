@@ -2,20 +2,20 @@
   "platform": "aarch64-macos",
   "python_tests": {
     "test_failure_annotations_test.py": {
-      "passed": 5
+      "passed": 6
     },
     "run_test_progress_test.py": {
-      "passed": 5
+      "passed": 6
     }
   },
   "sources": [
     {
       "path": "tools/ci/test_failure_annotations.py",
-      "sha256": "2003f4f4d7fd00f9dbc0784e2d1fceb465615d8eb0048ebc480f712704ffde7d"
+      "sha256": "094bd42b58726f0c28dbd2e9e855d3c44099bb086fd6bda1fe16989882d86cfe"
     },
     {
       "path": "tools/ci/test_failure_annotations_test.py",
-      "sha256": "4fbed05811883d5ebdfaf1651cb8c609e313b5f18f31088452db2dc3e8d6caf8"
+      "sha256": "56bc51dead1baeda97610a188ead091acf763d612eba9378ca797b3390fe57f7"
     },
     {
       "path": "tools/ci/run_test_progress.py",
@@ -23,11 +23,11 @@
     },
     {
       "path": "tools/ci/run_test_progress_test.py",
-      "sha256": "310f6cc29ad7f2b6cc41aaa9553bfa7079aa9b9a1db3d6bb6985ed1ca25f0883"
+      "sha256": "270079e5086d4b56249f0d3cf1629dae59dc4186e91b65a08c4cb81d5d21e103"
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "0c3e79ec6ecaddcc2ab206cc1224641160d7aec850e91ac29501139a63fe8f34"
+      "sha256": "f86be458583daf92be7d086e7725f4a0fe473e9f5d97bc3413de143585106734"
     }
   ],
   "notes": [
@@ -62,5 +62,15 @@
         "completed_at": "2026-11-25T10:04:39Z"
       }
     ]
+  },
+  "windows_helper_failure": {
+    "run_id": 45591765895,
+    "commit": "37c842cc157c1b4464326e3d423a79be74ca1ae2",
+    "job_id": 139127498668,
+    "step": "Validate native CI log helpers",
+    "conclusion": "failure",
+    "native_trust_step": "skipped",
+    "observed_mechanism": "The exact-LF test assertion fails under simulated Windows CRLF text output. The progress log must preserve those bytes.",
+    "checks": "Binary fixture output plus explicit CRLF-preservation case pass locally; native Windows execution still requires the next CI result."
   }
 }

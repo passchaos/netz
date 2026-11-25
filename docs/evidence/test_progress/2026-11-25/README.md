@@ -42,3 +42,12 @@ gate at 10:04:38 UTC and the Linux native step at 10:04:39 UTC. The follow-up
 wrapper therefore publishes its last visible progress in annotations while
 the command remains active. [Helper validation](helper-validation.json)
 records the ten passing Python checks, source hashes and exact canceled jobs.
+
+Run `45591765895` failed Windows helper validation before native trust tests.
+The exact-output fixture used Python text `print`, while its expected log
+required LF. Simulating Windows CRLF text output reproduces that assertion
+failure. The partial-progress fixture now emits binary bytes, and a separate
+text-output test requires the log to retain CRLF exactly. Both log helpers now
+have six passing local tests. CI captures both helper transcripts and annotates
+unittest FAIL/ERROR/Traceback contexts, so subsequent native validation failures
+remain reviewable. The Windows native result is still pending.
