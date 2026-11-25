@@ -4545,7 +4545,24 @@ def run_client_ca_reload_case(broker: Path, directory: Path) -> None:
 
         # Establish liveness immediately before changing trust, so a prior
         # connection failure is not attributed to the SIGHUP transaction.
-        mqtt_ping(old_mqtt, "client CA reload MQTT before SIGHUP")
+        try:
+            mqtt_ping(old_mqtt, "client CA reload MQTT before SIGHUP")
+        except (AssertionError, OSError) as error:
+            descriptor = process.stdout.fileno()
+            was_blocking = os.get_blocking(descriptor)
+            tail = ""
+            os.set_blocking(descriptor, False)
+            try:
+                tail = process.stdout.read(1024) or ""
+            except (BlockingIOError, OSError, TypeError):
+                pass
+            finally:
+                os.set_blocking(descriptor, was_blocking)
+            raise AssertionError(
+                "client CA reload MQTT failed before SIGHUP: "
+                f"{error}; age={time.monotonic() - old_mqtt_started:.3f}s; "
+                f"broker_exit={process.poll()}; broker_output={tail!r}"
+            ) from None
         mqtt_ping(old_capath, "client CA reload capath before SIGHUP")
         websocket_mqtt_ping(old_wss)
         write_config(second_ca, next_ca_directory, True)

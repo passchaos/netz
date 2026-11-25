@@ -1,0 +1,53 @@
+{
+  "observed_utc": "2026-11-25T19:18:52.234569+00:00",
+  "source_sha256": {
+    "src/internal/testing/native_protocol_io.zig": "c8e9569e077d52978bfd10e65216e9d8bc14ff72603ef3705da4c599e11a916b",
+    "src/webtransport/h2/endpoint_client/reconnecting/tests.zig": "81c993abea8de3257876d48b0900c0f28e2c62cccdd2684d06a3aab24fa1a5dc",
+    "src/webtransport/runtime/session_control/handshake_rejection_tests.zig": "c2b81bc44254e146e66eb5a633178540d040bfbbd7df2b6762054d70d84d23cb",
+    "tools/interop/mqtt_broker_config.py": "cf11ed8a5593c22908aa3faf0a10d39c9bc18809c227cffb1f04c1bc7eb1021e"
+  },
+  "ci_baseline": {
+    "run_id": 45674858707,
+    "head": "a3135b17f91b39712df3c05079dfb0f1b317f042",
+    "linux_protocol_step": "success",
+    "linux_ca_step": "failure before SIGHUP with Broken pipe",
+    "windows_protocol_step": "failure with Threaded ConcurrencyUnavailable and Unexpected NTSTATUS CONNECTION_RESET",
+    "complete": "failure with root reconnect UnexpectedEof and final exit137"
+  },
+  "local_validation": {
+    "dual_backend_case_scope": {
+      "exit_code": 0,
+      "tests_passed": 135,
+      "backends": [
+        "Threaded with zero async capacity",
+        "zio with one executor"
+      ]
+    },
+    "python314_peer_diagnostics": "syntax passed",
+    "plain_pre_reload": "passed without signal delivery",
+    "managed_pre_reload": "passed without signal delivery",
+    "delayed_plain_and_managed_pre_reload": "both passed across several management intervals",
+    "evidence_audit": {
+      "exit_code": 0,
+      "files": 305,
+      "entries": 10948,
+      "matched": 6426,
+      "stale": 4519,
+      "unresolved": 3,
+      "invalid": 0,
+      "unreadable": 0,
+      "log": "evidence-audit.log"
+    }
+  },
+  "pending": [
+    "native Windows supported-backend cases",
+    "next full Linux reconnect test context",
+    "Linux CA early-disconnect exit code and output",
+    "complete CI acceptance"
+  ],
+  "local_dependency_revisions": {
+    "vail": "d93847a7e091c835406ee10c0a86fd064f1475dd",
+    "vort": "a48e1151872a30a574363e994ec312969b3c7818"
+  },
+  "qualification": "Local macOS probes do not prove native Windows or Linux CA behavior; fixed CI dependency pins and command budgets remain unchanged."
+}

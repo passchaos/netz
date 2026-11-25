@@ -4,6 +4,7 @@ const tls = @import("../../../../tls/testing.zig");
 const h2 = @import("../../mod.zig");
 const endpoint_server = @import("../../endpoint_server.zig");
 const reconnecting = @import("../reconnecting.zig");
+const native_protocol_io = @import("../../../../internal/testing/native_protocol_io.zig");
 
 const allocator = std.testing.allocator;
 const credit: http2.WebTransportSettings = .{
@@ -17,11 +18,12 @@ const credit: http2.WebTransportSettings = .{
 };
 
 test "WebTransport HTTP2 ReconnectingEndpointClient reconnects only future Sessions" {
-    // The peer and both CONNECTs must run independently even when
-    // opportunistic async execution would fall back to the caller.
-    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .nothing });
-    defer threaded.deinit();
-    const io = threaded.io();
+    try native_protocol_io.run(reconnectFutureSessions);
+}
+
+fn reconnectFutureSessions(io: std.Io) anyerror!void {
+    var client_phase: []const u8 = "initial rejected CONNECT";
+    errdefer |err| std.debug.print("WT reconnect client phase {s}: {s}\n", .{ client_phase, @errorName(err) });
     var certificate: [tls.certificate_der_len]u8 = undefined;
     try std.base64.standard.Decoder.decode(
         &certificate,
@@ -46,11 +48,15 @@ test "WebTransport HTTP2 ReconnectingEndpointClient reconnects only future Sessi
     );
     defer listener.deinit();
     var drop_first: std.Io.Event = .unset;
+    var begin_second: std.Io.Event = .unset;
     const Peer = struct {
         listener: *http2.runtime.TlsServer,
         drop_first: *std.Io.Event,
+        begin_second: *std.Io.Event,
 
-        fn run(self: *@This()) !void {
+        fn run(self: *@This()) anyerror!void {
+            var phase: []const u8 = "first TLS accept";
+            errdefer |err| std.debug.print("WT reconnect peer phase {s}: {s}\n", .{ phase, @errorName(err) });
             var first = try endpoint_server.EndpointServer.acceptTlsConnectionWithTimeout(
                 allocator,
                 self.listener,
@@ -64,6 +70,7 @@ test "WebTransport HTTP2 ReconnectingEndpointClient reconnects only future Sessi
             // The reconnecting client verifies the server but presents no
             // client certificate.
             try std.testing.expect(first.peerCertificates() == null);
+            phase = "first rejected CONNECT";
             var rejected = try first.receiveRequestWithTimeout(.fromSeconds(3));
             var rejected_live = true;
             defer if (rejected_live) rejected.deinit();
@@ -74,6 +81,7 @@ test "WebTransport HTTP2 ReconnectingEndpointClient reconnects only future Sessi
             );
             rejected_live = false;
             var handles: [2]endpoint_server.Handle = undefined;
+            phase = "first sibling CONNECTs";
             for (&handles) |*handle| {
                 var request = try first.receiveRequestWithTimeout(.fromSeconds(3));
                 var request_live = true;
@@ -86,6 +94,7 @@ test "WebTransport HTTP2 ReconnectingEndpointClient reconnects only future Sessi
                 handle.* = accepted.handle;
                 accepted.deinit();
             }
+            phase = "first sibling DATAGRAMs";
             for (handles) |handle| {
                 var event = try first.receiveWithTimeout(handle, .fromSeconds(3));
                 defer event.deinit();
@@ -99,6 +108,11 @@ test "WebTransport HTTP2 ReconnectingEndpointClient reconnects only future Sessi
             first.deinit();
             first_live = false;
 
+            // The next accept budget belongs to the new connection. Keep
+            // unrelated old-generation receive/removal outside that budget.
+            phase = "waiting for second generation";
+            try self.begin_second.wait(self.listener.io);
+            phase = "second TLS accept";
             var second = try endpoint_server.EndpointServer.acceptTlsConnectionWithTimeout(
                 allocator,
                 self.listener,
@@ -106,6 +120,7 @@ test "WebTransport HTTP2 ReconnectingEndpointClient reconnects only future Sessi
                 .fromSeconds(3),
             );
             defer second.deinit();
+            phase = "second CONNECT";
             var request = try second.receiveRequestWithTimeout(.fromSeconds(3));
             var request_live = true;
             defer if (request_live) request.deinit();
@@ -115,6 +130,7 @@ test "WebTransport HTTP2 ReconnectingEndpointClient reconnects only future Sessi
             );
             request_live = false;
             defer accepted.deinit();
+            phase = "second DATAGRAM";
             var event = try second.receiveWithTimeout(
                 accepted.handle,
                 .fromSeconds(3),
@@ -128,7 +144,7 @@ test "WebTransport HTTP2 ReconnectingEndpointClient reconnects only future Sessi
             );
         }
     };
-    var peer = Peer{ .listener = &listener, .drop_first = &drop_first };
+    var peer = Peer{ .listener = &listener, .drop_first = &drop_first, .begin_second = &begin_second };
     var peer_task = try io.concurrent(Peer.run, .{&peer});
     defer _ = peer_task.cancel(io) catch {};
 
@@ -158,6 +174,7 @@ test "WebTransport HTTP2 ReconnectingEndpointClient reconnects only future Sessi
     try std.testing.expect(!rejected.accepted());
     try std.testing.expectEqual(@as(u16, 429), rejected.status());
     try std.testing.expectEqualStrings("later", rejected.body());
+    client_phase = "first sibling CONNECTs";
     const Open = struct {
         fn run(value: reconnecting.ReconnectingEndpointClient, path: []const u8) !reconnecting.Handle {
             return value.connectWithTimeout(
@@ -174,6 +191,7 @@ test "WebTransport HTTP2 ReconnectingEndpointClient reconnects only future Sessi
     const b = try b_task.await(io);
     try std.testing.expectEqual(a.connection_generation, b.connection_generation);
     try std.testing.expect(a.session.index != b.session.index);
+    client_phase = "first sibling DATAGRAMs";
     try client.sendDatagramWithTimeout(a, "a", .fromSeconds(3));
     try client.sendDatagramWithTimeout(b, "b", .fromSeconds(3));
     var ack_a = try client.receiveWithTimeout(a, .fromSeconds(3));
@@ -191,6 +209,7 @@ test "WebTransport HTTP2 ReconnectingEndpointClient reconnects only future Sessi
     );
 
     drop_first.set(io);
+    client_phase = "old-generation receive/removal";
     var unexpected = client.receiveWithTimeout(a, .fromSeconds(3)) catch |err| blk: {
         try std.testing.expect(err != error.Timeout);
         break :blk null;
@@ -199,8 +218,10 @@ test "WebTransport HTTP2 ReconnectingEndpointClient reconnects only future Sessi
         event.deinit();
         return error.TestUnexpectedResult;
     }
-    _ = removeAfterDrop(client, a) catch |err| return err;
-    _ = removeAfterDrop(client, b) catch |err| return err;
+    _ = try removeAfterDrop(client, a);
+    _ = try removeAfterDrop(client, b);
+    begin_second.set(io);
+    client_phase = "second CONNECT";
     const c = try client.connectWithTimeout(
         .{ .path = "/c", .authority = "localhost" },
         .fromSeconds(3),
@@ -210,6 +231,7 @@ test "WebTransport HTTP2 ReconnectingEndpointClient reconnects only future Sessi
         error.StaleConnection,
         client.sendDatagramWithTimeout(a, "old", .fromSeconds(3)),
     );
+    client_phase = "second DATAGRAM";
     try client.sendDatagramWithTimeout(c, "c", .fromSeconds(3));
     var ack_c = try client.receiveWithTimeout(c, .fromSeconds(3));
     defer ack_c.deinit();

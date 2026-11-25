@@ -1,0 +1,127 @@
+[
+  {
+    "href": "/passchaos/netz/actions/runs/45674858707/job/139419556280#step:21:333",
+    "title": "Portable x86_64-windows-gnu (windows-latest)",
+    "message": "Process completed with exit code 1."
+  },
+  {
+    "href": "/passchaos/netz/actions/runs/45674858707/job/139419556280#step:21:330",
+    "title": "Native regression: native protocol ci",
+    "message": "error: the following build command failed with exit code 1:\nD:\\a\\netz\\netz\\.zig-cache\\o\\55b042037682faabcd8750ed6bd3bb83\\build.exe D:\\a\\_temp\\d9c4b7e5-4742-44ec-8441-9f161ae16f48\\zig-x86_64-windows-0.16.0\\zig.exe D:\\a\\_temp\\d9c4b7e5-4742-44ec-8441-9f161ae16f48\\zig-x86_64-windows-0.16.0\\lib D:\\a\\netz\\netz\\netz D:\\a\\netz\\netz\\.zig-cache D:\\a\\netz\\netz\\.zig-cache --seed 0xc6f9b636 -Z548c064c237f9bbb test-http2 test-webtransport -j1 -Dtest-progress=true -Dtarget=x86_64-windows-gnu -Dtest-filter=HTTP/2 connection keeps optional state compact -Dtest-filter=standalone dispatcher retains rejection through bounded cleanup -Dtest-filter=ReconnectingEndpointClient reconnects only future Sessions --summary all"
+  },
+  {
+    "href": "/passchaos/netz/actions/runs/45674858707/job/139419556280#step:21:315",
+    "title": "Native regression: native protocol ci",
+    "message": "+- run test failure\nerror: process exited with error code 1\nfailed command: \"D:\\\\a\\\\netz\\\\netz\\\\.zig-cache\\\\o\\\\f987a4acd374196471e703a3fb727177\\\\test.exe\" \"--cache-dir=D:\\\\a\\\\netz\\\\netz\\\\.zig-cache\" --seed=0xc6f9b636\n\n1/28 test_scope.test_0...OK\n2/28 http2.mod.test_0...OK\n3/28 http2.mod.test_1...OK\n4/28 internal.priority.test_0...OK\n5/28 http2.runtime.test_0...OK\n6/28 http2.runtime.tests.test_0...OK\n7/28 http2.runtime.tests.test_1...OK\n8/28 http2.runtime.tests.test_2...OK\n9/28 http2.runtime.response.allocation_failure_tests.test_0...OK\n10/28 http2.runtime.response.forbidden_body_tests.test_0...OK\n11/28 http2.runtime.request.credit_failure_tests.test_0...OK"
+  },
+  {
+    "href": "/passchaos/netz/actions/runs/45674858707/job/139419556280#step:21:300",
+    "title": "Native regression: native protocol ci",
+    "message": "125/137 webtransport.runtime.stream_incremental.test_1...OK\n126/137 webtransport.runtime.session_control.handshake_rejection_tests.test.WebTransport standalone dispatcher retains rejection through bounded cleanup...FAIL (ConcurrencyUnavailable)\nD:\\a\\netz\\netz\\netz\\src\\quic\\runtime.zig:1718:38: 0x7ff6eee1c006 in finishManyKernelBytesInto (test_zcu.obj)\n            if (receive_error) |err| return err;\n                                     ^\nD:\\a\\netz\\netz\\netz\\src\\quic\\runtime.zig:1700:13: 0x7ff6eee1be14 in receiveManyBytesIntoTimeout (test_zcu.obj)\n            return self.finishManyKernelBytesInto(\n            ^\nD:\\a\\netz\\netz\\netz\\src\\quic\\one_rtt\\connection.zig:11280:25: 0x7ff6eee1ae08 in receiveDatagramsIntoServicingTimersUntil (test_zcu.obj)\n                        return error.ConcurrencyUnavailable;\n                        ^\nD:\\a\\netz\\netz\\netz\\src\\quic\\one_rtt\\connection.zig:11164:9: 0x7ff6eee23d56 in receiveDatagramsIntoServicingTimersDeadline (test_zcu.obj)\n        return self.receiveDatagramsIntoServicingTimersUntil(\n        ^\nD:\\a\\netz\\netz\\netz\\src\\http3\\runtime\\receive\\cursor.zig:243:36: 0x7ff6eee239fb in fillRawBatchWithDeadline (test_zcu.obj)"
+  },
+  {
+    "href": "/passchaos/netz/actions/runs/45674858707/job/139419556280#step:21:284",
+    "title": "Native regression: native protocol ci",
+    "message": "30/137 webtransport.h2.endpoint_client.reconnecting.tests.test.WebTransport HTTP2 ReconnectingEndpointClient reconnects only future Sessions...error.Unexpected NTSTATUS=0xc000020d (CONNECTION_RESET)\n???:?:?: 0x7fffa4c1f2bb in ??? (ntdll.dll)\nFAIL (Unexpected)\nD:\\a\\netz\\netz\\netz\\src\\webtransport\\h2\\endpoint_client\\reconnecting\\tests.zig:153:20: 0x7ff6edb2cb2d in test.WebTransport HTTP2 ReconnectingEndpointClient reconnects only future Sessions (test_zcu.obj)\n    var rejected = try client.connectAttemptWithTimeout(\n                   ^\n31/137 http2.mod.test_0...OK\n32/137 http2.mod.test_1...OK\n33/137 http2.runtime.test_0...OK\n34/137 http1.mod.test_0...OK\n35/137 http1.mod.test_1...OK\n36/137 http1.mod.test_2...OK\n37/137 http1.runtime.test_0...OK\n38/137 internal.tcp_connect.test_0...OK\n39/137 tls.mod.test_0...OK\n40/137 tls.stream.mod.test_0...OK"
+  },
+  {
+    "href": "/passchaos/netz/actions/runs/45674858707/job/139419556280#step:47:2",
+    "title": "Portable x86_64-windows-gnu (windows-latest)",
+    "message": "Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262, mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/"
+  },
+  {
+    "href": "/passchaos/netz/actions/runs/45674858707/job/139419556280#step:21:283",
+    "title": "Native protocol CI progress",
+    "message": "28/28 tls.server_identity_file.test_0...OK"
+  },
+  {
+    "href": "/passchaos/netz/actions/runs/45674858707/job/139419556280#step:21:14",
+    "title": "Native protocol CI progress",
+    "message": "No test name emitted yet; build or startup is still active."
+  },
+  {
+    "href": "/passchaos/netz/actions/runs/45674858707/job/139419556280#step:19:416",
+    "title": "Native trust progress",
+    "message": "63/63 quic.runtime.receive_deadline_admission_tests.test.QUIC receive caller-owned deadlines translate raw clocks without renewing budget...OK"
+  },
+  {
+    "href": "/passchaos/netz/actions/runs/45674858707/job/139419556280#step:19:414",
+    "title": "Native trust progress",
+    "message": "63/63 quic.runtime.receive_deadline_admission_tests.test.QUIC receive caller-owned deadlines translate raw clocks without renewing budget...OK"
+  },
+  {
+    "href": "/passchaos/netz/actions/runs/45674858707/job/139419556280#step:19:346",
+    "title": "Native trust progress",
+    "message": "119/119 http3.origin_pool.test_0...OK"
+  },
+  {
+    "href": "/passchaos/netz/actions/runs/45674858707/job/139419556280#step:19:222",
+    "title": "Native trust progress",
+    "message": "165/165 http.cookies.syntax.test_0...OK"
+  },
+  {
+    "href": "/passchaos/netz/actions/runs/45674858707/job/139419556280#step:19:52",
+    "title": "Native trust progress",
+    "message": "26/26 internal.stream_io.timed_read.test_0...OK"
+  },
+  {
+    "href": "/passchaos/netz/actions/runs/45674858707/job/139419556280#step:19:50",
+    "title": "Native trust progress",
+    "message": "26/26 internal.stream_io.timed_read.test_0...OK"
+  },
+  {
+    "href": "/passchaos/netz/actions/runs/45674858707/job/139419556280#step:19:19",
+    "title": "Native trust progress",
+    "message": "No test name emitted yet; build or startup is still active."
+  },
+  {
+    "href": "/passchaos/netz/actions/runs/45674858707/job/139419556280#step:16:17",
+    "title": "Winsock interface probe",
+    "message": "{\"family\": 23, \"index\": 1, \"enable_first\": true, \"byte_order\": \"=I\", \"bind_first\": true, \"v6_only_bytes\": \"01\", \"state\": 1, \"iflist_bytes\": \"01000000\", \"indices\": [1], \"result\": \"success\"}"
+  },
+  {
+    "href": "/passchaos/netz/actions/runs/45674858707/job/139419556280#step:16:16",
+    "title": "Winsock interface probe",
+    "message": "{\"family\": 23, \"index\": 1, \"enable_first\": true, \"byte_order\": \"=I\", \"bind_first\": false, \"v6_only_bytes\": \"01\", \"state\": 1, \"iflist_bytes\": \"01000000\", \"indices\": [1], \"result\": \"success\"}"
+  },
+  {
+    "href": "/passchaos/netz/actions/runs/45674858707/job/139419556280#step:16:15",
+    "title": "Winsock interface probe",
+    "message": "{\"family\": 2, \"index\": 1, \"enable_first\": false, \"byte_order\": \"!I\", \"bind_first\": true, \"step\": \"ADD_IFLIST\", \"winerror\": 10022, \"errno\": 22, \"result\": \"[WinError 10022] An invalid argument was supplied\"}"
+  },
+  {
+    "href": "/passchaos/netz/actions/runs/45674858707/job/139419556280#step:16:14",
+    "title": "Winsock interface probe",
+    "message": "{\"family\": 2, \"index\": 1, \"enable_first\": false, \"byte_order\": \"!I\", \"bind_first\": false, \"step\": \"ADD_IFLIST\", \"winerror\": 10022, \"errno\": 22, \"result\": \"[WinError 10022] An invalid argument was supplied\"}"
+  },
+  {
+    "href": "/passchaos/netz/actions/runs/45674858707/job/139419556280#step:16:13",
+    "title": "Winsock interface probe",
+    "message": "{\"family\": 2, \"index\": 1, \"enable_first\": false, \"byte_order\": \"=I\", \"bind_first\": true, \"step\": \"ADD_IFLIST\", \"winerror\": 10022, \"errno\": 22, \"result\": \"[WinError 10022] An invalid argument was supplied\"}"
+  },
+  {
+    "href": "/passchaos/netz/actions/runs/45674858707/job/139419556280#step:16:12",
+    "title": "Winsock interface probe",
+    "message": "{\"family\": 2, \"index\": 1, \"enable_first\": false, \"byte_order\": \"=I\", \"bind_first\": false, \"step\": \"ADD_IFLIST\", \"winerror\": 10022, \"errno\": 22, \"result\": \"[WinError 10022] An invalid argument was supplied\"}"
+  },
+  {
+    "href": "/passchaos/netz/actions/runs/45674858707/job/139419556280#step:16:11",
+    "title": "Winsock interface probe",
+    "message": "{\"family\": 2, \"index\": 1, \"enable_first\": true, \"byte_order\": \"!I\", \"bind_first\": true, \"step\": \"ADD_IFLIST\", \"winerror\": 10022, \"errno\": 22, \"result\": \"[WinError 10022] An invalid argument was supplied\"}"
+  },
+  {
+    "href": "/passchaos/netz/actions/runs/45674858707/job/139419556280#step:16:10",
+    "title": "Winsock interface probe",
+    "message": "{\"family\": 2, \"index\": 1, \"enable_first\": true, \"byte_order\": \"!I\", \"bind_first\": false, \"step\": \"ADD_IFLIST\", \"winerror\": 10022, \"errno\": 22, \"result\": \"[WinError 10022] An invalid argument was supplied\"}"
+  },
+  {
+    "href": "/passchaos/netz/actions/runs/45674858707/job/139419556280#step:16:9",
+    "title": "Winsock interface probe",
+    "message": "{\"family\": 2, \"index\": 1, \"enable_first\": true, \"byte_order\": \"=I\", \"bind_first\": true, \"state\": 1, \"iflist_bytes\": \"01000000\", \"indices\": [1], \"result\": \"success\"}"
+  },
+  {
+    "href": "/passchaos/netz/actions/runs/45674858707/job/139419556280#step:16:8",
+    "title": "Winsock interface probe",
+    "message": "{\"family\": 2, \"index\": 1, \"enable_first\": true, \"byte_order\": \"=I\", \"bind_first\": false, \"state\": 1, \"iflist_bytes\": \"01000000\", \"indices\": [1], \"result\": \"success\"}"
+  }
+]

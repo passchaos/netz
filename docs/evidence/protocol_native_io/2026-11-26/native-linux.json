@@ -1,0 +1,42 @@
+[
+  {
+    "href": "/passchaos/netz/actions/runs/45674858707/job/139419555694#step:22:79",
+    "title": "Portable x86_64-linux-gnu (ubuntu-latest)",
+    "message": "Process completed with exit code 1."
+  },
+  {
+    "href": "/passchaos/netz/actions/runs/45674858707/job/139419555694#step:22:76",
+    "title": "Native regression: native client ca reload",
+    "message": "error: the following build command failed with exit code 1:\n/home/runner/work/netz/netz/.zig-cache/o/078a8fd0c48078b4cd49b19c5e079989/build /home/runner/work/_temp/cbf58440-9ca6-44b8-9cf6-6c27ab05c213/zig-x86_64-linux-0.16.0/zig /home/runner/work/_temp/cbf58440-9ca6-44b8-9cf6-6c27ab05c213/zig-x86_64-linux-0.16.0/lib /home/runner/work/netz/netz/netz /home/runner/work/netz/netz/.zig-cache /home/runner/work/netz/netz/.zig-cache --seed 0x5431ff4d -Z7833d7c2cba83114 interop-mqtt-broker-config -j1 --summary all -- --only-client-ca-reload"
+  },
+  {
+    "href": "/passchaos/netz/actions/runs/45674858707/job/139419555694#step:22:61",
+    "title": "Native regression: native client ca reload",
+    "message": "+- run python3 failure\nerror: process exited with error code 1\nfailed command: python3 tools/interop/mqtt_broker_config.py /home/runner/work/netz/netz/.zig-cache/o/0002671496d133c47aa868cfd8c67840/netz-mqtt-vector-broker --only-client-ca-reload\n\nBuild Summary: 6/8 steps succeeded (1 failed)\ninterop-mqtt-broker-config transitive failure\n+- run python3 failure\n   +- compile exe netz-mqtt-vector-broker Debug native success 37s MaxRSS:1G\n      +- WriteFile cached\n      +- compile obj vort-br-record-optimal Debug native success 385ms MaxRSS:127M\n      +- WriteFile cached\n      +- compile obj vort-zstd-huffman-x2 Debug native success 392ms MaxRSS:127M\n      +- compile obj vort-br-record-optimal Debug native (reused)\n      +- compile obj vort-zstd-huffman-x2 Debug native (reused)\n      +- options cached"
+  },
+  {
+    "href": "/passchaos/netz/actions/runs/45674858707/job/139419555694#step:22:47",
+    "title": "Native regression: native client ca reload",
+    "message": "Traceback (most recent call last):\n  File \"/home/runner/work/netz/netz/netz/tools/interop/mqtt_broker_config.py\", line 8077, in <module>\n    main()\n    ~~~~^^\n  File \"/home/runner/work/netz/netz/netz/tools/interop/mqtt_broker_config.py\", line 7797, in main\n    run_client_ca_reload_case(args.broker, directory)\n    ~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/runner/work/netz/netz/netz/tools/interop/mqtt_broker_config.py\", line 4548, in run_client_ca_reload_case\n    mqtt_ping(old_mqtt, \"client CA reload MQTT before SIGHUP\")\n    ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/runner/work/netz/netz/netz/tools/interop/mqtt_broker_config.py\", line 635, in mqtt_ping\n    raise AssertionError(f\"{label}: {error}\") from None\nAssertionError: client CA reload MQTT before SIGHUP: [Errno 32] Broken pipe\ninterop-mqtt-broker-config"
+  },
+  {
+    "href": "/passchaos/netz/actions/runs/45674858707/job/139419555694#step:47:2",
+    "title": "Portable x86_64-linux-gnu (ubuntu-latest)",
+    "message": "Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262, mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/"
+  },
+  {
+    "href": "/passchaos/netz/actions/runs/45674858707/job/139419555694#step:22:46",
+    "title": "Native client CA reload progress",
+    "message": "No test name emitted yet; build or startup is still active."
+  },
+  {
+    "href": "/passchaos/netz/actions/runs/45674858707/job/139419555694#step:19:282",
+    "title": "Native trust progress",
+    "message": "63/63 quic.runtime.receive_deadline_admission_tests.test.QUIC receive caller-owned deadlines translate raw clocks without renewing budget...OK"
+  },
+  {
+    "href": "/passchaos/netz/actions/runs/45674858707/job/139419555694#step:19:47",
+    "title": "Native trust progress",
+    "message": "26/26 internal.stream_io.timed_read.test_0...OK"
+  }
+]

@@ -6,6 +6,7 @@ const Pair = support.Pair;
 const Role = support.Role;
 const control_mod = @import("../session_control.zig");
 const ObservedBatchSend = @import("../../../quic/one_rtt/tests/observed_batch_send.zig").ObservedBatchSend;
+const native_protocol_io = @import("../../../internal/testing/native_protocol_io.zig");
 
 test "WebTransport standalone malformed capsules terminate both handshake roles" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
@@ -123,10 +124,12 @@ test "WebTransport standalone CLOSE suffix rejection preserves deadline and meta
 }
 
 test "WebTransport standalone dispatcher retains rejection through bounded cleanup" {
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
+    try native_protocol_io.run(dispatcherRejection);
+}
+
+fn dispatcherRejection(io: std.Io) !void {
     var pair: Pair = undefined;
-    try pair.init(threaded.io());
+    try pair.init(io);
     defer pair.deinit();
     const stream_id = try pair.openStream();
     try pair.sendCapsules(.client, &.{ 0x68, 0x43, 3 });
