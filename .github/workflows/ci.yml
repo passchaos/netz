@@ -326,7 +326,7 @@ jobs:
         timeout-minutes: 5
         run: |
           send_deadline_status=0
-          python tools/ci/run_test_progress.py --title "Native HTTP3 send deadlines" --log native-http3-send-deadlines.log -- zig build test-http3 test-quic -j1 -Dtest-progress=true -Dtarget=${{ matrix.target }} '-Dtest-filter=QUIC send deadline' '-Dtest-filter=HTTP/3 development socket deadline' '-Dtest-filter=HTTP/3 protected batch deadline' '-Dtest-filter=HTTP/3 concurrent command' '-Dtest-filter=HTTP/3 concurrent DATA public' --summary all || send_deadline_status=$?
+          python tools/ci/run_test_progress.py --title "Native HTTP3 send deadlines" --log native-http3-send-deadlines.log -- zig build test-http3 test-quic test-webtransport -j1 -Dtest-progress=true -Dtarget=${{ matrix.target }} '-Dtest-filter=QUIC send deadline' '-Dtest-filter=HTTP/3 development socket deadline' '-Dtest-filter=HTTP/3 protected batch deadline' '-Dtest-filter=HTTP/3 concurrent command' '-Dtest-filter=HTTP/3 concurrent DATA public' '-Dtest-filter=QUIC stream socket deadline' '-Dtest-filter=QUIC datagram socket deadline' '-Dtest-filter=WebTransport STREAM socket deadline' --summary all || send_deadline_status=$?
           if [ "$send_deadline_status" -ne 0 ]; then
             python tools/ci/test_failure_annotations.py native-http3-send-deadlines.log
           fi

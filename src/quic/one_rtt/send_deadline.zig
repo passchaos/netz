@@ -8,14 +8,20 @@ pub const Error = runtime.Error || bounded.BudgetError;
 
 pub fn one(connection: anytype, frames: []const quic.Frame, until: std.Io.Clock.Timestamp) Error!void {
     const Connection = @typeInfo(@TypeOf(connection)).pointer.child;
-    const outcome = bounded.before(connection.endpoint.io, until, Connection.trySend, .{ connection, frames });
-    const result = outcome.result orelse return outcome.wait_error orelse error.Unexpected;
-    result catch |err| {
-        if (err == error.Canceled) if (outcome.wait_error) |wait_error| return wait_error;
-        return err;
-    };
-    // trySend is a one-packet transaction: successful return confirms the
-    // socket and transport-state commit, including when a timer raced it.
+    return bounded.runVoid(connection.endpoint.io, until, Connection.trySend, .{ connection, frames });
+}
+
+pub fn oneOptional(connection: anytype, frames: []const quic.Frame, until: ?std.Io.Clock.Timestamp) Error!void {
+    if (until) |deadline| return one(connection, frames, deadline);
+    return connection.trySend(frames);
+}
+
+/// Preserve the normal timestamped path when no application budget is set.
+/// The caller commits `progress` before exposing any returned timed error.
+pub fn manyOptional(connection: anytype, packets: []const []const quic.Frame, progress: *runtime.ConnectionBatchSendResult, sent_time_ns: ?u64, until: ?std.Io.Clock.Timestamp) Error!void {
+    progress.* = .{ .sent_count = 0, .protected_count = 0 };
+    if (until) |deadline| return many(connection, packets, progress, deadline);
+    progress.* = try connection.sendManyProgressAt(packets, sent_time_ns);
 }
 
 pub fn many(connection: anytype, packets: []const []const quic.Frame, progress: *runtime.ConnectionBatchSendResult, until: std.Io.Clock.Timestamp) Error!void {

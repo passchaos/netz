@@ -10,6 +10,7 @@ pub const Native = struct {
     now_ns: std.atomic.Value(i64) = .init(0),
     advance_after_send_ns: i64 = 0,
     send_calls: std.atomic.Value(usize) = .init(0),
+    duration_sleep_calls: std.atomic.Value(usize) = .init(0),
     clock_changed: std.Io.Event = .unset,
     send_context: ?*anyopaque = null,
     send_override: ?*const fn (?*anyopaque, net.Socket.Handle, []net.OutgoingMessage, net.SendFlags) struct { ?net.Socket.SendError, usize } = null,
@@ -42,7 +43,10 @@ pub const Native = struct {
         const base = self.backend.io();
         const until = switch (timeout) {
             .deadline => |until| until,
-            else => return base.vtable.sleep(base.userdata, timeout),
+            else => {
+                _ = self.duration_sleep_calls.fetchAdd(1, .monotonic);
+                return base.vtable.sleep(base.userdata, timeout);
+            },
         };
         if (until.clock != .awake) return base.vtable.sleep(base.userdata, timeout);
         // Expiry follows a confirmed send. If operation/pacing admission

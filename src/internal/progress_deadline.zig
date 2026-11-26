@@ -19,6 +19,49 @@ pub fn Outcome(comptime Result: type) type {
     };
 }
 
+fn VoidError(comptime work: anytype) type {
+    const result = @typeInfo(ResultOf(work)).error_union;
+    if (result.payload != void) @compileError("runVoid requires an error-union void operation");
+    return result.error_set || BudgetError || error{Unexpected};
+}
+
+/// Bound one void transaction. A complete commit wins a racing wait failure;
+/// source errors remain visible after its borrowed arguments have been joined.
+pub fn runVoid(io: std.Io, until: std.Io.Clock.Timestamp, comptime work: anytype, args: std.meta.ArgsTuple(@TypeOf(work))) VoidError(work)!void {
+    return runResult(io, until, work, args);
+}
+
+fn ResultError(comptime work: anytype) type {
+    return @typeInfo(ResultOf(work)).error_union.error_set || BudgetError || error{Unexpected};
+}
+
+pub fn runResult(io: std.Io, until: std.Io.Clock.Timestamp, comptime work: anytype, args: std.meta.ArgsTuple(@TypeOf(work))) ResultError(work)!@typeInfo(ResultOf(work)).error_union.payload {
+    const outcome = before(io, until, work, args);
+    const result = outcome.result orelse return outcome.wait_error orelse error.Unexpected;
+    return result catch |err| {
+        if (err == error.Canceled) if (outcome.wait_error) |wait_error| return wait_error;
+        return err;
+    };
+}
+
+fn BatchError(comptime Result: type) type {
+    return @typeInfo(@FieldType(Result, "send_error")).optional.child || BudgetError || error{Unexpected};
+}
+
+/// Call only after publishing socket progress and consuming protected nonces.
+/// `expected_count` describes this bounded window, not the caller's whole input.
+pub fn batchError(result: anytype, expected_count: usize, wait_error: ?BudgetError) ?BatchError(@TypeOf(result)) {
+    if (result.send_error) |err| {
+        if (err == error.Canceled) if (wait_error) |wait_failure| {
+            if (expected_count != 0 and result.sent_count == expected_count) return null;
+            return wait_failure;
+        };
+        return err;
+    }
+    if (result.sent_count != expected_count) return wait_error orelse error.Unexpected;
+    return null;
+}
+
 /// The result and wait error are independent: a canceled operation can return
 /// useful socket-prefix progress, and a complete send can race a timer. No user
 /// of args remains alive after this call. The consumer commits that progress

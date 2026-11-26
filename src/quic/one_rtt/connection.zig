@@ -3,6 +3,7 @@
 const std = @import("std");
 const secure_random = @import("../../internal/secure_random.zig");
 const send_deadline = @import("send_deadline.zig");
+const bounded_send = @import("../../internal/progress_deadline.zig");
 const quic = @import("../mod.zig");
 const net = std.Io.net;
 const runtime = @import("../one_rtt.zig");
@@ -1091,10 +1092,9 @@ pub const Connection = struct {
 
             const frames = frame_storage[0..frame_count];
             const packets = [_][]const quic.Frame{frames};
-            const result = self.sendManyProgressAt(
-                &packets,
-                now_ns,
-            ) catch |err| switch (err) {
+            var result: ConnectionBatchSendResult = .{ .sent_count = 0, .protected_count = 0 };
+            var send_failure: ?send_deadline.Error = null;
+            send_deadline.manyOptional(self, &packets, &result, now_ns, deadline) catch |err| switch (err) {
                 error.FlowControlBlocked, error.CongestionLimited => {
                     try self.receiveStreamSendProgressUntil(deadline, now_ns);
                     continue;
@@ -1107,7 +1107,7 @@ pub const Connection = struct {
                     }
                     continue;
                 },
-                else => |other| return other,
+                else => |other| send_failure = other,
             };
             if (result.sent_count > 1 or
                 result.sent_count > result.protected_count)
@@ -1115,11 +1115,13 @@ pub const Connection = struct {
                 return error.Unexpected;
             }
             if (result.sent_count == 0) {
+                if (send_failure) |err| return err;
                 if (result.send_error) |err| return err;
                 return error.Unexpected;
             }
             cursor = staged;
             committed_out.* = cursor.committed;
+            if (send_failure) |err| return err;
             if (result.send_error) |err| return err;
         }
     }
@@ -1229,10 +1231,9 @@ pub const Connection = struct {
 
             const frames = [_]quic.Frame{frame};
             const packets = [_][]const quic.Frame{&frames};
-            const result = self.sendManyProgressAt(
-                &packets,
-                now_ns,
-            ) catch |err| switch (err) {
+            var result: ConnectionBatchSendResult = .{ .sent_count = 0, .protected_count = 0 };
+            var send_failure: ?send_deadline.Error = null;
+            send_deadline.manyOptional(self, &packets, &result, now_ns, deadline) catch |err| switch (err) {
                 error.FlowControlBlocked, error.CongestionLimited => {
                     if (deadline) |value| {
                         self.servicePacketServicingTimersDeadline(value) catch |progress_err|
@@ -1267,7 +1268,7 @@ pub const Connection = struct {
                     }
                     continue;
                 },
-                else => |other| return other,
+                else => |other| send_failure = other,
             };
             if (result.sent_count > 1 or
                 result.sent_count > result.protected_count)
@@ -1275,14 +1276,17 @@ pub const Connection = struct {
                 return error.Unexpected;
             }
             if (result.sent_count == 0) {
+                if (send_failure) |err| return err;
                 if (result.send_error) |err| return err;
                 return error.Unexpected;
             }
             if (data.len == 0) {
+                if (send_failure) |err| return err;
                 if (result.send_error) |err| return err;
                 return;
             }
             committed_out.* += count;
+            if (send_failure) |err| return err;
             if (result.send_error) |err| return err;
         }
     }
@@ -2583,10 +2587,7 @@ pub const Connection = struct {
         while (committed_count.* < payloads.len) {
             _ = try deadline_policy.usableAwake(self.endpoint.io, deadline);
             var batch_committed: usize = 0;
-            self.trySendDatagramsValidated(
-                payloads[committed_count.*..],
-                &batch_committed,
-            ) catch |err| {
+            bounded_send.runVoid(self.endpoint.io, deadline, Connection.trySendDatagramsValidated, .{ self, payloads[committed_count.*..], &batch_committed }) catch |err| {
                 committed_count.* += batch_committed;
                 switch (err) {
                     error.CongestionLimited => {
@@ -2618,6 +2619,19 @@ pub const Connection = struct {
         const batch_len = @min(max_batch_packets, payloads.len);
         try self.validateDatagrams(payloads[0..batch_len]);
         return self.trySendDatagramsValidated(payloads, committed_count);
+    }
+
+    /// Submit one bounded DATAGRAM window without reading peer packets or
+    /// waiting for pacing. Progress is cleared before budget admission.
+    pub fn trySendDatagramsWithDeadline(self: *Connection, payloads: []const []const u8, committed_count: *usize, deadline: std.Io.Clock.Timestamp) (Error || quic.runtime.ReceiveTimeoutError)!void {
+        committed_count.* = 0;
+        return bounded_send.runVoid(self.endpoint.io, deadline, Connection.trySendDatagrams, .{ self, payloads, committed_count });
+    }
+
+    pub fn trySendDatagramsWithTimeout(self: *Connection, payloads: []const []const u8, committed_count: *usize, timeout: std.Io.Duration) (Error || quic.runtime.ReceiveTimeoutError)!void {
+        committed_count.* = 0;
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.trySendDatagramsWithDeadline(payloads, committed_count, .fromNow(self.endpoint.io, .{ .clock = .awake, .raw = timeout }));
     }
 
     pub fn validateDatagrams(
@@ -2831,7 +2845,7 @@ pub const Connection = struct {
             if (callerDeadlineExpired(deadline, now_ns)) {
                 return error.Timeout;
             }
-            self.trySendDatagramAtValidated(data, now_ns) catch |err| switch (err) {
+            bounded_send.runVoid(self.endpoint.io, deadline, Connection.trySendDatagramAtValidated, .{ self, data, now_ns }) catch |err| switch (err) {
                 error.PacingLimited => {
                     const pacing_deadline =
                         self.pacing_blocked_until_ns orelse return err;
@@ -2896,7 +2910,7 @@ pub const Connection = struct {
         {
             return error.Timeout;
         }
-        self.trySendDatagram(data) catch |err| switch (err) {
+        bounded_send.runVoid(self.endpoint.io, deadline, Connection.trySendDatagram, .{ self, data }) catch |err| switch (err) {
             error.PacingLimited => {
                 const pacing_deadline =
                     self.pacing_blocked_until_ns orelse return err;
@@ -4189,11 +4203,7 @@ pub const Connection = struct {
         while (true) {
             const now_ns = self.monotonicNowNs();
             if (callerDeadlineExpired(deadline, now_ns)) return error.Timeout;
-            self.sendTrackedFramesEcnAt(
-                frames,
-                .not_ect,
-                now_ns,
-            ) catch |err| switch (err) {
+            bounded_send.runVoid(self.endpoint.io, deadline, Connection.sendTrackedFramesEcnAt, .{ self, frames, .not_ect, now_ns }) catch |err| switch (err) {
                 error.PacingLimited => {
                     const pacing_deadline =
                         self.pacing_blocked_until_ns orelse return err;
@@ -6667,11 +6677,7 @@ pub const Connection = struct {
             if (deadline.durationFromNow(self.endpoint.io).raw.nanoseconds <= 0) {
                 return error.Timeout;
             }
-            self.resetStreamAt(
-                stream_id,
-                application_error_code,
-                self.monotonicNowNs(),
-            ) catch |err| switch (err) {
+            bounded_send.runVoid(self.endpoint.io, deadline, Connection.resetStreamAt, .{ self, stream_id, application_error_code, self.monotonicNowNs() }) catch |err| switch (err) {
                 error.CongestionLimited => {
                     self.servicePacketServicingTimersDeadline(deadline) catch |progress_err|
                         switch (progress_err) {
@@ -6760,12 +6766,7 @@ pub const Connection = struct {
             if (deadline.durationFromNow(self.endpoint.io).raw.nanoseconds <= 0) {
                 return error.Timeout;
             }
-            self.resetStreamReliablyAt(
-                stream_id,
-                application_error_code,
-                reliable_size,
-                self.monotonicNowNs(),
-            ) catch |err| switch (err) {
+            bounded_send.runVoid(self.endpoint.io, deadline, Connection.resetStreamReliablyAt, .{ self, stream_id, application_error_code, reliable_size, self.monotonicNowNs() }) catch |err| switch (err) {
                 error.CongestionLimited => {
                     self.servicePacketServicingTimersDeadline(deadline) catch |progress_err|
                         switch (progress_err) {
@@ -6884,11 +6885,7 @@ pub const Connection = struct {
             if (deadline.durationFromNow(self.endpoint.io).raw.nanoseconds <= 0) {
                 return error.Timeout;
             }
-            self.sendStopSendingAt(
-                stream_id,
-                application_error_code,
-                self.monotonicNowNs(),
-            ) catch |err| switch (err) {
+            bounded_send.runVoid(self.endpoint.io, deadline, Connection.sendStopSendingAt, .{ self, stream_id, application_error_code, self.monotonicNowNs() }) catch |err| switch (err) {
                 error.CongestionLimited => {
                     self.servicePacketServicingTimersDeadline(deadline) catch |progress_err|
                         switch (progress_err) {
@@ -14791,11 +14788,7 @@ pub const Connection = struct {
     ) (Error || quic.runtime.ReceiveTimeoutError)!void {
         _ = try deadline_policy.usableAwake(self.endpoint.io, deadline);
         while (true) {
-            self.releaseReceivedCapacityAt(
-                stream_id,
-                amount,
-                self.monotonicNowNs(),
-            ) catch |err| switch (err) {
+            bounded_send.runVoid(self.endpoint.io, deadline, Connection.releaseReceivedCapacityAt, .{ self, stream_id, amount, self.monotonicNowNs() }) catch |err| switch (err) {
                 error.CongestionLimited => {
                     self.servicePacketServicingTimersDeadline(deadline) catch |progress_err|
                         switch (progress_err) {

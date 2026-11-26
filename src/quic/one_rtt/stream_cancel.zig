@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const deadline_policy = @import("../../internal/deadline.zig");
+const bounded = @import("../../internal/progress_deadline.zig");
 
 /// A committed RESET has its own immutable error identity. Canceling the
 /// receive half may use another code, and a reliable-prefix downgrade must
@@ -32,7 +33,8 @@ pub fn withDeadline(
     _ = try deadline_policy.usableAwake(connection.endpoint.io, deadline);
     while (true) {
         _ = try deadline_policy.usableAwake(connection.endpoint.io, deadline);
-        connection.tryCancelStream(stream_id, application_error_code) catch |err|
+        const Connection = @typeInfo(@TypeOf(connection)).pointer.child;
+        bounded.runVoid(connection.endpoint.io, deadline, Connection.tryCancelStream, .{ connection, stream_id, application_error_code }) catch |err|
             switch (err) {
                 error.CongestionLimited => {
                     connection.servicePacketServicingTimersDeadline(deadline) catch |progress_err|

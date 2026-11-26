@@ -1,0 +1,17 @@
+{
+  "source_sha256": "4b802bcc90716aa4683861f78a3bfe73fde8c146ac7d766fd4abcc0d2cf7bb96",
+  "original_combined_unchanged": true,
+  "pins_and_timeout_values_unchanged": true,
+  "syntax_exit": 0,
+  "checks": [
+    {
+      "child_exit": 0,
+      "step_exit": 0
+    },
+    {
+      "child_exit": 7,
+      "step_exit": 7
+    }
+  ],
+  "scope": "simulated step status routing; native behavior verified separately"
+}

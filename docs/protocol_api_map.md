@@ -77,6 +77,16 @@ write retries.
   progress, including an error return. These entry points expose transport
   stalls to the owner; `sendWithDeadline` / `sendWithTimeout` also drive peer
   and timer progress while waiting for flow-control or congestion credit.
+- Direct QUIC `sendStreamWithDeadline`, sliced STREAM sends, DATAGRAM sends,
+  RESET/STOP and receive-credit output carry their original budget to socket
+  submission. Their workers join before caller-owned payload/progress storage
+  leaves scope. Stream bytes and payload counts retain a confirmed prefix on
+  error; protected unsent packets still consume their packet numbers.
+- `trySendDatagramsWithDeadline` and `trySendDatagramsWithTimeout` submit one
+  bounded DATAGRAM window and clear `committed_count` before admission. They
+  return pacing/congestion stalls to the endpoint owner without reading UDP.
+  HTTP/3 CONNECT DATAGRAM waits keep pacing with that same reader, so peer
+  CLOSE/STOP and buffered QPACK/stream work can be observed before retrying.
 - HTTP/3 handshake selection uses `http3.preference_timeout` for the H3 probe
   under `prefer_http3`; TCP fallback keeps the original request deadline.
 - `websocket.stream_connection` exposes deadline and relative-timeout forms

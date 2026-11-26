@@ -207,6 +207,17 @@ has the same socket budget, but its multi-packet head/body ownership remains
 conservative: an attempted partial submission requires the owner's terminal
 cleanup rather than a retry of the complete input.
 
+For stateful WebTransport STREAM sends, the byte-count output describes the
+confirmed application prefix of that call, including an error return. Retry
+only the remaining suffix, using the same stream's committed offset and a
+chosen remaining budget. Contiguous and sliced writes, their association
+prefix, FIN and fair cross-stream batches bound actual socket submission.
+DATAGRAM batches report the confirmed payload prefix and consume every sealed
+packet number; development and preconfigured-key paths retain the same rule.
+A deadline worker always joins before its borrowed buffers are released.
+HTTP/3 pacing stays with the connection reader: a later pacing wake must not
+hide a peer CLOSE or STOP that is already waiting on the socket.
+
 ## Client duplex requests (HTTP/1, HTTP/2, HTTP/3)
 
 `netz.http.RequestHandle` is the connection-level streaming client shape shared

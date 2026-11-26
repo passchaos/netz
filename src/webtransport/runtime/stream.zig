@@ -1,4 +1,6 @@
 const std = @import("std");
+const bounded_packets = @import("../../quic/one_rtt/send_deadline.zig");
+const association_send = @import("stream/association_send.zig");
 const receive_credit = @import("stream/receive_credit.zig");
 const webtransport = @import("../mod.zig");
 const http3 = @import("../../http3/mod.zig");
@@ -536,10 +538,9 @@ pub fn sendSlicesWithProgress(
         }
         std.debug.assert(packet_count != 0);
         const sent_time_ns = monotonicNowNs(connection);
-        const result = connection.sendManyProgressAt(
-            packets[0..packet_count],
-            sent_time_ns,
-        ) catch |err| switch (err) {
+        var result: quic.one_rtt.ConnectionBatchSendResult = .{ .sent_count = 0, .protected_count = 0 };
+        var send_failure: ?TimeoutError = null;
+        bounded_packets.manyOptional(connection, packets[0..packet_count], &result, sent_time_ns, deadline) catch |err| switch (err) {
             error.FlowControlBlocked, error.CongestionLimited => {
                 try send_wait.receive(connection, deadline, progress);
                 continue;
@@ -548,7 +549,7 @@ pub fn sendSlicesWithProgress(
                 try send_wait.pacing(connection, deadline, progress);
                 continue;
             },
-            else => |other| return other,
+            else => |other| send_failure = other,
         };
         if (result.sent_count > packet_count or
             result.sent_count > result.protected_count)
@@ -556,6 +557,7 @@ pub fn sendSlicesWithProgress(
             return error.Unexpected;
         }
         if (result.sent_count == 0) {
+            if (send_failure) |err| return err;
             if (result.send_error) |err| return err;
             return error.Unexpected;
         }
@@ -576,6 +578,7 @@ pub fn sendSlicesWithProgress(
         flow_send.commit(registry, committed);
         cursor = committed_cursor;
         committed_out.* = cursor.committed;
+        if (send_failure) |err| return err;
         if (result.send_error) |err| return err;
     }
     if (fin) try finishWithProgress(
@@ -674,10 +677,9 @@ pub fn sendWithProgress(
         _ = std.math.add(usize, offset, staged_bytes) catch
             return error.IntegerOverflow;
         const sent_time_ns = monotonicNowNs(connection);
-        const result = connection.sendManyProgressAt(
-            packets[0..packet_count],
-            sent_time_ns,
-        ) catch |err| switch (err) {
+        var result: quic.one_rtt.ConnectionBatchSendResult = .{ .sent_count = 0, .protected_count = 0 };
+        var send_failure: ?TimeoutError = null;
+        bounded_packets.manyOptional(connection, packets[0..packet_count], &result, sent_time_ns, deadline) catch |err| switch (err) {
             error.FlowControlBlocked, error.CongestionLimited => {
                 try send_wait.receive(connection, deadline, progress);
                 continue;
@@ -686,7 +688,7 @@ pub fn sendWithProgress(
                 try send_wait.pacing(connection, deadline, progress);
                 continue;
             },
-            else => |other| return other,
+            else => |other| send_failure = other,
         };
         if (result.sent_count > packet_count or
             result.sent_count > result.protected_count)
@@ -698,6 +700,7 @@ pub fn sendWithProgress(
             committed += frames[index][0].stream.data.len;
         }
         if (committed == 0) {
+            if (send_failure) |err| return err;
             if (result.send_error) |err| return err;
             return error.Unexpected;
         }
@@ -709,6 +712,7 @@ pub fn sendWithProgress(
         flow_send.commit(registry, committed);
         offset += committed;
         committed_out.* = offset;
+        if (send_failure) |err| return err;
         if (result.send_error) |err| return err;
     }
     if (fin) try finishWithProgress(
@@ -948,7 +952,7 @@ pub fn writeSlicesWithProgress(
             if (count == 0) break;
         }
         if (frame_count == 0) return error.DatagramTooLarge;
-        connection.trySend(frames[0..frame_count]) catch |err| switch (err) {
+        bounded_packets.oneOptional(connection, frames[0..frame_count], deadline) catch |err| switch (err) {
             error.FlowControlBlocked, error.CongestionLimited => {
                 try send_wait.receive(connection, deadline, progress);
                 continue;
@@ -1022,7 +1026,7 @@ pub fn writeWithProgress(
             stream.bytes_sent,
             count,
         ) catch return error.IntegerOverflow;
-        connection.trySend(&frames) catch |err| switch (err) {
+        bounded_packets.oneOptional(connection, &frames, deadline) catch |err| switch (err) {
             error.FlowControlBlocked, error.CongestionLimited => {
                 try send_wait.receive(connection, deadline, progress);
                 continue;
@@ -1307,7 +1311,7 @@ pub fn finishWithProgress(
             .data = &.{},
             .fin = true,
         } }};
-        connection.trySend(&frames) catch |err| switch (err) {
+        bounded_packets.oneOptional(connection, &frames, deadline) catch |err| switch (err) {
             error.FlowControlBlocked, error.CongestionLimited => {
                 try send_wait.receive(connection, deadline, progress);
                 continue;
@@ -1417,7 +1421,7 @@ fn sendPrefixIfNeededUntil(
         if (stream.prefix_sent) return;
         var prefix_storage: [16]u8 = undefined;
         const prefix = try association_prefix.header(session_id, stream.direction, &prefix_storage);
-        sendPrefixOnce(connection, stream, stream_id, prefix) catch |err| switch (err) {
+        association_send.prefix(connection, stream, stream_id, prefix, deadline) catch |err| switch (err) {
             error.FlowControlBlocked, error.CongestionLimited => {
                 try send_wait.receive(connection, deadline, progress);
                 continue;
@@ -1507,26 +1511,11 @@ fn submitOnce(
     }
 }
 
-fn sendPrefixOnce(
-    connection: *quic.one_rtt.Connection,
-    stream: *webtransport.StreamState,
-    stream_id: u62,
-    prefix: []const u8,
-) Error!void {
-    const next_offset = std.math.add(
-        u64,
-        stream.send_offset,
-        prefix.len,
-    ) catch return error.IntegerOverflow;
-    const frames = [_]quic.Frame{.{ .stream = .{
-        .stream_id = stream_id,
-        .offset = stream.send_offset,
-        .data = prefix,
-        .fin = false,
-    } }};
-    try connection.trySend(&frames);
-    stream.send_offset = next_offset;
-    stream.prefix_sent = true;
+fn sendPrefixOnce(connection: *quic.one_rtt.Connection, stream: *webtransport.StreamState, stream_id: u62, prefix: []const u8) Error!void {
+    return association_send.prefix(connection, stream, stream_id, prefix, null) catch |err| switch (err) {
+        error.Timeout, error.ConcurrencyUnavailable => unreachable,
+        else => return @errorCast(err),
+    };
 }
 
 pub fn receiveSendProgress(
@@ -1849,4 +1838,5 @@ fn takeHandshakeSessionStream(
 
 test {
     _ = @import("stream/tests/handshake_stream.zig");
+    _ = @import("stream/tests/socket_deadline.zig");
 }

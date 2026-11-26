@@ -3,8 +3,7 @@ const deadline_policy = @import("../../../internal/deadline.zig");
 const webtransport = @import("../../mod.zig");
 const quic = @import("../../../quic/mod.zig");
 const codec = @import("codec.zig");
-
-const protected_packet_capacity = codec.stack_capacity + 64;
+const socket_budget = @import("socket_budget.zig");
 
 pub const DevelopmentBatchScratch = struct {
     encoded_datagrams: std.ArrayList(u8) = .empty,
@@ -172,7 +171,7 @@ pub fn development(
         payload,
         null,
     ) catch |err| switch (err) {
-        error.Timeout => unreachable,
+        error.Timeout, error.ConcurrencyUnavailable => unreachable,
         else => return err,
     };
 }
@@ -207,7 +206,7 @@ pub fn developmentBatch(
         scratch,
         null,
     ) catch |err| switch (err) {
-        error.Timeout => unreachable,
+        error.Timeout, error.ConcurrencyUnavailable => unreachable,
         else => return err,
     };
 }
@@ -300,13 +299,7 @@ fn developmentBatchUntil(
     if (deadline) |absolute| {
         _ = try deadline_policy.usableAwake(endpoint.io, absolute);
     }
-    const result = try endpoint.sendManyBytesProgress(
-        to,
-        datagrams[0..payloads.len],
-    );
-    committed_count.* = result.sent_count;
-    if (result.send_error) |err| return err;
-    std.debug.assert(result.sent_count == payloads.len);
+    try socket_budget.developmentBatch(endpoint, to, datagrams[0..payloads.len], committed_count, deadline);
 }
 
 fn developmentUntil(
@@ -345,7 +338,7 @@ fn developmentUntil(
     if (deadline) |absolute| {
         _ = try deadline_policy.usableAwake(endpoint.io, absolute);
     }
-    try endpoint.sendFrames(to, &frames);
+    try socket_budget.frames(endpoint, to, &frames, deadline);
 }
 
 test "WebTransport development DATAGRAM deadline rechecks before UDP send" {
@@ -626,7 +619,7 @@ pub fn protected(
         payload,
         null,
     ) catch |err| switch (err) {
-        error.Timeout => unreachable,
+        error.Timeout, error.ConcurrencyUnavailable => unreachable,
         else => return err,
     };
 }
@@ -681,7 +674,7 @@ pub fn protectedBatch(
         scratch,
         null,
     ) catch |err| switch (err) {
-        error.Timeout => unreachable,
+        error.Timeout, error.ConcurrencyUnavailable => unreachable,
         else => return err,
     };
 }
@@ -814,18 +807,7 @@ fn protectedBatchUntil(
     if (deadline) |absolute| {
         _ = try deadline_policy.usableAwake(endpoint.io, absolute);
     }
-    const result = try quic.one_rtt.sendFramesBatchIntoProgress(
-        endpoint,
-        to,
-        keys,
-        options,
-        scratch.quic_payloads.items,
-        scratch.protected_packets.items,
-    );
-    packet_number.* += @intCast(result.protected_count);
-    committed_count.* = result.sent_count;
-    if (result.send_error) |err| return err;
-    std.debug.assert(result.sent_count == payloads.len);
+    try socket_budget.protectedBatch(endpoint, to, keys, options, scratch.quic_payloads.items, scratch.protected_packets.items, packet_number, committed_count, deadline);
 }
 
 fn protectedUntil(
@@ -875,30 +857,8 @@ fn protectedUntil(
         .packet_number = packet_number.*,
         .frames = &frames,
     };
-    const sizes = try quic.one_rtt.framePacketStorageSizes(options);
-    if (deadline) |absolute| {
-        _ = try deadline_policy.usableAwake(endpoint.io, absolute);
-    }
-    if (sizes.packet <= protected_packet_capacity) {
-        var packet_stack: [protected_packet_capacity]u8 = undefined;
-        const packet = try quic.one_rtt.sealFramesInto(
-            keys,
-            options,
-            &packet_stack,
-        );
-        packet_number.* += 1;
-        try endpoint.sendBytes(to, packet);
-    } else {
-        const packet_storage = try endpoint.allocator.alloc(u8, sizes.packet);
-        defer endpoint.allocator.free(packet_storage);
-        const packet = try quic.one_rtt.sealFramesInto(
-            keys,
-            options,
-            packet_storage,
-        );
-        packet_number.* += 1;
-        try endpoint.sendBytes(to, packet);
-    }
+    if (deadline) |absolute| _ = try deadline_policy.usableAwake(endpoint.io, absolute);
+    try socket_budget.protectedOne(endpoint, to, keys, options, packet_number, deadline);
 }
 
 test "WebTransport protected DATAGRAM deadline rechecks before UDP send" {

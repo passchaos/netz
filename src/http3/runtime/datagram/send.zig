@@ -1,6 +1,7 @@
 //! CONNECT DATAGRAM retries share the application's owner and optional deadline.
 const std = @import("std");
 const deadline_policy = @import("../../../internal/deadline.zig");
+const bounded = @import("../../../internal/progress_deadline.zig");
 
 pub fn Controller(comptime hooks: anytype) type {
     return struct {
@@ -15,7 +16,12 @@ pub fn Controller(comptime hooks: anytype) type {
                 try progress.maintain(deadline);
                 try checkDeadline(session, deadline);
                 try hooks.validate(session, stream_id, payload);
-                session.established.connection.trySendDatagram(encoded) catch |err| switch (err) {
+                const connection = &session.established.connection;
+                const Connection = @TypeOf(connection.*);
+                // The reader owner decides how pacing waits service peer
+                // termination. Bound socket work without translating a later
+                // pacing wake into timeout before that owner can receive.
+                (if (deadline) |until| bounded.runVoid(connection.endpoint.io, until, Connection.trySendDatagram, .{ connection, encoded }) else connection.trySendDatagram(encoded)) catch |err| switch (err) {
                     error.CongestionLimited => {
                         // Ordinary single-send APIs expose congestion to their
                         // caller. Only bounded single sends wait for credit.
@@ -45,7 +51,7 @@ pub fn Controller(comptime hooks: anytype) type {
                 try checkDeadline(session, deadline);
                 try hooks.validate(session, stream_id, payloads[committed.*]);
                 var count: usize = 0;
-                session.established.connection.trySendDatagrams(encoded.datagrams[committed.*..], &count) catch |err| {
+                (if (deadline) |until| session.established.connection.trySendDatagramsWithDeadline(encoded.datagrams[committed.*..], &count, until) else session.established.connection.trySendDatagrams(encoded.datagrams[committed.*..], &count)) catch |err| {
                     committed.* += count;
                     switch (err) {
                         error.CongestionLimited => try receive(session, stream_id, deadline),

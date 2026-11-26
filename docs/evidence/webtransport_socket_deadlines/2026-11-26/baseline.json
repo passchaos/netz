@@ -1,0 +1,7 @@
+{
+  "exit_code": 1,
+  "failure": "SocketDeadlineDidNotInterrupt after actual UDP prefix event",
+  "tests": 35,
+  "log": "/tmp/netz-wt-stream-socket-baseline.log",
+  "log_sha256": "3867f634a6debeb49256fbb43c1cd76a35ce933f53e980df5b48a4fd7bdaba53"
+}

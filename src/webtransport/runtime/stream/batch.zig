@@ -5,6 +5,8 @@
 //! offsets and caller counts commit exactly that socket-visible prefix.
 
 const std = @import("std");
+const bounded_packets = @import("../../../quic/one_rtt/send_deadline.zig");
+const bounded = @import("../../../internal/progress_deadline.zig");
 const webtransport = @import("../../mod.zig");
 const quic = @import("../../../quic/mod.zig");
 const deadline_policy = @import("../../../internal/deadline.zig");
@@ -309,10 +311,11 @@ fn writeOnceUntil(
     }
 
     try ensureDeadline(connection, deadline);
-    const sent = try connection.sendManyProgressAt(
-        packets[0..packet_count],
-        monotonicNowNs(connection),
-    );
+    var sent: quic.one_rtt.ConnectionBatchSendResult = .{ .sent_count = 0, .protected_count = 0 };
+    var send_failure: ?TimeoutError = null;
+    bounded_packets.manyOptional(connection, packets[0..packet_count], &sent, monotonicNowNs(connection), deadline) catch |err| {
+        send_failure = err;
+    };
     if (sent.sent_count > packet_count or
         sent.sent_count > sent.protected_count)
     {
@@ -326,6 +329,11 @@ fn writeOnceUntil(
         stream.bytes_sent = committed_bytes[packet_index];
         flow_send.commit(registry, byte_counts[packet_index]);
         counts[input_index] = byte_counts[packet_index];
+    }
+    if (send_failure) |err| {
+        // Real socket errors retain the existing Result.send_error contract.
+        // A mapped deadline/admission error is returned after counts commit.
+        if (sent.send_error == null or err != sent.send_error.?) return err;
     }
     if (sent.sent_count == 0 and sent.send_error == null) {
         return error.Unexpected;
@@ -522,12 +530,15 @@ fn stagePrefixAwareBatchWith(
             selection_epoch,
         ) orelse return error.UnknownStream;
         if (!mark.first) return error.Unexpected;
-        const stream = try prepare_stream(
-            connection,
-            registry,
-            session_id,
-            item.stream_id,
-        );
+        const stream = if (deadline) |until|
+            try bounded.runResult(connection.endpoint.io, until, prepare_stream, .{ connection, registry, session_id, item.stream_id })
+        else
+            try prepare_stream(
+                connection,
+                registry,
+                session_id,
+                item.stream_id,
+            );
         const count = @min(
             item.data.len,
             sendableBytes(connection.streamSendCredit(item.stream_id)),

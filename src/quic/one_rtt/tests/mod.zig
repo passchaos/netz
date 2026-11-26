@@ -17,4 +17,6 @@ test {
 }
 test {
     _ = @import("send_deadline_tests.zig");
+    _ = @import("stream_socket_deadline_tests.zig");
+    _ = @import("datagram_socket_deadline_tests.zig");
 }

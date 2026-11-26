@@ -1,4 +1,5 @@
 const std = @import("std");
+const NativeSendIo = @import("../../../../internal/testing/deadline_send_io.zig").Native;
 const stream_root = @import("../../stream.zig");
 
 const association = @import("../../stream_association.zig");
@@ -748,9 +749,9 @@ test "WebTransport local unidirectional FIN requests transport retirement" {
 
 test "WebTransport complete stream send batches consecutive packets" {
     const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var send_io: NativeSendIo = .{ .backend = .init(allocator, .{}), .fixed_clock = false };
+    defer send_io.backend.deinit();
+    const io = send_io.backend.io();
     var sender_endpoint = try quic.runtime.Endpoint.bind(
         allocator,
         io,
@@ -792,12 +793,9 @@ test "WebTransport complete stream send batches consecutive packets" {
         @import("../../../../quic/one_rtt/tests/observed_batch_send.zig")
             .ObservedBatchSend;
     var observed = ObservedBatchSend{ .delegate = sender_endpoint.io };
-    var observed_vtable = sender_endpoint.io.vtable.*;
-    observed_vtable.netSend = ObservedBatchSend.netSend;
-    sender_endpoint.io = .{
-        .userdata = &observed,
-        .vtable = &observed_vtable,
-    };
+    send_io.send_context = &observed;
+    send_io.send_override = ObservedBatchSend.netSend;
+    sender_endpoint.io = send_io.io();
     defer sender_endpoint.io = observed.delegate;
 
     const payload = [_]u8{0xa5} ** 10_000;
@@ -822,9 +820,9 @@ test "WebTransport complete stream send batches consecutive packets" {
 
 test "WebTransport complete stream batch commits only socket prefix" {
     const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var send_io: NativeSendIo = .{ .backend = .init(allocator, .{}), .fixed_clock = false };
+    defer send_io.backend.deinit();
+    const io = send_io.backend.io();
     var sender_endpoint = try quic.runtime.Endpoint.bind(
         allocator,
         io,
@@ -876,12 +874,9 @@ test "WebTransport complete stream batch commits only socket prefix" {
         .delegate = sender_endpoint.io,
         .fail_after_prefix = 0,
     };
-    var observed_vtable = sender_endpoint.io.vtable.*;
-    observed_vtable.netSend = ObservedBatchSend.netSend;
-    sender_endpoint.io = .{
-        .userdata = &observed,
-        .vtable = &observed_vtable,
-    };
+    send_io.send_context = &observed;
+    send_io.send_override = ObservedBatchSend.netSend;
+    sender_endpoint.io = send_io.io();
     defer sender_endpoint.io = observed.delegate;
 
     const payload = [_]u8{0x5a} ** 10_000;
@@ -951,9 +946,9 @@ test "WebTransport complete stream batch commits only socket prefix" {
 
 test "WebTransport stream slice batch commits only socket prefix" {
     const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var send_io: NativeSendIo = .{ .backend = .init(allocator, .{}), .fixed_clock = false };
+    defer send_io.backend.deinit();
+    const io = send_io.backend.io();
     var sender_endpoint = try quic.runtime.Endpoint.bind(
         allocator,
         io,
@@ -1004,12 +999,9 @@ test "WebTransport stream slice batch commits only socket prefix" {
         .delegate = sender_endpoint.io,
         .fail_after_prefix = 1,
     };
-    var observed_vtable = sender_endpoint.io.vtable.*;
-    observed_vtable.netSend = ObservedBatchSend.netSend;
-    sender_endpoint.io = .{
-        .userdata = &observed,
-        .vtable = &observed_vtable,
-    };
+    send_io.send_context = &observed;
+    send_io.send_override = ObservedBatchSend.netSend;
+    sender_endpoint.io = send_io.io();
     defer sender_endpoint.io = observed.delegate;
 
     const payload = [_]u8{0x5b} ** 10_000;

@@ -2,6 +2,7 @@ const std = @import("std");
 const quic = @import("../../mod.zig");
 const one_rtt = @import("../../one_rtt.zig");
 const ObservedBatchSend = @import("observed_batch_send.zig").ObservedBatchSend;
+const NativeSendIo = @import("../../../internal/testing/deadline_send_io.zig").Native;
 
 const Fixture = struct {
     endpoint: quic.runtime.Endpoint,
@@ -161,17 +162,17 @@ test "QUIC stream cancel deadline services queued ACK congestion progress" {
 }
 
 test "QUIC stream cancel deadline retries atomic socket failure" {
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
+    var send_io: NativeSendIo = .{ .backend = .init(std.testing.allocator, .{}), .fixed_clock = false };
+    defer send_io.backend.deinit();
     var fixture: Fixture = undefined;
-    try fixture.init(threaded.io());
+    try fixture.init(send_io.backend.io());
     defer fixture.deinit();
     try fixture.prepare();
     const original_io = fixture.endpoint.io;
     var observed = ObservedBatchSend{ .delegate = original_io, .fail_on_call = 1 };
-    var vtable = original_io.vtable.*;
-    vtable.netSend = ObservedBatchSend.netSend;
-    fixture.endpoint.io = .{ .userdata = &observed, .vtable = &vtable };
+    send_io.send_context = &observed;
+    send_io.send_override = ObservedBatchSend.netSend;
+    fixture.endpoint.io = send_io.io();
     defer fixture.endpoint.io = original_io;
     try std.testing.expectError(error.NetworkDown, fixture.connection.cancelStreamWithTimeout(0, 71, .fromSeconds(1)));
     try fixture.expectRetryable();

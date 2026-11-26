@@ -1,40 +1,8 @@
 const std = @import("std");
+const NativeSendIo = @import("../../../../internal/testing/deadline_send_io.zig").Native;
 const webtransport = @import("../../../mod.zig");
 const quic = @import("../../../../quic/mod.zig");
 const batch = @import("../batch.zig");
-
-const AdvancingSendIo = struct {
-    delegate: std.Io,
-    now_ns: i96,
-    advance_ns: i96,
-    send_calls: usize = 0,
-
-    fn now(
-        userdata: ?*anyopaque,
-        _: std.Io.Clock,
-    ) std.Io.Timestamp {
-        const self: *@This() = @ptrCast(@alignCast(userdata));
-        return .fromNanoseconds(self.now_ns);
-    }
-
-    fn netSend(
-        userdata: ?*anyopaque,
-        socket_handle: std.Io.net.Socket.Handle,
-        messages: []std.Io.net.OutgoingMessage,
-        flags: std.Io.net.SendFlags,
-    ) struct { ?std.Io.net.Socket.SendError, usize } {
-        const self: *@This() = @ptrCast(@alignCast(userdata));
-        const result = self.delegate.vtable.netSend(
-            self.delegate.userdata,
-            socket_handle,
-            messages,
-            flags,
-        );
-        self.send_calls += 1;
-        self.now_ns += self.advance_ns;
-        return result;
-    }
-};
 
 test "WebTransport batch selects high priority streams with stable ties" {
     var registry = try webtransport.StreamRegistry.init(
@@ -444,9 +412,9 @@ test "WebTransport batch deadline resumes prefix-only flow control" {
 
 test "WebTransport batch partial socket send commits exact per-stream counts" {
     const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var send_io: NativeSendIo = .{ .backend = .init(allocator, .{}), .fixed_clock = false };
+    defer send_io.backend.deinit();
+    const io = send_io.backend.io();
     var sender_endpoint = try quic.runtime.Endpoint.bind(
         allocator,
         io,
@@ -500,12 +468,9 @@ test "WebTransport batch partial socket send commits exact per-stream counts" {
         .delegate = sender_endpoint.io,
         .fail_after_prefix = 1,
     };
-    var observed_vtable = sender_endpoint.io.vtable.*;
-    observed_vtable.netSend = ObservedBatchSend.netSend;
-    sender_endpoint.io = .{
-        .userdata = &observed,
-        .vtable = &observed_vtable,
-    };
+    send_io.send_context = &observed;
+    send_io.send_override = ObservedBatchSend.netSend;
+    sender_endpoint.io = send_io.io();
     defer sender_endpoint.io = observed.delegate;
 
     const result = try batch.writeOnce(
@@ -526,9 +491,9 @@ test "WebTransport batch partial socket send commits exact per-stream counts" {
 
 test "WebTransport batch deadline stops between association prefixes" {
     const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var advancing: NativeSendIo = .{ .backend = .init(allocator, .{}), .now_ns = .init(1_000_000), .advance_after_send_ns = 2_000_000 };
+    defer advancing.backend.deinit();
+    const io = advancing.backend.io();
     var sender_endpoint = try quic.runtime.Endpoint.bind(
         allocator,
         io,
@@ -571,19 +536,8 @@ test "WebTransport batch deadline stops between association prefixes" {
     };
     var counts = [_]usize{ 99, 99 };
 
-    var advancing = AdvancingSendIo{
-        .delegate = sender_endpoint.io,
-        .now_ns = 1_000_000,
-        .advance_ns = 2_000_000,
-    };
-    var advancing_vtable = sender_endpoint.io.vtable.*;
-    advancing_vtable.now = AdvancingSendIo.now;
-    advancing_vtable.netSend = AdvancingSendIo.netSend;
-    sender_endpoint.io = .{
-        .userdata = &advancing,
-        .vtable = &advancing_vtable,
-    };
-    defer sender_endpoint.io = advancing.delegate;
+    sender_endpoint.io = advancing.io();
+    defer sender_endpoint.io = io;
 
     try std.testing.expectError(
         error.Timeout,
@@ -599,7 +553,7 @@ test "WebTransport batch deadline stops between association prefixes" {
             },
         ),
     );
-    try std.testing.expectEqual(@as(usize, 1), advancing.send_calls);
+    try std.testing.expectEqual(@as(usize, 1), advancing.send_calls.load(.acquire));
     try std.testing.expectEqualSlices(usize, &.{ 0, 0 }, &counts);
     try std.testing.expect(first.prefix_sent);
     try std.testing.expect(!second.prefix_sent);

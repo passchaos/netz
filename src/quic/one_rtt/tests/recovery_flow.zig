@@ -3,12 +3,13 @@ const quic = @import("../../mod.zig");
 const one_rtt = @import("../../one_rtt.zig");
 const net = std.Io.net;
 const ObservedBatchSend = @import("observed_batch_send.zig").ObservedBatchSend;
+const NativeSendIo = @import("../../../internal/testing/deadline_send_io.zig").Native;
 
 test "QUIC server anti-amplification batch retains only sent wire bytes" {
     const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var send_io: NativeSendIo = .{ .backend = .init(allocator, .{}), .fixed_clock = false };
+    defer send_io.backend.deinit();
+    const io = send_io.backend.io();
     var sender_endpoint = try quic.runtime.Endpoint.bind(
         allocator,
         io,
@@ -45,12 +46,9 @@ test "QUIC server anti-amplification batch retains only sent wire bytes" {
         .delegate = sender_endpoint.io,
         .fail_after_prefix = 1,
     };
-    var partial_vtable = sender_endpoint.io.vtable.*;
-    partial_vtable.netSend = ObservedBatchSend.netSend;
-    sender_endpoint.io = .{
-        .userdata = &partial_send,
-        .vtable = &partial_vtable,
-    };
+    send_io.send_context = &partial_send;
+    send_io.send_override = ObservedBatchSend.netSend;
+    sender_endpoint.io = send_io.io();
     defer sender_endpoint.io = partial_send.delegate;
 
     const first = [_]quic.Frame{.{ .ping = {} }};
@@ -72,9 +70,9 @@ test "QUIC server anti-amplification batch retains only sent wire bytes" {
 test "QUIC 1-RTT stateful batch rolls back unsent suffix and skips nonces" {
     const allocator = std.testing.allocator;
 
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var send_io: NativeSendIo = .{ .backend = .init(allocator, .{}), .fixed_clock = false };
+    defer send_io.backend.deinit();
+    const io = send_io.backend.io();
 
     var server_endpoint = try quic.runtime.Endpoint.bind(
         allocator,
@@ -121,12 +119,9 @@ test "QUIC 1-RTT stateful batch rolls back unsent suffix and skips nonces" {
         .delegate = client.endpoint.io,
         .fail_after_prefix = 1,
     };
-    var partial_vtable = client.endpoint.io.vtable.*;
-    partial_vtable.netSend = ObservedBatchSend.netSend;
-    client.endpoint.io = .{
-        .userdata = &partial_send,
-        .vtable = &partial_vtable,
-    };
+    send_io.send_context = &partial_send;
+    send_io.send_override = ObservedBatchSend.netSend;
+    client.endpoint.io = send_io.io();
     defer client.endpoint.io = partial_send.delegate;
 
     const first = [_]quic.Frame{.{ .stream = .{
@@ -1348,9 +1343,9 @@ test "QUIC bounded DATAGRAM send waits for ACK congestion credit" {
 
 test "QUIC DATAGRAM batch validates all input and commits socket prefix" {
     const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var send_io: NativeSendIo = .{ .backend = .init(allocator, .{}), .fixed_clock = false };
+    defer send_io.backend.deinit();
+    const io = send_io.backend.io();
 
     var server_endpoint = try quic.runtime.Endpoint.bind(
         allocator,
@@ -1461,12 +1456,9 @@ test "QUIC DATAGRAM batch validates all input and commits socket prefix" {
         .delegate = client.endpoint.io,
         .fail_after_prefix = 1,
     };
-    var partial_vtable = client.endpoint.io.vtable.*;
-    partial_vtable.netSend = ObservedBatchSend.netSend;
-    client.endpoint.io = .{
-        .userdata = &partial_send,
-        .vtable = &partial_vtable,
-    };
+    send_io.send_context = &partial_send;
+    send_io.send_override = ObservedBatchSend.netSend;
+    client.endpoint.io = send_io.io();
     defer client.endpoint.io = partial_send.delegate;
 
     const payloads = [_][]const u8{ "one", "two", "three" };
@@ -1570,9 +1562,9 @@ test "QUIC DATAGRAM batch continues across transport batch windows" {
 
 test "QUIC DATAGRAM batch packs payloads into the MTU" {
     const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var send_io: NativeSendIo = .{ .backend = .init(allocator, .{}), .fixed_clock = false };
+    defer send_io.backend.deinit();
+    const io = send_io.backend.io();
     var receiver_endpoint = try quic.runtime.Endpoint.bind(
         allocator,
         io,
@@ -1666,12 +1658,9 @@ test "QUIC DATAGRAM batch packs payloads into the MTU" {
         .delegate = sender.endpoint.io,
         .fail_after_prefix = 1,
     };
-    var partial_vtable = sender.endpoint.io.vtable.*;
-    partial_vtable.netSend = ObservedBatchSend.netSend;
-    sender.endpoint.io = .{
-        .userdata = &partial_send,
-        .vtable = &partial_vtable,
-    };
+    send_io.send_context = &partial_send;
+    send_io.send_override = ObservedBatchSend.netSend;
+    sender.endpoint.io = send_io.io();
     defer sender.endpoint.io = partial_send.delegate;
     try std.testing.expectError(
         error.NetworkDown,
@@ -1765,9 +1754,9 @@ test "QUIC 1-RTT single send builds frames in recovery ownership" {
 test "QUIC 1-RTT PTO batch commits a socket-sent prefix before returning error" {
     const allocator = std.testing.allocator;
 
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var send_io: NativeSendIo = .{ .backend = .init(allocator, .{}), .fixed_clock = false };
+    defer send_io.backend.deinit();
+    const io = send_io.backend.io();
 
     var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
     defer server_endpoint.deinit();
@@ -1813,12 +1802,9 @@ test "QUIC 1-RTT PTO batch commits a socket-sent prefix before returning error" 
         .delegate = client.endpoint.io,
         .fail_after_prefix = 1,
     };
-    var partial_vtable = client.endpoint.io.vtable.*;
-    partial_vtable.netSend = ObservedBatchSend.netSend;
-    client.endpoint.io = .{
-        .userdata = &partial_send,
-        .vtable = &partial_vtable,
-    };
+    send_io.send_context = &partial_send;
+    send_io.send_override = ObservedBatchSend.netSend;
+    client.endpoint.io = send_io.io();
     defer client.endpoint.io = partial_send.delegate;
 
     try std.testing.expectError(error.NetworkDown, client.retransmitPtoProbesAt(20_000_000, 2));
@@ -1866,9 +1852,9 @@ test "QUIC 1-RTT PTO batch commits a socket-sent prefix before returning error" 
 
 test "QUIC 1-RTT PTO batch retires sealed nonces after zero socket progress" {
     const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var send_io: NativeSendIo = .{ .backend = .init(allocator, .{}), .fixed_clock = false };
+    defer send_io.backend.deinit();
+    const io = send_io.backend.io();
 
     var receiver = try quic.runtime.Endpoint.bind(
         allocator,
@@ -1907,9 +1893,9 @@ test "QUIC 1-RTT PTO batch retires sealed nonces after zero socket progress" {
         .delegate = sender.io,
         .fail_after_prefix = 0,
     };
-    var failed_vtable = sender.io.vtable.*;
-    failed_vtable.netSend = ObservedBatchSend.netSend;
-    sender.io = .{ .userdata = &failed, .vtable = &failed_vtable };
+    send_io.send_context = &failed;
+    send_io.send_override = ObservedBatchSend.netSend;
+    sender.io = send_io.io();
     defer sender.io = failed.delegate;
 
     try std.testing.expectError(
@@ -3650,9 +3636,9 @@ test "QUIC STREAM sender retains payload when only the header fits capacity" {
 
 test "QUIC bounded stream send reports socket-visible prefix" {
     const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var send_io: NativeSendIo = .{ .backend = .init(allocator, .{}), .fixed_clock = false };
+    defer send_io.backend.deinit();
+    const io = send_io.backend.io();
 
     var server_endpoint = try quic.runtime.Endpoint.bind(
         allocator,
@@ -3700,9 +3686,9 @@ test "QUIC bounded stream send reports socket-visible prefix" {
         .delegate = client.endpoint.io,
         .fail_after_prefix = 1,
     };
-    var failed_vtable = client.endpoint.io.vtable.*;
-    failed_vtable.netSend = ObservedBatchSend.netSend;
-    client.endpoint.io = .{ .userdata = &failed, .vtable = &failed_vtable };
+    send_io.send_context = &failed;
+    send_io.send_override = ObservedBatchSend.netSend;
+    client.endpoint.io = send_io.io();
     defer client.endpoint.io = failed.delegate;
 
     var committed: usize = 99;
@@ -3793,9 +3779,9 @@ test "QUIC bounded stream send reports socket-visible prefix" {
 
 test "QUIC bounded stream slices cross boundaries and resume exact suffix" {
     const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var send_io: NativeSendIo = .{ .backend = .init(allocator, .{}), .fixed_clock = false };
+    defer send_io.backend.deinit();
+    const io = send_io.backend.io();
 
     var sender_endpoint = try quic.runtime.Endpoint.bind(
         allocator,
@@ -3871,9 +3857,9 @@ test "QUIC bounded stream slices cross boundaries and resume exact suffix" {
         .delegate = client.endpoint.io,
         .fail_after_prefix = 0,
     };
-    var failed_vtable = client.endpoint.io.vtable.*;
-    failed_vtable.netSend = ObservedBatchSend.netSend;
-    client.endpoint.io = .{ .userdata = &failed, .vtable = &failed_vtable };
+    send_io.send_context = &failed;
+    send_io.send_override = ObservedBatchSend.netSend;
+    client.endpoint.io = send_io.io();
     defer client.endpoint.io = failed.delegate;
 
     var zero_committed: usize = 99;
@@ -4245,9 +4231,9 @@ test "QUIC ordinary send preserves final size validation after credit planning" 
 test "QUIC 1-RTT connection handles stream-level flow control" {
     const allocator = std.testing.allocator;
 
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var send_io: NativeSendIo = .{ .backend = .init(allocator, .{}), .fixed_clock = false };
+    defer send_io.backend.deinit();
+    const io = send_io.backend.io();
 
     var server_endpoint = try quic.runtime.Endpoint.bind(allocator, io, .{ .ip4 = .loopback(0) }, .{ .max_datagram_size = 4096 });
     defer server_endpoint.deinit();
@@ -4385,12 +4371,9 @@ test "QUIC 1-RTT connection handles stream-level flow control" {
         .delegate = combined_server.endpoint.io,
         .fail_after_prefix = 0,
     };
-    var failed_credit_vtable = combined_server.endpoint.io.vtable.*;
-    failed_credit_vtable.netSend = ObservedBatchSend.netSend;
-    combined_server.endpoint.io = .{
-        .userdata = &failed_credit_send,
-        .vtable = &failed_credit_vtable,
-    };
+    send_io.send_context = &failed_credit_send;
+    send_io.send_override = ObservedBatchSend.netSend;
+    combined_server.endpoint.io = send_io.io();
     try std.testing.expectError(
         error.NetworkDown,
         combined_server.releaseReceivedCapacity(0, 6),
@@ -5593,9 +5576,9 @@ test "QUIC bounded STOP_SENDING validates deadline before commit" {
 test "QUIC deferred peer stream credit retries from connection timer" {
     const allocator = std.testing.allocator;
 
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var send_io: NativeSendIo = .{ .backend = .init(allocator, .{}), .fixed_clock = false };
+    defer send_io.backend.deinit();
+    const io = send_io.backend.io();
 
     var server_endpoint = try quic.runtime.Endpoint.bind(
         allocator,
@@ -5661,12 +5644,9 @@ test "QUIC deferred peer stream credit retries from connection timer" {
         .delegate = server.endpoint.io,
         .fail_after_prefix = 0,
     };
-    var failed_credit_vtable = server.endpoint.io.vtable.*;
-    failed_credit_vtable.netSend = ObservedBatchSend.netSend;
-    server.endpoint.io = .{
-        .userdata = &failed_credit_send,
-        .vtable = &failed_credit_vtable,
-    };
+    send_io.send_context = &failed_credit_send;
+    send_io.send_override = ObservedBatchSend.netSend;
+    server.endpoint.io = send_io.io();
     defer server.endpoint.io = failed_credit_send.delegate;
 
     // ACK processing is committed even when the automatic MAX_STREAMS send
@@ -5740,9 +5720,9 @@ test "QUIC deferred peer stream credit retries from connection timer" {
 
 test "QUIC committed receive credit retries from connection timer" {
     const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var send_io: NativeSendIo = .{ .backend = .init(allocator, .{}), .fixed_clock = false };
+    defer send_io.backend.deinit();
+    const io = send_io.backend.io();
 
     var server_endpoint = try quic.runtime.Endpoint.bind(
         allocator,
@@ -5803,12 +5783,9 @@ test "QUIC committed receive credit retries from connection timer" {
         .delegate = server.endpoint.io,
         .fail_after_prefix = 0,
     };
-    var failed_credit_vtable = server.endpoint.io.vtable.*;
-    failed_credit_vtable.netSend = ObservedBatchSend.netSend;
-    server.endpoint.io = .{
-        .userdata = &failed_credit_send,
-        .vtable = &failed_credit_vtable,
-    };
+    send_io.send_context = &failed_credit_send;
+    send_io.send_override = ObservedBatchSend.netSend;
+    server.endpoint.io = send_io.io();
     defer server.endpoint.io = failed_credit_send.delegate;
 
     // Parser ownership is committed even though the first credit packet
@@ -5847,33 +5824,10 @@ test "QUIC committed receive credit retries from connection timer" {
 }
 
 test "QUIC bounded receive credit preserves flow state across pacing timeout" {
-    const FixedClockIo = struct {
-        delegate: std.Io,
-        now_ns: i96 = 1_000_000,
-        sleep_calls: usize = 0,
-
-        fn now(
-            userdata: ?*anyopaque,
-            _: std.Io.Clock,
-        ) std.Io.Timestamp {
-            const self: *@This() = @ptrCast(@alignCast(userdata));
-            return .fromNanoseconds(self.now_ns);
-        }
-
-        fn sleep(
-            userdata: ?*anyopaque,
-            _: std.Io.Timeout,
-        ) std.Io.Cancelable!void {
-            const self: *@This() = @ptrCast(@alignCast(userdata));
-            self.sleep_calls += 1;
-            return error.Canceled;
-        }
-    };
-
     const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var fixed: NativeSendIo = .{ .backend = .init(allocator, .{}), .now_ns = .init(1_000_000) };
+    defer fixed.backend.deinit();
+    const io = fixed.backend.io();
     var sender_endpoint = try quic.runtime.Endpoint.bind(
         allocator,
         io,
@@ -5926,13 +5880,9 @@ test "QUIC bounded receive credit preserves flow state across pacing timeout" {
     var packet = try receiver.receivePacket();
     defer packet.deinit(allocator);
 
-    var fixed = FixedClockIo{ .delegate = receiver.endpoint.io };
-    var vtable = fixed.delegate.vtable.*;
-    vtable.now = FixedClockIo.now;
-    vtable.sleep = FixedClockIo.sleep;
-    receiver.endpoint.io = .{ .userdata = &fixed, .vtable = &vtable };
-    defer receiver.endpoint.io = fixed.delegate;
-    one_rtt.testing.exhaustPacingAt(&receiver, @intCast(fixed.now_ns));
+    receiver.endpoint.io = fixed.io();
+    defer receiver.endpoint.io = io;
+    one_rtt.testing.exhaustPacingAt(&receiver, @intCast(fixed.now_ns.load(.acquire)));
 
     const packet_number = receiver.next_packet_number;
     try std.testing.expectError(
@@ -5943,10 +5893,10 @@ test "QUIC bounded receive credit preserves flow state across pacing timeout" {
         error.Timeout,
         receiver.releaseReceivedCapacityWithDeadline(0, 6, .{
             .clock = .awake,
-            .raw = .fromNanoseconds(fixed.now_ns + 1),
+            .raw = .fromNanoseconds(fixed.now_ns.load(.acquire) + 1),
         }),
     );
-    try std.testing.expectEqual(@as(usize, 0), fixed.sleep_calls);
+    try std.testing.expectEqual(@as(usize, 0), fixed.duration_sleep_calls.load(.acquire));
     try std.testing.expectEqual(packet_number, receiver.next_packet_number);
     try std.testing.expectEqual(
         @as(u64, 0),
@@ -5964,11 +5914,11 @@ test "QUIC bounded receive credit preserves flow state across pacing timeout" {
     one_rtt.testing.setPacingBudgetAt(
         &receiver,
         receiver.congestionWindow(),
-        @intCast(fixed.now_ns),
+        @intCast(fixed.now_ns.load(.acquire)),
     );
     try receiver.releaseReceivedCapacityWithDeadline(0, 6, .{
         .clock = .awake,
-        .raw = .fromNanoseconds(fixed.now_ns + std.time.ns_per_s),
+        .raw = .fromNanoseconds(fixed.now_ns.load(.acquire) + std.time.ns_per_s),
     });
     try std.testing.expectEqual(
         @as(u64, 6),
@@ -5990,9 +5940,9 @@ test "QUIC bounded receive credit preserves flow state across pacing timeout" {
 
 test "QUIC committed receive credit batches streams fairly" {
     const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var send_io: NativeSendIo = .{ .backend = .init(allocator, .{}), .fixed_clock = false };
+    defer send_io.backend.deinit();
+    const io = send_io.backend.io();
 
     var server_endpoint = try quic.runtime.Endpoint.bind(
         allocator,
@@ -6060,12 +6010,9 @@ test "QUIC committed receive credit batches streams fairly" {
         .delegate = server.endpoint.io,
         .fail_after_prefix = 0,
     };
-    var failed_credit_vtable = server.endpoint.io.vtable.*;
-    failed_credit_vtable.netSend = ObservedBatchSend.netSend;
-    server.endpoint.io = .{
-        .userdata = &failed_credit_send,
-        .vtable = &failed_credit_vtable,
-    };
+    send_io.send_context = &failed_credit_send;
+    send_io.send_override = ObservedBatchSend.netSend;
+    server.endpoint.io = send_io.io();
     defer server.endpoint.io = failed_credit_send.delegate;
 
     try server.commitReceivedThrough(0, 6);
@@ -6447,9 +6394,9 @@ test "QUIC discarded reset restores only connection credit" {
 
 test "QUIC automatic stopped connection credit retries from timer" {
     const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var send_io: NativeSendIo = .{ .backend = .init(allocator, .{}), .fixed_clock = false };
+    defer send_io.backend.deinit();
+    const io = send_io.backend.io();
     var receiver = try quic.runtime.Endpoint.bind(
         allocator,
         io,
@@ -6498,12 +6445,9 @@ test "QUIC automatic stopped connection credit retries from timer" {
         // connection-credit update fails and must be retried by the timer.
         .fail_on_call = 2,
     };
-    var failed_vtable = connection.endpoint.io.vtable.*;
-    failed_vtable.netSend = ObservedBatchSend.netSend;
-    connection.endpoint.io = .{
-        .userdata = &failed,
-        .vtable = &failed_vtable,
-    };
+    send_io.send_context = &failed;
+    send_io.send_override = ObservedBatchSend.netSend;
+    connection.endpoint.io = send_io.io();
     defer connection.endpoint.io = failed.delegate;
     try connection.sendStopSending(0, 44);
     try std.testing.expectEqual(@as(usize, 2), failed.calls);
@@ -6570,12 +6514,9 @@ test "QUIC automatic stopped connection credit retries from timer" {
     var observed = ObservedBatchSend{
         .delegate = connection.endpoint.io,
     };
-    var observed_vtable = connection.endpoint.io.vtable.*;
-    observed_vtable.netSend = ObservedBatchSend.netSend;
-    connection.endpoint.io = .{
-        .userdata = &observed,
-        .vtable = &observed_vtable,
-    };
+    send_io.send_context = &observed;
+    send_io.send_override = ObservedBatchSend.netSend;
+    connection.endpoint.io = send_io.io();
     try connection.trySendStopSending(4, 45);
     try std.testing.expectEqual(@as(usize, 1), observed.calls);
     try std.testing.expectEqual(
@@ -6628,9 +6569,9 @@ test "QUIC automatic stopped connection credit retries from timer" {
 
 test "QUIC committed receive credit batch respects send MTU" {
     const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    var send_io: NativeSendIo = .{ .backend = .init(allocator, .{}), .fixed_clock = false };
+    defer send_io.backend.deinit();
+    const io = send_io.backend.io();
 
     var server_endpoint = try quic.runtime.Endpoint.bind(
         allocator,
@@ -6697,12 +6638,9 @@ test "QUIC committed receive credit batch respects send MTU" {
         .delegate = server.endpoint.io,
         .fail_after_prefix = 0,
     };
-    var failed_vtable = server.endpoint.io.vtable.*;
-    failed_vtable.netSend = ObservedBatchSend.netSend;
-    server.endpoint.io = .{
-        .userdata = &failed_send,
-        .vtable = &failed_vtable,
-    };
+    send_io.send_context = &failed_send;
+    send_io.send_override = ObservedBatchSend.netSend;
+    server.endpoint.io = send_io.io();
     defer server.endpoint.io = failed_send.delegate;
     try server.commitReceivedThrough(0, 6);
     try server.commitReceivedThrough(4, 6);
