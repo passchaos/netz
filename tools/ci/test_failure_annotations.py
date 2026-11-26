@@ -65,13 +65,13 @@ def last_artifact_test(runs, key, index):
     return tests[position][1] if position >= 0 else None
 
 
-def last_active_test(runs, index):
+def active_artifact(runs, index):
     active = None
     for key, invocations in runs.items():
         for invocation in invocations:
             if invocation["start"] <= index and (active is None or invocation["start"] > active[0]):
                 active = invocation["start"], key
-    return last_artifact_test(runs, active[1], index) if active is not None else None
+    return active[1] if active is not None else None
 
 
 def failure_priority(line):
@@ -122,6 +122,13 @@ def annotate(path: Path) -> None:
             if last_test is not None:
                 context_lines.insert(0, "Last visible test for failed artifact: " + last_test)
         elif "FAIL (" in lines[index] or "panic:" in lines[index] or "leaked:" in lines[index] or "[gpa] (err)" in lines[index] or logged_error(lines[index]) or native_crash(lines[index]):
+            active_key = active_artifact(runs, index)
+            if active_key is not None:
+                last_test = last_artifact_test(runs, active_key, index)
+                if last_test is not None:
+                    context_lines.insert(0, "Last visible test for active artifact: " + last_test)
+                emit(path, "\n".join(context_lines))
+                continue
             test_found = False
             for previous in range(index, max(-1, index - 40), -1):
                 if re.match(r"^\d+/\d+\s", lines[previous]):
@@ -130,9 +137,15 @@ def annotate(path: Path) -> None:
                         context_lines.insert(0, lines[previous])
                     break
             if not test_found:
-                last_test = last_active_test(runs, index)
-                if last_test is not None:
-                    context_lines.insert(0, "Last visible test for active artifact: " + last_test)
+                if "process terminated with signal" not in lines[index]:
+                    # Native filtered commands need not use --verbose, so no
+                    # executable marker is available. An immediate failure
+                    # can still retain its last visible command-output test.
+                    # Delayed signal summaries must not use this fallback.
+                    for previous in range(index - 1, -1, -1):
+                        if re.match(r"^\d+/\d+\s", lines[previous]):
+                            context_lines.insert(0, "Last visible test in command output: " + lines[previous])
+                            break
         emit(path, "\n".join(context_lines))
 
 

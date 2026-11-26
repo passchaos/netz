@@ -206,6 +206,23 @@ class AnnotationsTest(unittest.TestCase):
         self.assertIn("http3.test.send deadline", first)
         self.assertIn("expected error.Timeout, found error.Unexpected", first)
 
+    def test_nonverbose_immediate_failure_retains_test_before_long_trace(self):
+        text = "88/143 http3.test.response deadline...\n"
+        text += "\n".join("native transport trace %d" % n for n in range(80))
+        text += "\nexpected error.Timeout, found error.Unexpected\nFAIL (TestUnexpectedError)\n"
+        first = self.render(text, "native-protocol-test-contexts.log").splitlines()[0]
+        self.assertIn("Last visible test in command output", first)
+        self.assertIn("http3.test.response deadline", first)
+        self.assertIn("expected error.Timeout, found error.Unexpected", first)
+
+    def test_new_known_artifact_immediate_failure_does_not_reuse_old_test(self):
+        old = "/tmp/.zig-cache/o/" + "a" * 32 + "/test"
+        current = "/tmp/.zig-cache/o/" + "b" * 32 + "/test"
+        text = old + " --cache-dir=cache\n1/1 http.test.old...OK\n"
+        text += current + " --cache-dir=cache\nexpected error.Timeout, found error.Unexpected\nFAIL (TestUnexpectedError)\n"
+        first = self.render(text, "native-context.log").splitlines()[0]
+        self.assertNotIn("http.test.old", first)
+
     def test_delayed_windows_signal_matches_quoted_artifact_with_spaces(self):
         root = r"D:\a Project\netz\.zig-cache\o" + "\\" + "a" * 32 + r"\test.exe"
         fuzz = r"D:\a Project\netz\.zig-cache\o" + "\\" + "b" * 32 + r"\fuzz-replay-other.exe"

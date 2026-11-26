@@ -345,6 +345,12 @@ jobs:
             python tools/ci/test_failure_annotations.py native-wt-removal-context.log
             protocol_status=$removal_context_status
           fi
+          session_control_status=0
+          python tools/ci/run_test_progress.py --title "Native WebTransport session control deadlines" --log native-wt-session-control.log -- zig build test-webtransport -j1 -Dtest-progress=true -Dtarget=${{ matrix.target }} '-Dtest-filter=WebTransport authenticated close deadline' '-Dtest-filter=WebTransport authenticated drain deadline' '-Dtest-filter=WebTransport server close deadline' '-Dtest-filter=WebTransport terminal event survives cleanup timeout' '-Dtest-filter=WebTransport deadline cleanup retains completed stream prefix' --summary all || session_control_status=$?
+          if [ "$session_control_status" -ne 0 ]; then
+            python tools/ci/test_failure_annotations.py native-wt-session-control.log
+            protocol_status=$session_control_status
+          fi
           exit "$protocol_status"
 
       - name: Run native HTTP3 send deadline regressions

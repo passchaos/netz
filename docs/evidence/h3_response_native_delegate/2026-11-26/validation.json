@@ -1,0 +1,81 @@
+{
+  "observed_utc": "2026-11-26T12:09:38.314860+00:00",
+  "base_commit": "f5dcf94e42d7fd1a2f42fabd42c9265f478ce78b",
+  "source_sha256": {
+    "src/http3/runtime/client/tests/deadline.zig": "4a338176ee37807b654d8453d1a7a6caabcc0500c8d450529f8a3a079270e5ef",
+    "tools/ci/test_failure_annotations.py": "299d9f5fefb1c39880ad08ce927281a386914397107f40b919aa480f38005186",
+    "tools/ci/test_failure_annotations_test.py": "dc7340d5faa652c92b6c7673996b5d9f7c1dda9fe38f24ca8a100c3d71f5e489",
+    "docs/architecture/optimization-backlog.md": "84fde89f387710b51472e7b5e956344870a71067a0203f7c1e22c1000b2436af",
+    "src/internal/testing/deadline_send_io.zig": "141d74566f3c9f02c8843586e865afb1e9510edf411382beaf12abd5693217ea",
+    "src/internal/testing/forwarded_io.zig": "fdcb7229cbf0199ee36d55668335adc49b0bd04747ba56b6aa793793f7d6fd40",
+    ".github/workflows/ci.yml": "03e11a97935ba85930daf44673bc2ae14795cd8bcbcd2c4fb749de05e9062150"
+  },
+  "checks": {
+    "fmt": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "fmt",
+        "src/http3/runtime/client/tests/deadline.zig"
+      ],
+      "exit_code": 0,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "native": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-http3",
+        "-j1",
+        "-Dtest-progress=true",
+        "-Dtest-filter=HTTP/3 protected response deadlines preserve aggregate and streaming progress",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log_sha256": "ac4744f1dbc071d0cff6c85d8062df67a352496349b4de2ee92a271dba901d27"
+    },
+    "windows-compile": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-http3-compile",
+        "-j1",
+        "-Dtarget=x86_64-windows-gnu",
+        "-Dtest-filter=HTTP/3 protected response deadlines preserve aggregate and streaming progress",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log_sha256": "8f90cefb112ee9083f0fa310333629818db0951d076b06fedc37e18440fe7597"
+    }
+  },
+  "native_host": "aarch64-macos",
+  "native_scoped_passed": 66,
+  "focused_named_fixture": "HTTP/3 protected response deadlines preserve aggregate and streaming progress",
+  "native_backends": [
+    "POSIX Threaded zero async capacity",
+    "application backend one executor"
+  ],
+  "windows_compile_steps": "8/8",
+  "diagnostic": {
+    "command": [
+      "/usr/bin/python3",
+      "-m",
+      "unittest",
+      "test_failure_annotations_test"
+    ],
+    "cwd": "tools/ci",
+    "exit_code": 0,
+    "tests_passed": 24,
+    "log_sha256": "59bb1a381795c2d4376e07b7e4aad0096b50d95f08ac1aae4bd3f38e2b051655",
+    "behavior": "known artifact uses its own current invocation; non-verbose immediate failure keeps last visible command-output test; delayed signal does not use this fallback"
+  },
+  "repair": "Native observer delegates saved endpoint IO that owns the socket rather than selecting a new embedded Threaded backend",
+  "public_api_and_fixture_assertions_changed": false,
+  "commands_pins_budgets_and_cap_changed": false,
+  "native_h3_unexpected_attribution": "pending; current first H3 failure lacks name in non-verbose long trace",
+  "native_h3_causal_fix_qualification": "pending delivered revision",
+  "full_goal_status": "active",
+  "guard": "All Zig invocations serialized under shared zig-tree-guard",
+  "independent_ci_scope_added": "WebTransport session-control deadlines; all preexisting commands unchanged"
+}

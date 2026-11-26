@@ -148,6 +148,7 @@ fn protectedResponseDeadlines(io: std.Io) !void {
         const delegate_timed_io = client.quic_client.endpoint.io;
         var timed_io: NativeSendIo = .{
             .backend = .init(allocator, .{ .async_limit = .nothing }),
+            .delegate_io = delegate_timed_io,
             .now_ns = .init(@intCast(1_000_000)),
             .advance_after_send_ns = std.time.ns_per_s,
         };

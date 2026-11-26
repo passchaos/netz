@@ -1,0 +1,109 @@
+{
+  "observed_utc": "2026-11-26T12:30:14.804324+00:00",
+  "base_commit": "f5dcf94e42d7fd1a2f42fabd42c9265f478ce78b",
+  "source_sha256": {
+    "src/webtransport/runtime/session_control_tests.zig": "ccdc9f1d4a66c333af782f4958f051805e0286072f296053a583e33d68907d1b",
+    "src/webtransport/runtime/session_control/tests/cleanup_deadline.zig": "277f2459a92a6d59be53c6f4be6c760c5345346f6ac9efecf616bf7d44be7eac",
+    "src/webtransport/runtime/session_control/tests/close_deadline.zig": "059fa530c6b32c88f5645f0033be18f4f208390f4fa44ca665fdd8d436e34d16",
+    "src/webtransport/runtime/session_control/tests/io.zig": "97e27e49027c5738542b90c6f4c039f9b02bfa3f9f4d2cc9b51643f9b6a9e036",
+    "src/internal/testing/deadline_send_io.zig": "141d74566f3c9f02c8843586e865afb1e9510edf411382beaf12abd5693217ea",
+    "src/internal/testing/forwarded_io.zig": "fdcb7229cbf0199ee36d55668335adc49b0bd04747ba56b6aa793793f7d6fd40",
+    "src/internal/testing/native_protocol_io.zig": "c8e9569e077d52978bfd10e65216e9d8bc14ff72603ef3705da4c599e11a916b",
+    ".github/workflows/ci.yml": "03e11a97935ba85930daf44673bc2ae14795cd8bcbcd2c4fb749de05e9062150",
+    "docs/architecture/optimization-backlog.md": "84fde89f387710b51472e7b5e956344870a71067a0203f7c1e22c1000b2436af"
+  },
+  "checks": {
+    "fmt": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "fmt",
+        "src/webtransport/runtime/session_control_tests.zig",
+        "src/webtransport/runtime/session_control/tests"
+      ],
+      "exit_code": 0,
+      "log_sha256": "0a49a8d6aa76ee2b8b2f568ba2197a793660464f810d0f83e1e11eca715b49fd"
+    },
+    "native": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-webtransport",
+        "-j1",
+        "-Dtest-progress=true",
+        "-Dtest-filter=WebTransport authenticated close deadline",
+        "-Dtest-filter=WebTransport authenticated drain deadline",
+        "-Dtest-filter=WebTransport server close deadline",
+        "-Dtest-filter=WebTransport terminal event survives cleanup timeout",
+        "-Dtest-filter=WebTransport deadline cleanup retains completed stream prefix",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log_sha256": "7f57aa9751c89e606d06b9318400d7a89092e8cd47a5fde854f425b6b30949d0"
+    },
+    "windows-compile": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-webtransport-compile",
+        "-j1",
+        "-Dtarget=x86_64-windows-gnu",
+        "-Dtest-filter=WebTransport authenticated close deadline",
+        "-Dtest-filter=WebTransport authenticated drain deadline",
+        "-Dtest-filter=WebTransport server close deadline",
+        "-Dtest-filter=WebTransport terminal event survives cleanup timeout",
+        "-Dtest-filter=WebTransport deadline cleanup retains completed stream prefix",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log_sha256": "039448382cdee01f4f3ae89f8fa246416a08978f2c3d46fba6d0a873dcfc487e"
+    }
+  },
+  "native_host": "aarch64-macos",
+  "native_scoped_passed": 119,
+  "named_fixtures": [
+    "WebTransport authenticated close deadline resumes capsule and stream cleanup",
+    "WebTransport authenticated drain deadline resumes exact capsule",
+    "WebTransport server close deadline resumes one exact capsule",
+    "WebTransport terminal event survives cleanup timeout",
+    "WebTransport deadline cleanup retains completed stream prefix"
+  ],
+  "native_backends": [
+    "POSIX Threaded zero async capacity",
+    "application backend one executor"
+  ],
+  "windows_compile_steps": "8/8",
+  "deadline_observer": "full native callback forwarding to actual socket/execution owner; atomic awake clock advanced after selected successful send; real event and cancellable absolute wait",
+  "lifetime": "restore endpoint I/O before observer and session destruction; await/cancel peer Future before server/backend destruction",
+  "assertions_retained": [
+    "invalid deadline admits no sends",
+    "exact CLOSE/DRAIN suffix on retry",
+    "conflicting close metadata rejected",
+    "interleaving denied while capsule is pending",
+    "completed RESET/STOP stream prefix retained",
+    "terminal event code and reason retained after timeout",
+    "repeated close sends no packets",
+    "pacing duration sleep count stays zero"
+  ],
+  "public_api_changed": false,
+  "ci": {
+    "run": "https://github.com/passchaos/netz/actions/runs/45813013101",
+    "attempt": 1,
+    "complete_job": 139885449340,
+    "observed_crash_test": "4692/7478 WebTransport authenticated close deadline resumes capsule and stream cleanup",
+    "observed_crash": "Segmentation fault at address 0x3; Threaded Group.concurrent allocator creation",
+    "new_scope": "independent five-name native session-control deadline invocation",
+    "existing_commands_preserved_byte_for_byte": true,
+    "pins_budgets_and_annotation_cap_changed": false,
+    "native_qualification": "pending delivered revision",
+    "complete_crash_qualification": "pending delivered revision"
+  },
+  "independent_open_findings": [
+    "HTTP/2 concurrent informational responses compose with bodies and trailers: StreamReset at4486/7478",
+    "Windows H3 two expected-Timeout/actual-Unexpected protected send failures",
+    "peer QUIC close loss fixture inherited-callback ownership audit"
+  ],
+  "guard": "All Zig invocations serialized under shared zig-tree-guard",
+  "full_goal_status": "active"
+}

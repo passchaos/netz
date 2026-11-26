@@ -564,3 +564,60 @@ four-send, pending-DRAIN, protocol-rejection, retry and sibling assertions on
 supported real backends. The local scope passes118 cases and Windows8/8-step
 compilation; an independent native scope remains inside the original
 five-minute protocol budget. Complete/native crash qualification is still open.
+
+### H3 response deadline observer delegate ownership
+
+The protected response deadline fixture saves an endpoint created by the
+actual-backend runner, then installs a Native clock observer without assigning
+its delegate. That selects a new embedded Threaded backend for a socket that
+may belong to application IOCP. The observer now delegates to the saved socket
+owner and restores endpoint I/O before destruction; existing timing, SETTINGS,
+stream/lifecycle/QPACK, aggregate/streaming retry and exact-body assertions
+remain unchanged. [The focused qualification](../evidence/h3_response_native_delegate/2026-11-26/validation.json)
+records66 native scoped passes and matching Windows8/8 compilation.
+
+Native H3 command output lacks verbose executable markers. Its immediate
+failure fallback now retains the last visible command-output test after a long
+trace, while known artifacts and delayed signal summaries retain their own
+invocation context. Twenty-four diagnostic cases pass. Attribution of the
+current two expected-Timeout/actual-Unexpected send failures is still pending
+delivered native evidence; the source ownership repair alone does not close
+that causal gate or the broader optimization scope.
+
+### Located complete-run session-control deadline crash
+
+[Run 45813013101](https://github.com/passchaos/netz/actions/runs/45813013101),
+attempt 1, advanced beyond the repaired endpoint-removal fixture, then aborted
+at test 4692/7478, `WebTransport authenticated close deadline resumes capsule
+and stream cleanup`. Its stack reaches Threaded Group.concurrent allocator
+creation with FixedSendIo userdata supplied to inherited backend callbacks.
+Five related session-control deadline fixtures had the same callback-owner
+mismatch. Their former sleep override also fabricated `Canceled` instead of
+letting real deadline-task cancellation release a backend wait.
+
+These fixtures now share the existing Native observer's typed forwarding,
+borrow their actual socket/execution backend and restore endpoint I/O before
+observer destruction. Selected successful sends advance an atomic synthetic
+awake clock and wake an actual event. Peer tasks use the same real I/O backend
+and are joined or canceled before owner destruction. The tests are split into
+close/drain and cleanup modules, with all five original names formally imported.
+Exact capsule suffixes, conflicting retry metadata, completed stream prefixes,
+terminal event retention and no pacing-duration sleep remain asserted; the
+deadline watcher itself uses a cancellable absolute wait.
+
+[The focused qualification](../evidence/session_control_native_delegate/2026-11-26/validation.json)
+records 119 native scoped passes, including all five fixtures on POSIX Threaded
+and the application backend, plus Windows 8/8 compilation. A separate native
+session-control command runs the five existing names inside the unchanged
+five-minute protocol step. The original combined command, failure propagation,
+dependency pins and complete-gate budgets remain unchanged. Delivered Linux
+and Windows native runs and complete-crash qualification remain pending.
+
+The same complete run's first named test failure is test 4486/7478,
+`HTTP/2 concurrent informational responses compose with bodies and trailers`,
+with `StreamReset`; an earlier MalformedHeader stack entry is not root-cause
+evidence. This requires an independent reproducer and remains open, as do the
+Windows H3 expected-Timeout/actual-Unexpected failures. The peer QUIC close
+loss fixture's remaining DropFirstCloseIo inherited-callback ownership also
+needs a separate audit; its forwarding scope is not qualified by these five
+deadline tests. The continuous optimization goal remains active.
