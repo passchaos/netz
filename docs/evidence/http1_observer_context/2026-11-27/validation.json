@@ -1,0 +1,168 @@
+{
+  "observed_utc": "2026-11-26T18:17:21.534455+00:00",
+  "base_commit": "d17d9d4365470ae54b68585c0037e8f9bbf6e2b0",
+  "native_host": "aarch64-macos",
+  "guard": "All Zig invocations serialized under shared zig-tree-guard",
+  "source_sha256": {
+    "src/http1/runtime/write_strategy_tests.zig": "b6d739a05b31dc3b5280dfeafc60a2862e62d00618f08c54a12e9416da1348ca",
+    "src/http1/runtime/tunnel_tests.zig": "6c10edc511f0d94417963bd67711736b290542e1cd294045c5b1b8a7dccf10fd",
+    "src/http1/runtime/client_pool_tests.zig": "156044bcaa71393bd80e3531feb756f354da76af97d5a34c71c4e69f23902929"
+  },
+  "checks": {
+    "fmt": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "fmt",
+        "src/http1/runtime/write_strategy_tests.zig",
+        "src/http1/runtime/tunnel_tests.zig",
+        "src/http1/runtime/client_pool_tests.zig"
+      ],
+      "exit_code": 0,
+      "log_sha256": "8acf9a8b03813cb6662f2211712b0ae621165efa2d6bfed30228656499f2fa2b"
+    },
+    "native": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-http1",
+        "-j1",
+        "-Dtest-progress=true",
+        "-Dtest-filter=HTTP/1 write strategy controls complete message transport shape",
+        "-Dtest-filter=HTTP/1 flatten strategy applies to streaming chunks",
+        "-Dtest-filter=HTTP/1 response batch write strategy overrides the automatic threshold",
+        "-Dtest-filter=HTTP/1 flatten allocation failure is retryable before transport",
+        "-Dtest-filter=HTTP/1 aggregate write failures make connections unusable",
+        "-Dtest-filter=HTTP/1 aggregate 100 Continue partial write is terminal",
+        "-Dtest-filter=HTTP/1 tunnel write-half close failure is terminal",
+        "-Dtest-filter=HTTP/1 TLS post-close-notify shutdown treats disconnected peer as complete",
+        "-Dtest-filter=HTTP/1 client pool discards an aggregate partial-write failure",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log_sha256": "2c6d28bff26269afff6967fbfa4d0015f4e3fcfef853687cf64f8343cd545428"
+    },
+    "windows-compile": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-http1-compile",
+        "-j1",
+        "-Dtarget=x86_64-windows-gnu",
+        "-Dtest-filter=HTTP/1 write strategy controls complete message transport shape",
+        "-Dtest-filter=HTTP/1 flatten strategy applies to streaming chunks",
+        "-Dtest-filter=HTTP/1 response batch write strategy overrides the automatic threshold",
+        "-Dtest-filter=HTTP/1 flatten allocation failure is retryable before transport",
+        "-Dtest-filter=HTTP/1 aggregate write failures make connections unusable",
+        "-Dtest-filter=HTTP/1 aggregate 100 Continue partial write is terminal",
+        "-Dtest-filter=HTTP/1 tunnel write-half close failure is terminal",
+        "-Dtest-filter=HTTP/1 TLS post-close-notify shutdown treats disconnected peer as complete",
+        "-Dtest-filter=HTTP/1 client pool discards an aggregate partial-write failure",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log_sha256": "df4fe46c5d79d3bf62da92ed7d633f01e5d574503b385f15d55573c9bd6793df"
+    }
+  },
+  "native_scoped_passed": 34,
+  "windows_compilation": "passed 8/8 build steps",
+  "observer_installations": 18,
+  "backends": [
+    "Threaded stream including Windows, zero async capacity",
+    "application backend one executor"
+  ],
+  "invariants": {
+    "src/http1/runtime/write_strategy_tests.zig": {
+      "original_names": [
+        "HTTP/1 write strategy controls complete message transport shape",
+        "HTTP/1 flatten strategy applies to streaming chunks",
+        "HTTP/1 response batch write strategy overrides the automatic threshold",
+        "HTTP/1 flatten allocation failure is retryable before transport",
+        "HTTP/1 aggregate write failures make connections unusable",
+        "HTTP/1 TLS key updates require an idle HTTP exchange",
+        "HTTP/1 large response batch write failure makes connection unusable",
+        "HTTP/1 aggregate 100 Continue partial write is terminal",
+        "HTTP/1 aggregate write validation errors remain retryable",
+        "HTTP/1 response batch borrows fixed bodies after validation",
+        "HTTP/1 response batch retains chunk framing beside borrowed bodies"
+      ],
+      "original_assertions_preserved": 65,
+      "converted_cases": [
+        "HTTP/1 write strategy controls complete message transport shape",
+        "HTTP/1 flatten strategy applies to streaming chunks",
+        "HTTP/1 response batch write strategy overrides the automatic threshold",
+        "HTTP/1 flatten allocation failure is retryable before transport",
+        "HTTP/1 aggregate write failures make connections unusable",
+        "HTTP/1 aggregate 100 Continue partial write is terminal"
+      ]
+    },
+    "src/http1/runtime/tunnel_tests.zig": {
+      "original_names": [
+        "HTTP/1 runtime opens CONNECT tunnel",
+        "HTTP/1 TLS tunnels close the write half and retain reads",
+        "HTTP/1 tunnel write-half close failure is terminal",
+        "HTTP/1 TLS post-close-notify shutdown treats disconnected peer as complete",
+        "HTTP/1 tunnel deadline preserves buffered bytes and recovers after timeout",
+        "HTTP/1 runtime hands off generic Upgrade with buffered bytes",
+        "CONNECT-UDP tunnel adapter timeout rejects non-positive budgets"
+      ],
+      "original_assertions_preserved": 53,
+      "converted_cases": [
+        "HTTP/1 tunnel write-half close failure is terminal",
+        "HTTP/1 TLS post-close-notify shutdown treats disconnected peer as complete"
+      ]
+    },
+    "src/http1/runtime/client_pool_tests.zig": {
+      "original_names": [
+        "HTTP/1 client pool reuses one persistent connection",
+        "HTTP/1 client pool discards unsolicited read-ahead response",
+        "HTTP/1 client pool discards kernel-queued unsolicited response",
+        "HTTP/1 client pool rechecks an idle socket before checkout",
+        "HTTP/1 client pool discards kernel-queued EOF",
+        "HTTP/1 client pool discards a CONNECT handoff",
+        "HTTP/1 client pool discards an aggregate partial-write failure",
+        "HTTP/1 client pool normalizes explicit default port keys",
+        "HTTP/1 client connect timeout is available through direct and pool APIs",
+        "HTTP/1 client pool retries a stale idempotent connection",
+        "HTTP/1 client pool discards close in any Connection response field",
+        "HTTP/1 client pool retires TE plus CL response connection",
+        "HTTP/1 client pool reuses verified TLS connection",
+        "HTTP/1 client pool resumes TLS 1.2 ticket after retirement",
+        "HTTP/1 client pool resumes TLS 1.3 ticket after retirement",
+        "HTTP/1 client pool discards TLS-buffered unsolicited response",
+        "HTTP/1 client pool serves concurrent leases per authority",
+        "HTTP/1 client pool caps checked-out connections",
+        "HTTP/1 client pool releases failed connection reservation",
+        "HTTP/1 client pool waits for an idle lease within one deadline",
+        "HTTP/1 client pool admits capacity waiters in FIFO order",
+        "HTTP/1 client pool acquisition timeout preserves capacity",
+        "HTTP/1 pool request deadline spans capacity wait and response",
+        "HTTP/1 pool request timeout rejects a non-positive budget",
+        "HTTP/1 pool deadline rejects a non-awake clock before URI parsing",
+        "HTTP/1 client pool close wakes blocked acquisition",
+        "HTTP/1 client pool enforces per-authority idle limit",
+        "HTTP/1 client pool zero idle capacity disables reuse",
+        "HTTP/1 client pool expires idle connections",
+        "HTTP/1 client pool replaces an idle authority at total capacity"
+      ],
+      "original_assertions_preserved": 116,
+      "converted_cases": [
+        "HTTP/1 client pool discards an aggregate partial-write failure"
+      ]
+    }
+  },
+  "ownership": [
+    "partial Continue I/O restored before connection close on all returns",
+    "pooled failure observer removed from I/O before lease release",
+    "backend userdata and token owners forwarded for every non-overridden callback"
+  ],
+  "findings": "source contract review; not18 independent failing native baselines",
+  "ci_commands_budgets_pins_changed": false,
+  "full_goal_status": "active",
+  "limitations": [
+    "Windows compilation is distinct from native execution",
+    "nine changed cases and34 scoped tests do not qualify the complete HTTP-family goal",
+    "remaining read/clock observers and fairness/performance remain open"
+  ]
+}

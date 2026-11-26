@@ -824,3 +824,22 @@ records the actual failing baseline, 126 scoped native passes and Windows
 8/8 compilation. Delivered native and complete acceptance, CA reload,
 Windows protocol-step timing, remaining observer contexts, fairness and
 workload performance remain part of the continuous goal.
+
+### HTTP/1 writer and shutdown observer ownership
+
+The inherited-context survey identifies 18 writer/shutdown installations in
+HTTP/1 write strategy, tunnel and client-pool fixtures. They now use the shared
+typed observer constructor with actual delegate userdata and token ownership.
+The partial 100 Continue fixture removes its manually selected forwarding
+subset and restores connection I/O with `defer` on every return. The pool's
+partial-write observer is scoped and removed before releasing the lease.
+
+All original case names and 234 assertion statements remain, including exact
+wire shape and TCP prefix, retryable pre-transport allocation failure,
+terminal write/shutdown behavior, no later write and empty pool state. Nine
+cases run on supported Threaded/application stream backends, including Windows.
+[The qualification](../evidence/http1_observer_context/2026-11-27/validation.json)
+records 34 scoped native passes and Windows 8/8 compilation. These are source
+contract repairs and scoped checks, not 18 separate failing native baselines.
+Delivered native/full acceptance, remaining contexts, measured fairness and
+performance remain part of the active HTTP-family goal.

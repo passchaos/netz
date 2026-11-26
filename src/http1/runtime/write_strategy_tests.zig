@@ -1,6 +1,8 @@
 //! HTTP/1 write-strategy, batch, and partial-write tests.
 
 const std = @import("std");
+const forwarded_io = @import("../../internal/testing/forwarded_io.zig");
+const native_protocol_io = @import("../../internal/testing/native_protocol_io.zig");
 const http1 = @import("../mod.zig");
 const net = std.Io.net;
 const runtime = @import("../runtime.zig");
@@ -51,7 +53,12 @@ const writeResponseToStream = runtime.writeResponseToStream;
 const writeResponsesToTransportScratch = runtime.writeResponsesToTransportScratch;
 
 test "HTTP/1 write strategy controls complete message transport shape" {
+    try native_protocol_io.runStream(messageTransportShape);
+}
+
+fn messageTransportShape(io: std.Io) !void {
     const Observer = struct {
+        delegate: std.Io,
         bytes: [8192]u8 = undefined,
         len: usize = 0,
         calls: usize = 0,
@@ -98,17 +105,10 @@ test "HTTP/1 write strategy controls complete message transport shape" {
         .host = "example.test",
         .body = "request-body",
     };
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
 
-    var vectored_request: Observer = .{};
-    var vectored_request_vtable = threaded.io().vtable.*;
-    vectored_request_vtable.netWrite = Observer.write;
+    var vectored_request: Observer = .{ .delegate = io };
     var vectored_client = Client{
-        .io = .{
-            .userdata = &vectored_request,
-            .vtable = &vectored_request_vtable,
-        },
+        .io = forwarded_io.observer(&vectored_request, .{ .netWrite = Observer.write }),
         .allocator = std.testing.allocator,
         .stream = undefined,
         .limits = .{ .write_strategy = .vectored },
@@ -121,11 +121,9 @@ test "HTTP/1 write strategy controls complete message transport shape" {
     try std.testing.expectEqual(@as(usize, 1), vectored_request.calls);
     try std.testing.expectEqual(@as(usize, 2), vectored_request.max_non_empty_parts);
 
-    var flat_request: Observer = .{};
-    var flat_request_vtable = threaded.io().vtable.*;
-    flat_request_vtable.netWrite = Observer.write;
+    var flat_request: Observer = .{ .delegate = io };
     var flat_client = Client{
-        .io = .{ .userdata = &flat_request, .vtable = &flat_request_vtable },
+        .io = forwarded_io.observer(&flat_request, .{ .netWrite = Observer.write }),
         .allocator = std.testing.allocator,
         .stream = undefined,
         .limits = .{ .write_strategy = .flatten },
@@ -143,14 +141,9 @@ test "HTTP/1 write strategy controls complete message transport shape" {
     );
 
     const response_options = ResponseOptions{ .body = "response-body" };
-    var vectored_response: Observer = .{};
-    var vectored_response_vtable = threaded.io().vtable.*;
-    vectored_response_vtable.netWrite = Observer.write;
+    var vectored_response: Observer = .{ .delegate = io };
     var vectored_connection = Connection{
-        .io = .{
-            .userdata = &vectored_response,
-            .vtable = &vectored_response_vtable,
-        },
+        .io = forwarded_io.observer(&vectored_response, .{ .netWrite = Observer.write }),
         .allocator = std.testing.allocator,
         .stream = undefined,
         .limits = .{
@@ -165,14 +158,9 @@ test "HTTP/1 write strategy controls complete message transport shape" {
     try vectored_connection.writeResponse(response_options);
     try std.testing.expectEqual(@as(usize, 2), vectored_response.max_non_empty_parts);
 
-    var flat_response: Observer = .{};
-    var flat_response_vtable = threaded.io().vtable.*;
-    flat_response_vtable.netWrite = Observer.write;
+    var flat_response: Observer = .{ .delegate = io };
     var flat_connection = Connection{
-        .io = .{
-            .userdata = &flat_response,
-            .vtable = &flat_response_vtable,
-        },
+        .io = forwarded_io.observer(&flat_response, .{ .netWrite = Observer.write }),
         .allocator = std.testing.allocator,
         .stream = undefined,
         .limits = .{
@@ -193,7 +181,12 @@ test "HTTP/1 write strategy controls complete message transport shape" {
 }
 
 test "HTTP/1 flatten strategy applies to streaming chunks" {
+    try native_protocol_io.runStream(flattenedStreamingChunks);
+}
+
+fn flattenedStreamingChunks(io: std.Io) !void {
     const Observer = struct {
+        delegate: std.Io,
         bytes: [1024]u8 = undefined,
         len: usize = 0,
         calls: usize = 0,
@@ -228,13 +221,9 @@ test "HTTP/1 flatten strategy applies to streaming chunks" {
         }
     };
 
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
-    var observer: Observer = .{};
-    var vtable = threaded.io().vtable.*;
-    vtable.netWrite = Observer.write;
+    var observer: Observer = .{ .delegate = io };
     var connection = Connection{
-        .io = .{ .userdata = &observer, .vtable = &vtable },
+        .io = forwarded_io.observer(&observer, .{ .netWrite = Observer.write }),
         .allocator = std.testing.allocator,
         .stream = undefined,
         .limits = .{
@@ -259,6 +248,10 @@ test "HTTP/1 flatten strategy applies to streaming chunks" {
 }
 
 test "HTTP/1 response batch write strategy overrides the automatic threshold" {
+    try native_protocol_io.runStream(batchedTransportShape);
+}
+
+fn batchedTransportShape(io: std.Io) !void {
     try std.testing.expectEqual(
         WriteStrategy.flatten,
         responseBatchWriteStrategy(.auto, response_batch_borrow_threshold),
@@ -283,6 +276,7 @@ test "HTTP/1 response batch write strategy overrides the automatic threshold" {
     );
 
     const Observer = struct {
+        delegate: std.Io,
         bytes: [2048]u8 = undefined,
         len: usize = 0,
         calls: usize = 0,
@@ -322,10 +316,7 @@ test "HTTP/1 response batch write strategy overrides the automatic threshold" {
         .{ .body = "one" },
         .{ .status = 201, .reason = "Created", .body = "two" },
     };
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
 
-    const io = threaded.io();
     var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
         io,
         .{ .reuse_address = true },
@@ -346,11 +337,9 @@ test "HTTP/1 response batch write strategy overrides the automatic threshold" {
     defer vectored.close();
     try vectored.writeResponses(&responses);
 
-    var flat_observer: Observer = .{};
-    var flat_vtable = threaded.io().vtable.*;
-    flat_vtable.netWrite = Observer.write;
+    var flat_observer: Observer = .{ .delegate = io };
     var flat = Connection{
-        .io = .{ .userdata = &flat_observer, .vtable = &flat_vtable },
+        .io = forwarded_io.observer(&flat_observer, .{ .netWrite = Observer.write }),
         .allocator = std.testing.allocator,
         .stream = undefined,
         .limits = .{
@@ -374,7 +363,12 @@ test "HTTP/1 response batch write strategy overrides the automatic threshold" {
 }
 
 test "HTTP/1 flatten allocation failure is retryable before transport" {
+    try native_protocol_io.runStream(flattenAllocationRetry);
+}
+
+fn flattenAllocationRetry(io: std.Io) !void {
     const Observer = struct {
+        delegate: std.Io,
         calls: usize = 0,
 
         fn write(
@@ -395,13 +389,9 @@ test "HTTP/1 flatten allocation failure is retryable before transport" {
     };
 
     const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    var observer: Observer = .{};
-    var vtable = threaded.io().vtable.*;
-    vtable.netWrite = Observer.write;
+    var observer: Observer = .{ .delegate = io };
     var client = Client{
-        .io = .{ .userdata = &observer, .vtable = &vtable },
+        .io = forwarded_io.observer(&observer, .{ .netWrite = Observer.write }),
         .allocator = allocator,
         .stream = undefined,
         .limits = .{ .write_strategy = .flatten },
@@ -430,7 +420,12 @@ test "HTTP/1 flatten allocation failure is retryable before transport" {
 }
 
 test "HTTP/1 aggregate write failures make connections unusable" {
+    try native_protocol_io.runStream(aggregateWriteFailure);
+}
+
+fn aggregateWriteFailure(io: std.Io) !void {
     const FailingWriter = struct {
+        delegate: std.Io,
         calls: usize = 0,
 
         fn write(
@@ -447,14 +442,9 @@ test "HTTP/1 aggregate write failures make connections unusable" {
         }
     };
 
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
-
-    var client_writer: FailingWriter = .{};
-    var client_vtable = threaded.io().vtable.*;
-    client_vtable.netWrite = FailingWriter.write;
+    var client_writer: FailingWriter = .{ .delegate = io };
     var client = Client{
-        .io = .{ .userdata = &client_writer, .vtable = &client_vtable },
+        .io = forwarded_io.observer(&client_writer, .{ .netWrite = FailingWriter.write }),
         .allocator = std.testing.allocator,
         .stream = undefined,
     };
@@ -479,11 +469,9 @@ test "HTTP/1 aggregate write failures make connections unusable" {
     );
     try std.testing.expectEqual(client_calls, client_writer.calls);
 
-    var response_writer: FailingWriter = .{};
-    var response_vtable = threaded.io().vtable.*;
-    response_vtable.netWrite = FailingWriter.write;
+    var response_writer: FailingWriter = .{ .delegate = io };
     var connection = Connection{
-        .io = .{ .userdata = &response_writer, .vtable = &response_vtable },
+        .io = forwarded_io.observer(&response_writer, .{ .netWrite = FailingWriter.write }),
         .allocator = std.testing.allocator,
         .stream = undefined,
         .limits = .{ .auto_date_header = false },
@@ -503,11 +491,9 @@ test "HTTP/1 aggregate write failures make connections unusable" {
     );
     try std.testing.expectEqual(response_calls, response_writer.calls);
 
-    var batch_writer: FailingWriter = .{};
-    var batch_vtable = threaded.io().vtable.*;
-    batch_vtable.netWrite = FailingWriter.write;
+    var batch_writer: FailingWriter = .{ .delegate = io };
     var batch_connection = Connection{
-        .io = .{ .userdata = &batch_writer, .vtable = &batch_vtable },
+        .io = forwarded_io.observer(&batch_writer, .{ .netWrite = FailingWriter.write }),
         .allocator = std.testing.allocator,
         .stream = undefined,
         .limits = .{ .auto_date_header = false },
@@ -530,11 +516,9 @@ test "HTTP/1 aggregate write failures make connections unusable" {
     );
     try std.testing.expectEqual(batch_calls, batch_writer.calls);
 
-    var continue_writer: FailingWriter = .{};
-    var continue_vtable = threaded.io().vtable.*;
-    continue_vtable.netWrite = FailingWriter.write;
+    var continue_writer: FailingWriter = .{ .delegate = io };
     var continue_connection = Connection{
-        .io = .{ .userdata = &continue_writer, .vtable = &continue_vtable },
+        .io = forwarded_io.observer(&continue_writer, .{ .netWrite = FailingWriter.write }),
         .allocator = std.testing.allocator,
         .stream = undefined,
         .limits = .{ .auto_date_header = false },
@@ -654,12 +638,11 @@ test "HTTP/1 large response batch write failure makes connection unusable" {
 }
 
 test "HTTP/1 aggregate 100 Continue partial write is terminal" {
+    try native_protocol_io.runStream(continuePartialWrite);
+}
+
+fn continuePartialWrite(io: std.Io) !void {
     const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{
-        .async_limit = .unlimited,
-    });
-    defer threaded.deinit();
-    const io = threaded.io();
     var server = try Server.listen(
         allocator,
         io,
@@ -669,77 +652,10 @@ test "HTTP/1 aggregate 100 Continue partial write is terminal" {
     defer server.deinit();
 
     const FailingWriter = struct {
-        base_io: std.Io,
+        delegate: std.Io,
         calls: usize = 0,
 
-        fn base(context: ?*anyopaque) std.Io {
-            const self: *@This() = @ptrCast(@alignCast(context.?));
-            return self.base_io;
-        }
-
-        fn now(
-            context: ?*anyopaque,
-            clock: std.Io.Clock,
-        ) std.Io.Timestamp {
-            const backend = base(context);
-            return backend.vtable.now(backend.userdata, clock);
-        }
-
-        /// The wrapped `userdata` is this writer, not the Threaded backend.
-        /// Forward every vtable entry the portable deadline read uses so the
-        /// backend still receives its own userdata.
-        fn sleep(
-            context: ?*anyopaque,
-            timeout: std.Io.Timeout,
-        ) std.Io.Cancelable!void {
-            const backend = base(context);
-            return backend.vtable.sleep(backend.userdata, timeout);
-        }
-
-        fn netRead(
-            context: ?*anyopaque,
-            handle: net.Socket.Handle,
-            data: [][]u8,
-        ) net.Stream.Reader.Error!usize {
-            const backend = base(context);
-            return backend.vtable.netRead(backend.userdata, handle, data);
-        }
-
-        fn groupConcurrent(
-            context: ?*anyopaque,
-            group: *std.Io.Group,
-            task_context: []const u8,
-            alignment: std.mem.Alignment,
-            start: *const fn (task: *const anyopaque) void,
-        ) std.Io.ConcurrentError!void {
-            const backend = base(context);
-            return backend.vtable.groupConcurrent(
-                backend.userdata,
-                group,
-                task_context,
-                alignment,
-                start,
-            );
-        }
-
-        fn groupAwait(
-            context: ?*anyopaque,
-            group: *std.Io.Group,
-            token: *anyopaque,
-        ) std.Io.Cancelable!void {
-            const backend = base(context);
-            return backend.vtable.groupAwait(backend.userdata, group, token);
-        }
-
-        fn groupCancel(
-            context: ?*anyopaque,
-            group: *std.Io.Group,
-            token: *anyopaque,
-        ) void {
-            const backend = base(context);
-            backend.vtable.groupCancel(backend.userdata, group, token);
-        }
-
+        /// Accept one TCP prefix before the terminal write failure.
         fn write(
             context: ?*anyopaque,
             handle: net.Socket.Handle,
@@ -750,8 +666,8 @@ test "HTTP/1 aggregate 100 Continue partial write is terminal" {
             const self: *@This() = @ptrCast(@alignCast(context.?));
             self.calls += 1;
             if (self.calls != 1) return error.NetworkDown;
-            return self.base_io.vtable.netWrite(
-                self.base_io.userdata,
+            return self.delegate.vtable.netWrite(
+                self.delegate.userdata,
                 handle,
                 header[0..@min(header.len, 4)],
                 &.{""},
@@ -775,20 +691,13 @@ test "HTTP/1 aggregate 100 Continue partial write is terminal" {
         fn runFallible(self: *@This()) !void {
             var connection = try self.server.accept();
             defer connection.close();
-            var writer = FailingWriter{ .base_io = self.io };
-            var vtable = self.io.vtable.*;
-            vtable.netWrite = FailingWriter.write;
-            vtable.netRead = FailingWriter.netRead;
-            vtable.sleep = FailingWriter.sleep;
-            vtable.groupConcurrent = FailingWriter.groupConcurrent;
-            vtable.groupAwait = FailingWriter.groupAwait;
-            vtable.groupCancel = FailingWriter.groupCancel;
-            vtable.now = FailingWriter.now;
+            var writer = FailingWriter{ .delegate = self.io };
             const deadline = std.Io.Clock.Timestamp.fromNow(self.io, .{
                 .raw = .fromSeconds(5),
                 .clock = .awake,
             });
-            connection.io = .{ .userdata = &writer, .vtable = &vtable };
+            connection.io = forwarded_io.observer(&writer, .{ .netWrite = FailingWriter.write });
+            defer connection.io = self.io;
 
             try std.testing.expectError(
                 error.NetworkDown,
@@ -805,9 +714,6 @@ test "HTTP/1 aggregate 100 Continue partial write is terminal" {
             );
             try std.testing.expectEqual(calls, writer.calls);
             self.writer_calls = writer.calls;
-            // Connection.close uses the ordinary vtable methods and therefore
-            // must receive the Threaded backend's original userdata.
-            connection.io = self.io;
         }
     };
     var shared = Shared{ .server = &server, .io = io };

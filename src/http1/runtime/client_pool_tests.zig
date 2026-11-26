@@ -1,4 +1,6 @@
 const std = @import("std");
+const forwarded_io = @import("../../internal/testing/forwarded_io.zig");
+const native_protocol_io = @import("../../internal/testing/native_protocol_io.zig");
 const pool_mod = @import("../client_pool.zig");
 const runtime = @import("../runtime.zig");
 const tls_stream = @import("../../tls/mod.zig").stream;
@@ -653,12 +655,11 @@ test "HTTP/1 client pool discards a CONNECT handoff" {
 }
 
 test "HTTP/1 client pool discards an aggregate partial-write failure" {
+    try native_protocol_io.runStream(pooledPartialWriteFailure);
+}
+
+fn pooledPartialWriteFailure(io: std.Io) !void {
     const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{
-        .async_limit = .unlimited,
-    });
-    defer threaded.deinit();
-    const io = threaded.io();
     var server = try runtime.Server.listen(
         allocator,
         io,
@@ -710,7 +711,7 @@ test "HTTP/1 client pool discards an aggregate partial-write failure" {
     var lease = try pool.acquireUri(uri);
 
     const FailingWriter = struct {
-        base_io: std.Io,
+        delegate: std.Io,
         calls: usize = 0,
 
         fn write(
@@ -723,8 +724,8 @@ test "HTTP/1 client pool discards an aggregate partial-write failure" {
             const self: *@This() = @ptrCast(@alignCast(context.?));
             self.calls += 1;
             if (self.calls != 1) return error.NetworkDown;
-            return self.base_io.vtable.netWrite(
-                self.base_io.userdata,
+            return self.delegate.vtable.netWrite(
+                self.delegate.userdata,
                 handle,
                 header[0..@min(header.len, 4)],
                 &.{""},
@@ -732,23 +733,20 @@ test "HTTP/1 client pool discards an aggregate partial-write failure" {
             );
         }
     };
-    var failing = FailingWriter{ .base_io = io };
-    var failing_vtable = io.vtable.*;
-    failing_vtable.netWrite = FailingWriter.write;
-    lease.client().io = .{
-        .userdata = &failing,
-        .vtable = &failing_vtable,
-    };
-    try std.testing.expectError(
-        error.NetworkDown,
-        lease.client().request(.{
-            .method = .POST,
-            .target = "/partial",
-            .body = "body",
-        }),
-    );
-    try std.testing.expect(!lease.client().isReusable());
-    lease.client().io = io;
+    {
+        var failing = FailingWriter{ .delegate = io };
+        lease.client().io = forwarded_io.observer(&failing, .{ .netWrite = FailingWriter.write });
+        defer lease.client().io = io;
+        try std.testing.expectError(
+            error.NetworkDown,
+            lease.client().request(.{
+                .method = .POST,
+                .target = "/partial",
+                .body = "body",
+            }),
+        );
+        try std.testing.expect(!lease.client().isReusable());
+    }
     lease.release();
     try std.testing.expectEqual(@as(usize, 0), pool.idleCount());
     try std.testing.expectEqual(@as(usize, 0), pool.connectionCount());

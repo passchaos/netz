@@ -1,6 +1,8 @@
 //! HTTP/1 CONNECT tunnel, TLS half-close, and Upgrade tests.
 
 const std = @import("std");
+const forwarded_io = @import("../../internal/testing/forwarded_io.zig");
+const native_protocol_io = @import("../../internal/testing/native_protocol_io.zig");
 const http1 = @import("../mod.zig");
 const net = std.Io.net;
 const runtime = @import("../runtime.zig");
@@ -298,7 +300,12 @@ test "HTTP/1 TLS tunnels close the write half and retain reads" {
 }
 
 test "HTTP/1 tunnel write-half close failure is terminal" {
+    try native_protocol_io.runStream(tunnelWriteCloseFailure);
+}
+
+fn tunnelWriteCloseFailure(io: std.Io) !void {
     const PartialFailWriter = struct {
+        delegate: std.Io,
         calls: usize = 0,
 
         fn write(
@@ -316,6 +323,7 @@ test "HTTP/1 tunnel write-half close failure is terminal" {
     };
 
     const FailingIo = struct {
+        delegate: std.Io,
         shutdown_calls: usize = 0,
         write_calls: usize = 0,
 
@@ -342,19 +350,11 @@ test "HTTP/1 tunnel write-half close failure is terminal" {
         }
     };
 
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
-
-    var write_failure: FailingIo = .{};
-    var write_failure_vtable = threaded.io().vtable.*;
-    write_failure_vtable.netWrite = FailingIo.write;
+    var write_failure: FailingIo = .{ .delegate = io };
     var write_failure_inbuf: std.ArrayList(u8) = .empty;
     defer write_failure_inbuf.deinit(std.testing.allocator);
     var write_failure_tunnel = Tunnel{
-        .io = .{
-            .userdata = &write_failure,
-            .vtable = &write_failure_vtable,
-        },
+        .io = forwarded_io.observer(&write_failure, .{ .netWrite = FailingIo.write }),
         .allocator = std.testing.allocator,
         .stream = undefined,
         .inbuf = &write_failure_inbuf,
@@ -369,13 +369,11 @@ test "HTTP/1 tunnel write-half close failure is terminal" {
     );
     try std.testing.expectEqual(@as(usize, 1), write_failure.write_calls);
 
-    var partial: PartialFailWriter = .{};
-    var partial_vtable = threaded.io().vtable.*;
-    partial_vtable.netWrite = PartialFailWriter.write;
+    var partial: PartialFailWriter = .{ .delegate = io };
     var partial_inbuf: std.ArrayList(u8) = .empty;
     defer partial_inbuf.deinit(std.testing.allocator);
     var partial_tunnel = Tunnel{
-        .io = .{ .userdata = &partial, .vtable = &partial_vtable },
+        .io = forwarded_io.observer(&partial, .{ .netWrite = PartialFailWriter.write }),
         .allocator = std.testing.allocator,
         .stream = undefined,
         .inbuf = &partial_inbuf,
@@ -400,13 +398,11 @@ test "HTTP/1 tunnel write-half close failure is terminal" {
     );
     try std.testing.expectEqual(@as(usize, 2), partial.calls);
 
-    var zero_budget: FailingIo = .{};
-    var zero_budget_vtable = threaded.io().vtable.*;
-    zero_budget_vtable.netWrite = FailingIo.write;
+    var zero_budget: FailingIo = .{ .delegate = io };
     var zero_budget_inbuf: std.ArrayList(u8) = .empty;
     defer zero_budget_inbuf.deinit(std.testing.allocator);
     var zero_budget_tunnel = Tunnel{
-        .io = .{ .userdata = &zero_budget, .vtable = &zero_budget_vtable },
+        .io = forwarded_io.observer(&zero_budget, .{ .netWrite = FailingIo.write }),
         .allocator = std.testing.allocator,
         .stream = undefined,
         .inbuf = &zero_budget_inbuf,
@@ -423,14 +419,11 @@ test "HTTP/1 tunnel write-half close failure is terminal" {
     try std.testing.expectEqual(@as(usize, 0), zero_budget.write_calls);
     try std.testing.expectEqual(@as(usize, 0), zero_budget_progress.committed_bytes);
 
-    var failing: FailingIo = .{};
-    var vtable = threaded.io().vtable.*;
-    vtable.netShutdown = FailingIo.shutdown;
-    vtable.netWrite = FailingIo.write;
+    var failing: FailingIo = .{ .delegate = io };
     var inbuf: std.ArrayList(u8) = .empty;
     defer inbuf.deinit(std.testing.allocator);
     var tunnel = Tunnel{
-        .io = .{ .userdata = &failing, .vtable = &vtable },
+        .io = forwarded_io.observer(&failing, .{ .netShutdown = FailingIo.shutdown, .netWrite = FailingIo.write }),
         .allocator = std.testing.allocator,
         .stream = undefined,
         .inbuf = &inbuf,
@@ -452,7 +445,12 @@ test "HTTP/1 tunnel write-half close failure is terminal" {
 }
 
 test "HTTP/1 TLS post-close-notify shutdown treats disconnected peer as complete" {
+    try native_protocol_io.runStream(postNotifyPeerShutdown);
+}
+
+fn postNotifyPeerShutdown(base_io: std.Io) !void {
     const ShutdownIo = struct {
+        delegate: std.Io,
         calls: usize = 0,
         result: enum { disconnected, failed } = .disconnected,
 
@@ -470,12 +468,8 @@ test "HTTP/1 TLS post-close-notify shutdown treats disconnected peer as complete
         }
     };
 
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
-    var state: ShutdownIo = .{};
-    var vtable = threaded.io().vtable.*;
-    vtable.netShutdown = ShutdownIo.shutdown;
-    const io = std.Io{ .userdata = &state, .vtable = &vtable };
+    var state: ShutdownIo = .{ .delegate = base_io };
+    const io = forwarded_io.observer(&state, .{ .netShutdown = ShutdownIo.shutdown });
     const stream: net.Stream = undefined;
 
     try shutdownAfterTlsCloseNotify(io, stream);
