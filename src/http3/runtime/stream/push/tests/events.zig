@@ -1,4 +1,5 @@
 const std = @import("std");
+const native_protocol_io = @import("../../../../../internal/testing/native_protocol_io.zig");
 const NativeSendIo = @import("../../../../../internal/testing/deadline_send_io.zig").Native;
 const http3 = @import("../../../../mod.zig");
 const runtime = @import("../../../../runtime.zig");
@@ -430,10 +431,11 @@ test "HTTP/3 protected client retains pending push cancellation on send failure"
 }
 
 test "HTTP/3 protected client resumes pending push cancellation after deadline" {
+    try native_protocol_io.run(pendingPushCancellationDeadline);
+}
+
+fn pendingPushCancellationDeadline(io: std.Io) !void {
     const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
     const client_cid = [_]u8{ 0xd5, 0x10, 0x20, 0x30 };
     const server_cid = [_]u8{ 0xd6, 0x10, 0x20, 0x30 };
     const client_keys = quic.protection.deriveAes128Keys(
@@ -494,6 +496,7 @@ test "HTTP/3 protected client resumes pending push cancellation after deadline" 
     const delegate_timed_io = client.quic_client.endpoint.io;
     var timed_io: NativeSendIo = .{
         .backend = .init(allocator, .{ .async_limit = .nothing }),
+        .delegate_io = delegate_timed_io,
         .now_ns = .init(@intCast(1_000_000)),
         .advance_after_send_ns = std.time.ns_per_s,
     };

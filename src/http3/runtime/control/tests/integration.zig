@@ -1,4 +1,5 @@
 const std = @import("std");
+const native_protocol_io = @import("../../../../internal/testing/native_protocol_io.zig");
 const NativeSendIo = @import("../../../../internal/testing/deadline_send_io.zig").Native;
 const http3 = @import("../../../mod.zig");
 const runtime = @import("../../../runtime.zig");
@@ -13,10 +14,11 @@ fn findStreamFrame(frames: []const quic.Frame) ?quic.StreamFrame {
 }
 
 test "HTTP/3 connection control frames advance control stream offset" {
+    try native_protocol_io.run(controlOffsets);
+}
+
+fn controlOffsets(io: std.Io) !void {
     const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
 
     const client_cid = [_]u8{ 0xf1, 0xf2, 0xf3, 0xf4 };
     const server_cid = [_]u8{ 0xf5, 0xf6, 0xf7, 0xf8 };
@@ -72,6 +74,7 @@ test "HTTP/3 connection control frames advance control stream offset" {
     const delegate_timed_io = client.quic_client.endpoint.io;
     var timed_io: NativeSendIo = .{
         .backend = .init(allocator, .{ .async_limit = .nothing }),
+        .delegate_io = delegate_timed_io,
         .now_ns = .init(@intCast(1_000_000)),
         .advance_after_send_ns = std.time.ns_per_s,
     };
@@ -154,10 +157,11 @@ test "HTTP/3 connection control frames advance control stream offset" {
 }
 
 test "HTTP/3 protected runtime sends and accumulates RFC 9412 origins" {
+    try native_protocol_io.run(origins);
+}
+
+fn origins(io: std.Io) !void {
     const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
 
     const client_cid = [_]u8{ 0xe1, 0xe2, 0xe3, 0xe4 };
     const server_cid = [_]u8{ 0xe5, 0xe6, 0xe7, 0xe8 };
@@ -213,6 +217,7 @@ test "HTTP/3 protected runtime sends and accumulates RFC 9412 origins" {
     const delegate_timed_io = server.quic_server.endpoint.io;
     var timed_io: NativeSendIo = .{
         .backend = .init(allocator, .{ .async_limit = .nothing }),
+        .delegate_io = delegate_timed_io,
         .now_ns = .init(@intCast(1_000_000)),
         .advance_after_send_ns = std.time.ns_per_s,
     };

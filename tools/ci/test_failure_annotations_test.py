@@ -110,6 +110,32 @@ class AnnotationsTest(unittest.TestCase):
         self.assertIn("quic.test.batch prefix", first)
         self.assertIn("process terminated with signal ILL", first)
 
+    def test_native_crash_prefaces_keep_case_before_long_stack_and_build_output(self):
+        for diagnostic in [
+            "General protection exception (no address available)",
+            "Illegal instruction at address 0x1234",
+            "Stack overflow at address 0x1234",
+        ]:
+            with self.subTest(diagnostic=diagnostic):
+                text = "2287/7451 webtransport.test.visible prefix..." + diagnostic + "\n"
+                text += "backend at Threaded.zig:42\n"
+                text += "\n".join("stack frame %d" % n for n in range(60))
+                text += "\n1/3 fuzz.test.other...OK\nerror: process terminated with signal ABRT\n"
+                first = self.render(text, "complete-tests.log").splitlines()[0]
+                self.assertIn("webtransport.test.visible prefix", first)
+                self.assertIn(diagnostic, first)
+                self.assertIn("backend at Threaded.zig:42", first)
+                self.assertNotIn("fuzz.test.other", first)
+
+    def test_crash_words_in_test_names_and_diagnostics_are_not_native_crashes(self):
+        text = "1/2 test.General protection exception fixture...OK\n"
+        text += "[test] (warn): Illegal instruction is an expected fixture diagnostic\n"
+        text += "2/2 test.real failure...\nFAIL (TestUnexpectedResult)\n"
+        first = self.render(text, "complete-tests.log").splitlines()[0]
+        self.assertIn("test.real failure", first)
+        self.assertIn("FAIL (TestUnexpectedResult)", first)
+        self.assertNotIn("test.General protection", first)
+
 
 if __name__ == "__main__":
     unittest.main()

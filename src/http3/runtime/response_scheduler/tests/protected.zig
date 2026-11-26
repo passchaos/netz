@@ -1,16 +1,18 @@
 const std = @import("std");
+const native_protocol_io = @import("../../../../internal/testing/native_protocol_io.zig");
 const NativeSendIo = @import("../../../../internal/testing/deadline_send_io.zig").Native;
 const runtime = @import("../../../runtime.zig");
 const quic = @import("../../../../quic/mod.zig");
 const body_sender = @import("../../send/body.zig");
 
 test "HTTP/3 protected response scheduler honors request priority" {
+    try native_protocol_io.run(protectedPriorities);
+}
+
+fn protectedPriorities(io: std.Io) !void {
     const allocator = std.testing.allocator;
     const low_body = "low-" ** 18;
     const high_body = "high" ** 18;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
     const client_cid = [_]u8{ 0xc6, 0x10, 0x20, 0x30 };
     const server_cid = [_]u8{ 0xc7, 0x10, 0x20, 0x30 };
     const client_keys = quic.protection.deriveAes128Keys(
@@ -141,6 +143,7 @@ test "HTTP/3 protected response scheduler honors request priority" {
     const delegate_timed = server.quic_server.endpoint.io;
     var timed: NativeSendIo = .{
         .backend = .init(allocator, .{ .async_limit = .nothing }),
+        .delegate_io = delegate_timed,
         .now_ns = .init(@intCast(std.Io.Clock.awake.now(
             server.quic_server.endpoint.io,
         ).nanoseconds)),

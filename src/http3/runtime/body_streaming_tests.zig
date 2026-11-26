@@ -1,6 +1,7 @@
 //! HTTP/3 body streaming, GRO batch, and small-window tests.
 
 const std = @import("std");
+const native_protocol_io = @import("../../internal/testing/native_protocol_io.zig");
 const NativeSendIo = @import("../../internal/testing/deadline_send_io.zig").Native;
 const ObservedBatchSend = @import("../../quic/one_rtt/tests/observed_batch_send.zig").ObservedBatchSend;
 const http3 = @import("../mod.zig");
@@ -260,10 +261,11 @@ test "HTTP/3 handshake client drains GRO response batch one packet at a time" {
 }
 
 test "HTTP/3 handshake client batches request DATA across streams" {
+    try native_protocol_io.run(batchRequestBodies);
+}
+
+fn batchRequestBodies(io: std.Io) !void {
     const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
 
     const original_dcid = [_]u8{
         0xd1, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7, 0xd8,
@@ -481,6 +483,7 @@ test "HTTP/3 handshake client batches request DATA across streams" {
     const fixed_delegate_io = client.endpoint.io;
     var fixed_io: NativeSendIo = .{
         .backend = .init(allocator, .{ .async_limit = .nothing }),
+        .delegate_io = fixed_delegate_io,
         .now_ns = .init(1_000_000),
     };
     defer fixed_io.backend.deinit();
@@ -525,6 +528,7 @@ test "HTTP/3 handshake client batches request DATA across streams" {
     var partial: ObservedBatchSend = .{ .delegate = client.endpoint.io, .fail_after_prefix = 1 };
     var partial_io: NativeSendIo = .{
         .backend = .init(allocator, .{ .async_limit = .nothing }),
+        .delegate_io = partial.delegate,
         .fixed_clock = false,
         .send_context = &partial,
         .send_override = ObservedBatchSend.netSend,

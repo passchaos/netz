@@ -1,4 +1,5 @@
 const std = @import("std");
+const native_protocol_io = @import("../../../internal/testing/native_protocol_io.zig");
 const NativeSendIo = @import("../../../internal/testing/deadline_send_io.zig").Native;
 const http3 = @import("../../mod.zig");
 const quic = @import("../../../quic/mod.zig");
@@ -120,11 +121,13 @@ test "HTTP/3 complete response validates every field before output and retains z
 }
 
 test "HTTP/3 complete response queues refused cancellation and retries before a sibling" {
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
+    try native_protocol_io.run(queuedResponseCancellation);
+}
+
+fn queuedResponseCancellation(io: std.Io) !void {
     for ([_]bool{ false, true }) |packet_progress| {
         var pair: Pair = undefined;
-        try pair.init(threaded.io());
+        try pair.init(io);
         defer pair.deinit();
         try admit(&pair, 0);
         try admit(&pair, 4);
@@ -132,7 +135,7 @@ test "HTTP/3 complete response queues refused cancellation and retries before a 
             fn send(context: ?*anyopaque, handle: std.Io.net.Socket.Handle, messages: []std.Io.net.OutgoingMessage, flags: std.Io.net.SendFlags) struct { ?std.Io.net.Socket.SendError, usize } {
                 const sender: *NativeSendIo = @ptrCast(@alignCast(context.?));
                 if (sender.send_calls.load(.acquire) >= 2) return .{ error.NetworkDown, 0 };
-                const base = sender.backend.io();
+                const base = sender.baseIo();
                 return base.vtable.netSend(base.userdata, handle, messages, flags);
             }
         };
@@ -140,6 +143,7 @@ test "HTTP/3 complete response queues refused cancellation and retries before a 
         const fixed_delegate_io = connection.endpoint.io;
         var fixed: NativeSendIo = .{
             .backend = .init(std.testing.allocator, .{ .async_limit = .nothing }),
+            .delegate_io = fixed_delegate_io,
             .now_ns = .init(1_000_000),
             .advance_after_send_ns = std.time.ns_per_s,
             .send_override = FailAfterFirst.send,

@@ -1,0 +1,177 @@
+{
+  "observed_utc": "2026-11-26T07:01:38.570262+00:00",
+  "base_commit": "e421d17a84dcac8dd6e915f5a78083aa58469316",
+  "source_sha256": {
+    "src/http3/runtime/body_streaming_tests.zig": "15cdeb12a69c9459756f6fd2b4cf1a4f4bc4e88be1f2baa38b3e17a0d49da723",
+    "src/http3/runtime/control/tests/integration.zig": "10ca636bcf53f9fb0b158231bbabab3ffa63065abd0d18ff18bd87f1da741724",
+    "src/http3/runtime/development_runtime_tests.zig": "54570c1a34d115e340eb7b0eb1a8c5023354c819f0fb2ba6e9b2b094293fb245",
+    "src/http3/runtime/handshake_deadline_tests.zig": "fb668f7a54ea5c55604475ef4093e228ca81e4e0e239836a86714cfff61ff3fe",
+    "src/http3/runtime/response_scheduler/tests/protected.zig": "f869692b75c2efff80924bed4bbf08fe80d00737a46c5de63e8160f8b004ae6d",
+    "src/http3/runtime/server/complete_response_tests.zig": "30b383ed837e802811213b167624a4ae1ae4c1df569a849a122bf41e00636b4e",
+    "src/http3/runtime/server/tests/streaming.zig": "5e1b4a1a0d75cc46a7ad86fe466bf2ecd523edac1f88257c6837962011eff951",
+    "src/http3/runtime/stream/push/tests/events.zig": "f3fc20f5e795fcc421b66b37795fb6844b6121e377109f2f28df531f718c3fe8",
+    "src/http3/runtime/stream/push/tests/send.zig": "aa00c1e67c76421cde6953be179ecbe6794f72ffd88862795f006fe64c034377",
+    "src/http3/runtime/uri_and_shutdown_tests.zig": "1c913a765a1b79be91d37aa39b79800dce5589677fe5f99d88e0ee40b33cb723",
+    "src/internal/testing/deadline_send_io.zig": "141d74566f3c9f02c8843586e865afb1e9510edf411382beaf12abd5693217ea",
+    "src/webtransport/runtime/flow/send/tests.zig": "69de971ebc8fcc6439dfe26d2b9006a8ec9600ffad0e328cfef9a4b06258f9d7",
+    "src/webtransport/runtime/flow/write/tests.zig": "7f984c709297b49c91afb47dffd48be92cfc851b3556b7b0341d0eff71dcbe79",
+    "src/webtransport/runtime/tests.zig": "65f3f76bbfab123de272574f751ad7957f59a144d8ccbe79564472301f3dea1a",
+    "tools/ci/test_failure_annotations.py": "4d04666c5e735eaaee714be95a9183caadcae047aa4b46639f4360d00c80bd55",
+    "tools/ci/test_failure_annotations_test.py": "08a63062c0315c1237d9c3523e88fefd7e91c8aafa50f15aafe87c4ea9d65506",
+    "src/internal/testing/forwarded_io.zig": "fdcb7229cbf0199ee36d55668335adc49b0bd04747ba56b6aa793793f7d6fd40",
+    "src/internal/testing/deadline_send_io_tests.zig": "2411a60c65e420e31829d72dbb8c223981d44dbc1a2e7ac2d7f71885a4444cc5"
+  },
+  "behavior": [
+    "complete typed IO callback forwarding with real delegate userdata and token ownership",
+    "synthetic awake absolute deadlines translated to remaining native duration at submission",
+    "every changed UDP fixture exercises POSIX Threaded and the application backend; Windows uses the supported application IOCP backend",
+    "selected raw peer threads replaced by cancellation/join futures",
+    "real entered UDP read canceled and original socket reused",
+    "actual backend sees the synthetic clock remaining deadline budget",
+    "protected CONNECT and both DATA-slice fixtures preserve visible prefix, exact suffix, FIN and counters",
+    "all send-flow grant and multi-packet tests preserve their wire and credit assertions"
+  ],
+  "checks": {
+    "fmt": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "fmt",
+        "src/http3/runtime/body_streaming_tests.zig",
+        "src/http3/runtime/control/tests/integration.zig",
+        "src/http3/runtime/development_runtime_tests.zig",
+        "src/http3/runtime/handshake_deadline_tests.zig",
+        "src/http3/runtime/response_scheduler/tests/protected.zig",
+        "src/http3/runtime/server/complete_response_tests.zig",
+        "src/http3/runtime/server/tests/streaming.zig",
+        "src/http3/runtime/stream/push/tests/events.zig",
+        "src/http3/runtime/stream/push/tests/send.zig",
+        "src/http3/runtime/uri_and_shutdown_tests.zig",
+        "src/internal/testing/deadline_send_io.zig",
+        "src/webtransport/runtime/flow/send/tests.zig",
+        "src/webtransport/runtime/flow/write/tests.zig",
+        "src/webtransport/runtime/tests.zig",
+        "src/internal/testing/forwarded_io.zig",
+        "src/internal/testing/deadline_send_io_tests.zig"
+      ],
+      "exit_code": 0,
+      "log_sha256": "127f192337d065aee9aa6560553f88bc888b52c10cd345c99a92d8d5d7beda12",
+      "tests_passed": []
+    },
+    "core-native": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-http3",
+        "-j1",
+        "-Dtest-progress=true",
+        "-Dtest-filter=Native protocol observer",
+        "-Dtest-filter=HTTP/3 protected response deadlines preserve aggregate and streaming progress",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log_sha256": "2305bdc7301c2429dec734d334c819b7bff2d580a516562e1939d0bf1e58af6f",
+      "tests_passed": [
+        68
+      ]
+    },
+    "core-windows-compile": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-http3-compile",
+        "-j1",
+        "-Dtarget=x86_64-windows-gnu",
+        "-Dtest-filter=Native protocol observer",
+        "-Dtest-filter=HTTP/3 protected response deadlines preserve aggregate and streaming progress",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log_sha256": "d922f9f403a35cd9983e65bcaa4365225fa241c43ba1e9aa3369dc90c7c8e183",
+      "tests_passed": []
+    },
+    "fixtures-native": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-http3",
+        "test-webtransport",
+        "-j1",
+        "-Dtest-progress=true",
+        "-Dtest-filter=WebTransport protected runtime CONNECT and datagrams over QUIC 1-RTT",
+        "-Dtest-filter=WebTransport protected session DATA slices resume exact suffix",
+        "-Dtest-filter=WebTransport handshake session DATA slices resume exact suffix",
+        "-Dtest-filter=Native protocol observer",
+        "-Dtest-filter=paced push timeout retires only its streams",
+        "-Dtest-filter=HTTP/3 protected server sends promised push response",
+        "-Dtest-filter=HTTP/3 protected runtime streams request and response DATA chunks",
+        "-Dtest-filter=HTTP/3 handshake client batches request DATA across streams",
+        "-Dtest-filter=HTTP/3 protected response scheduler honors request priority",
+        "-Dtest-filter=HTTP/3 connection control frames advance control stream offset",
+        "-Dtest-filter=HTTP/3 protected runtime sends and accumulates RFC 9412 origins",
+        "-Dtest-filter=HTTP/3 protected response deadlines preserve aggregate and streaming progress",
+        "-Dtest-filter=HTTP/3 development body deadline distinguishes retry from fail close",
+        "-Dtest-filter=HTTP/3 protected client resumes pending push cancellation after deadline",
+        "-Dtest-filter=WebTransport send flow",
+        "-Dtest-filter=HTTP/3 aggregate deadlines bound request and response head sends",
+        "-Dtest-filter=HTTP/3 serveConnection shutdown deadline covers GOAWAY send",
+        "-Dtest-filter=HTTP/3 complete response queues refused cancellation and retries before a sibling",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log_sha256": "32526e32a476478fd46224beefc8af273ff31aebf8a2138f80339d820db3bbb9",
+      "tests_passed": [
+        143,
+        84
+      ]
+    },
+    "fixtures-windows-compile": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-http3-compile",
+        "test-webtransport-compile",
+        "-j1",
+        "-Dtarget=x86_64-windows-gnu",
+        "-Dtest-filter=WebTransport protected runtime CONNECT and datagrams over QUIC 1-RTT",
+        "-Dtest-filter=WebTransport protected session DATA slices resume exact suffix",
+        "-Dtest-filter=WebTransport handshake session DATA slices resume exact suffix",
+        "-Dtest-filter=Native protocol observer",
+        "-Dtest-filter=paced push timeout retires only its streams",
+        "-Dtest-filter=HTTP/3 protected server sends promised push response",
+        "-Dtest-filter=HTTP/3 protected runtime streams request and response DATA chunks",
+        "-Dtest-filter=HTTP/3 handshake client batches request DATA across streams",
+        "-Dtest-filter=HTTP/3 protected response scheduler honors request priority",
+        "-Dtest-filter=HTTP/3 connection control frames advance control stream offset",
+        "-Dtest-filter=HTTP/3 protected runtime sends and accumulates RFC 9412 origins",
+        "-Dtest-filter=HTTP/3 protected response deadlines preserve aggregate and streaming progress",
+        "-Dtest-filter=HTTP/3 development body deadline distinguishes retry from fail close",
+        "-Dtest-filter=HTTP/3 protected client resumes pending push cancellation after deadline",
+        "-Dtest-filter=WebTransport send flow",
+        "-Dtest-filter=HTTP/3 aggregate deadlines bound request and response head sends",
+        "-Dtest-filter=HTTP/3 serveConnection shutdown deadline covers GOAWAY send",
+        "-Dtest-filter=HTTP/3 complete response queues refused cancellation and retries before a sibling",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log_sha256": "59874c145b229298ab94aabfd3ae909ca05bdec0d2b212892bd55f85610bb77c",
+      "tests_passed": []
+    }
+  },
+  "native_core_tests_passed": 68,
+  "native_http3_tests_passed": 84,
+  "native_webtransport_tests_passed": 143,
+  "windows_cross_compile": "core and complete selected fixtures passed; native Windows acceptance remains pending",
+  "python_failure_annotations_tests": 13,
+  "pinned_ci_before_delivery": {
+    "run": "https://github.com/passchaos/netz/actions/runs/45766158848",
+    "revision": "e421d17a84dcac8dd6e915f5a78083aa58469316",
+    "linux_native": "success, including original and added protocol commands, send deadline scopes and isolated CA reload",
+    "windows_native": "failed in the new owned-input command: EndpointClient closed_a AuthenticationFailed and EndpointServer overflow Unexpected, both after CONNECTION_RESET; peer cause remains open",
+    "complete": "failure: GP at 2300/7469 WebTransport protected runtime CONNECT and datagrams over QUIC 1-RTT; complete MQTT config interop passed"
+  },
+  "acceptance": "delivered-revision pinned native and complete qualification pending; broader goal remains active"
+}

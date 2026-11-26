@@ -1,13 +1,15 @@
 const std = @import("std");
+const native_protocol_io = @import("../../../../internal/testing/native_protocol_io.zig");
 const NativeSendIo = @import("../../../../internal/testing/deadline_send_io.zig").Native;
 const runtime = @import("../../../runtime.zig");
 const quic = @import("../../../../quic/mod.zig");
 
 test "HTTP/3 protected runtime streams request and response DATA chunks" {
+    try native_protocol_io.run(protectedStreaming);
+}
+
+fn protectedStreaming(io: std.Io) !void {
     const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
 
     const client_cid = [_]u8{ 0xb1, 0x10, 0x20, 0x30 };
     const server_cid = [_]u8{ 0xb2, 0x10, 0x20, 0x30 };
@@ -174,6 +176,7 @@ test "HTTP/3 protected runtime streams request and response DATA chunks" {
                 const delegate_io = server_ptr.quic_server.endpoint.io;
                 var timed: NativeSendIo = .{
                     .backend = .init(allocator, .{ .async_limit = .nothing }),
+                    .delegate_io = delegate_io,
                     .now_ns = .init(@intCast(std.Io.Clock.awake.now(delegate_io).nanoseconds)),
                     .advance_after_send_ns = std.time.ns_per_s,
                 };
@@ -318,7 +321,8 @@ test "HTTP/3 protected runtime streams request and response DATA chunks" {
     };
 
     var shared = Shared{ .server = &server };
-    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var thread = try std.Io.concurrent(io, Shared.run, .{&shared});
+    defer thread.cancel(io);
     var client = try runtime.ProtectedClient.connect(
         allocator,
         io,
@@ -422,6 +426,7 @@ test "HTTP/3 protected runtime streams request and response DATA chunks" {
         const delegate_io = client.quic_client.endpoint.io;
         var timed: NativeSendIo = .{
             .backend = .init(allocator, .{ .async_limit = .nothing }),
+            .delegate_io = delegate_io,
             .now_ns = .init(@intCast(std.Io.Clock.awake.now(delegate_io).nanoseconds)),
             .advance_after_send_ns = std.time.ns_per_s,
         };
@@ -539,7 +544,7 @@ test "HTTP/3 protected runtime streams request and response DATA chunks" {
     );
     var response = try client.receiveResponse(stream_id);
     defer response.deinit(allocator);
-    thread.join();
+    thread.await(io);
     if (shared.err) |err| return err;
     try std.testing.expectEqualStrings(
         "response-chunks",

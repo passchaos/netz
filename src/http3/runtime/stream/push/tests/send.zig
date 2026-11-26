@@ -1,4 +1,5 @@
 const std = @import("std");
+const native_protocol_io = @import("../../../../../internal/testing/native_protocol_io.zig");
 const NativeSendIo = @import("../../../../../internal/testing/deadline_send_io.zig").Native;
 const http3 = @import("../../../../../http3/mod.zig");
 const runtime = @import("../../../../runtime.zig");
@@ -8,10 +9,11 @@ const server_response = @import("../../../server/response.zig");
 const first_server_push_stream_id: u62 = 15;
 
 test "HTTP/3 protected server sends promised push response" {
+    try native_protocol_io.run(promisedPushResponse);
+}
+
+fn promisedPushResponse(io: std.Io) !void {
     const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
     const client_cid = [_]u8{ 0xf5, 0x10, 0x20, 0x30 };
     const server_cid = [_]u8{ 0xf6, 0x10, 0x20, 0x30 };
     const client_keys = quic.protection.deriveAes128Keys(
@@ -115,6 +117,7 @@ test "HTTP/3 protected server sends promised push response" {
             const delegate_io = server.quic_server.endpoint.io;
             var timed_io: NativeSendIo = .{
                 .backend = .init(allocator, .{ .async_limit = .nothing }),
+                .delegate_io = delegate_io,
                 .now_ns = .init(1_000_000),
                 .advance_after_send_ns = std.time.ns_per_s,
             };
@@ -684,14 +687,12 @@ test "HTTP/3 handshake paced push stops after client cancellation" {
 }
 
 fn runPushTimeoutCase(
+    io: std.Io,
     allocator: std.mem.Allocator,
     parent_body: []const u8,
     expect_parent_reset: bool,
 ) !void {
     const body_len: usize = 1024 * 1024;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
 
     const original_dcid = [_]u8{ 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xab, 0xac };
     const client_cid = [_]u8{ 0xad, 0xae, 0xaf, 0xb0 };
@@ -734,6 +735,7 @@ fn runPushTimeoutCase(
 
     var timed: NativeSendIo = .{
         .backend = .init(allocator, .{ .async_limit = .nothing }),
+        .delegate_io = io,
         .now_ns = .init(1_000_000),
     };
     defer timed.backend.deinit();
@@ -824,9 +826,8 @@ fn runPushTimeoutCase(
         .parent_body = parent_body,
         .expect_parent_reset = expect_parent_reset,
     };
-    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
-    var joined = false;
-    defer if (!joined) thread.join();
+    var thread = try std.Io.concurrent(io, Shared.run, .{&shared});
+    defer thread.cancel(io);
     var client = try runtime.HandshakeClient.connect(
         allocator,
         io,
@@ -871,7 +872,7 @@ fn runPushTimeoutCase(
     try std.testing.expectEqual(@as(u64, 0), promise.push_promise.push_id);
 
     _ = timed.now_ns.fetchAdd(10 * std.time.ns_per_s, .acq_rel);
-    timed.clock_changed.set(timed.backend.io());
+    timed.clock_changed.set(timed.baseIo());
     try client.established.connection.trySend(&.{.{ .ping = {} }});
     const sibling_stream_id = try client.sendRequest(.{
         .method = "GET",
@@ -897,8 +898,7 @@ fn runPushTimeoutCase(
         }
     }
 
-    thread.join();
-    joined = true;
+    thread.await(io);
     if (shared.err) |err| return err;
     try std.testing.expectEqual(
         @as(u64, http3.ApplicationErrorCode.request_cancelled),
@@ -916,16 +916,21 @@ fn runPushTimeoutCase(
 }
 
 test "HTTP/3 handshake paced push timeout retires only its streams" {
-    try runPushTimeoutCase(std.testing.allocator, "parent", true);
-    try runPushTimeoutCase(std.testing.allocator, "", false);
+    try native_protocol_io.run(handshakePushTimeout);
+}
+
+fn handshakePushTimeout(io: std.Io) !void {
+    try runPushTimeoutCase(io, std.testing.allocator, "parent", true);
+    try runPushTimeoutCase(io, std.testing.allocator, "", false);
 }
 
 test "HTTP/3 protected server paced push timeout retires only its streams" {
+    try native_protocol_io.run(protectedPushTimeout);
+}
+
+fn protectedPushTimeout(io: std.Io) !void {
     const allocator = std.testing.allocator;
     const body_len: usize = 1024 * 1024;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
     const client_cid = [_]u8{ 0xc1, 0xc2, 0xc3, 0xc4 };
     const server_cid = [_]u8{ 0xc5, 0xc6, 0xc7, 0xc8 };
     const client_keys = quic.protection.deriveAes128Keys(
@@ -965,6 +970,7 @@ test "HTTP/3 protected server paced push timeout retires only its streams" {
 
     var timed: NativeSendIo = .{
         .backend = .init(allocator, .{ .async_limit = .nothing }),
+        .delegate_io = io,
         .now_ns = .init(1_000_000),
     };
     defer timed.backend.deinit();
@@ -1030,9 +1036,8 @@ test "HTTP/3 protected server paced push timeout retires only its streams" {
     };
 
     var shared = Shared{ .server = &server, .timed = &timed };
-    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
-    var joined = false;
-    defer if (!joined) thread.join();
+    var thread = try std.Io.concurrent(io, Shared.run, .{&shared});
+    defer thread.cancel(io);
 
     try client.sendMaxPushId(0);
     const request_stream_id = try client.sendRequest(.{
@@ -1051,7 +1056,7 @@ test "HTTP/3 protected server paced push timeout retires only its streams" {
     try std.testing.expectEqual(@as(u64, 0), promise.push_promise.push_id);
 
     _ = timed.now_ns.fetchAdd(10 * std.time.ns_per_s, .acq_rel);
-    timed.clock_changed.set(timed.backend.io());
+    timed.clock_changed.set(timed.baseIo());
     try client.protected_send.sendFrames(
         &client.quic_client.endpoint,
         server.address(),
@@ -1085,8 +1090,7 @@ test "HTTP/3 protected server paced push timeout retires only its streams" {
         }
     }
 
-    thread.join();
-    joined = true;
+    thread.await(io);
     if (shared.err) |err| return err;
     try std.testing.expect(shared.push_retired);
     try std.testing.expectEqual(@as(u16, 204), shared.sibling_status);

@@ -1,6 +1,7 @@
 //! HTTP/3 development runtime, STREAM reassembly, and deadline tests.
 
 const std = @import("std");
+const native_protocol_io = @import("../../internal/testing/native_protocol_io.zig");
 const NativeSendIo = @import("../../internal/testing/deadline_send_io.zig").Native;
 const http3 = @import("../mod.zig");
 const net = std.Io.net;
@@ -472,10 +473,11 @@ test "HTTP/3 dev client deadline validation does not send" {
 }
 
 test "HTTP/3 development body deadline distinguishes retry from fail close" {
+    try native_protocol_io.run(developmentBodyDeadline);
+}
+
+fn developmentBodyDeadline(io: std.Io) !void {
     const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
 
     var server = try Server.bind(
         allocator,
@@ -529,6 +531,7 @@ test "HTTP/3 development body deadline distinguishes retry from fail close" {
     const delegate_timed = client.quic_client.endpoint.io;
     var timed: NativeSendIo = .{
         .backend = .init(allocator, .{ .async_limit = .nothing }),
+        .delegate_io = delegate_timed,
         .now_ns = .init(@intCast(std.Io.Clock.awake.now(
             client.quic_client.endpoint.io,
         ).nanoseconds)),

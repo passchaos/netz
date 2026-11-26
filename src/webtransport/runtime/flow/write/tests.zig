@@ -1,4 +1,5 @@
 const std = @import("std");
+const native_protocol_io = @import("../../../../internal/testing/native_protocol_io.zig");
 const NativeSendIo = @import("../../../../internal/testing/deadline_send_io.zig").Native;
 const webtransport = @import("../../../mod.zig");
 const Pair = @import("../../session_control/test_support/handshake_pair.zig").Pair;
@@ -12,11 +13,13 @@ fn init(pair: *Pair, io: std.Io, data: u64) !void {
 }
 
 test "WebTransport send flow deadline reports exact prefix and resumes after automatic grant" {
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
+    try native_protocol_io.run(resumeAfterGrant);
+}
+
+fn resumeAfterGrant(io: std.Io) !void {
     for ([_]bool{ false, true }) |slices| {
         var pair: Pair = undefined;
-        try init(&pair, threaded.io(), 3);
+        try init(&pair, io, 3);
         defer pair.deinit();
         const id = try pair.client.openBidirectionalStream();
         var committed: usize = 99;
@@ -55,10 +58,12 @@ test "WebTransport send flow deadline reports exact prefix and resumes after aut
 }
 
 test "WebTransport send flow zero data credit permits association FIN and waits for body grant" {
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
+    try native_protocol_io.run(zeroCreditFin);
+}
+
+fn zeroCreditFin(io: std.Io) !void {
     var pair: Pair = undefined;
-    try init(&pair, threaded.io(), 0);
+    try init(&pair, io, 0);
     defer pair.deinit();
     const empty = try pair.client.openUnidirectionalStream();
     try pair.client.sendStream(empty, "", true);
@@ -76,12 +81,14 @@ test "WebTransport send flow zero data credit permits association FIN and waits 
 }
 
 test "WebTransport send flow server waits for client grant on a unidirectional stream" {
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
+    try native_protocol_io.run(serverGrant);
+}
+
+fn serverGrant(io: std.Io) !void {
     var client_settings = webtransport.defaultSettings(.{});
     client_settings.webtransport_initial_max_data = 0;
     var pair: Pair = undefined;
-    try pair.initWithSettings(threaded.io(), client_settings, webtransport.defaultSettings(.{}));
+    try pair.initWithSettings(io, client_settings, webtransport.defaultSettings(.{}));
     defer pair.deinit();
     const id = try pair.server.openUnidirectionalStream();
     var committed: usize = 99;
@@ -105,10 +112,12 @@ test "WebTransport send flow server waits for client grant on a unidirectional s
 }
 
 test "WebTransport send flow waiting for data grant retains DRAIN notification" {
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
+    try native_protocol_io.run(retainDrain);
+}
+
+fn retainDrain(io: std.Io) !void {
     var pair: Pair = undefined;
-    try init(&pair, threaded.io(), 0);
+    try init(&pair, io, 0);
     defer pair.deinit();
     const id = try pair.client.openBidirectionalStream();
     try pair.server.grantData(4);
@@ -123,10 +132,12 @@ test "WebTransport send flow waiting for data grant retains DRAIN notification" 
 }
 
 test "WebTransport send flow rejects duplicate grant while waiting for data credit" {
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
+    try native_protocol_io.run(duplicateGrant);
+}
+
+fn duplicateGrant(io: std.Io) !void {
     var pair: Pair = undefined;
-    try init(&pair, threaded.io(), 0);
+    try init(&pair, io, 0);
     defer pair.deinit();
     const id = try pair.client.openBidirectionalStream();
     var storage: [16]u8 = undefined;
@@ -143,10 +154,12 @@ test "WebTransport send flow rejects duplicate grant while waiting for data cred
 }
 
 test "WebTransport send flow batch deadline waits for one shared byte budget" {
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
+    try native_protocol_io.run(sharedBatchBudget);
+}
+
+fn sharedBatchBudget(io: std.Io) !void {
     var pair: Pair = undefined;
-    try init(&pair, threaded.io(), 0);
+    try init(&pair, io, 0);
     defer pair.deinit();
     const first = try pair.client.openBidirectionalStream();
     const second = try pair.client.openBidirectionalStream();
@@ -166,10 +179,12 @@ test "WebTransport send flow batch deadline waits for one shared byte budget" {
 }
 
 test "WebTransport send flow multi-packet socket failure reports only submitted credit" {
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
+    try native_protocol_io.run(socketFailureCredit);
+}
+
+fn socketFailureCredit(io: std.Io) !void {
     var pair: Pair = undefined;
-    try init(&pair, threaded.io(), 4096);
+    try init(&pair, io, 4096);
     defer pair.deinit();
     const id = try pair.client.openBidirectionalStream();
     const conn = pair.connection(.client);
@@ -180,6 +195,7 @@ test "WebTransport send flow multi-packet socket failure reports only submitted 
     var send_io: NativeSendIo = .{
         .backend = .init(std.testing.allocator, .{ .async_limit = .nothing }),
         .fixed_clock = false,
+        .delegate_io = original_io,
         .send_context = &observed,
         .send_override = ObservedBatchSend.netSend,
     };

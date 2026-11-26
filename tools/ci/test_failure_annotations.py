@@ -12,7 +12,12 @@ def logged_error(line: str) -> bool:
 
 
 def native_crash(line: str) -> bool:
-    return "Segmentation fault" in line or "Bus error" in line or bool(
+    return bool(
+        re.search(
+            r"(?:^\s*|\.\.\.\s*)(?:Segmentation fault|Bus error|General protection exception|Illegal instruction|Stack overflow)\b",
+            line,
+        )
+    ) or bool(
         re.search(r"process terminated with signal (?:ABRT|ILL|SEGV|BUS)\b", line)
     )
 

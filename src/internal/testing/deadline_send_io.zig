@@ -2,10 +2,13 @@
 //! Keep backend userdata intact for every callback we do not override.
 const std = @import("std");
 const net = std.Io.net;
+const forwarded_io = @import("forwarded_io.zig");
 
 pub const Native = struct {
     backend: std.Io.Threaded,
     table: std.Io.VTable = undefined,
+    /// Borrowed actual execution and socket backend; must outlive all users.
+    delegate_io: ?std.Io = null,
     fixed_clock: bool = true,
     now_ns: std.atomic.Value(i64) = .init(0),
     advance_after_send_ns: i64 = 0,
@@ -17,13 +20,35 @@ pub const Native = struct {
 
     pub fn io(self: *Native) std.Io {
         const base = self.backend.io();
-        self.table = base.vtable.*;
+        self.table = if (self.delegate_io != null)
+            forwarded_io.table(from, baseIo, mapTimeout)
+        else
+            base.vtable.*;
         if (self.fixed_clock) {
             self.table.now = now;
             self.table.sleep = sleep;
         }
         self.table.netSend = send;
         return .{ .userdata = base.userdata, .vtable = &self.table };
+    }
+
+    pub fn baseIo(self: *Native) std.Io {
+        return self.delegate_io orelse self.backend.io();
+    }
+
+    fn mapTimeout(self: *Native, timeout: std.Io.Timeout) std.Io.Timeout {
+        if (!self.fixed_clock) return timeout;
+        const until = switch (timeout) {
+            .deadline => |until| until,
+            else => return timeout,
+        };
+        if (until.clock != .awake) return timeout;
+        // Backend waits use their real clock. Preserve the remaining budget
+        // of this observer's synthetic absolute clock at each submission.
+        return .{ .duration = .{
+            .clock = .awake,
+            .raw = .fromNanoseconds(@max(0, until.raw.nanoseconds - self.now_ns.load(.acquire))),
+        } };
     }
 
     fn from(userdata: ?*anyopaque) *Native {
@@ -34,13 +59,13 @@ pub const Native = struct {
     fn now(userdata: ?*anyopaque, clock: std.Io.Clock) std.Io.Timestamp {
         const self = from(userdata);
         if (clock == .awake) return .fromNanoseconds(self.now_ns.load(.acquire));
-        const base = self.backend.io();
+        const base = self.baseIo();
         return base.vtable.now(base.userdata, clock);
     }
 
     fn sleep(userdata: ?*anyopaque, timeout: std.Io.Timeout) std.Io.Cancelable!void {
         const self = from(userdata);
-        const base = self.backend.io();
+        const base = self.baseIo();
         const until = switch (timeout) {
             .deadline => |until| until,
             else => {
@@ -59,7 +84,7 @@ pub const Native = struct {
 
     fn send(userdata: ?*anyopaque, socket: net.Socket.Handle, messages: []net.OutgoingMessage, flags: net.SendFlags) struct { ?net.Socket.SendError, usize } {
         const self = from(userdata);
-        const base = self.backend.io();
+        const base = self.baseIo();
         _ = self.send_calls.fetchAdd(1, .monotonic);
         const result = if (self.send_override) |override|
             override(self.send_context, socket, messages, flags)
@@ -72,3 +97,7 @@ pub const Native = struct {
         return result;
     }
 };
+
+test {
+    _ = @import("deadline_send_io_tests.zig");
+}

@@ -1,6 +1,7 @@
 //! HTTP/3 URI, Alt-Svc, cancellation, and shutdown tests.
 
 const std = @import("std");
+const native_protocol_io = @import("../../internal/testing/native_protocol_io.zig");
 const NativeSendIo = @import("../../internal/testing/deadline_send_io.zig").Native;
 const http3 = @import("../mod.zig");
 const net = std.Io.net;
@@ -793,10 +794,11 @@ test "HTTP/3 handshake server performs two-phase graceful shutdown" {
 }
 
 test "HTTP/3 serveConnection shutdown deadline covers GOAWAY send" {
+    try native_protocol_io.run(shutdownDeadline);
+}
+
+fn shutdownDeadline(io: std.Io) !void {
     const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
 
     var endpoint = try quic.runtime.Endpoint.bind(
         allocator,
@@ -847,6 +849,7 @@ test "HTTP/3 serveConnection shutdown deadline covers GOAWAY send" {
     const fixed_delegate_io = endpoint.io;
     var fixed: NativeSendIo = .{
         .backend = .init(allocator, .{ .async_limit = .nothing }),
+        .delegate_io = fixed_delegate_io,
         .now_ns = .init(1_000_000),
     };
     defer fixed.backend.deinit();

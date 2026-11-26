@@ -1,6 +1,7 @@
 //! HTTP/3 handshake and request deadline tests.
 
 const std = @import("std");
+const native_protocol_io = @import("../../internal/testing/native_protocol_io.zig");
 const NativeSendIo = @import("../../internal/testing/deadline_send_io.zig").Native;
 const http3 = @import("../mod.zig");
 const net = std.Io.net;
@@ -64,10 +65,11 @@ const testing = runtime.testing;
 const validateHandshakeSessionOptions = runtime.validateHandshakeSessionOptions;
 
 test "HTTP/3 aggregate deadlines bound request and response head sends" {
+    try native_protocol_io.run(aggregateHeadDeadline);
+}
+
+fn aggregateHeadDeadline(io: std.Io) !void {
     const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
 
     const original_dcid =
         [_]u8{ 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48 };
@@ -156,6 +158,7 @@ test "HTTP/3 aggregate deadlines bound request and response head sends" {
             const fixed_delegate_io = session.established.connection.endpoint.io;
             var fixed: NativeSendIo = .{
                 .backend = .init(allocator, .{ .async_limit = .nothing }),
+                .delegate_io = fixed_delegate_io,
                 .now_ns = .init(1_000_000),
             };
             defer fixed.backend.deinit();
@@ -298,6 +301,7 @@ test "HTTP/3 aggregate deadlines bound request and response head sends" {
     const fixed_delegate_io = client.endpoint.io;
     var fixed: NativeSendIo = .{
         .backend = .init(allocator, .{ .async_limit = .nothing }),
+        .delegate_io = fixed_delegate_io,
         .now_ns = .init(1_000_000),
     };
     defer fixed.backend.deinit();

@@ -320,7 +320,7 @@ HTTP/3 result, Windows compilation and the remaining pinned CI boundary.
 The H2 batch wake [qualification](../evidence/http2_batch_wake/2026-11-26/validation.json)
 records current-source native cancellation and completion-retention checks and
 the matching Windows cross-compilation. It does not establish native Windows,
-Linux or complete acceptance. In current revision `997de2c7`,
+Linux or complete acceptance. In revision `997de2c7`,
 [run 45761345203](https://github.com/passchaos/netz/actions/runs/45761345203)
 still reports the Linux client CA reload failure before SIGHUP. The bounded
 observer reports only three expected `CertificateUntrusted` accept events;
@@ -341,3 +341,35 @@ sliced-storage command shares its existing five-minute budget on Linux/Windows.
 The final combined native scopes pass 39 H2 and 147 WebTransport cases; the
 matching Windows scopes compile. These counts include imported support tests
 and do not establish a throughput result or complete acceptance.
+
+### Native fixture follow-up on e421d17a
+
+[Run 45766158848](https://github.com/passchaos/netz/actions/runs/45766158848)
+passed the Linux native task, including the original protocol command, added
+H2 owned-input command, send-deadline scopes and isolated CA reload. Complete
+MQTT configuration interop also passed. That does not identify a causal repair
+for the earlier retained TLS connection loss; its history remains relevant.
+
+The complete run now identifies its GP at test 2300/7469, `WebTransport protected
+runtime CONNECT and datagrams over QUIC 1-RTT`. That fixture and two same-family
+DATA-slice fixtures still replaced Threaded userdata with clock observers.
+They now use stable native context, complete typed callback forwarding and
+atomic send-advanced clocks. Synthetic awake deadlines become remaining native
+durations at backend submission. All changed UDP fixture bodies retain POSIX
+Threaded plus application-backend coverage and use application IOCP on Windows;
+selected peer threads are canceled/joined Futures.
+
+The [forwarding qualification](../evidence/protocol_native_test_context/2026-11-26/forwarding.json)
+records 68 core checks, final H3 84 and WebTransport 143 scoped native cases,
+matching Windows compilation and 13 failure-annotation checks. Real UDP tests
+observe an entered read before cancellation, reuse its socket, and capture the
+exact synthetic deadline duration reaching the actual backend. GP, illegal
+instruction and stack-overflow prefaces retain their original test name before
+long stacks, with the existing twelve-annotation cap.
+
+Windows' new owned-input command failed in two existing H2 TLS endpoint tests:
+EndpointClient received `AuthenticationFailed` at `closed_a`, and EndpointServer
+received `Unexpected` at `/overflow`, both following native `CONNECTION_RESET`.
+Their first peer-side cause remains open. This prevents native Windows/complete
+acceptance despite current local fixture passes. Original commands, dependency
+pins, budgets and real IP-migration assertions are preserved.

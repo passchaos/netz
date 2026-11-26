@@ -1,6 +1,7 @@
 //! Tests moved out of the WebTransport runtime root.
 
 const std = @import("std");
+const native_protocol_io = @import("../../internal/testing/native_protocol_io.zig");
 const NativeSendIo = @import("../../internal/testing/deadline_send_io.zig").Native;
 
 test {
@@ -1339,42 +1340,11 @@ test "WebTransport development server close deadline preserves zero-progress sta
 }
 
 test "WebTransport protected runtime CONNECT and datagrams over QUIC 1-RTT" {
+    try native_protocol_io.run(protectedConnectDatagrams);
+}
+
+fn protectedConnectDatagrams(io: std.Io) !void {
     const allocator = std.testing.allocator;
-    const DeadlineAfterSendIo = struct {
-        delegate: std.Io,
-        now_ns: i96,
-        send_calls: usize = 0,
-
-        fn now(
-            userdata: ?*anyopaque,
-            _: std.Io.Clock,
-        ) std.Io.Timestamp {
-            const self: *@This() = @ptrCast(@alignCast(userdata.?));
-            return .fromNanoseconds(self.now_ns);
-        }
-
-        fn netSend(
-            userdata: ?*anyopaque,
-            socket_handle: net.Socket.Handle,
-            messages: []net.OutgoingMessage,
-            flags: net.SendFlags,
-        ) struct { ?net.Socket.SendError, usize } {
-            const self: *@This() = @ptrCast(@alignCast(userdata.?));
-            self.send_calls += 1;
-            const result = self.delegate.vtable.netSend(
-                self.delegate.userdata,
-                socket_handle,
-                messages,
-                flags,
-            );
-            if (result[1] != 0) self.now_ns += std.time.ns_per_s;
-            return result;
-        }
-    };
-
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
 
     const client_cid = [_]u8{ 0xfa, 0xce, 0x00, 0x01 };
     const server_cid = [_]u8{ 0xfa, 0xce, 0x00, 0x02 };
@@ -1512,26 +1482,25 @@ test "WebTransport protected runtime CONNECT and datagrams over QUIC 1-RTT" {
             try std.testing.expect(
                 !accepted.control.control.local_drain_started,
             );
-            var timed = DeadlineAfterSendIo{
-                .delegate = server_ptr.h3.quic_server.endpoint.io,
-                .now_ns = std.Io.Clock.awake.now(
+            const delegate_timed_io = server_ptr.h3.quic_server.endpoint.io;
+            var timed: NativeSendIo = .{
+                .backend = .init(allocator, .{ .async_limit = .nothing }),
+                .delegate_io = delegate_timed_io,
+                .now_ns = .init(@intCast(std.Io.Clock.awake.now(
                     server_ptr.h3.quic_server.endpoint.io,
-                ).nanoseconds,
+                ).nanoseconds)),
+                .advance_after_send_ns = std.time.ns_per_s,
             };
-            var timed_vtable = timed.delegate.vtable.*;
-            timed_vtable.now = DeadlineAfterSendIo.now;
-            timed_vtable.netSend = DeadlineAfterSendIo.netSend;
-            server_ptr.h3.quic_server.endpoint.io = .{
-                .userdata = &timed,
-                .vtable = &timed_vtable,
-            };
+            defer timed.backend.deinit();
+            server_ptr.h3.quic_server.endpoint.io = timed.io();
+            defer server_ptr.h3.quic_server.endpoint.io = delegate_timed_io;
             try std.testing.expectError(
                 error.Timeout,
                 accepted.drainWithDeadline(
                     server_ptr,
                     .{
                         .clock = .awake,
-                        .raw = .fromNanoseconds(timed.now_ns + 1),
+                        .raw = .fromNanoseconds(timed.now_ns.load(.acquire) + 1),
                     },
                 ),
             );
@@ -1542,11 +1511,11 @@ test "WebTransport protected runtime CONNECT and datagrams over QUIC 1-RTT" {
             try std.testing.expect(
                 drain_progress.committed < drain_progress.total,
             );
-            try std.testing.expectEqual(@as(usize, 1), timed.send_calls);
+            try std.testing.expectEqual(@as(usize, 1), timed.send_calls.load(.acquire));
             try std.testing.expect(
                 !accepted.control.control.local_drain_sent,
             );
-            server_ptr.h3.quic_server.endpoint.io = timed.delegate;
+            server_ptr.h3.quic_server.endpoint.io = delegate_timed_io;
             try accepted.drainWithTimeout(server_ptr, .fromSeconds(1));
             try std.testing.expect(
                 testing.pendingDrainProgress(&accepted) == null,
@@ -1658,9 +1627,8 @@ test "WebTransport protected runtime CONNECT and datagrams over QUIC 1-RTT" {
     };
 
     var shared = Shared{ .server = &server, .io = io };
-    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
-    var joined = false;
-    defer if (!joined) thread.join();
+    var thread = try std.Io.concurrent(io, Shared.run, .{&shared});
+    defer thread.cancel(io);
     try shared.initial_timeout_done.waitTimeout(io, .{ .duration = .{
         .raw = .fromSeconds(3),
         .clock = .awake,
@@ -1722,30 +1690,29 @@ test "WebTransport protected runtime CONNECT and datagrams over QUIC 1-RTT" {
     );
     defer allocator.free(oversized_datagram);
 
-    var size_probe = DeadlineAfterSendIo{
-        .delegate = client.h3.quic_client.endpoint.io,
-        .now_ns = std.Io.Clock.awake.now(
+    const delegate_size_probe_io = client.h3.quic_client.endpoint.io;
+    var size_probe: NativeSendIo = .{
+        .backend = .init(allocator, .{ .async_limit = .nothing }),
+        .delegate_io = delegate_size_probe_io,
+        .now_ns = .init(@intCast(std.Io.Clock.awake.now(
             client.h3.quic_client.endpoint.io,
-        ).nanoseconds,
+        ).nanoseconds)),
+        .advance_after_send_ns = std.time.ns_per_s,
     };
-    var size_probe_vtable = size_probe.delegate.vtable.*;
-    size_probe_vtable.now = DeadlineAfterSendIo.now;
-    size_probe_vtable.netSend = DeadlineAfterSendIo.netSend;
-    client.h3.quic_client.endpoint.io = .{
-        .userdata = &size_probe,
-        .vtable = &size_probe_vtable,
-    };
+    defer size_probe.backend.deinit();
+    client.h3.quic_client.endpoint.io = size_probe.io();
+    defer client.h3.quic_client.endpoint.io = delegate_size_probe_io;
     const size_probe_packet_number = client.h3.next_packet_number;
     try std.testing.expectError(
         error.DatagramTooLarge,
         client.sendDatagram(oversized_datagram),
     );
-    try std.testing.expectEqual(@as(usize, 0), size_probe.send_calls);
+    try std.testing.expectEqual(@as(usize, 0), size_probe.send_calls.load(.acquire));
     try std.testing.expectEqual(
         size_probe_packet_number,
         client.h3.next_packet_number,
     );
-    client.h3.quic_client.endpoint.io = size_probe.delegate;
+    client.h3.quic_client.endpoint.io = delegate_size_probe_io;
     try std.testing.expectEqualStrings(
         "accepted",
         client.responseHeader("x-protected-admission").?,
@@ -1818,33 +1785,32 @@ test "WebTransport protected runtime CONNECT and datagrams over QUIC 1-RTT" {
     );
     try std.testing.expect(testing.pendingCloseProgress(&client) == null);
     try std.testing.expect(!client.control.control.local_close_started);
-    var timed = DeadlineAfterSendIo{
-        .delegate = client.h3.quic_client.endpoint.io,
-        .now_ns = std.Io.Clock.awake.now(
+    const delegate_timed_io = client.h3.quic_client.endpoint.io;
+    var timed: NativeSendIo = .{
+        .backend = .init(allocator, .{ .async_limit = .nothing }),
+        .delegate_io = delegate_timed_io,
+        .now_ns = .init(@intCast(std.Io.Clock.awake.now(
             client.h3.quic_client.endpoint.io,
-        ).nanoseconds,
+        ).nanoseconds)),
+        .advance_after_send_ns = std.time.ns_per_s,
     };
-    var timed_vtable = timed.delegate.vtable.*;
-    timed_vtable.now = DeadlineAfterSendIo.now;
-    timed_vtable.netSend = DeadlineAfterSendIo.netSend;
-    client.h3.quic_client.endpoint.io = .{
-        .userdata = &timed,
-        .vtable = &timed_vtable,
-    };
+    defer timed.backend.deinit();
+    client.h3.quic_client.endpoint.io = timed.io();
+    defer client.h3.quic_client.endpoint.io = delegate_timed_io;
     try std.testing.expectError(
         error.Timeout,
         client.closeWithDeadline(91, "protected done", .{
             .clock = .awake,
-            .raw = .fromNanoseconds(timed.now_ns + 1),
+            .raw = .fromNanoseconds(timed.now_ns.load(.acquire) + 1),
         }),
     );
     const close_progress = testing.pendingCloseProgress(&client) orelse
         return error.TestUnexpectedResult;
     try std.testing.expect(close_progress.committed > 0);
     try std.testing.expect(close_progress.committed < close_progress.total);
-    try std.testing.expectEqual(@as(usize, 1), timed.send_calls);
+    try std.testing.expectEqual(@as(usize, 1), timed.send_calls.load(.acquire));
     try std.testing.expect(!client.control.control.local_close_sent);
-    client.h3.quic_client.endpoint.io = timed.delegate;
+    client.h3.quic_client.endpoint.io = delegate_timed_io;
     try client.closeWithTimeout(91, "protected done", .fromSeconds(1));
     shared.close_sent.set(io);
     try std.testing.expect(testing.pendingCloseProgress(&client) == null);
@@ -1856,8 +1822,7 @@ test "WebTransport protected runtime CONNECT and datagrams over QUIC 1-RTT" {
     // The lightweight adapter deliberately has no retransmission owner. Wait
     // until its server thread has submitted the final FIN before starting the
     // client budget, so scheduler delay is not mistaken for packet loss.
-    thread.join();
-    joined = true;
+    thread.await(io);
     if (shared.err) |err| return err;
     const peer_fin = try client.receiveSessionEventWithTimeout(.fromSeconds(3));
     try std.testing.expect(peer_fin == .closed);
@@ -1866,42 +1831,11 @@ test "WebTransport protected runtime CONNECT and datagrams over QUIC 1-RTT" {
 }
 
 test "WebTransport protected session DATA slices resume exact suffix" {
+    try native_protocol_io.run(protectedSessionSlices);
+}
+
+fn protectedSessionSlices(io: std.Io) !void {
     const allocator = std.testing.allocator;
-    const DeadlineAfterSendIo = struct {
-        delegate: std.Io,
-        now_ns: i96,
-        send_calls: usize = 0,
-
-        fn now(
-            userdata: ?*anyopaque,
-            _: std.Io.Clock,
-        ) std.Io.Timestamp {
-            const self: *@This() = @ptrCast(@alignCast(userdata.?));
-            return .fromNanoseconds(self.now_ns);
-        }
-
-        fn netSend(
-            userdata: ?*anyopaque,
-            socket_handle: net.Socket.Handle,
-            messages: []net.OutgoingMessage,
-            flags: net.SendFlags,
-        ) struct { ?net.Socket.SendError, usize } {
-            const self: *@This() = @ptrCast(@alignCast(userdata.?));
-            self.send_calls += 1;
-            const result = self.delegate.vtable.netSend(
-                self.delegate.userdata,
-                socket_handle,
-                messages,
-                flags,
-            );
-            if (result[1] != 0) self.now_ns += std.time.ns_per_s;
-            return result;
-        }
-    };
-
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
 
     const client_cid = [_]u8{ 0x6d, 0x73, 0x67, 0x01 };
     const server_cid = [_]u8{ 0x6d, 0x73, 0x67, 0x02 };
@@ -2006,9 +1940,8 @@ test "WebTransport protected session DATA slices resume exact suffix" {
         .io = io,
         .expected = expected_capsule,
     };
-    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
-    var joined = false;
-    defer if (!joined) thread.join();
+    var thread = try std.Io.concurrent(io, Shared.run, .{&shared});
+    defer thread.cancel(io);
 
     var client = try ProtectedClientSession.connect(
         allocator,
@@ -2053,19 +1986,18 @@ test "WebTransport protected session DATA slices resume exact suffix" {
     );
     try std.testing.expect(!invalid_progress.fin_committed);
 
-    var timed = DeadlineAfterSendIo{
-        .delegate = client.h3.quic_client.endpoint.io,
-        .now_ns = std.Io.Clock.awake.now(
+    const delegate_timed_io = client.h3.quic_client.endpoint.io;
+    var timed: NativeSendIo = .{
+        .backend = .init(allocator, .{ .async_limit = .nothing }),
+        .delegate_io = delegate_timed_io,
+        .now_ns = .init(@intCast(std.Io.Clock.awake.now(
             client.h3.quic_client.endpoint.io,
-        ).nanoseconds,
+        ).nanoseconds)),
+        .advance_after_send_ns = std.time.ns_per_s,
     };
-    var timed_vtable = timed.delegate.vtable.*;
-    timed_vtable.now = DeadlineAfterSendIo.now;
-    timed_vtable.netSend = DeadlineAfterSendIo.netSend;
-    client.h3.quic_client.endpoint.io = .{
-        .userdata = &timed,
-        .vtable = &timed_vtable,
-    };
+    defer timed.backend.deinit();
+    client.h3.quic_client.endpoint.io = timed.io();
+    defer client.h3.quic_client.endpoint.io = delegate_timed_io;
     var progress: http3.runtime.BodyWriteProgress = .{};
     try std.testing.expectError(
         error.Timeout,
@@ -2075,7 +2007,7 @@ test "WebTransport protected session DATA slices resume exact suffix" {
             &progress,
             .{
                 .clock = .awake,
-                .raw = .fromNanoseconds(timed.now_ns + 1),
+                .raw = .fromNanoseconds(timed.now_ns.load(.acquire) + 1),
             },
         ),
     );
@@ -2084,9 +2016,9 @@ test "WebTransport protected session DATA slices resume exact suffix" {
         progress.committed_bytes < expected_capsule.len,
     );
     try std.testing.expect(!progress.fin_committed);
-    try std.testing.expectEqual(@as(usize, 1), timed.send_calls);
+    try std.testing.expectEqual(@as(usize, 1), timed.send_calls.load(.acquire));
 
-    client.h3.quic_client.endpoint.io = timed.delegate;
+    client.h3.quic_client.endpoint.io = delegate_timed_io;
     var suffix_storage: [parts.len][]const u8 = undefined;
     const suffix = testBodyPartsSuffix(
         &parts,
@@ -2120,8 +2052,7 @@ test "WebTransport protected session DATA slices resume exact suffix" {
         response[0..response_len],
     );
 
-    thread.join();
-    joined = true;
+    thread.await(io);
     if (shared.err) |err| return err;
 }
 
@@ -3289,42 +3220,11 @@ test "WebTransport handshake runtime CONNECT and datagrams over QUIC handshake" 
 }
 
 test "WebTransport handshake session DATA slices resume exact suffix" {
+    try native_protocol_io.run(handshakeSessionSlices);
+}
+
+fn handshakeSessionSlices(io: std.Io) !void {
     const allocator = std.testing.allocator;
-    const DeadlineAfterSendIo = struct {
-        delegate: std.Io,
-        now_ns: i96,
-        send_calls: usize = 0,
-
-        fn now(
-            userdata: ?*anyopaque,
-            _: std.Io.Clock,
-        ) std.Io.Timestamp {
-            const self: *@This() = @ptrCast(@alignCast(userdata.?));
-            return .fromNanoseconds(self.now_ns);
-        }
-
-        fn netSend(
-            userdata: ?*anyopaque,
-            socket_handle: net.Socket.Handle,
-            messages: []net.OutgoingMessage,
-            flags: net.SendFlags,
-        ) struct { ?net.Socket.SendError, usize } {
-            const self: *@This() = @ptrCast(@alignCast(userdata.?));
-            self.send_calls += 1;
-            const result = self.delegate.vtable.netSend(
-                self.delegate.userdata,
-                socket_handle,
-                messages,
-                flags,
-            );
-            if (result[1] != 0) self.now_ns += std.time.ns_per_s;
-            return result;
-        }
-    };
-
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
 
     const original_dcid =
         [_]u8{ 0x73, 0x6c, 0x69, 0x63, 0x65, 0x73, 0x01, 0x02 };
@@ -3417,19 +3317,18 @@ test "WebTransport handshake session DATA slices resume exact suffix" {
             );
             try std.testing.expect(!invalid_progress.fin_committed);
 
-            var timed = DeadlineAfterSendIo{
-                .delegate = accepted.h3.established.connection.endpoint.io,
-                .now_ns = std.Io.Clock.awake.now(
+            const delegate_timed_io = accepted.h3.established.connection.endpoint.io;
+            var timed: NativeSendIo = .{
+                .backend = .init(allocator, .{ .async_limit = .nothing }),
+                .delegate_io = delegate_timed_io,
+                .now_ns = .init(@intCast(std.Io.Clock.awake.now(
                     accepted.h3.established.connection.endpoint.io,
-                ).nanoseconds,
+                ).nanoseconds)),
+                .advance_after_send_ns = std.time.ns_per_s,
             };
-            var timed_vtable = timed.delegate.vtable.*;
-            timed_vtable.now = DeadlineAfterSendIo.now;
-            timed_vtable.netSend = DeadlineAfterSendIo.netSend;
-            accepted.h3.established.connection.endpoint.io = .{
-                .userdata = &timed,
-                .vtable = &timed_vtable,
-            };
+            defer timed.backend.deinit();
+            accepted.h3.established.connection.endpoint.io = timed.io();
+            defer accepted.h3.established.connection.endpoint.io = delegate_timed_io;
             var progress: http3.runtime.BodyWriteProgress = .{};
             try std.testing.expectError(
                 error.Timeout,
@@ -3439,7 +3338,7 @@ test "WebTransport handshake session DATA slices resume exact suffix" {
                     &progress,
                     .{
                         .clock = .awake,
-                        .raw = .fromNanoseconds(timed.now_ns + 1),
+                        .raw = .fromNanoseconds(timed.now_ns.load(.acquire) + 1),
                     },
                 ),
             );
@@ -3448,9 +3347,9 @@ test "WebTransport handshake session DATA slices resume exact suffix" {
                 progress.committed_bytes < shared.total_len,
             );
             try std.testing.expect(!progress.fin_committed);
-            try std.testing.expectEqual(@as(usize, 1), timed.send_calls);
+            try std.testing.expectEqual(@as(usize, 1), timed.send_calls.load(.acquire));
 
-            accepted.h3.established.connection.endpoint.io = timed.delegate;
+            accepted.h3.established.connection.endpoint.io = delegate_timed_io;
             var suffix_storage: [parts.len][]const u8 = undefined;
             const suffix = testBodyPartsSuffix(
                 shared.parts,
@@ -3509,9 +3408,8 @@ test "WebTransport handshake session DATA slices resume exact suffix" {
         .total_len = total_len,
         .stream_payload = stream_payload,
     };
-    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
-    var joined = false;
-    defer if (!joined) thread.join();
+    var thread = try std.Io.concurrent(io, Shared.run, .{&shared});
+    defer thread.cancel(io);
 
     var client = try HandshakeClientSession.connect(
         allocator,
@@ -3556,19 +3454,18 @@ test "WebTransport handshake session DATA slices resume exact suffix" {
     );
     try client.sendStream(stream_id, "seed", false);
 
-    var timed = DeadlineAfterSendIo{
-        .delegate = client.h3.established.connection.endpoint.io,
-        .now_ns = std.Io.Clock.awake.now(
+    const delegate_timed_io = client.h3.established.connection.endpoint.io;
+    var timed: NativeSendIo = .{
+        .backend = .init(allocator, .{ .async_limit = .nothing }),
+        .delegate_io = delegate_timed_io,
+        .now_ns = .init(@intCast(std.Io.Clock.awake.now(
             client.h3.established.connection.endpoint.io,
-        ).nanoseconds,
+        ).nanoseconds)),
+        .advance_after_send_ns = std.time.ns_per_s,
     };
-    var timed_vtable = timed.delegate.vtable.*;
-    timed_vtable.now = DeadlineAfterSendIo.now;
-    timed_vtable.netSend = DeadlineAfterSendIo.netSend;
-    client.h3.established.connection.endpoint.io = .{
-        .userdata = &timed,
-        .vtable = &timed_vtable,
-    };
+    defer timed.backend.deinit();
+    client.h3.established.connection.endpoint.io = timed.io();
+    defer client.h3.established.connection.endpoint.io = delegate_timed_io;
     var progress: http3.runtime.BodyWriteProgress = .{};
     try std.testing.expectError(
         error.Timeout,
@@ -3578,16 +3475,16 @@ test "WebTransport handshake session DATA slices resume exact suffix" {
             &progress,
             .{
                 .clock = .awake,
-                .raw = .fromNanoseconds(timed.now_ns + 1),
+                .raw = .fromNanoseconds(timed.now_ns.load(.acquire) + 1),
             },
         ),
     );
     try std.testing.expect(progress.committed_bytes > 0);
     try std.testing.expect(progress.committed_bytes < total_len);
     try std.testing.expect(!progress.fin_committed);
-    try std.testing.expectEqual(@as(usize, 1), timed.send_calls);
+    try std.testing.expectEqual(@as(usize, 1), timed.send_calls.load(.acquire));
 
-    client.h3.established.connection.endpoint.io = timed.delegate;
+    client.h3.established.connection.endpoint.io = delegate_timed_io;
     var suffix_storage: [parts.len][]const u8 = undefined;
     const suffix = testBodyPartsSuffix(
         &parts,
@@ -3611,12 +3508,10 @@ test "WebTransport handshake session DATA slices resume exact suffix" {
         stream_payload[8193..24577],
         stream_payload[24577..],
     };
-    timed.now_ns = std.Io.Clock.awake.now(timed.delegate).nanoseconds;
-    timed.send_calls = 0;
-    client.h3.established.connection.endpoint.io = .{
-        .userdata = &timed,
-        .vtable = &timed_vtable,
-    };
+    timed.now_ns.store(@intCast(std.Io.Clock.awake.now(delegate_timed_io).nanoseconds), .release);
+    timed.send_calls.store(0, .release);
+    client.h3.established.connection.endpoint.io = timed.io();
+    defer client.h3.established.connection.endpoint.io = delegate_timed_io;
     var stream_progress: usize = 99;
     try std.testing.expectError(
         error.Timeout,
@@ -3627,15 +3522,15 @@ test "WebTransport handshake session DATA slices resume exact suffix" {
             &stream_progress,
             .{
                 .clock = .awake,
-                .raw = .fromNanoseconds(timed.now_ns + 1),
+                .raw = .fromNanoseconds(timed.now_ns.load(.acquire) + 1),
             },
         ),
     );
     try std.testing.expect(stream_progress > 0);
     try std.testing.expect(stream_progress < stream_payload.len);
-    try std.testing.expectEqual(@as(usize, 1), timed.send_calls);
+    try std.testing.expectEqual(@as(usize, 1), timed.send_calls.load(.acquire));
 
-    client.h3.established.connection.endpoint.io = timed.delegate;
+    client.h3.established.connection.endpoint.io = delegate_timed_io;
     var stream_suffix_storage: [stream_parts.len][]const u8 = undefined;
     const stream_suffix = testBodyPartsSuffix(
         &stream_parts,
@@ -3665,8 +3560,7 @@ test "WebTransport handshake session DATA slices resume exact suffix" {
         response_stream.payload,
     );
 
-    thread.join();
-    joined = true;
+    thread.await(io);
     if (shared.err) |err| return err;
 }
 

@@ -1,4 +1,6 @@
 const std = @import("std");
+const native_protocol_io = @import("../../../../internal/testing/native_protocol_io.zig");
+const NativeSendIo = @import("../../../../internal/testing/deadline_send_io.zig").Native;
 const webtransport = @import("../../../mod.zig");
 const Pair = @import("../../session_control/test_support/handshake_pair.zig").Pair;
 const stream = @import("../../stream.zig");
@@ -27,18 +29,26 @@ fn expectBody(pair: *Pair, expected: []const u8) !void {
 }
 
 test "WebTransport send flow complete one-attempt sends preserve credit on failure" {
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
+    try native_protocol_io.run(completeOneAttempt);
+}
+
+fn completeOneAttempt(io: std.Io) !void {
     var pair: Pair = undefined;
-    try init(&pair, threaded.io(), 4);
+    try init(&pair, io, 4);
     defer pair.deinit();
     const id = try pair.client.openBidirectionalStream();
     const conn = pair.connection(.client);
     const original_io = conn.endpoint.io;
     var observed = ObservedBatchSend{ .delegate = original_io, .fail_on_call = 1 };
-    var vtable = original_io.vtable.*;
-    vtable.netSend = ObservedBatchSend.netSend;
-    conn.endpoint.io = .{ .userdata = &observed, .vtable = &vtable };
+    var sender: NativeSendIo = .{
+        .backend = .init(std.testing.allocator, .{ .async_limit = .nothing }),
+        .fixed_clock = false,
+        .delegate_io = original_io,
+        .send_context = &observed,
+        .send_override = ObservedBatchSend.netSend,
+    };
+    defer sender.backend.deinit();
+    conn.endpoint.io = sender.io();
     defer conn.endpoint.io = original_io;
     try std.testing.expectError(error.NetworkDown, stream.sendSlicesOnce(conn, &pair.client.streams, pair.client.session_id, id, &.{ "ab", "cd" }, false));
     try std.testing.expectEqual(@as(u64, 0), pair.client.streams.flow.?.sent.data);
@@ -57,11 +67,13 @@ test "WebTransport send flow complete one-attempt sends preserve credit on failu
 }
 
 test "WebTransport send flow fair one-attempt writes clamp scatter and contiguous bodies" {
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
+    try native_protocol_io.run(fairOneAttempt);
+}
+
+fn fairOneAttempt(io: std.Io) !void {
     for ([_]bool{ false, true }) |slices| {
         var pair: Pair = undefined;
-        try init(&pair, threaded.io(), 4);
+        try init(&pair, io, 4);
         defer pair.deinit();
         const id = try pair.client.openUnidirectionalStream();
         const conn = pair.connection(.client);
@@ -83,10 +95,12 @@ test "WebTransport send flow fair one-attempt writes clamp scatter and contiguou
 }
 
 test "WebTransport send flow cross-stream partial batch commits one shared budget" {
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
+    try native_protocol_io.run(crossStreamBatch);
+}
+
+fn crossStreamBatch(io: std.Io) !void {
     var pair: Pair = undefined;
-    try init(&pair, threaded.io(), 5);
+    try init(&pair, io, 5);
     defer pair.deinit();
     const first = try pair.client.openBidirectionalStream();
     const second = try pair.client.openBidirectionalStream();
@@ -99,9 +113,15 @@ test "WebTransport send flow cross-stream partial batch commits one shared budge
     try pair.client.setStreamPriority(second, 10);
     const original_io = conn.endpoint.io;
     var observed = ObservedBatchSend{ .delegate = original_io, .fail_after_prefix = 1 };
-    var vtable = original_io.vtable.*;
-    vtable.netSend = ObservedBatchSend.netSend;
-    conn.endpoint.io = .{ .userdata = &observed, .vtable = &vtable };
+    var sender: NativeSendIo = .{
+        .backend = .init(std.testing.allocator, .{ .async_limit = .nothing }),
+        .fixed_clock = false,
+        .delegate_io = original_io,
+        .send_context = &observed,
+        .send_override = ObservedBatchSend.netSend,
+    };
+    defer sender.backend.deinit();
+    conn.endpoint.io = sender.io();
     defer conn.endpoint.io = original_io;
     const writes = [_]batch.Write{
         .{ .stream_id = first, .data = "aaaa" },
