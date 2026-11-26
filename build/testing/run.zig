@@ -15,6 +15,9 @@ fn configure(run: *std.Build.Step.Run) void {
         const listen = run.argv.pop().?;
         std.debug.assert(listen == .bytes and std.mem.eql(u8, listen.bytes, "--listen=-"));
         run.stdio = .inherit;
+        if (tests.root_module.root_source_file) |root| {
+            run.step.name = run.step.owner.fmt("run test {s}: {s}", .{ tests.name, root.getDisplayName() });
+        }
     }
 }
 

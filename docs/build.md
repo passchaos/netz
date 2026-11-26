@@ -981,3 +981,25 @@ executables for diagnosis; existing individual named steps remain available.
 The membership registry and literal import root are checked for missing,
 unregistered and duplicate entries. `-Dtest-filter` selects named cases as in
 other test steps.
+
+## Grouped fuzz corpus replay
+
+`zig build test-fuzz-replay` replays the same 37 original fuzz roots in eight
+protocol families. All original corpus callbacks, deterministic mutations and
+named tests remain registered. `zig build test` uses this grouped replay to
+share compilation within each family. Individual `fuzz-*` steps keep their
+original roots and coverage-guided entry points.
+
+Use `test-fuzz-replay-independent` to replay every original root separately
+for diagnosis. Family steps are `test-fuzz-replay-codecs`, `-http1`, `-http2`,
+`-http3`, `-mqtt_sessions`, `-mqtt_bridge`, `-mqtt_outbound`, and `-quic`.
+`test-fuzz-replay-compile` compiles all groups for the selected target without
+claiming runtime acceptance. A build-time membership guard rejects omitted,
+duplicate or incorrectly grouped literal imports. Existing error-tracing flags
+and allocator checks are preserved.
+
+The original QUIC path corpus requires real source addresses 127.0.0.1,
+127.0.0.2 and 127.0.0.3. A host that cannot bind the latter two reports
+`AddressUnavailable` in both independent and grouped replay. Those cases and
+all IP-migration assertions remain included; another native platform's runtime
+result is required to certify them.

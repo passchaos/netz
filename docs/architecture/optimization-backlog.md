@@ -288,3 +288,31 @@ Implement R1-R3 with production regressions first; then combine R4/R5 with
 small owner extractions and fixed-binary measurements. R6/R7 can proceed in
 separate commits that retain protocol behavior. Refresh the affected independent
 gates before broadening performance claims in R8. Keep R9 workload-driven.
+
+## HTTP-family follow-up, 2026-11-26
+
+This follow-up reviews production revision `31febe5a`. Its native Linux and
+Windows combined protocol and HTTP/3 socket deadline steps passed. The complete
+CI [run 45740784651](https://github.com/passchaos/netz/actions/runs/45740784651)
+failed separately in a WebTransport send-flow test and the client CA reload
+interop sequence. Scoped results do not close complete acceptance.
+
+| Priority | Remaining work | Current evidence and acceptance boundary |
+| --- | --- | --- |
+| P0 | Qualify the native deadline fixture repairs on pinned platforms | Clock and partial-send fixtures now preserve Threaded userdata and joined lifetimes. Local full HTTP/3 passed 1,005 cases with four existing GRO skips; selected Windows compilation passed. Pinned native/complete CI remains required. |
+| P0 | Diagnose client CA reload retained-connection failure | The complete run reports BrokenPipe while reading old MQTT PINGRESP before SIGHUP; the same head's isolated native CA reload step passed. Rejected-certificate and anonymous-client transitions need examination with the unchanged pinned dependencies. |
+| P1 | Join finite HTTP/1 and WebSocket service workers on failure | `serveAcceptedConcurrent` frees its result array on a later accept/await error without first cancelling and joining previously started tasks. Confirm socket ownership and result lifetime through setup, admission and teardown failures. |
+| P1 | Guarantee HTTP/2 batch receive/wake admission | `readBufferedFrameWithDeadlineOrWake` starts the reader with `Select.async`; constrained executors can run it inline before the wake task is admitted. Retain any completed frame, one reader and same-socket reuse after cancellation. |
+| P1 | Copy WebTransport H2 slices once into owned job storage | `sendStreamSlicesWithDeadline` allocates and copies a temporary contiguous buffer; `cloneCommand` copies it again. Check deadline admission before staging and preserve task-owned data after caller cancellation. Measure allocation calls on the actual endpoint path. |
+| P2 | Extract coherent HTTP/2 and WebSocket owner responsibilities | The current H2 connection has 16,145 lines and WebSocket runtime has 3,705. Extract batch/frame and finite-service responsibilities while retaining existing public imports, connection state and sole-reader ownership. |
+| P2 | Complete grouped fuzz replay acceptance | Preserve all 37 entry points and 107 named tests in eight replay groups. The local QUIC path address limitation requires native Linux runtime evidence; cross-compilation alone is insufficient. |
+
+The grouped replay [validation record](../evidence/fuzz_replay_groups/2026-11-26/validation.json)
+separates the single paired compilation sample, all-member macOS replay and
+Windows cross-compilation from pending native Linux and complete CI acceptance.
+The existing budgets, dependency pins and real IP-migration tests remain part of
+the acceptance contract.
+
+The native fixture [qualification](../evidence/protocol_native_test_context/2026-11-26/validation.json)
+records the repaired callbacks, actual send-prefix and pacing checks, full
+HTTP/3 result, Windows compilation and the remaining pinned CI boundary.

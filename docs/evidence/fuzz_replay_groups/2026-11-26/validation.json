@@ -1,0 +1,88 @@
+{
+  "observed_utc": "2026-11-26T02:36:33.557946+00:00",
+  "base_commit": "31febe5ac3c45c6c93e1eca13bb2fac16dd3087f",
+  "source_sha256": {
+    "build/fuzz.zig": "ced2bb008991f781629b114434a4c518112698de6cfcafc1243c33638bc125ec",
+    "build/fuzz/specs.zig": "c9ffb7a922a7c6031aa5bd21fb29223db3ff8fd335407c8846e4bb52da723a45",
+    "test/fuzz_replay_test.zig": "b40d7ff918a3733be7bd5311893b2da7e15b7855ee1f75418492e9b31d45a283",
+    "build/testing/run.zig": "99f36c53bd8d89dde33411c4cf09f56ebc9e1a6c4e1ff394434046f530b49059",
+    ".github/workflows/ci.yml": "1e2ecbad446d0ab38215eb02ff075717b16ba69bbee1cc504e668216dc61378e",
+    "docs/build.md": "9d263fd70d2f37e3c0a0d1262c6503e130987fdee5cb3f6dc762f7d9c8c43cca"
+  },
+  "membership": {
+    "original_entry_points": 37,
+    "families": 8,
+    "original_named_tests": 107,
+    "original_entry_points_and_callbacks_preserved": true,
+    "default_and_preflight_replay": "test-fuzz-replay"
+  },
+  "static_checks": {
+    "original_names_roots_descriptions_preserved": true,
+    "dependency_pins_and_ci_timeouts_preserved": true
+  },
+  "windows_cross_compile": {
+    "command": [
+      "zig",
+      "build",
+      "test-fuzz-replay-compile",
+      "-Dtarget=x86_64-windows-gnu",
+      "-j1",
+      "--summary",
+      "all"
+    ],
+    "compiled_groups": 8,
+    "status": "passed",
+    "scope": "compile only"
+  },
+  "macos_native_replay": {
+    "command": [
+      "zig",
+      "build",
+      "test-fuzz-replay",
+      "-j1",
+      "-Dtest-progress=true",
+      "--summary",
+      "all"
+    ],
+    "observed_original_names": 107,
+    "passed": 104,
+    "failures": [
+      {
+        "name": "structured QUIC path sequences reach migration states",
+        "error": "AddressUnavailable"
+      },
+      {
+        "name": "fuzz bounded authenticated QUIC path sequences",
+        "error": "AddressUnavailable"
+      },
+      {
+        "name": "bounded deterministic QUIC path mutation smoke",
+        "error": "AddressUnavailable"
+      }
+    ],
+    "independent_quic_path_control": "same three AddressUnavailable failures",
+    "required_real_source_ips": [
+      "127.0.0.1",
+      "127.0.0.2",
+      "127.0.0.3"
+    ],
+    "migration_assertions_preserved": true
+  },
+  "paired_candidate_sample": {
+    "families": [
+      "http3",
+      "mqtt_sessions"
+    ],
+    "original_roots": 8,
+    "original_named_tests": 27,
+    "seed": "0x5eed",
+    "cache_conditions": "separate initially empty local caches; same candidate sources and dependencies",
+    "independent_seconds": 208.992396,
+    "grouped_seconds": 87.142765,
+    "independent_compile_roots": 8,
+    "grouped_compile_roots": 2,
+    "scope": "one Debug macOS sample on the candidate; no stable whole-CI speedup claim"
+  },
+  "native_linux_grouped_acceptance": "pending CI at the delivered revision",
+  "complete_acceptance": "pending; scoped replay and cross-compilation do not replace the complete gate"
+}
