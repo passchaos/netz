@@ -6,6 +6,16 @@ const builtin = @import("builtin");
 const windows = std.os.windows;
 const net = std.Io.net;
 
+const Cancellation = struct {
+    ready: std.Io.Event = .unset,
+    never: std.Io.Event = .unset,
+
+    fn wait(self: *Cancellation, io: std.Io) std.Io.Cancelable!void {
+        self.ready.set(io);
+        try self.never.wait(io);
+    }
+};
+
 const Pair = struct {
     sender: net.Stream,
     receiver: net.Stream,
@@ -104,13 +114,22 @@ const Observation = struct {
     received: usize = 0,
     read_error: ?anyerror = null,
     cancellation_pending: bool = false,
+    cancellation: Cancellation = .{},
 
     fn run(self: *Observation, io: std.Io, stream: net.Stream, batch: bool) void {
-        // The raw observation targets the pre-APC cancellation branch with
-        // already-readable data. Whether the kernel completed is observed,
-        // not assumed. The Batch case injects cancellation after its actual
-        // native completion, before the caller has dequeued the result.
-        if (!batch) std.Io.recancel(io);
+        // An early read failure must also release the parent's handshake wait;
+        // assertions will distinguish it from the intended canceled boundary.
+        defer self.cancellation.ready.set(io);
+        // The parent cancels this actual Future at the announced point.
+        // Only a cancellation already observed at a real wait can be rearmed.
+        // The raw case then targets submission with readable data; the Batch
+        // case announces cancellation after native completion, before dequeue.
+        if (!batch) {
+            self.cancellation.wait(io) catch |err| {
+                std.debug.assert(err == error.Canceled);
+                std.Io.recancel(io);
+            };
+        }
         const result = if (batch) read(io, stream, &self.bytes, false) else raw: {
             var buffers = [_][]u8{&self.bytes};
             break :raw io.vtable.netRead(io.userdata, stream.socket.handle, &buffers);
@@ -127,18 +146,46 @@ const Observation = struct {
 
 const CompletedAwait = struct {
     var delegate: std.Io = undefined;
+    var cancellation: *Cancellation = undefined;
 
     fn awaitConcurrent(userdata: ?*anyopaque, batch: *std.Io.Batch, timeout: std.Io.Timeout) std.Io.Batch.AwaitConcurrentError!void {
         try delegate.vtable.batchAwaitConcurrent(userdata, batch, timeout);
         if (batch.completed.head != .none) {
-            std.Io.recancel(delegate);
-            // Consume the cancellation as a backend wait would, leaving the
-            // candidate responsible for rearming it after returning bytes.
-            try std.Io.checkCancel(delegate);
-            unreachable;
+            // The real Future.cancel request reaches this wait after the
+            // receive completed. Propagate its actual Canceled result with
+            // the native completion still available for the candidate.
+            try cancellation.wait(delegate);
         }
     }
 };
+
+test "TCP completion probe consumes and rearms real task cancellation" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .nothing });
+    defer threaded.deinit();
+    const io = threaded.io();
+    const Caller = struct {
+        cancellation: Cancellation = .{},
+        observed: usize = 0,
+
+        fn run(self: *@This(), task_io: std.Io) void {
+            self.cancellation.wait(task_io) catch |err| {
+                std.debug.assert(err == error.Canceled);
+                self.observed += 1;
+                std.Io.recancel(task_io);
+                std.Io.checkCancel(task_io) catch |next| {
+                    std.debug.assert(next == error.Canceled);
+                    self.observed += 1;
+                };
+            };
+        }
+    };
+    var caller = Caller{};
+    var worker = try io.concurrent(Caller.run, .{ &caller, io });
+    defer worker.cancel(io);
+    try caller.cancellation.ready.wait(io);
+    worker.cancel(io);
+    try std.testing.expectEqual(@as(usize, 2), caller.observed);
+}
 
 test "Windows Threaded TCP completion probe compares ordinary receive with joined Batch" {
     if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
@@ -160,9 +207,11 @@ test "Windows Threaded TCP completion probe compares ordinary receive with joine
         try std.testing.expectEqualStrings("ABCDE", &peek);
 
         const worker_io = if (index == 1) interrupted else io;
+        CompletedAwait.cancellation = &observation.cancellation;
         var worker = try io.concurrent(Observation.run, .{ observation, worker_io, pair.receiver, index == 1 });
         defer worker.cancel(io);
-        worker.await(io);
+        try observation.cancellation.ready.wait(io);
+        worker.cancel(io);
         if (observation.read_error) |err| try std.testing.expectEqual(error.Canceled, err);
         if (index == 0 and observation.read_error == null) {
             try std.testing.expectEqual(@as(usize, 5), observation.received);

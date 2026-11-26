@@ -1,0 +1,94 @@
+{
+  "observed_utc": "2026-11-26T10:02:54.324436+00:00",
+  "base_commit": "f5ac1c1bd345b5c40055c5051b45176fb5b8fcae",
+  "source_sha256": {
+    "tools/ci/windows_tcp_completion_probe.zig": "50b17ff7f6f4400cacb28d5d812b756d6e3ca00a8c83aa276a2a8cf7492facb5",
+    ".github/workflows/ci.yml": "6f402d0f8759e2336e3e0e2a08fd60cd9fcf057fd65742e593bff5ac87969872",
+    "docs/architecture/optimization-backlog.md": "26efd6d08d3bc02f61a162a361f5b8fbe53d360b41c3bed0a5fc98f5b1b27cc2"
+  },
+  "checks": {
+    "fmt": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "fmt",
+        "tools/ci/windows_tcp_completion_probe.zig"
+      ],
+      "exit_code": 0,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "native-cancellation": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "test",
+        "tools/ci/windows_tcp_completion_probe.zig",
+        "--test-filter",
+        "TCP completion probe consumes and rearms real task cancellation"
+      ],
+      "exit_code": 0,
+      "log_sha256": "2f1da93cc758674b56268ac4ebf5a238fc54111062a3dd2d096756cfa7f3a19b",
+      "tests_passed": 1
+    },
+    "windows-codegen": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "test",
+        "tools/ci/windows_tcp_completion_probe.zig",
+        "-target",
+        "x86_64-windows-gnu",
+        "--test-no-exec",
+        "-femit-bin=/tmp/netz-windows-tcp-real-cancellation.exe"
+      ],
+      "exit_code": 0,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "artifact_sha256": "7d2fab9469efe7621181047cee85a4f73e36e0fac4d92d3bd987c2563f3b8984",
+      "embedded_test_names": [
+        "TCP completion probe consumes and rearms real task cancellation",
+        "Windows Threaded TCP completion probe compares ordinary receive with joined Batch",
+        "Windows Threaded TCP completion probe cancels pending receive and reuses its socket"
+      ]
+    },
+    "evidence-audit": {
+      "command": [
+        "netz-evidence-audit",
+        "--max-unresolved=24"
+      ],
+      "exit_code": 0,
+      "unresolved": 3,
+      "invalid": 0,
+      "unreadable": 0,
+      "unresolved_scope": "three historical WebTransport source paths"
+    }
+  },
+  "native_host": "aarch64-macos",
+  "native_portable_contract_tests_passed": 1,
+  "windows_kernel_tests_executed_locally": 0,
+  "windows_tests_generated": 3,
+  "behavior": [
+    "Parent Future.cancel supplies actual cancellation at a real event wait",
+    "Raw worker rearms only after observing Canceled",
+    "Completed Batch waits for real parent cancellation while keeping its completion",
+    "Early read failure releases the parent handshake before join",
+    "Probe runs after original protocol commands and streams live output"
+  ],
+  "current_native_windows": {
+    "url": "https://github.com/passchaos/netz/actions/runs/45793518173/job/139818218926",
+    "head": "4a25e2fb80e1364fd4cdf56a15dfda1f92fe2fb9",
+    "conclusion": "failure",
+    "first_error": "initial probe called recancel before observing Canceled",
+    "annotation": "1/2 windows_tcp_completion_probe.test.Windows Threaded TCP completion probe compares ordinary receive with joined Batch...thread 2892 panic: reached unreachable code\nD:\\a\\_temp\\51f95784-3321-4294-84af-1e3a1b9068b0\\zig-x86_64-windows-0.16.0\\lib\\std\\Io\\Threaded.zig:2392:18: 0x7ff6679bf022 in recancelInner (test_zcu.obj)\n        .none => unreachable, // called `recancel` but was not canceled\n                 ^\nD:\\a\\_temp\\51f95784-3321-4294-84af-1e3a1b9068b0\\zig-x86_64-windows-0.16.0\\lib\\std\\Io\\Threaded.zig:2383:18: 0x7ff6679dbc09 in recancel (test_zcu.obj)\n    recancelInner();\n                 ^\nD:\\a\\_temp\\51f95784-3321-4294-84af-1e3a1b9068b0\\zig-x86_64-windows-0.16.0\\lib\\std\\Io.zig:1311:23: 0x7ff66799a856 in recancel (test_zcu.obj)\n    io.vtable.recancel(io.userdata);\n                      ^\nD:\\a\\netz\\netz\\netz\\tools\\ci\\windows_tcp_completion_probe.zig:113:36: 0x7ff667a2ae13 in run (test_zcu.obj)\n        if (!batch) std.Io.recancel(io);\n                                   ^\nD:\\a\\_temp\\51f95784-3321-4294-84af-1e3a1b9068b0\\zig-x86_64-windows-0.16.0\\lib\\std\\Io.zig:2376:13: 0x7ff667a2acad in start (test_zcu.obj)",
+    "raw_bytes_or_count_evidence": false,
+    "pending_batch_cancel_evidence": false
+  },
+  "original_commands_preserved_exactly": [
+    "native H1/H2 resolver",
+    "native combined protocol",
+    "native H2 batch wake and owned-input"
+  ],
+  "native_protocol_step_budget_minutes": 5,
+  "dependency_pins_and_budgets_changed": false,
+  "production_transport_changed": false,
+  "native_windows_kernel_qualification": "pending corrected delivered revision",
+  "h2_tls_cause": "unproven; earlier CLOSE input / RecordTooLarge remains open",
+  "full_goal_status": "active",
+  "guard": "All Zig commands executed serially under shared zig-tree-guard"
+}

@@ -459,3 +459,22 @@ field/byte limits, HPACK reuse, parent/sibling isolation, deferred duplex heads
 and aggregate/streaming deadlines are covered by existing real-socket tests.
 Pinned native and complete acceptance remains separate. The broader H2 owner
 extraction work and Windows TCP/TLS completion investigation remain active.
+
+### TCP probe real-cancellation correction on 4a25e2fb
+
+The native Windows [run 45793518173](https://github.com/passchaos/netz/actions/runs/45793518173)
+aborted the first TCP probe in `Threaded.recancelInner`: the harness tried to
+initiate cancellation with `recancel` before observing any real `Canceled`.
+The target raw receive had not begun, so this result does not establish byte
+loss or the pending Batch cancellation behavior. Production transport code
+remains unchanged while these mechanisms are qualified.
+
+The corrected harness uses actual parent Future cancellation and an event
+handshake at both raw-read and completed-Batch boundaries. It rearms only a
+real cancellation already observed by the worker. A portable contract case
+checks that initial and rearmed cancellation are both delivered. The probe
+streams through the existing progress wrapper after the original combined and
+owned-input H2 commands, keeping their exact text, five-minute step budget and
+failure aggregation. [The follow-up qualification](../evidence/windows_tcp_completion/2026-11-26/real-cancellation.json)
+separates that portable contract and Windows code generation from pending
+native Windows results and the still-unproven H2 TLS root cause.

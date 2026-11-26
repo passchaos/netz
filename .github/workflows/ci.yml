@@ -287,15 +287,6 @@ jobs:
           if [ "$resolver_status" -ne 0 ]; then
             python tools/ci/test_failure_annotations.py native-resolver.log
           fi
-          if [ '${{ runner.os }}' = 'Windows' ]; then
-            completion_status=0
-            zig test tools/ci/windows_tcp_completion_probe.zig -target x86_64-windows-gnu > native-windows-tcp-completion.log 2>&1 || completion_status=$?
-            cat native-windows-tcp-completion.log
-            if [ "$completion_status" -ne 0 ]; then
-              python tools/ci/test_failure_annotations.py native-windows-tcp-completion.log
-              resolver_status=$completion_status
-            fi
-          fi
           exit "$resolver_status"
 
       - name: Run native protocol CI regressions
@@ -333,6 +324,14 @@ jobs:
           if [ "$owned_input_status" -ne 0 ]; then
             python tools/ci/test_failure_annotations.py native-h2-owned-input.log
             protocol_status=$owned_input_status
+          fi
+          if [ '${{ runner.os }}' = 'Windows' ]; then
+            completion_status=0
+            python tools/ci/run_test_progress.py --title "Native Windows TCP completion probe" --log native-windows-tcp-completion.log -- zig test tools/ci/windows_tcp_completion_probe.zig -target x86_64-windows-gnu || completion_status=$?
+            if [ "$completion_status" -ne 0 ]; then
+              python tools/ci/test_failure_annotations.py native-windows-tcp-completion.log
+              protocol_status=$completion_status
+            fi
           fi
           exit "$protocol_status"
 
