@@ -4,6 +4,7 @@ const std = @import("std");
 
 test {
     _ = @import("trust_deadline_tests.zig");
+    _ = @import("stream/tests/socket_deadline.zig");
 }
 const webtransport = @import("../mod.zig");
 const http3 = @import("../../http3/mod.zig");

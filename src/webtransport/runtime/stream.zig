@@ -1838,5 +1838,4 @@ fn takeHandshakeSessionStream(
 
 test {
     _ = @import("stream/tests/handshake_stream.zig");
-    _ = @import("stream/tests/socket_deadline.zig");
 }

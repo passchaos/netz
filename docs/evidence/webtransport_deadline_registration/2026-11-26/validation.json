@@ -1,0 +1,29 @@
+{
+  "base": "045cb2ad14a5f812d301ea852917d1faf1fcd70e",
+  "run_id": 45735343013,
+  "native_failures": {
+    "linux_job": 139627112465,
+    "windows_job": 139627112459,
+    "error": "NoMatchingProtocolTests in focused webtransport suite"
+  },
+  "cause": "new named tests imported by lazy stream implementation instead of canonical runtime test entry",
+  "fix": "move socket deadline test import to runtime/tests.zig; retain scope match guard and original tests",
+  "validation_session_id": 81584,
+  "windows_compile_session_id": 82633,
+  "exact_filters_log": "/tmp/netz-wt-deadline-exact-ci-main.log",
+  "validation": {
+    "macos_native_exit": 0,
+    "counts": [
+      91,
+      139,
+      48
+    ],
+    "windows_compile_exit": 0,
+    "windows_log": "/tmp/netz-wt-deadline-exact-ci-windows.log",
+    "exact_ci_filter_set": true
+  },
+  "source_sha256": {
+    "src/webtransport/runtime/tests.zig": "d8286d4fc234f6d5a6ed9c5939bd93f3265c4ce18af73926eaa5f0c634fddddf",
+    "src/webtransport/runtime/stream.zig": "4b7184bd5d697d195ae2a91c44e5ec9fc0692f2ed21a9d37746e01ba2b26dd80"
+  }
+}
