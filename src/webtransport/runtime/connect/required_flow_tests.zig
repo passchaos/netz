@@ -11,23 +11,11 @@ const native_protocol_io = @import("../../../internal/testing/native_protocol_io
 
 const FailedSend = struct {
     delegate: std.Io,
-    table: std.Io.VTable = undefined,
     connection: *quic.one_rtt.Connection,
     fail: bool = true,
 
     fn io(self: *@This()) std.Io {
-        self.table = forwarded_io.table(from, baseIo, mapTimeout);
-        self.table.netSend = send;
-        return .{ .userdata = self, .vtable = &self.table };
-    }
-    fn from(userdata: ?*anyopaque) *@This() {
-        return @ptrCast(@alignCast(userdata.?));
-    }
-    fn baseIo(self: *@This()) std.Io {
-        return self.delegate;
-    }
-    fn mapTimeout(_: *@This(), timeout: std.Io.Timeout) std.Io.Timeout {
-        return timeout;
+        return forwarded_io.observer(self, .{ .netSend = send });
     }
     fn send(userdata: ?*anyopaque, socket: std.Io.net.Socket.Handle, messages: []std.Io.net.OutgoingMessage, flags: std.Io.net.SendFlags) struct { ?std.Io.net.Socket.SendError, usize } {
         const self: *@This() = @ptrCast(@alignCast(userdata));

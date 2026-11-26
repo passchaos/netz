@@ -1,4 +1,5 @@
 const std = @import("std");
+const forwarded_io = @import("../../../internal/testing/forwarded_io.zig");
 const runtime = @import("../../runtime.zig");
 const http3 = @import("../../../http3/mod.zig");
 const quic = @import("../../../quic/mod.zig");
@@ -23,14 +24,6 @@ test "WebTransport malformed HTTP3 HEADERS retain cancellation through socket fa
             if (self.connection.sendStreamStats(0) != null) return .{ error.SystemResources, 0 };
             return self.delegate.vtable.netSend(self.delegate.userdata, socket, messages, flags);
         }
-        fn await(userdata: ?*anyopaque, batch: *std.Io.Batch, timeout: std.Io.Timeout) std.Io.Batch.AwaitConcurrentError!void {
-            const self: *@This() = @ptrCast(@alignCast(userdata));
-            return self.delegate.vtable.batchAwaitConcurrent(self.delegate.userdata, batch, timeout);
-        }
-        fn cancel(userdata: ?*anyopaque, batch: *std.Io.Batch) void {
-            const self: *@This() = @ptrCast(@alignCast(userdata));
-            self.delegate.vtable.batchCancel(self.delegate.userdata, batch);
-        }
     };
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
@@ -44,11 +37,7 @@ test "WebTransport malformed HTTP3 HEADERS retain cancellation through socket fa
     var output: [16]u8 = undefined;
     {
         var failed = FailedSend{ .delegate = original_io, .connection = &peer.server.established.connection };
-        var vtable = original_io.vtable.*;
-        vtable.netSend = FailedSend.send;
-        vtable.batchAwaitConcurrent = FailedSend.await;
-        vtable.batchCancel = FailedSend.cancel;
-        fixture.template.h3.quic_server.endpoint.io = .{ .userdata = &failed, .vtable = &vtable };
+        fixture.template.h3.quic_server.endpoint.io = forwarded_io.observer(&failed, .{ .netSend = FailedSend.send });
         defer fixture.template.h3.quic_server.endpoint.io = original_io;
         try std.testing.expectError(error.SystemResources, fixture.endpoint.receiveWithTimeout(&versions, .fromSeconds(1), &output));
     }

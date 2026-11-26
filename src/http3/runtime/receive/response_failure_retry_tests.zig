@@ -1,4 +1,5 @@
 const std = @import("std");
+const forwarded_io = @import("../../../internal/testing/forwarded_io.zig");
 const http3 = @import("../../mod.zig");
 const quic = @import("../../../quic/mod.zig");
 const support = @import("test_support/response_pair.zig");
@@ -31,9 +32,7 @@ fn socketFailureScenario(targeted: bool, owning: bool, transfer: bool) !void {
     const original = pair.client.established.connection.endpoint.io;
     {
         var failed = FailedSend{ .delegate = original, .connection = &pair.client.established.connection };
-        var vtable = original.vtable.*;
-        vtable.netSend = FailedSend.send;
-        pair.client.established.connection.endpoint.io = .{ .userdata = &failed, .vtable = &vtable };
+        pair.client.established.connection.endpoint.io = forwarded_io.observer(&failed, .{ .netSend = FailedSend.send });
         defer pair.client.established.connection.endpoint.io = original;
         if (targeted) {
             if (owning) try std.testing.expectError(error.SystemResources, pair.client.pollResponseEvent(0)) else try std.testing.expectError(error.SystemResources, pair.client.pollResponseEventOnce(0));

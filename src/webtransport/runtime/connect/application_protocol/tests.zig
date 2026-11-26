@@ -1,4 +1,5 @@
 const std = @import("std");
+const forwarded_io = @import("../../../../internal/testing/forwarded_io.zig");
 const webtransport = @import("../../../mod.zig");
 const runtime = @import("../../../runtime.zig");
 const http3 = @import("../../../../http3/mod.zig");
@@ -250,9 +251,10 @@ test "WebTransport application protocol dispatcher keeps failed ALPN cancellatio
             }
             return self.delegate.vtable.netSend(self.delegate.userdata, socket, messages, flags);
         }
-        fn sleep(userdata: ?*anyopaque, _: std.Io.Timeout) std.Io.Cancelable!void {
+        fn sleep(userdata: ?*anyopaque, timeout: std.Io.Timeout) std.Io.Cancelable!void {
             const self: *@This() = @ptrCast(@alignCast(userdata));
             self.sleeps += 1;
+            return self.delegate.vtable.sleep(self.delegate.userdata, timeout);
         }
     };
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
@@ -269,10 +271,7 @@ test "WebTransport application protocol dispatcher keeps failed ALPN cancellatio
     try dispatcher.registerConnection(handle, pair.client.connection());
     const original_io = pair.client_endpoint.io;
     var failed = FailedSend{ .delegate = original_io, .pending = &pair.client };
-    var vtable = original_io.vtable.*;
-    vtable.netSend = FailedSend.send;
-    vtable.sleep = FailedSend.sleep;
-    pair.client_endpoint.io = .{ .userdata = &failed, .vtable = &vtable };
+    pair.client_endpoint.io = forwarded_io.observer(&failed, .{ .netSend = FailedSend.send, .sleep = FailedSend.sleep });
     defer pair.client_endpoint.io = original_io;
     while (!failed.failed) {
         try pair.receiveClient();

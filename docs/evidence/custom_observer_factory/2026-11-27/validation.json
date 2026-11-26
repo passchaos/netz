@@ -1,0 +1,320 @@
+{
+  "observed_utc": "2026-11-26T17:27:18.545828+00:00",
+  "base_commit": "4011ebe5e17f16a5f4d6dbdf297b0b4ab58ce620",
+  "native_host": "aarch64-macos",
+  "guard": "All Zig invocations serialized under shared zig-tree-guard",
+  "source_sha256": {
+    "src/internal/testing/forwarded_io.zig": "c056ad2969f4d9eb39b9970e8919ca7583cae041cedc394a7ef9e07c1f7a8314",
+    "src/webtransport/runtime/connect/required_flow_tests.zig": "87428d0147775995f35c28c8c02f331e2e446a0fe064e039a4ed0c35bd912528",
+    "src/http3/runtime/receive/request_failure_retry_tests.zig": "4cfc81a59da3727efc038109b8f0052d87ce9fcf5b19b74331830c9e9d8fc7a7",
+    "src/http3/runtime/receive/response_failure_retry_tests.zig": "281469716a3e4be307be630282c0f4cb6717287e72d0a1f487b27a6e4ebe1dd7",
+    "src/webtransport/runtime/connect/message_failure_tests.zig": "a824a6252c76149a19da30c8be04559820777db25d3a3c36b7187a7cf3a33053",
+    "src/webtransport/runtime/connect/handshake_tests.zig": "66719490f68e64907bf5878be9a1092505e2752b78fbbf2760c2ef467017b27b",
+    "src/webtransport/runtime/connect/endpoint_rejection_tests.zig": "c0825f9e59821619133da17247959a87635115deb590117b8904bada794cae3a",
+    "src/webtransport/runtime/connect/application_protocol/tests.zig": "e94a397abfa0fbd3023029a08dc0947dfea662d840a56aee4a33a9bea27cea96",
+    "src/webtransport/runtime/endpoint_server/serve_failure_tests.zig": "b624f32fed9c441a710d0c317de6868b302d9a0e8998b1e0758fec82e8af4709"
+  },
+  "checks": {
+    "fmt": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "fmt",
+        "src/internal/testing/forwarded_io.zig",
+        "src/webtransport/runtime/connect/required_flow_tests.zig",
+        "src/http3/runtime/receive/request_failure_retry_tests.zig",
+        "src/http3/runtime/receive/response_failure_retry_tests.zig",
+        "src/webtransport/runtime/connect/message_failure_tests.zig",
+        "src/webtransport/runtime/connect/handshake_tests.zig",
+        "src/webtransport/runtime/connect/endpoint_rejection_tests.zig",
+        "src/webtransport/runtime/connect/application_protocol/tests.zig",
+        "src/webtransport/runtime/endpoint_server/serve_failure_tests.zig"
+      ],
+      "exit_code": 0,
+      "log_sha256": "7a40ff4150c83a9b271f3ffb03aa55fdaf9694f2d4f103dd404560d555a82f66"
+    },
+    "native": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-http3",
+        "test-webtransport",
+        "-j1",
+        "-Dtest-progress=true",
+        "-Dtest-filter=HTTP/3 default failed-request",
+        "-Dtest-filter=HTTP/3 failed-response",
+        "-Dtest-filter=WebTransport malformed HTTP3 HEADERS retain cancellation through socket failure",
+        "-Dtest-filter=WebTransport routed malformed CONNECT retries failed MESSAGE_ERROR cancellation",
+        "-Dtest-filter=WebTransport endpoint retained rejection",
+        "-Dtest-filter=WebTransport application protocol dispatcher keeps failed ALPN cancellation retryable",
+        "-Dtest-filter=WebTransport serve loop keeps socket errors fatal and retains unsubmitted rejection",
+        "-Dtest-filter=WebTransport required Session flow control",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log_sha256": "530e6cad5ab94e7395dbc8353a9bec94b78d6867e4467351e19713eade406662"
+    },
+    "windows-compile": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-http3-compile",
+        "test-webtransport-compile",
+        "-j1",
+        "-Dtarget=x86_64-windows-gnu",
+        "-Dtest-filter=HTTP/3 default failed-request",
+        "-Dtest-filter=HTTP/3 failed-response",
+        "-Dtest-filter=WebTransport malformed HTTP3 HEADERS retain cancellation through socket failure",
+        "-Dtest-filter=WebTransport routed malformed CONNECT retries failed MESSAGE_ERROR cancellation",
+        "-Dtest-filter=WebTransport endpoint retained rejection",
+        "-Dtest-filter=WebTransport application protocol dispatcher keeps failed ALPN cancellation retryable",
+        "-Dtest-filter=WebTransport serve loop keeps socket errors fatal and retains unsubmitted rejection",
+        "-Dtest-filter=WebTransport required Session flow control",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log_sha256": "3c97bfb039992c48594769f9db454cfd75d6174a045fa3868d13b4343ca6d4a0"
+    }
+  },
+  "native_execution": "passed",
+  "windows_compilation": "passed",
+  "review": {
+    "base_commit": "4011ebe5e17f16a5f4d6dbdf297b0b4ab58ce620",
+    "reviewed_installations": 18,
+    "wrong_context_installations": 8,
+    "original_userdata_installations": 10,
+    "entries": [
+      {
+        "path": "src/http3/runtime/stream/push/failure_tests.zig",
+        "line": 23,
+        "observer": "FailedSend",
+        "classification": "original_userdata_preserved",
+        "audited_source_sha256": "2570ced9b88be66a932b5c54cae935d09ff174e66c0c511c149469f5157e5ab1"
+      },
+      {
+        "path": "src/http3/runtime/stream/push/failure_tests.zig",
+        "line": 71,
+        "observer": "FailedSend",
+        "classification": "original_userdata_preserved",
+        "audited_source_sha256": "2570ced9b88be66a932b5c54cae935d09ff174e66c0c511c149469f5157e5ab1"
+      },
+      {
+        "path": "src/http3/runtime/stream/push/failure_tests.zig",
+        "line": 286,
+        "observer": "FeedbackFailure",
+        "classification": "original_userdata_preserved",
+        "audited_source_sha256": "2570ced9b88be66a932b5c54cae935d09ff174e66c0c511c149469f5157e5ab1"
+      },
+      {
+        "path": "src/http3/runtime/receive/message_data_tests.zig",
+        "line": 52,
+        "observer": "FailedSend",
+        "classification": "original_userdata_preserved",
+        "audited_source_sha256": "bc286b8444857508086d346264e013fb444b8cf3c3188ca1cf8083c59647eeb5"
+      },
+      {
+        "path": "src/http3/runtime/receive/message_data_tests.zig",
+        "line": 152,
+        "observer": "FailedSend",
+        "classification": "original_userdata_preserved",
+        "audited_source_sha256": "bc286b8444857508086d346264e013fb444b8cf3c3188ca1cf8083c59647eeb5"
+      },
+      {
+        "path": "src/http3/runtime/receive/message_data_tests.zig",
+        "line": 203,
+        "observer": "FailedSend",
+        "classification": "original_userdata_preserved",
+        "audited_source_sha256": "bc286b8444857508086d346264e013fb444b8cf3c3188ca1cf8083c59647eeb5"
+      },
+      {
+        "path": "src/http3/runtime/receive/response_failure_retry_tests.zig",
+        "line": 35,
+        "observer": "FailedSend",
+        "classification": "observer_userdata_inherited_backend_callbacks",
+        "audited_source_sha256": "8c4b323911b19d4f3932c516522aa2ee8f3336363fdbb1aede72403830769896"
+      },
+      {
+        "path": "src/http3/runtime/receive/request_failure_retry_tests.zig",
+        "line": 37,
+        "observer": "FailedSend",
+        "classification": "observer_userdata_inherited_backend_callbacks",
+        "audited_source_sha256": "70891be18c1b939af6ce8ad0866925ada543b770ef67f15e3f4253b1f7da83e6"
+      },
+      {
+        "path": "src/http3/runtime/receive/request_failure_retry_tests.zig",
+        "line": 123,
+        "observer": "FailedSend",
+        "classification": "observer_userdata_inherited_backend_callbacks",
+        "audited_source_sha256": "70891be18c1b939af6ce8ad0866925ada543b770ef67f15e3f4253b1f7da83e6"
+      },
+      {
+        "path": "src/http3/runtime/receive/failure_ownership_tests.zig",
+        "line": 103,
+        "observer": "FailedSend",
+        "classification": "original_userdata_preserved",
+        "audited_source_sha256": "8770f838451af9a1e4afdf8c155e065e2b4b788819e719add762eb0639839720"
+      },
+      {
+        "path": "src/quic/handshake/failure_tests.zig",
+        "line": 284,
+        "observer": "FailedSend",
+        "classification": "original_userdata_preserved",
+        "audited_source_sha256": "499a031e3bf7955d16c85e0361fc5178ba290596a3a2b4aba62e979b82999f41"
+      },
+      {
+        "path": "src/quic/endpoint_dispatcher/closing_tests.zig",
+        "line": 129,
+        "observer": "FailedSend",
+        "classification": "original_userdata_preserved",
+        "audited_source_sha256": "3276d0aa71b0034deefd1a34ee3e2588dfa6a0363d235c0c7d8e9446875f49ad"
+      },
+      {
+        "path": "src/quic/endpoint_server/closing_handshake_tests.zig",
+        "line": 54,
+        "observer": "FailedSend",
+        "classification": "original_userdata_preserved",
+        "audited_source_sha256": "361c96dfac2420d4e7b22e24395170b0fbb16eb39df4bf42e8d60bbd890f85c1"
+      },
+      {
+        "path": "src/webtransport/runtime/connect/message_failure_tests.zig",
+        "line": 48,
+        "observer": "FailedSend",
+        "classification": "observer_userdata_inherited_backend_callbacks",
+        "audited_source_sha256": "bf763e1e959b8fd5058edbf878039f3434e5e2790848cb69ccbbedab43d7eaf9"
+      },
+      {
+        "path": "src/webtransport/runtime/connect/handshake_tests.zig",
+        "line": 200,
+        "observer": "FailedSend",
+        "classification": "observer_userdata_inherited_backend_callbacks",
+        "audited_source_sha256": "2bf5896e3186b62fc39684430951040ca3690bc44c981d6cbd0d88ec2b8a1c1f"
+      },
+      {
+        "path": "src/webtransport/runtime/connect/endpoint_rejection_tests.zig",
+        "line": 47,
+        "observer": "FailedCancel",
+        "classification": "observer_userdata_inherited_backend_callbacks",
+        "audited_source_sha256": "d64d53cdbd30ec7af7469ba01d08ccc01d17b10a9a0b490774a34145f58cb50a"
+      },
+      {
+        "path": "src/webtransport/runtime/connect/application_protocol/tests.zig",
+        "line": 273,
+        "observer": "FailedSend",
+        "classification": "observer_userdata_inherited_backend_callbacks",
+        "audited_source_sha256": "464aab855e14bc0a5b0fbd2d2eb5e92eb94851fd2079a2adf16f732faf240275"
+      },
+      {
+        "path": "src/webtransport/runtime/endpoint_server/serve_failure_tests.zig",
+        "line": 72,
+        "observer": "FailedSend",
+        "classification": "observer_userdata_inherited_backend_callbacks",
+        "audited_source_sha256": "6951c879c2ed94fc1247b33e72d8bcd9e3b55e92e7035f705c32cabca25127d4"
+      }
+    ]
+  },
+  "original_assertions_preserved": 287,
+  "original_test_names": {
+    "src/internal/testing/forwarded_io.zig": [],
+    "src/webtransport/runtime/connect/required_flow_tests.zig": [
+      "WebTransport required Session flow control rejects shared and reused opens before CONNECT",
+      "WebTransport required Session flow control rejects queued CONNECT before stream allocation",
+      "WebTransport required Session flow control retries scoped server rejection",
+      "WebTransport required Session flow control rejects a pending server acceptance before 200"
+    ],
+    "src/http3/runtime/receive/request_failure_retry_tests.zig": [
+      "HTTP/3 default failed-request polling preserves socket errors and retries the original cause",
+      "HTTP/3 default failed-request owning poll preserves the connection through socket failure",
+      "HTTP/3 default failed-request queue transfers cancellation ownership to explicit polling",
+      "HTTP/3 default failed-request polling keeps a healthy sibling readable while cancellation is paced",
+      "HTTP/3 default failed-request polling retains independent failures for targeted requests",
+      "HTTP/3 default failed-request ownership is reserved before decoding",
+      "HTTP/3 default failed-request owning receive retains cancellation at its deadline"
+    ],
+    "src/http3/runtime/receive/response_failure_retry_tests.zig": [
+      "HTTP/3 failed-response targeted polling preserves socket errors and request ownership",
+      "HTTP/3 failed-response owning polling keeps the connection reusable after socket failure",
+      "HTTP/3 failed-response multiplexed polling retries the original cause",
+      "HTTP/3 failed-response polling transfers retained cancellation ownership",
+      "HTTP/3 failed-response polling keeps a healthy response readable while cancellation is paced",
+      "HTTP/3 failed-response explicit polling transfers a fresh parser failure before cancellation",
+      "HTTP/3 failed-response default polling reserves ownership before decoding",
+      "HTTP/3 failed-response polling leaves allocation failures retryable with their original bytes",
+      "HTTP/3 failed-response polling keeps malformed QPACK at connection scope",
+      "HTTP/3 failed-response owning receives retain cancellation across their deadline",
+      "HTTP/3 failed-response targeted polling preserves independent parser causes",
+      "HTTP/3 failed-response caller cancellation retires retained ownership",
+      "HTTP/3 failed-response connection termination retires retained cancellation",
+      "HTTP/3 failed-response explicit polling returns owned healthy events"
+    ],
+    "src/webtransport/runtime/connect/message_failure_tests.zig": [
+      "WebTransport malformed HTTP3 HEADERS retain cancellation through socket failure",
+      "WebTransport malformed HTTP3 HEADERS transfer explicit rejection ownership from the parser",
+      "WebTransport malformed HTTP3 HEADERS owned polling propagates local allocation failures",
+      "WebTransport malformed HTTP3 HEADERS QPACK errors retain connection scope",
+      "WebTransport malformed HTTP3 HEADERS report missing method and admit a coalesced sibling",
+      "WebTransport malformed HTTP3 HEADERS report invalid fields and admit a coalesced sibling"
+    ],
+    "src/webtransport/runtime/connect/handshake_tests.zig": [
+      "WebTransport modern pending CONNECT waits for SETTINGS and retains long caller metadata",
+      "WebTransport modern pending CONNECT rejects missing transport support without opening a request",
+      "WebTransport modern session streams allow the client to omit ENABLE_CONNECT_PROTOCOL",
+      "WebTransport malformed modern CONNECT sends MESSAGE_ERROR and leaves HTTP3 siblings usable",
+      "WebTransport routed malformed CONNECT retries failed MESSAGE_ERROR cancellation"
+    ],
+    "src/webtransport/runtime/connect/endpoint_rejection_tests.zig": [
+      "WebTransport endpoint retained rejection retries without new packets and refreshes recovery timer",
+      "WebTransport endpoint retained rejection advances another connection while one is pacing blocked",
+      "WebTransport endpoint retained rejection leaves an accepted sibling readable under pacing"
+    ],
+    "src/webtransport/runtime/connect/application_protocol/tests.zig": [
+      "WebTransport application protocol runtime selects client preference and exposes decoded values",
+      "WebTransport application protocol no-common server decision remains retryable before status 200",
+      "WebTransport application protocol rejects bad success responses with scoped ALPN resets",
+      "WebTransport application protocol optional malformed response is ignored",
+      "WebTransport application protocol endpoint rejection preserves an existing Session",
+      "WebTransport application protocol dispatcher keeps failed ALPN cancellation retryable"
+    ],
+    "src/webtransport/runtime/endpoint_server/serve_failure_tests.zig": [
+      "WebTransport serve loop propagates a callback error even when it matches a peer rejection",
+      "WebTransport serve loop keeps socket errors fatal and retains unsubmitted rejection"
+    ]
+  },
+  "invariants": [
+    "complete backend userdata and token ownership forwarding",
+    "immutable callback table has static lifetime",
+    "caller context and delegate remain borrowed through all joined operations",
+    "explicit typed send overrides retain original error and retry predicates",
+    "three sleep observers delegate actual waits with original zero-sleep assertions",
+    "original named cases and assertions retained"
+  ],
+  "ci_commands_budgets_and_pins_changed": false,
+  "limitations": [
+    "eight context defects are source findings; not eight individual native failing baselines",
+    "Windows cross-compilation will remain distinct from native execution",
+    "112 additional inherited-context candidates require individual layout and timeout inspection",
+    "native and complete CI, CA reload, fairness and workload performance remain open"
+  ],
+  "full_goal_status": "active",
+  "native_group_passed": [
+    150,
+    85
+  ],
+  "native_executions_total": 235,
+  "native_count_note": "Separate filtered H3 and WebTransport artifacts may execute shared imported tests; this is not a unique-case count",
+  "windows_build_summary": [
+    "11/11 steps succeeded"
+  ],
+  "delivered_native_and_complete_qualification": "pending",
+  "current_prior_ci": {
+    "run": 45863309674,
+    "complete_job": 140059643838,
+    "complete_failure_case": "WebTransport endpoint control and datagram sends do not wait for pacing",
+    "complete_failure_number": "4830/7490",
+    "complete_failure": "General protection exception during Threaded task allocation",
+    "linux_protocol21": "passed",
+    "linux_send_deadline22": "passed",
+    "linux_ca_reload23": "failed before SIGHUP at0.158s",
+    "windows_protocol21": "five-minute timeout; native deadline22 skipped"
+  }
+}

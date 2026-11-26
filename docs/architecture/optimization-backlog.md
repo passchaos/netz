@@ -777,3 +777,27 @@ pending. A further source survey records 18 custom-send observer
 installations for individual review across H3, QUIC and WebTransport; it does
 not classify every copied VTable as invalid. Existing CI commands, budgets
 and pins remain unchanged.
+
+### Shared construction for custom observer contexts
+
+Individual inspection of the 18 custom-send candidates identifies eight
+installations that pass observer userdata to inherited backend callbacks.
+The other ten preserve original backend userdata. The eight now use the shared
+`forwarded_io.observer` constructor with an immutable static table and typed
+overrides. Every other callback receives the actual delegate context and token
+owner. The prior required-flow observer uses the same constructor, and two
+observers remove redundant Batch forwarding methods. Three sleep counters
+delegate actual waits while retaining their original zero-sleep checks.
+
+[The qualification](../evidence/custom_observer_factory/2026-11-27/validation.json)
+records original case names and 287 unchanged assertion statements, native
+artifact passes of 150 and 85, and Windows 11/11 build steps. These artifact
+counts include shared imported tests. A broader read/clock survey records 112
+further inherited-context candidates for individual layout and timeout review.
+
+Run 45863309674 passes Linux protocol and send-deadline steps, then fails client
+CA reload before SIGHUP at 158 ms. Complete CI's next GP is at 4830/7490,
+`WebTransport endpoint control and datagram sends do not wait for pacing`, in
+a separate frozen-clock observer. Windows still times out at the existing
+five-minute protocol step and skips its next deadline gate. Those native and
+complete follow-ups, measured fairness and workload performance remain open.

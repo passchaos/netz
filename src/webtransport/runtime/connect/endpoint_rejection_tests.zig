@@ -1,4 +1,5 @@
 const std = @import("std");
+const forwarded_io = @import("../../../internal/testing/forwarded_io.zig");
 const runtime = @import("../../runtime.zig");
 const http3 = @import("../../../http3/mod.zig");
 const quic = @import("../../../quic/mod.zig");
@@ -22,20 +23,10 @@ const FailedCancel = struct {
         return self.delegate.vtable.netSend(self.delegate.userdata, socket, messages, flags);
     }
 
-    fn sleep(userdata: ?*anyopaque, _: std.Io.Timeout) std.Io.Cancelable!void {
+    fn sleep(userdata: ?*anyopaque, timeout: std.Io.Timeout) std.Io.Cancelable!void {
         const self: *@This() = @ptrCast(@alignCast(userdata));
         self.sleeps += 1;
-        return error.Canceled;
-    }
-
-    fn batchAwaitConcurrent(userdata: ?*anyopaque, batch: *std.Io.Batch, timeout: std.Io.Timeout) std.Io.Batch.AwaitConcurrentError!void {
-        const self: *@This() = @ptrCast(@alignCast(userdata));
-        return self.delegate.vtable.batchAwaitConcurrent(self.delegate.userdata, batch, timeout);
-    }
-
-    fn batchCancel(userdata: ?*anyopaque, batch: *std.Io.Batch) void {
-        const self: *@This() = @ptrCast(@alignCast(userdata));
-        self.delegate.vtable.batchCancel(self.delegate.userdata, batch);
+        return self.delegate.vtable.sleep(self.delegate.userdata, timeout);
     }
 };
 
@@ -43,12 +34,7 @@ fn retainFailedRejection(fixture: *Fixture, peer: *Peer) !void {
     const stream_id = try peer.connect(false);
     const original_io = fixture.template.h3.quic_server.endpoint.io;
     var failed = FailedCancel{ .delegate = original_io, .connection = &peer.server.established.connection, .stream_id = stream_id };
-    var vtable = original_io.vtable.*;
-    vtable.netSend = FailedCancel.send;
-    vtable.sleep = FailedCancel.sleep;
-    vtable.batchAwaitConcurrent = FailedCancel.batchAwaitConcurrent;
-    vtable.batchCancel = FailedCancel.batchCancel;
-    fixture.template.h3.quic_server.endpoint.io = .{ .userdata = &failed, .vtable = &vtable };
+    fixture.template.h3.quic_server.endpoint.io = forwarded_io.observer(&failed, .{ .netSend = FailedCancel.send, .sleep = FailedCancel.sleep });
     defer fixture.template.h3.quic_server.endpoint.io = original_io;
     var buffer: [16]u8 = undefined;
     try std.testing.expectError(error.SystemResources, fixture.endpoint.receiveWithTimeout(&versions, .fromSeconds(1), &buffer));

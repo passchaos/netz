@@ -1,4 +1,5 @@
 const std = @import("std");
+const forwarded_io = @import("../../../internal/testing/forwarded_io.zig");
 const runtime = @import("../../runtime.zig");
 const quic = @import("../../../quic/mod.zig");
 const Fixture = @import("test_support.zig").Fixture;
@@ -68,9 +69,7 @@ test "WebTransport serve loop keeps socket errors fatal and retains unsubmitted 
     const original_io = fixture.server.h3.quic_server.endpoint.io;
     {
         var failed = FailedSend{ .delegate = original_io, .connection = connection };
-        var vtable = original_io.vtable.*;
-        vtable.netSend = FailedSend.send;
-        fixture.server.h3.quic_server.endpoint.io = .{ .userdata = &failed, .vtable = &vtable };
+        fixture.server.h3.quic_server.endpoint.io = forwarded_io.observer(&failed, .{ .netSend = FailedSend.send });
         defer fixture.server.h3.quic_server.endpoint.io = original_io;
         try std.testing.expectError(error.SystemResources, fixture.endpoint.serveUntil(Handler, &handler, Handler.handle, .{ .shutdown = &shutdown, .supported_versions = &versions }));
     }

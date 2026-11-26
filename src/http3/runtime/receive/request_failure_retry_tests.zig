@@ -1,4 +1,5 @@
 const std = @import("std");
+const forwarded_io = @import("../../../internal/testing/forwarded_io.zig");
 const http3 = @import("../../mod.zig");
 const runtime = @import("../../runtime.zig");
 const quic = @import("../../../quic/mod.zig");
@@ -33,9 +34,7 @@ fn verifySocketRetry(owning: bool, transfer: bool) !void {
     const original_io = pair.server_endpoint.io;
     {
         var failed = FailedSend{ .delegate = original_io, .connection = &pair.server.established.connection };
-        var vtable = original_io.vtable.*;
-        vtable.netSend = FailedSend.send;
-        pair.server_endpoint.io = .{ .userdata = &failed, .vtable = &vtable };
+        pair.server_endpoint.io = forwarded_io.observer(&failed, .{ .netSend = FailedSend.send });
         defer pair.server_endpoint.io = original_io;
         if (owning) {
             try std.testing.expectError(error.SystemResources, pair.server.pollRequestEvent());
@@ -119,9 +118,7 @@ test "HTTP/3 default failed-request polling retains independent failures for tar
     const original_io = pair.server_endpoint.io;
     {
         var failed = FailedSend{ .delegate = original_io, .connection = &pair.server.established.connection };
-        var vtable = original_io.vtable.*;
-        vtable.netSend = FailedSend.send;
-        pair.server_endpoint.io = .{ .userdata = &failed, .vtable = &vtable };
+        pair.server_endpoint.io = forwarded_io.observer(&failed, .{ .netSend = FailedSend.send });
         defer pair.server_endpoint.io = original_io;
         try std.testing.expectError(error.SystemResources, pair.server.pollRequestEventForOnce(0));
         try std.testing.expectError(error.SystemResources, pair.server.pollRequestEventForOnce(4));

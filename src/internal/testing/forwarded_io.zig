@@ -2,6 +2,33 @@
 //! Every callback reaches the delegate with its own userdata and token owners.
 const std = @import("std");
 
+/// Borrow an observer with a `delegate: std.Io` field and typed callback
+/// overrides. The immutable table has static lifetime; the context and its
+/// delegate must outlive every operation or task using the returned I/O.
+/// Clock-remapping observers can use `table` with their own timeout mapping.
+pub fn observer(context: anytype, comptime overrides: anytype) std.Io {
+    const Context = @typeInfo(@TypeOf(context)).pointer.child;
+    const Adapter = struct {
+        fn from(userdata: ?*anyopaque) *Context {
+            return @ptrCast(@alignCast(userdata.?));
+        }
+        fn baseIo(self: *Context) std.Io {
+            return self.delegate;
+        }
+        fn preserveTimeout(_: *Context, timeout: std.Io.Timeout) std.Io.Timeout {
+            return timeout;
+        }
+        const callbacks = blk: {
+            var value = table(from, baseIo, preserveTimeout);
+            for (@typeInfo(@TypeOf(overrides)).@"struct".fields) |field| {
+                @field(value, field.name) = @field(overrides, field.name);
+            }
+            break :blk value;
+        };
+    };
+    return .{ .userdata = context, .vtable = &Adapter.callbacks };
+}
+
 pub fn table(comptime from: anytype, comptime base_io: anytype, comptime map_timeout: anytype) std.Io.VTable {
     var result: std.Io.VTable = undefined;
     inline for (@typeInfo(std.Io.VTable).@"struct".fields) |field| {
