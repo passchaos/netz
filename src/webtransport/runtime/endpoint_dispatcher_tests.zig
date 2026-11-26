@@ -27,51 +27,15 @@ fn startPendingMockRequest(server: *quic.one_rtt.Connection, pending: *runtime.P
     return error.TestUnexpectedResult;
 }
 
-const FixedClockIo = struct {
-    delegate: std.Io,
-    now_ns: i96,
-    send_calls: usize = 0,
-    sleep_calls: usize = 0,
-
-    fn now(
-        userdata: ?*anyopaque,
-        _: std.Io.Clock,
-    ) std.Io.Timestamp {
-        const self: *FixedClockIo = @ptrCast(@alignCast(userdata));
-        return .fromNanoseconds(self.now_ns);
-    }
-
-    fn sleep(
-        userdata: ?*anyopaque,
-        _: std.Io.Timeout,
-    ) std.Io.Cancelable!void {
-        const self: *FixedClockIo = @ptrCast(@alignCast(userdata));
-        self.sleep_calls += 1;
-        return error.Canceled;
-    }
-
-    fn netSend(
-        userdata: ?*anyopaque,
-        socket_handle: std.Io.net.Socket.Handle,
-        messages: []std.Io.net.OutgoingMessage,
-        flags: std.Io.net.SendFlags,
-    ) struct { ?std.Io.net.Socket.SendError, usize } {
-        const self: *FixedClockIo = @ptrCast(@alignCast(userdata));
-        self.send_calls += 1;
-        return self.delegate.vtable.netSend(
-            self.delegate.userdata,
-            socket_handle,
-            messages,
-            flags,
-        );
-    }
-};
+const FixedClockIo = @import("../../internal/testing/deadline_send_io.zig").Native;
+const native_protocol_io = @import("../../internal/testing/native_protocol_io.zig");
 
 test "WebTransport endpoint admission HEADERS do not wait for pacing" {
+    try native_protocol_io.run(admissionHeadPacing);
+}
+
+fn admissionHeadPacing(io: std.Io) !void {
     const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
 
     var server = try runtime.HandshakeServer.bind(
         allocator,
@@ -194,21 +158,16 @@ test "WebTransport endpoint admission HEADERS do not wait for pacing" {
     try endpoint.pending.put(allocator, handle, pending);
 
     var fixed_io = FixedClockIo{
-        .delegate = server.h3.quic_server.endpoint.io,
-        .now_ns = 1_000_000,
+        .backend = .init(allocator, .{ .async_limit = .nothing }),
+        .delegate_io = server.h3.quic_server.endpoint.io,
+        .now_ns = .init(1_000_000),
     };
-    var fixed_vtable = server.h3.quic_server.endpoint.io.vtable.*;
-    fixed_vtable.now = FixedClockIo.now;
-    fixed_vtable.sleep = FixedClockIo.sleep;
-    fixed_vtable.netSend = FixedClockIo.netSend;
-    server.h3.quic_server.endpoint.io = .{
-        .userdata = &fixed_io,
-        .vtable = &fixed_vtable,
-    };
-    defer server.h3.quic_server.endpoint.io = fixed_io.delegate;
+    defer fixed_io.backend.deinit();
+    server.h3.quic_server.endpoint.io = fixed_io.io();
+    defer server.h3.quic_server.endpoint.io = fixed_io.baseIo();
     quic.one_rtt.testing.exhaustPacingAt(
         &h3.established.connection,
-        @intCast(fixed_io.now_ns),
+        @intCast(fixed_io.now_ns.load(.acquire)),
     );
 
     const request_available =
@@ -234,7 +193,7 @@ test "WebTransport endpoint admission HEADERS do not wait for pacing" {
         error.PacingLimited,
         endpoint.reject(handle, 403, &.{}),
     );
-    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.duration_sleep_calls.load(.acquire));
     try std.testing.expectEqual(
         packet_number,
         h3.established.connection.next_packet_number,
@@ -249,7 +208,7 @@ test "WebTransport endpoint admission HEADERS do not wait for pacing" {
             .value = "literal",
         }}),
     );
-    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.duration_sleep_calls.load(.acquire));
     try std.testing.expectEqual(
         packet_number,
         h3.established.connection.next_packet_number,
@@ -276,7 +235,7 @@ test "WebTransport endpoint admission HEADERS do not wait for pacing" {
         quic.one_rtt.TimerDeadlineKind.pacing,
         timer.timer.kind,
     );
-    fixed_io.now_ns = @intCast(timer.timer.deadline_ns);
+    fixed_io.setNow(@intCast(timer.timer.deadline_ns));
     _ = (try endpoint.h3.dispatcher.serviceNextTimerAt(
         timer.timer.deadline_ns,
     )) orelse
@@ -285,7 +244,7 @@ test "WebTransport endpoint admission HEADERS do not wait for pacing" {
         .name = "x-admission",
         .value = "literal",
     }});
-    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.duration_sleep_calls.load(.acquire));
     try std.testing.expectEqual(@as(usize, 0), endpoint.pendingSessionCount());
     try std.testing.expectEqual(@as(usize, 1), endpoint.sessionCount());
     try std.testing.expect(h3.outbound_bodies.find(0) != null);
@@ -353,10 +312,11 @@ test "WebTransport endpoint admission HEADERS do not wait for pacing" {
 }
 
 test "WebTransport accepted session rejects a second CONNECT and stays usable" {
+    try native_protocol_io.run(acceptedSiblingConnect);
+}
+
+fn acceptedSiblingConnect(io: std.Io) !void {
     const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
 
     var server_endpoint = try quic.runtime.Endpoint.bind(
         allocator,
@@ -445,21 +405,16 @@ test "WebTransport accepted session rejects a second CONNECT and stays usable" {
     defer peer.deinit();
 
     var fixed_io = FixedClockIo{
-        .delegate = server_endpoint.io,
-        .now_ns = 1_000_000,
+        .backend = .init(allocator, .{ .async_limit = .nothing }),
+        .delegate_io = server_endpoint.io,
+        .now_ns = .init(1_000_000),
     };
-    var fixed_vtable = server_endpoint.io.vtable.*;
-    fixed_vtable.now = FixedClockIo.now;
-    fixed_vtable.sleep = FixedClockIo.sleep;
-    fixed_vtable.netSend = FixedClockIo.netSend;
-    server_endpoint.io = .{
-        .userdata = &fixed_io,
-        .vtable = &fixed_vtable,
-    };
-    defer server_endpoint.io = fixed_io.delegate;
+    defer fixed_io.backend.deinit();
+    server_endpoint.io = fixed_io.io();
+    defer server_endpoint.io = fixed_io.baseIo();
     quic.one_rtt.testing.exhaustPacingAt(
         &h3.established.connection,
-        @intCast(fixed_io.now_ns),
+        @intCast(fixed_io.now_ns.load(.acquire)),
     );
 
     var second_connect: std.ArrayList(u8) = .empty;
@@ -539,7 +494,7 @@ test "WebTransport accepted session rejects a second CONNECT and stays usable" {
         "alive",
         payload[0..stream_event.data.bytes],
     );
-    fixed_io.now_ns = @intCast(retry.timer.deadline_ns);
+    fixed_io.setNow(@intCast(retry.timer.deadline_ns));
     try std.testing.expect(
         (try runtime.EndpointServer.testing.pollAcceptedSessionEntry(
             &accepted,
@@ -718,10 +673,11 @@ test "WebTransport endpoint poll mirrors automatic stream-credit retry timer" {
 }
 
 test "WebTransport endpoint reads commit data and CLOSE before paced feedback" {
+    try native_protocol_io.run(readCommitBeforeFeedback);
+}
+
+fn readCommitBeforeFeedback(io: std.Io) !void {
     const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
 
     var server_endpoint = try quic.runtime.Endpoint.bind(
         allocator,
@@ -808,18 +764,13 @@ test "WebTransport endpoint reads commit data and CLOSE before paced feedback" {
     }
 
     var fixed_io = FixedClockIo{
-        .delegate = server_endpoint.io,
-        .now_ns = 1_000_000,
+        .backend = .init(allocator, .{ .async_limit = .nothing }),
+        .delegate_io = server_endpoint.io,
+        .now_ns = .init(1_000_000),
     };
-    var fixed_vtable = server_endpoint.io.vtable.*;
-    fixed_vtable.now = FixedClockIo.now;
-    fixed_vtable.sleep = FixedClockIo.sleep;
-    fixed_vtable.netSend = FixedClockIo.netSend;
-    server_endpoint.io = .{
-        .userdata = &fixed_io,
-        .vtable = &fixed_vtable,
-    };
-    defer server_endpoint.io = fixed_io.delegate;
+    defer fixed_io.backend.deinit();
+    server_endpoint.io = fixed_io.io();
+    defer server_endpoint.io = fixed_io.baseIo();
 
     var stream_bytes: std.ArrayList(u8) = .empty;
     defer stream_bytes.deinit(allocator);
@@ -844,7 +795,7 @@ test "WebTransport endpoint reads commit data and CLOSE before paced feedback" {
     );
     quic.one_rtt.testing.exhaustPacingAt(
         &h3.established.connection,
-        @intCast(fixed_io.now_ns),
+        @intCast(fixed_io.now_ns.load(.acquire)),
     );
 
     var buffer: [64]u8 = undefined;
@@ -855,12 +806,12 @@ test "WebTransport endpoint reads commit data and CLOSE before paced feedback" {
     try std.testing.expectEqual(@as(u64, payload.len), accepted.streams.get(2).?.bytes_received);
     try std.testing.expectEqual(@as(usize, 0), quic.one_rtt.testing.receiveStreamAvailableLen(&h3.established.connection, 2).?);
     try std.testing.expectEqual(prefix_len + payload.len, stream_bytes.items.len);
-    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.duration_sleep_calls.load(.acquire));
     try std.testing.expect(h3.established.connection.receive_credit_retry_deadline_ns != null);
     for (0..16) |_| {
         if (h3.established.connection.receive_credit_retry_deadline_ns == null) break;
         const timer = dispatcher.nextTimerDeadline().?;
-        fixed_io.now_ns = @intCast(timer.timer.deadline_ns);
+        fixed_io.setNow(@intCast(timer.timer.deadline_ns));
         _ = (try dispatcher.serviceNextTimerAt(timer.timer.deadline_ns)) orelse return error.TestUnexpectedResult;
     }
     try std.testing.expect(h3.established.connection.receive_credit_retry_deadline_ns == null);
@@ -884,12 +835,12 @@ test "WebTransport endpoint reads commit data and CLOSE before paced feedback" {
             .data = control_bytes[0..control_len],
             .fin = true,
         } }},
-        @intCast(fixed_io.now_ns),
+        @intCast(fixed_io.now_ns.load(.acquire)),
         .not_ect,
     );
     quic.one_rtt.testing.exhaustPacingAt(
         &h3.established.connection,
-        @intCast(fixed_io.now_ns),
+        @intCast(fixed_io.now_ns.load(.acquire)),
     );
     // CLOSE is observed immediately; response FIN and receive feedback remain
     // pending transport work and cannot hide its original code or reason.
@@ -903,16 +854,16 @@ test "WebTransport endpoint reads commit data and CLOSE before paced feedback" {
     try std.testing.expect(accepted.close_response_pending);
     try std.testing.expectEqual(@as(u64, control_len), h3.established.connection.recvStreamStats(0).?.bytes_read);
     try std.testing.expect(h3.established.connection.receive_credit_retry_deadline_ns != null);
-    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.duration_sleep_calls.load(.acquire));
     for (0..16) |_| {
         if (h3.established.connection.receive_credit_retry_deadline_ns == null) break;
         const timer = dispatcher.nextTimerDeadline().?;
-        fixed_io.now_ns = @intCast(timer.timer.deadline_ns);
+        fixed_io.setNow(@intCast(timer.timer.deadline_ns));
         _ = (try dispatcher.serviceNextTimerAt(timer.timer.deadline_ns)) orelse return error.TestUnexpectedResult;
     }
     try std.testing.expect(h3.established.connection.receive_credit_retry_deadline_ns == null);
     try std.testing.expect((try runtime.EndpointServer.testing.pollAcceptedSessionEntry(&accepted, &buffer)) == null);
-    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.duration_sleep_calls.load(.acquire));
 }
 
 test "WebTransport endpoint poll refreshes timers before returning an error" {
@@ -1272,476 +1223,16 @@ test "WebTransport endpoint stream write leaves UDP receive to dispatcher" {
     try std.testing.expect(stream.local_fin);
 }
 
-test "WebTransport endpoint control and datagram sends do not wait for pacing" {
-    const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    var server_endpoint = try quic.runtime.Endpoint.bind(
-        allocator,
-        io,
-        .{ .ip4 = .loopback(0) },
-        .{ .max_datagram_size = 4096 },
-    );
-    defer server_endpoint.deinit();
-    var peer_endpoint = try quic.runtime.Endpoint.bind(
-        allocator,
-        io,
-        .{ .ip4 = .loopback(0) },
-        .{ .max_datagram_size = 4096 },
-    );
-    defer peer_endpoint.deinit();
-    const keys = quic.protection.deriveAes128Keys(
-        [_]u8{0xef} ** quic.protection.secret_len,
-    );
-    const settings = webtransport.defaultSettings(.{});
-    var h3 = try http3.runtime.HandshakeServerSession.initPreconfigured(
-        &server_endpoint,
-        peer_endpoint.address(),
-        .{ .local_settings = settings },
-        .{
-            .receive_keys = keys,
-            .send_keys = keys,
-            .local_connection_id = "wt-control-server",
-            .peer_connection_id = "wt-control-client",
-            .one_rtt = .{
-                .max_datagram_size = 1200,
-                .pacing_max_burst_packets = 1,
-            },
-        },
-    );
-    defer h3.deinit();
-    h3.control.settings.markSent(settings);
-    h3.control.settings.markReceived(settings);
-    try h3.connect_datagrams.register(0);
-    try h3.outbound_bodies.reserveOpen(0);
-    h3.outbound_bodies.appendOpenAssumeCapacity(
-        0,
-        quic.stream_state.SendState.init(0),
-        null,
-    );
-    var streams = try handshake_stream.initRegistry(
-        allocator,
-        .init(0),
-        .server,
-        settings,
-        settings,
-        8,
-        1,
-        null,
-    );
-    var streams_owned = true;
-    defer if (streams_owned) streams.deinit();
-    var dispatcher = quic.endpoint_dispatcher.Dispatcher.init(
-        allocator,
-        &server_endpoint,
-    );
-    defer dispatcher.deinit();
-    const handle: quic.endpoint_dispatcher.ConnectionHandle = 13;
-    try dispatcher.registerConnection(handle, &h3.established.connection);
-    var accepted = runtime.EndpointAcceptedSession{
-        .handle = handle,
-        .dispatcher = &dispatcher,
-        .h3 = &h3,
-        .request = undefined,
-        .session_id = .init(0),
-        .streams = streams,
-        .control = try session_control.Control.init(std.testing.allocator, .init(0)),
-    };
-    streams_owned = false;
-    defer {
-        accepted.control.deinit();
-        accepted.streams.deinit();
-    }
-    const reset_stream_id = try accepted.openBidirectionalStream();
-    const stopped_stream_id: u62 = 4;
-    _ = try accepted.streams.registerPeer(
-        stopped_stream_id,
-        .bidirectional,
-    );
-    const close_send_id: u62 = 15;
-    _ = try accepted.streams.registerLocal(
-        close_send_id,
-        .unidirectional,
-    );
-    const close_receive_id: u62 = 14;
-    const close_receive = try accepted.streams.registerPeer(
-        close_receive_id,
-        .unidirectional,
-    );
-
-    // Freeze std.Io's awake clock so a blocking pacing loop cannot make
-    // progress. The one-attempt endpoint methods must return PacingLimited
-    // without ever invoking the wrapped sleep operation.
-    var fixed_io = FixedClockIo{
-        .delegate = server_endpoint.io,
-        .now_ns = 1_000_000,
-    };
-    var fixed_vtable = server_endpoint.io.vtable.*;
-    fixed_vtable.now = FixedClockIo.now;
-    fixed_vtable.sleep = FixedClockIo.sleep;
-    fixed_vtable.netSend = FixedClockIo.netSend;
-    server_endpoint.io = .{
-        .userdata = &fixed_io,
-        .vtable = &fixed_vtable,
-    };
-    defer server_endpoint.io = fixed_io.delegate;
-
-    const fill = [_]quic.Frame{
-        .{ .stream = .{ .stream_id = 0, .data = &.{} } },
-        .{ .padding = .{ .len = 1150 } },
-    };
-    try h3.established.connection.sendAt(&fill, 1_000_000);
-    const next_packet_number = h3.established.connection.next_packet_number;
-    try std.testing.expectError(
-        error.PacingLimited,
-        accepted.resetStream(reset_stream_id, 41),
-    );
-    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
-    try std.testing.expectEqual(@as(usize, 1), fixed_io.send_calls);
-    try std.testing.expectEqual(
-        next_packet_number,
-        h3.established.connection.next_packet_number,
-    );
-    try std.testing.expect(
-        accepted.streams.get(reset_stream_id).?.send_reset == null,
-    );
-    try std.testing.expect(
-        h3.established.connection.sendStreamStats(reset_stream_id).?.reset ==
-            null,
-    );
-    const reset_timer = dispatcher.nextTimerDeadline() orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expectEqual(handle, reset_timer.connection_id);
-    try std.testing.expectEqual(
-        quic.one_rtt.TimerDeadlineKind.pacing,
-        reset_timer.timer.kind,
-    );
-    fixed_io.now_ns = @intCast(reset_timer.timer.deadline_ns);
-    const reset_timer_event = (try dispatcher.serviceNextTimerAt(
-        reset_timer.timer.deadline_ns,
-    )) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(
-        quic.one_rtt.TimerDeadlineKind.pacing,
-        reset_timer_event.timer.kind,
-    );
-    try accepted.resetStream(reset_stream_id, 41);
-    try std.testing.expect(
-        accepted.streams.get(reset_stream_id).?.send_reset != null,
-    );
-
-    const reset_packet_number = h3.established.connection.next_packet_number;
-    try std.testing.expectError(
-        error.PacingLimited,
-        accepted.stopStream(stopped_stream_id, 42),
-    );
-    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
-    try std.testing.expectEqual(
-        reset_packet_number,
-        h3.established.connection.next_packet_number,
-    );
-    try std.testing.expect(
-        accepted.streams.get(stopped_stream_id).?.stop_sent == null,
-    );
-    try std.testing.expect(
-        h3.established.connection.recvStreamStats(stopped_stream_id).?
-            .stop_sending_sent == null,
-    );
-
-    const stop_timer = dispatcher.nextTimerDeadline() orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expectEqual(handle, stop_timer.connection_id);
-    try std.testing.expectEqual(
-        quic.one_rtt.TimerDeadlineKind.pacing,
-        stop_timer.timer.kind,
-    );
-    fixed_io.now_ns = @intCast(stop_timer.timer.deadline_ns);
-    const stop_timer_event = (try dispatcher.serviceNextTimerAt(
-        stop_timer.timer.deadline_ns,
-    )) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(
-        quic.one_rtt.TimerDeadlineKind.pacing,
-        stop_timer_event.timer.kind,
-    );
-    try accepted.stopStream(stopped_stream_id, 42);
-    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
-    try std.testing.expectEqual(@as(usize, 3), fixed_io.send_calls);
-    try std.testing.expect(
-        accepted.streams.get(stopped_stream_id).?.stop_sent != null,
-    );
-
-    const before_datagram = accepted.stats();
-    const datagram_packet_number =
-        h3.established.connection.next_packet_number;
-    try std.testing.expectError(
-        error.PacingLimited,
-        accepted.sendDatagram("single-attempt"),
-    );
-    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
-    try std.testing.expectEqual(
-        datagram_packet_number,
-        h3.established.connection.next_packet_number,
-    );
-    try std.testing.expectEqual(
-        before_datagram.datagrams_sent,
-        accepted.stats().datagrams_sent,
-    );
-    const datagram_timer = dispatcher.nextTimerDeadline() orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expectEqual(
-        quic.one_rtt.TimerDeadlineKind.pacing,
-        datagram_timer.timer.kind,
-    );
-    fixed_io.now_ns = @intCast(datagram_timer.timer.deadline_ns);
-    _ = (try dispatcher.serviceNextTimerAt(
-        datagram_timer.timer.deadline_ns,
-    )) orelse return error.TestUnexpectedResult;
-    try accepted.sendDatagram("single-attempt");
-    try std.testing.expectEqual(
-        before_datagram.datagrams_sent + 1,
-        accepted.stats().datagrams_sent,
-    );
-
-    const bounded_deadline = std.Io.Clock.Timestamp.fromNow(
-        server_endpoint.io,
-        .{ .raw = .fromSeconds(1), .clock = .awake },
-    );
-    try std.testing.expectError(
-        error.PacingLimited,
-        accepted.trySendDatagramWithDeadline(
-            "bounded-attempt",
-            bounded_deadline,
-        ),
-    );
-    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
-    try std.testing.expectEqual(
-        before_datagram.datagrams_sent + 1,
-        accepted.stats().datagrams_sent,
-    );
-    const bounded_timer = dispatcher.nextTimerDeadline() orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expectEqual(
-        quic.one_rtt.TimerDeadlineKind.pacing,
-        bounded_timer.timer.kind,
-    );
-    fixed_io.now_ns = @intCast(bounded_timer.timer.deadline_ns);
-    _ = (try dispatcher.serviceNextTimerAt(
-        bounded_timer.timer.deadline_ns,
-    )) orelse return error.TestUnexpectedResult;
-    try accepted.trySendDatagramWithDeadline(
-        "bounded-attempt",
-        bounded_deadline,
-    );
-    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
-    try std.testing.expectEqual(
-        before_datagram.datagrams_sent + 2,
-        accepted.stats().datagrams_sent,
-    );
-
-    var datagram_batch_count: usize = 99;
-    try std.testing.expectError(
-        error.PacingLimited,
-        accepted.sendDatagrams(
-            &.{ "batch-one", "batch-two" },
-            &datagram_batch_count,
-        ),
-    );
-    try std.testing.expectEqual(@as(usize, 0), datagram_batch_count);
-    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
-    try std.testing.expectEqual(
-        before_datagram.datagrams_sent + 2,
-        accepted.stats().datagrams_sent,
-    );
-    const datagram_batch_timer = dispatcher.nextTimerDeadline() orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expectEqual(
-        quic.one_rtt.TimerDeadlineKind.pacing,
-        datagram_batch_timer.timer.kind,
-    );
-    fixed_io.now_ns = @intCast(datagram_batch_timer.timer.deadline_ns);
-    _ = (try dispatcher.serviceNextTimerAt(
-        datagram_batch_timer.timer.deadline_ns,
-    )) orelse return error.TestUnexpectedResult;
-    try accepted.sendDatagrams(
-        &.{ "batch-one", "batch-two" },
-        &datagram_batch_count,
-    );
-    // One pacing slot admits one QUIC packet. Both small logical DATAGRAMs
-    // fit in that packet, so the committed prefix includes both payloads.
-    try std.testing.expectEqual(@as(usize, 2), datagram_batch_count);
-    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
-    try std.testing.expectEqual(
-        before_datagram.datagrams_sent + 4,
-        accepted.stats().datagrams_sent,
-    );
-
-    const body_offset = h3.outbound_bodies.find(0).?.send.next_offset;
-    try std.testing.expectError(
-        error.PacingLimited,
-        accepted.sendSessionData("not-sent", false),
-    );
-    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
-    try std.testing.expectEqual(
-        body_offset,
-        h3.outbound_bodies.find(0).?.send.next_offset,
-    );
-    const body_timer = dispatcher.nextTimerDeadline() orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expectEqual(handle, body_timer.connection_id);
-    try std.testing.expectEqual(
-        quic.one_rtt.TimerDeadlineKind.pacing,
-        body_timer.timer.kind,
-    );
-    fixed_io.now_ns = @intCast(body_timer.timer.deadline_ns);
-    _ = (try dispatcher.serviceNextTimerAt(
-        body_timer.timer.deadline_ns,
-    )) orelse return error.TestUnexpectedResult;
-    var body_sent = false;
-    for (0..4) |_| {
-        accepted.sendSessionDataSlices(
-            &.{ "unknown-", &.{}, "capsule" },
-            false,
-        ) catch |err| switch (err) {
-            error.PacingLimited => {
-                const retry_timer = dispatcher.nextTimerDeadline() orelse
-                    return error.TestUnexpectedResult;
-                try std.testing.expectEqual(
-                    quic.one_rtt.TimerDeadlineKind.pacing,
-                    retry_timer.timer.kind,
-                );
-                fixed_io.now_ns = @intCast(retry_timer.timer.deadline_ns);
-                _ = (try dispatcher.serviceNextTimerAt(
-                    retry_timer.timer.deadline_ns,
-                )) orelse return error.TestUnexpectedResult;
-                continue;
-            },
-            else => return err,
-        };
-        body_sent = true;
-        break;
-    }
-    try std.testing.expect(body_sent);
-    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
-    try std.testing.expect(
-        h3.outbound_bodies.find(0).?.send.next_offset > body_offset,
-    );
-
-    const before_drain_offset = h3.outbound_bodies.find(0).?.send.next_offset;
-    try std.testing.expectError(error.PacingLimited, accepted.drain());
-    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
-    try std.testing.expect(!accepted.control.local_drain_sent);
-    try std.testing.expectEqual(
-        before_drain_offset,
-        h3.outbound_bodies.find(0).?.send.next_offset,
-    );
-    const drain_timer = dispatcher.nextTimerDeadline() orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expectEqual(
-        quic.one_rtt.TimerDeadlineKind.pacing,
-        drain_timer.timer.kind,
-    );
-    fixed_io.now_ns = @intCast(drain_timer.timer.deadline_ns);
-    _ = (try dispatcher.serviceNextTimerAt(
-        drain_timer.timer.deadline_ns,
-    )) orelse return error.TestUnexpectedResult;
-    try accepted.drain();
-    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
-    try std.testing.expect(accepted.control.local_drain_sent);
-    try std.testing.expect(
-        h3.outbound_bodies.find(0).?.send.next_offset > before_drain_offset,
-    );
-
-    // Keep the earlier bidi cancellation fixtures out of close cleanup so
-    // this section has exactly one send-only and one receive-only stream.
-    accepted.streams.get(reset_stream_id).?.peer_fin = true;
-    accepted.streams.get(stopped_stream_id).?.local_fin = true;
-    const close_body_offset =
-        h3.outbound_bodies.find(0).?.send.next_offset;
-    try std.testing.expectError(
-        error.PacingLimited,
-        accepted.close(71, "single-attempt close"),
-    );
-    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
-    try std.testing.expect(!accepted.control.local_close_sent);
-    try std.testing.expectEqual(
-        close_body_offset,
-        h3.outbound_bodies.find(0).?.send.next_offset,
-    );
-
-    const close_timer = dispatcher.nextTimerDeadline() orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expectEqual(
-        quic.one_rtt.TimerDeadlineKind.pacing,
-        close_timer.timer.kind,
-    );
-    fixed_io.now_ns = @intCast(close_timer.timer.deadline_ns);
-    _ = (try dispatcher.serviceNextTimerAt(
-        close_timer.timer.deadline_ns,
-    )) orelse return error.TestUnexpectedResult;
-    try accepted.close(71, "single-attempt close");
-    try std.testing.expect(accepted.control.local_close_sent);
-    try std.testing.expect(accepted.control.state.closed);
-    try std.testing.expect(h3.outbound_bodies.find(0) == null);
-    try std.testing.expect(
-        accepted.streams.get(close_send_id).?.send_reset == null,
-    );
-    try std.testing.expect(close_receive.stop_sent == null);
-
-    // Each later invocation advances at most one stream-control packet. A
-    // paced failure commits neither registry state nor a packet number.
-    const cleanup_packet_number =
-        h3.established.connection.next_packet_number;
-    try std.testing.expectError(
-        error.PacingLimited,
-        accepted.close(71, "ignored after capsule commit"),
-    );
-    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
-    try std.testing.expectEqual(
-        cleanup_packet_number,
-        h3.established.connection.next_packet_number,
-    );
-    try std.testing.expect(
-        accepted.streams.get(close_send_id).?.send_reset == null,
-    );
-    const reset_close_timer = dispatcher.nextTimerDeadline() orelse
-        return error.TestUnexpectedResult;
-    fixed_io.now_ns = @intCast(reset_close_timer.timer.deadline_ns);
-    _ = (try dispatcher.serviceNextTimerAt(
-        reset_close_timer.timer.deadline_ns,
-    )) orelse return error.TestUnexpectedResult;
-    try accepted.close(71, "ignored after capsule commit");
-    try std.testing.expect(
-        accepted.streams.get(close_send_id).?.send_reset != null,
-    );
-    try std.testing.expect(close_receive.stop_sent == null);
-
-    try std.testing.expectError(
-        error.PacingLimited,
-        accepted.close(71, "ignored after capsule commit"),
-    );
-    const stop_close_timer = dispatcher.nextTimerDeadline() orelse
-        return error.TestUnexpectedResult;
-    fixed_io.now_ns = @intCast(stop_close_timer.timer.deadline_ns);
-    _ = (try dispatcher.serviceNextTimerAt(
-        stop_close_timer.timer.deadline_ns,
-    )) orelse return error.TestUnexpectedResult;
-    try accepted.close(71, "ignored after capsule commit");
-    try std.testing.expect(close_receive.stop_sent != null);
-    const send_calls_after_cleanup = fixed_io.send_calls;
-    try accepted.close(71, "ignored after capsule commit");
-    try std.testing.expectEqual(
-        send_calls_after_cleanup,
-        fixed_io.send_calls,
-    );
-    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+comptime {
+    _ = @import("endpoint_dispatcher/pacing_tests.zig");
 }
 
 test "WebTransport endpoint reports peer close before paced response FIN" {
+    try native_protocol_io.run(peerCloseBeforeResponseFin);
+}
+
+fn peerCloseBeforeResponseFin(io: std.Io) !void {
     const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
 
     var server_endpoint = try quic.runtime.Endpoint.bind(
         allocator,
@@ -1820,18 +1311,13 @@ test "WebTransport endpoint reports peer close before paced response FIN" {
     }
 
     var fixed_io = FixedClockIo{
-        .delegate = server_endpoint.io,
-        .now_ns = 1_000_000,
+        .backend = .init(allocator, .{ .async_limit = .nothing }),
+        .delegate_io = server_endpoint.io,
+        .now_ns = .init(1_000_000),
     };
-    var fixed_vtable = server_endpoint.io.vtable.*;
-    fixed_vtable.now = FixedClockIo.now;
-    fixed_vtable.sleep = FixedClockIo.sleep;
-    fixed_vtable.netSend = FixedClockIo.netSend;
-    server_endpoint.io = .{
-        .userdata = &fixed_io,
-        .vtable = &fixed_vtable,
-    };
-    defer server_endpoint.io = fixed_io.delegate;
+    defer fixed_io.backend.deinit();
+    server_endpoint.io = fixed_io.io();
+    defer server_endpoint.io = fixed_io.baseIo();
 
     try h3.established.connection.sendAt(
         &.{.{ .padding = .{ .len = 1160 } }},
@@ -1873,7 +1359,7 @@ test "WebTransport endpoint reports peer close before paced response FIN" {
     try std.testing.expect(accepted.control.terminal_reported);
     try std.testing.expect(accepted.close_response_pending);
     try std.testing.expect(!accepted.control.local_close_sent);
-    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.duration_sleep_calls.load(.acquire));
 
     try std.testing.expect(
         (try runtime.EndpointServer.testing.pollAcceptedSessionEntry(
@@ -1883,7 +1369,7 @@ test "WebTransport endpoint reports peer close before paced response FIN" {
     );
     try std.testing.expect(accepted.close_response_pending);
     try std.testing.expect(!accepted.control.local_close_sent);
-    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.duration_sleep_calls.load(.acquire));
     const timer = dispatcher.nextTimerDeadline() orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(
@@ -1891,7 +1377,7 @@ test "WebTransport endpoint reports peer close before paced response FIN" {
         timer.timer.kind,
     );
 
-    fixed_io.now_ns = @intCast(timer.timer.deadline_ns);
+    fixed_io.setNow(@intCast(timer.timer.deadline_ns));
     _ = (try dispatcher.serviceNextTimerAt(
         timer.timer.deadline_ns,
     )) orelse return error.TestUnexpectedResult;
@@ -1904,14 +1390,15 @@ test "WebTransport endpoint reports peer close before paced response FIN" {
     try std.testing.expect(!accepted.close_response_pending);
     try std.testing.expect(accepted.control.local_close_sent);
     try std.testing.expect(h3.outbound_bodies.find(0) == null);
-    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.duration_sleep_calls.load(.acquire));
 }
 
 test "WebTransport endpoint stream credit operations do not wait for pacing" {
+    try native_protocol_io.run(streamCreditPacing);
+}
+
+fn streamCreditPacing(io: std.Io) !void {
     const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
 
     var server_endpoint = try quic.runtime.Endpoint.bind(
         allocator,
@@ -2012,18 +1499,13 @@ test "WebTransport endpoint stream credit operations do not wait for pacing" {
     }
 
     var fixed_io = FixedClockIo{
-        .delegate = server_endpoint.io,
-        .now_ns = 1_000_000,
+        .backend = .init(allocator, .{ .async_limit = .nothing }),
+        .delegate_io = server_endpoint.io,
+        .now_ns = .init(1_000_000),
     };
-    var fixed_vtable = server_endpoint.io.vtable.*;
-    fixed_vtable.now = FixedClockIo.now;
-    fixed_vtable.sleep = FixedClockIo.sleep;
-    fixed_vtable.netSend = FixedClockIo.netSend;
-    server_endpoint.io = .{
-        .userdata = &fixed_io,
-        .vtable = &fixed_vtable,
-    };
-    defer server_endpoint.io = fixed_io.delegate;
+    defer fixed_io.backend.deinit();
+    server_endpoint.io = fixed_io.io();
+    defer server_endpoint.io = fixed_io.baseIo();
 
     try h3.established.connection.sendAt(
         &.{.{ .padding = .{ .len = 1160 } }},
@@ -2033,7 +1515,7 @@ test "WebTransport endpoint stream credit operations do not wait for pacing" {
         error.PacingLimited,
         accepted.openBidirectionalStream(),
     );
-    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.duration_sleep_calls.load(.acquire));
     try std.testing.expectEqual(
         @as(u64, 1),
         h3.established.connection.nextLocalBidirectionalStreamId(),
@@ -2045,7 +1527,7 @@ test "WebTransport endpoint stream credit operations do not wait for pacing" {
         quic.one_rtt.TimerDeadlineKind.pacing,
         bidi_timer.timer.kind,
     );
-    fixed_io.now_ns = @intCast(bidi_timer.timer.deadline_ns);
+    fixed_io.setNow(@intCast(bidi_timer.timer.deadline_ns));
     _ = (try dispatcher.serviceNextTimerAt(
         bidi_timer.timer.deadline_ns,
     )) orelse return error.TestUnexpectedResult;
@@ -2061,7 +1543,7 @@ test "WebTransport endpoint stream credit operations do not wait for pacing" {
         &h3.established.connection,
         1,
         &.{.{ .max_streams_bidi = .{ .maximum_streams = 1 } }},
-        @intCast(fixed_io.now_ns),
+        @intCast(fixed_io.now_ns.load(.acquire)),
         .not_ect,
     );
     try std.testing.expectEqual(
@@ -2073,7 +1555,7 @@ test "WebTransport endpoint stream credit operations do not wait for pacing" {
         error.PacingLimited,
         accepted.openUnidirectionalStream(),
     );
-    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.duration_sleep_calls.load(.acquire));
     try std.testing.expectEqual(
         @as(u64, 15),
         h3.established.connection.nextLocalUnidirectionalStreamId(),
@@ -2081,7 +1563,7 @@ test "WebTransport endpoint stream credit operations do not wait for pacing" {
     try std.testing.expect(accepted.streams.get(15) == null);
     const uni_timer = dispatcher.nextTimerDeadline() orelse
         return error.TestUnexpectedResult;
-    fixed_io.now_ns = @intCast(uni_timer.timer.deadline_ns);
+    fixed_io.setNow(@intCast(uni_timer.timer.deadline_ns));
     _ = (try dispatcher.serviceNextTimerAt(
         uni_timer.timer.deadline_ns,
     )) orelse return error.TestUnexpectedResult;
@@ -2093,7 +1575,7 @@ test "WebTransport endpoint stream credit operations do not wait for pacing" {
         &h3.established.connection,
         2,
         &.{.{ .max_streams_uni = .{ .maximum_streams = 4 } }},
-        @intCast(fixed_io.now_ns),
+        @intCast(fixed_io.now_ns.load(.acquire)),
         .not_ect,
     );
     try std.testing.expectEqual(
@@ -2105,13 +1587,13 @@ test "WebTransport endpoint stream credit operations do not wait for pacing" {
         error.PacingLimited,
         accepted.releaseCompletedPeerStream(peer_stream_id),
     );
-    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.duration_sleep_calls.load(.acquire));
     try std.testing.expect(
         !h3.established.connection.peerStreamClosed(peer_stream_id),
     );
     const release_timer = dispatcher.nextTimerDeadline() orelse
         return error.TestUnexpectedResult;
-    fixed_io.now_ns = @intCast(release_timer.timer.deadline_ns);
+    fixed_io.setNow(@intCast(release_timer.timer.deadline_ns));
     _ = (try dispatcher.serviceNextTimerAt(
         release_timer.timer.deadline_ns,
     )) orelse return error.TestUnexpectedResult;
@@ -2121,14 +1603,15 @@ test "WebTransport endpoint stream credit operations do not wait for pacing" {
     try std.testing.expect(
         h3.established.connection.peerStreamClosed(peer_stream_id),
     );
-    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.duration_sleep_calls.load(.acquire));
 }
 
 test "WebTransport dispatcher client defers terminal cleanup pacing" {
+    try native_protocol_io.run(clientCleanupPacing);
+}
+
+fn clientCleanupPacing(io: std.Io) !void {
     const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
 
     var endpoint = try quic.runtime.Endpoint.bind(
         allocator,
@@ -2253,21 +1736,16 @@ test "WebTransport dispatcher client defers terminal cleanup pacing" {
     const framed_len = try writeDataFrame(&framed, capsule);
 
     var fixed_io = FixedClockIo{
-        .delegate = endpoint.io,
-        .now_ns = 4_000_000,
+        .backend = .init(allocator, .{ .async_limit = .nothing }),
+        .delegate_io = endpoint.io,
+        .now_ns = .init(4_000_000),
     };
-    var fixed_vtable = endpoint.io.vtable.*;
-    fixed_vtable.now = FixedClockIo.now;
-    fixed_vtable.sleep = FixedClockIo.sleep;
-    fixed_vtable.netSend = FixedClockIo.netSend;
-    endpoint.io = .{
-        .userdata = &fixed_io,
-        .vtable = &fixed_vtable,
-    };
-    defer endpoint.io = fixed_io.delegate;
+    defer fixed_io.backend.deinit();
+    endpoint.io = fixed_io.io();
+    defer endpoint.io = fixed_io.baseIo();
     quic.one_rtt.testing.exhaustPacingAt(
         &session.h3.established.connection,
-        @intCast(fixed_io.now_ns),
+        @intCast(fixed_io.now_ns.load(.acquire)),
     );
     const drain_packet_number =
         session.h3.established.connection.next_packet_number;
@@ -2277,19 +1755,19 @@ test "WebTransport dispatcher client defers terminal cleanup pacing" {
         drain_packet_number,
         session.h3.established.connection.next_packet_number,
     );
-    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.duration_sleep_calls.load(.acquire));
     var timer = dispatcher.nextTimerDeadline() orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(
         quic.one_rtt.TimerDeadlineKind.pacing,
         timer.timer.kind,
     );
-    fixed_io.now_ns = @intCast(timer.timer.deadline_ns);
+    fixed_io.setNow(@intCast(timer.timer.deadline_ns));
     _ = (try dispatcher.serviceNextTimerAt(timer.timer.deadline_ns)) orelse
         return error.TestUnexpectedResult;
     try session.drain();
     try std.testing.expect(session.control.local_drain_sent);
-    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.duration_sleep_calls.load(.acquire));
 
     // Exercise advisory DRAIN while the Session is open, then receive the
     // terminal peer CLOSE/FIN and defer its response cleanup independently.
@@ -2301,12 +1779,12 @@ test "WebTransport dispatcher client defers terminal cleanup pacing" {
             .data = framed[0..framed_len],
             .fin = true,
         } }},
-        @intCast(fixed_io.now_ns),
+        @intCast(fixed_io.now_ns.load(.acquire)),
         .not_ect,
     );
     quic.one_rtt.testing.exhaustPacingAt(
         &session.h3.established.connection,
-        @intCast(fixed_io.now_ns),
+        @intCast(fixed_io.now_ns.load(.acquire)),
     );
 
     const event = (try session.pollSessionEvent()) orelse
@@ -2316,7 +1794,7 @@ test "WebTransport dispatcher client defers terminal cleanup pacing" {
     try std.testing.expectEqualStrings("client peer close", event.closed.reason);
     try std.testing.expect(session.close_response_pending);
     try std.testing.expect(!session.control.local_close_sent);
-    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.duration_sleep_calls.load(.acquire));
 
     const packet_number = session.h3.established.connection.next_packet_number;
     try std.testing.expect((try session.pollSessionEvent()) == null);
@@ -2325,7 +1803,7 @@ test "WebTransport dispatcher client defers terminal cleanup pacing" {
         packet_number,
         session.h3.established.connection.next_packet_number,
     );
-    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.duration_sleep_calls.load(.acquire));
 
     timer = dispatcher.nextTimerDeadline() orelse
         return error.TestUnexpectedResult;
@@ -2333,27 +1811,27 @@ test "WebTransport dispatcher client defers terminal cleanup pacing" {
         quic.one_rtt.TimerDeadlineKind.pacing,
         timer.timer.kind,
     );
-    fixed_io.now_ns = @intCast(timer.timer.deadline_ns);
+    fixed_io.setNow(@intCast(timer.timer.deadline_ns));
     _ = (try dispatcher.serviceNextTimerAt(timer.timer.deadline_ns)) orelse
         return error.TestUnexpectedResult;
     try std.testing.expect((try session.pollSessionEvent()) == null);
     try std.testing.expect(!session.close_response_pending);
     try std.testing.expect(session.control.local_close_sent);
     try std.testing.expect(session.h3.outbound_bodies.find(0) == null);
-    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.duration_sleep_calls.load(.acquire));
 
     // Each later poll terminates at most one associated direction. Both the
     // RESET_STREAM and STOP_SENDING are paced and remain retryable.
     inline for (.{ "reset", "stop" }) |stage| {
         try std.testing.expect((try session.pollSessionEvent()) == null);
-        try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+        try std.testing.expectEqual(@as(usize, 0), fixed_io.duration_sleep_calls.load(.acquire));
         timer = dispatcher.nextTimerDeadline() orelse
             return error.TestUnexpectedResult;
         try std.testing.expectEqual(
             quic.one_rtt.TimerDeadlineKind.pacing,
             timer.timer.kind,
         );
-        fixed_io.now_ns = @intCast(timer.timer.deadline_ns);
+        fixed_io.setNow(@intCast(timer.timer.deadline_ns));
         _ = (try dispatcher.serviceNextTimerAt(timer.timer.deadline_ns)) orelse
             return error.TestUnexpectedResult;
         try std.testing.expect((try session.pollSessionEvent()) == null);
@@ -2364,7 +1842,7 @@ test "WebTransport dispatcher client defers terminal cleanup pacing" {
         } else {
             try std.testing.expect(state.stop_sent != null);
         }
-        try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+        try std.testing.expectEqual(@as(usize, 0), fixed_io.duration_sleep_calls.load(.acquire));
     }
 }
 
@@ -3240,10 +2718,11 @@ test "WebTransport client polls a dispatcher-injected packet" {
 }
 
 test "WebTransport client CONNECT polling defers paced feedback and credit" {
+    try native_protocol_io.run(connectFeedbackPacing);
+}
+
+fn connectFeedbackPacing(io: std.Io) !void {
     const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
 
     const client_cid = "wt-paced-client";
     const server_cid = "wt-paced-server";
@@ -3371,25 +2850,20 @@ test "WebTransport client CONNECT polling defers paced feedback and credit" {
     const decoder_offset = pending.h3.?.qpack_decoder_send.next_offset;
 
     var fixed_io = FixedClockIo{
-        .delegate = client_endpoint.io,
-        .now_ns = 1_000_000,
+        .backend = .init(allocator, .{ .async_limit = .nothing }),
+        .delegate_io = client_endpoint.io,
+        .now_ns = .init(1_000_000),
     };
-    var fixed_vtable = client_endpoint.io.vtable.*;
-    fixed_vtable.now = FixedClockIo.now;
-    fixed_vtable.sleep = FixedClockIo.sleep;
-    fixed_vtable.netSend = FixedClockIo.netSend;
-    client_endpoint.io = .{
-        .userdata = &fixed_io,
-        .vtable = &fixed_vtable,
-    };
-    defer client_endpoint.io = fixed_io.delegate;
+    defer fixed_io.backend.deinit();
+    client_endpoint.io = fixed_io.io();
+    defer client_endpoint.io = fixed_io.baseIo();
     quic.one_rtt.testing.exhaustPacingAt(
         pending.connection(),
-        @intCast(fixed_io.now_ns),
+        @intCast(fixed_io.now_ns.load(.acquire)),
     );
 
     try pending.processPacket(&response_packet);
-    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.duration_sleep_calls.load(.acquire));
     try std.testing.expectEqual(
         feedback_len,
         pending.h3.?.qpack_decode.pendingDecoderInstructions().len,
@@ -3412,7 +2886,7 @@ test "WebTransport client CONNECT polling defers paced feedback and credit" {
     )) == null);
     try std.testing.expect(pending.h3.?.dispatcherBound());
     try std.testing.expectEqual(@as(usize, 1), dispatcher.connectionCount());
-    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.duration_sleep_calls.load(.acquire));
     try std.testing.expectEqual(packet_number, pending.connection().next_packet_number);
     try std.testing.expectEqual(
         response_available,
@@ -3432,7 +2906,7 @@ test "WebTransport client CONNECT polling defers paced feedback and credit" {
             quic.one_rtt.TimerDeadlineKind.pacing,
             timer.timer.kind,
         );
-        fixed_io.now_ns = @intCast(timer.timer.deadline_ns);
+        fixed_io.setNow(@intCast(timer.timer.deadline_ns));
         _ = (try dispatcher.serviceNextTimerAt(timer.timer.deadline_ns)) orelse
             return error.TestUnexpectedResult;
         const before =
@@ -3457,7 +2931,7 @@ test "WebTransport client CONNECT polling defers paced feedback and credit" {
                 pending.sessionId().value,
             ).?,
         );
-        try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+        try std.testing.expectEqual(@as(usize, 0), fixed_io.duration_sleep_calls.load(.acquire));
     }
     try std.testing.expect(saw_feedback_progress);
     try std.testing.expect(saw_credit_deferral);
@@ -3491,7 +2965,7 @@ test "WebTransport client CONNECT polling defers paced feedback and credit" {
     var session_owned = true;
     defer if (session_owned) session.deinit();
     try std.testing.expectEqual(@as(usize, 1), dispatcher.connectionCount());
-    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.duration_sleep_calls.load(.acquire));
     try std.testing.expectEqual(@as(u16, 200), session.response.status);
     session.deinit();
     session_owned = false;
@@ -3499,10 +2973,11 @@ test "WebTransport client CONNECT polling defers paced feedback and credit" {
 }
 
 test "WebTransport dispatcher CONNECT attempt deinit never waits for pacing" {
+    try native_protocol_io.run(connectDeinitPacing);
+}
+
+fn connectDeinitPacing(io: std.Io) !void {
     const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
 
     var endpoint = try quic.runtime.Endpoint.bind(
         allocator,
@@ -3593,24 +3068,22 @@ test "WebTransport dispatcher CONNECT attempt deinit never waits for pacing" {
     attempt.dispatcher_handle = handle;
 
     var fixed_io = FixedClockIo{
-        .delegate = endpoint.io,
-        .now_ns = 6_000_000,
+        .backend = .init(allocator, .{ .async_limit = .nothing }),
+        .delegate_io = endpoint.io,
+        .now_ns = .init(6_000_000),
     };
-    var fixed_vtable = endpoint.io.vtable.*;
-    fixed_vtable.now = FixedClockIo.now;
-    fixed_vtable.sleep = FixedClockIo.sleep;
-    fixed_vtable.netSend = FixedClockIo.netSend;
-    endpoint.io = .{ .userdata = &fixed_io, .vtable = &fixed_vtable };
-    defer endpoint.io = fixed_io.delegate;
+    defer fixed_io.backend.deinit();
+    endpoint.io = fixed_io.io();
+    defer endpoint.io = fixed_io.baseIo();
     quic.one_rtt.testing.exhaustPacingAt(
         &attempt.h3.?.established.connection,
-        @intCast(fixed_io.now_ns),
+        @intCast(fixed_io.now_ns.load(.acquire)),
     );
 
     attempt.deinit();
     restored_owned = true;
     try std.testing.expectEqual(@as(usize, 0), dispatcher.connectionCount());
-    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.duration_sleep_calls.load(.acquire));
     try std.testing.expectEqual(
         @as(usize, 0),
         http3.runtime.testing.clientRequestCount(&restored),
@@ -3619,10 +3092,11 @@ test "WebTransport dispatcher CONNECT attempt deinit never waits for pacing" {
 }
 
 test "WebTransport dispatcher client stream polls do not wait for credit" {
+    try native_protocol_io.run(streamPollCredit);
+}
+
+fn streamPollCredit(io: std.Io) !void {
     const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
 
     var endpoint = try quic.runtime.Endpoint.bind(
         allocator,
@@ -3723,18 +3197,13 @@ test "WebTransport dispatcher client stream polls do not wait for credit" {
     );
 
     var fixed_io = FixedClockIo{
-        .delegate = endpoint.io,
-        .now_ns = 3_000_000,
+        .backend = .init(allocator, .{ .async_limit = .nothing }),
+        .delegate_io = endpoint.io,
+        .now_ns = .init(3_000_000),
     };
-    var fixed_vtable = endpoint.io.vtable.*;
-    fixed_vtable.now = FixedClockIo.now;
-    fixed_vtable.sleep = FixedClockIo.sleep;
-    fixed_vtable.netSend = FixedClockIo.netSend;
-    endpoint.io = .{
-        .userdata = &fixed_io,
-        .vtable = &fixed_vtable,
-    };
-    defer endpoint.io = fixed_io.delegate;
+    defer fixed_io.backend.deinit();
+    endpoint.io = fixed_io.io();
+    defer endpoint.io = fixed_io.baseIo();
 
     var incremental_bytes: std.ArrayList(u8) = .empty;
     defer incremental_bytes.deinit(allocator);
@@ -3751,12 +3220,12 @@ test "WebTransport dispatcher client stream polls do not wait for credit" {
             .stream_id = 3,
             .data = incremental_bytes.items,
         } }},
-        @intCast(fixed_io.now_ns),
+        @intCast(fixed_io.now_ns.load(.acquire)),
         .not_ect,
     );
     quic.one_rtt.testing.exhaustPacingAt(
         &session.h3.established.connection,
-        @intCast(fixed_io.now_ns),
+        @intCast(fixed_io.now_ns.load(.acquire)),
     );
     const packet_number = session.h3.established.connection.next_packet_number;
     var buffer: [64]u8 = undefined;
@@ -3764,7 +3233,7 @@ test "WebTransport dispatcher client stream polls do not wait for credit" {
     try std.testing.expect(incremental == .data);
     try std.testing.expectEqual(@as(u62, 3), incremental.data.stream_id);
     try std.testing.expectEqualStrings(&([_]u8{'i'} ** 40), buffer[0..incremental.data.bytes]);
-    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.duration_sleep_calls.load(.acquire));
     try std.testing.expectEqual(packet_number, session.h3.established.connection.next_packet_number);
     try std.testing.expectEqual(@as(u64, 40), session.streams.get(3).?.bytes_received);
     try std.testing.expectEqual(@as(usize, 0), quic.one_rtt.testing.receiveStreamAvailableLen(&session.h3.established.connection, 3).?);
@@ -3772,7 +3241,7 @@ test "WebTransport dispatcher client stream polls do not wait for credit" {
     for (0..16) |_| {
         if (session.h3.established.connection.receive_credit_retry_deadline_ns == null) break;
         const timer = dispatcher.nextTimerDeadline().?;
-        fixed_io.now_ns = @intCast(timer.timer.deadline_ns);
+        fixed_io.setNow(@intCast(timer.timer.deadline_ns));
         _ = (try dispatcher.serviceNextTimerAt(timer.timer.deadline_ns)) orelse return error.TestUnexpectedResult;
     }
     try std.testing.expect(session.h3.established.connection.receive_credit_retry_deadline_ns == null);
@@ -3794,24 +3263,24 @@ test "WebTransport dispatcher client stream polls do not wait for credit" {
             .data = whole_bytes.items,
             .fin = true,
         } }},
-        @intCast(fixed_io.now_ns),
+        @intCast(fixed_io.now_ns.load(.acquire)),
         .not_ect,
     );
     quic.one_rtt.testing.exhaustPacingAt(
         &session.h3.established.connection,
-        @intCast(fixed_io.now_ns),
+        @intCast(fixed_io.now_ns.load(.acquire)),
     );
     var whole = (try session.pollCompleteStream()) orelse return error.TestUnexpectedResult;
     defer whole.deinit();
     try std.testing.expectEqual(@as(u62, 7), whole.stream_id);
     try std.testing.expectEqualStrings(&([_]u8{'w'} ** 40), whole.payload);
     try std.testing.expectEqual(@as(u64, 40), session.streams.get(7).?.bytes_received);
-    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.duration_sleep_calls.load(.acquire));
     try std.testing.expect(session.h3.established.connection.receive_credit_retry_deadline_ns != null);
     for (0..16) |_| {
         if (session.h3.established.connection.receive_credit_retry_deadline_ns == null) break;
         const timer = dispatcher.nextTimerDeadline().?;
-        fixed_io.now_ns = @intCast(timer.timer.deadline_ns);
+        fixed_io.setNow(@intCast(timer.timer.deadline_ns));
         _ = (try dispatcher.serviceNextTimerAt(timer.timer.deadline_ns)) orelse return error.TestUnexpectedResult;
     }
     try std.testing.expect(session.h3.established.connection.receive_credit_retry_deadline_ns == null);
@@ -3840,7 +3309,7 @@ test "WebTransport dispatcher client stream polls do not wait for credit" {
         .data = "bounded",
     }};
     var bounded_counts = [_]usize{99};
-    const sends_before_bounded_batch = fixed_io.send_calls;
+    const sends_before_bounded_batch = fixed_io.send_calls.load(.acquire);
     try std.testing.expectError(
         error.InvalidDispatcherState,
         session.resetStreamWithDeadline(
@@ -3852,7 +3321,7 @@ test "WebTransport dispatcher client stream polls do not wait for credit" {
             }),
         ),
     );
-    try std.testing.expectEqual(sends_before_bounded_batch, fixed_io.send_calls);
+    try std.testing.expectEqual(sends_before_bounded_batch, fixed_io.send_calls.load(.acquire));
     try std.testing.expectError(
         error.InvalidDispatcherState,
         session.writeStreamsWithDeadline(
@@ -3865,7 +3334,7 @@ test "WebTransport dispatcher client stream polls do not wait for credit" {
         ),
     );
     try std.testing.expectEqual(@as(usize, 0), bounded_counts[0]);
-    try std.testing.expectEqual(sends_before_bounded_batch, fixed_io.send_calls);
+    try std.testing.expectEqual(sends_before_bounded_batch, fixed_io.send_calls.load(.acquire));
     const bounded_state = session.streams.get(bounded_stream) orelse
         return error.TestUnexpectedResult;
     try std.testing.expect(!bounded_state.prefix_sent);
@@ -3875,7 +3344,7 @@ test "WebTransport dispatcher client stream polls do not wait for credit" {
         @as(?webtransport.StreamError, null),
         bounded_state.send_reset,
     );
-    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.duration_sleep_calls.load(.acquire));
 }
 
 test "WebTransport client polls complete rejected CONNECT entity" {
@@ -4030,10 +3499,11 @@ test "WebTransport client polls complete rejected CONNECT entity" {
 }
 
 test "WebTransport client rejection body is not repeated by paced credit" {
+    try native_protocol_io.run(rejectionBodyOnce);
+}
+
+fn rejectionBodyOnce(io: std.Io) !void {
     const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
 
     const client_cid = "wt-reject-client-p";
     const server_cid = "wt-reject-server-p";
@@ -4149,21 +3619,16 @@ test "WebTransport client rejection body is not repeated by paced credit" {
     try dispatcher.registerConnection(handle, pending.connection());
 
     var fixed_io = FixedClockIo{
-        .delegate = client_endpoint.io,
-        .now_ns = 2_000_000,
+        .backend = .init(allocator, .{ .async_limit = .nothing }),
+        .delegate_io = client_endpoint.io,
+        .now_ns = .init(2_000_000),
     };
-    var fixed_vtable = client_endpoint.io.vtable.*;
-    fixed_vtable.now = FixedClockIo.now;
-    fixed_vtable.sleep = FixedClockIo.sleep;
-    fixed_vtable.netSend = FixedClockIo.netSend;
-    client_endpoint.io = .{
-        .userdata = &fixed_io,
-        .vtable = &fixed_vtable,
-    };
-    defer client_endpoint.io = fixed_io.delegate;
+    defer fixed_io.backend.deinit();
+    client_endpoint.io = fixed_io.io();
+    defer client_endpoint.io = fixed_io.baseIo();
     quic.one_rtt.testing.exhaustPacingAt(
         pending.connection(),
-        @intCast(fixed_io.now_ns),
+        @intCast(fixed_io.now_ns.load(.acquire)),
     );
 
     try pending.processPacket(&response_packet);
@@ -4171,7 +3636,7 @@ test "WebTransport client rejection body is not repeated by paced credit" {
         &dispatcher,
         handle,
     )) == null);
-    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.duration_sleep_calls.load(.acquire));
     try std.testing.expectEqual(body.len, pending.rejection_body.items.len);
     try std.testing.expectEqualStrings(&body, pending.rejection_body.items);
     try std.testing.expectEqual(@as(usize, 1), dispatcher.connectionCount());
@@ -4190,7 +3655,7 @@ test "WebTransport client rejection body is not repeated by paced credit" {
         pending.connection().next_packet_number,
     );
     try std.testing.expectEqual(@as(usize, 1), dispatcher.connectionCount());
-    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.duration_sleep_calls.load(.acquire));
 
     var completed: ?runtime.HandshakeConnectAttempt = null;
     for (0..4) |_| {
@@ -4200,7 +3665,7 @@ test "WebTransport client rejection body is not repeated by paced credit" {
             quic.one_rtt.TimerDeadlineKind.pacing,
             timer.timer.kind,
         );
-        fixed_io.now_ns = @intCast(timer.timer.deadline_ns);
+        fixed_io.setNow(@intCast(timer.timer.deadline_ns));
         _ = (try dispatcher.serviceNextTimerAt(timer.timer.deadline_ns)) orelse
             return error.TestUnexpectedResult;
         if (try pending.pollConnectForDispatcher(
@@ -4214,7 +3679,7 @@ test "WebTransport client rejection body is not repeated by paced credit" {
         try std.testing.expectEqual(body.len, pending.rejection_body.items.len);
         try std.testing.expectEqualStrings(&body, pending.rejection_body.items);
         try std.testing.expectEqual(@as(usize, 1), dispatcher.connectionCount());
-        try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+        try std.testing.expectEqual(@as(usize, 0), fixed_io.duration_sleep_calls.load(.acquire));
     }
     var attempt = completed orelse return error.TestUnexpectedResult;
     pending_owned = false;
@@ -4227,7 +3692,7 @@ test "WebTransport client rejection body is not repeated by paced credit" {
         attempt.trailers()[0].value,
     );
     try std.testing.expectEqual(@as(usize, 0), dispatcher.connectionCount());
-    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.duration_sleep_calls.load(.acquire));
 }
 
 test "WebTransport handshake admission polls routed CONNECT state" {

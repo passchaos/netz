@@ -1,0 +1,169 @@
+{
+  "observed_utc": "2026-11-26T17:41:15.034587+00:00",
+  "base_commit": "19a8694fe50fae76ee8df7f84cccb92940d37bdf",
+  "native_host": "aarch64-macos",
+  "guard": "All Zig and baseline invocations serialized under shared zig-tree-guard",
+  "source_sha256": {
+    "src/internal/testing/deadline_send_io.zig": "fc5bc18c28afe1539801d1b6c5e50cdbe3fb06222cddfe292dc56b1cd72b5a2c",
+    "src/webtransport/runtime/endpoint_dispatcher_tests.zig": "8e5185c29f03360efddc4edab5a83e55c5eb788578da62a23bb6b51a8fbb39e7",
+    "src/webtransport/runtime/endpoint_dispatcher/pacing_tests.zig": "dc9a2ef5018514cff731ba78844cb7e464bb2944a6acb226f217e29eb2b8a525"
+  },
+  "checks": {
+    "fmt": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "fmt",
+        "src/internal/testing/deadline_send_io.zig",
+        "src/webtransport/runtime/endpoint_dispatcher_tests.zig",
+        "src/webtransport/runtime/endpoint_dispatcher/pacing_tests.zig"
+      ],
+      "exit_code": 0,
+      "log_sha256": "e3e3106b457b342d2f1d01f7dfbb60ffbc1abed1a20f51aed4b7eb4ed0d0c1a7"
+    },
+    "native": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-webtransport",
+        "-j1",
+        "-Dtest-progress=true",
+        "-Dtest-filter=WebTransport endpoint admission HEADERS do not wait for pacing",
+        "-Dtest-filter=WebTransport accepted session rejects a second CONNECT and stays usable",
+        "-Dtest-filter=WebTransport endpoint reads commit data and CLOSE before paced feedback",
+        "-Dtest-filter=WebTransport endpoint control and datagram sends do not wait for pacing",
+        "-Dtest-filter=WebTransport endpoint reports peer close before paced response FIN",
+        "-Dtest-filter=WebTransport endpoint stream credit operations do not wait for pacing",
+        "-Dtest-filter=WebTransport dispatcher client defers terminal cleanup pacing",
+        "-Dtest-filter=WebTransport client CONNECT polling defers paced feedback and credit",
+        "-Dtest-filter=WebTransport dispatcher CONNECT attempt deinit never waits for pacing",
+        "-Dtest-filter=WebTransport dispatcher client stream polls do not wait for credit",
+        "-Dtest-filter=WebTransport client rejection body is not repeated by paced credit",
+        "-Dtest-filter=Native protocol observer",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log_sha256": "ccd6348415b0b0a7eac30a7a63a1ca0996d93b0a5c64e35852d26dbf3f5bdd25"
+    },
+    "windows-compile": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-webtransport-compile",
+        "-j1",
+        "-Dtarget=x86_64-windows-gnu",
+        "-Dtest-filter=WebTransport endpoint admission HEADERS do not wait for pacing",
+        "-Dtest-filter=WebTransport accepted session rejects a second CONNECT and stays usable",
+        "-Dtest-filter=WebTransport endpoint reads commit data and CLOSE before paced feedback",
+        "-Dtest-filter=WebTransport endpoint control and datagram sends do not wait for pacing",
+        "-Dtest-filter=WebTransport endpoint reports peer close before paced response FIN",
+        "-Dtest-filter=WebTransport endpoint stream credit operations do not wait for pacing",
+        "-Dtest-filter=WebTransport dispatcher client defers terminal cleanup pacing",
+        "-Dtest-filter=WebTransport client CONNECT polling defers paced feedback and credit",
+        "-Dtest-filter=WebTransport dispatcher CONNECT attempt deinit never waits for pacing",
+        "-Dtest-filter=WebTransport dispatcher client stream polls do not wait for credit",
+        "-Dtest-filter=WebTransport client rejection body is not repeated by paced credit",
+        "-Dtest-filter=Native protocol observer",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log_sha256": "f4e7b3c6304a18bd128985c559c41c901c219634804226ccf23b2e3d8481a4ae"
+    }
+  },
+  "native_scoped_passed": 126,
+  "windows_compile_steps": "8/8",
+  "converted_clock_installations": 11,
+  "backends": [
+    "POSIX Threaded zero async capacity",
+    "application backend one executor including Windows"
+  ],
+  "baseline": {
+    "base_commit": "19a8694fe50fae76ee8df7f84cccb92940d37bdf",
+    "source_path": "src/webtransport/runtime/endpoint_dispatcher_tests.zig",
+    "source_sha256": "506cf9bc8303cf10971c8b2734ef1f63e814a940dcd7a408797cf0277f3d1623",
+    "command": [
+      "/Users/bytedance/.local/bin/zig",
+      "build",
+      "test-webtransport",
+      "-j1",
+      "-Dtest-progress=true",
+      "-Dtest-filter=WebTransport endpoint control and datagram sends do not wait for pacing",
+      "--cache-dir",
+      "/Users/bytedance/project-z/netz/.zig-cache",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 1,
+    "log_sha256": "00771a34aa6e37063127015efed99594d98eb56aff09ce721aa11c11d1404e4a",
+    "failed_case_number": "47/111",
+    "failure": "Bus error during Threaded task allocation for the absolute deadline watcher",
+    "call_chain": [
+      "EndpointAcceptedSession.trySendDatagramWithDeadline",
+      "Connection.trySendDatagramOnceWithDeadline",
+      "progress_deadline.before",
+      "Select.concurrent timer",
+      "Threaded.groupConcurrent",
+      "Task.create allocator"
+    ],
+    "source_immutable": true
+  },
+  "invariant_comparison": {
+    "original_case_names": [
+      "WebTransport endpoint admission HEADERS do not wait for pacing",
+      "WebTransport accepted session rejects a second CONNECT and stays usable",
+      "WebTransport endpoint poll mirrors automatic stream-credit retry timer",
+      "WebTransport endpoint reads commit data and CLOSE before paced feedback",
+      "WebTransport endpoint poll refreshes timers before returning an error",
+      "WebTransport endpoint close failure still schedules expiry",
+      "WebTransport endpoint stream write leaves UDP receive to dispatcher",
+      "WebTransport endpoint control and datagram sends do not wait for pacing",
+      "WebTransport endpoint reports peer close before paced response FIN",
+      "WebTransport endpoint stream credit operations do not wait for pacing",
+      "WebTransport dispatcher client defers terminal cleanup pacing",
+      "WebTransport client handshake and CONNECT share one socket owner",
+      "WebTransport shared-endpoint client handshake has a total timeout",
+      "WebTransport sessions poll dispatcher-routed stream and datagram state",
+      "WebTransport client polls a dispatcher-injected packet",
+      "WebTransport client CONNECT polling defers paced feedback and credit",
+      "WebTransport dispatcher CONNECT attempt deinit never waits for pacing",
+      "WebTransport dispatcher client stream polls do not wait for credit",
+      "WebTransport client polls complete rejected CONNECT entity",
+      "WebTransport client rejection body is not repeated by paced credit",
+      "WebTransport handshake admission polls routed CONNECT state",
+      "WebTransport routed Initial timeout preserves event ownership",
+      "WebTransport routed admission keeps its handshake deadline",
+      "WebTransport handshake receive helpers honor timeouts"
+    ],
+    "converted_clock_cases": [
+      "WebTransport endpoint admission HEADERS do not wait for pacing",
+      "WebTransport accepted session rejects a second CONNECT and stays usable",
+      "WebTransport endpoint reads commit data and CLOSE before paced feedback",
+      "WebTransport endpoint control and datagram sends do not wait for pacing",
+      "WebTransport endpoint reports peer close before paced response FIN",
+      "WebTransport endpoint stream credit operations do not wait for pacing",
+      "WebTransport dispatcher client defers terminal cleanup pacing",
+      "WebTransport client CONNECT polling defers paced feedback and credit",
+      "WebTransport dispatcher CONNECT attempt deinit never waits for pacing",
+      "WebTransport dispatcher client stream polls do not wait for credit",
+      "WebTransport client rejection body is not repeated by paced credit"
+    ],
+    "assertion_statements_preserved": 410,
+    "normalization": "atomic reads retain send counts; zero pacing duration sleeps exclude actual absolute deadline watchers"
+  },
+  "wait_semantics": [
+    "pacing duration sleeps remain zero",
+    "absolute caller-deadline watchers use actual cancellable waits and are joined",
+    "manual awake-clock changes are atomic and wake entered waits",
+    "refused operations preserve packet numbers, stream state and DATAGRAM/body progress"
+  ],
+  "ci_commands_budgets_pins_changed": false,
+  "full_goal_status": "active",
+  "delivered_native_complete_qualification": "pending",
+  "limitations": [
+    "Windows compilation is distinct from native execution",
+    "126 scoped passes do not qualify the complete repository gate",
+    "zero pacing sleeps distinguish legitimate absolute deadline watcher waits",
+    "CA reload, Windows native timing, broader observer review, fairness and performance remain open"
+  ]
+}

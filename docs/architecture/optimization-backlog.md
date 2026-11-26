@@ -801,3 +801,26 @@ CA reload before SIGHUP at 158 ms. Complete CI's next GP is at 4830/7490,
 a separate frozen-clock observer. Windows still times out at the existing
 five-minute protocol step and skips its next deadline gate. Those native and
 complete follow-ups, measured fairness and workload performance remain open.
+
+### Dispatcher pacing clock and deadline-watcher ownership
+
+The original dispatcher control/DATAGRAM pacing case reproduces a Bus error
+in an immutable `19a8694f` worktree at 47/111 on macOS. Its bounded DATAGRAM
+call admits an absolute-deadline watcher with observer userdata and inherited
+Threaded callbacks, matching complete CI's allocator/task GP at 4830/7490.
+All 11 shared clock fixtures now use the complete native delegate, atomic
+awake time and explicit clock-change notification. They run on supported
+Threaded/application backends, including the Windows application path.
+
+The original zero pacing duration-sleep checks remain. Absolute deadline
+watchers use actual cancellable waits and joined lifetime instead of a
+fabricated `Canceled`; the original caller/socket budgets remain. All 24
+case names and 410 protocol assertions are preserved after normalizing atomic
+counter reads and the explicit pacing-sleep counter. The large control and
+DATAGRAM fixture is extracted from the dispatcher test root.
+
+[The qualification](../evidence/dispatcher_pacing_native_clock/2026-11-27/validation.json)
+records the actual failing baseline, 126 scoped native passes and Windows
+8/8 compilation. Delivered native and complete acceptance, CA reload,
+Windows protocol-step timing, remaining observer contexts, fairness and
+workload performance remain part of the continuous goal.

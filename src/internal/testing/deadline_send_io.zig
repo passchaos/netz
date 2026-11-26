@@ -36,6 +36,13 @@ pub const Native = struct {
         return self.delegate_io orelse self.backend.io();
     }
 
+    /// Advance a controlled awake clock and wake an already entered deadline
+    /// wait. Use this instead of changing clock state without notifying it.
+    pub fn setNow(self: *Native, now_ns: i64) void {
+        self.now_ns.store(now_ns, .release);
+        self.clock_changed.set(self.baseIo());
+    }
+
     fn mapTimeout(self: *Native, timeout: std.Io.Timeout) std.Io.Timeout {
         if (!self.fixed_clock) return timeout;
         const until = switch (timeout) {
