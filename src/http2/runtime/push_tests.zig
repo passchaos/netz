@@ -1,4 +1,6 @@
 const std = @import("std");
+const forwarded_io = @import("../../internal/testing/forwarded_io.zig");
+const native_protocol_io = @import("../../internal/testing/native_protocol_io.zig");
 const http2 = @import("../mod.zig");
 const runtime = @import("../runtime.zig");
 
@@ -144,8 +146,13 @@ test "HTTP/2 push promises require monotonic server stream IDs" {
 }
 
 test "HTTP/2 reserved push promises consume peer stream capacity" {
+    try native_protocol_io.runStream(reservedPushPromisesConsumePeerStreamCapacity);
+}
+
+fn reservedPushPromisesConsumePeerStreamCapacity(io: std.Io) !void {
     const allocator = std.testing.allocator;
     const RecordingWriter = struct {
+        delegate: std.Io,
         bytes: std.ArrayList(u8) = .empty,
 
         fn write(
@@ -174,14 +181,10 @@ test "HTTP/2 reserved push promises consume peer stream capacity" {
         }
     };
 
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    var writer: RecordingWriter = .{};
+    var writer: RecordingWriter = .{ .delegate = io };
     defer writer.bytes.deinit(allocator);
-    var vtable = threaded.io().vtable.*;
-    vtable.netWrite = RecordingWriter.write;
     var connection = Connection{
-        .io = .{ .userdata = &writer, .vtable = &vtable },
+        .io = forwarded_io.observer(&writer, .{ .netWrite = RecordingWriter.write }),
         .allocator = allocator,
         .stream = undefined,
         .role = .client,

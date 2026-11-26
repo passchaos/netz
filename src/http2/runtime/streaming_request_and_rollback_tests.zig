@@ -1,6 +1,8 @@
 //! HTTP/2 streaming-request and transactional batch rollback tests.
 
 const std = @import("std");
+const forwarded_io = @import("../../internal/testing/forwarded_io.zig");
+const native_protocol_io = @import("../../internal/testing/native_protocol_io.zig");
 const http2 = @import("../mod.zig");
 const net = std.Io.net;
 const runtime = @import("../runtime.zig");
@@ -417,8 +419,13 @@ test "HTTP/2 response batch validates transactionally" {
 }
 
 test "HTTP/2 response batch partial HEADERS write fails closed" {
+    try native_protocol_io.runStream(responseBatchPartialHeadersWriteFailsClosed);
+}
+
+fn responseBatchPartialHeadersWriteFailsClosed(io: std.Io) !void {
     const allocator = std.testing.allocator;
     const PartialWriter = struct {
+        delegate: std.Io,
         writes: usize = 0,
 
         fn write(
@@ -435,13 +442,9 @@ test "HTTP/2 response batch partial HEADERS write fails closed" {
         }
     };
 
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    var writer: PartialWriter = .{};
-    var vtable = threaded.io().vtable.*;
-    vtable.netWrite = PartialWriter.write;
+    var writer: PartialWriter = .{ .delegate = io };
     var connection = Connection{
-        .io = .{ .userdata = &writer, .vtable = &vtable },
+        .io = forwarded_io.observer(&writer, .{ .netWrite = PartialWriter.write }),
         .allocator = allocator,
         .stream = undefined,
         .role = .server,

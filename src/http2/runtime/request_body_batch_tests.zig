@@ -1,6 +1,8 @@
 //! HTTP/2 request-body batch and streaming-response batch tests.
 
 const std = @import("std");
+const forwarded_io = @import("../../internal/testing/forwarded_io.zig");
+const native_protocol_io = @import("../../internal/testing/native_protocol_io.zig");
 const http2 = @import("../mod.zig");
 const net = std.Io.net;
 const runtime = @import("../runtime.zig");
@@ -80,8 +82,13 @@ const writeFrame = runtime.writeFrame;
 const writeInitialSettings = runtime.writeInitialSettings;
 
 test "HTTP/2 streaming request batch partial HEADERS write fails closed" {
+    try native_protocol_io.runStream(streamingRequestBatchPartialHeadersWriteFailsClosed);
+}
+
+fn streamingRequestBatchPartialHeadersWriteFailsClosed(io: std.Io) !void {
     const allocator = std.testing.allocator;
     const PartialWriter = struct {
+        delegate: std.Io,
         writes: usize = 0,
 
         fn write(
@@ -98,13 +105,9 @@ test "HTTP/2 streaming request batch partial HEADERS write fails closed" {
         }
     };
 
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    var writer: PartialWriter = .{};
-    var vtable = threaded.io().vtable.*;
-    vtable.netWrite = PartialWriter.write;
+    var writer: PartialWriter = .{ .delegate = io };
     var connection = Connection{
-        .io = .{ .userdata = &writer, .vtable = &vtable },
+        .io = forwarded_io.observer(&writer, .{ .netWrite = PartialWriter.write }),
         .allocator = allocator,
         .stream = undefined,
         .role = .client,
@@ -150,8 +153,13 @@ test "HTTP/2 streaming request batch partial HEADERS write fails closed" {
 }
 
 test "HTTP/2 body request streaming response batch partial HEADERS fails closed" {
+    try native_protocol_io.runStream(bodyRequestStreamingResponseBatchPartialHeadersFailsClosed);
+}
+
+fn bodyRequestStreamingResponseBatchPartialHeadersFailsClosed(io: std.Io) !void {
     const allocator = std.testing.allocator;
     const PartialWriter = struct {
+        delegate: std.Io,
         writes: usize = 0,
 
         fn write(
@@ -168,13 +176,9 @@ test "HTTP/2 body request streaming response batch partial HEADERS fails closed"
         }
     };
 
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    var writer: PartialWriter = .{};
-    var vtable = threaded.io().vtable.*;
-    vtable.netWrite = PartialWriter.write;
+    var writer: PartialWriter = .{ .delegate = io };
     var connection = Connection{
-        .io = .{ .userdata = &writer, .vtable = &vtable },
+        .io = forwarded_io.observer(&writer, .{ .netWrite = PartialWriter.write }),
         .allocator = allocator,
         .stream = undefined,
         .role = .client,
@@ -219,8 +223,13 @@ test "HTTP/2 body request streaming response batch partial HEADERS fails closed"
 }
 
 test "HTTP/2 request body batch partial DATA does not append cleanup resets" {
+    try native_protocol_io.runStream(requestBodyBatchPartialDataDoesNotAppendCleanupResets);
+}
+
+fn requestBodyBatchPartialDataDoesNotAppendCleanupResets(io: std.Io) !void {
     const allocator = std.testing.allocator;
     const PartialDataWriter = struct {
+        delegate: std.Io,
         writes: usize = 0,
 
         fn write(
@@ -238,13 +247,9 @@ test "HTTP/2 request body batch partial DATA does not append cleanup resets" {
         }
     };
 
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    var writer: PartialDataWriter = .{};
-    var vtable = threaded.io().vtable.*;
-    vtable.netWrite = PartialDataWriter.write;
+    var writer: PartialDataWriter = .{ .delegate = io };
     var connection = Connection{
-        .io = .{ .userdata = &writer, .vtable = &vtable },
+        .io = forwarded_io.observer(&writer, .{ .netWrite = PartialDataWriter.write }),
         .allocator = allocator,
         .stream = undefined,
         .role = .client,

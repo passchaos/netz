@@ -1,0 +1,509 @@
+{
+  "observed_utc": "2026-11-26T21:23:14.506511+00:00",
+  "base_commit": "7a2e6bcc94ca8ff66e8b1b08ef1c387a37006289",
+  "native_host": "aarch64-macos",
+  "guard": "All Zig invocations and source invariant/qualification audits run under shared zig-tree-guard",
+  "source_sha256": {
+    "src/http2/runtime/partial_write_tests.zig": "c7b2f9ebfa49075f4f222ea1f671208a89c19e7286d4d3d05bee7e0c297c476e",
+    "src/http2/runtime/flow_control_tests.zig": "d1f8723df1f4aaf39a13b2c99c5885fd02675d1b4ebeda9f5fb8623fe83b5542",
+    "src/http2/runtime/graceful_shutdown_tests.zig": "189d7c506f4ba284011a5655a0d43bf28dc38905fb6fb78090b5b260a5172063",
+    "src/http2/runtime/request_body_batch_tests.zig": "03128ceebdf99bb3c0a1bbfdf23858a4181a6638c5f925df69c4b7671da335cd",
+    "src/http2/runtime/streaming_request_and_rollback_tests.zig": "cc919f68fa538af17e3b5b38f9f62a90467154e3505179204042b1e5ad7ee6f2",
+    "src/http2/runtime/push_tests.zig": "c96d93d737a9387b3a26f9c2b4100f55890b23aa841dada8fb9f6e97abfa31ca",
+    "src/http2/runtime/client_reset_and_refusal_tests.zig": "958bce3f5a1a374054a8eb14dfc0b36cda59ca584d5275aa67f6b86da9c83fb0",
+    "src/internal/testing/forwarded_io.zig": "c056ad2969f4d9eb39b9970e8919ca7583cae041cedc394a7ef9e07c1f7a8314",
+    "src/internal/testing/native_protocol_io.zig": "4f965f49ed0ba48fb0c9d1b572122415d4b95c165785f79bb2281a05e437b6ad"
+  },
+  "checks": {
+    "fmt": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "fmt",
+        "src/http2/runtime/partial_write_tests.zig",
+        "src/http2/runtime/flow_control_tests.zig",
+        "src/http2/runtime/graceful_shutdown_tests.zig",
+        "src/http2/runtime/request_body_batch_tests.zig",
+        "src/http2/runtime/streaming_request_and_rollback_tests.zig",
+        "src/http2/runtime/push_tests.zig",
+        "src/http2/runtime/client_reset_and_refusal_tests.zig"
+      ],
+      "exit_code": 0,
+      "log_sha256": "c1d46fac1713f9c1ef214a5e3aea7c3ad8a85d42873e5ec97f74329f8938670c"
+    },
+    "invariants": {
+      "command": [
+        "/usr/bin/python3",
+        "/tmp/netz-h2-observer-invariants.py"
+      ],
+      "exit_code": 0,
+      "log_sha256": "55a9c9836d9dab7c4a60686d5cd05898f1294e5a3414e5720a45727df6cdc070"
+    },
+    "native": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-http2",
+        "-j1",
+        "-Dtest-progress=true",
+        "-Dtest-filter=HTTP/2 bodyless request batch partial HEADERS write fails closed",
+        "-Dtest-filter=HTTP/2 single request partial HEADERS write fails closed",
+        "-Dtest-filter=HTTP/2 PUSH_PROMISE partial write rolls back state and fails closed",
+        "-Dtest-filter=HTTP/2 partial DATA frame write fails connection closed",
+        "-Dtest-filter=HTTP/2 partial extension control write fails connection closed",
+        "-Dtest-filter=HTTP/2 application batch reset partial write fails closed",
+        "-Dtest-filter=HTTP/2 adaptive window partial write fails closed without local commit",
+        "-Dtest-filter=HTTP/2 internal error GOAWAY bypasses public fail-fast guard",
+        "-Dtest-filter=HTTP/2 final DATA returns connection credit without stream update",
+        "-Dtest-filter=HTTP/2 graceful shutdown write failure is terminal",
+        "-Dtest-filter=HTTP/2 graceful shutdown bounds final GOAWAY write",
+        "-Dtest-filter=HTTP/2 streaming request batch partial HEADERS write fails closed",
+        "-Dtest-filter=HTTP/2 body request streaming response batch partial HEADERS fails closed",
+        "-Dtest-filter=HTTP/2 request body batch partial DATA does not append cleanup resets",
+        "-Dtest-filter=HTTP/2 response batch partial HEADERS write fails closed",
+        "-Dtest-filter=HTTP/2 reserved push promises consume peer stream capacity",
+        "-Dtest-filter=HTTP/2 client drains buffered sibling after reset peer close",
+        "-Dtest-filter=HTTP/2 refusal write failure makes later request reads terminal",
+        "-Dtest-filter=Native protocol observer",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log_sha256": "8d2b5ca31d4a9fa70a110fbac20011476b6e773f143d553a0e857306f4b27392"
+    },
+    "windows-compile": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-http2-compile",
+        "-j1",
+        "-Dtarget=x86_64-windows-gnu",
+        "-Dtest-filter=HTTP/2 bodyless request batch partial HEADERS write fails closed",
+        "-Dtest-filter=HTTP/2 single request partial HEADERS write fails closed",
+        "-Dtest-filter=HTTP/2 PUSH_PROMISE partial write rolls back state and fails closed",
+        "-Dtest-filter=HTTP/2 partial DATA frame write fails connection closed",
+        "-Dtest-filter=HTTP/2 partial extension control write fails connection closed",
+        "-Dtest-filter=HTTP/2 application batch reset partial write fails closed",
+        "-Dtest-filter=HTTP/2 adaptive window partial write fails closed without local commit",
+        "-Dtest-filter=HTTP/2 internal error GOAWAY bypasses public fail-fast guard",
+        "-Dtest-filter=HTTP/2 final DATA returns connection credit without stream update",
+        "-Dtest-filter=HTTP/2 graceful shutdown write failure is terminal",
+        "-Dtest-filter=HTTP/2 graceful shutdown bounds final GOAWAY write",
+        "-Dtest-filter=HTTP/2 streaming request batch partial HEADERS write fails closed",
+        "-Dtest-filter=HTTP/2 body request streaming response batch partial HEADERS fails closed",
+        "-Dtest-filter=HTTP/2 request body batch partial DATA does not append cleanup resets",
+        "-Dtest-filter=HTTP/2 response batch partial HEADERS write fails closed",
+        "-Dtest-filter=HTTP/2 reserved push promises consume peer stream capacity",
+        "-Dtest-filter=HTTP/2 client drains buffered sibling after reset peer close",
+        "-Dtest-filter=HTTP/2 refusal write failure makes later request reads terminal",
+        "-Dtest-filter=Native protocol observer",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log_sha256": "835c7c564aa1a80e4816eb82e764991b78b70607ed3a97527ed73a17757c3c5f"
+    },
+    "linux-compile": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-http2-compile",
+        "-j1",
+        "-Dtarget=x86_64-linux-gnu",
+        "-Dtest-filter=HTTP/2 internal error GOAWAY bypasses public fail-fast guard",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log_sha256": "af1f1d67f20fbb3850d3dcdd69bc998649dd51206307f75424664c65f6b782e9"
+    }
+  },
+  "native_scoped_passed": 53,
+  "native_build_steps": "10/10",
+  "windows_compile_steps": "8/8",
+  "baseline": {
+    "base_commit": "7a2e6bcc94ca8ff66e8b1b08ef1c387a37006289",
+    "classification": "context-contract source finding; no individual failing runtime baseline claimed",
+    "source_sha256": {
+      "src/http2/runtime/partial_write_tests.zig": "619febd800b5df0ca59cec7cbedf6a1867b77fdb021ae6fc4fed1f5086c61542",
+      "src/http2/runtime/flow_control_tests.zig": "559b976e83133260410acdf1807979a54c9d4ccb0efb4b4402c7d9c3ac2c98e5",
+      "src/http2/runtime/graceful_shutdown_tests.zig": "acbca730fdcd5b7feb314c242c8bc6000151db1efb1406248b42c425dd06472c",
+      "src/http2/runtime/request_body_batch_tests.zig": "1e894b977568ebbd24c32aa61d06580f67d4c3e97da1b32889f2b434efce7229",
+      "src/http2/runtime/streaming_request_and_rollback_tests.zig": "d1a928dd0e0bc04428c948e65e75076ad2a7cf45a7b3258b9eb260bf34aaa19b",
+      "src/http2/runtime/push_tests.zig": "cdec5e578980aadf9e63b92c9cc6137b0ce5b092697b89ae80418259db6dc4e8",
+      "src/http2/runtime/client_reset_and_refusal_tests.zig": "32b354561982e10933114e4db8ec4fd9cfae018d24bcde897b300c06c6302f66"
+    },
+    "immutable_committed_source_verified": true,
+    "changed_userdata_with_inherited_callbacks": 16,
+    "original_userdata_with_global_observer": 2
+  },
+  "invariant_comparison": {
+    "original_names": [
+      "HTTP/2 bodyless request batch partial HEADERS write fails closed",
+      "HTTP/2 single request partial HEADERS write fails closed",
+      "HTTP/2 PUSH_PROMISE partial write rolls back state and fails closed",
+      "HTTP/2 partial DATA frame write fails connection closed",
+      "HTTP/2 partial extension control write fails connection closed",
+      "HTTP/2 application batch reset partial write fails closed",
+      "HTTP/2 adaptive window partial write fails closed without local commit",
+      "HTTP/2 internal error GOAWAY bypasses public fail-fast guard",
+      "HTTP/2 final DATA returns connection credit without stream update",
+      "HTTP/2 graceful shutdown write failure is terminal",
+      "HTTP/2 graceful shutdown bounds final GOAWAY write",
+      "HTTP/2 streaming request batch partial HEADERS write fails closed",
+      "HTTP/2 body request streaming response batch partial HEADERS fails closed",
+      "HTTP/2 request body batch partial DATA does not append cleanup resets",
+      "HTTP/2 response batch partial HEADERS write fails closed",
+      "HTTP/2 reserved push promises consume peer stream capacity",
+      "HTTP/2 client drains buffered sibling after reset peer close",
+      "HTTP/2 refusal write failure makes later request reads terminal"
+    ],
+    "selected_assertions_preserved": 103,
+    "all_changed_file_assertions_preserved": 278,
+    "case_assertions": [
+      {
+        "path": "src/http2/runtime/partial_write_tests.zig",
+        "name": "HTTP/2 bodyless request batch partial HEADERS write fails closed",
+        "helper": "bodylessRequestBatchPartialHeadersWriteFailsClosed",
+        "linux_only": false,
+        "assertions_preserved": 7
+      },
+      {
+        "path": "src/http2/runtime/partial_write_tests.zig",
+        "name": "HTTP/2 single request partial HEADERS write fails closed",
+        "helper": "singleRequestPartialHeadersWriteFailsClosed",
+        "linux_only": false,
+        "assertions_preserved": 7
+      },
+      {
+        "path": "src/http2/runtime/partial_write_tests.zig",
+        "name": "HTTP/2 PUSH_PROMISE partial write rolls back state and fails closed",
+        "helper": "pushPromisePartialWriteRollsBackStateAndFailsClosed",
+        "linux_only": false,
+        "assertions_preserved": 8
+      },
+      {
+        "path": "src/http2/runtime/partial_write_tests.zig",
+        "name": "HTTP/2 partial DATA frame write fails connection closed",
+        "helper": "partialDataFrameWriteFailsConnectionClosed",
+        "linux_only": false,
+        "assertions_preserved": 5
+      },
+      {
+        "path": "src/http2/runtime/partial_write_tests.zig",
+        "name": "HTTP/2 partial extension control write fails connection closed",
+        "helper": "partialExtensionControlWriteFailsConnectionClosed",
+        "linux_only": false,
+        "assertions_preserved": 5
+      },
+      {
+        "path": "src/http2/runtime/partial_write_tests.zig",
+        "name": "HTTP/2 application batch reset partial write fails closed",
+        "helper": "applicationBatchResetPartialWriteFailsClosed",
+        "linux_only": false,
+        "assertions_preserved": 6
+      },
+      {
+        "path": "src/http2/runtime/partial_write_tests.zig",
+        "name": "HTTP/2 adaptive window partial write fails closed without local commit",
+        "helper": "adaptiveWindowPartialWriteFailsClosedWithoutLocalCommit",
+        "linux_only": false,
+        "assertions_preserved": 8
+      },
+      {
+        "path": "src/http2/runtime/partial_write_tests.zig",
+        "name": "HTTP/2 internal error GOAWAY bypasses public fail-fast guard",
+        "helper": "internalErrorGoawayBypassesPublicFailFastGuard",
+        "linux_only": true,
+        "assertions_preserved": 7
+      },
+      {
+        "path": "src/http2/runtime/flow_control_tests.zig",
+        "name": "HTTP/2 final DATA returns connection credit without stream update",
+        "helper": "finalDataReturnsConnectionCreditWithoutStreamUpdate",
+        "linux_only": false,
+        "assertions_preserved": 4
+      },
+      {
+        "path": "src/http2/runtime/graceful_shutdown_tests.zig",
+        "name": "HTTP/2 graceful shutdown write failure is terminal",
+        "helper": "gracefulShutdownWriteFailureIsTerminal",
+        "linux_only": false,
+        "assertions_preserved": 3
+      },
+      {
+        "path": "src/http2/runtime/graceful_shutdown_tests.zig",
+        "name": "HTTP/2 graceful shutdown bounds final GOAWAY write",
+        "helper": "gracefulShutdownBoundsFinalGoawayWrite",
+        "linux_only": false,
+        "assertions_preserved": 4
+      },
+      {
+        "path": "src/http2/runtime/request_body_batch_tests.zig",
+        "name": "HTTP/2 streaming request batch partial HEADERS write fails closed",
+        "helper": "streamingRequestBatchPartialHeadersWriteFailsClosed",
+        "linux_only": false,
+        "assertions_preserved": 7
+      },
+      {
+        "path": "src/http2/runtime/request_body_batch_tests.zig",
+        "name": "HTTP/2 body request streaming response batch partial HEADERS fails closed",
+        "helper": "bodyRequestStreamingResponseBatchPartialHeadersFailsClosed",
+        "linux_only": false,
+        "assertions_preserved": 6
+      },
+      {
+        "path": "src/http2/runtime/request_body_batch_tests.zig",
+        "name": "HTTP/2 request body batch partial DATA does not append cleanup resets",
+        "helper": "requestBodyBatchPartialDataDoesNotAppendCleanupResets",
+        "linux_only": false,
+        "assertions_preserved": 4
+      },
+      {
+        "path": "src/http2/runtime/streaming_request_and_rollback_tests.zig",
+        "name": "HTTP/2 response batch partial HEADERS write fails closed",
+        "helper": "responseBatchPartialHeadersWriteFailsClosed",
+        "linux_only": false,
+        "assertions_preserved": 6
+      },
+      {
+        "path": "src/http2/runtime/push_tests.zig",
+        "name": "HTTP/2 reserved push promises consume peer stream capacity",
+        "helper": "reservedPushPromisesConsumePeerStreamCapacity",
+        "linux_only": false,
+        "assertions_preserved": 7
+      },
+      {
+        "path": "src/http2/runtime/client_reset_and_refusal_tests.zig",
+        "name": "HTTP/2 client drains buffered sibling after reset peer close",
+        "helper": "clientDrainsBufferedSiblingAfterResetPeerClose",
+        "linux_only": false,
+        "assertions_preserved": 5
+      },
+      {
+        "path": "src/http2/runtime/client_reset_and_refusal_tests.zig",
+        "name": "HTTP/2 refusal write failure makes later request reads terminal",
+        "helper": "refusalWriteFailureMakesLaterRequestReadsTerminal",
+        "linux_only": false,
+        "assertions_preserved": 4
+      }
+    ],
+    "normalization": "whitespace only; no assertion expressions changed",
+    "buffered_reset_clock": "original zero clock retained; no timed wait uses it",
+    "original_write_injections": "unchanged prefixes, counters, payload capture and failure sequence"
+  },
+  "backends": [
+    "Threaded stream with zero async capacity",
+    "application backend with one executor"
+  ],
+  "supported_macos_fixture_handlers": 17,
+  "linux_only_case": {
+    "name": "HTTP/2 internal error GOAWAY bypasses public fail-fast guard",
+    "original_platform_gate_preserved": true,
+    "current_cross_compile": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-http2-compile",
+        "-j1",
+        "-Dtarget=x86_64-linux-gnu",
+        "-Dtest-filter=HTTP/2 internal error GOAWAY bypasses public fail-fast guard",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log_sha256": "af1f1d67f20fbb3850d3dcdd69bc998649dd51206307f75424664c65f6b782e9"
+    },
+    "native_execution": "pending; macOS/Windows test returns before the Linux body"
+  },
+  "observer_lifetime": "per-instance writer context, complete immutable table, original I/O restored before real TCP connection/fixture cleanup",
+  "tcp_sender_failure_cleanup": "accept failure closes untransferred sender; later assertion failure closes only through Connection",
+  "ci_commands_budgets_pins_changed": false,
+  "production_or_public_api_changed": false,
+  "preceding_delivered_ci": {
+    "commit": "7a2e6bcc94ca8ff66e8b1b08ef1c387a37006289",
+    "run_id": "45890482581",
+    "attempt": 1,
+    "run_url": "https://github.com/passchaos/netz/actions/runs/45890482581",
+    "all_current_jobs_terminal": true,
+    "jobs": {
+      "linux": {
+        "page_sha256": "2157072c26246cf9e0513feac77bc268c6d2517ee4f3233a1a0560e4a1cb8f09",
+        "selected_steps": [
+          {
+            "name": "Run native Linux interface binding regressions",
+            "number": "14",
+            "conclusion": "success",
+            "started-at": "2026-11-26T20:23:53Z",
+            "completed-at": "2026-11-26T20:24:26Z"
+          },
+          {
+            "name": "Run native Linux connection and command regressions",
+            "number": "15",
+            "conclusion": "success",
+            "started-at": "2026-11-26T20:24:26Z",
+            "completed-at": "2026-11-26T20:26:00Z"
+          },
+          {
+            "name": "Run native HTTP3 resolver and acquisition regressions",
+            "number": "17",
+            "conclusion": "success",
+            "started-at": "2026-11-26T20:26:00Z",
+            "completed-at": "2026-11-26T20:26:22Z"
+          },
+          {
+            "name": "Run native ordered TCP hostname regressions",
+            "number": "18",
+            "conclusion": "success",
+            "started-at": "2026-11-26T20:26:22Z",
+            "completed-at": "2026-11-26T20:26:24Z"
+          },
+          {
+            "name": "Run native trust startup regressions",
+            "number": "19",
+            "conclusion": "success",
+            "started-at": "2026-11-26T20:26:24Z",
+            "completed-at": "2026-11-26T20:28:41Z"
+          },
+          {
+            "name": "Run native H1 H2 resolver and pull reader regressions",
+            "number": "20",
+            "conclusion": "success",
+            "started-at": "2026-11-26T20:28:41Z",
+            "completed-at": "2026-11-26T20:29:15Z"
+          },
+          {
+            "name": "Run native protocol CI regressions",
+            "number": "21",
+            "conclusion": "success",
+            "started-at": "2026-11-26T20:29:15Z",
+            "completed-at": "2026-11-26T20:30:48Z"
+          },
+          {
+            "name": "Run native HTTP3 send deadline regressions",
+            "number": "22",
+            "conclusion": "success",
+            "started-at": "2026-11-26T20:30:48Z",
+            "completed-at": "2026-11-26T20:31:45Z"
+          },
+          {
+            "name": "Run native client CA reload regression",
+            "number": "23",
+            "conclusion": "success",
+            "started-at": "2026-11-26T20:31:45Z",
+            "completed-at": "2026-11-26T20:32:18Z"
+          },
+          {
+            "name": "Run native Windows transport regressions",
+            "number": "24",
+            "conclusion": "skipped",
+            "started-at": "2026-11-26T20:32:18Z",
+            "completed-at": "2026-11-26T20:32:18Z"
+          }
+        ]
+      },
+      "windows": {
+        "page_sha256": "8e841b3fb5ac3ee571e0c476690dd8bbe3ab1e8136211962e62c1ca1131ef0e5",
+        "selected_steps": [
+          {
+            "name": "Run native Linux interface binding regressions",
+            "number": "14",
+            "conclusion": "skipped",
+            "started-at": "2026-11-26T20:22:49Z",
+            "completed-at": "2026-11-26T20:22:49Z"
+          },
+          {
+            "name": "Run native Linux connection and command regressions",
+            "number": "15",
+            "conclusion": "skipped",
+            "started-at": "2026-11-26T20:22:49Z",
+            "completed-at": "2026-11-26T20:22:49Z"
+          },
+          {
+            "name": "Run native HTTP3 resolver and acquisition regressions",
+            "number": "17",
+            "conclusion": "success",
+            "started-at": "2026-11-26T20:22:49Z",
+            "completed-at": "2026-11-26T20:25:21Z"
+          },
+          {
+            "name": "Run native ordered TCP hostname regressions",
+            "number": "18",
+            "conclusion": "success",
+            "started-at": "2026-11-26T20:25:21Z",
+            "completed-at": "2026-11-26T20:25:38Z"
+          },
+          {
+            "name": "Run native trust startup regressions",
+            "number": "19",
+            "conclusion": "success",
+            "started-at": "2026-11-26T20:25:38Z",
+            "completed-at": "2026-11-26T20:29:25Z"
+          },
+          {
+            "name": "Run native H1 H2 resolver and pull reader regressions",
+            "number": "20",
+            "conclusion": "success",
+            "started-at": "2026-11-26T20:29:25Z",
+            "completed-at": "2026-11-26T20:30:51Z"
+          },
+          {
+            "name": "Run native protocol CI regressions",
+            "number": "21",
+            "conclusion": "success",
+            "started-at": "2026-11-26T20:30:51Z",
+            "completed-at": "2026-11-26T20:34:17Z"
+          },
+          {
+            "name": "Run native HTTP3 send deadline regressions",
+            "number": "22",
+            "conclusion": "success",
+            "started-at": "2026-11-26T20:34:17Z",
+            "completed-at": "2026-11-26T20:36:21Z"
+          },
+          {
+            "name": "Run native client CA reload regression",
+            "number": "23",
+            "conclusion": "skipped",
+            "started-at": "2026-11-26T20:36:21Z",
+            "completed-at": "2026-11-26T20:36:21Z"
+          },
+          {
+            "name": "Run native Windows transport regressions",
+            "number": "24",
+            "conclusion": "success",
+            "started-at": "2026-11-26T20:36:21Z",
+            "completed-at": "2026-11-26T20:38:39Z"
+          }
+        ]
+      },
+      "complete": {
+        "page_sha256": "e33eca639edb95d95dc76aac61ebae4657531608acb7c1241b1332acf991a1ae",
+        "selected_steps": [
+          {
+            "name": "Run the complete test gate serially",
+            "number": "5",
+            "conclusion": "failure",
+            "started-at": "2026-11-26T20:22:21Z",
+            "completed-at": "2026-11-26T20:50:21Z"
+          }
+        ]
+      }
+    },
+    "complete_last_emitted": "6355/7490 grpc.runtime_tests.test.gRPC TLS runtime streams health Watch updates...OK",
+    "complete_exit_code": 137,
+    "complete_budget_seconds": 1680,
+    "complete_public_annotations": "no allocator GP; terminal command exceeded original budget",
+    "ca_reload_causal_resolution": false,
+    "qualification_of_this_h2_change": false
+  },
+  "full_goal_status": "active",
+  "delivered_native_complete_qualification": "pending",
+  "limitations": [
+    "53 artifact passes include shared imported tests and the gated Linux case return",
+    "Windows and Linux compilation do not establish native execution",
+    "prior native CI success precedes this source change",
+    "the complete gate has not passed its original 28-minute budget",
+    "no new throughput, latency or allocation improvement measured",
+    "remaining observer contexts, owner structure, fairness and workload performance remain open"
+  ]
+}

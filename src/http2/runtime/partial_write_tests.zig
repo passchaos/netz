@@ -1,6 +1,8 @@
 //! HTTP/2 partial-write and fail-closed tests.
 
 const std = @import("std");
+const forwarded_io = @import("../../internal/testing/forwarded_io.zig");
+const native_protocol_io = @import("../../internal/testing/native_protocol_io.zig");
 const http2 = @import("../mod.zig");
 const net = std.Io.net;
 const runtime = @import("../runtime.zig");
@@ -80,8 +82,13 @@ const writeFrame = runtime.writeFrame;
 const writeInitialSettings = runtime.writeInitialSettings;
 
 test "HTTP/2 bodyless request batch partial HEADERS write fails closed" {
+    try native_protocol_io.runStream(bodylessRequestBatchPartialHeadersWriteFailsClosed);
+}
+
+fn bodylessRequestBatchPartialHeadersWriteFailsClosed(io: std.Io) !void {
     const allocator = std.testing.allocator;
     const PartialWriter = struct {
+        delegate: std.Io,
         writes: usize = 0,
 
         fn write(
@@ -98,13 +105,9 @@ test "HTTP/2 bodyless request batch partial HEADERS write fails closed" {
         }
     };
 
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    var writer: PartialWriter = .{};
-    var vtable = threaded.io().vtable.*;
-    vtable.netWrite = PartialWriter.write;
+    var writer: PartialWriter = .{ .delegate = io };
     var connection = Connection{
-        .io = .{ .userdata = &writer, .vtable = &vtable },
+        .io = forwarded_io.observer(&writer, .{ .netWrite = PartialWriter.write }),
         .allocator = allocator,
         .stream = undefined,
         .role = .client,
@@ -143,8 +146,13 @@ test "HTTP/2 bodyless request batch partial HEADERS write fails closed" {
 }
 
 test "HTTP/2 single request partial HEADERS write fails closed" {
+    try native_protocol_io.runStream(singleRequestPartialHeadersWriteFailsClosed);
+}
+
+fn singleRequestPartialHeadersWriteFailsClosed(io: std.Io) !void {
     const allocator = std.testing.allocator;
     const PartialWriter = struct {
+        delegate: std.Io,
         writes: usize = 0,
 
         fn write(
@@ -161,13 +169,9 @@ test "HTTP/2 single request partial HEADERS write fails closed" {
         }
     };
 
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    var writer: PartialWriter = .{};
-    var vtable = threaded.io().vtable.*;
-    vtable.netWrite = PartialWriter.write;
+    var writer: PartialWriter = .{ .delegate = io };
     var connection = Connection{
-        .io = .{ .userdata = &writer, .vtable = &vtable },
+        .io = forwarded_io.observer(&writer, .{ .netWrite = PartialWriter.write }),
         .allocator = allocator,
         .stream = undefined,
         .role = .client,
@@ -253,8 +257,13 @@ test "HTTP/2 single HEADERS encode failure preserves live HPACK state" {
 }
 
 test "HTTP/2 PUSH_PROMISE partial write rolls back state and fails closed" {
+    try native_protocol_io.runStream(pushPromisePartialWriteRollsBackStateAndFailsClosed);
+}
+
+fn pushPromisePartialWriteRollsBackStateAndFailsClosed(io: std.Io) !void {
     const allocator = std.testing.allocator;
     const PartialWriter = struct {
+        delegate: std.Io,
         writes: usize = 0,
 
         fn write(
@@ -271,13 +280,9 @@ test "HTTP/2 PUSH_PROMISE partial write rolls back state and fails closed" {
         }
     };
 
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    var writer: PartialWriter = .{};
-    var vtable = threaded.io().vtable.*;
-    vtable.netWrite = PartialWriter.write;
+    var writer: PartialWriter = .{ .delegate = io };
     var connection = Connection{
-        .io = .{ .userdata = &writer, .vtable = &vtable },
+        .io = forwarded_io.observer(&writer, .{ .netWrite = PartialWriter.write }),
         .allocator = allocator,
         .stream = undefined,
         .role = .server,
@@ -322,8 +327,13 @@ test "HTTP/2 PUSH_PROMISE partial write rolls back state and fails closed" {
 }
 
 test "HTTP/2 partial DATA frame write fails connection closed" {
+    try native_protocol_io.runStream(partialDataFrameWriteFailsConnectionClosed);
+}
+
+fn partialDataFrameWriteFailsConnectionClosed(io: std.Io) !void {
     const allocator = std.testing.allocator;
     const PartialWriter = struct {
+        delegate: std.Io,
         writes: usize = 0,
 
         fn write(
@@ -340,13 +350,9 @@ test "HTTP/2 partial DATA frame write fails connection closed" {
         }
     };
 
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    var writer: PartialWriter = .{};
-    var vtable = threaded.io().vtable.*;
-    vtable.netWrite = PartialWriter.write;
+    var writer: PartialWriter = .{ .delegate = io };
     var connection = Connection{
-        .io = .{ .userdata = &writer, .vtable = &vtable },
+        .io = forwarded_io.observer(&writer, .{ .netWrite = PartialWriter.write }),
         .allocator = allocator,
         .stream = undefined,
         .role = .client,
@@ -373,8 +379,13 @@ test "HTTP/2 partial DATA frame write fails connection closed" {
 }
 
 test "HTTP/2 partial extension control write fails connection closed" {
+    try native_protocol_io.runStream(partialExtensionControlWriteFailsConnectionClosed);
+}
+
+fn partialExtensionControlWriteFailsConnectionClosed(io: std.Io) !void {
     const allocator = std.testing.allocator;
     const PartialWriter = struct {
+        delegate: std.Io,
         writes: usize = 0,
 
         fn write(
@@ -391,13 +402,9 @@ test "HTTP/2 partial extension control write fails connection closed" {
         }
     };
 
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    var writer: PartialWriter = .{};
-    var vtable = threaded.io().vtable.*;
-    vtable.netWrite = PartialWriter.write;
+    var writer: PartialWriter = .{ .delegate = io };
     var connection = Connection{
-        .io = .{ .userdata = &writer, .vtable = &vtable },
+        .io = forwarded_io.observer(&writer, .{ .netWrite = PartialWriter.write }),
         .allocator = allocator,
         .stream = undefined,
         .role = .server,
@@ -424,40 +431,39 @@ test "HTTP/2 partial extension control write fails connection closed" {
 }
 
 test "HTTP/2 application batch reset partial write fails closed" {
+    try native_protocol_io.runStream(applicationBatchResetPartialWriteFailsClosed);
+}
+
+fn applicationBatchResetPartialWriteFailsClosed(io: std.Io) !void {
     const allocator = std.testing.allocator;
     const PartialWriter = struct {
-        var active: std.atomic.Value(?*@This()) = .init(null);
+        delegate: std.Io,
         writes: std.atomic.Value(usize) = .init(0),
 
         fn write(
-            _: ?*anyopaque,
+            context: ?*anyopaque,
             _: net.Socket.Handle,
             bytes: []const u8,
             _: []const []const u8,
             _: usize,
         ) net.Stream.Writer.Error!usize {
-            const self = active.load(.acquire).?;
+            const self: *@This() = @ptrCast(@alignCast(context.?));
             if (self.writes.fetchAdd(1, .monotonic) == 0) return @min(bytes.len, 4);
             return error.NetworkDown;
         }
     };
 
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
     var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(io, .{});
     defer listener.deinit(io);
     const stream = try listener.socket.address.connect(io, .{ .mode = .stream });
-    errdefer stream.close(io);
-    const peer = try listener.accept(io);
+    const peer = listener.accept(io) catch |err| {
+        stream.close(io);
+        return err;
+    };
     defer peer.close(io);
-    var writer: PartialWriter = .{};
-    PartialWriter.active.store(&writer, .release);
-    defer PartialWriter.active.store(null, .release);
-    var vtable = threaded.io().vtable.*;
-    vtable.netWrite = PartialWriter.write;
+    var writer: PartialWriter = .{ .delegate = io };
     var connection = Connection{
-        .io = .{ .userdata = threaded.io().userdata, .vtable = &vtable },
+        .io = forwarded_io.observer(&writer, .{ .netWrite = PartialWriter.write }),
         .allocator = allocator,
         .stream = stream,
         .role = .client,
@@ -502,8 +508,13 @@ test "HTTP/2 application batch reset partial write fails closed" {
 }
 
 test "HTTP/2 adaptive window partial write fails closed without local commit" {
+    try native_protocol_io.runStream(adaptiveWindowPartialWriteFailsClosedWithoutLocalCommit);
+}
+
+fn adaptiveWindowPartialWriteFailsClosedWithoutLocalCommit(io: std.Io) !void {
     const allocator = std.testing.allocator;
     const PartialWriter = struct {
+        delegate: std.Io,
         writes: usize = 0,
 
         fn write(
@@ -520,13 +531,9 @@ test "HTTP/2 adaptive window partial write fails closed without local commit" {
         }
     };
 
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    var writer: PartialWriter = .{};
-    var vtable = threaded.io().vtable.*;
-    vtable.netWrite = PartialWriter.write;
+    var writer: PartialWriter = .{ .delegate = io };
     var connection = Connection{
-        .io = .{ .userdata = &writer, .vtable = &vtable },
+        .io = forwarded_io.observer(&writer, .{ .netWrite = PartialWriter.write }),
         .allocator = allocator,
         .stream = undefined,
         .role = .client,
@@ -561,21 +568,24 @@ test "HTTP/2 adaptive window partial write fails closed without local commit" {
 
 test "HTTP/2 internal error GOAWAY bypasses public fail-fast guard" {
     if (comptime builtin.os.tag != .linux) return;
-    const allocator = std.testing.allocator;
+    try native_protocol_io.runStream(internalErrorGoawayBypassesPublicFailFastGuard);
+}
+
+fn internalErrorGoawayBypassesPublicFailFastGuard(io: std.Io) !void {
     const RecordingWriter = struct {
-        var active: std.atomic.Value(?*@This()) = .init(null);
+        delegate: std.Io,
         bytes: [128]u8 = undefined,
         len: usize = 0,
         writes: usize = 0,
 
         fn write(
-            _: ?*anyopaque,
+            context: ?*anyopaque,
             _: net.Socket.Handle,
             header: []const u8,
             _: []const []const u8,
             _: usize,
         ) net.Stream.Writer.Error!usize {
-            const self = active.load(.acquire).?;
+            const self: *@This() = @ptrCast(@alignCast(context.?));
             self.writes += 1;
             const count = @min(header.len, self.bytes.len - self.len);
             if (count == 0) return error.SocketUnconnected;
@@ -585,18 +595,11 @@ test "HTTP/2 internal error GOAWAY bypasses public fail-fast guard" {
         }
     };
 
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    var writer: RecordingWriter = .{};
-    RecordingWriter.active.store(&writer, .release);
-    defer RecordingWriter.active.store(null, .release);
-    const io = threaded.io();
+    var writer: RecordingWriter = .{ .delegate = io };
     var fixture = try @import("testing/blocked_output.zig").BlockedOutput.init(io, .server);
     defer fixture.deinit();
     const connection = &fixture.connection;
-    var vtable = io.vtable.*;
-    vtable.netWrite = RecordingWriter.write;
-    connection.io = .{ .userdata = io.userdata, .vtable = &vtable };
+    connection.io = forwarded_io.observer(&writer, .{ .netWrite = RecordingWriter.write });
     defer connection.io = io;
     connection.serve_read_connection_error = .frame_sequence;
 

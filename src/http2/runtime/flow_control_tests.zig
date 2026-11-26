@@ -1,6 +1,8 @@
 //! HTTP/2 DATA flow-control and receive-window tests.
 
 const std = @import("std");
+const forwarded_io = @import("../../internal/testing/forwarded_io.zig");
+const native_protocol_io = @import("../../internal/testing/native_protocol_io.zig");
 const http2 = @import("../mod.zig");
 const net = std.Io.net;
 const runtime = @import("../runtime.zig");
@@ -156,8 +158,13 @@ test "HTTP/2 empty DATA is legal while stream window is negative" {
 }
 
 test "HTTP/2 final DATA returns connection credit without stream update" {
+    try native_protocol_io.runStream(finalDataReturnsConnectionCreditWithoutStreamUpdate);
+}
+
+fn finalDataReturnsConnectionCreditWithoutStreamUpdate(io: std.Io) !void {
     const allocator = std.testing.allocator;
     const RecordingWriter = struct {
+        delegate: std.Io,
         bytes: [32]u8 = undefined,
         len: usize = 0,
 
@@ -177,13 +184,9 @@ test "HTTP/2 final DATA returns connection credit without stream update" {
         }
     };
 
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    var writer: RecordingWriter = .{};
-    var vtable = threaded.io().vtable.*;
-    vtable.netWrite = RecordingWriter.write;
+    var writer: RecordingWriter = .{ .delegate = io };
     var connection = Connection{
-        .io = .{ .userdata = &writer, .vtable = &vtable },
+        .io = forwarded_io.observer(&writer, .{ .netWrite = RecordingWriter.write }),
         .allocator = allocator,
         .stream = undefined,
         .role = .client,

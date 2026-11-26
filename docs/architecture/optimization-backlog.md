@@ -885,3 +885,35 @@ records the actual failing baseline, 116 native scoped passes and Windows
 8/8 compilation. The existing reverse-path/limits and cursor-churn cases remain
 in the validation range. Delivered full/native acceptance, remaining observer
 contexts, fairness and workload performance remain open.
+
+### HTTP/2 write observers and current native CI progress
+
+The remaining HTTP/2 survey confirms sixteen writer installations that pass
+observer userdata to inherited backend callbacks. Two other writers retain
+backend userdata but locate their state through global pointers. All eighteen
+now use complete typed delegation with per-instance writer state. Partial
+HEADERS/DATA, HPACK commit/rollback, PUSH_PROMISE capacity, connection credit,
+graceful shutdown and refusal behavior retain their original assertions.
+The real TCP batch-reset fixture restores original I/O before connection
+cleanup and removes a second sender close on later assertion failure.
+
+All eighteen original names and 103 selected assertion statements remain;
+all 278 assertions in the seven affected files are unchanged. Seventeen
+supported cases run on Threaded with zero async capacity and the application
+backend. The internal-error GOAWAY case retains its existing Linux-only gate.
+[The qualification](../evidence/http2_observer_context/2026-11-27/validation.json)
+records 53 scoped macOS native passes and Windows 8/8 compilation. These are
+source contract repairs, not eighteen separate native crash reproductions.
+The Linux-only GOAWAY compilation also passes 8/8 steps; delivered native
+execution of that case and complete acceptance remain pending.
+
+The preceding `7a2e6bcc` run 45890482581 has all current jobs terminal. Linux
+protocol, send-deadline and CA reload gates pass. Windows protocol and
+send-deadline gates pass within their original budgets, taking 3m26s and
+2m04s. Complete CI advances beyond the previous WebTransport visible-prefix
+allocator crash; its last emitted result is 6355/7490, gRPC TLS health Watch
+OK, before exit 137 at the unchanged 28-minute budget. Public terminal
+annotations contain no new allocator GP. This result precedes the HTTP/2
+observer repair, and the one CA reload pass does not causally resolve earlier
+intermittent pre-SIGHUP failures. Full acceptance, remaining contexts, owner
+structure, measured fairness and workload performance remain active.

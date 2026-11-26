@@ -1,6 +1,8 @@
 //! HTTP/2 graceful-shutdown tests moved out of the runtime test root.
 
 const std = @import("std");
+const forwarded_io = @import("../../internal/testing/forwarded_io.zig");
+const native_protocol_io = @import("../../internal/testing/native_protocol_io.zig");
 const http2 = @import("../mod.zig");
 const net = std.Io.net;
 const runtime = @import("../runtime.zig");
@@ -549,7 +551,12 @@ test "HTTP/2 completed graceful shutdown ignores expired wait budgets" {
 }
 
 test "HTTP/2 graceful shutdown write failure is terminal" {
+    try native_protocol_io.runStream(gracefulShutdownWriteFailureIsTerminal);
+}
+
+fn gracefulShutdownWriteFailureIsTerminal(io: std.Io) !void {
     const FailingWriter = struct {
+        delegate: std.Io,
         writes: usize = 0,
 
         fn write(
@@ -566,14 +573,10 @@ test "HTTP/2 graceful shutdown write failure is terminal" {
         }
     };
 
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
-    var writer: FailingWriter = .{};
-    var vtable = threaded.io().vtable.*;
-    vtable.netWrite = FailingWriter.write;
-    const io = std.Io{ .userdata = &writer, .vtable = &vtable };
+    var writer: FailingWriter = .{ .delegate = io };
+    const observed_io = forwarded_io.observer(&writer, .{ .netWrite = FailingWriter.write });
     var connection = Connection{
-        .io = io,
+        .io = observed_io,
         .allocator = std.testing.allocator,
         .stream = undefined,
         .role = .server,
@@ -657,7 +660,12 @@ test "HTTP/2 graceful shutdown fails closed when PING ACK write times out" {
 }
 
 test "HTTP/2 graceful shutdown bounds final GOAWAY write" {
+    try native_protocol_io.runStream(gracefulShutdownBoundsFinalGoawayWrite);
+}
+
+fn gracefulShutdownBoundsFinalGoawayWrite(io: std.Io) !void {
     const RecordingWriter = struct {
+        delegate: std.Io,
         bytes: std.ArrayList(u8) = .empty,
 
         fn write(
@@ -690,14 +698,10 @@ test "HTTP/2 graceful shutdown bounds final GOAWAY write" {
         }
     };
 
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
-    var writer: RecordingWriter = .{};
+    var writer: RecordingWriter = .{ .delegate = io };
     defer writer.bytes.deinit(std.testing.allocator);
-    var vtable = threaded.io().vtable.*;
-    vtable.netWrite = RecordingWriter.write;
     var connection = Connection{
-        .io = .{ .userdata = &writer, .vtable = &vtable },
+        .io = forwarded_io.observer(&writer, .{ .netWrite = RecordingWriter.write }),
         .allocator = std.testing.allocator,
         .stream = undefined,
         .role = .server,

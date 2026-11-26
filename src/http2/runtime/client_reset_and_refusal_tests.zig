@@ -1,6 +1,8 @@
 //! HTTP/2 client reset, sibling drain, and refusal tests.
 
 const std = @import("std");
+const forwarded_io = @import("../../internal/testing/forwarded_io.zig");
+const native_protocol_io = @import("../../internal/testing/native_protocol_io.zig");
 const http2 = @import("../mod.zig");
 const net = std.Io.net;
 const runtime = @import("../runtime.zig");
@@ -306,6 +308,10 @@ test "HTTP/2 client ignores in-flight frames after local reset" {
 }
 
 test "HTTP/2 client drains buffered sibling after reset peer close" {
+    try native_protocol_io.runStream(clientDrainsBufferedSiblingAfterResetPeerClose);
+}
+
+fn clientDrainsBufferedSiblingAfterResetPeerClose(io: std.Io) !void {
     const allocator = std.testing.allocator;
 
     // Model the exact race deterministically: one transport read has already
@@ -338,6 +344,7 @@ test "HTTP/2 client drains buffered sibling after reset peer close" {
     );
 
     const ClosedWriter = struct {
+        delegate: std.Io,
         writes: usize = 0,
         fail_with_network_down: bool = false,
 
@@ -362,16 +369,11 @@ test "HTTP/2 client drains buffered sibling after reset peer close" {
         }
     };
 
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    var writer: ClosedWriter = .{};
-    var closed_vtable = threaded.io().vtable.*;
-    closed_vtable.now = ClosedWriter.now;
-    closed_vtable.netWrite = ClosedWriter.write;
-    const closed_io = std.Io{
-        .userdata = &writer,
-        .vtable = &closed_vtable,
-    };
+    var writer: ClosedWriter = .{ .delegate = io };
+    const closed_io = forwarded_io.observer(&writer, .{
+        .now = ClosedWriter.now,
+        .netWrite = ClosedWriter.write,
+    });
 
     var connection = Connection{
         .io = closed_io,
@@ -538,8 +540,13 @@ test "HTTP/2 reset retirement clears both stream windows" {
 }
 
 test "HTTP/2 refusal write failure makes later request reads terminal" {
+    try native_protocol_io.runStream(refusalWriteFailureMakesLaterRequestReadsTerminal);
+}
+
+fn refusalWriteFailureMakesLaterRequestReadsTerminal(io: std.Io) !void {
     const allocator = std.testing.allocator;
     const PartialWriter = struct {
+        delegate: std.Io,
         writes: usize = 0,
 
         fn write(
@@ -556,13 +563,9 @@ test "HTTP/2 refusal write failure makes later request reads terminal" {
         }
     };
 
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    var writer: PartialWriter = .{};
-    var vtable = threaded.io().vtable.*;
-    vtable.netWrite = PartialWriter.write;
+    var writer: PartialWriter = .{ .delegate = io };
     var connection = Connection{
-        .io = .{ .userdata = &writer, .vtable = &vtable },
+        .io = forwarded_io.observer(&writer, .{ .netWrite = PartialWriter.write }),
         .allocator = allocator,
         .stream = undefined,
         .role = .server,
