@@ -1,42 +1,11 @@
 const std = @import("std");
+const NativeSendIo = @import("../../../../../internal/testing/deadline_send_io.zig").Native;
 const http3 = @import("../../../../../http3/mod.zig");
 const runtime = @import("../../../../runtime.zig");
 const quic = @import("../../../../../quic/mod.zig");
 const server_response = @import("../../../server/response.zig");
 
 const first_server_push_stream_id: u62 = 15;
-
-const DeadlineAfterSendIo = struct {
-    delegate: std.Io,
-    now_ns: i96,
-    send_calls: usize = 0,
-
-    fn now(
-        userdata: ?*anyopaque,
-        _: std.Io.Clock,
-    ) std.Io.Timestamp {
-        const self: *@This() = @ptrCast(@alignCast(userdata.?));
-        return .fromNanoseconds(self.now_ns);
-    }
-
-    fn netSend(
-        userdata: ?*anyopaque,
-        socket_handle: std.Io.net.Socket.Handle,
-        messages: []std.Io.net.OutgoingMessage,
-        flags: std.Io.net.SendFlags,
-    ) struct { ?std.Io.net.Socket.SendError, usize } {
-        const self: *@This() = @ptrCast(@alignCast(userdata.?));
-        self.send_calls += 1;
-        const result = self.delegate.vtable.netSend(
-            self.delegate.userdata,
-            socket_handle,
-            messages,
-            flags,
-        );
-        if (result[1] != 0) self.now_ns += std.time.ns_per_s;
-        return result;
-    }
-};
 
 test "HTTP/3 protected server sends promised push response" {
     const allocator = std.testing.allocator;
@@ -143,18 +112,15 @@ test "HTTP/3 protected server sends promised push response" {
         );
         try std.testing.expectEqual(@as(usize, 1), server.request_lifecycle.count());
         if (exchange == 0) {
-            var timed_io = DeadlineAfterSendIo{
-                .delegate = server.quic_server.endpoint.io,
-                .now_ns = 1_000_000,
+            const delegate_io = server.quic_server.endpoint.io;
+            var timed_io: NativeSendIo = .{
+                .backend = .init(allocator, .{ .async_limit = .nothing }),
+                .now_ns = .init(1_000_000),
+                .advance_after_send_ns = std.time.ns_per_s,
             };
-            var timed_vtable = server.quic_server.endpoint.io.vtable.*;
-            timed_vtable.now = DeadlineAfterSendIo.now;
-            timed_vtable.netSend = DeadlineAfterSendIo.netSend;
-            server.quic_server.endpoint.io = .{
-                .userdata = &timed_io,
-                .vtable = &timed_vtable,
-            };
-            defer server.quic_server.endpoint.io = timed_io.delegate;
+            defer timed_io.backend.deinit();
+            server.quic_server.endpoint.io = timed_io.io();
+            defer server.quic_server.endpoint.io = delegate_io;
             try std.testing.expectError(
                 error.Timeout,
                 server.sendResponseWithPushAndDeadline(
@@ -164,12 +130,12 @@ test "HTTP/3 protected server sends promised push response" {
                     push,
                     .{
                         .clock = .awake,
-                        .raw = .fromNanoseconds(timed_io.now_ns + 1),
+                        .raw = .fromNanoseconds(timed_io.now_ns.load(.acquire) + 1),
                     },
                 ),
             );
             try std.testing.expect(server.control.settings.sent);
-            try std.testing.expectEqual(@as(usize, 1), timed_io.send_calls);
+            try std.testing.expectEqual(@as(usize, 1), timed_io.send_calls.load(.acquire));
             try std.testing.expect(server.next_packet_number > packet_number);
             try std.testing.expect(server.control_send.next_offset > control_offset);
             try std.testing.expectEqual(next_push_stream_id, server.next_push_stream_id);
@@ -186,7 +152,7 @@ test "HTTP/3 protected server sends promised push response" {
                 @as(usize, 1),
                 server.request_lifecycle.count(),
             );
-            server.quic_server.endpoint.io = timed_io.delegate;
+            server.quic_server.endpoint.io = delegate_io;
         }
         const push_stream_id = if (exchange == 0)
             try server.sendResponseWithPushAndTimeout(
@@ -766,29 +732,16 @@ fn runPushTimeoutCase(
     );
     defer server.deinit();
 
-    const AdvanceIo = struct {
-        delegate: std.Io,
-        base_ns: i96 = 1_000_000,
-        advance: *std.atomic.Value(bool),
-
-        fn now(
-            userdata: ?*anyopaque,
-            _: std.Io.Clock,
-        ) std.Io.Timestamp {
-            const self: *@This() = @ptrCast(@alignCast(userdata.?));
-            const advanced = self.advance.load(.acquire);
-            const offset: i96 = if (advanced)
-                10 * std.time.ns_per_s
-            else
-                0;
-            return .fromNanoseconds(self.base_ns + offset);
-        }
+    var timed: NativeSendIo = .{
+        .backend = .init(allocator, .{ .async_limit = .nothing }),
+        .now_ns = .init(1_000_000),
     };
+    defer timed.backend.deinit();
 
     const Shared = struct {
         allocator: std.mem.Allocator,
         server: *runtime.HandshakeServer,
-        advance: *std.atomic.Value(bool),
+        timed: *NativeSendIo,
         parent_body: []const u8,
         expect_parent_reset: bool,
         err: ?anyerror = null,
@@ -815,17 +768,9 @@ fn runPushTimeoutCase(
             const body = try shared.allocator.alloc(u8, body_len);
             defer shared.allocator.free(body);
             @memset(body, 0x5a);
-            var timed = AdvanceIo{
-                .delegate = session.established.connection.endpoint.io,
-                .advance = shared.advance,
-            };
-            var timed_vtable = timed.delegate.vtable.*;
-            timed_vtable.now = AdvanceIo.now;
-            session.established.connection.endpoint.io = .{
-                .userdata = &timed,
-                .vtable = &timed_vtable,
-            };
-            defer session.established.connection.endpoint.io = timed.delegate;
+            const delegate_io = session.established.connection.endpoint.io;
+            session.established.connection.endpoint.io = shared.timed.io();
+            defer session.established.connection.endpoint.io = delegate_io;
             const result = session.sendResponseWithPushPacedAndTimeout(
                 request.stream_id,
                 .{ .status = 200, .body = shared.parent_body },
@@ -862,7 +807,7 @@ fn runPushTimeoutCase(
             try std.testing.expect(!session.request_lifecycle.contains(
                 request.stream_id,
             ));
-            session.established.connection.endpoint.io = timed.delegate;
+            session.established.connection.endpoint.io = delegate_io;
             var sibling = try session.receiveRequestWithTimeout(.fromSeconds(5));
             defer sibling.deinit(
                 session.established.connection.endpoint.allocator,
@@ -872,11 +817,10 @@ fn runPushTimeoutCase(
         }
     };
 
-    var advance = std.atomic.Value(bool).init(false);
     var shared = Shared{
         .allocator = allocator,
         .server = &server,
-        .advance = &advance,
+        .timed = &timed,
         .parent_body = parent_body,
         .expect_parent_reset = expect_parent_reset,
     };
@@ -926,7 +870,8 @@ fn runPushTimeoutCase(
     try std.testing.expect(promise == .push_promise);
     try std.testing.expectEqual(@as(u64, 0), promise.push_promise.push_id);
 
-    advance.store(true, .release);
+    _ = timed.now_ns.fetchAdd(10 * std.time.ns_per_s, .acq_rel);
+    timed.clock_changed.set(timed.backend.io());
     try client.established.connection.trySend(&.{.{ .ping = {} }});
     const sibling_stream_id = try client.sendRequest(.{
         .method = "GET",
@@ -1018,27 +963,15 @@ test "HTTP/3 protected server paced push timeout retires only its streams" {
     );
     defer client.deinit();
 
-    const AdvanceIo = struct {
-        delegate: std.Io,
-        base_ns: i96 = 1_000_000,
-        advance: *std.atomic.Value(bool),
-
-        fn now(
-            userdata: ?*anyopaque,
-            _: std.Io.Clock,
-        ) std.Io.Timestamp {
-            const self: *@This() = @ptrCast(@alignCast(userdata.?));
-            const offset: i96 = if (self.advance.load(.acquire))
-                10 * std.time.ns_per_s
-            else
-                0;
-            return .fromNanoseconds(self.base_ns + offset);
-        }
+    var timed: NativeSendIo = .{
+        .backend = .init(allocator, .{ .async_limit = .nothing }),
+        .now_ns = .init(1_000_000),
     };
+    defer timed.backend.deinit();
 
     const Shared = struct {
         server: *runtime.ProtectedServer,
-        advance: *std.atomic.Value(bool),
+        timed: *NativeSendIo,
         err: ?anyerror = null,
         push_retired: bool = false,
         sibling_status: u16 = 0,
@@ -1061,17 +994,9 @@ test "HTTP/3 protected server paced push timeout retires only its streams" {
             );
             defer shared.server.quic_server.endpoint.allocator.free(body);
             @memset(body, 0x5a);
-            var timed = AdvanceIo{
-                .delegate = shared.server.quic_server.endpoint.io,
-                .advance = shared.advance,
-            };
-            var timed_vtable = timed.delegate.vtable.*;
-            timed_vtable.now = AdvanceIo.now;
-            shared.server.quic_server.endpoint.io = .{
-                .userdata = &timed,
-                .vtable = &timed_vtable,
-            };
-            defer shared.server.quic_server.endpoint.io = timed.delegate;
+            const delegate_io = shared.server.quic_server.endpoint.io;
+            shared.server.quic_server.endpoint.io = shared.timed.io();
+            defer shared.server.quic_server.endpoint.io = delegate_io;
             const result = shared.server.sendResponseWithPushPacedAndTimeout(
                 request.from,
                 request.stream_id,
@@ -1096,7 +1021,7 @@ test "HTTP/3 protected server paced push timeout retires only its streams" {
                 request.stream_id,
             ));
             shared.push_retired = true;
-            shared.server.quic_server.endpoint.io = timed.delegate;
+            shared.server.quic_server.endpoint.io = delegate_io;
             var sibling = try shared.server.receiveRequestWithTimeout(.fromSeconds(5));
             defer sibling.deinit(shared.server.quic_server.endpoint.allocator);
             shared.sibling_status = 204;
@@ -1104,8 +1029,7 @@ test "HTTP/3 protected server paced push timeout retires only its streams" {
         }
     };
 
-    var advance = std.atomic.Value(bool).init(false);
-    var shared = Shared{ .server = &server, .advance = &advance };
+    var shared = Shared{ .server = &server, .timed = &timed };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
     var joined = false;
     defer if (!joined) thread.join();
@@ -1126,7 +1050,8 @@ test "HTTP/3 protected server paced push timeout retires only its streams" {
     try std.testing.expect(promise == .push_promise);
     try std.testing.expectEqual(@as(u64, 0), promise.push_promise.push_id);
 
-    advance.store(true, .release);
+    _ = timed.now_ns.fetchAdd(10 * std.time.ns_per_s, .acq_rel);
+    timed.clock_changed.set(timed.backend.io());
     try client.protected_send.sendFrames(
         &client.quic_client.endpoint,
         server.address(),

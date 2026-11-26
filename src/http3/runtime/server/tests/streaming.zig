@@ -1,38 +1,7 @@
 const std = @import("std");
+const NativeSendIo = @import("../../../../internal/testing/deadline_send_io.zig").Native;
 const runtime = @import("../../../runtime.zig");
 const quic = @import("../../../../quic/mod.zig");
-
-const DeadlineAfterSendIo = struct {
-    delegate: std.Io,
-    now_ns: i96,
-    send_calls: usize = 0,
-
-    fn now(
-        userdata: ?*anyopaque,
-        _: std.Io.Clock,
-    ) std.Io.Timestamp {
-        const self: *@This() = @ptrCast(@alignCast(userdata.?));
-        return .fromNanoseconds(self.now_ns);
-    }
-
-    fn netSend(
-        userdata: ?*anyopaque,
-        socket_handle: std.Io.net.Socket.Handle,
-        messages: []std.Io.net.OutgoingMessage,
-        flags: std.Io.net.SendFlags,
-    ) struct { ?std.Io.net.Socket.SendError, usize } {
-        const self: *@This() = @ptrCast(@alignCast(userdata.?));
-        self.send_calls += 1;
-        const result = self.delegate.vtable.netSend(
-            self.delegate.userdata,
-            socket_handle,
-            messages,
-            flags,
-        );
-        if (result[1] != 0) self.now_ns += std.time.ns_per_s;
-        return result;
-    }
-};
 
 test "HTTP/3 protected runtime streams request and response DATA chunks" {
     const allocator = std.testing.allocator;
@@ -202,20 +171,15 @@ test "HTTP/3 protected runtime streams request and response DATA chunks" {
             );
 
             {
-                var timed = DeadlineAfterSendIo{
-                    .delegate = server_ptr.quic_server.endpoint.io,
-                    .now_ns = std.Io.Clock.awake.now(
-                        server_ptr.quic_server.endpoint.io,
-                    ).nanoseconds,
+                const delegate_io = server_ptr.quic_server.endpoint.io;
+                var timed: NativeSendIo = .{
+                    .backend = .init(allocator, .{ .async_limit = .nothing }),
+                    .now_ns = .init(@intCast(std.Io.Clock.awake.now(delegate_io).nanoseconds)),
+                    .advance_after_send_ns = std.time.ns_per_s,
                 };
-                var timed_vtable = timed.delegate.vtable.*;
-                timed_vtable.now = DeadlineAfterSendIo.now;
-                timed_vtable.netSend = DeadlineAfterSendIo.netSend;
-                server_ptr.quic_server.endpoint.io = .{
-                    .userdata = &timed,
-                    .vtable = &timed_vtable,
-                };
-                defer server_ptr.quic_server.endpoint.io = timed.delegate;
+                defer timed.backend.deinit();
+                server_ptr.quic_server.endpoint.io = timed.io();
+                defer server_ptr.quic_server.endpoint.io = delegate_io;
                 try std.testing.expectError(
                     error.Timeout,
                     server_ptr.sendResponseBodyPacedWithDeadline(
@@ -226,7 +190,7 @@ test "HTTP/3 protected runtime streams request and response DATA chunks" {
                         &body_progress,
                         .{
                             .clock = .awake,
-                            .raw = .fromNanoseconds(timed.now_ns + 1),
+                            .raw = .fromNanoseconds(timed.now_ns.load(.acquire) + 1),
                         },
                     ),
                 );
@@ -235,7 +199,7 @@ test "HTTP/3 protected runtime streams request and response DATA chunks" {
                     body_progress.committed_bytes,
                 );
                 try std.testing.expect(!body_progress.fin_committed);
-                try std.testing.expectEqual(@as(usize, 1), timed.send_calls);
+                try std.testing.expectEqual(@as(usize, 1), timed.send_calls.load(.acquire));
             }
             try server_ptr.sendResponseBodyPacedWithTimeout(
                 request.from,
@@ -455,20 +419,15 @@ test "HTTP/3 protected runtime streams request and response DATA chunks" {
     );
 
     {
-        var timed = DeadlineAfterSendIo{
-            .delegate = client.quic_client.endpoint.io,
-            .now_ns = std.Io.Clock.awake.now(
-                client.quic_client.endpoint.io,
-            ).nanoseconds,
+        const delegate_io = client.quic_client.endpoint.io;
+        var timed: NativeSendIo = .{
+            .backend = .init(allocator, .{ .async_limit = .nothing }),
+            .now_ns = .init(@intCast(std.Io.Clock.awake.now(delegate_io).nanoseconds)),
+            .advance_after_send_ns = std.time.ns_per_s,
         };
-        var timed_vtable = timed.delegate.vtable.*;
-        timed_vtable.now = DeadlineAfterSendIo.now;
-        timed_vtable.netSend = DeadlineAfterSendIo.netSend;
-        client.quic_client.endpoint.io = .{
-            .userdata = &timed,
-            .vtable = &timed_vtable,
-        };
-        defer client.quic_client.endpoint.io = timed.delegate;
+        defer timed.backend.deinit();
+        client.quic_client.endpoint.io = timed.io();
+        defer client.quic_client.endpoint.io = delegate_io;
         try std.testing.expectError(
             error.Timeout,
             client.sendRequestBodyPartsPacedWithDeadline(
@@ -478,7 +437,7 @@ test "HTTP/3 protected runtime streams request and response DATA chunks" {
                 &body_progress,
                 .{
                     .clock = .awake,
-                    .raw = .fromNanoseconds(timed.now_ns + 1),
+                    .raw = .fromNanoseconds(timed.now_ns.load(.acquire) + 1),
                 },
             ),
         );
@@ -487,7 +446,7 @@ test "HTTP/3 protected runtime streams request and response DATA chunks" {
             body_progress.committed_bytes,
         );
         try std.testing.expect(!body_progress.fin_committed);
-        try std.testing.expectEqual(@as(usize, 1), timed.send_calls);
+        try std.testing.expectEqual(@as(usize, 1), timed.send_calls.load(.acquire));
     }
     try client.sendRequestBodyPartsPacedWithTimeout(
         stream_id,

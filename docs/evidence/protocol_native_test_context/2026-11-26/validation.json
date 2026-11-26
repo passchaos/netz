@@ -1,0 +1,221 @@
+{
+  "observed_utc": "2026-11-26T03:38:54.427439+00:00",
+  "base_commit": "31febe5ac3c45c6c93e1eca13bb2fac16dd3087f",
+  "source_sha256": {
+    "src/http3/runtime/stream/push/tests/send.zig": "e9206cc2c5d6879551505f88bc84b3b2e086182113226bfc68f707d1f01c3f41",
+    "src/webtransport/runtime/flow/write/tests.zig": "8943d275783391d892e19cfb38a32a72b615a4ddad0d14f20b797cdc9c3361a0",
+    "src/http3/runtime/server/tests/streaming.zig": "2e75e498008ae39a860e62e2249bae6d3f22fa9fa387aefd76badd42863c381b",
+    "src/http3/runtime/response_scheduler/tests/protected.zig": "b36edd0ab20e1c7a925bee904e70af0284970dd34859f37e91cb697a421ed518",
+    "src/http3/runtime/control/tests/integration.zig": "749534805fd52450b387e84b588573cb9d0bf40b5ab934a32783ab1c58b03254",
+    "src/http3/runtime/client/tests/deadline.zig": "71583289051b4c8a7f8566ddf58571ddd3b74c32a02adf2f8dbe145cc40e170f",
+    "src/http3/runtime/development_runtime_tests.zig": "bf946c96e90f0d93fbbfd4553df5592f5c07a2ee21caf447a1f2d4fe832c054a",
+    "src/http3/runtime/stream/push/tests/events.zig": "bf91d64f4d7fc007f37d582801b9acfb2b579868eec224affe4cfa1a93b28bdb",
+    "src/http3/runtime/body_streaming_tests.zig": "3c672b5a29a555626e5220bcfa30aaf053b0918e1c4722269e5af2a58930241d",
+    "src/http3/runtime/handshake_deadline_tests.zig": "c77e8750fb6a22a04c1b8423ee63f3113173d1071958778c79cb96d4caa3d84f",
+    "src/http3/runtime/uri_and_shutdown_tests.zig": "305ab0144f51ff704a1ef3bd2d8f21cc85d03e2e4592641984c09002d2f027be",
+    "src/http3/runtime/server/complete_response_tests.zig": "fc72a125ed36ffbf819a949fc9c9ec2593f28c91b5d96f0b1b722fb3a6894227"
+  },
+  "baseline": {
+    "http3_native": "385/1009 paced push timeout segmentation fault in Threaded concurrent",
+    "complete_linux_ci": {
+      "run": 45740784651,
+      "job": 139644970366,
+      "test": "506/7451 WebTransport send flow multi-packet socket failure reports only submitted credit",
+      "error": "General protection exception"
+    },
+    "separate_remaining_failure": "client CA reload MQTT PINGRESP BrokenPipe before SIGHUP"
+  },
+  "passed_push_regression": {
+    "command": [
+      "zig",
+      "build",
+      "test-http3",
+      "-j1",
+      "-Dtest-progress=true",
+      "-Dtest-filter=paced push timeout retires only its streams",
+      "-Dtest-filter=HTTP/3 protected server sends promised push response",
+      "--summary",
+      "all"
+    ],
+    "test_count": 69,
+    "affected_named_cases": 3,
+    "status": "passed"
+  },
+  "local_dependencies": {
+    "vail": "d93847a7e091c835406ee10c0a86fd064f1475dd",
+    "vort": "a48e1151872a30a574363e994ec312969b3c7818"
+  },
+  "ci_vail_pin": "3b772b0cccb64d84fbc760df6428bc51e0fe0761",
+  "checks_pending": [
+    "pinned native and complete CI at delivered revision"
+  ],
+  "webtransport_native": {
+    "command": [
+      "zig",
+      "build",
+      "test-webtransport",
+      "-j1",
+      "-Dtest-progress=true",
+      "-Dtest-filter=WebTransport send flow",
+      "--summary",
+      "all"
+    ],
+    "status": "passed",
+    "test_count": 120,
+    "ci_crash_case_observed": "WebTransport send flow multi-packet socket failure reports only submitted credit"
+  },
+  "full_http3_first_retry": {
+    "status": "failed",
+    "position": "398/1009",
+    "test": "HTTP/3 protected runtime streams request and response DATA chunks",
+    "error": "signal ILL",
+    "original_paced_push_cases": "passed at385/386",
+    "next": "both client/server context observers migrated; exact and full checks pending"
+  },
+  "same_class_named_cases": [
+    "HTTP/3 protected response scheduler honors request priority",
+    "HTTP/3 connection control frames advance control stream offset",
+    "HTTP/3 protected runtime sends and accumulates RFC 9412 origins",
+    "HTTP/3 protected response deadlines preserve aggregate and streaming progress",
+    "HTTP/3 development body deadline distinguishes retry from fail close",
+    "HTTP/3 protected client resumes pending push cancellation after deadline",
+    "HTTP/3 aggregate deadlines bound request and response head sends",
+    "HTTP/3 serveConnection shutdown deadline covers GOAWAY send",
+    "HTTP/3 complete response queues refused cancellation and retries before a sibling"
+  ],
+  "passed_streaming_and_clock_scope": {
+    "named_cases": 7,
+    "total_tests": 72,
+    "status": "passed"
+  },
+  "full_http3_second_retry": {
+    "status": "failed",
+    "position": "780/1009",
+    "test": "HTTP/3 handshake client batches request DATA across streams",
+    "error": "signal ILL",
+    "next": "repair fixed pacing and partial batch wrappers; exact/full checks pending"
+  },
+  "native_ci_filters_added": [
+    "paced push timeout retires only its streams",
+    "HTTP/3 protected server sends promised push response",
+    "HTTP/3 protected runtime streams request and response DATA chunks",
+    "HTTP/3 handshake client batches request DATA across streams",
+    "HTTP/3 protected response scheduler honors request priority",
+    "HTTP/3 connection control frames advance control stream offset",
+    "HTTP/3 protected runtime sends and accumulates RFC 9412 origins",
+    "HTTP/3 protected response deadlines preserve aggregate and streaming progress",
+    "HTTP/3 development body deadline distinguishes retry from fail close",
+    "HTTP/3 protected client resumes pending push cancellation after deadline",
+    "WebTransport send flow",
+    "HTTP/3 aggregate deadlines bound request and response head sends",
+    "HTTP/3 serveConnection shutdown deadline covers GOAWAY send",
+    "HTTP/3 complete response queues refused cancellation and retries before a sibling"
+  ],
+  "native_ci_budget_minutes": 5,
+  "native_ci_existing_scopes_and_filters_preserved": true,
+  "native_ci_fixture_separate_command": true,
+  "native_ci_original_deadline_command_preserved_exactly": true,
+  "current_checks": [
+    {
+      "name": "format_streaming_context",
+      "command": [
+        "zig",
+        "fmt",
+        "src/http3/runtime/server/tests/streaming.zig",
+        "src/http3/runtime/response_scheduler/tests/protected.zig",
+        "src/http3/runtime/control/tests/integration.zig",
+        "src/http3/runtime/client/tests/deadline.zig",
+        "src/http3/runtime/development_runtime_tests.zig",
+        "src/http3/runtime/stream/push/tests/events.zig",
+        "src/http3/runtime/body_streaming_tests.zig",
+        "src/http3/runtime/handshake_deadline_tests.zig",
+        "src/http3/runtime/uri_and_shutdown_tests.zig",
+        "src/http3/runtime/server/complete_response_tests.zig"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 0.042803208999999995,
+      "log": "/tmp/netz-h3-streaming-context-format.log"
+    },
+    {
+      "name": "http3_streaming_regression",
+      "command": [
+        "zig",
+        "build",
+        "test-http3",
+        "-j1",
+        "-Dtest-progress=true",
+        "-Dtest-filter=HTTP/3 protected runtime streams request and response DATA chunks",
+        "-Dtest-filter=HTTP/3 protected response scheduler honors request priority",
+        "-Dtest-filter=HTTP/3 connection control frames advance control stream offset",
+        "-Dtest-filter=HTTP/3 protected runtime sends and accumulates RFC 9412 origins",
+        "-Dtest-filter=HTTP/3 protected response deadlines preserve aggregate and streaming progress",
+        "-Dtest-filter=HTTP/3 development body deadline distinguishes retry from fail close",
+        "-Dtest-filter=HTTP/3 protected client resumes pending push cancellation after deadline",
+        "-Dtest-filter=HTTP/3 handshake client batches request DATA across streams",
+        "-Dtest-filter=HTTP/3 aggregate deadlines bound request and response head sends",
+        "-Dtest-filter=HTTP/3 serveConnection shutdown deadline covers GOAWAY send",
+        "-Dtest-filter=HTTP/3 complete response queues refused cancellation and retries before a sibling",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 32.241200875,
+      "log": "/tmp/netz-h3-streaming-context-regression.log"
+    },
+    {
+      "name": "http3_full",
+      "command": [
+        "zig",
+        "build",
+        "test-http3",
+        "-j1",
+        "-Dtest-progress=true",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 66.481238292,
+      "log": "/tmp/netz-h3-full-after-aggregate-context.log"
+    },
+    {
+      "name": "windows_selected_compile",
+      "command": [
+        "zig",
+        "build",
+        "test-http3-compile",
+        "test-webtransport-compile",
+        "-Dtarget=x86_64-windows-gnu",
+        "-j1",
+        "-Dtest-filter=paced push timeout retires only its streams",
+        "-Dtest-filter=HTTP/3 protected server sends promised push response",
+        "-Dtest-filter=WebTransport send flow",
+        "-Dtest-filter=HTTP/3 protected runtime streams request and response DATA chunks",
+        "-Dtest-filter=HTTP/3 protected response scheduler honors request priority",
+        "-Dtest-filter=HTTP/3 connection control frames advance control stream offset",
+        "-Dtest-filter=HTTP/3 protected runtime sends and accumulates RFC 9412 origins",
+        "-Dtest-filter=HTTP/3 protected response deadlines preserve aggregate and streaming progress",
+        "-Dtest-filter=HTTP/3 development body deadline distinguishes retry from fail close",
+        "-Dtest-filter=HTTP/3 protected client resumes pending push cancellation after deadline",
+        "-Dtest-filter=HTTP/3 handshake client batches request DATA across streams",
+        "-Dtest-filter=HTTP/3 aggregate deadlines bound request and response head sends",
+        "-Dtest-filter=HTTP/3 serveConnection shutdown deadline covers GOAWAY send",
+        "-Dtest-filter=HTTP/3 complete response queues refused cancellation and retries before a sibling",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "elapsed_seconds": 57.43044654200001,
+      "log": "/tmp/netz-native-context-windows-compile.log"
+    }
+  ],
+  "full_http3_current": {
+    "status": "passed",
+    "named_cases_observed": 1009,
+    "skipped_cases": 4,
+    "scope": "native macOS HTTP3 protocol; does not replace pinned native Linux or Windows complete acceptance"
+  },
+  "evidence_audit": {
+    "status": "passed",
+    "max_unresolved": 24
+  }
+}

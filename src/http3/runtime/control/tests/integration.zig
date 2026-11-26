@@ -1,40 +1,9 @@
 const std = @import("std");
+const NativeSendIo = @import("../../../../internal/testing/deadline_send_io.zig").Native;
 const http3 = @import("../../../mod.zig");
 const runtime = @import("../../../runtime.zig");
 const quic = @import("../../../../quic/mod.zig");
 const control_receive = @import("../receive.zig");
-
-const DeadlineAfterSendIo = struct {
-    delegate: std.Io,
-    now_ns: i96,
-    send_calls: usize = 0,
-
-    fn now(
-        context: ?*anyopaque,
-        _: std.Io.Clock,
-    ) std.Io.Timestamp {
-        const self: *@This() = @ptrCast(@alignCast(context.?));
-        return .fromNanoseconds(self.now_ns);
-    }
-
-    fn netSend(
-        context: ?*anyopaque,
-        socket_handle: std.Io.net.Socket.Handle,
-        messages: []std.Io.net.OutgoingMessage,
-        flags: std.Io.net.SendFlags,
-    ) struct { ?std.Io.net.Socket.SendError, usize } {
-        const self: *@This() = @ptrCast(@alignCast(context.?));
-        self.send_calls += 1;
-        const result = self.delegate.vtable.netSend(
-            self.delegate.userdata,
-            socket_handle,
-            messages,
-            flags,
-        );
-        if (result[1] != 0) self.now_ns += std.time.ns_per_s;
-        return result;
-    }
-};
 
 fn findStreamFrame(frames: []const quic.Frame) ?quic.StreamFrame {
     for (frames) |frame| {
@@ -100,34 +69,31 @@ test "HTTP/3 connection control frames advance control stream offset" {
     try std.testing.expectEqual(control_offset, client.control_send.next_offset);
     try std.testing.expectEqual(@as(?u64, null), client.control.local_goaway_id);
 
-    var timed_io = DeadlineAfterSendIo{
-        .delegate = client.quic_client.endpoint.io,
-        .now_ns = 1_000_000,
+    const delegate_timed_io = client.quic_client.endpoint.io;
+    var timed_io: NativeSendIo = .{
+        .backend = .init(allocator, .{ .async_limit = .nothing }),
+        .now_ns = .init(@intCast(1_000_000)),
+        .advance_after_send_ns = std.time.ns_per_s,
     };
-    var timed_vtable = client.quic_client.endpoint.io.vtable.*;
-    timed_vtable.now = DeadlineAfterSendIo.now;
-    timed_vtable.netSend = DeadlineAfterSendIo.netSend;
-    client.quic_client.endpoint.io = .{
-        .userdata = &timed_io,
-        .vtable = &timed_vtable,
-    };
-    defer client.quic_client.endpoint.io = timed_io.delegate;
+    defer timed_io.backend.deinit();
+    client.quic_client.endpoint.io = timed_io.io();
+    defer client.quic_client.endpoint.io = delegate_timed_io;
     try std.testing.expectError(
         error.Timeout,
         client.sendGoAwayWithDeadline(0, .{
             .clock = .awake,
-            .raw = .fromNanoseconds(timed_io.now_ns + 1),
+            .raw = .fromNanoseconds(timed_io.now_ns.load(.acquire) + 1),
         }),
     );
     try std.testing.expect(client.control.settings.sent);
-    try std.testing.expect(timed_io.send_calls != 0);
+    try std.testing.expect(timed_io.send_calls.load(.acquire) != 0);
     try std.testing.expectEqual(@as(?u64, null), client.control.local_goaway_id);
     const settings_packet_number = client.next_packet_number;
     const settings_control_offset = client.control_send.next_offset;
     try std.testing.expect(settings_packet_number > packet_number);
     try std.testing.expect(settings_control_offset > control_offset);
 
-    client.quic_client.endpoint.io = timed_io.delegate;
+    client.quic_client.endpoint.io = delegate_timed_io;
     try client.sendGoAwayWithTimeout(0, .fromSeconds(1));
     try std.testing.expect(client.next_packet_number > settings_packet_number);
     try std.testing.expect(client.control_send.next_offset > settings_control_offset);
@@ -244,18 +210,15 @@ test "HTTP/3 protected runtime sends and accumulates RFC 9412 origins" {
     try std.testing.expectEqual(control_offset, server.control_send.next_offset);
     try std.testing.expect(!server.control.local_origin_set_sent);
 
-    var timed_io = DeadlineAfterSendIo{
-        .delegate = server.quic_server.endpoint.io,
-        .now_ns = 1_000_000,
+    const delegate_timed_io = server.quic_server.endpoint.io;
+    var timed_io: NativeSendIo = .{
+        .backend = .init(allocator, .{ .async_limit = .nothing }),
+        .now_ns = .init(@intCast(1_000_000)),
+        .advance_after_send_ns = std.time.ns_per_s,
     };
-    var timed_vtable = server.quic_server.endpoint.io.vtable.*;
-    timed_vtable.now = DeadlineAfterSendIo.now;
-    timed_vtable.netSend = DeadlineAfterSendIo.netSend;
-    server.quic_server.endpoint.io = .{
-        .userdata = &timed_io,
-        .vtable = &timed_vtable,
-    };
-    defer server.quic_server.endpoint.io = timed_io.delegate;
+    defer timed_io.backend.deinit();
+    server.quic_server.endpoint.io = timed_io.io();
+    defer server.quic_server.endpoint.io = delegate_timed_io;
     try std.testing.expectError(
         error.Timeout,
         server.sendOriginsWithDeadline(
@@ -263,19 +226,19 @@ test "HTTP/3 protected runtime sends and accumulates RFC 9412 origins" {
             &.{"https://must-not-send.example"},
             .{
                 .clock = .awake,
-                .raw = .fromNanoseconds(timed_io.now_ns + 1),
+                .raw = .fromNanoseconds(timed_io.now_ns.load(.acquire) + 1),
             },
         ),
     );
     try std.testing.expect(server.control.settings.sent);
-    try std.testing.expect(timed_io.send_calls != 0);
+    try std.testing.expect(timed_io.send_calls.load(.acquire) != 0);
     try std.testing.expect(server.next_packet_number > packet_number);
     const settings_packet_number = server.next_packet_number;
     const settings_control_offset = server.control_send.next_offset;
     try std.testing.expect(settings_control_offset > control_offset);
     try std.testing.expect(!server.control.local_origin_set_sent);
 
-    server.quic_server.endpoint.io = timed_io.delegate;
+    server.quic_server.endpoint.io = delegate_timed_io;
     try server.sendOriginsWithTimeout(client.quic_client.address(), &.{
         "https://Example.COM",
         "https://cdn.example.com:8443",

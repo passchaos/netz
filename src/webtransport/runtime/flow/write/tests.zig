@@ -1,4 +1,5 @@
 const std = @import("std");
+const NativeSendIo = @import("../../../../internal/testing/deadline_send_io.zig").Native;
 const webtransport = @import("../../../mod.zig");
 const Pair = @import("../../session_control/test_support/handshake_pair.zig").Pair;
 const stream = @import("../../stream.zig");
@@ -176,9 +177,14 @@ test "WebTransport send flow multi-packet socket failure reports only submitted 
     _ = try stream.prepareOnce(conn, &pair.client.streams, pair.client.session_id, id);
     const original_io = conn.endpoint.io;
     var observed = ObservedBatchSend{ .delegate = original_io, .fail_after_prefix = 1 };
-    var vtable = original_io.vtable.*;
-    vtable.netSend = ObservedBatchSend.netSend;
-    conn.endpoint.io = .{ .userdata = &observed, .vtable = &vtable };
+    var send_io: NativeSendIo = .{
+        .backend = .init(std.testing.allocator, .{ .async_limit = .nothing }),
+        .fixed_clock = false,
+        .send_context = &observed,
+        .send_override = ObservedBatchSend.netSend,
+    };
+    defer send_io.backend.deinit();
+    conn.endpoint.io = send_io.io();
     defer conn.endpoint.io = original_io;
     var payload: [4096]u8 = undefined;
     for (&payload, 0..) |*byte, index| byte.* = @intCast(index % 251);

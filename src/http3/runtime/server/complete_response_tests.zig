@@ -1,4 +1,5 @@
 const std = @import("std");
+const NativeSendIo = @import("../../../internal/testing/deadline_send_io.zig").Native;
 const http3 = @import("../../mod.zig");
 const quic = @import("../../../quic/mod.zig");
 const Pair = @import("../receive/test_support/request_pair.zig").Pair;
@@ -127,37 +128,33 @@ test "HTTP/3 complete response queues refused cancellation and retries before a 
         defer pair.deinit();
         try admit(&pair, 0);
         try admit(&pair, 4);
-        const DeadlineIo = struct {
-            delegate: std.Io,
-            now_ns: i96 = 1_000_000,
-            calls: usize = 0,
-            fn now(userdata: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
-                const self: *@This() = @ptrCast(@alignCast(userdata.?));
-                return .fromNanoseconds(self.now_ns);
-            }
-            fn netSend(userdata: ?*anyopaque, handle: std.Io.net.Socket.Handle, messages: []std.Io.net.OutgoingMessage, flags: std.Io.net.SendFlags) struct { ?std.Io.net.Socket.SendError, usize } {
-                const self: *@This() = @ptrCast(@alignCast(userdata.?));
-                self.calls += 1;
-                if (self.calls >= 2) return .{ error.NetworkDown, 0 };
-                const result = self.delegate.vtable.netSend(self.delegate.userdata, handle, messages, flags);
-                if (result[1] != 0) self.now_ns += std.time.ns_per_s;
-                return result;
+        const FailAfterFirst = struct {
+            fn send(context: ?*anyopaque, handle: std.Io.net.Socket.Handle, messages: []std.Io.net.OutgoingMessage, flags: std.Io.net.SendFlags) struct { ?std.Io.net.Socket.SendError, usize } {
+                const sender: *NativeSendIo = @ptrCast(@alignCast(context.?));
+                if (sender.send_calls.load(.acquire) >= 2) return .{ error.NetworkDown, 0 };
+                const base = sender.backend.io();
+                return base.vtable.netSend(base.userdata, handle, messages, flags);
             }
         };
         const connection = &pair.server.established.connection;
-        var fixed = DeadlineIo{ .delegate = connection.endpoint.io };
-        var vtable = fixed.delegate.vtable.*;
-        vtable.now = DeadlineIo.now;
-        vtable.netSend = DeadlineIo.netSend;
-        connection.endpoint.io = .{ .userdata = &fixed, .vtable = &vtable };
-        defer connection.endpoint.io = fixed.delegate;
-        try std.testing.expectError(error.Timeout, pair.server.sendResponsePacedWithDeadline(0, .{ .status = 200, .body = "response" }, .{ .clock = .awake, .raw = .fromNanoseconds(fixed.now_ns + 100) }));
-        try std.testing.expectEqual(@as(usize, 2), fixed.calls);
+        const fixed_delegate_io = connection.endpoint.io;
+        var fixed: NativeSendIo = .{
+            .backend = .init(std.testing.allocator, .{ .async_limit = .nothing }),
+            .now_ns = .init(1_000_000),
+            .advance_after_send_ns = std.time.ns_per_s,
+            .send_override = FailAfterFirst.send,
+        };
+        fixed.send_context = &fixed;
+        defer fixed.backend.deinit();
+        connection.endpoint.io = fixed.io();
+        defer connection.endpoint.io = fixed_delegate_io;
+        try std.testing.expectError(error.Timeout, pair.server.sendResponsePacedWithDeadline(0, .{ .status = 200, .body = "response" }, .{ .clock = .awake, .raw = .fromNanoseconds(fixed.now_ns.load(.acquire) + 100) }));
+        try std.testing.expectEqual(@as(usize, 2), fixed.send_calls.load(.acquire));
         try std.testing.expectEqual(@as(usize, 1), pair.server.pending_response_cancellations.items.len);
         try std.testing.expect(!pair.server.request_lifecycle.contains(0));
         try std.testing.expect(pair.server.request_lifecycle.contains(4));
         try std.testing.expect(!connection.closed());
-        connection.endpoint.io = fixed.delegate;
+        connection.endpoint.io = fixed_delegate_io;
         if (packet_progress) {
             try pair.send(&.{.ping});
             try std.testing.expectEqual(@as(usize, 0), pair.server.pending_response_cancellations.items.len);

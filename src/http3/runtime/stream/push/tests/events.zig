@@ -1,4 +1,5 @@
 const std = @import("std");
+const NativeSendIo = @import("../../../../../internal/testing/deadline_send_io.zig").Native;
 const http3 = @import("../../../../mod.zig");
 const runtime = @import("../../../../runtime.zig");
 const quic = @import("../../../../../quic/mod.zig");
@@ -32,38 +33,6 @@ const FailOnCall = struct {
             messages,
             flags,
         );
-    }
-};
-
-const DeadlineAfterSendIo = struct {
-    delegate: std.Io,
-    now_ns: i96,
-    send_calls: usize = 0,
-
-    fn now(
-        userdata: ?*anyopaque,
-        _: std.Io.Clock,
-    ) std.Io.Timestamp {
-        const self: *@This() = @ptrCast(@alignCast(userdata.?));
-        return .fromNanoseconds(self.now_ns);
-    }
-
-    fn netSend(
-        userdata: ?*anyopaque,
-        socket_handle: std.Io.net.Socket.Handle,
-        messages: []std.Io.net.OutgoingMessage,
-        flags: std.Io.net.SendFlags,
-    ) struct { ?std.Io.net.Socket.SendError, usize } {
-        const self: *@This() = @ptrCast(@alignCast(userdata.?));
-        self.send_calls += 1;
-        const result = self.delegate.vtable.netSend(
-            self.delegate.userdata,
-            socket_handle,
-            messages,
-            flags,
-        );
-        if (result[1] != 0) self.now_ns += std.time.ns_per_s;
-        return result;
     }
 };
 
@@ -522,34 +491,31 @@ test "HTTP/3 protected client resumes pending push cancellation after deadline" 
         client.control,
     ));
 
-    var timed_io = DeadlineAfterSendIo{
-        .delegate = client.quic_client.endpoint.io,
-        .now_ns = 1_000_000,
+    const delegate_timed_io = client.quic_client.endpoint.io;
+    var timed_io: NativeSendIo = .{
+        .backend = .init(allocator, .{ .async_limit = .nothing }),
+        .now_ns = .init(@intCast(1_000_000)),
+        .advance_after_send_ns = std.time.ns_per_s,
     };
-    var timed_vtable = client.quic_client.endpoint.io.vtable.*;
-    timed_vtable.now = DeadlineAfterSendIo.now;
-    timed_vtable.netSend = DeadlineAfterSendIo.netSend;
-    client.quic_client.endpoint.io = .{
-        .userdata = &timed_io,
-        .vtable = &timed_vtable,
-    };
-    defer client.quic_client.endpoint.io = timed_io.delegate;
+    defer timed_io.backend.deinit();
+    client.quic_client.endpoint.io = timed_io.io();
+    defer client.quic_client.endpoint.io = delegate_timed_io;
 
     const cancel_offset = client.control_send.next_offset;
     try std.testing.expectError(
         error.Timeout,
         client.cancelPushWithDeadline(0, .{
             .clock = .awake,
-            .raw = .fromNanoseconds(timed_io.now_ns + 1),
+            .raw = .fromNanoseconds(timed_io.now_ns.load(.acquire) + 1),
         }),
     );
-    try std.testing.expectEqual(@as(usize, 1), timed_io.send_calls);
+    try std.testing.expectEqual(@as(usize, 1), timed_io.send_calls.load(.acquire));
     try std.testing.expect(client.control_send.next_offset > cancel_offset);
     try std.testing.expectEqual(@as(usize, 0), client.push_streams.promiseCount());
     try std.testing.expectEqual(@as(usize, 1), client.push_streams.cancelledStreamCount());
 
     const committed_offset = client.control_send.next_offset;
-    client.quic_client.endpoint.io = timed_io.delegate;
+    client.quic_client.endpoint.io = delegate_timed_io;
     try client.cancelPushWithTimeout(0, .fromSeconds(1));
     try std.testing.expectEqual(committed_offset, client.control_send.next_offset);
     try std.testing.expectEqual(@as(usize, 0), client.push_streams.cancelledStreamCount());

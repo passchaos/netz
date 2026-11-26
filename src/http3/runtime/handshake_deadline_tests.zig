@@ -1,6 +1,7 @@
 //! HTTP/3 handshake and request deadline tests.
 
 const std = @import("std");
+const NativeSendIo = @import("../../internal/testing/deadline_send_io.zig").Native;
 const http3 = @import("../mod.zig");
 const net = std.Io.net;
 const runtime = @import("../runtime.zig");
@@ -67,46 +68,6 @@ test "HTTP/3 aggregate deadlines bound request and response head sends" {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-
-    const DeadlineSendIo = struct {
-        delegate: std.Io,
-        now_ns: i96 = 1_000_000,
-        send_calls: usize = 0,
-        sleep_calls: usize = 0,
-
-        fn now(
-            context: ?*anyopaque,
-            _: std.Io.Clock,
-        ) std.Io.Timestamp {
-            const self: *@This() = @ptrCast(@alignCast(context.?));
-            return .fromNanoseconds(self.now_ns);
-        }
-
-        fn sleep(
-            context: ?*anyopaque,
-            _: std.Io.Timeout,
-        ) std.Io.Cancelable!void {
-            const self: *@This() = @ptrCast(@alignCast(context.?));
-            self.sleep_calls += 1;
-            return error.Canceled;
-        }
-
-        fn netSend(
-            context: ?*anyopaque,
-            socket_handle: net.Socket.Handle,
-            messages: []net.OutgoingMessage,
-            flags: net.SendFlags,
-        ) struct { ?net.Socket.SendError, usize } {
-            const self: *@This() = @ptrCast(@alignCast(context.?));
-            self.send_calls += 1;
-            return self.delegate.vtable.netSend(
-                self.delegate.userdata,
-                socket_handle,
-                messages,
-                flags,
-            );
-        }
-    };
 
     const original_dcid =
         [_]u8{ 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48 };
@@ -192,20 +153,17 @@ test "HTTP/3 aggregate deadlines bound request and response head sends" {
                 session.options,
                 server_control_stream_id,
             );
-            var fixed = DeadlineSendIo{
-                .delegate = session.established.connection.endpoint.io,
+            const fixed_delegate_io = session.established.connection.endpoint.io;
+            var fixed: NativeSendIo = .{
+                .backend = .init(allocator, .{ .async_limit = .nothing }),
+                .now_ns = .init(1_000_000),
             };
-            var vtable = fixed.delegate.vtable.*;
-            vtable.now = DeadlineSendIo.now;
-            vtable.sleep = DeadlineSendIo.sleep;
-            vtable.netSend = DeadlineSendIo.netSend;
-            session.established.connection.endpoint.io = .{
-                .userdata = &fixed,
-                .vtable = &vtable,
-            };
+            defer fixed.backend.deinit();
+            session.established.connection.endpoint.io = fixed.io();
+            defer session.established.connection.endpoint.io = fixed_delegate_io;
             quic.one_rtt.testing.exhaustPacingAt(
                 &session.established.connection,
-                @intCast(fixed.now_ns),
+                @intCast(fixed.now_ns.load(.acquire)),
             );
             const packet_number =
                 session.established.connection.next_packet_number;
@@ -214,7 +172,7 @@ test "HTTP/3 aggregate deadlines bound request and response head sends" {
                 .{ .status = 204 },
                 .{
                     .clock = .awake,
-                    .raw = .fromNanoseconds(fixed.now_ns + 1),
+                    .raw = .fromNanoseconds(fixed.now_ns.load(.acquire) + 1),
                 },
             )) |_| {
                 return error.TestUnexpectedResult;
@@ -222,8 +180,8 @@ test "HTTP/3 aggregate deadlines bound request and response head sends" {
                 if (err != error.Timeout) return err;
                 self.response_timeout = true;
             }
-            self.zero_send_calls = fixed.send_calls == 0;
-            self.zero_sleep_calls = fixed.sleep_calls == 0;
+            self.zero_send_calls = fixed.send_calls.load(.acquire) == 0;
+            self.zero_sleep_calls = fixed.duration_sleep_calls.load(.acquire) == 0;
             self.lifecycle_retained =
                 session.request_lifecycle.count() == 1;
             self.connection_open =
@@ -232,7 +190,7 @@ test "HTTP/3 aggregate deadlines bound request and response head sends" {
                 packet_number,
                 session.established.connection.next_packet_number,
             );
-            session.established.connection.endpoint.io = fixed.delegate;
+            session.established.connection.endpoint.io = fixed_delegate_io;
             try session.sendResponsePacedWithDeadline(
                 request.stream_id,
                 .{ .status = 204 },
@@ -254,30 +212,22 @@ test "HTTP/3 aggregate deadlines bound request and response head sends" {
             const now = std.Io.Clock.awake.now(
                 session.established.connection.endpoint.io,
             ).nanoseconds;
-            fixed = .{
-                .delegate = session.established.connection.endpoint.io,
-                .now_ns = now,
-            };
-            vtable = fixed.delegate.vtable.*;
-            vtable.now = DeadlineSendIo.now;
-            vtable.sleep = DeadlineSendIo.sleep;
-            vtable.netSend = DeadlineSendIo.netSend;
-            session.established.connection.endpoint.io = .{
-                .userdata = &fixed,
-                .vtable = &vtable,
-            };
+            fixed.now_ns.store(@intCast(now), .release);
+            fixed.send_calls.store(0, .release);
+            fixed.duration_sleep_calls.store(0, .release);
+            session.established.connection.endpoint.io = fixed.io();
             quic.one_rtt.testing.exhaustPacingAt(
                 &session.established.connection,
-                @intCast(fixed.now_ns),
+                @intCast(fixed.now_ns.load(.acquire)),
             );
-            fixed.now_ns += std.time.ns_per_s;
+            _ = fixed.now_ns.fetchAdd(std.time.ns_per_s, .acq_rel);
             var body: [4096]u8 = .{0xa5} ** 4096;
             if (session.sendResponsePacedWithDeadline(
                 body_request.stream_id,
                 .{ .status = 200, .body = &body },
                 .{
                     .clock = .awake,
-                    .raw = .fromNanoseconds(fixed.now_ns + 1),
+                    .raw = .fromNanoseconds(fixed.now_ns.load(.acquire) + 1),
                 },
             )) |_| {
                 return error.TestUnexpectedResult;
@@ -285,17 +235,16 @@ test "HTTP/3 aggregate deadlines bound request and response head sends" {
                 if (err != error.Timeout) return err;
                 self.body_timeout = true;
             }
-            try std.testing.expect(fixed.send_calls >= 1);
+            try std.testing.expect(fixed.send_calls.load(.acquire) >= 1);
             try std.testing.expect(!session.established.connection.closed());
             try std.testing.expect(!session.request_lifecycle.contains(body_request.stream_id));
-            session.established.connection.endpoint.io = fixed.delegate;
+            session.established.connection.endpoint.io = fixed_delegate_io;
         }
     };
 
     var shared = Shared{ .server = &server, .io = io };
-    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
-    var joined = false;
-    defer if (!joined) thread.join();
+    var peer_work = try std.Io.concurrent(io, Shared.run, .{&shared});
+    defer peer_work.cancel(io);
 
     var client = try HandshakeClient.connect(
         allocator,
@@ -346,15 +295,17 @@ test "HTTP/3 aggregate deadlines bound request and response head sends" {
         client.options,
         client_control_stream_id,
     );
-    var fixed = DeadlineSendIo{ .delegate = client.endpoint.io };
-    var vtable = fixed.delegate.vtable.*;
-    vtable.now = DeadlineSendIo.now;
-    vtable.sleep = DeadlineSendIo.sleep;
-    vtable.netSend = DeadlineSendIo.netSend;
-    client.endpoint.io = .{ .userdata = &fixed, .vtable = &vtable };
+    const fixed_delegate_io = client.endpoint.io;
+    var fixed: NativeSendIo = .{
+        .backend = .init(allocator, .{ .async_limit = .nothing }),
+        .now_ns = .init(1_000_000),
+    };
+    defer fixed.backend.deinit();
+    client.endpoint.io = fixed.io();
+    defer client.endpoint.io = fixed_delegate_io;
     quic.one_rtt.testing.exhaustPacingAt(
         &client.established.connection,
-        @intCast(fixed.now_ns),
+        @intCast(fixed.now_ns.load(.acquire)),
     );
     const packet_number = client.established.connection.next_packet_number;
     try std.testing.expectError(
@@ -368,18 +319,18 @@ test "HTTP/3 aggregate deadlines bound request and response head sends" {
             null,
             .{
                 .clock = .awake,
-                .raw = .fromNanoseconds(fixed.now_ns + 1),
+                .raw = .fromNanoseconds(fixed.now_ns.load(.acquire) + 1),
             },
         ),
     );
-    try std.testing.expectEqual(@as(usize, 0), fixed.send_calls);
-    try std.testing.expectEqual(@as(usize, 0), fixed.sleep_calls);
+    try std.testing.expectEqual(@as(usize, 0), fixed.send_calls.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), fixed.duration_sleep_calls.load(.acquire));
     try std.testing.expectEqual(packet_number, client.established.connection.next_packet_number);
     try std.testing.expectEqual(@as(usize, 1), client.request_lifecycle.count());
     try std.testing.expect(client.request_lifecycle.contains(0));
     try std.testing.expectEqual(@as(u62, 0), client.next_stream_id);
     try std.testing.expect(!client.established.connection.closed());
-    client.endpoint.io = fixed.delegate;
+    client.endpoint.io = fixed_delegate_io;
 
     var response = try client.requestWithDeadline(
         .{
@@ -398,8 +349,7 @@ test "HTTP/3 aggregate deadlines bound request and response head sends" {
     });
     try shared.body_done.wait(io);
 
-    thread.join();
-    joined = true;
+    peer_work.await(io);
     if (shared.err) |err| return err;
     try std.testing.expect(shared.response_timeout);
     try std.testing.expect(shared.body_timeout);

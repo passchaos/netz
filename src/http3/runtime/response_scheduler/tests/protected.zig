@@ -1,39 +1,8 @@
 const std = @import("std");
+const NativeSendIo = @import("../../../../internal/testing/deadline_send_io.zig").Native;
 const runtime = @import("../../../runtime.zig");
 const quic = @import("../../../../quic/mod.zig");
 const body_sender = @import("../../send/body.zig");
-
-const DeadlineAfterSendIo = struct {
-    delegate: std.Io,
-    now_ns: i96,
-    send_calls: usize = 0,
-
-    fn now(
-        userdata: ?*anyopaque,
-        _: std.Io.Clock,
-    ) std.Io.Timestamp {
-        const self: *@This() = @ptrCast(@alignCast(userdata.?));
-        return .fromNanoseconds(self.now_ns);
-    }
-
-    fn netSend(
-        userdata: ?*anyopaque,
-        socket_handle: std.Io.net.Socket.Handle,
-        messages: []std.Io.net.OutgoingMessage,
-        flags: std.Io.net.SendFlags,
-    ) struct { ?std.Io.net.Socket.SendError, usize } {
-        const self: *@This() = @ptrCast(@alignCast(userdata.?));
-        self.send_calls += 1;
-        const result = self.delegate.vtable.netSend(
-            self.delegate.userdata,
-            socket_handle,
-            messages,
-            flags,
-        );
-        if (result[1] != 0) self.now_ns += std.time.ns_per_s;
-        return result;
-    }
-};
 
 test "HTTP/3 protected response scheduler honors request priority" {
     const allocator = std.testing.allocator;
@@ -169,20 +138,17 @@ test "HTTP/3 protected response scheduler honors request priority" {
         server.outbound_bodies.find(high_id).?.send.next_offset,
     );
 
-    var timed = DeadlineAfterSendIo{
-        .delegate = server.quic_server.endpoint.io,
-        .now_ns = std.Io.Clock.awake.now(
+    const delegate_timed = server.quic_server.endpoint.io;
+    var timed: NativeSendIo = .{
+        .backend = .init(allocator, .{ .async_limit = .nothing }),
+        .now_ns = .init(@intCast(std.Io.Clock.awake.now(
             server.quic_server.endpoint.io,
-        ).nanoseconds,
+        ).nanoseconds)),
+        .advance_after_send_ns = std.time.ns_per_s,
     };
-    var timed_vtable = timed.delegate.vtable.*;
-    timed_vtable.now = DeadlineAfterSendIo.now;
-    timed_vtable.netSend = DeadlineAfterSendIo.netSend;
-    server.quic_server.endpoint.io = .{
-        .userdata = &timed,
-        .vtable = &timed_vtable,
-    };
-    defer server.quic_server.endpoint.io = timed.delegate;
+    defer timed.backend.deinit();
+    server.quic_server.endpoint.io = timed.io();
+    defer server.quic_server.endpoint.io = delegate_timed;
     const first_chunk = body_sender.pacedProtectedBodyChunkLimit(
         server.config,
     );
@@ -194,11 +160,11 @@ test "HTTP/3 protected response scheduler honors request priority" {
             &committed,
             .{
                 .clock = .awake,
-                .raw = .fromNanoseconds(timed.now_ns + 1),
+                .raw = .fromNanoseconds(timed.now_ns.load(.acquire) + 1),
             },
         ),
     );
-    try std.testing.expectEqual(@as(usize, 1), timed.send_calls);
+    try std.testing.expectEqual(@as(usize, 1), timed.send_calls.load(.acquire));
     try std.testing.expectEqualSlices(
         usize,
         &.{ 0, first_chunk },
@@ -227,7 +193,7 @@ test "HTTP/3 protected response scheduler honors request priority" {
             .data = responses[1].data[first_chunk..],
         },
     };
-    timed.send_calls = 0;
+    timed.send_calls.store(0, .release);
     try std.testing.expectError(
         error.Timeout,
         server.sendResponseBodiesPacedWithDeadline(
@@ -236,11 +202,11 @@ test "HTTP/3 protected response scheduler honors request priority" {
             &committed,
             .{
                 .clock = .awake,
-                .raw = .fromNanoseconds(timed.now_ns + 1),
+                .raw = .fromNanoseconds(timed.now_ns.load(.acquire) + 1),
             },
         ),
     );
-    try std.testing.expectEqual(@as(usize, 1), timed.send_calls);
+    try std.testing.expectEqual(@as(usize, 1), timed.send_calls.load(.acquire));
     try std.testing.expectEqualSlices(
         usize,
         &.{ 0, small_flow_chunk },
@@ -252,7 +218,7 @@ test "HTTP/3 protected response scheduler honors request priority" {
     );
 
     server.outbound_bodies.find(high_id).?.flow_limit = null;
-    server.quic_server.endpoint.io = timed.delegate;
+    server.quic_server.endpoint.io = delegate_timed;
     const final_suffixes = [_]runtime.ResponseBody{
         responses[0],
         .{

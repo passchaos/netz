@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const NativeSendIo = @import("../../internal/testing/deadline_send_io.zig").Native;
+const ObservedBatchSend = @import("../../quic/one_rtt/tests/observed_batch_send.zig").ObservedBatchSend;
 const http3 = @import("../mod.zig");
 const net = std.Io.net;
 const runtime = @import("../runtime.zig");
@@ -399,7 +400,8 @@ test "HTTP/3 handshake client batches request DATA across streams" {
     };
 
     var shared = Shared{ .server = &server };
-    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var thread = try std.Io.concurrent(io, Shared.run, .{&shared});
+    defer thread.cancel(io);
     var client = try HandshakeClient.connect(
         allocator,
         io,
@@ -476,43 +478,19 @@ test "HTTP/3 handshake client batches request DATA across streams" {
             .{ .stream_id = first, .data = "first-body", .fin = true },
         }),
     );
-    const FixedPacingIo = struct {
-        delegate: std.Io,
-        now_ns: i96,
-        sleep_calls: usize = 0,
-
-        fn now(
-            userdata: ?*anyopaque,
-            _: std.Io.Clock,
-        ) std.Io.Timestamp {
-            const self: *@This() = @ptrCast(@alignCast(userdata));
-            return .fromNanoseconds(self.now_ns);
-        }
-
-        fn sleep(
-            userdata: ?*anyopaque,
-            _: std.Io.Timeout,
-        ) std.Io.Cancelable!void {
-            const self: *@This() = @ptrCast(@alignCast(userdata));
-            self.sleep_calls += 1;
-            return error.Canceled;
-        }
+    const fixed_delegate_io = client.endpoint.io;
+    var fixed_io: NativeSendIo = .{
+        .backend = .init(allocator, .{ .async_limit = .nothing }),
+        .now_ns = .init(1_000_000),
     };
-    var fixed_io = FixedPacingIo{
-        .delegate = client.endpoint.io,
-        .now_ns = 1_000_000,
-    };
-    var fixed_vtable = client.endpoint.io.vtable.*;
-    fixed_vtable.now = FixedPacingIo.now;
-    fixed_vtable.sleep = FixedPacingIo.sleep;
-    client.endpoint.io = .{
-        .userdata = &fixed_io,
-        .vtable = &fixed_vtable,
-    };
+    defer fixed_io.backend.deinit();
+    client.endpoint.io = fixed_io.io();
+    defer client.endpoint.io = fixed_delegate_io;
     quic.one_rtt.testing.exhaustPacingAt(
         &client.established.connection,
-        @intCast(fixed_io.now_ns),
+        @intCast(fixed_io.now_ns.load(.acquire)),
     );
+    const pacing_packet_number = client.established.connection.next_packet_number;
     committed = 99;
     try std.testing.expectError(
         error.Timeout,
@@ -526,52 +504,33 @@ test "HTTP/3 handshake client batches request DATA across streams" {
         ),
     );
     try std.testing.expectEqual(@as(usize, 0), committed);
-    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    // The socket deadline watcher has its own cancelable wait. A budget
+    // shorter than the pacing delay must not sleep for pacing or submit data.
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.duration_sleep_calls.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.send_calls.load(.acquire));
+    try std.testing.expectEqual(pacing_packet_number, client.established.connection.next_packet_number);
+    try std.testing.expectEqual(first_offset, client.outbound_bodies.find(first).?.send.next_offset);
+    try std.testing.expectEqual(second_offset, client.outbound_bodies.find(second).?.send.next_offset);
     const pacing = client.established.connection.nextTimerDeadline() orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(
         quic.one_rtt.TimerDeadlineKind.pacing,
         pacing.kind,
     );
-    fixed_io.now_ns = @intCast(pacing.deadline_ns);
+    fixed_io.now_ns.store(@intCast(pacing.deadline_ns), .release);
     _ = (try client.established.connection.serviceNextTimerAt(
         pacing.deadline_ns,
     )) orelse return error.TestUnexpectedResult;
-    client.endpoint.io = fixed_io.delegate;
-    const PartialBatchSend = struct {
-        delegate: std.Io,
-        calls: usize = 0,
-
-        fn netSend(
-            userdata: ?*anyopaque,
-            socket_handle: net.Socket.Handle,
-            messages: []net.OutgoingMessage,
-            flags: net.SendFlags,
-        ) struct { ?net.Socket.SendError, usize } {
-            const self: *@This() = @ptrCast(@alignCast(userdata));
-            self.calls += 1;
-            const prefix_len = @min(@as(usize, 1), messages.len);
-            if (prefix_len != 0) {
-                const send_error, const sent_count = self.delegate.vtable.netSend(
-                    self.delegate.userdata,
-                    socket_handle,
-                    messages[0..prefix_len],
-                    flags,
-                );
-                if (send_error != null or sent_count != prefix_len) {
-                    return .{ send_error, sent_count };
-                }
-            }
-            return .{ error.NetworkDown, prefix_len };
-        }
+    client.endpoint.io = fixed_delegate_io;
+    var partial: ObservedBatchSend = .{ .delegate = client.endpoint.io, .fail_after_prefix = 1 };
+    var partial_io: NativeSendIo = .{
+        .backend = .init(allocator, .{ .async_limit = .nothing }),
+        .fixed_clock = false,
+        .send_context = &partial,
+        .send_override = ObservedBatchSend.netSend,
     };
-    var partial = PartialBatchSend{ .delegate = client.endpoint.io };
-    var partial_vtable = client.endpoint.io.vtable.*;
-    partial_vtable.netSend = PartialBatchSend.netSend;
-    client.endpoint.io = .{
-        .userdata = &partial,
-        .vtable = &partial_vtable,
-    };
+    defer partial_io.backend.deinit();
+    client.endpoint.io = partial_io.io();
     defer client.endpoint.io = partial.delegate;
     committed = 99;
     try std.testing.expectError(
@@ -618,7 +577,7 @@ test "HTTP/3 handshake client batches request DATA across streams" {
             return error.TestUnexpectedResult;
         }
     }
-    thread.join();
+    thread.await(io);
     if (shared.err) |err| return err;
 }
 

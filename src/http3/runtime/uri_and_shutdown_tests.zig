@@ -1,6 +1,7 @@
 //! HTTP/3 URI, Alt-Svc, cancellation, and shutdown tests.
 
 const std = @import("std");
+const NativeSendIo = @import("../../internal/testing/deadline_send_io.zig").Native;
 const http3 = @import("../mod.zig");
 const net = std.Io.net;
 const runtime = @import("../runtime.zig");
@@ -843,56 +844,18 @@ test "HTTP/3 serveConnection shutdown deadline covers GOAWAY send" {
         server_control_stream_id,
     );
 
-    const FixedIo = struct {
-        delegate: std.Io,
-        now_ns: i96 = 1_000_000,
-        send_calls: usize = 0,
-        sleep_calls: usize = 0,
-
-        fn now(
-            context: ?*anyopaque,
-            _: std.Io.Clock,
-        ) std.Io.Timestamp {
-            const self: *@This() = @ptrCast(@alignCast(context.?));
-            return .fromNanoseconds(self.now_ns);
-        }
-
-        fn sleep(
-            context: ?*anyopaque,
-            _: std.Io.Timeout,
-        ) std.Io.Cancelable!void {
-            const self: *@This() = @ptrCast(@alignCast(context.?));
-            self.sleep_calls += 1;
-            return error.Canceled;
-        }
-
-        fn netSend(
-            context: ?*anyopaque,
-            socket_handle: net.Socket.Handle,
-            messages: []net.OutgoingMessage,
-            flags: net.SendFlags,
-        ) struct { ?net.Socket.SendError, usize } {
-            const self: *@This() = @ptrCast(@alignCast(context.?));
-            self.send_calls += 1;
-            return self.delegate.vtable.netSend(
-                self.delegate.userdata,
-                socket_handle,
-                messages,
-                flags,
-            );
-        }
+    const fixed_delegate_io = endpoint.io;
+    var fixed: NativeSendIo = .{
+        .backend = .init(allocator, .{ .async_limit = .nothing }),
+        .now_ns = .init(1_000_000),
     };
-    var fixed = FixedIo{ .delegate = endpoint.io };
-    var fixed_vtable = fixed.delegate.vtable.*;
-    fixed_vtable.now = FixedIo.now;
-    fixed_vtable.sleep = FixedIo.sleep;
-    fixed_vtable.netSend = FixedIo.netSend;
-    endpoint.io = .{ .userdata = &fixed, .vtable = &fixed_vtable };
-    defer endpoint.io = fixed.delegate;
+    defer fixed.backend.deinit();
+    endpoint.io = fixed.io();
+    defer endpoint.io = fixed_delegate_io;
 
     quic.one_rtt.testing.exhaustPacingAt(
         &session.established.connection,
-        @intCast(fixed.now_ns),
+        @intCast(fixed.now_ns.load(.acquire)),
     );
     const packet_number = session.established.connection.next_packet_number;
     const control_offset = session.control_send.next_offset;
@@ -900,11 +863,11 @@ test "HTTP/3 serveConnection shutdown deadline covers GOAWAY send" {
         error.RecoveryDrainTimeout,
         finishServedConnectionWithDeadline(&session, .{
             .clock = .awake,
-            .raw = .fromNanoseconds(fixed.now_ns + 1),
+            .raw = .fromNanoseconds(fixed.now_ns.load(.acquire) + 1),
         }),
     );
-    try std.testing.expectEqual(@as(usize, 0), fixed.send_calls);
-    try std.testing.expectEqual(@as(usize, 0), fixed.sleep_calls);
+    try std.testing.expectEqual(@as(usize, 0), fixed.send_calls.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), fixed.duration_sleep_calls.load(.acquire));
     try std.testing.expectEqual(
         packet_number,
         session.established.connection.next_packet_number,

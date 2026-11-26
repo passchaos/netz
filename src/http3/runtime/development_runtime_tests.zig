@@ -1,6 +1,7 @@
 //! HTTP/3 development runtime, STREAM reassembly, and deadline tests.
 
 const std = @import("std");
+const NativeSendIo = @import("../../internal/testing/deadline_send_io.zig").Native;
 const http3 = @import("../mod.zig");
 const net = std.Io.net;
 const runtime = @import("../runtime.zig");
@@ -525,51 +526,17 @@ test "HTTP/3 development body deadline distinguishes retry from fail close" {
     );
     try std.testing.expect(!client.request_unusable);
 
-    const DeadlineAfterSendIo = struct {
-        delegate: std.Io,
-        now_ns: i96,
-        send_calls: usize = 0,
-
-        fn now(
-            userdata: ?*anyopaque,
-            _: std.Io.Clock,
-        ) std.Io.Timestamp {
-            const self: *@This() = @ptrCast(@alignCast(userdata.?));
-            return .fromNanoseconds(self.now_ns);
-        }
-
-        fn netSend(
-            userdata: ?*anyopaque,
-            socket_handle: net.Socket.Handle,
-            messages: []net.OutgoingMessage,
-            flags: net.SendFlags,
-        ) struct { ?net.Socket.SendError, usize } {
-            const self: *@This() = @ptrCast(@alignCast(userdata.?));
-            self.send_calls += 1;
-            const result = self.delegate.vtable.netSend(
-                self.delegate.userdata,
-                socket_handle,
-                messages,
-                flags,
-            );
-            if (result[1] != 0) self.now_ns += std.time.ns_per_s;
-            return result;
-        }
-    };
-    var timed = DeadlineAfterSendIo{
-        .delegate = client.quic_client.endpoint.io,
-        .now_ns = std.Io.Clock.awake.now(
+    const delegate_timed = client.quic_client.endpoint.io;
+    var timed: NativeSendIo = .{
+        .backend = .init(allocator, .{ .async_limit = .nothing }),
+        .now_ns = .init(@intCast(std.Io.Clock.awake.now(
             client.quic_client.endpoint.io,
-        ).nanoseconds,
+        ).nanoseconds)),
+        .advance_after_send_ns = std.time.ns_per_s,
     };
-    var timed_vtable = timed.delegate.vtable.*;
-    timed_vtable.now = DeadlineAfterSendIo.now;
-    timed_vtable.netSend = DeadlineAfterSendIo.netSend;
-    client.quic_client.endpoint.io = .{
-        .userdata = &timed,
-        .vtable = &timed_vtable,
-    };
-    defer client.quic_client.endpoint.io = timed.delegate;
+    defer timed.backend.deinit();
+    client.quic_client.endpoint.io = timed.io();
+    defer client.quic_client.endpoint.io = delegate_timed;
     try std.testing.expectError(
         error.Timeout,
         client.sendRequestBodyWithDeadline(
@@ -579,13 +546,13 @@ test "HTTP/3 development body deadline distinguishes retry from fail close" {
             &progress,
             .{
                 .clock = .awake,
-                .raw = .fromNanoseconds(timed.now_ns + 1),
+                .raw = .fromNanoseconds(timed.now_ns.load(.acquire) + 1),
             },
         ),
     );
     try std.testing.expect(progress.send_attempted);
     try std.testing.expect(!progress.completed);
-    try std.testing.expectEqual(@as(usize, 1), timed.send_calls);
+    try std.testing.expectEqual(@as(usize, 1), timed.send_calls.load(.acquire));
     try std.testing.expect(client.request_unusable);
     try std.testing.expectError(
         error.ConnectionUnusable,
