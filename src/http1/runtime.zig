@@ -848,7 +848,7 @@ pub const TlsListenOptions = struct {
 /// TLS 1.2/1.3 server transport for the same HTTP/1 parser and writer used by the
 /// cleartext listener. Accepted connections own their TLS state and expose the
 /// authenticated peer chain when client certificates are configured.
-pub const AsyncServeError = Error || std.Io.Cancelable;
+pub const AsyncServeError = Error || std.Io.Cancelable || std.Io.ConcurrentError;
 
 pub const ConcurrentServeResult = struct {
     allocator: std.mem.Allocator,
@@ -944,6 +944,8 @@ pub fn serveAcceptedConcurrent(
     var group: std.Io.Group = .init;
     const results = try allocator.alloc(?anyerror, max_connections);
     errdefer allocator.free(results);
+    // Workers borrow result slots; join them before releasing that storage.
+    defer group.cancel(io);
     @memset(results, null);
 
     for (results) |*result| {
@@ -954,7 +956,7 @@ pub fn serveAcceptedConcurrent(
             .context = context,
             .result = result,
         };
-        group.async(io, ServeTask(HandlerContext, handler).run, .{task});
+        try group.concurrent(io, ServeTask(HandlerContext, handler).run, .{task});
     }
 
     try group.await(io);

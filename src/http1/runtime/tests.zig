@@ -62,6 +62,7 @@ test {
     _ = @import("tunnel_tests.zig");
     _ = @import("write_strategy_tests.zig");
     _ = @import("uri_and_serve_tests.zig");
+    _ = @import("finite_server_tests.zig");
     _ = @import("message_batch_tests.zig");
     _ = @import("close_and_drain_tests.zig");
     _ = @import("close_timeout_tests.zig");

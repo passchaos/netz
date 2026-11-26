@@ -623,7 +623,7 @@ pub fn receiveUpgradeRequestFromTransport(
     };
 }
 
-pub const AsyncServeError = Error || std.Io.Cancelable;
+pub const AsyncServeError = Error || std.Io.Cancelable || std.Io.ConcurrentError;
 
 pub const ConcurrentServeResult = struct {
     allocator: std.mem.Allocator,
@@ -695,6 +695,8 @@ pub fn serveAcceptedConcurrent(
     var group: std.Io.Group = .init;
     const results = try allocator.alloc(?anyerror, max_connections);
     errdefer allocator.free(results);
+    // Workers borrow result slots; join them before releasing that storage.
+    defer group.cancel(io);
     @memset(results, null);
 
     for (results) |*result| {
@@ -706,7 +708,7 @@ pub fn serveAcceptedConcurrent(
             .handler = handler,
             .result = result,
         };
-        group.async(io, ServeTask(HandlerContext).run, .{task});
+        try group.concurrent(io, ServeTask(HandlerContext).run, .{task});
     }
 
     try group.await(io);

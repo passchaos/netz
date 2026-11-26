@@ -1,0 +1,45 @@
+{
+  "observed_utc": "2026-11-26T04:53:58.951617+00:00",
+  "base_commit": "59ce674b39d20298e9b247d7ddaf867b2ad41f22",
+  "source_sha256": {
+    "src/http1/runtime.zig": "51c93dfa59e3bab2067ff537ad53bc6c17be9e711596d5fafdf16fb3ffc2ecd2",
+    "src/websocket/runtime.zig": "5c59293d3dcf18a8d8ca379576bc40b27a2edd4c3d616231fa201202328ae7b0",
+    "src/http1/runtime/tests.zig": "5edb1cb2cdde459fa0475dde96d766a1b7ac40583dbfdfcb90fe10291abeae44",
+    "src/websocket/runtime/tests.zig": "ddb4739b5505c18c85b7c30358e5b4cac6ac63b6302b46840f53cd7232ddec19",
+    "src/http1/runtime/finite_server_tests.zig": "97d518f49d1526d4ab4bda4175cd9526fd533e5e951dd10dd3a7779ef3acb4e4",
+    "src/websocket/runtime/finite_server_tests.zig": "5e10bf0f05d4eef6a4b85821dc332da0c8861c9441ba84c7e27da74cf422f8fd",
+    "src/internal/testing/finite_serve.zig": "d5cfc0fec335e0aa70870e0f610c463da2da7a41267003881ed08c90c0ff2bbb"
+  },
+  "behavior": [
+    "each finite handler independently admitted",
+    "just-accepted socket closed on admission failure",
+    "workers cancelled and joined before result slots freed",
+    "per-connection result ownership unchanged on success"
+  ],
+  "real_socket_cases": {
+    "protocols": [
+      "http1",
+      "websocket"
+    ],
+    "scenarios": [
+      "later accept failure after actual read entry with zero async capacity",
+      "initial concurrent admission unavailable",
+      "second concurrent admission unavailable while first reader active",
+      "caller cancellation while both readers blocked"
+    ],
+    "case_count": 8,
+    "observed": "each accepted socket closes exactly once; every started read returns before serve exits; initial refusal starts no read"
+  },
+  "native": {
+    "http1_tests_passed": 26,
+    "websocket_tests_passed": 54,
+    "scopes": [
+      "finite server",
+      "HTTP/1 async std.Io server handles concurrent clients",
+      "HTTP/1 TLS server handles concurrent clients",
+      "WebSocket async std.Io server handles concurrent clients"
+    ]
+  },
+  "windows_cross_compile": "passed for the same selected H1/WS tests",
+  "native_pinned_ci": "pending delivered revision"
+}

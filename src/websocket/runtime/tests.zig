@@ -4630,5 +4630,6 @@ test {
     _ = @import("proxy_tests.zig");
     _ = @import("redirect_tests.zig");
     _ = @import("server_lifecycle_tests.zig");
+    _ = @import("finite_server_tests.zig");
     _ = @import("handshake_header_tests.zig");
 }

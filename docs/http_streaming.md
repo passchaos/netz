@@ -115,6 +115,21 @@ The advanced `StreamingBodyWriter.init` constructor remains available; timed
 operations require the I/O and tracked output hook supplied by
 `initWithDeadline`. Native request/response constructors install them.
 
+
+### Finite HTTP/1 and WebSocket service batches
+
+`Server.serveConcurrent` and the corresponding Unix-domain/TLS server forms
+accept a fixed number of connections and admit each handler as an independent
+task. The returned `ConcurrentServeResult` owns one error slot per accepted
+input; successful completion retains the existing per-connection results.
+The WebSocket server forms use the same finite-batch lifetime contract.
+
+If the backend cannot admit a worker, the call returns
+`error.ConcurrencyUnavailable` before invoking that handler and closes its
+accepted connection. A later accept, admission or caller-cancellation failure
+cancels and joins already admitted workers before freeing their result storage.
+The caller must keep its handler context alive until the serve call returns.
+
 ## HTTP/2
 
 Two stable shapes are available:
