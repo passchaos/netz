@@ -1,5 +1,6 @@
 //! Owned EndpointServer commands, admission metadata, and results.
 const std = @import("std");
+const slice_storage = @import("../endpoint/slice_storage.zig");
 const http2 = @import("../../../http2/mod.zig");
 const runtime = @import("../runtime.zig");
 const state_model = @import("../state.zig");
@@ -202,6 +203,18 @@ pub fn Job(comptime State: type) type {
             parent.retain();
             return job;
         }
+        pub fn createStreamSlices(parent: *State, handle: Handle, id: u62, slices: []const []const u8, fin: bool, deadline: std.Io.Clock.Timestamp) (std.mem.Allocator.Error || error{CapsuleTooLarge})!*Self {
+            const length = try slice_storage.byteLength(slices);
+            // An empty payload initializes the regular command lifecycle without
+            // allocating payload storage. The arena then owns the sole copy.
+            const job = try create(parent, .{ .send_stream = .{ .handle = handle, .id = id, .data = &.{}, .fin = fin } }, deadline);
+            errdefer job.release();
+            const data = try job.arena.allocator().alloc(u8, length);
+            slice_storage.copy(data, slices);
+            job.command.send_stream.data = data;
+            return job;
+        }
+
         pub fn retain(self: *Self) void {
             _ = self.refs.fetchAdd(1, .monotonic);
         }

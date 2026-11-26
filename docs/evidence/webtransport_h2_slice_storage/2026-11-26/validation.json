@@ -1,0 +1,96 @@
+{
+  "observed_utc": "2026-11-26T06:06:41.341893+00:00",
+  "base_commit": "2cac2f93b4c4c6bc8e2f1fa9affb5775982623f9",
+  "source_sha256": {
+    "src/webtransport/h2/endpoint_client.zig": "8cd5976831cbc8f2acb05ab02f4b990651ea4bd46082c8041f1b92376ef860ee",
+    "src/webtransport/h2/endpoint_server.zig": "17e9af95c32bba767a77b435f9bcc02c9c551f2e88a29e89e8423a21d2a663ff",
+    "src/webtransport/h2/endpoint_client/job.zig": "3ef51e859b4ce28361b78068b322c23f8ba6f3473adaa8187aa27083bc815ec1",
+    "src/webtransport/h2/endpoint_server/job.zig": "c7137081d338f97862e32ab2a04ded2252f15484bf07587212d1e6668c8de7d4",
+    "src/webtransport/h2/endpoint_client/admission_tests.zig": "92a9d75dde45f24faa463c49a43b17c1088eeddbcef3ff31b1dc226ddbcc6c27",
+    "src/webtransport/h2/endpoint_server/admission_tests.zig": "3a46f18e403d3d91825d696d9a9557b5a884a0dfb59983bd21c740e9ab48bebd",
+    "src/webtransport/h2/endpoint/slice_storage.zig": "98754c376017dd0b43f96157dc22212866180e66fa4466c7ae45d296eae95aee",
+    "src/webtransport/h2/endpoint/slice_storage_tests.zig": "b78f5eacbac7b54b29d453ec8f33105a56c3a9209067f1506aa6013e1d0d9efc",
+    "src/webtransport/h2/mod.zig": "62c921dae743a21309cb7c21b6e31198de8eff1cbe5420776037e8830372e217",
+    ".github/workflows/ci.yml": "ca170d4b4bd0b500cdebbfbdad73d1e9405c9d0a68eb1fe33381aac8b19e1f9b"
+  },
+  "behavior": [
+    "both endpoint roles copy slices directly into the job arena",
+    "expired or wrong-clock deadlines return before payload allocation",
+    "caller cancellation checked before staging",
+    "queued ownership survives caller abandonment and caller buffer mutation",
+    "allocation failures release the job arena and parent references",
+    "slice order and FIN traverse actual TLS endpoint tests"
+  ],
+  "filters": [
+    "HTTP/2 buffered frame wake",
+    "HTTP/2 batch cancellation",
+    "WebTransport HTTP2 sliced",
+    "WebTransport HTTP2 EndpointClient queue admission",
+    "WebTransport HTTP2 EndpointServer queue admission",
+    "WebTransport HTTP2 EndpointClient owns multiplexed Sessions",
+    "WebTransport HTTP2 EndpointServer owns admission Sessions"
+  ],
+  "checks": {
+    "native": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-http2",
+        "test-webtransport",
+        "-j1",
+        "-Dtest-progress=true",
+        "-Dtest-filter=HTTP/2 buffered frame wake",
+        "-Dtest-filter=HTTP/2 batch cancellation",
+        "-Dtest-filter=WebTransport HTTP2 sliced",
+        "-Dtest-filter=WebTransport HTTP2 EndpointClient queue admission",
+        "-Dtest-filter=WebTransport HTTP2 EndpointServer queue admission",
+        "-Dtest-filter=WebTransport HTTP2 EndpointClient owns multiplexed Sessions",
+        "-Dtest-filter=WebTransport HTTP2 EndpointServer owns admission Sessions",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log_sha256": "2202e63609fc2324b33368b8ad6a6a05888dd875327e695c9189187fc9a5d266",
+      "tests_passed_by_root": [
+        147,
+        39
+      ],
+      "staging_allocations": [
+        {
+          "endpoint": "webtransport.h2.endpoint_client.EndpointClient",
+          "contiguous": 2,
+          "sliced": 2
+        },
+        {
+          "endpoint": "webtransport.h2.endpoint_server.EndpointServer",
+          "contiguous": 2,
+          "sliced": 2
+        }
+      ]
+    },
+    "windows-compile": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-http2-compile",
+        "test-webtransport-compile",
+        "-j1",
+        "-Dtarget=x86_64-windows-gnu",
+        "-Dtest-filter=HTTP/2 buffered frame wake",
+        "-Dtest-filter=HTTP/2 batch cancellation",
+        "-Dtest-filter=WebTransport HTTP2 sliced",
+        "-Dtest-filter=WebTransport HTTP2 EndpointClient queue admission",
+        "-Dtest-filter=WebTransport HTTP2 EndpointServer queue admission",
+        "-Dtest-filter=WebTransport HTTP2 EndpointClient owns multiplexed Sessions",
+        "-Dtest-filter=WebTransport HTTP2 EndpointServer owns admission Sessions",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log_sha256": "3bb3478e5044677571cd8a7535525601fca10127bd869687f81102ed2769099a"
+    }
+  },
+  "native_pinned_ci": "pending delivered revision; new independent native command preserves original combined command and five-minute budget",
+  "complete_acceptance": "open; previous pinned revision 997de2c7 has library ABRT, Linux CA reload BrokenPipe and Windows Threaded datagram deadline fixture failures",
+  "performance_boundary": "caller job staging allocation count only; no throughput or complete wire copy claim"
+}

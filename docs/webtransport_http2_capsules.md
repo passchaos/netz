@@ -115,9 +115,14 @@ queues, while interrupted writes retain their capsule header and payload
 progress and resume only the uncommitted suffix before virtual-stream
 accounting advances. `sendStreamSlicesWith{Timeout,Deadline}` writes the
 encoded capsule header and borrowed payload slices directly (no payload copy);
-the caller keeps those slices valid until the write completes. The endpoint
-command queue still stages one buffer because a timed-out job may outlive the
-caller. `run-webtransport-h2-capsule-echo` demonstrates the path end to end.
+the caller keeps those slices valid until the write completes. The client and
+server endpoint command queues copy those slices directly into one task-owned
+buffer because a timed-out job may outlive the caller. They check deadline and
+caller cancellation before allocating or copying payload storage. The task
+retains its own copy after the caller abandons a queued command; the caller's
+slices only need to remain valid for the public call. Empty slices preserve
+payload order and FIN. `run-webtransport-h2-capsule-echo` demonstrates the path
+end to end.
 Deadline and relative-timeout forms cover admission, receive, sends, control
 updates, drain, close, and retained-write resumption.
 

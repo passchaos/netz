@@ -44,6 +44,7 @@ test {
     _ = state;
     _ = @import("runtime_tests.zig");
     _ = @import("session_write_tests.zig");
+    _ = @import("endpoint/slice_storage_tests.zig");
     _ = endpoint_client;
     _ = reconnecting_endpoint_client;
     _ = endpoint_server;

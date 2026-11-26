@@ -319,6 +319,12 @@ jobs:
               fi
             done
           fi
+          owned_input_status=0
+          python tools/ci/run_test_progress.py --title "Native H2 batch wake and sliced command storage" --log native-h2-owned-input.log -- zig build test-http2 test-webtransport -j1 -Dtest-progress=true -Dtarget=${{ matrix.target }} '-Dtest-filter=HTTP/2 buffered frame wake' '-Dtest-filter=HTTP/2 batch cancellation' '-Dtest-filter=WebTransport HTTP2 sliced' '-Dtest-filter=WebTransport HTTP2 EndpointClient queue admission' '-Dtest-filter=WebTransport HTTP2 EndpointServer queue admission' '-Dtest-filter=WebTransport HTTP2 EndpointClient owns multiplexed Sessions' '-Dtest-filter=WebTransport HTTP2 EndpointServer owns admission Sessions' --summary all || owned_input_status=$?
+          if [ "$owned_input_status" -ne 0 ]; then
+            python tools/ci/test_failure_annotations.py native-h2-owned-input.log
+            protocol_status=$owned_input_status
+          fi
           exit "$protocol_status"
 
       - name: Run native HTTP3 send deadline regressions

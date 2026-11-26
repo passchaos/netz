@@ -427,10 +427,17 @@ pub const EndpointServer = struct {
         if (timeout.nanoseconds <= 0) return error.Timeout;
         return acceptTlsConnectionWithDeadline(allocator, listener, options, .fromNow(listener.io, .{ .raw = timeout, .clock = .awake }));
     }
-    fn submit(self: EndpointServer, operation: job_mod.Command, deadline: std.Io.Clock.Timestamp) Error!*State.Job {
+    fn checkAdmission(self: EndpointServer, deadline: std.Io.Clock.Timestamp) Error!void {
         if (deadline.clock != .awake or deadline.durationFromNow(self.state.io).raw.nanoseconds <= 0) return error.Timeout;
         try self.state.io.checkCancel();
-        const job = try State.Job.create(self.state, operation, deadline);
+    }
+
+    fn submit(self: EndpointServer, operation: job_mod.Command, deadline: std.Io.Clock.Timestamp) Error!*State.Job {
+        try self.checkAdmission(deadline);
+        return self.submitOwned(try State.Job.create(self.state, operation, deadline));
+    }
+
+    fn submitOwned(self: EndpointServer, job: *State.Job) Error!*State.Job {
         errdefer job.release();
         try self.state.enqueue(job);
         try self.state.await(job);
@@ -518,20 +525,12 @@ pub const EndpointServer = struct {
         return self.sendStreamWithDeadline(handle, id, data, fin, .fromNow(self.state.io, .{ .raw = timeout, .clock = .awake }));
     }
 
-    /// Stage multiple payload slices into one command buffer. The command
-    /// queue duplicates its input, so the caller's slices only need to remain
-    /// valid for this call.
+    /// Copy the payload once into task-owned storage after deadline and caller
+    /// cancellation admission. The slices only need to remain valid for this call.
     pub fn sendStreamSlicesWithDeadline(self: EndpointServer, handle: Handle, id: u62, slices: []const []const u8, fin: bool, deadline: std.Io.Clock.Timestamp) Error!void {
-        var total: usize = 0;
-        for (slices) |slice| total = std.math.add(usize, total, slice.len) catch return error.CapsuleTooLarge;
-        const data = try self.state.allocator.alloc(u8, total);
-        defer self.state.allocator.free(data);
-        var offset: usize = 0;
-        for (slices) |slice| {
-            @memcpy(data[offset..][0..slice.len], slice);
-            offset += slice.len;
-        }
-        return self.sendStreamWithDeadline(handle, id, data, fin, deadline);
+        try self.checkAdmission(deadline);
+        const job = try self.submitOwned(try State.Job.createStreamSlices(self.state, handle, id, slices, fin, deadline));
+        job.release();
     }
     pub fn sendStreamSlicesWithTimeout(self: EndpointServer, handle: Handle, id: u62, slices: []const []const u8, fin: bool, timeout: std.Io.Duration) Error!void {
         if (timeout.nanoseconds <= 0) return error.Timeout;
