@@ -400,3 +400,41 @@ Windows peer cause remains unproven. Linux isolated/full CA reload also still
 fails before SIGHUP at about 160-162 ms, with only expected rejected-certificate
 accept events. Neither prior isolated passes nor current scoped repairs close
 these remaining correctness requirements or the broader optimization goal.
+
+### Windows TCP completion investigation on 26de4f06
+
+[Run 45785436516](https://github.com/passchaos/netz/actions/runs/45785436516)
+has finished. The Windows owned-input scope's first peer failure is now
+`stage=CLOSE input err=RecordTooLarge`, followed by `CONNECTION_RESET` and
+`Unexpected` in the EndpointServer Session close sequence. This establishes
+the peer's TLS record-parser failure stage, but not its root cause.
+The native x86_64 Linux resolver, original/added protocol, HTTP/3 send-deadline
+and isolated CA reload steps passed. An isolated CA reload pass does not
+explain the retained-connection failures in earlier runs.
+The complete step ended after its existing 28-minute command budget with exit
+137; its public summary also contains a failed MQTT broker configuration
+interop node. Neither that exit nor the truncated summary identifies a new
+HTTP-family crash or closes complete acceptance.
+
+The current Threaded Windows ordinary receive calls `deviceIoControl`, whose
+cancellation path cancels/joins the native request and returns `Canceled`
+without returning a successful completion's byte count. Losing a consumed
+prefix could desynchronize the incremental TLS reader; that mechanism still
+needs native evidence. `std.Io.Batch.cancel()` explicitly preserves operations
+that complete successfully despite cancellation. Its Windows AFD receive
+path uses the same flags and can expose the retained completion without
+changing socket nonblocking mode or replacing the Threaded backend.
+Its current Windows cancel implementation also begins with an infinite
+alertable wait before issuing kernel cancellation. The experiment arms one
+native self-alert for a pending Batch to let an idle receive reach cancel/join;
+that liveness boundary is qualified separately from completion retention.
+
+A [minimal native experiment](../evidence/windows_tcp_completion/2026-11-26/README.md)
+now records the raw cancellation result and buffer contents, checks retention
+after controlled cancellation of an actually completed Batch receive, and
+checks an entered pending receive's cancellation/join and same-socket reuse.
+The original native resolver and combined protocol commands are unchanged;
+the standalone Windows probe runs serially in the existing resolver step.
+Production transport code and H2 traffic/KeyUpdate/capacity/close assertions
+remain unchanged while the primitive is being qualified. A passing candidate
+completion test alone will not establish the cause of the H2 TLS failure.

@@ -1,0 +1,134 @@
+{
+  "observed_utc": "2026-11-26T09:34:17.000444+00:00",
+  "base_commit": "26de4f0693dce3db3186bca4ff483f5b9a21b135",
+  "source_sha256": {
+    "tools/ci/windows_tcp_completion_probe.zig": "850dc85ae18a6ee5953a1253eb9bebfe89c2ad7ce10b0ceb2563cfef6fbfc009",
+    ".github/workflows/ci.yml": "9e68a7b74f9c42db18173a6151d78ccb54544aa173786739150aee6274d81905",
+    "docs/architecture/optimization-backlog.md": "d59734c78a3934911bcf57563b1ba91e99334f594c7946e473a902f0d9cded19"
+  },
+  "scope": "Native Windows diagnostic only; unchanged production transport and H2 fixtures",
+  "checks": {
+    "toolchain-version": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "version"
+      ],
+      "exit_code": 0,
+      "log_sha256": "aa037454b5e8320521a32b278a3f4aff05fc79009ab5503f5d4a1b9a33b38c47"
+    },
+    "fmt": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "fmt",
+        "tools/ci/windows_tcp_completion_probe.zig"
+      ],
+      "exit_code": 0,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "windows-compile": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "test",
+        "tools/ci/windows_tcp_completion_probe.zig",
+        "-target",
+        "x86_64-windows-gnu",
+        "-fno-emit-bin"
+      ],
+      "exit_code": 0,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "windows-codegen": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "test",
+        "tools/ci/windows_tcp_completion_probe.zig",
+        "-target",
+        "x86_64-windows-gnu",
+        "--test-no-exec",
+        "-femit-bin=/tmp/netz-windows-tcp-completion.exe"
+      ],
+      "exit_code": 0,
+      "artifact_sha256": "95c067225fe8eabb1f7ed1eed62bf9063511b3253641848a725d42653b42fb4c",
+      "artifact_kind": "PE32+ executable x86-64 for Windows",
+      "native_tests_executed": 0,
+      "embedded_test_names": [
+        "Windows Threaded TCP completion probe compares ordinary receive with joined Batch",
+        "Windows Threaded TCP completion probe cancels pending receive and reuses its socket"
+      ]
+    },
+    "evidence-audit": {
+      "command": [
+        "netz-evidence-audit",
+        "--max-unresolved=24"
+      ],
+      "exit_code": 0,
+      "unresolved": 3,
+      "invalid": 0,
+      "unreadable": 0,
+      "unresolved_scope": "three historical WebTransport source paths"
+    }
+  },
+  "native_windows_probe": "pending delivered-revision CI",
+  "h2_tls_root_cause": "open; first peer stage CLOSE input / RecordTooLarge",
+  "complete_acceptance": "open; prior run command exit137 and MQTT config interop failed node",
+  "original_ci_commands_preserved": true,
+  "dependency_pins_and_budgets_changed": false,
+  "current_ci": {
+    "url": "https://github.com/passchaos/netz/actions/runs/45785436516",
+    "head": "26de4f0693dce3db3186bca4ff483f5b9a21b135",
+    "all_observed_jobs_terminal": true,
+    "linux": {
+      "url": "https://github.com/passchaos/netz/actions/runs/45785436516/job/139790903919",
+      "steps": [
+        {
+          "name": "Run native H1 H2 resolver and pull reader regressions",
+          "conclusion": "success"
+        },
+        {
+          "name": "Run native protocol CI regressions",
+          "conclusion": "success"
+        },
+        {
+          "name": "Run native HTTP3 send deadline regressions",
+          "conclusion": "success"
+        },
+        {
+          "name": "Run native client CA reload regression",
+          "conclusion": "success"
+        }
+      ]
+    },
+    "windows": {
+      "url": "https://github.com/passchaos/netz/actions/runs/45785436516/job/139790903997",
+      "first_peer_failure": "stage=CLOSE input err=RecordTooLarge",
+      "following_error": "CONNECTION_RESET / Unexpected",
+      "annotation": "34/147 webtransport.h2.endpoint_server.tests.test.WebTransport HTTP2 EndpointServer owns admission Sessions and capacity...error.Unexpected NTSTATUS=0xc000020d (CONNECTION_RESET)\nWebTransport H2 server fixture peer failed: stage=CLOSE input err=RecordTooLarge\nFAIL (Unexpected)\nD:\\a\\netz\\netz\\netz\\src\\webtransport\\h2\\endpoint_server\\tests.zig:214:29: 0x7ff79aba446a in test.WebTransport HTTP2 EndpointServer owns admission Sessions and capacity (test_zcu.obj)\n    try std.testing.expect((try next(&b)) == .closed);\n                            ^\n35/147 webtransport.h2.endpoint_server.admission_tests.test.WebTransport HTTP2 EndpointServer queue admission keeps all operation deadlines and ownership...OK\n36/147 http2.runtime.test_0...OK\n37/147 http2.mod.test_0...OK\n38/147 http2.mod.test_1...OK\n39/147 tls.mod.test_0...OK\n40/147 tls.stream.mod.test_0...OK\n41/147 internal.tcp_connect.test_0...OK\n42/147 http1.mod.test_0...OK\n43/147 http1.mod.test_1...OK\n44/147 http1.mod.test_2...OK"
+    },
+    "complete": {
+      "url": "https://github.com/passchaos/netz/actions/runs/45785436516/job/139790904076",
+      "step": {
+        "name": "Run the complete test gate serially",
+        "conclusion": "failure",
+        "started-at": "2026-11-26T08:42:59Z",
+        "completed-at": "2026-11-26T09:10:59Z"
+      },
+      "exit_code": 137,
+      "failed_node": "python3 tools/interop/mqtt_broker_config.py",
+      "causal_error_available": false
+    }
+  },
+  "guard": "All Zig invocations ran serially under zig-tree-guard; toolchain, fmt and analysis shared one guarded process tree.",
+  "toolchain": {
+    "version": "0.16.0",
+    "std_threaded_sha256": "eb7bbb4ddf590ec3d0d2a1ee5c3845ef4984d9e440965a3e7c920cd0c906df94"
+  },
+  "named_native_probe_tests": 2,
+  "native_tests_executed_locally": 0,
+  "candidate_contracts": [
+    "Retain a real native Batch completion through controlled cancellation before dequeue",
+    "Rearm cancellation after returning its consumed prefix",
+    "Read the following suffix exactly once",
+    "One native self-alert lets an idle pending Batch reach cancellation",
+    "Cancel/join an entered receive without changing its buffer and reuse the same TCP socket"
+  ]
+}
