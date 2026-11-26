@@ -863,3 +863,25 @@ retention through joined completion. Three cases run on supported native stream
 backends. [The qualification](../evidence/websocket_observer_context/2026-11-27/validation.json)
 records 78 scoped native passes and Windows 8/8 compilation. Full/native CI,
 remaining contexts, fairness and workload performance remain open.
+
+### Development stream visible-prefix deadline observer
+
+Complete run 45877140272 reports a further allocator/task GP at 4898/7490,
+`WebTransport development stream deadline isolates a visible prefix`.
+The immutable `8b6b5f2a` baseline reproduces a segmentation fault at 47/111
+on macOS. Its inherited I/O table receives the send-advanced clock object's
+userdata when admitting a deadline watcher.
+
+The extracted fixture now uses full native callback delegation, atomic awake
+time and actual wait notification after the original one-second advance on
+an accepted datagram. The one-nanosecond initial deadline is retained. Scoped
+I/O restoration precedes sibling use and client cleanup; the server Future is
+canceled/joined on failure. All original three development test names and 57
+assertion statements remain after normalizing atomic reads, including exact
+visible-prefix isolation, reset/unusable state, no replay and healthy sibling.
+
+[The qualification](../evidence/wt_visible_prefix_native_clock/2026-11-27/validation.json)
+records the actual failing baseline, 116 native scoped passes and Windows
+8/8 compilation. The existing reverse-path/limits and cursor-churn cases remain
+in the validation range. Delivered full/native acceptance, remaining observer
+contexts, fairness and workload performance remain open.

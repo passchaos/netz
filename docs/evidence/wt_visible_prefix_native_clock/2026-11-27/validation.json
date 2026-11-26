@@ -1,0 +1,111 @@
+{
+  "observed_utc": "2026-11-26T19:33:10.597437+00:00",
+  "base_commit": "8b6b5f2a2aeb21a15a4024b92cf83ae01c62a6b7",
+  "native_host": "aarch64-macos",
+  "guard": "All Zig and baseline invocations serialized under shared zig-tree-guard",
+  "source_sha256": {
+    "src/webtransport/runtime/development_stream_tests.zig": "5a76f8d860a4bce8777b76307a12aedc96256c4d8fc4ebed52008c199f60b10a",
+    "src/webtransport/runtime/development_stream/deadline_tests.zig": "952537bee9a8e08f44b59731b931509604028835c8266d3e5006c8b31389e429",
+    "src/internal/testing/deadline_send_io.zig": "fc5bc18c28afe1539801d1b6c5e50cdbe3fb06222cddfe292dc56b1cd72b5a2c",
+    "src/internal/testing/native_protocol_io.zig": "4f965f49ed0ba48fb0c9d1b572122415d4b95c165785f79bb2281a05e437b6ad"
+  },
+  "checks": {
+    "fmt": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "fmt",
+        "src/webtransport/runtime/development_stream_tests.zig",
+        "src/webtransport/runtime/development_stream/deadline_tests.zig"
+      ],
+      "exit_code": 0,
+      "log_sha256": "5387df34f181267c1dfb9528f4cfbaffb5caca8c8f17e5e75822b9f016ac9a44"
+    },
+    "native": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-webtransport",
+        "-j1",
+        "-Dtest-progress=true",
+        "-Dtest-filter=WebTransport development streams preserve prefixes reverse path and limits",
+        "-Dtest-filter=WebTransport development stream deadline isolates a visible prefix",
+        "-Dtest-filter=WebTransport development peer churn reclaims cursor and partial prefix",
+        "-Dtest-filter=Native protocol observer",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log_sha256": "61eb7269d01982342c405e8776429159d9d82d4359808802b682feaf12a55cea"
+    },
+    "windows-compile": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-webtransport-compile",
+        "-j1",
+        "-Dtarget=x86_64-windows-gnu",
+        "-Dtest-filter=WebTransport development streams preserve prefixes reverse path and limits",
+        "-Dtest-filter=WebTransport development stream deadline isolates a visible prefix",
+        "-Dtest-filter=WebTransport development peer churn reclaims cursor and partial prefix",
+        "-Dtest-filter=Native protocol observer",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log_sha256": "847c728c8a4f87467631047031adfc40310f961b3f28f5eba2f3374a2e0344fc"
+    }
+  },
+  "native_scoped_passed": 116,
+  "windows_compile_steps": "8/8",
+  "baseline": {
+    "base_commit": "8b6b5f2a2aeb21a15a4024b92cf83ae01c62a6b7",
+    "source_path": "src/webtransport/runtime/development_stream_tests.zig",
+    "source_sha256": "2a797d87d881d049abbf234ca1cdef47eca53342f9f4a0054e8a509af9c0bcec",
+    "command": [
+      "/Users/bytedance/.local/bin/zig",
+      "build",
+      "test-webtransport",
+      "-j1",
+      "-Dtest-progress=true",
+      "-Dtest-filter=WebTransport development stream deadline isolates a visible prefix",
+      "--cache-dir",
+      "/Users/bytedance/project-z/netz/.zig-cache",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 1,
+    "log_sha256": "f72d5e912ffe9b355355eec7069a6d76eeb32839a2758653456dfe9d2d522e4e"
+  },
+  "baseline_failed_case_number": "47/111",
+  "baseline_failure": "Segmentation fault in Threaded allocator/task creation",
+  "source_baseline_immutable": true,
+  "invariant_comparison": {
+    "original_names": [
+      "WebTransport development streams preserve prefixes reverse path and limits",
+      "WebTransport development stream deadline isolates a visible prefix",
+      "WebTransport development peer churn reclaims cursor and partial prefix"
+    ],
+    "original_assertions_preserved": 57,
+    "controlled_deadline_ns_delta": 1,
+    "clock_advance_after_accepted_send_ns": 1000000000,
+    "real_peer_future_joined": true,
+    "normalization": "atomic counter/time reads only"
+  },
+  "original_deadline_delta_ns": 1,
+  "accepted_send_clock_advance_ns": 1000000000,
+  "peer_lifetime": "concurrent Future with failure cancel/join",
+  "observer_lifetime": "lexical endpoint I/O restore before sibling and client cleanup",
+  "backends": [
+    "POSIX Threaded zero async capacity",
+    "application backend one executor including Windows"
+  ],
+  "ci_commands_budgets_pins_changed": false,
+  "full_goal_status": "active",
+  "delivered_native_complete_qualification": "pending",
+  "limitations": [
+    "neighboring cases retain their original Threaded execution; the corrected case uses both supported backends",
+    "Windows compilation is distinct from native execution",
+    "116 scoped tests do not qualify the full HTTP-family gate",
+    "remaining contexts, fairness and measured performance remain open"
+  ]
+}
