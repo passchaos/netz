@@ -1,0 +1,110 @@
+{
+  "observed_utc": "2026-11-26T18:48:43.503106+00:00",
+  "base_commit": "b1da6174065c96c39ece19b23d5ba65c2ad054c7",
+  "native_host": "aarch64-macos",
+  "guard": "All Zig invocations serialized under shared zig-tree-guard",
+  "source_sha256": {
+    "src/websocket/stream_connection/concurrency_tests.zig": "05b463a2cd867e6a303ea6a3fbef26382a6543210494757c51f32f649f079dc4",
+    "src/websocket/stream_connection/failure_tests.zig": "7ccd649b9016f0f618f5522396c5ef54cc9be86f973abeab93933748cf47414d",
+    "src/websocket/runtime/receive_failure/writer_lifetime_tests.zig": "76cb1371606c5312d8ca82c070a7aa6d6ff4e31d04bf7b13a4d546ec35c0161d"
+  },
+  "checks": {
+    "fmt": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "fmt",
+        "src/websocket/stream_connection/concurrency_tests.zig",
+        "src/websocket/stream_connection/failure_tests.zig",
+        "src/websocket/runtime/receive_failure/writer_lifetime_tests.zig"
+      ],
+      "exit_code": 0,
+      "log_sha256": "d37d0aed13e25e0896179cfb7c788d7e6e1e375a53214dcbc57dc4b768b2e10b"
+    },
+    "native": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-websocket",
+        "-j1",
+        "-Dtest-progress=true",
+        "-Dtest-filter=WebSocket stream adapter queued writers observe Close and transport failure",
+        "-Dtest-filter=WebSocket stream adapter retires a frame when its budget expires after the header",
+        "-Dtest-filter=WebSocket fatal receive cleanup retains active writer buffers until joined completion",
+        "-Dtest-filter=Native protocol observer",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log_sha256": "c4ef87f57f31baa7336a5d202adb0c659530c238d1be360d33fece308f2b8d72"
+    },
+    "windows-compile": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-websocket-compile",
+        "-j1",
+        "-Dtarget=x86_64-windows-gnu",
+        "-Dtest-filter=WebSocket stream adapter queued writers observe Close and transport failure",
+        "-Dtest-filter=WebSocket stream adapter retires a frame when its budget expires after the header",
+        "-Dtest-filter=WebSocket fatal receive cleanup retains active writer buffers until joined completion",
+        "-Dtest-filter=Native protocol observer",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log_sha256": "f7c7f9023d212ed0cca08a1a425baf827c78ac02ca0644947b7b19064cd3b295"
+    }
+  },
+  "native_scoped_passed": 78,
+  "windows_compilation": "passed 8/8 build steps",
+  "wrong_userdata_contexts_repaired": 2,
+  "correct_userdata_global_gate_refactored": 1,
+  "backends": [
+    "Threaded stream including Windows, zero async capacity",
+    "application backend one executor"
+  ],
+  "original_invariants": {
+    "src/websocket/stream_connection/concurrency_tests.zig": {
+      "original_names": [
+        "WebSocket stream adapter queued writers observe Close and transport failure"
+      ],
+      "original_assertions_preserved": 12,
+      "base_source_sha256": "ddac981a51a94649155976f4663d0d0c641a727242ff2fe96622b08cb6e8927c"
+    },
+    "src/websocket/stream_connection/failure_tests.zig": {
+      "original_names": [
+        "WebSocket stream adapter retires a partially written slice frame",
+        "WebSocket stream adapter retires every invoked write callback error",
+        "WebSocket stream adapter preserves preflight failures for retry",
+        "WebSocket stream adapter preserves encoding allocation failure for retry",
+        "WebSocket stream adapter retires a frame when its budget expires after the header",
+        "WebSocket stream adapter retains peer Close metadata after a failed automatic reply",
+        "WebSocket stream adapter retires a failed automatic Pong write",
+        "WebSocket stream adapter hides buffered frames after a write failure"
+      ],
+      "original_assertions_preserved": 50,
+      "base_source_sha256": "d7a2dfa4566a4959d8a4bbe47f077bde2bc0f59be22c348b5f8e27435d177c6f"
+    },
+    "src/websocket/runtime/receive_failure/writer_lifetime_tests.zig": {
+      "original_names": [
+        "WebSocket fatal receive cleanup retains active writer buffers until joined completion"
+      ],
+      "original_assertions_preserved": 8,
+      "base_source_sha256": "487aaff2987964c30d2d0ff210e7a304be8afe451dda533179f217f9b8b2b7f5"
+    }
+  },
+  "lifetime": [
+    "queued probe I/O restored before connection deinit",
+    "clock and transport peer remain alive through stream connection deinit",
+    "active writer gate restored after joining read/write futures and before close"
+  ],
+  "original_assertions_preserved": 70,
+  "classification": "source context-contract and global-state review; not three separate failing native baselines",
+  "ci_commands_budgets_pins_changed": false,
+  "full_goal_status": "active",
+  "limitations": [
+    "scoped native result does not qualify the complete HTTP-family gate",
+    "Windows compilation is distinct from native execution",
+    "remaining I/O observers, fairness and measured performance remain open"
+  ]
+}

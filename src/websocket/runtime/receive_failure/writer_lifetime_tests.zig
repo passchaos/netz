@@ -1,6 +1,8 @@
 const std = @import("std");
 const runtime = @import("../../runtime.zig");
 const allocator = std.testing.allocator;
+const forwarded_io = @import("../../../internal/testing/forwarded_io.zig");
+const native_protocol_io = @import("../../../internal/testing/native_protocol_io.zig");
 
 const Gate = struct {
     delegate: std.Io,
@@ -10,45 +12,44 @@ const Gate = struct {
     write_entered: std.Io.Event = .unset,
     write_release: std.Io.Event = .unset,
     stable: bool = true,
-    var active: std.atomic.Value(?*Gate) = .init(null);
 
     fn read(userdata: ?*anyopaque, socket: std.Io.net.Socket.Handle, buffers: [][]u8) std.Io.net.Stream.Reader.Error!usize {
-        const self = active.load(.acquire).?;
+        const self: *Gate = @ptrCast(@alignCast(userdata.?));
         if (self.read_armed.swap(false, .acq_rel)) {
             self.read_entered.set(self.delegate);
             self.read_release.waitUncancelable(self.delegate);
         }
-        return self.delegate.vtable.netRead(userdata, socket, buffers);
+        return self.delegate.vtable.netRead(self.delegate.userdata, socket, buffers);
     }
 
     fn write(userdata: ?*anyopaque, socket: std.Io.net.Socket.Handle, header: []const u8, parts: []const []const u8, splat: usize) std.Io.net.Stream.Writer.Error!usize {
-        const self = active.load(.acquire).?;
+        const self: *Gate = @ptrCast(@alignCast(userdata.?));
         const fingerprint = std.hash.Wyhash.hash(0, header);
         self.write_entered.set(self.delegate);
         self.write_release.waitUncancelable(self.delegate);
         self.stable = fingerprint == std.hash.Wyhash.hash(0, header);
-        return self.delegate.vtable.netWrite(userdata, socket, header, parts, splat);
+        return self.delegate.vtable.netWrite(self.delegate.userdata, socket, header, parts, splat);
     }
 };
 
 test "WebSocket fatal receive cleanup retains active writer buffers until joined completion" {
-    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
-    defer threaded.deinit();
-    const base = threaded.io();
+    try native_protocol_io.runStream(activeWriterLifetime);
+}
+
+fn activeWriterLifetime(base: std.Io) !void {
     var listener = try (std.Io.net.IpAddress{ .ip4 = .loopback(0) }).listen(base, .{ .reuse_address = true });
     defer listener.deinit(base);
     const peer = try listener.socket.address.connect(base, .{ .mode = .stream });
     defer peer.close(base);
     const stream = try listener.accept(base);
     var gate = Gate{ .delegate = base };
-    Gate.active.store(&gate, .release);
-    defer Gate.active.store(null, .release);
-    var table = base.vtable.*;
-    table.netRead = Gate.read;
-    table.netWrite = Gate.write;
-    const io = std.Io{ .userdata = base.userdata, .vtable = &table };
+    const io = forwarded_io.observer(&gate, .{
+        .netRead = Gate.read,
+        .netWrite = Gate.write,
+    });
     var connection = runtime.testing.initDirectConnection(allocator, io, stream, .client, .{});
     defer connection.close();
+    defer connection.io = base;
     connection.permessage_deflate = true;
     connection.compression_send_context_takeover = true;
     connection.compression_threshold = 1;

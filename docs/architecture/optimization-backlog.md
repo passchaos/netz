@@ -843,3 +843,23 @@ records 34 scoped native passes and Windows 8/8 compilation. These are source
 contract repairs and scoped checks, not 18 separate failing native baselines.
 Delivered native/full acceptance, remaining contexts, measured fairness and
 performance remain part of the active HTTP-family goal.
+
+### WebSocket stream observers and active-writer gate
+
+The remaining WebSocket candidates include two observers that change userdata
+while inheriting backend callbacks. The queued-writer futex probe now declares
+only its wait/wake overrides through complete delegate construction and restores
+I/O before connection deinit. The header-expiry peer uses the native controlled
+clock, including actual callback ownership and atomic clock-change notification.
+
+A separate active-writer cleanup fixture already preserves backend userdata,
+but obtains its read/write state through a global Gate pointer. It now uses
+per-instance observer context, delegates both operations with actual userdata,
+and restores I/O after joining futures and before connection close.
+
+All original names and 70 assertion statements remain: held Close versus queued
+writers, exact timed header prefix, terminal metadata and compressed buffer
+retention through joined completion. Three cases run on supported native stream
+backends. [The qualification](../evidence/websocket_observer_context/2026-11-27/validation.json)
+records 78 scoped native passes and Windows 8/8 compilation. Full/native CI,
+remaining contexts, fairness and workload performance remain open.

@@ -174,19 +174,19 @@ test "WebSocket stream adapter preserves encoding allocation failure for retry" 
 }
 
 test "WebSocket stream adapter retires a frame when its budget expires after the header" {
+    try @import("../../internal/testing/native_protocol_io.zig").runStream(headerDeadline);
+}
+
+fn headerDeadline(io: std.Io) !void {
+    const NativeIo = @import("../../internal/testing/deadline_send_io.zig").Native;
     const ClockPeer = struct {
         peer: Peer = .{ .fail_write = std.math.maxInt(usize) },
-        timestamp: std.Io.Timestamp = .zero,
-
-        fn now(context: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
-            const self: *@This() = @ptrCast(@alignCast(context.?));
-            return self.timestamp;
-        }
+        clock: *NativeIo,
 
         fn write(context: ?*anyopaque, bytes: []const u8, until: std.Io.Clock.Timestamp) anyerror!void {
             const self: *@This() = @ptrCast(@alignCast(context.?));
             try Peer.write(&self.peer, bytes);
-            self.timestamp = until.raw;
+            self.clock.setNow(@intCast(until.raw.nanoseconds));
         }
 
         fn read(context: ?*anyopaque, bytes: []u8) anyerror!usize {
@@ -204,12 +204,14 @@ test "WebSocket stream adapter retires a frame when its budget expires after the
             Peer.close(&self.peer);
         }
     };
-    var peer = ClockPeer{};
+    var clock: NativeIo = .{
+        .backend = .init(allocator, .{ .async_limit = .nothing }),
+        .delegate_io = io,
+    };
+    defer clock.backend.deinit();
+    var peer = ClockPeer{ .clock = &clock };
     defer peer.peer.output.deinit(allocator);
-    var table = std.testing.io.vtable.*;
-    table.now = ClockPeer.now;
-    const io: std.Io = .{ .userdata = &peer, .vtable = &table };
-    var connection = stream_connection.Connection.init(allocator, io, .{
+    var connection = stream_connection.Connection.init(allocator, clock.io(), .{
         .context = &peer,
         .read_fn = ClockPeer.read,
         .write_fn = ClockPeer.writeOrdinary,

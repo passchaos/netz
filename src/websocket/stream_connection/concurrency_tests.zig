@@ -3,6 +3,8 @@
 const std = @import("std");
 const stream_connection = @import("../stream_connection.zig");
 const allocator = std.testing.allocator;
+const forwarded_io = @import("../../internal/testing/forwarded_io.zig");
+const native_protocol_io = @import("../../internal/testing/native_protocol_io.zig");
 
 const Peer = struct {
     io: std.Io,
@@ -38,21 +40,21 @@ const Peer = struct {
 };
 
 const WaitProbe = struct {
-    base: std.Io,
+    delegate: std.Io,
     mutex: *std.Io.Mutex,
     waiting: std.Io.Event = .unset,
 
     fn wait(context: ?*anyopaque, pointer: *const u32, expected: u32) void {
         const self: *WaitProbe = @ptrCast(@alignCast(context.?));
         if (pointer == @as(*const u32, @ptrCast(&self.mutex.state.raw))) {
-            self.waiting.set(self.base);
+            self.waiting.set(self.delegate);
         }
-        self.base.vtable.futexWaitUncancelable(self.base.userdata, pointer, expected);
+        self.delegate.vtable.futexWaitUncancelable(self.delegate.userdata, pointer, expected);
     }
 
     fn wake(context: ?*anyopaque, pointer: *const u32, count: u32) void {
         const self: *WaitProbe = @ptrCast(@alignCast(context.?));
-        self.base.vtable.futexWake(self.base.userdata, pointer, count);
+        self.delegate.vtable.futexWake(self.delegate.userdata, pointer, count);
     }
 };
 
@@ -84,11 +86,12 @@ fn exercise(base: std.Io, fail: bool, kind: Writer.Kind) !void {
         .close_fn = Peer.close,
     }, .{});
     defer connection.deinit();
-    var probe = WaitProbe{ .base = base, .mutex = &connection.write_mutex };
-    var table = base.vtable.*;
-    table.futexWaitUncancelable = WaitProbe.wait;
-    table.futexWake = WaitProbe.wake;
-    connection.io = .{ .userdata = &probe, .vtable = &table };
+    var probe = WaitProbe{ .delegate = base, .mutex = &connection.write_mutex };
+    connection.io = forwarded_io.observer(&probe, .{
+        .futexWaitUncancelable = WaitProbe.wait,
+        .futexWake = WaitProbe.wake,
+    });
+    defer connection.io = base;
 
     var first = Writer{ .connection = &connection, .kind = .close };
     const closer = try std.Thread.spawn(.{}, Writer.run, .{&first});
@@ -131,9 +134,11 @@ fn exercise(base: std.Io, fail: bool, kind: Writer.Kind) !void {
 }
 
 test "WebSocket stream adapter queued writers observe Close and transport failure" {
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
+    try native_protocol_io.runStream(queuedWriters);
+}
+
+fn queuedWriters(io: std.Io) !void {
     for ([_]bool{ false, true }) |fail| {
-        for (std.meta.tags(Writer.Kind)) |kind| try exercise(threaded.io(), fail, kind);
+        for (std.meta.tags(Writer.Kind)) |kind| try exercise(io, fail, kind);
     }
 }
