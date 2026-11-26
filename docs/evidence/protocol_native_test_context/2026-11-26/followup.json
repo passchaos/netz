@@ -1,0 +1,28 @@
+{
+  "base_commit": "59ce674b39d20298e9b247d7ddaf867b2ad41f22",
+  "source_sha256": {
+    "src/http3/runtime/client/tests/deadline.zig": "06f742ccfa1ba8be057f340a3ed0a76a1eac4aebc1b8b48dcaf0478027b1e546",
+    "src/webtransport/runtime/tests.zig": "639ae1ee12c74f3366a7ffae006afeab6e2fc1ed9dbaaf0a5aae352f4d0fa458"
+  },
+  "windows_failure": {
+    "run": 45750666840,
+    "job": 139677407675,
+    "test": "HTTP/3 protected response deadlines preserve aggregate and streaming progress",
+    "observed": "ConcurrencyUnavailable followed by five-minute timeout",
+    "boundary": "Threaded Windows timed datagram wait unsupported; existing native_protocol_io runner exercises application IOCP on every platform and Threaded where supported",
+    "repair": "reuse existing backend runner; cancel and join peer Future on error; preserve all Timeout/progress/lifecycle assertions"
+  },
+  "complete_failure": {
+    "run": 45750666840,
+    "position": "2298/7451",
+    "test": "WebTransport development close deadline fails closed after a visible prefix",
+    "observed": "general protection exception in old send observer",
+    "repair": "existing Native sender with atomic send-advanced clock, native userdata and restored endpoint IO"
+  },
+  "native": {
+    "h3_scope_tests_passed": 65,
+    "wt_close_scope_tests_passed": 110
+  },
+  "windows_selected_compile": "passed",
+  "pinned_native_ci": "pending next revision"
+}

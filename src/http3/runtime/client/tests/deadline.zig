@@ -8,12 +8,11 @@ const control_sender = @import("../../control/send.zig");
 const server_control_stream_id: u62 = 3;
 
 test "HTTP/3 protected response deadlines preserve aggregate and streaming progress" {
+    try @import("../../../../internal/testing/native_protocol_io.zig").run(protectedResponseDeadlines);
+}
+
+fn protectedResponseDeadlines(io: std.Io) !void {
     const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{
-        .async_limit = .unlimited,
-    });
-    defer threaded.deinit();
-    const io = threaded.io();
 
     const client_cid = [_]u8{ 0xa9, 0x10, 0x20, 0x30 };
     const server_cid = [_]u8{ 0xaa, 0x10, 0x20, 0x30 };
@@ -109,9 +108,8 @@ test "HTTP/3 protected response deadlines preserve aggregate and streaming progr
         }
     };
     var shared = Shared{ .server = &server, .io = io };
-    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
-    var joined = false;
-    defer if (!joined) thread.join();
+    var peer_work = try std.Io.concurrent(io, Shared.run, .{&shared});
+    defer peer_work.cancel(io);
 
     var client = try runtime.ProtectedClient.connect(
         allocator,
@@ -288,8 +286,7 @@ test "HTTP/3 protected response deadlines preserve aggregate and streaming progr
         !client.request_lifecycle.contains(streaming_id),
     );
 
-    thread.join();
-    joined = true;
+    peer_work.await(io);
     if (shared.err) |err| return err;
 }
 

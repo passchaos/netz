@@ -47,7 +47,8 @@
   },
   "ci_vail_pin": "3b772b0cccb64d84fbc760df6428bc51e0fe0761",
   "checks_pending": [
-    "pinned native and complete CI at delivered revision"
+    "native Windows blocked-response fixture correction",
+    "complete CI acceptance"
   ],
   "webtransport_native": {
     "command": [
@@ -217,5 +218,16 @@
   "evidence_audit": {
     "status": "passed",
     "max_unresolved": 24
+  },
+  "pinned_ci_59ce": {
+    "run": 45750666840,
+    "head": "59ce674b39d20298e9b247d7ddaf867b2ad41f22",
+    "linux_job": 139677407687,
+    "linux_original_and_fixture_step": "success",
+    "linux_other_failure": "client CA reload beforeSIGHUP BrokenPipe",
+    "windows_job": 139677407675,
+    "windows_fixture_failure": "119/137 protected response deadlines returnedConcurrencyUnavailable; joinedstdThread then5min timeout",
+    "windows_original_combined_protocol": "success",
+    "complete": "live at last refresh"
   }
 }

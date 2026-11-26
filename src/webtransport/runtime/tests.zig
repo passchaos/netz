@@ -1,6 +1,7 @@
 //! Tests moved out of the WebTransport runtime root.
 
 const std = @import("std");
+const NativeSendIo = @import("../../internal/testing/deadline_send_io.zig").Native;
 
 test {
     _ = @import("trust_deadline_tests.zig");
@@ -1216,61 +1217,25 @@ test "WebTransport development close deadline fails closed after a visible prefi
     try shared.accepted.wait(io);
     client.h3.quic_client.endpoint.limits.max_datagram_size = 96;
 
-    const DeadlineAfterSendIo = struct {
-        delegate: std.Io,
-        now_ns: i96,
-        send_calls: usize = 0,
-
-        fn now(
-            userdata: ?*anyopaque,
-            _: std.Io.Clock,
-        ) std.Io.Timestamp {
-            const self: *@This() = @ptrCast(@alignCast(userdata.?));
-            return .fromNanoseconds(self.now_ns);
-        }
-
-        fn netSend(
-            userdata: ?*anyopaque,
-            socket_handle: net.Socket.Handle,
-            messages: []net.OutgoingMessage,
-            flags: net.SendFlags,
-        ) struct { ?net.Socket.SendError, usize } {
-            const self: *@This() = @ptrCast(@alignCast(userdata.?));
-            self.send_calls += 1;
-            const result = self.delegate.vtable.netSend(
-                self.delegate.userdata,
-                socket_handle,
-                messages,
-                flags,
-            );
-            if (result[1] != 0) self.now_ns += std.time.ns_per_s;
-            return result;
-        }
+    const timed_delegate_io = client.h3.quic_client.endpoint.io;
+    var timed: NativeSendIo = .{
+        .backend = .init(allocator, .{ .async_limit = .nothing }),
+        .now_ns = .init(@intCast(std.Io.Clock.awake.now(timed_delegate_io).nanoseconds)),
+        .advance_after_send_ns = std.time.ns_per_s,
     };
-    var timed = DeadlineAfterSendIo{
-        .delegate = client.h3.quic_client.endpoint.io,
-        .now_ns = std.Io.Clock.awake.now(
-            client.h3.quic_client.endpoint.io,
-        ).nanoseconds,
-    };
-    var timed_vtable = timed.delegate.vtable.*;
-    timed_vtable.now = DeadlineAfterSendIo.now;
-    timed_vtable.netSend = DeadlineAfterSendIo.netSend;
-    client.h3.quic_client.endpoint.io = .{
-        .userdata = &timed,
-        .vtable = &timed_vtable,
-    };
-    defer client.h3.quic_client.endpoint.io = timed.delegate;
+    defer timed.backend.deinit();
+    client.h3.quic_client.endpoint.io = timed.io();
+    defer client.h3.quic_client.endpoint.io = timed_delegate_io;
 
     const reason = "0123456789abcdef" ** 16;
     try std.testing.expectError(
         error.Timeout,
         client.closeWithDeadline(41, reason, .{
             .clock = .awake,
-            .raw = .fromNanoseconds(timed.now_ns + 1),
+            .raw = .fromNanoseconds(timed.now_ns.load(.acquire) + 1),
         }),
     );
-    try std.testing.expectEqual(@as(usize, 1), timed.send_calls);
+    try std.testing.expectEqual(@as(usize, 1), timed.send_calls.load(.acquire));
     try std.testing.expect(client.h3.request_unusable);
     try std.testing.expect(client.control.control.local_close_failed);
     try std.testing.expect(!client.control.control.local_close_started);
