@@ -1,0 +1,10 @@
+{
+  "head": "1bd95082b20408baad85ccc674cbdf7ab05f8874",
+  "test": "HTTP/3 handshake body parts deadline resumes exact slice prefix",
+  "baseline_exit": 1,
+  "baseline_log": "/tmp/netz-1bd-body-parts-baseline.log",
+  "baseline_log_sha256": "ae05c0052036f11b80454fb24cb8b7f8d3443dccb86a245da9c67ede760a5d53",
+  "baseline_failure": "Segmentation fault at address0 and process ABRT",
+  "cause": "clock observer userdata inherited Threaded groupConcurrent; now each observer owns a native sender backend and atomic clock",
+  "scope": "local named regression; CI aggregate ABRT remains unlabelled and complete budget unresolved"
+}

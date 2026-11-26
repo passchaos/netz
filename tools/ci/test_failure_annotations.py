@@ -11,12 +11,18 @@ def logged_error(line: str) -> bool:
     return bool(re.search(r"(?:\[[^]\r\n]+\] \(err\)|(?:^|\s)error\([^\r\n)]*\)):", line))
 
 
+def native_crash(line: str) -> bool:
+    return "Segmentation fault" in line or "Bus error" in line or bool(
+        re.search(r"process terminated with signal (?:ABRT|ILL|SEGV|BUS)\b", line)
+    )
+
+
 def annotate(path: Path) -> None:
     lines = path.read_text(errors="replace").splitlines()
     failures = [
         index
         for index, line in enumerate(lines)
-        if "error:" in line or "FAIL (" in line or "panic:" in line or logged_error(line)
+        if "error:" in line or "FAIL (" in line or "panic:" in line or logged_error(line) or native_crash(line)
         or "leaked:" in line or "leaked memory" in line or "[gpa] (err)" in line
         or line.startswith(("FAIL:", "ERROR:", "Traceback"))
     ]
@@ -25,7 +31,7 @@ def annotate(path: Path) -> None:
     for index in failures[:12]:
         start = max(0, index - 1)
         context_lines = lines[start:index + 14]
-        if "FAIL (" in lines[index] or "panic:" in lines[index] or "leaked:" in lines[index] or "[gpa] (err)" in lines[index] or logged_error(lines[index]):
+        if "FAIL (" in lines[index] or "panic:" in lines[index] or "leaked:" in lines[index] or "[gpa] (err)" in lines[index] or logged_error(lines[index]) or native_crash(lines[index]):
             for previous in range(index, max(-1, index - 40), -1):
                 if re.match(r"^\d+/\d+\s", lines[previous]):
                     if previous < start:

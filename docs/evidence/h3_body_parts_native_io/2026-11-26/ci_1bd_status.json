@@ -1,0 +1,77 @@
+{
+  "observed_utc": "2026-11-26T00:20:54.362015+00:00",
+  "head": "1bd95082b20408baad85ccc674cbdf7ab05f8874",
+  "run_id": 45724043080,
+  "jobs": [
+    {
+      "id": 139589237618,
+      "displayName": "preflight",
+      "status": "completed",
+      "conclusion": "success",
+      "href": "/passchaos/netz/actions/runs/45724043080/job/139589237618"
+    },
+    {
+      "id": 139589237919,
+      "displayName": "complete",
+      "status": "completed",
+      "conclusion": "failure",
+      "href": "/passchaos/netz/actions/runs/45724043080/job/139589237919"
+    },
+    {
+      "id": 139589237939,
+      "displayName": "Portable aarch64-linux-gnu (ubuntu-latest)",
+      "status": "completed",
+      "conclusion": "success",
+      "href": "/passchaos/netz/actions/runs/45724043080/job/139589237939"
+    },
+    {
+      "id": 139589237962,
+      "displayName": "Portable x86_64-linux-gnu (ubuntu-latest)",
+      "status": "completed",
+      "conclusion": "success",
+      "href": "/passchaos/netz/actions/runs/45724043080/job/139589237962"
+    },
+    {
+      "id": 139589238071,
+      "displayName": "Portable x86_64-windows-gnu (ubuntu-latest)",
+      "status": "completed",
+      "conclusion": "success",
+      "href": "/passchaos/netz/actions/runs/45724043080/job/139589238071"
+    },
+    {
+      "id": 139589238086,
+      "displayName": "Portable x86_64-windows-gnu (windows-latest)",
+      "status": "completed",
+      "conclusion": "success",
+      "href": "/passchaos/netz/actions/runs/45724043080/job/139589238086"
+    },
+    {
+      "id": 139589238037,
+      "displayName": "Cross-compile aarch64-macos-none (macOS SDK)",
+      "status": "completed",
+      "conclusion": "success",
+      "href": "/passchaos/netz/actions/runs/45724043080/job/139589238037"
+    },
+    {
+      "id": 139589238060,
+      "displayName": "Cross-compile x86_64-macos-none (macOS SDK)",
+      "status": "completed",
+      "conclusion": "success",
+      "href": "/passchaos/netz/actions/runs/45724043080/job/139589238060"
+    },
+    {
+      "id": 139589239441,
+      "displayName": "fuzz",
+      "status": "completed",
+      "conclusion": "skipped",
+      "href": "/passchaos/netz/actions/runs/45724043080/job/139589239441"
+    },
+    {
+      "id": 139601032185,
+      "displayName": "verify",
+      "status": "completed",
+      "conclusion": "failure",
+      "href": "/passchaos/netz/actions/runs/45724043080/job/139601032185"
+    }
+  ]
+}

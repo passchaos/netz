@@ -92,6 +92,24 @@ class AnnotationsTest(unittest.TestCase):
         self.assertIn("[default] (err): unexpected cleanup", first)
         self.assertNotIn("quic.test.other", first)
 
+    def test_segfault_keeps_first_case_before_long_stack_and_fuzz_output(self):
+        text = "72/233 quic.test.receive credit...Segmentation fault at address 0x0\n"
+        text += "allocator at Allocator.zig:142\n" + "\n".join("stack frame %d" % n for n in range(50))
+        text += "\nerror: process terminated with signal ABRT\n"
+        text += "failed command: ./test\n1/3 fuzz.test.other...OK\n"
+        first = self.render(text, "complete-tests.log").splitlines()[0]
+        self.assertIn("quic.test.receive credit", first)
+        self.assertIn("Segmentation fault at address 0x0", first)
+        self.assertIn("allocator at Allocator.zig:142", first)
+        self.assertNotIn("fuzz.test.other", first)
+
+    def test_signal_exit_keeps_case_without_panic_preface(self):
+        text = "68/230 quic.test.batch prefix...\n+- run test failure\n"
+        text += "error: process terminated with signal ILL\nfailed command: ./test\n"
+        first = self.render(text, "complete-tests.log").splitlines()[0]
+        self.assertIn("quic.test.batch prefix", first)
+        self.assertIn("process terminated with signal ILL", first)
+
 
 if __name__ == "__main__":
     unittest.main()

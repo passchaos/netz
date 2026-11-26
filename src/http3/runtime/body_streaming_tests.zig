@@ -1,6 +1,7 @@
 //! HTTP/3 body streaming, GRO batch, and small-window tests.
 
 const std = @import("std");
+const NativeSendIo = @import("../../internal/testing/deadline_send_io.zig").Native;
 const http3 = @import("../mod.zig");
 const net = std.Io.net;
 const runtime = @import("../runtime.zig");
@@ -670,38 +671,6 @@ test "HTTP/3 handshake body parts deadline resumes exact slice prefix" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    const DeadlineAfterSendIo = struct {
-        delegate: std.Io,
-        now_ns: i96,
-        send_calls: usize = 0,
-
-        fn now(
-            context: ?*anyopaque,
-            _: std.Io.Clock,
-        ) std.Io.Timestamp {
-            const self: *@This() = @ptrCast(@alignCast(context.?));
-            return .fromNanoseconds(self.now_ns);
-        }
-
-        fn netSend(
-            context: ?*anyopaque,
-            socket_handle: net.Socket.Handle,
-            messages: []net.OutgoingMessage,
-            flags: net.SendFlags,
-        ) struct { ?net.Socket.SendError, usize } {
-            const self: *@This() = @ptrCast(@alignCast(context.?));
-            self.send_calls += 1;
-            const send_error, const sent_count = self.delegate.vtable.netSend(
-                self.delegate.userdata,
-                socket_handle,
-                messages,
-                flags,
-            );
-            if (sent_count != 0) self.now_ns += std.time.ns_per_s;
-            return .{ send_error, sent_count };
-        }
-    };
-
     const original_dcid =
         [_]u8{ 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88 };
     const client_cid = [_]u8{ 0x89, 0x8a, 0x8b, 0x8c };
@@ -814,20 +783,13 @@ test "HTTP/3 handshake body parts deadline resumes exact slice prefix" {
                 session.established.connection.next_packet_number,
             );
 
-            var timed = DeadlineAfterSendIo{
-                .delegate = session.established.connection.endpoint.io,
-                .now_ns = std.Io.Clock.awake.now(
-                    session.established.connection.endpoint.io,
-                ).nanoseconds,
-            };
-            var timed_vtable = timed.delegate.vtable.*;
-            timed_vtable.now = DeadlineAfterSendIo.now;
-            timed_vtable.netSend = DeadlineAfterSendIo.netSend;
-            session.established.connection.endpoint.io = .{
-                .userdata = &timed,
-                .vtable = &timed_vtable,
-            };
-            defer session.established.connection.endpoint.io = timed.delegate;
+            const timed_delegate_io = session.established.connection.endpoint.io;
+            var timed: NativeSendIo = .{ .backend = .init(allocator, .{ .async_limit = .nothing }), .now_ns = .init(@intCast(std.Io.Clock.awake.now(
+                session.established.connection.endpoint.io,
+            ).nanoseconds)), .advance_after_send_ns = std.time.ns_per_s };
+            defer timed.backend.deinit();
+            session.established.connection.endpoint.io = timed.io();
+            defer session.established.connection.endpoint.io = timed_delegate_io;
 
             try std.testing.expectError(
                 error.Timeout,
@@ -838,15 +800,15 @@ test "HTTP/3 handshake body parts deadline resumes exact slice prefix" {
                     &progress,
                     .{
                         .clock = .awake,
-                        .raw = .fromNanoseconds(timed.now_ns + 1),
+                        .raw = .fromNanoseconds(timed.now_ns.load(.acquire) + 1),
                     },
                 ),
             );
             try std.testing.expectEqual(@as(usize, 3), progress.committed_bytes);
             try std.testing.expect(!progress.fin_committed);
-            try std.testing.expectEqual(@as(usize, 1), timed.send_calls);
+            try std.testing.expectEqual(@as(usize, 1), timed.send_calls.load(.acquire));
 
-            session.established.connection.endpoint.io = timed.delegate;
+            session.established.connection.endpoint.io = timed_delegate_io;
             try session.sendResponseBodyPartsPacedWithDeadline(
                 request.stream_id,
                 &.{ "mno", "pqr" },
@@ -1002,15 +964,11 @@ test "HTTP/3 handshake body parts deadline resumes exact slice prefix" {
         client.established.connection.next_packet_number,
     );
 
-    var timed = DeadlineAfterSendIo{
-        .delegate = client.endpoint.io,
-        .now_ns = std.Io.Clock.awake.now(client.endpoint.io).nanoseconds,
-    };
-    var timed_vtable = timed.delegate.vtable.*;
-    timed_vtable.now = DeadlineAfterSendIo.now;
-    timed_vtable.netSend = DeadlineAfterSendIo.netSend;
-    client.endpoint.io = .{ .userdata = &timed, .vtable = &timed_vtable };
-    defer client.endpoint.io = timed.delegate;
+    const timed_delegate_io = client.endpoint.io;
+    var timed: NativeSendIo = .{ .backend = .init(allocator, .{ .async_limit = .nothing }), .now_ns = .init(@intCast(std.Io.Clock.awake.now(client.endpoint.io).nanoseconds)), .advance_after_send_ns = std.time.ns_per_s };
+    defer timed.backend.deinit();
+    client.endpoint.io = timed.io();
+    defer client.endpoint.io = timed_delegate_io;
     try std.testing.expectError(
         error.Timeout,
         client.sendRequestBodyPartsPacedWithDeadline(
@@ -1020,15 +978,15 @@ test "HTTP/3 handshake body parts deadline resumes exact slice prefix" {
             &progress,
             .{
                 .clock = .awake,
-                .raw = .fromNanoseconds(timed.now_ns + 1),
+                .raw = .fromNanoseconds(timed.now_ns.load(.acquire) + 1),
             },
         ),
     );
     try std.testing.expectEqual(@as(usize, 3), progress.committed_bytes);
     try std.testing.expect(!progress.fin_committed);
-    try std.testing.expectEqual(@as(usize, 1), timed.send_calls);
+    try std.testing.expectEqual(@as(usize, 1), timed.send_calls.load(.acquire));
 
-    client.endpoint.io = timed.delegate;
+    client.endpoint.io = timed_delegate_io;
     try client.sendRequestBodyPartsPacedWithDeadline(
         stream_id,
         &.{ "def", "ghi" },

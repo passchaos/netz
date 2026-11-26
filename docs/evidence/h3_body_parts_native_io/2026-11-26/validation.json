@@ -1,0 +1,48 @@
+{
+  "checks": [
+    {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-http3",
+        "-j1",
+        "-Dtest-progress=true",
+        "-Dtest-filter=HTTP/3 handshake body parts deadline resumes exact slice prefix",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log": "/tmp/netz-h3-body-parts-main-check-0.log",
+      "seconds": 44.543075
+    },
+    {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-http3-compile",
+        "-Dtarget=x86_64-windows-gnu",
+        "-j1",
+        "-Dtest-progress=true",
+        "-Dtest-filter=HTTP/3 handshake body parts deadline resumes exact slice prefix",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log": "/tmp/netz-h3-body-parts-main-check-1.log",
+      "seconds": 26.02983
+    }
+  ],
+  "source_sha256": {
+    "src/http3/runtime/body_streaming_tests.zig": "a012dcd55ca4813ef84ad5be41be9dc277bc8b8bfbcd1c520c45c146ed64860d",
+    "tools/ci/test_failure_annotations.py": "efe06d6f7a37c83243d08183cf29f3f2046389fa530b00b61d5e5f2a054190cd",
+    "tools/ci/test_failure_annotations_test.py": "5fcd15872c3525ca2e386e1cf43e50d7d09e1ad70c4c4066f3244dd057e18c16"
+  },
+  "scope": "current main named macOS regression and Windows compilation; aggregate CI pending",
+  "native_test_count": 67,
+  "annotation_support_tests": {
+    "count": 11,
+    "exit_code": 0,
+    "interpreter": "uv Python 3.14"
+  },
+  "local_vail_head": "d93847a7e091c835406ee10c0a86fd064f1475dd"
+}
