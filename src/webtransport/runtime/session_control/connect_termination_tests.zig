@@ -1,4 +1,5 @@
 const std = @import("std");
+const native_protocol_io = @import("../../../internal/testing/native_protocol_io.zig");
 const support = @import("test_support/handshake_pair.zig");
 const webtransport = @import("../../mod.zig");
 const control_mod = @import("../session_control.zig");
@@ -206,12 +207,14 @@ test "WebTransport CONNECT STOP_SENDING retains post-CLOSE protocol rejection" {
 }
 
 test "WebTransport CONNECT STOP_SENDING retains its reset event across cleanup socket failure" {
+    try native_protocol_io.run(retainedConnectReset);
+}
+
+fn retainedConnectReset(io: std.Io) !void {
     const ObservedBatchSend = @import("../../../quic/one_rtt/tests/observed_batch_send.zig").ObservedBatchSend;
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
     for ([_]support.Role{ .client, .server }) |role| {
         var pair: support.Pair = undefined;
-        try pair.init(threaded.io());
+        try pair.init(io);
         defer pair.deinit();
         const id = try pair.openStream();
         var output: [16]u8 = undefined;
@@ -221,9 +224,7 @@ test "WebTransport CONNECT STOP_SENDING retains its reset event across cleanup s
         const endpoint = connection.endpoint;
         const original_io = endpoint.io;
         var observed = ObservedBatchSend{ .delegate = original_io, .fail_on_call = 1 };
-        var vtable = original_io.vtable.*;
-        vtable.netSend = ObservedBatchSend.netSend;
-        endpoint.io = .{ .userdata = &observed, .vtable = &vtable };
+        endpoint.io = observed.io();
         defer endpoint.io = original_io;
         try std.testing.expectError(error.NetworkDown, pair.receiveWithTimeout(role, .fromSeconds(1)));
         const registry = if (role == .client) &pair.client.streams else &pair.server.streams;

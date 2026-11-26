@@ -928,16 +928,31 @@ pub const ServerDuplexStream = struct {
         options: StreamingResponseOptions,
         data: []const u8,
     ) Error!void {
+        return self.startResponseWithBodyUntil(options, data, null);
+    }
+
+    /// HEADERS and DATA retain one caller-owned awake-clock deadline.
+    pub fn startResponseWithBodyWithDeadline(self: *ServerDuplexStream, options: StreamingResponseOptions, data: []const u8, deadline: std.Io.Clock.Timestamp) ResponseTimeoutError!void {
+        _ = try deadline_policy.usableAwake(self.connection.io, deadline);
+        return self.startResponseWithBodyUntil(options, data, deadline);
+    }
+
+    pub fn startResponseWithBodyWithTimeout(self: *ServerDuplexStream, options: StreamingResponseOptions, data: []const u8, timeout: std.Io.Duration) ResponseTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.startResponseWithBodyWithDeadline(options, data, .fromNow(self.connection.io, .{ .raw = timeout, .clock = .awake }));
+    }
+
+    fn startResponseWithBodyUntil(self: *ServerDuplexStream, options: StreamingResponseOptions, data: []const u8, deadline: ?std.Io.Clock.Timestamp) Error!void {
         if (self.response_started or self.released) {
             return error.UnexpectedFrame;
         }
-        try self.connection.writeResponse(self.stream_id, .{
+        try self.connection.writeResponseInternalUntil(self.stream_id, .{
             .status = options.status,
             .headers = options.headers,
             .body = data,
             .request_method = options.request_method,
             .extended_connect = options.extended_connect,
-        });
+        }, true, deadline);
         self.response_started = true;
         self.response_finished = true;
         self.response_written = data.len;
@@ -1025,6 +1040,20 @@ pub const ServerDuplexStream = struct {
         self: *ServerDuplexStream,
         error_code: http2.ErrorCode,
     ) Error!void {
+        return self.resetUntil(error_code, null);
+    }
+
+    pub fn resetWithDeadline(self: *ServerDuplexStream, error_code: http2.ErrorCode, deadline: std.Io.Clock.Timestamp) ResponseTimeoutError!void {
+        _ = try deadline_policy.usableAwake(self.connection.io, deadline);
+        return self.resetUntil(error_code, deadline);
+    }
+
+    pub fn resetWithTimeout(self: *ServerDuplexStream, error_code: http2.ErrorCode, timeout: std.Io.Duration) ResponseTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.resetWithDeadline(error_code, .fromNow(self.connection.io, .{ .raw = timeout, .clock = .awake }));
+    }
+
+    fn resetUntil(self: *ServerDuplexStream, error_code: http2.ErrorCode, deadline: ?std.Io.Clock.Timestamp) Error!void {
         if (self.released) return error.ConnectionClosed;
         defer {
             self.request_finished = true;
@@ -1036,7 +1065,10 @@ pub const ServerDuplexStream = struct {
         if (self.pending_header.getPtr()) |pending| {
             if (!pending.decode_complete) self.connection.aggregate_timeout_unusable = true;
         }
-        return self.connection.terminateOwnedStream(self.stream_id, error_code);
+        return if (deadline) |until|
+            self.connection.terminateOwnedStreamWithDeadline(self.stream_id, error_code, until)
+        else
+            self.connection.terminateOwnedStream(self.stream_id, error_code);
     }
 
     pub fn writeResponse(

@@ -6,7 +6,17 @@ const runtime = @import("../../runtime.zig");
 pub fn run(comptime test_case: anytype) anyerror!void {
     // Threaded's native Windows datagram deadline path reports unavailable
     // concurrency. Preserve Threaded coverage where it supports this scope.
-    if (builtin.os.tag != .windows) {
+    return runImpl(test_case, builtin.os.tag != .windows);
+}
+
+/// Stream and futex tests retain Threaded TCP coverage on Windows as well.
+/// They do not rely on Threaded's unsupported timed datagram receive path.
+pub fn runStream(comptime test_case: anytype) anyerror!void {
+    return runImpl(test_case, true);
+}
+
+fn runImpl(comptime test_case: anytype, comptime include_threaded: bool) anyerror!void {
+    if (include_threaded) {
         var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .nothing });
         defer threaded.deinit();
         try test_case(threaded.io());

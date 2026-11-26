@@ -60,16 +60,23 @@ def stream(command, output, title, interval):
             last_output = recent.splitlines()[-1][-2000:] if recent else "No command output yet."
             Path(path).write_text("### " + html.escape(title) + "\n\n<pre>" + html.escape(last_test) + "\n\nLast command output:\n" + html.escape(last_output) + "</pre>\n", encoding="utf-8")
 
-    def notice():
-        summary()
+    def notice(update_summary=True):
+        if update_summary:
+            summary()
         property_title = escape(title).replace(",", "%2C").replace(":", "%3A")
         # Test names are printed before their result without a newline. Actions
         # commands must begin a new line to become annotations.
-        line = "\n::notice title=" + property_title + "::" + escape(last_test) + "\n"
+        # Public Actions annotations display the step name in place of the
+        # custom title. Keep invocation ownership in the visible message too.
+        line = "\n::notice title=" + property_title + "::" + escape(title + ": " + last_test) + "\n"
         sys.stdout.buffer.write(line.encode("utf-8"))
         sys.stdout.buffer.flush()
 
     try:
+        # Even a command admitted near the step's timeout must identify itself
+        # before its first periodic notice. Do not write the optional summary
+        # until the child has had a chance to produce output.
+        notice(update_summary=False)
         while True:
             try:
                 chunk = chunks.get(timeout=max(0.001, deadline - time.monotonic()))
@@ -123,7 +130,7 @@ def stream(command, output, title, interval):
         if isinstance(err, Interrupted):
             property_title = escape(title).replace(",", "%2C").replace(":", "%3A")
             last_output = recent.splitlines()[-1][-2000:] if recent else "No command output yet."
-            line = "\n::error title=" + property_title + "::Interrupted command; last visible test: " + escape(last_test) + "; last output: " + escape(last_output) + "\n"
+            line = "\n::error title=" + property_title + "::" + escape("Interrupted command [" + title + "]; last visible test: " + last_test + "; last output: " + last_output) + "\n"
             sys.stdout.buffer.write(line.encode("utf-8"))
             sys.stdout.buffer.flush()
         raise

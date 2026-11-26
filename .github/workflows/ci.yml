@@ -351,6 +351,18 @@ jobs:
             python tools/ci/test_failure_annotations.py native-wt-session-control.log
             protocol_status=$session_control_status
           fi
+          h2_command_status=0
+          python tools/ci/run_test_progress.py --title "Native H2 command deadline and completion contracts" --log native-h2-command-deadlines.log -- zig build test-http2 -j1 -Dtest-progress=true -Dtarget=${{ matrix.target }} '-Dtest-filter=HTTP/2 concurrent informational' '-Dtest-filter=HTTP/2 concurrent inline expired' '-Dtest-filter=HTTP/2 concurrent command' '-Dtest-filter=HTTP/2 concurrent DATA retry' '-Dtest-filter=HTTP/2 concurrent compound response retry' '-Dtest-filter=HTTP/2 concurrent output counterparts' --summary all || h2_command_status=$?
+          if [ "$h2_command_status" -ne 0 ]; then
+            python tools/ci/test_failure_annotations.py native-h2-command-deadlines.log
+            protocol_status=$h2_command_status
+          fi
+          rejection_context_status=0
+          python tools/ci/run_test_progress.py --title "Native WebTransport rejection callback ownership" --log native-wt-rejection-context.log -- zig build test-webtransport -j1 -Dtest-progress=true -Dtarget=${{ matrix.target }} '-Dtest-filter=WebTransport standalone retains malformed Capsule error through cleanup timeout' '-Dtest-filter=WebTransport standalone dispatcher retains rejection through bounded cleanup' '-Dtest-filter=WebTransport endpoint server retries malformed Capsule cancellation after socket failure' '-Dtest-filter=WebTransport CONNECT STOP_SENDING retains its reset event across cleanup socket failure' '-Dtest-filter=WebTransport runtime flow grant commits only after the packet is sent' '-Dtest-filter=WebTransport runtime flow parser commits grants and retains failed transport credit' --summary all || rejection_context_status=$?
+          if [ "$rejection_context_status" -ne 0 ]; then
+            python tools/ci/test_failure_annotations.py native-wt-rejection-context.log
+            protocol_status=$rejection_context_status
+          fi
           exit "$protocol_status"
 
       - name: Run native HTTP3 send deadline regressions

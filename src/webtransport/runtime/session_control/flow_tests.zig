@@ -1,4 +1,5 @@
 const std = @import("std");
+const native_protocol_io = @import("../../../internal/testing/native_protocol_io.zig");
 const webtransport = @import("../../mod.zig");
 const http3 = @import("../../../http3/mod.zig");
 const quic = @import("../../../quic/mod.zig");
@@ -47,18 +48,18 @@ test "WebTransport runtime flow Capsule grants zero initial stream credit" {
 }
 
 test "WebTransport runtime flow grant commits only after the packet is sent" {
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
+    try native_protocol_io.run(committedFlowGrant);
+}
+
+fn committedFlowGrant(io: std.Io) !void {
     var pair: Pair = undefined;
-    try pair.init(threaded.io());
+    try pair.init(io);
     defer pair.deinit();
     const conn = pair.connection(.server);
     const previous = pair.server.streams.flow.?.receive_limit.data;
     const original_io = conn.endpoint.io;
     var observed = ObservedBatchSend{ .delegate = original_io, .fail_on_call = 1 };
-    var vtable = original_io.vtable.*;
-    vtable.netSend = ObservedBatchSend.netSend;
-    conn.endpoint.io = .{ .userdata = &observed, .vtable = &vtable };
+    conn.endpoint.io = observed.io();
     defer conn.endpoint.io = original_io;
     try std.testing.expectError(error.NetworkDown, pair.server.grantData(previous + 1024));
     try std.testing.expectEqual(previous, pair.server.streams.flow.?.receive_limit.data);
@@ -113,10 +114,12 @@ test "WebTransport runtime flow parses fragmented grants beside DRAIN" {
 }
 
 test "WebTransport runtime flow parser commits grants and retains failed transport credit" {
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
+    try native_protocol_io.run(retainedFlowCredit);
+}
+
+fn retainedFlowCredit(io: std.Io) !void {
     var pair: Pair = undefined;
-    try pair.init(threaded.io());
+    try pair.init(io);
     defer pair.deinit();
     const conn = pair.connection(.client);
     const original_limit = pair.client.streams.flow.?.send_limit.data;
@@ -125,9 +128,7 @@ test "WebTransport runtime flow parser commits grants and retains failed transpo
     try pair.sendCapsules(.client, grant);
     const original_io = conn.endpoint.io;
     var observed = ObservedBatchSend{ .delegate = original_io, .fail_on_call = 1 };
-    var vtable = original_io.vtable.*;
-    vtable.netSend = ObservedBatchSend.netSend;
-    conn.endpoint.io = .{ .userdata = &observed, .vtable = &vtable };
+    conn.endpoint.io = observed.io();
     defer conn.endpoint.io = original_io;
     // Force receive-window replenishment during the control poll.
     const entry = conn.stream_recv_index.get(0).?;

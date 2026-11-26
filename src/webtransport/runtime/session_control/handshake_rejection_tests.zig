@@ -7,6 +7,7 @@ const Role = support.Role;
 const control_mod = @import("../session_control.zig");
 const ObservedBatchSend = @import("../../../quic/one_rtt/tests/observed_batch_send.zig").ObservedBatchSend;
 const native_protocol_io = @import("../../../internal/testing/native_protocol_io.zig");
+const forwarded_io = @import("../../../internal/testing/forwarded_io.zig");
 
 test "WebTransport standalone malformed capsules terminate both handshake roles" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
@@ -47,8 +48,24 @@ test "WebTransport standalone malformed Capsule deadline resumes cancellation" {
 
 const PaceAfterFirstSend = struct {
     delegate: std.Io,
+    table: std.Io.VTable = undefined,
     connection: *quic.one_rtt.Connection,
     calls: usize = 0,
+
+    fn io(self: *@This()) std.Io {
+        self.table = forwarded_io.table(from, baseIo, mapTimeout);
+        self.table.netSend = netSend;
+        return .{ .userdata = self, .vtable = &self.table };
+    }
+    fn from(userdata: ?*anyopaque) *@This() {
+        return @ptrCast(@alignCast(userdata.?));
+    }
+    fn baseIo(self: *@This()) std.Io {
+        return self.delegate;
+    }
+    fn mapTimeout(_: *@This(), timeout: std.Io.Timeout) std.Io.Timeout {
+        return timeout;
+    }
 
     fn netSend(
         userdata: ?*anyopaque,
@@ -69,20 +86,20 @@ const PaceAfterFirstSend = struct {
 };
 
 test "WebTransport standalone retains malformed Capsule error through cleanup timeout" {
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
+    try native_protocol_io.run(retainedMalformedCapsule);
+}
+
+fn retainedMalformedCapsule(io: std.Io) !void {
     for ([_]Role{ .client, .server }) |role| {
         var pair: Pair = undefined;
-        try pair.init(threaded.io());
+        try pair.init(io);
         defer pair.deinit();
         const stream_id = try pair.openStream();
         try pair.sendCapsules(role, &.{ 0x68, 0x43, 3 });
         const conn = pair.connection(role);
         const original_io = conn.endpoint.io;
         var observed = PaceAfterFirstSend{ .delegate = original_io, .connection = conn };
-        var vtable = original_io.vtable.*;
-        vtable.netSend = PaceAfterFirstSend.netSend;
-        conn.endpoint.io = .{ .userdata = &observed, .vtable = &vtable };
+        conn.endpoint.io = observed.io();
         defer conn.endpoint.io = original_io;
         try std.testing.expectError(error.Timeout, pair.receiveWithTimeout(role, .fromMilliseconds(5)));
         const ctrl = pair.control(role);
@@ -152,9 +169,7 @@ fn dispatcherRejection(io: std.Io) !void {
     }
     const original_io = conn.endpoint.io;
     var observed = ObservedBatchSend{ .delegate = original_io };
-    var vtable = original_io.vtable.*;
-    vtable.netSend = ObservedBatchSend.netSend;
-    conn.endpoint.io = .{ .userdata = &observed, .vtable = &vtable };
+    conn.endpoint.io = observed.io();
     defer conn.endpoint.io = original_io;
     // CONNECT cancellation, associated RESET_STREAM, then STOP_SENDING each
     // occupy one poll. The original protocol error is reported after all three.

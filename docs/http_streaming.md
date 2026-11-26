@@ -489,15 +489,26 @@ Concurrency contract:
   is emitted.
 - Every response-start, informational, DATA, trailer-finish and reset form has
   an absolute-deadline and a relative-timeout variant (`*WithDeadline`,
-  `*WithTimeout`). The deadline bounds the handler's wait for the owner to
-  commit the command; a non-positive timeout is rejected before the command is
-  queued. The unbounded forms keep the owner's normal flow-control waiting.
-- HTTP/3 retains the original timestamp through command admission, execution
+  `*WithTimeout`). Expired or foreign-clock deadlines and non-positive
+  timeouts are rejected before queue allocation or output, including inline
+  handlers. The unbounded forms keep the owner's normal flow-control waiting.
+- HTTP/2 and HTTP/3 retain the original timestamp through command admission, execution
   and socket submission. If a handler wait expires or is canceled, it waits
   for the owner to release the borrowed command before returning. A command
   that fully completes during that race returns success; a skipped or partial
   command retains the wait error. Cleanup can therefore finish after the
   timestamp.
+- HTTP/2 preserves actual task cancellation when reporting a response that
+  committed during cancellation. The next cancellation point still reports
+  `Canceled`; reporting the committed response does not acknowledge that
+  notification for the handler.
+- HTTP/2 commands retain their committed DATA prefix and completed response
+  head while the owner services inbound progress or retries backpressure.
+  The direct `ServerDuplexStream` also offers
+  `startResponseWithBodyWithDeadline`/`WithTimeout` for one complete buffered
+  response and `resetWithDeadline`/`WithTimeout` for terminal output. Explicit
+  reset preserves the caller's deadline when applying the configured terminal
+  cleanup cap; expired admission leaves stream ownership untouched.
 - HTTP/3 `writeDataWithProgress`, `writeDataWithProgressAndDeadline` and
   `writeDataWithProgressAndTimeout` accept `*Stream.DataWriteProgress`.
   Both byte and FIN progress are reset before admission and published on every

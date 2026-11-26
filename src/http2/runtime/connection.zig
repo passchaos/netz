@@ -11911,6 +11911,18 @@ pub const Connection = struct {
         return stream_termination.reset(self, id, code, response_cleanup.cleanupDeadline(self, null), local_stream_termination_hooks);
     }
 
+    /// Explicit terminal output keeps the original bound when applying the
+    /// configured cleanup cap. Expired admission leaves ownership untouched.
+    pub fn terminateOwnedStreamWithDeadline(self: *Connection, id: u31, code: http2.ErrorCode, deadline: std.Io.Clock.Timestamp) ResponseTimeoutError!void {
+        const absolute = try deadline_policy.usableAwake(self.io, deadline);
+        return stream_termination.reset(self, id, code, response_cleanup.limitDeadline(self, absolute), local_stream_termination_hooks);
+    }
+
+    pub fn terminateOwnedStreamWithTimeout(self: *Connection, id: u31, code: http2.ErrorCode, timeout: std.Io.Duration) ResponseTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.terminateOwnedStreamWithDeadline(id, code, .fromNow(self.io, .{ .raw = timeout, .clock = .awake }));
+    }
+
     fn peerStreamIsActive(self: Connection, id: u31) bool {
         return self.active_peer_index.count() != 0 and self.active_peer_index.contains(id);
     }

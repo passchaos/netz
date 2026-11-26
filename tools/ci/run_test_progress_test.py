@@ -131,7 +131,7 @@ class ProgressTest(unittest.TestCase):
         self.assertEqual(0, result.returncode)
         self.assertEqual(b"1/1 http.test.wait...OK\n", log)
         output = result.stdout.decode()
-        self.assertIn("::notice title=Test progress::1/1 http.test.wait...", output)
+        self.assertIn("::notice title=Test progress::Test progress: 1/1 http.test.wait...", output)
         self.assertIn("\n::notice title=Test progress::", output)
         self.assertLess(output.index("::notice"), output.rindex("OK"))
 
@@ -147,6 +147,14 @@ class ProgressTest(unittest.TestCase):
         output = result.stdout.decode()
         self.assertIn("CI%3A compile%2C 50%25", output)
         self.assertIn("No test name emitted yet", output)
+
+    def test_short_command_identifies_invocation_before_first_periodic_notice(self):
+        result, log = self.launch("print('completed')", "Native WT: deadline, 50%")
+        self.assertEqual(0, result.returncode)
+        self.assertEqual(b"completed\n", log)
+        output = result.stdout.decode()
+        self.assertIn("::notice title=Native WT%3A deadline%2C 50%25::Native WT: deadline, 50%25: No test name emitted yet", output)
+        self.assertLess(output.index("::notice"), output.index("completed"))
 
     def test_large_output_remains_exact_in_the_log(self):
         result, log = self.launch("import sys; sys.stdout.buffer.write(b'x' * (256 * 1024))")

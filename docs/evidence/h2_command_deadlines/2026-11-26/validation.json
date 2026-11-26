@@ -1,0 +1,183 @@
+{
+  "observed_utc": "2026-11-26T13:22:05.052348+00:00",
+  "base_commit": "f126f64cc66a033e96b0df6610acfd8acdd46a87",
+  "native_host": "aarch64-macos",
+  "windows_compile_steps": "8/8",
+  "ci": {
+    "run": "https://github.com/passchaos/netz/actions/runs/45820773252",
+    "attempt": 1,
+    "complete_job": 139912133386,
+    "windows_job": 139912133455,
+    "all_jobs_terminal_before_delivery": true,
+    "existing_commands_preserved_byte_for_byte": true,
+    "pins_budgets_and_annotation_cap_changed": false,
+    "delivered_native_and_complete_qualification": "pending"
+  },
+  "guard": "All Zig invocations serialized under shared zig-tree-guard",
+  "full_goal_status": "active",
+  "source_sha256": {
+    "src/http2/runtime/concurrent.zig": "e38f51b22082c94691e86efdfdf2b28f5135f1b6ec3cd2bdcbefdcc471874a78",
+    "src/http2/runtime/concurrent_tests.zig": "c518d0bffe46029d0e69417aedd0fe6a478d657f795da510b3ae73947f2d08a1",
+    "src/http2/runtime/connection.zig": "dad3f7500e3a0d2a349388d78e3f2f7a06b32ae2b3a6440c4e2a70d71ad8dbe3",
+    "src/http2/runtime/duplex/streams.zig": "02798a36a04c220b07ba6b5da913504ee90193a55ce6931734c7fd7017efb738",
+    "src/http2/runtime/concurrent/body_retry_tests.zig": "5190cf18a2f89854e5e3188cfd7094be6258ac169754e42b5a2c5a6e3d3d69ad",
+    "src/http2/runtime/concurrent/command_output.zig": "4eb6902593252e8fc3089bab7f010f9f9a1dd875394b425abe6b70b8fa196de2",
+    "src/http2/runtime/concurrent/command_queue.zig": "8e89e4d6081d94a14b3f888255821f6c95bb30bcfb842fbe1101273d14c15ccb",
+    "src/http2/runtime/concurrent/completion_tests.zig": "57502dcced767fd36b36df54fb4bca55083be9972bec0aab338e4f8b80b3fdec",
+    "src/http2/runtime/concurrent/informational_tests.zig": "7bf96b7bef72635e6249f9cf827aa01747e892d9baa63198e49135c9bd07ce2a",
+    "src/internal/testing/native_protocol_io.zig": "4f965f49ed0ba48fb0c9d1b572122415d4b95c165785f79bb2281a05e437b6ad",
+    "docs/http_streaming.md": "ce80701ff016f9803631a2a629cdd1994e6c57923df0d26c788f2de33d402085",
+    "docs/architecture/optimization-backlog.md": "43ba35f6e8ae6f79bbfc2be97d0732cb04c723b8ab19fa1eb4efad561c69e81a",
+    ".github/workflows/ci.yml": "e6f8c0ef10ce3ec68748c9960de7d87f82224428663ba800d461b92d8f8dea93"
+  },
+  "checks": {
+    "fmt": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "fmt",
+        "src/http2/runtime/concurrent.zig",
+        "src/http2/runtime/concurrent_tests.zig",
+        "src/http2/runtime/concurrent",
+        "src/http2/runtime/connection.zig",
+        "src/http2/runtime/duplex/streams.zig",
+        "src/internal/testing/native_protocol_io.zig"
+      ],
+      "exit_code": 0,
+      "log_sha256": "edead512fe45c7db762685167be7584af700de06be3ee53d3672b592791a6c01"
+    },
+    "native": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-http2",
+        "-j1",
+        "-Dtest-progress=true",
+        "-Dtest-filter=HTTP/2 concurrent informational",
+        "-Dtest-filter=HTTP/2 concurrent inline expired",
+        "-Dtest-filter=HTTP/2 concurrent command",
+        "-Dtest-filter=HTTP/2 concurrent DATA retry",
+        "-Dtest-filter=HTTP/2 concurrent compound response retry",
+        "-Dtest-filter=HTTP/2 concurrent output counterparts",
+        "-Dtest-filter=HTTP/2 continuous concurrent serving",
+        "-Dtest-filter=HTTP/2 combined response command suppresses HEAD bodies",
+        "-Dtest-filter=HTTP/2 concurrent oversize declared body",
+        "-Dtest-filter=HTTP/2 concurrent bodyless request",
+        "-Dtest-filter=HTTP/2 stream output deadline",
+        "-Dtest-filter=HTTP/2 owned stream",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log_sha256": "f4d99802dd6ab9c6e0a36cf063233f08e086e9a44309bc432b1a13b7be1ef278"
+    },
+    "windows-compile": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-http2-compile",
+        "-j1",
+        "-Dtarget=x86_64-windows-gnu",
+        "-Dtest-filter=HTTP/2 concurrent informational",
+        "-Dtest-filter=HTTP/2 concurrent inline expired",
+        "-Dtest-filter=HTTP/2 concurrent command",
+        "-Dtest-filter=HTTP/2 concurrent DATA retry",
+        "-Dtest-filter=HTTP/2 concurrent compound response retry",
+        "-Dtest-filter=HTTP/2 concurrent output counterparts",
+        "-Dtest-filter=HTTP/2 continuous concurrent serving",
+        "-Dtest-filter=HTTP/2 combined response command suppresses HEAD bodies",
+        "-Dtest-filter=HTTP/2 concurrent oversize declared body",
+        "-Dtest-filter=HTTP/2 concurrent bodyless request",
+        "-Dtest-filter=HTTP/2 stream output deadline",
+        "-Dtest-filter=HTTP/2 owned stream",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log_sha256": "32662cd6ba92b9e8f4074508322e31b91501398df21527ff36c1f96c35b0419a"
+    }
+  },
+  "native_scoped_passed": 68,
+  "native_backends": [
+    "Threaded zero async capacity",
+    "application backend one executor"
+  ],
+  "windows_backends_generated": [
+    "Threaded TCP/futex",
+    "application backend IOCP"
+  ],
+  "named_command_contracts": [
+    "HTTP/2 concurrent command cancellation joins borrowed stack before return",
+    "HTTP/2 concurrent command cancellation reports actual committed response",
+    "HTTP/2 concurrent command owner rejects expired queued response before sending",
+    "HTTP/2 concurrent output counterparts retain timeout admission and terminal ownership",
+    "HTTP/2 concurrent informational responses compose with bodies and trailers",
+    "HTTP/2 concurrent inline expired commands preserve response state",
+    "HTTP/2 concurrent DATA retry retains confirmed TCP prefix and original deadline",
+    "HTTP/2 concurrent compound response retry retains one HEADERS and exact DATA",
+    "HTTP/2 concurrent DATA retry resumes after inbound progress without replay",
+    "HTTP/2 concurrent compound response retry resumes after inbound progress"
+  ],
+  "baseline": {
+    "command": [
+      "/Users/bytedance/.local/share/traex-guard/zig-tree-guard",
+      "--",
+      "/Users/bytedance/.local/bin/zig",
+      "build",
+      "test-http2",
+      "-j1",
+      "-Dtest-progress=true",
+      "-Dtest-filter=HTTP/2 concurrent informational responses compose with bodies and trailers",
+      "--summary",
+      "all"
+    ],
+    "snapshot": "/var/folders/3h/rw6tyryn6ps_mw9bcstc2lfm0000gn/T/netz-h2-expired-command-zh8yua2u/netz",
+    "exit_code": 1,
+    "log_sha256": "bed3162a0711cb327fca81a819a0e8130252c181060bfe08294d0c69b39d91b2",
+    "symptom": "expired inline startResponseWithBodyWithDeadline returned void instead of Timeout; client StreamReset",
+    "fixture_change": "existing inline_bodyless mode enabled; original two-stream payload/status/trailer assertions retained",
+    "admission_only_patch": {
+      "before_sha256": "858ebb21dc0a81d08b714cd30c2f8306dccf45069de158e82d4393068f7ce6fc",
+      "after_sha256": "801e0ea3a5113b066d308c0cc602717ae248d7c5edeafc0e21e29c5a45cd8408",
+      "change": "shared usableAwake check at submit entry before inline or queue admission; all other old source unchanged"
+    },
+    "admission_only_result": {
+      "command": [
+        "/Users/bytedance/.local/share/traex-guard/zig-tree-guard",
+        "--",
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-http2",
+        "-j1",
+        "-Dtest-progress=true",
+        "-Dtest-filter=HTTP/2 concurrent informational responses compose with bodies and trailers",
+        "--summary",
+        "all"
+      ],
+      "snapshot": "/var/folders/3h/rw6tyryn6ps_mw9bcstc2lfm0000gn/T/netz-h2-expired-command-zh8yua2u/netz",
+      "exit_code": 0,
+      "log_sha256": "baf8375e44ffd10f7c9f3bf86c4270ae8e7f29c0984bb8ff53f6fa98f91f49eb"
+    },
+    "admission_only_scoped_passed": 34
+  },
+  "direct_counterparts": [
+    "ServerDuplexStream.startResponseWithBodyWithDeadline/WithTimeout",
+    "ServerDuplexStream.resetWithDeadline/WithTimeout",
+    "Connection.terminateOwnedStreamWithDeadline/WithTimeout"
+  ],
+  "invariants": [
+    "expired/foreign-clock deadline rejected before queue allocation or inline output",
+    "actual cancellation checked before command admission",
+    "one original timestamp through owner retries and all output phases",
+    "borrowed command joined uncancelably after wait failure",
+    "fully committed result reported and actual consumed cancellation rearmed",
+    "completed HEADERS and exact DATA suffix retained across refusal/inbound progress",
+    "direct timeout admission leaves ownership intact; valid complete/reset retires once"
+  ],
+  "limitations": [
+    "Windows native results pending; compile is not native execution",
+    "Linux-only blocked-output fixtures return early on macOS and are not qualified here",
+    "earlier queued complete-CI StreamReset causal qualification still pending",
+    "broader slow-writer fairness, unbounded flow-control waiting and performance measurements remain open",
+    "H3 completed-cancellation rearm requires separate actual-cancellation qualification"
+  ]
+}

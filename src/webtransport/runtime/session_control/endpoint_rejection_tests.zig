@@ -1,4 +1,5 @@
 const std = @import("std");
+const native_protocol_io = @import("../../../internal/testing/native_protocol_io.zig");
 const runtime = @import("../../runtime.zig");
 const webtransport = @import("../../mod.zig");
 const http3 = @import("../../../http3/mod.zig");
@@ -185,17 +186,17 @@ test "WebTransport endpoint server defers paced malformed Capsule cancellation" 
 }
 
 test "WebTransport endpoint server retries malformed Capsule cancellation after socket failure" {
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
+    try native_protocol_io.run(retryMalformedCapsule);
+}
+
+fn retryMalformedCapsule(io: std.Io) !void {
     var fixture: Fixture = undefined;
-    try fixture.init(threaded.io());
+    try fixture.init(io);
     defer fixture.deinit();
     try fixture.receive(0, &.{ 0, 3, 0x68, 0x43, 3 }, false);
     const original_io = fixture.endpoint.io;
     var observed = ObservedBatchSend{ .delegate = original_io, .fail_on_call = 1 };
-    var vtable = original_io.vtable.*;
-    vtable.netSend = ObservedBatchSend.netSend;
-    fixture.endpoint.io = .{ .userdata = &observed, .vtable = &vtable };
+    fixture.endpoint.io = observed.io();
     defer fixture.endpoint.io = original_io;
     try std.testing.expectError(error.NetworkDown, fixture.poll(0));
     try std.testing.expect(fixture.sessions[0].control.capsule_error_pending);

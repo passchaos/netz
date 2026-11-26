@@ -1,0 +1,123 @@
+{
+  "observed_utc": "2026-11-26T13:22:05.052348+00:00",
+  "base_commit": "f126f64cc66a033e96b0df6610acfd8acdd46a87",
+  "native_host": "aarch64-macos",
+  "windows_compile_steps": "8/8",
+  "ci": {
+    "run": "https://github.com/passchaos/netz/actions/runs/45820773252",
+    "attempt": 1,
+    "complete_job": 139912133386,
+    "windows_job": 139912133455,
+    "all_jobs_terminal_before_delivery": true,
+    "existing_commands_preserved_byte_for_byte": true,
+    "pins_budgets_and_annotation_cap_changed": false,
+    "delivered_native_and_complete_qualification": "pending"
+  },
+  "guard": "All Zig invocations serialized under shared zig-tree-guard",
+  "full_goal_status": "active",
+  "source_sha256": {
+    "src/quic/one_rtt/tests/observed_batch_send.zig": "538fd960bc62bc9f9af4e1270ebad4d55acbd8f8dbff1c3cffe491cac1c1f205",
+    "src/webtransport/runtime/session_control/handshake_rejection_tests.zig": "62ff43aa3240e1d50a6872a412abb02a5fb280ba779b65649129af3536a6c313",
+    "src/webtransport/runtime/session_control/endpoint_rejection_tests.zig": "1b45d03edb2f104f9d03edefca7123798533161394ffa7fb63b1b35cd5ac39cb",
+    "src/webtransport/runtime/session_control/connect_termination_tests.zig": "448e832f355a841f1bc95795e303c964941fd046b42acab93b034c9128d48379",
+    "src/webtransport/runtime/session_control/flow_tests.zig": "833ffd432e6e6fe65135244fa8ff87ec84e955d2804763abac978e27f7f5c979",
+    "src/internal/testing/forwarded_io.zig": "fdcb7229cbf0199ee36d55668335adc49b0bd04747ba56b6aa793793f7d6fd40",
+    "src/internal/testing/native_protocol_io.zig": "4f965f49ed0ba48fb0c9d1b572122415d4b95c165785f79bb2281a05e437b6ad",
+    "tools/ci/run_test_progress.py": "ca8f71f30cd8d3d4e144ec265358dafc5a0af2ed042b7e33966c7cde3dc29355",
+    "tools/ci/run_test_progress_test.py": "b7f0bd84f9a4efe0c0e2b982be0b5edfaf5b845d6ea18b2c05e4a0cc4699883c",
+    "docs/architecture/optimization-backlog.md": "43ba35f6e8ae6f79bbfc2be97d0732cb04c723b8ab19fa1eb4efad561c69e81a",
+    ".github/workflows/ci.yml": "e6f8c0ef10ce3ec68748c9960de7d87f82224428663ba800d461b92d8f8dea93"
+  },
+  "checks": {
+    "fmt": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "fmt",
+        "src/quic/one_rtt/tests/observed_batch_send.zig",
+        "src/webtransport/runtime/session_control/handshake_rejection_tests.zig",
+        "src/webtransport/runtime/session_control/endpoint_rejection_tests.zig",
+        "src/webtransport/runtime/session_control/connect_termination_tests.zig",
+        "src/webtransport/runtime/session_control/flow_tests.zig"
+      ],
+      "exit_code": 0,
+      "log_sha256": "c0ba07e6a4ec064987d6eebfb5d65aef1ec7bbf4014052afcceaf8a7b6cf1359"
+    },
+    "native": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-webtransport",
+        "-j1",
+        "-Dtest-progress=true",
+        "-Dtest-filter=WebTransport standalone retains malformed Capsule error through cleanup timeout",
+        "-Dtest-filter=WebTransport standalone dispatcher retains rejection through bounded cleanup",
+        "-Dtest-filter=WebTransport endpoint server retries malformed Capsule cancellation after socket failure",
+        "-Dtest-filter=WebTransport CONNECT STOP_SENDING retains its reset event across cleanup socket failure",
+        "-Dtest-filter=WebTransport runtime flow grant commits only after the packet is sent",
+        "-Dtest-filter=WebTransport runtime flow parser commits grants and retains failed transport credit",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log_sha256": "b848af53dd02a7c799de3062edf238aa89e23b0ff4807e718d444be75b877903"
+    },
+    "windows-compile": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-webtransport-compile",
+        "-j1",
+        "-Dtarget=x86_64-windows-gnu",
+        "-Dtest-filter=WebTransport standalone retains malformed Capsule error through cleanup timeout",
+        "-Dtest-filter=WebTransport standalone dispatcher retains rejection through bounded cleanup",
+        "-Dtest-filter=WebTransport endpoint server retries malformed Capsule cancellation after socket failure",
+        "-Dtest-filter=WebTransport CONNECT STOP_SENDING retains its reset event across cleanup socket failure",
+        "-Dtest-filter=WebTransport runtime flow grant commits only after the packet is sent",
+        "-Dtest-filter=WebTransport runtime flow parser commits grants and retains failed transport credit",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log_sha256": "3b9b1f5e8b72d882778d77264b455ef69943e17f4b08961211969ba2caf661ef"
+    }
+  },
+  "native_scoped_passed": 117,
+  "native_backends": [
+    "POSIX Threaded zero async capacity",
+    "application backend one executor"
+  ],
+  "named_observer_contracts": [
+    "WebTransport standalone retains malformed Capsule error through cleanup timeout",
+    "WebTransport standalone dispatcher retains rejection through bounded cleanup",
+    "WebTransport endpoint server retries malformed Capsule cancellation after socket failure",
+    "WebTransport CONNECT STOP_SENDING retains its reset event across cleanup socket failure",
+    "WebTransport runtime flow grant commits only after the packet is sent",
+    "WebTransport runtime flow parser commits grants and retains failed transport credit"
+  ],
+  "inherited_wrappers_repaired": 6,
+  "observed_crash": "4712/7479 WebTransport standalone retains malformed Capsule error through cleanup timeout; Threaded Group.concurrent allocator creation with send-observer userdata",
+  "invariants": [
+    "all inherited callbacks forwarded to their actual delegate userdata and token owner",
+    "netSend accepted-prefix/error behavior unchanged",
+    "endpoint restoration precedes observer and fixture destruction",
+    "malformed Capsule, associated RESET/STOP, pending metadata and credit retry assertions retained",
+    "both handshake roles preserved on supported actual backends"
+  ],
+  "diagnostic": {
+    "command": [
+      "/usr/bin/python3",
+      "-m",
+      "unittest",
+      "run_test_progress_test"
+    ],
+    "cwd": "tools/ci",
+    "exit_code": 0,
+    "tests_passed": 11,
+    "duration_seconds": 7.247,
+    "startup_notice": true,
+    "invocation_title_visible_in_notice_and_interrupted_message": true,
+    "raw_logs_exit_status_and_child_cleanup_preserved": true
+  },
+  "windows_previous_result": "native protocol step timed out at unchanged five-minute cap; TCP completion/reuse probe passed; later H3 steps skipped; active invocation unknown in old notices",
+  "complete_crash_qualification": "pending delivered revision"
+}

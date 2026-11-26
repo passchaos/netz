@@ -621,3 +621,66 @@ Windows H3 expected-Timeout/actual-Unexpected failures. The peer QUIC close
 loss fixture's remaining DropFirstCloseIo inherited-callback ownership also
 needs a separate audit; its forwarding scope is not qualified by these five
 deadline tests. The continuous optimization goal remains active.
+
+### HTTP/2 concurrent command deadline and completion ownership
+
+The independent replay of the complete run's informational test passes
+34 scoped cases locally. Its observed native `StreamReset` remains causally
+unqualified. Source inspection identifies additional command-contract gaps:
+H2 queued commands before validating the caller's deadline, inline commands
+skipped that validation, most output kinds discarded the timestamp, and the
+wait-error cleanup used another cancellable wait on a borrowed stack command.
+An owner retry also restarted combined response HEADERS or DATA after a
+committed prefix.
+
+The current candidate separates command queue lifetime and output dispatch
+into cohesive modules. It validates deadline/cancellation before admission,
+retains the original timestamp at every owner execution and passes it to the
+actual head, body, trailer and reset operations. Abandonment wakes the owner;
+an uncancelable join retains the borrowed payload, and a fully committed
+command racing caller cancellation reports success. Retry state preserves a
+completed head and exact DATA prefix. Direct server duplex buffered-response
+and reset methods now have matching deadline/timeout forms; explicit terminal
+output caps the existing timestamp without renewal.
+
+New qualification fixtures use actual Future cancellation/native timer waits,
+an independent uncanceled owner and real TCP response frames. Controlled
+backpressure follows confirmed TCP DATA to verify one HEADERS, the exact body,
+one FIN and unchanged timestamps through retries. The original two-stream
+informational exchange remains intact, with an additional inline variant.
+The f126 inline baseline reproduces `expected error.Timeout, found void`
+followed by the same client-visible `StreamReset`. Adding only the shared
+deadline admission check makes that exact exchange pass 34 scoped tests.
+The final candidate passes 68 scoped native cases and Windows 8/8 compilation,
+including the direct buffered-response/reset counterpart. The stream runner
+retains Threaded TCP on Windows as well as the application backend.
+[The qualification](../evidence/h2_command_deadlines/2026-11-26/validation.json)
+records the source, baseline and actual cancellation/TCP checks.
+Native Linux/Windows causal qualification of the original queued CI failure,
+complete acceptance and broader fairness/performance work remain open.
+
+### Complete-run rejection observer ownership and timeout attribution
+
+The next complete gate, f126f64c run 45820773252 attempt 1, aborts at
+4712/7479, `WebTransport standalone retains malformed Capsule error through
+cleanup timeout`. Its stack again enters Threaded Group.concurrent allocator
+creation through a send observer's inherited callbacks. The session-control
+rejection, CONNECT termination and flow tests contain six such wrappers.
+They now use complete typed forwarding; the shared ObservedBatchSend offers
+its own stable table, and the pacing observer forwards every non-send callback
+to its original owner. Endpoint restoration precedes fixture destruction.
+All six names retain their original packet/error/metadata/credit assertions
+and run on supported real datagram backends. The focused scope passes 117
+native cases and Windows 8/8 compilation; [the qualification](../evidence/wt_rejection_callback_ownership/2026-11-26/validation.json)
+records the final source and original assertions. Delivered native and complete
+qualification remain pending.
+
+That run's Windows protocol step times out at the unchanged five-minute cap.
+Public annotations show the TCP completion/reuse probe passing, but replace
+custom notice titles with the step name, so later command ownership is lost.
+Progress notices now include the invocation title in their visible message
+and emit a startup notice before the first periodic update. Interrupted
+commands keep that title too. Eleven actual-child process checks pass; raw
+logs, exit propagation, annotation cap, pins and existing commands remain
+intact. Independent H2 command and WT rejection scopes preserve the existing
+protocol-step budget. Their next native run must locate any remaining stall.

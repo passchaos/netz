@@ -9,6 +9,8 @@ const std = @import("std");
 const http2 = @import("../mod.zig");
 const runtime_backend = @import("../../runtime.zig");
 const Fifo = @import("../../internal/fifo.zig").Fifo;
+const command_queue = @import("concurrent/command_queue.zig");
+const command_output = @import("concurrent/command_output.zig");
 
 /// Upper bound on the per-stream body reservation derived from a declared
 /// Content-Length. Larger bodies grow normally.
@@ -72,7 +74,11 @@ pub fn Engine(
         const Command = struct {
             slot: *Slot,
             kind: Kind,
+            deadline: ?std.Io.Clock.Timestamp = null,
             result: ?anyerror = null,
+            succeeded: bool = false,
+            head_started: bool = false,
+            body_offset: usize = 0,
             done: std.Io.Event = .unset,
             abandoned: std.atomic.Value(bool) = .init(false),
 
@@ -80,7 +86,6 @@ pub fn Engine(
                 informational: struct {
                     status: u16,
                     headers: []const http2.Hpack.HeaderField,
-                    deadline: ?std.Io.Clock.Timestamp = null,
                 },
                 start_response: ResponseOptions,
                 write_body: struct {
@@ -199,7 +204,7 @@ pub fn Engine(
             }
 
             pub fn writeInformationalResponseWithDeadline(self: Stream, status: u16, headers: []const http2.Hpack.HeaderField, deadline: std.Io.Clock.Timestamp) anyerror!void {
-                var command = Command{ .slot = self.slot, .kind = .{ .informational = .{ .status = status, .headers = headers, .deadline = deadline } } };
+                var command = Command{ .slot = self.slot, .kind = .{ .informational = .{ .status = status, .headers = headers } } };
                 return self.engine.submit(&command, deadline);
             }
 
@@ -1022,25 +1027,7 @@ pub fn Engine(
         }
 
         fn submit(self: *Self, command: *Command, deadline: ?std.Io.Clock.Timestamp) anyerror!void {
-            if (self.inline_active and self.inline_slot == command.slot) {
-                return self.submitInline(command);
-            }
-            self.mutex.lockUncancelable(self.io);
-            self.commands.append(self.allocator, command) catch |err| {
-                self.mutex.unlock(self.io);
-                return err;
-            };
-            self.mutex.unlock(self.io);
-            self.wake.set(self.io);
-            waitForEvent(self.io, &command.done, deadline) catch |err| {
-                command.abandoned.store(true, .release);
-                // The handler's stack owns the command and its payload. Wait
-                // for the owner to observe abandonment or finish execution
-                // before unwinding that stack.
-                command.done.wait(self.io) catch {};
-                return err;
-            };
-            if (command.result) |failure| return failure;
+            return command_queue.submit(self, command, deadline, submitInline, waitForEvent);
         }
 
         /// Execute a command from the owner thread. Flow-control, congestion,
@@ -1068,92 +1055,11 @@ pub fn Engine(
         }
 
         fn drainCommands(self: *Self) !void {
-            self.commands_blocked = false;
-            while (true) {
-                self.mutex.lockUncancelable(self.io);
-                if (self.commands.isEmpty()) {
-                    self.mutex.unlock(self.io);
-                    return;
-                }
-                const command = self.commands.popFront().?;
-                self.mutex.unlock(self.io);
-                if (command.abandoned.load(.acquire)) {
-                    command.done.set(self.io);
-                    continue;
-                }
-                self.execute(command) catch |err| switch (err) {
-                    error.FlowControlBlocked,
-                    error.CongestionLimited,
-                    error.PacingLimited,
-                    => {
-                        self.mutex.lockUncancelable(self.io);
-                        self.commands.append(self.allocator, command) catch {
-                            command.result = error.OutOfMemory;
-                            command.done.set(self.io);
-                            self.mutex.unlock(self.io);
-                            continue;
-                        };
-                        self.mutex.unlock(self.io);
-                        self.commands_blocked = true;
-                        return;
-                    },
-                    else => command.result = err,
-                };
-                command.done.set(self.io);
-            }
+            return command_queue.drain(self, execute);
         }
 
         fn execute(self: *Self, command: *Command) anyerror!void {
-            _ = self;
-            const slot = command.slot;
-            switch (command.kind) {
-                .informational => |value| {
-                    if (value.deadline) |deadline| {
-                        try slot.stream.writeInformationalResponseWithDeadline(value.status, value.headers, deadline);
-                    } else {
-                        try slot.stream.writeInformationalResponse(value.status, value.headers);
-                    }
-                },
-                .start_response => |options| {
-                    try slot.stream.startResponse(options);
-                },
-                .start_response_with_body => |value| {
-                    if (value.fin and
-                        comptime @hasDecl(StreamType, "startResponseWithBody"))
-                    {
-                        try slot.stream.startResponseWithBody(
-                            value.options,
-                            value.data,
-                        );
-                        slot.response_finished = true;
-                        return;
-                    }
-                    try slot.stream.startResponse(value.options);
-                    if (slot.stream.responseFinished()) {
-                        // HEAD/204/304: the head already ended the stream, so
-                        // there is no DATA to append.
-                        if (value.data.len != 0) return error.InvalidContentLength;
-                        slot.response_finished = true;
-                        return;
-                    }
-                    const slices = if (value.data.len == 0) &.{} else &.{value.data};
-                    _ = try slot.stream.writeResponseSlices(slices, value.fin);
-                    if (value.fin) slot.response_finished = true;
-                },
-                .write_body => |value| {
-                    const slices = if (value.data.len == 0) &.{} else &.{value.data};
-                    _ = try slot.stream.writeResponseSlices(slices, value.fin);
-                    if (value.fin) slot.response_finished = true;
-                },
-                .finish_trailers => |fields| {
-                    try slot.stream.finishResponseTrailers(fields);
-                    slot.response_finished = true;
-                },
-                .cancel => |code| {
-                    try slot.stream.reset(code);
-                    slot.response_finished = true;
-                },
-            }
+            return command_output.execute(self, command);
         }
 
         fn reap(self: *Self) void {
