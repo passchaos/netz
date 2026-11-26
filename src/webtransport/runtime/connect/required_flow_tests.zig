@@ -6,11 +6,29 @@ const quic = @import("../../../quic/mod.zig");
 const Pair = @import("test_support/pair.zig").Pair;
 const parameters = @import("test_support/pair.zig").parameters;
 const Fixture = @import("../endpoint_client/test_support.zig").Fixture;
+const forwarded_io = @import("../../../internal/testing/forwarded_io.zig");
+const native_protocol_io = @import("../../../internal/testing/native_protocol_io.zig");
 
 const FailedSend = struct {
     delegate: std.Io,
+    table: std.Io.VTable = undefined,
     connection: *quic.one_rtt.Connection,
     fail: bool = true,
+
+    fn io(self: *@This()) std.Io {
+        self.table = forwarded_io.table(from, baseIo, mapTimeout);
+        self.table.netSend = send;
+        return .{ .userdata = self, .vtable = &self.table };
+    }
+    fn from(userdata: ?*anyopaque) *@This() {
+        return @ptrCast(@alignCast(userdata.?));
+    }
+    fn baseIo(self: *@This()) std.Io {
+        return self.delegate;
+    }
+    fn mapTimeout(_: *@This(), timeout: std.Io.Timeout) std.Io.Timeout {
+        return timeout;
+    }
     fn send(userdata: ?*anyopaque, socket: std.Io.net.Socket.Handle, messages: []std.Io.net.OutgoingMessage, flags: std.Io.net.SendFlags) struct { ?std.Io.net.Socket.SendError, usize } {
         const self: *@This() = @ptrCast(@alignCast(userdata));
         if (self.fail and self.connection.sendStreamStats(0) != null) {
@@ -22,10 +40,12 @@ const FailedSend = struct {
 };
 
 test "WebTransport required Session flow control rejects shared and reused opens before CONNECT" {
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
+    try native_protocol_io.run(rejectSharedOpens);
+}
+
+fn rejectSharedOpens(io: std.Io) !void {
     var fixture: Fixture = undefined;
-    try fixture.init(threaded.io());
+    try fixture.init(io);
     defer fixture.deinit();
     const sibling = try fixture.addSession();
     fixture.client.require_session_flow_control = true;
@@ -51,10 +71,12 @@ test "WebTransport required Session flow control rejects shared and reused opens
 }
 
 test "WebTransport required Session flow control rejects queued CONNECT before stream allocation" {
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
+    try native_protocol_io.run(rejectQueuedConnect);
+}
+
+fn rejectQueuedConnect(io: std.Io) !void {
     var pair: Pair = undefined;
-    try pair.initWithLimits(threaded.io(), parameters(), parameters(), &.{}, .{ .require_session_flow_control = true });
+    try pair.initWithLimits(io, parameters(), parameters(), &.{}, .{ .require_session_flow_control = true });
     defer pair.deinit();
     pair.server.options.local_settings = try webtransport.settingsWithInitialFlowLimits(.{}, 1, .{});
     try pair.server.ensureSettingsSent();
@@ -75,15 +97,17 @@ test "WebTransport required Session flow control rejects queued CONNECT before s
 }
 
 test "WebTransport required Session flow control retries scoped server rejection" {
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
+    try native_protocol_io.run(retryScopedRejection);
+}
+
+fn retryScopedRejection(io: std.Io) !void {
     var pair: Pair = undefined;
-    try pair.initWithLimits(threaded.io(), parameters(), parameters(), &.{}, .{ .initial_flow_limits = .{} });
+    try pair.initWithLimits(io, parameters(), parameters(), &.{}, .{ .initial_flow_limits = .{} });
     defer pair.deinit();
     try pair.server.ensureSettingsSent();
     try pair.receiveClient();
     while (pair.client.queued_connect != null) _ = try pair.client.pollConnect();
-    const deadline = std.Io.Clock.Timestamp.fromNow(threaded.io(), .{ .clock = .awake, .raw = .fromSeconds(2) });
+    const deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(2) });
     while (!pair.server.control.settings.received or
         (if (pair.server.established.connection.recvStreamStats(0)) |stats| stats.highest_received_offset else 0) == 0)
     {
@@ -95,9 +119,7 @@ test "WebTransport required Session flow control retries scoped server rejection
     try admission.h3.bindDispatcher();
     const original_io = pair.server_endpoint.io;
     var failed = FailedSend{ .delegate = original_io, .connection = admission.connection() };
-    var vtable = original_io.vtable.*;
-    vtable.netSend = FailedSend.send;
-    pair.server_endpoint.io = .{ .userdata = &failed, .vtable = &vtable };
+    pair.server_endpoint.io = failed.io();
     defer pair.server_endpoint.io = original_io;
     const first = admission.pollSessionRequest();
     // Restore a wrongly admitted Session too, so regressions report the
@@ -133,10 +155,12 @@ test "WebTransport required Session flow control retries scoped server rejection
 }
 
 test "WebTransport required Session flow control rejects a pending server acceptance before 200" {
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
+    try native_protocol_io.run(rejectPendingAcceptance);
+}
+
+fn rejectPendingAcceptance(io: std.Io) !void {
     var pair: Pair = undefined;
-    try pair.initWithLimits(threaded.io(), parameters(), parameters(), &.{}, .{ .initial_flow_limits = .{} });
+    try pair.initWithLimits(io, parameters(), parameters(), &.{}, .{ .initial_flow_limits = .{} });
     defer pair.deinit();
     try pair.server.ensureSettingsSent();
     try pair.receiveClient();
@@ -145,9 +169,7 @@ test "WebTransport required Session flow control rejects a pending server accept
     defer pending.deinit();
     const original_io = pair.server_endpoint.io;
     var failed = FailedSend{ .delegate = original_io, .connection = &pending.h3.established.connection };
-    var vtable = original_io.vtable.*;
-    vtable.netSend = FailedSend.send;
-    pair.server_endpoint.io = .{ .userdata = &failed, .vtable = &vtable };
+    pair.server_endpoint.io = failed.io();
     defer pair.server_endpoint.io = original_io;
     try std.testing.expectError(error.SystemResources, pending.accept());
     try std.testing.expect(pending.rejection_pending != null);
@@ -157,7 +179,7 @@ test "WebTransport required Session flow control rejects a pending server accept
     try std.testing.expectEqual(@as(u64, 0), connection.sendStreamStats(0).?.reset.?.final_size);
     try std.testing.expect(!connection.closed());
     // Verify the rejection carried over the protected wire to the client.
-    const deadline = std.Io.Clock.Timestamp.fromNow(threaded.io(), .{ .clock = .awake, .raw = .fromSeconds(1) });
+    const deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(1) });
     while ((if (pair.client.connection().recvStreamStats(0)) |stats| stats.reset else null) == null) {
         var packet = try pair.client.connection().receivePacketServicingTimersDeadline(deadline);
         packet.deinit(std.testing.allocator);

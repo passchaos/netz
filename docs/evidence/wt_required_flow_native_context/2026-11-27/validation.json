@@ -1,0 +1,88 @@
+{
+  "observed_utc": "2026-11-26T16:54:53.614847+00:00",
+  "base_commit": "37891503c21cd2e2fe9401464924243616de0f62",
+  "original_ci_commit": "4b1924f427973a330b4cd2e5094e9340778d4951",
+  "native_host": "aarch64-macos",
+  "guard": "All Zig invocations serialized under shared zig-tree-guard",
+  "source_sha256": {
+    "src/webtransport/runtime/connect/required_flow_tests.zig": "caa6e22473aadf6040244b1c29e7e0e730641eaafcb438a7237db0fdc5b409d3",
+    "src/internal/testing/forwarded_io.zig": "fdcb7229cbf0199ee36d55668335adc49b0bd04747ba56b6aa793793f7d6fd40",
+    "src/internal/testing/native_protocol_io.zig": "4f965f49ed0ba48fb0c9d1b572122415d4b95c165785f79bb2281a05e437b6ad"
+  },
+  "checks": {
+    "fmt": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "fmt",
+        "src/webtransport/runtime/connect/required_flow_tests.zig"
+      ],
+      "exit_code": 0,
+      "log_sha256": "fd92533adcf6dc3c6da2a4ac4257c2f7808a4b1a859a54b6bef536edd67316fc"
+    },
+    "native": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-webtransport",
+        "-j1",
+        "-Dtest-progress=true",
+        "-Dtest-filter=WebTransport required Session flow control",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log_sha256": "7ab3b77f54c4c81740056d6bb63f8912c06084261fe84aa5fb71ea65782b8788"
+    },
+    "windows-compile": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-webtransport-compile",
+        "-j1",
+        "-Dtarget=x86_64-windows-gnu",
+        "-Dtest-filter=WebTransport required Session flow control",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log_sha256": "6afa63c9e9fcbdc0d998d16153912d40d10de5bdfb11570ffc4e55a579626934"
+    }
+  },
+  "native_scoped_passed": 122,
+  "windows_compilation": "passed 8/8 build steps; native execution remains pending",
+  "baseline": {
+    "run": 45849067907,
+    "attempt": 1,
+    "job": 140010311466,
+    "case_number": "4792/7490",
+    "case_name": "WebTransport required Session flow control retries scoped server rejection",
+    "failure": "General protection exception during Threaded task creation",
+    "source_sha256": "f9b68e63f973e525e4f63619ba15bbc82d26481894dcb5ef543192d20fe5f4f7"
+  },
+  "original_case_names": [
+    "WebTransport required Session flow control rejects shared and reused opens before CONNECT",
+    "WebTransport required Session flow control rejects queued CONNECT before stream allocation",
+    "WebTransport required Session flow control retries scoped server rejection",
+    "WebTransport required Session flow control rejects a pending server acceptance before 200"
+  ],
+  "original_assertions_preserved": 31,
+  "datagram_backends": [
+    "POSIX Threaded zero async capacity",
+    "application backend one executor including Windows"
+  ],
+  "observer_installations_repaired": 2,
+  "invariants": [
+    "all callback userdata and token ownership forwarded to the actual delegate",
+    "existing send failure condition and SystemResources result retained",
+    "original four test names, 31 assertions and deadline values retained",
+    "endpoint I/O restored before transport ownership cleanup",
+    "no production API, protocol or dependency pin change"
+  ],
+  "limitations": [
+    "macOS scoped execution is distinct from delivered Linux and Windows native qualification",
+    "complete CI and the separate Windows five-minute protocol timeout remain open",
+    "other custom send observer candidates require individual inspection"
+  ],
+  "ci_commands_and_budgets_changed": false,
+  "full_goal_status": "active"
+}

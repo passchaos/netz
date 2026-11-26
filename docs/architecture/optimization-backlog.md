@@ -756,3 +756,24 @@ GP at `WebTransport required Session flow control retries scoped server rejectio
 timeout. Those findings are separate follow-ups. The original 100 ms Happy
 Eyeballs deadline and both Initial-packet checks remain unchanged, and the
 continuous HTTP-family goal remains active.
+
+### Required WebTransport flow-control rejection observer
+
+The complete run's GP at 4792/7490 starts a deadline task through a send
+observer's inherited backend VTable. Both installations in
+`connect/required_flow_tests.zig` now forward every callback with the actual
+delegate's userdata and token ownership, while preserving the existing send
+failure injection. The four original named cases and all 31 assertions
+remain, including no stream allocation before capability admission,
+retryable scoped rejection, usable HTTP siblings and protected rejection
+delivery before status 200.
+
+[The focused qualification](../evidence/wt_required_flow_native_context/2026-11-27/validation.json)
+records 122 native scoped passes and Windows 8/8 compilation. The four cases
+exercise POSIX Threaded with zero async capacity and the application backend
+with one executor; the Windows datagram scope generates the supported
+application-backend path. Delivered complete/native qualification remains
+pending. A further source survey records 18 custom-send observer
+installations for individual review across H3, QUIC and WebTransport; it does
+not classify every copied VTable as invalid. Existing CI commands, budgets
+and pins remain unchanged.
