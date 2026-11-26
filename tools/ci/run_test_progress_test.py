@@ -149,7 +149,7 @@ class ProgressTest(unittest.TestCase):
         self.assertIn("No test name emitted yet", output)
 
     def test_short_command_identifies_invocation_before_first_periodic_notice(self):
-        result, log = self.launch("print('completed')", "Native WT: deadline, 50%")
+        result, log = self.launch("import sys; sys.stdout.buffer.write(b'completed\\n')", "Native WT: deadline, 50%")
         self.assertEqual(0, result.returncode)
         self.assertEqual(b"completed\n", log)
         output = result.stdout.decode()

@@ -60,12 +60,7 @@ test "HTTP/3 protected cancellation clears request state on send failure" {
         .delegate = server.quic_server.endpoint.io,
         .fail_after_prefix = 0,
     };
-    var failed_vtable = server.quic_server.endpoint.io.vtable.*;
-    failed_vtable.netSend = ObservedBatchSend.netSend;
-    server.quic_server.endpoint.io = .{
-        .userdata = &failed_send,
-        .vtable = &failed_vtable,
-    };
+    server.quic_server.endpoint.io = failed_send.io();
     defer server.quic_server.endpoint.io = failed_send.delegate;
 
     try std.testing.expectError(
@@ -218,12 +213,7 @@ test "HTTP/3 protected aggregate request queues QPACK ack across send failure" {
         .delegate = server.quic_server.endpoint.io,
         .fail_after_prefix = 0,
     };
-    var failed_vtable = server.quic_server.endpoint.io.vtable.*;
-    failed_vtable.netSend = ObservedBatchSend.netSend;
-    server.quic_server.endpoint.io = .{
-        .userdata = &failed_send,
-        .vtable = &failed_vtable,
-    };
+    server.quic_server.endpoint.io = failed_send.io();
     var request = try server.receiveRequest();
     defer request.deinit(allocator);
     try std.testing.expectEqual(@as(u62, 0), request.stream_id);
@@ -375,12 +365,7 @@ test "HTTP/3 protected streaming request preflights QPACK ack" {
         .delegate = server.quic_server.endpoint.io,
         .fail_after_prefix = 0,
     };
-    var failed_vtable = server.quic_server.endpoint.io.vtable.*;
-    failed_vtable.netSend = ObservedBatchSend.netSend;
-    server.quic_server.endpoint.io = .{
-        .userdata = &failed_send,
-        .vtable = &failed_vtable,
-    };
+    server.quic_server.endpoint.io = failed_send.io();
     var head = (try server.pollRequestEvent()) orelse
         return error.TestUnexpectedResult;
     defer head.deinit(allocator);

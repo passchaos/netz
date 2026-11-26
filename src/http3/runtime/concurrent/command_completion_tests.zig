@@ -6,6 +6,8 @@ const RequestEvent = @import("../stream/events.zig").Request;
 const BodyProgress = @import("body_write.zig").Progress;
 const net = std.Io.net;
 const allocator = std.testing.allocator;
+const actual_completion = @import("actual_completion_tests.zig");
+const native_io = @import("../../../internal/testing/native_protocol_io.zig");
 
 const Session = struct { writes: usize = 0 };
 const Adapter = struct {
@@ -43,7 +45,6 @@ const Adapter = struct {
 };
 
 const Engine = concurrent.Engine(Session, Adapter);
-const Failure = enum { timeout, canceled };
 const Outcome = enum { skipped, completed };
 
 const Probe = struct {
@@ -51,7 +52,6 @@ const Probe = struct {
     table: std.Io.VTable = undefined,
     engine: ?*Engine = null,
     shutdown: std.Io.Event = .unset,
-    failure: Failure,
     outcome: Outcome,
     expired: bool = false,
     driving: bool = false,
@@ -102,16 +102,13 @@ const Probe = struct {
             return base.vtable.futexWait(base.userdata, pointer, expected, timeout);
         }
         self.cancelable_waits += 1;
-        // The old cleanup's second cancelable wait must not borrow the
-        // expired caller's cancellation state again.
-        if (self.cancelable_waits > 1) return error.Canceled;
-        switch (self.failure) {
-            .timeout => self.expired = true,
-            .canceled => {
-                if (self.outcome == .completed) self.driveOwner();
-                return error.Canceled;
-            },
+        // Keep a legacy second cancelable cleanup observable without
+        // fabricating a cancellation notification for a real backend.
+        if (self.cancelable_waits > 1) {
+            self.driveOwner();
+            return;
         }
+        self.expired = true;
     }
     fn waitUncancelable(userdata: ?*anyopaque, pointer: *const u32, expected: u32) void {
         const self = from(userdata);
@@ -136,8 +133,8 @@ const Probe = struct {
     }
 };
 
-fn completion(failure: Failure, outcome: Outcome) !void {
-    var probe: Probe = .{ .backend = .init(allocator, .{}), .failure = failure, .outcome = outcome };
+fn completion(outcome: Outcome) !void {
+    var probe: Probe = .{ .backend = .init(allocator, .{}), .outcome = outcome };
     defer probe.backend.deinit();
     const base = probe.backend.io();
     const io = probe.io();
@@ -159,7 +156,7 @@ fn completion(failure: Failure, outcome: Outcome) !void {
         try std.testing.expectEqual(@as(usize, 1), session.writes);
         try std.testing.expect(slot.response_started and slot.response_finished);
     } else {
-        try std.testing.expectError(if (failure == .timeout) error.Timeout else error.Canceled, result);
+        try std.testing.expectError(error.Timeout, result);
         try std.testing.expectEqual(@as(usize, 0), session.writes);
         try std.testing.expect(!slot.response_started and !slot.response_finished);
         try std.testing.expectEqual(@as(usize, 1), probe.uncancelable_joins);
@@ -171,14 +168,14 @@ fn completion(failure: Failure, outcome: Outcome) !void {
 }
 
 test "HTTP/3 concurrent command timeout joins skipped stack command before return" {
-    try completion(.timeout, .skipped);
+    try native_io.run(actual_completion.timeoutSkipped);
 }
 test "HTTP/3 concurrent command cancellation joins skipped stack command before return" {
-    try completion(.canceled, .skipped);
+    try native_io.run(actual_completion.canceledSkipped);
 }
 test "HTTP/3 concurrent command timeout reports racing complete response success" {
-    try completion(.timeout, .completed);
+    try completion(.completed);
 }
 test "HTTP/3 concurrent command cancellation reports racing complete response success" {
-    try completion(.canceled, .completed);
+    try native_io.run(actual_completion.canceledCompleted);
 }

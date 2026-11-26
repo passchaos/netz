@@ -1040,12 +1040,7 @@ test "QUIC 1-RTT batch send reports a socket-sent prefix" {
         .delegate = sender.io,
         .fail_after_prefix = 1,
     };
-    var partial_vtable = sender.io.vtable.*;
-    partial_vtable.netSend = ObservedBatchSend.netSend;
-    sender.io = .{
-        .userdata = &partial_send,
-        .vtable = &partial_vtable,
-    };
+    sender.io = partial_send.io();
     defer sender.io = partial_send.delegate;
 
     const keys = quic.protection.deriveAes128Keys(

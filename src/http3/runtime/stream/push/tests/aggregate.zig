@@ -586,12 +586,7 @@ test "HTTP/3 protected aggregate response queues QPACK ack across send failure" 
         .delegate = client.quic_client.endpoint.io,
         .fail_after_prefix = 0,
     };
-    var failed_vtable = client.quic_client.endpoint.io.vtable.*;
-    failed_vtable.netSend = ObservedBatchSend.netSend;
-    client.quic_client.endpoint.io = .{
-        .userdata = &failed_send,
-        .vtable = &failed_vtable,
-    };
+    client.quic_client.endpoint.io = failed_send.io();
     var response = try client.receiveResponse(stream_id);
     defer response.deinit(allocator);
     try std.testing.expectEqual(@as(u16, 204), response.response.status);
@@ -789,12 +784,7 @@ test "HTTP/3 protected streaming response preflights QPACK ack" {
         .delegate = client.quic_client.endpoint.io,
         .fail_after_prefix = 0,
     };
-    var failed_vtable = client.quic_client.endpoint.io.vtable.*;
-    failed_vtable.netSend = ObservedBatchSend.netSend;
-    client.quic_client.endpoint.io = .{
-        .userdata = &failed_send,
-        .vtable = &failed_vtable,
-    };
+    client.quic_client.endpoint.io = failed_send.io();
     var head = (try client.pollResponseEvent(stream_id)) orelse
         return error.TestUnexpectedResult;
     defer head.deinit(allocator);

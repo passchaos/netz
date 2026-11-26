@@ -52,9 +52,7 @@ test "WebTransport early DATAGRAM survives pre-CONNECT reordering and acceptance
     const connection = pair.connection(.server);
     const original_io = connection.endpoint.io;
     var observed = ObservedBatchSend{ .delegate = original_io, .fail_on_call = 1 };
-    var vtable = original_io.vtable.*;
-    vtable.netSend = ObservedBatchSend.netSend;
-    connection.endpoint.io = .{ .userdata = &observed, .vtable = &vtable };
+    connection.endpoint.io = observed.io();
     defer connection.endpoint.io = original_io;
     try std.testing.expectError(error.NetworkDown, pair.server.h3.tryAcceptConnectResponse(id, response));
     try std.testing.expect(!pair.server.h3.connect_datagrams.contains(id));

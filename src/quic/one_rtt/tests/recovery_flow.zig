@@ -3005,9 +3005,7 @@ test "QUIC single packet socket failure skips sealed nonce only" {
         .delegate = client_endpoint.io,
         .fail_after_prefix = 0,
     };
-    var vtable = failed.delegate.vtable.*;
-    vtable.netSend = ObservedBatchSend.netSend;
-    client_endpoint.io = .{ .userdata = &failed, .vtable = &vtable };
+    client_endpoint.io = failed.io();
     defer client_endpoint.io = failed.delegate;
 
     try std.testing.expectError(
@@ -8675,9 +8673,7 @@ test "QUIC 1-RTT automatic ACK_FREQUENCY retries after socket failure" {
         .delegate = sender.io,
         .fail_after_prefix = 0,
     };
-    var vtable = sender.io.vtable.*;
-    vtable.netSend = ObservedBatchSend.netSend;
-    sender.io = .{ .userdata = &failed, .vtable = &vtable };
+    sender.io = failed.io();
     defer sender.io = failed.delegate;
 
     try std.testing.expectError(

@@ -13,6 +13,7 @@ const std = @import("std");
 const http3 = @import("../mod.zig");
 const deadline_policy = @import("../../internal/deadline.zig");
 const body_writer = @import("concurrent/body_write.zig");
+const borrowed_command = @import("../../internal/borrowed_command.zig");
 
 /// Upper bound on the per-stream body reservation derived from a declared
 /// Content-Length. Larger bodies grow normally.
@@ -1148,34 +1149,7 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
         }
 
         fn submit(self: *Self, command: *Command, deadline: ?std.Io.Clock.Timestamp) anyerror!void {
-            if (deadline) |until| _ = try deadline_policy.usableAwake(self.io, until);
-            try self.io.checkCancel();
-            command.deadline = deadline;
-            if (self.inline_active and self.inline_slot == command.slot) {
-                return self.submitInline(command);
-            }
-            self.mutex.lockUncancelable(self.io);
-            self.commands.append(self.allocator, command) catch |err| {
-                self.mutex.unlock(self.io);
-                return err;
-            };
-            self.mutex.unlock(self.io);
-            self.wake.set(self.io);
-            waitForEvent(self.io, &command.done, deadline) catch |err| {
-                command.abandoned.store(true, .release);
-                self.wake.set(self.io);
-                // The handler's stack owns the command and its payload. Wait
-                // for the owner to observe abandonment or finish execution
-                // before unwinding that stack.
-                command.done.waitUncancelable(self.io);
-                // A complete mutation can race the caller's wait failure.
-                // Report its committed outcome so the caller does not retry
-                // an already-written response. Partial and skipped commands
-                // retain the original wait error.
-                if (command.succeeded) return;
-                return err;
-            };
-            if (command.result) |failure| return failure;
+            return borrowed_command.submit(self, command, deadline, submitInline, waitForEvent);
         }
 
         /// Execute a command from the owner thread. Congestion, pacing, and
@@ -1257,44 +1231,7 @@ pub fn Engine(comptime Session: type, comptime Adapter: type) type {
         }
 
         fn drainCommands(self: *Self) !void {
-            self.commands_blocked = false;
-            while (true) {
-                self.mutex.lockUncancelable(self.io);
-                if (self.commands.isEmpty()) {
-                    self.mutex.unlock(self.io);
-                    return;
-                }
-                const command = self.commands.popFront().?;
-                self.mutex.unlock(self.io);
-                if (command.abandoned.load(.acquire)) {
-                    command.done.set(self.io);
-                    continue;
-                }
-                self.execute(command) catch |err| switch (err) {
-                    error.FlowControlBlocked,
-                    error.CongestionLimited,
-                    error.PacingLimited,
-                    => {
-                        self.mutex.lockUncancelable(self.io);
-                        self.commands.append(self.allocator, command) catch {
-                            command.result = error.OutOfMemory;
-                            command.done.set(self.io);
-                            self.mutex.unlock(self.io);
-                            continue;
-                        };
-                        self.mutex.unlock(self.io);
-                        self.commands_blocked = true;
-                        return;
-                    },
-                    else => {
-                        command.result = err;
-                        command.done.set(self.io);
-                        continue;
-                    },
-                };
-                command.succeeded = true;
-                command.done.set(self.io);
-            }
+            return borrowed_command.drain(self, execute);
         }
 
         fn execute(self: *Self, command: *Command) anyerror!void {

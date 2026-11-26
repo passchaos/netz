@@ -37,9 +37,7 @@ test "WebTransport endpoint client active removal preserves its owner after CLOS
     const connection = &fixture.client.h3.established.connection;
     const original_io = connection.endpoint.io;
     var observed = ObservedBatchSend{ .delegate = original_io, .fail_on_call = 1 };
-    var vtable = original_io.vtable.*;
-    vtable.netSend = ObservedBatchSend.netSend;
-    connection.endpoint.io = .{ .userdata = &observed, .vtable = &vtable };
+    connection.endpoint.io = observed.io();
     defer connection.endpoint.io = original_io;
     try std.testing.expectError(error.NetworkDown, fixture.client.removeSession(id));
     try std.testing.expect(fixture.client.session(id) == session);
@@ -94,9 +92,7 @@ test "WebTransport endpoint client active removal resumes a one-byte DATA prefix
     fixture.client.h3.options.max_stream_frame_data = 1;
     const original_io = connection.endpoint.io;
     var observed = ObservedBatchSend{ .delegate = original_io, .fail_on_call = 3 };
-    var vtable = original_io.vtable.*;
-    vtable.netSend = ObservedBatchSend.netSend;
-    connection.endpoint.io = .{ .userdata = &observed, .vtable = &vtable };
+    connection.endpoint.io = observed.io();
     defer connection.endpoint.io = original_io;
     try std.testing.expectError(error.NetworkDown, fixture.client.removeSession(id));
     try std.testing.expect(fixture.client.session(id) == session and session.control.local_close_started);
@@ -130,9 +126,7 @@ test "WebTransport endpoint client active removal does not replay CLOSE after cl
     const connection = &fixture.client.h3.established.connection;
     const original_io = connection.endpoint.io;
     var observed = ObservedBatchSend{ .delegate = original_io, .fail_on_call = 2 };
-    var vtable = original_io.vtable.*;
-    vtable.netSend = ObservedBatchSend.netSend;
-    connection.endpoint.io = .{ .userdata = &observed, .vtable = &vtable };
+    connection.endpoint.io = observed.io();
     defer connection.endpoint.io = original_io;
     try std.testing.expectError(error.NetworkDown, fixture.client.removeSession(id));
     try std.testing.expect(fixture.client.session(id) == session and session.control.local_close_sent);

@@ -20,9 +20,7 @@ test "WebTransport flow combined grants commit all limits in one socket submissi
     };
     const original_io = conn.endpoint.io;
     var observed = ObservedBatchSend{ .delegate = original_io, .fail_on_call = 1 };
-    var vtable = original_io.vtable.*;
-    vtable.netSend = ObservedBatchSend.netSend;
-    conn.endpoint.io = .{ .userdata = &observed, .vtable = &vtable };
+    conn.endpoint.io = observed.io();
     defer conn.endpoint.io = original_io;
     try std.testing.expectError(error.NetworkDown, grant.sendMany(&pair.server.control, &pair.server.h3, &pair.server.streams, &updates));
     try std.testing.expectEqualDeep(snapshot, flow.*);

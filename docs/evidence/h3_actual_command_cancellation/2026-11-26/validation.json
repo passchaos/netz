@@ -1,0 +1,181 @@
+{
+  "observed_utc": "2026-11-26T15:16:14.340746+00:00",
+  "base_commit": "4b8a5a84919ff7a3a63312b7d7e7ea9748be0359",
+  "native_host": "aarch64-macos",
+  "guard": "All Zig invocations serialized under shared zig-tree-guard",
+  "pins_existing_commands_and_budgets_changed": false,
+  "full_goal_status": "active",
+  "delivered_native_and_complete_qualification": "pending",
+  "source_sha256": {
+    "src/internal/borrowed_command.zig": "970ce57b2f78fbd7d96afc5fdc85d56462a7a0a1dd5db7693f1896a2cbd97da0",
+    "src/internal/testing/borrowed_command_io.zig": "e70037cd6f1b43ad1f97412e3b841f0714b15e3b0bc94811feb0fd4eea9fc5bd",
+    "src/http2/runtime/concurrent/command_queue.zig": "19b8f4cfb0485f129a4b7886224c16042f309a6a68a333b803adba941e968c61",
+    "src/http2/runtime/concurrent/completion_tests.zig": "64746f1891606a2858cc42e7757e055c11e0f1f8eb4a48702c2ffd5e55951a35",
+    "src/http3/runtime/concurrent.zig": "a11f13aefa69b520a24c8962c5d71e5c27e8604837863ec72a4b134bb53a5632",
+    "src/http3/runtime/concurrent/command_completion_tests.zig": "f0f3bc3b13002dabaab7685accd3118b1695192d5eb875be3fc0593e2f7abfbb",
+    "src/http3/runtime/concurrent/actual_completion_tests.zig": "e2cbdf530a8012aab96cfd98eb21133cc7980cebc18a894d4c4ae993a50b35bb",
+    "src/http3/runtime/concurrent/test_support/completion_pair.zig": "51303de6b9f301d157759fe3f3ef62e8cf3b299a80d9d88b5db38a8dfb0bc14f",
+    "docs/http_streaming.md": "749a678f1df2798916f0270d66f6b1073d4927f1caabaf449567a8535beb8393",
+    "docs/architecture/optimization-backlog.md": "389440b1280d2cbab2b677c472410731ad30adc0de38397fbb3d57863178c929",
+    ".github/workflows/ci.yml": "e6f8c0ef10ce3ec68748c9960de7d87f82224428663ba800d461b92d8f8dea93"
+  },
+  "checks": {
+    "fmt": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "fmt",
+        "src/internal/borrowed_command.zig",
+        "src/internal/testing/borrowed_command_io.zig",
+        "src/http2/runtime/concurrent/command_queue.zig",
+        "src/http2/runtime/concurrent/completion_tests.zig",
+        "src/http3/runtime/concurrent.zig",
+        "src/http3/runtime/concurrent/command_completion_tests.zig",
+        "src/http3/runtime/concurrent/actual_completion_tests.zig",
+        "src/http3/runtime/concurrent/test_support/completion_pair.zig"
+      ],
+      "exit_code": 0,
+      "log_sha256": "648498c317afd81d2250e0e829866268931204e8fbc123c5b1c61c4de68f5868"
+    },
+    "native": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-http3",
+        "-j1",
+        "-Dtest-progress=true",
+        "-Dtest-filter=HTTP/3 concurrent command",
+        "-Dtest-filter=HTTP/3 concurrent inline expired",
+        "-Dtest-filter=HTTP/3 concurrent informational",
+        "-Dtest-filter=HTTP/3 concurrent DATA",
+        "-Dtest-filter=HTTP/3 continuous concurrent",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log_sha256": "4b8af5ecd6a5db0af3be697d3c8f605f09d1e805a5c9f5bafeaaea31e37dfd30"
+    },
+    "windows-compile": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-http3-compile",
+        "-j1",
+        "-Dtarget=x86_64-windows-gnu",
+        "-Dtest-filter=HTTP/3 concurrent command",
+        "-Dtest-filter=HTTP/3 concurrent inline expired",
+        "-Dtest-filter=HTTP/3 concurrent informational",
+        "-Dtest-filter=HTTP/3 concurrent DATA",
+        "-Dtest-filter=HTTP/3 continuous concurrent",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log_sha256": "3a420ef44ac3c9e80e574ff5ccc92a5d17b8629d3ed75b5d9a15c5551552b5a5"
+    },
+    "h2-overlap-native": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-http2",
+        "-j1",
+        "-Dtest-progress=true",
+        "-Dtest-filter=HTTP/2 concurrent command",
+        "-Dtest-filter=HTTP/2 concurrent inline expired",
+        "-Dtest-filter=HTTP/2 concurrent output counterparts",
+        "-Dtest-filter=HTTP/2 concurrent DATA retry",
+        "-Dtest-filter=HTTP/2 concurrent compound response retry",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log_sha256": "1074b1fcf70a557f8e48e428beb275b996603654144ac868748341e8bc850982"
+    },
+    "h2-overlap-windows-compile": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-http2-compile",
+        "-j1",
+        "-Dtarget=x86_64-windows-gnu",
+        "-Dtest-filter=HTTP/2 concurrent command",
+        "-Dtest-filter=HTTP/2 concurrent inline expired",
+        "-Dtest-filter=HTTP/2 concurrent output counterparts",
+        "-Dtest-filter=HTTP/2 concurrent DATA retry",
+        "-Dtest-filter=HTTP/2 concurrent compound response retry",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log_sha256": "22e30fd8dceaceb41c98f070f4206fd2d226bf34f6b231df591e9c35cf052293"
+    }
+  },
+  "native_scoped_passed": 91,
+  "h2_overlap_native_scoped_passed": 42,
+  "windows_compile_steps": [
+    "8/8",
+    "8/8"
+  ],
+  "datagram_backends": [
+    "POSIX Threaded zero async capacity",
+    "application backend one executor"
+  ],
+  "stream_backends_generated": [
+    "Threaded TCP/futex including Windows",
+    "application backend including IOCP"
+  ],
+  "baseline": {
+    "checks": {
+      "fmt": {
+        "command": [
+          "/Users/bytedance/.local/bin/zig",
+          "fmt",
+          "src/internal/testing/borrowed_command_io.zig",
+          "src/http3/runtime/concurrent/command_completion_tests.zig",
+          "src/http3/runtime/concurrent/actual_completion_tests.zig",
+          "src/http3/runtime/concurrent/test_support/completion_pair.zig"
+        ],
+        "exit_code": 0,
+        "log_sha256": "62d005910417db331294c7c448fa33270abf89b3a043a5f325a00588f582f2e2"
+      },
+      "native": {
+        "command": [
+          "/Users/bytedance/.local/bin/zig",
+          "build",
+          "test-http3",
+          "-j1",
+          "-Dtest-progress=true",
+          "-Dtest-filter=HTTP/3 concurrent command cancellation reports racing complete response success",
+          "--summary",
+          "all"
+        ],
+        "exit_code": 1,
+        "log_sha256": "829c78e3bebc24ed0ef1081e928837d2259e25087f78be05d8449954c3828f36"
+      }
+    },
+    "source": {
+      "path": "src/http3/runtime/concurrent.zig",
+      "sha256": "409b2be9f9aeeb503f4c0905d39095f5d8e46a0f90ddc7f53759d8f141642aae",
+      "baseline_checks": "/tmp/netz-h3-real-cancel-baseline-checks.json",
+      "actual_response_verified_before_failure": true,
+      "failure": "expected error.Canceled, found void"
+    },
+    "passed": 64,
+    "failed": 1,
+    "actual_protected_response_verified_before_failure": true,
+    "failure": "expected error.Canceled, found void at the next actual cancellation point"
+  },
+  "invariants": [
+    "deadline/cancellation checked before admission",
+    "same owner retains borrowed stack through uncancelable release",
+    "fully committed response returns success while actual consumed cancellation is rearmed",
+    "H2/H3 protocol dispatch and sole-reader state retained",
+    "four original H3 completion names retained",
+    "actual Future/timer and protected packet checks replace fabricated Canceled",
+    "H2 and H3 share complete actual-IO forwarding probe"
+  ],
+  "limitations": [
+    "Windows/Linux native results still pending delivered revision",
+    "one synthetic-clock timeout/completion ordering test is not native timer qualification",
+    "broader fairness, unbounded flow-control liveness and workload performance remain open"
+  ]
+}

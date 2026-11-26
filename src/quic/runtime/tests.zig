@@ -1046,12 +1046,7 @@ test "QUIC UDP single send treats a complete datagram as success despite a trail
         .delegate = sender.io,
         .fail_after_prefix = 1,
     };
-    var vtable = sender.io.vtable.*;
-    vtable.netSend = ObservedBatchSend.netSend;
-    sender.io = .{
-        .userdata = &observed,
-        .vtable = &vtable,
-    };
+    sender.io = observed.io();
     defer sender.io = observed.delegate;
 
     try sender.sendBytes(receiver.address(), "complete");

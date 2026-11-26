@@ -46,9 +46,7 @@ test "WebTransport endpoint client retries post-CLOSE cancellation without reply
     const endpoint = fixture.client.h3.established.connection.endpoint;
     const original_io = endpoint.io;
     var observed = ObservedBatchSend{ .delegate = original_io, .fail_on_call = 1 };
-    var vtable = original_io.vtable.*;
-    vtable.netSend = ObservedBatchSend.netSend;
-    endpoint.io = .{ .userdata = &observed, .vtable = &vtable };
+    endpoint.io = observed.io();
     defer endpoint.io = original_io;
     try std.testing.expectError(error.NetworkDown, fixture.poll(session));
     try std.testing.expect(!session.control.handledPostTerminalData());
@@ -214,9 +212,7 @@ test "WebTransport endpoint client retries malformed Capsule rejection after sen
     const original_io = endpoint.io;
     const original_available = fixture.client.h3.established.connection.availableReceivedStream(session.session_id.value).?.len;
     var observed = ObservedBatchSend{ .delegate = original_io, .fail_on_call = 1 };
-    var vtable = original_io.vtable.*;
-    vtable.netSend = ObservedBatchSend.netSend;
-    endpoint.io = .{ .userdata = &observed, .vtable = &vtable };
+    endpoint.io = observed.io();
     defer endpoint.io = original_io;
     try std.testing.expectError(error.NetworkDown, fixture.poll(session));
     try std.testing.expect(session.control.capsule_error_pending);

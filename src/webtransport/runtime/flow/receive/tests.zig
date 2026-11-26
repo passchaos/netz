@@ -184,9 +184,7 @@ test "WebTransport receive flow automatic grant retries after socket submission 
     }
     const original_io = conn.endpoint.io;
     var observed = ObservedBatchSend{ .delegate = original_io, .fail_on_call = 1 };
-    var vtable = original_io.vtable.*;
-    vtable.netSend = ObservedBatchSend.netSend;
-    conn.endpoint.io = .{ .userdata = &observed, .vtable = &vtable };
+    conn.endpoint.io = observed.io();
     defer conn.endpoint.io = original_io;
     var output: [16]u8 = undefined;
     const event = try pair.server.readStream(&output);

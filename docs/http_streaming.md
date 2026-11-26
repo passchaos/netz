@@ -498,7 +498,7 @@ Concurrency contract:
   that fully completes during that race returns success; a skipped or partial
   command retains the wait error. Cleanup can therefore finish after the
   timestamp.
-- HTTP/2 preserves actual task cancellation when reporting a response that
+- HTTP/2 and HTTP/3 preserve actual task cancellation when reporting a response that
   committed during cancellation. The next cancellation point still reports
   `Canceled`; reporting the committed response does not acknowledge that
   notification for the handler.

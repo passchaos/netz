@@ -59,9 +59,7 @@ fn checkReaders(readers: []const Reader, fail_close: bool) !void {
                 while ((if (connection.recvStreamStats(id)) |stats| stats.highest_received_offset else 0) < data.len) try pair.receiveProgress(receiver, deadline);
                 const original_io = connection.endpoint.io;
                 var observed = ObservedBatchSend{ .delegate = original_io, .fail_on_call = 1 };
-                var vtable = original_io.vtable.*;
-                vtable.netSend = ObservedBatchSend.netSend;
-                if (fail_close) connection.endpoint.io = .{ .userdata = &observed, .vtable = &vtable };
+                if (fail_close) connection.endpoint.io = observed.io();
                 defer connection.endpoint.io = original_io;
                 switch (receiver) {
                     .client => try expectInvalid(&pair.client, reader),

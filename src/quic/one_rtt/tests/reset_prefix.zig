@@ -106,9 +106,7 @@ test "QUIC reset prefix keeps atomic cancellation retryable after socket failure
     const id = try pair.sender.tryOpenStreamWithResetPrefix(.bidirectional, "tag");
     const original_io = pair.sender_endpoint.io;
     var observed = ObservedBatchSend{ .delegate = original_io, .fail_on_call = 1 };
-    var vtable = original_io.vtable.*;
-    vtable.netSend = ObservedBatchSend.netSend;
-    pair.sender_endpoint.io = .{ .userdata = &observed, .vtable = &vtable };
+    pair.sender_endpoint.io = observed.io();
     defer pair.sender_endpoint.io = original_io;
     try std.testing.expectError(error.NetworkDown, pair.sender.tryCancelStream(id, 19));
     try std.testing.expect(pair.sender.sendStreamStats(id).?.reset == null);

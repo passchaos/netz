@@ -60,9 +60,7 @@ test "WebTransport shared server tiny CLOSE preserves a submitted DATA header af
     const start = connection.sendStreamStats(id.value).?.highest_sent_offset;
     const original_io = connection.endpoint.io;
     var observed = ObservedBatchSend{ .delegate = original_io, .fail_on_call = 3 };
-    var vtable = original_io.vtable.*;
-    vtable.netSend = ObservedBatchSend.netSend;
-    connection.endpoint.io = .{ .userdata = &observed, .vtable = &vtable };
+    connection.endpoint.io = observed.io();
     defer connection.endpoint.io = original_io;
     try std.testing.expectError(error.NetworkDown, accepted.close(93, "small"));
     try std.testing.expectEqual(start + 2, connection.sendStreamStats(id.value).?.highest_sent_offset);
@@ -89,9 +87,7 @@ test "WebTransport shared server tiny CLOSE progresses from endpoint polling" {
     const connection = &h3.established.connection;
     const original_io = connection.endpoint.io;
     var observed = ObservedBatchSend{ .delegate = original_io, .fail_on_call = 3 };
-    var vtable = original_io.vtable.*;
-    vtable.netSend = ObservedBatchSend.netSend;
-    connection.endpoint.io = .{ .userdata = &observed, .vtable = &vtable };
+    connection.endpoint.io = observed.io();
     defer connection.endpoint.io = original_io;
     try std.testing.expectError(error.NetworkDown, accepted.close(93, "poll"));
     connection.endpoint.io = original_io;
@@ -147,9 +143,7 @@ test "WebTransport shared server tiny CLOSE frees pending heap storage on teardo
     const connection = &h3.established.connection;
     const original_io = connection.endpoint.io;
     var observed = ObservedBatchSend{ .delegate = original_io, .fail_on_call = 1 };
-    var vtable = original_io.vtable.*;
-    vtable.netSend = ObservedBatchSend.netSend;
-    connection.endpoint.io = .{ .userdata = &observed, .vtable = &vtable };
+    connection.endpoint.io = observed.io();
     defer connection.endpoint.io = original_io;
     const reason = [_]u8{'h'} ** 200;
     try std.testing.expectError(error.NetworkDown, accepted.close(96, &reason));
@@ -226,9 +220,7 @@ test "WebTransport shared server tiny removal resumes the original heap-backed C
     const connection = &h3.established.connection;
     const original_io = connection.endpoint.io;
     var observed = ObservedBatchSend{ .delegate = original_io, .fail_on_call = 2 };
-    var vtable = original_io.vtable.*;
-    vtable.netSend = ObservedBatchSend.netSend;
-    connection.endpoint.io = .{ .userdata = &observed, .vtable = &vtable };
+    connection.endpoint.io = observed.io();
     defer connection.endpoint.io = original_io;
     const reason = [_]u8{'h'} ** 200;
     try std.testing.expectError(error.NetworkDown, accepted.close(96, &reason));

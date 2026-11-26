@@ -956,12 +956,7 @@ test "QUIC 1-RTT local close installs state when socket send fails" {
             .delegate = transport_endpoint.io,
             .fail_after_prefix = 0,
         };
-        var failed_transport_vtable = transport_endpoint.io.vtable.*;
-        failed_transport_vtable.netSend = ObservedBatchSend.netSend;
-        transport_endpoint.io = .{
-            .userdata = &failed_transport_send,
-            .vtable = &failed_transport_vtable,
-        };
+        transport_endpoint.io = failed_transport_send.io();
         defer transport_endpoint.io = failed_transport_send.delegate;
 
         try std.testing.expectError(
@@ -1056,12 +1051,7 @@ test "QUIC 1-RTT local close installs state when socket send fails" {
             .delegate = application_endpoint.io,
             .fail_after_prefix = 0,
         };
-        var failed_application_vtable = application_endpoint.io.vtable.*;
-        failed_application_vtable.netSend = ObservedBatchSend.netSend;
-        application_endpoint.io = .{
-            .userdata = &failed_application_send,
-            .vtable = &failed_application_vtable,
-        };
+        application_endpoint.io = failed_application_send.io();
         defer application_endpoint.io = failed_application_send.delegate;
 
         try std.testing.expectError(
@@ -1132,12 +1122,7 @@ test "QUIC 1-RTT local close allocates reason before packet emission" {
     defer connection.deinit();
 
     var observed_send = ObservedBatchSend{ .delegate = endpoint.io };
-    var observed_vtable = endpoint.io.vtable.*;
-    observed_vtable.netSend = ObservedBatchSend.netSend;
-    endpoint.io = .{
-        .userdata = &observed_send,
-        .vtable = &observed_vtable,
-    };
+    endpoint.io = observed_send.io();
     defer endpoint.io = observed_send.delegate;
     counting.fail_index = counting.alloc_index;
 
@@ -2405,12 +2390,7 @@ test "QUIC 1-RTT PTO service sends up to two probes" {
     try std.testing.expectEqual(@as(usize, 2), client.pendingRecoveryCount());
 
     var observed_send = ObservedBatchSend{ .delegate = client.endpoint.io };
-    var observed_vtable = client.endpoint.io.vtable.*;
-    observed_vtable.netSend = ObservedBatchSend.netSend;
-    client.endpoint.io = .{
-        .userdata = &observed_send,
-        .vtable = &observed_vtable,
-    };
+    client.endpoint.io = observed_send.io();
     defer client.endpoint.io = observed_send.delegate;
 
     const serviced = (try client.serviceLossDetectionTimer(335_000_000)) orelse return error.TestUnexpectedResult;

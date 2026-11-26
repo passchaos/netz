@@ -95,9 +95,7 @@ test "WebTransport early truncated Session ID after buffering closes despite soc
     while (connection.recvStreamStats(id).?.final_size == null) try pair.receiveProgress(.server, deadline);
     const original_io = connection.endpoint.io;
     var observed = ObservedBatchSend{ .delegate = original_io, .fail_on_call = 1 };
-    var vtable = original_io.vtable.*;
-    vtable.netSend = ObservedBatchSend.netSend;
-    connection.endpoint.io = .{ .userdata = &observed, .vtable = &vtable };
+    connection.endpoint.io = observed.io();
     defer connection.endpoint.io = original_io;
     try std.testing.expectError(error.BufferTooShort, pending.poll(std.testing.allocator, connection, owners));
     try std.testing.expectEqual(@as(usize, 1), observed.calls);

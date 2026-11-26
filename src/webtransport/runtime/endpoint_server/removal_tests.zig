@@ -67,9 +67,7 @@ test "WebTransport endpoint server removal keeps its owner when rejection send f
     const connection = &fixture.connectionSession().established.connection;
     const original_io = connection.endpoint.io;
     var observed = ObservedBatchSend{ .delegate = original_io, .fail_on_call = 1 };
-    var vtable = original_io.vtable.*;
-    vtable.netSend = ObservedBatchSend.netSend;
-    connection.endpoint.io = .{ .userdata = &observed, .vtable = &vtable };
+    connection.endpoint.io = observed.io();
     defer connection.endpoint.io = original_io;
     try std.testing.expectError(error.NetworkDown, fixture.endpoint.removeSession(fixture.handle, accepted.session_id));
     try std.testing.expect(fixture.endpoint.sessionById(fixture.handle, accepted.session_id) == accepted);
@@ -111,9 +109,7 @@ test "WebTransport endpoint server removal resumes after CLOSE without replaying
     const connection = &fixture.connectionSession().established.connection;
     const original_io = connection.endpoint.io;
     var observed = ObservedBatchSend{ .delegate = original_io, .fail_on_call = 2 };
-    var vtable = original_io.vtable.*;
-    vtable.netSend = ObservedBatchSend.netSend;
-    connection.endpoint.io = .{ .userdata = &observed, .vtable = &vtable };
+    connection.endpoint.io = observed.io();
     defer connection.endpoint.io = original_io;
     try std.testing.expectError(error.NetworkDown, fixture.endpoint.removeSession(fixture.handle, id));
     try std.testing.expect(fixture.endpoint.sessionById(fixture.handle, id) == accepted);

@@ -1,0 +1,321 @@
+{
+  "observed_utc": "2026-11-26T15:16:14.340746+00:00",
+  "base_commit": "4b8a5a84919ff7a3a63312b7d7e7ea9748be0359",
+  "native_host": "aarch64-macos",
+  "guard": "All Zig invocations serialized under shared zig-tree-guard",
+  "pins_existing_commands_and_budgets_changed": false,
+  "full_goal_status": "active",
+  "delivered_native_and_complete_qualification": "pending",
+  "source_sha256": {
+    "src/http3/runtime/endpoint_server_tests.zig": "c389ff2034f10ea6abbb4c568a6b1c4d867ed44580a905496d57e2a2a36e2889",
+    "src/http3/runtime/stream/push/tests/aggregate.zig": "eaab5ad41e07034ad2ce20154ed1258962924809e1a114ecf6012f4c9b7b8c25",
+    "src/http3/runtime/server/tests/lifecycle.zig": "b6bcbf2972a50799fb7848b29f587833f1b0eda02a2f022284bd0987997b6996",
+    "src/quic/one_rtt/tests/recovery_flow.zig": "48fc52051b06b80ea8f3c4eca9a37ba70b6f6f28c995655cf6985570aa4008a8",
+    "src/quic/one_rtt/tests/reset_prefix.zig": "9776754b935aa933b2c57f46f61c6aeca74eb5807e356cc143dfc92408375021",
+    "src/quic/one_rtt/tests/basic.zig": "f478054036aace9bc2ed9883e9c6a4cce9b7f41da062bd459f56874287e4d496",
+    "src/quic/one_rtt/tests/lifecycle.zig": "67f119c67e233d4b0e704739e984985494f9f98ee3a6c21485ccec89530b6782",
+    "src/quic/runtime/tests.zig": "7fca0d7d8d940056df0f726c8761c0c4c3bd429e6cf17968e5060fc2747ea6d8",
+    "src/quic/endpoint_dispatcher/tests.zig": "b07ef950aa9e26988f699d5599a7aed1759c59d1c2009868089e3c41a091d492",
+    "src/webtransport/runtime/endpoint_dispatcher_tests.zig": "506cf9bc8303cf10971c8b2734ef1f63e814a940dcd7a408797cf0277f3d1623",
+    "src/webtransport/runtime/association/tests/early_datagram.zig": "ea4bdece5115cd5c74cc760f355f023f0121cf051fbd460e2e18b063933f7c7d",
+    "src/webtransport/runtime/association/tests/truncated.zig": "28138d1076f95c3dc62de2883168ab3af27801213dd570699a0a2098a22f7576",
+    "src/webtransport/runtime/association/tests/early_streams.zig": "4185010671d9c71a4eebc8a2c2ae7885fdbbc52abc93200395893a1dbfbb8eb0",
+    "src/webtransport/runtime/association/tests/invalid_session_id.zig": "337e0e742fc8e50c7aae4dc91385a0913df269366b55853d79530d6544435976",
+    "src/webtransport/runtime/endpoint_client/terminal_tests.zig": "1ef3ce9a7fefa8a5c3b3173b3c7075f3248c3b165aa4cd0ab42e4e5cf0618487",
+    "src/webtransport/runtime/endpoint_client/removal_tests.zig": "a325e8b46650f5a10e4fddc14d288b3290cbf54d91ff9f89768146a986bdbb33",
+    "src/webtransport/runtime/datagram/send.zig": "cb598535edae190e28e619b05ca81107b679da22ddd60ef25610b5e2efd042d5",
+    "src/webtransport/runtime/endpoint_server/removal_tests.zig": "c9c8d5bd02fff91896eb9636cabf5153d845146187385bf43dede3918daaef07",
+    "src/webtransport/runtime/endpoint_server/close_tests.zig": "da683472a3b68575550e2d5c911bb0942da33ae6b21f29838b9deef40f3c98b1",
+    "src/webtransport/runtime/flow/receive/tests.zig": "1c3ae5f4169ea8c12e56b3c31d8a12a52ce9ce579576b2573ffd4da7607f1090",
+    "src/webtransport/runtime/flow/grant/tests.zig": "04f2c951bf92b31cccad93d7e35041e81e2ac995c6e827c087b074034c836e34",
+    "src/webtransport/runtime/connect/admission_tests.zig": "ad7b90f4e35f4f8b651e0f6245b4c980c60c580b613ff785cb84b91c3615cc86",
+    "src/webtransport/runtime/connect/admission/deadline_tests.zig": "dcf3fc2a1a8cbf8340d648cb12487d15ea2f62a1583cd3ce04b7017a597507df",
+    "src/quic/one_rtt/tests/observed_batch_send.zig": "538fd960bc62bc9f9af4e1270ebad4d55acbd8f8dbff1c3cffe491cac1c1f205",
+    "src/internal/testing/forwarded_io.zig": "fdcb7229cbf0199ee36d55668335adc49b0bd04747ba56b6aa793793f7d6fd40",
+    "src/internal/testing/deadline_send_io.zig": "141d74566f3c9f02c8843586e865afb1e9510edf411382beaf12abd5693217ea",
+    "src/internal/testing/native_protocol_io.zig": "4f965f49ed0ba48fb0c9d1b572122415d4b95c165785f79bb2281a05e437b6ad",
+    "tools/ci/run_test_progress_test.py": "6b5a45b800059509bfefc87cc1aba00107ab501966e6c90b0ebc05fd9e17f893",
+    "docs/architecture/optimization-backlog.md": "389440b1280d2cbab2b677c472410731ad30adc0de38397fbb3d57863178c929",
+    ".github/workflows/ci.yml": "e6f8c0ef10ce3ec68748c9960de7d87f82224428663ba800d461b92d8f8dea93"
+  },
+  "checks": {
+    "fmt": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "fmt",
+        "src/http3/runtime/endpoint_server_tests.zig",
+        "src/http3/runtime/stream/push/tests/aggregate.zig",
+        "src/http3/runtime/server/tests/lifecycle.zig",
+        "src/quic/one_rtt/tests/recovery_flow.zig",
+        "src/quic/one_rtt/tests/reset_prefix.zig",
+        "src/quic/one_rtt/tests/basic.zig",
+        "src/quic/one_rtt/tests/lifecycle.zig",
+        "src/quic/runtime/tests.zig",
+        "src/quic/endpoint_dispatcher/tests.zig",
+        "src/webtransport/runtime/endpoint_dispatcher_tests.zig",
+        "src/webtransport/runtime/association/tests/early_datagram.zig",
+        "src/webtransport/runtime/association/tests/truncated.zig",
+        "src/webtransport/runtime/association/tests/early_streams.zig",
+        "src/webtransport/runtime/association/tests/invalid_session_id.zig",
+        "src/webtransport/runtime/endpoint_client/terminal_tests.zig",
+        "src/webtransport/runtime/endpoint_client/removal_tests.zig",
+        "src/webtransport/runtime/datagram/send.zig",
+        "src/webtransport/runtime/endpoint_server/removal_tests.zig",
+        "src/webtransport/runtime/endpoint_server/close_tests.zig",
+        "src/webtransport/runtime/flow/receive/tests.zig",
+        "src/webtransport/runtime/flow/grant/tests.zig"
+      ],
+      "exit_code": 0,
+      "log_sha256": "36702a8dac0d26dc51af4fb6098ae789f88c5a9a83e1bda2df65e33925d2e075"
+    },
+    "http3-native": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-http3",
+        "-j1",
+        "-Dtest-progress=true",
+        "-Dtest-filter=HTTP/3 endpoint request poll mirrors automatic stream-credit retry timer",
+        "-Dtest-filter=HTTP/3 protected aggregate response queues QPACK ack across send failure",
+        "-Dtest-filter=HTTP/3 protected streaming response preflights QPACK ack",
+        "-Dtest-filter=HTTP/3 protected cancellation clears request state on send failure",
+        "-Dtest-filter=HTTP/3 protected aggregate request queues QPACK ack across send failure",
+        "-Dtest-filter=HTTP/3 protected streaming request preflights QPACK ack",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log_sha256": "e0cbff885d6ee2b7b28030b098c2d5f6810ed6ce664c887e967862d914bcd496"
+    },
+    "http3-windows-compile": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-http3-compile",
+        "-j1",
+        "-Dtarget=x86_64-windows-gnu",
+        "-Dtest-filter=HTTP/3 endpoint request poll mirrors automatic stream-credit retry timer",
+        "-Dtest-filter=HTTP/3 protected aggregate response queues QPACK ack across send failure",
+        "-Dtest-filter=HTTP/3 protected streaming response preflights QPACK ack",
+        "-Dtest-filter=HTTP/3 protected cancellation clears request state on send failure",
+        "-Dtest-filter=HTTP/3 protected aggregate request queues QPACK ack across send failure",
+        "-Dtest-filter=HTTP/3 protected streaming request preflights QPACK ack",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log_sha256": "77800cd240abc4530e430b7d6ddf9ee7ae2cd3eebf35d831bf403f146b0cd6f2"
+    },
+    "quic-native": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-quic",
+        "-j1",
+        "-Dtest-progress=true",
+        "-Dtest-filter=QUIC single packet socket failure skips sealed nonce only",
+        "-Dtest-filter=QUIC 1-RTT automatic ACK_FREQUENCY retries after socket failure",
+        "-Dtest-filter=QUIC reset prefix keeps atomic cancellation retryable after socket failure",
+        "-Dtest-filter=QUIC 1-RTT batch send reports a socket-sent prefix",
+        "-Dtest-filter=QUIC 1-RTT local close installs state when socket send fails",
+        "-Dtest-filter=QUIC 1-RTT local close allocates reason before packet emission",
+        "-Dtest-filter=QUIC 1-RTT PTO service sends up to two probes",
+        "-Dtest-filter=QUIC UDP single send treats a complete datagram as success despite a trailing error",
+        "-Dtest-filter=QUIC endpoint dispatcher leaves no CID route after send failure",
+        "-Dtest-filter=QUIC endpoint dispatcher batches derived CID replenishment",
+        "-Dtest-filter=QUIC endpoint dispatcher rate limits close responses",
+        "-Dtest-filter=QUIC endpoint dispatcher keeps draining connections silent",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log_sha256": "f647fa4ed43ba999c5f5026dce900401f16e707a1121f265577dceed88ca5ea6"
+    },
+    "quic-windows-compile": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-quic-compile",
+        "-j1",
+        "-Dtarget=x86_64-windows-gnu",
+        "-Dtest-filter=QUIC single packet socket failure skips sealed nonce only",
+        "-Dtest-filter=QUIC 1-RTT automatic ACK_FREQUENCY retries after socket failure",
+        "-Dtest-filter=QUIC reset prefix keeps atomic cancellation retryable after socket failure",
+        "-Dtest-filter=QUIC 1-RTT batch send reports a socket-sent prefix",
+        "-Dtest-filter=QUIC 1-RTT local close installs state when socket send fails",
+        "-Dtest-filter=QUIC 1-RTT local close allocates reason before packet emission",
+        "-Dtest-filter=QUIC 1-RTT PTO service sends up to two probes",
+        "-Dtest-filter=QUIC UDP single send treats a complete datagram as success despite a trailing error",
+        "-Dtest-filter=QUIC endpoint dispatcher leaves no CID route after send failure",
+        "-Dtest-filter=QUIC endpoint dispatcher batches derived CID replenishment",
+        "-Dtest-filter=QUIC endpoint dispatcher rate limits close responses",
+        "-Dtest-filter=QUIC endpoint dispatcher keeps draining connections silent",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log_sha256": "860048b3a036638b7fa733337e2420774251feabbc99f85a396680f33b853206"
+    },
+    "webtransport-native": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-webtransport",
+        "-j1",
+        "-Dtest-progress=true",
+        "-Dtest-filter=WebTransport endpoint poll mirrors automatic stream-credit retry timer",
+        "-Dtest-filter=WebTransport endpoint close failure still schedules expiry",
+        "-Dtest-filter=WebTransport early DATAGRAM survives pre-CONNECT reordering and acceptance retry",
+        "-Dtest-filter=WebTransport early truncated Session ID after buffering closes despite socket failure",
+        "-Dtest-filter=WebTransport early STREAM expiry remains retryable after a failed cancellation send",
+        "-Dtest-filter=WebTransport invalid Session ID closes with H3_ID_ERROR despite a socket failure",
+        "-Dtest-filter=WebTransport endpoint client retries post-CLOSE cancellation without replying FIN",
+        "-Dtest-filter=WebTransport endpoint client retries malformed Capsule rejection after send failure",
+        "-Dtest-filter=WebTransport endpoint client active removal preserves its owner after CLOSE send failure",
+        "-Dtest-filter=WebTransport endpoint client active removal resumes a one-byte DATA prefix without closing siblings",
+        "-Dtest-filter=WebTransport endpoint client active removal does not replay CLOSE after cleanup send failure",
+        "-Dtest-filter=WebTransport development DATAGRAM batch commits only socket prefix",
+        "-Dtest-filter=WebTransport lightweight protected DATAGRAM retires a sealed nonce after zero socket progress",
+        "-Dtest-filter=WebTransport lightweight protected DATAGRAM batch preserves nonce and socket prefix",
+        "-Dtest-filter=WebTransport endpoint server removal keeps its owner when rejection send fails",
+        "-Dtest-filter=WebTransport endpoint server removal resumes after CLOSE without replaying its bytes",
+        "-Dtest-filter=WebTransport shared server tiny CLOSE preserves a submitted DATA header after failure",
+        "-Dtest-filter=WebTransport shared server tiny CLOSE progresses from endpoint polling",
+        "-Dtest-filter=WebTransport shared server tiny CLOSE frees pending heap storage on teardown",
+        "-Dtest-filter=WebTransport shared server tiny removal resumes the original heap-backed CLOSE",
+        "-Dtest-filter=WebTransport receive flow automatic grant retries after socket submission fails",
+        "-Dtest-filter=WebTransport flow combined grants commit all limits in one socket submission",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log_sha256": "dd8e63272e8eaf20d93610d19f7770012596f3aecd1c43f2a8746f8d34bbc645"
+    },
+    "webtransport-windows-compile": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-webtransport-compile",
+        "-j1",
+        "-Dtarget=x86_64-windows-gnu",
+        "-Dtest-filter=WebTransport endpoint poll mirrors automatic stream-credit retry timer",
+        "-Dtest-filter=WebTransport endpoint close failure still schedules expiry",
+        "-Dtest-filter=WebTransport early DATAGRAM survives pre-CONNECT reordering and acceptance retry",
+        "-Dtest-filter=WebTransport early truncated Session ID after buffering closes despite socket failure",
+        "-Dtest-filter=WebTransport early STREAM expiry remains retryable after a failed cancellation send",
+        "-Dtest-filter=WebTransport invalid Session ID closes with H3_ID_ERROR despite a socket failure",
+        "-Dtest-filter=WebTransport endpoint client retries post-CLOSE cancellation without replying FIN",
+        "-Dtest-filter=WebTransport endpoint client retries malformed Capsule rejection after send failure",
+        "-Dtest-filter=WebTransport endpoint client active removal preserves its owner after CLOSE send failure",
+        "-Dtest-filter=WebTransport endpoint client active removal resumes a one-byte DATA prefix without closing siblings",
+        "-Dtest-filter=WebTransport endpoint client active removal does not replay CLOSE after cleanup send failure",
+        "-Dtest-filter=WebTransport development DATAGRAM batch commits only socket prefix",
+        "-Dtest-filter=WebTransport lightweight protected DATAGRAM retires a sealed nonce after zero socket progress",
+        "-Dtest-filter=WebTransport lightweight protected DATAGRAM batch preserves nonce and socket prefix",
+        "-Dtest-filter=WebTransport endpoint server removal keeps its owner when rejection send fails",
+        "-Dtest-filter=WebTransport endpoint server removal resumes after CLOSE without replaying its bytes",
+        "-Dtest-filter=WebTransport shared server tiny CLOSE preserves a submitted DATA header after failure",
+        "-Dtest-filter=WebTransport shared server tiny CLOSE progresses from endpoint polling",
+        "-Dtest-filter=WebTransport shared server tiny CLOSE frees pending heap storage on teardown",
+        "-Dtest-filter=WebTransport shared server tiny removal resumes the original heap-backed CLOSE",
+        "-Dtest-filter=WebTransport receive flow automatic grant retries after socket submission fails",
+        "-Dtest-filter=WebTransport flow combined grants commit all limits in one socket submission",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log_sha256": "0b49462f2a36896df160914d0c88398d771e40474e108f8eff3174a060ed882c"
+    }
+  },
+  "admission_checks": {
+    "fmt": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "fmt",
+        "src/webtransport/runtime/connect/admission_tests.zig",
+        "src/webtransport/runtime/connect/admission/deadline_tests.zig"
+      ],
+      "exit_code": 0,
+      "log_sha256": "a20f63745326aa3776e7504a7d3bf7ffd936bcd050371d88372f91704c0396a7"
+    },
+    "native": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-webtransport",
+        "-j1",
+        "-Dtest-progress=true",
+        "-Dtest-filter=WebTransport caller-owned H3 bounds acceptance and flushes response ACK",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log_sha256": "ad7a68022c0a161d13fb5e0356c938805c649d35e63ecfb5e895f07405fccaf1"
+    },
+    "windows-compile": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-webtransport-compile",
+        "-j1",
+        "-Dtarget=x86_64-windows-gnu",
+        "-Dtest-filter=WebTransport caller-owned H3 bounds acceptance and flushes response ACK",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log_sha256": "3b205f8099f82d07982ccfa53a8b5bb3bb1893d3b5086d82602f8a50884ccb3a"
+    }
+  },
+  "observer_wrappers_repaired": 41,
+  "observer_reinstallations_updated": 1,
+  "changed_observer_files": 21,
+  "original_named_tests_and_assertions_retained": true,
+  "native_scoped_passed": {
+    "http3": 70,
+    "quic": 46,
+    "webtransport": 133,
+    "caller_owned_acceptance": 116
+  },
+  "native_skips": {
+    "quic": 1,
+    "reason": "QUIC UDP accepted-complete-prefix contract is Linux-only; platform guard retained"
+  },
+  "windows_compile_steps": [
+    "8/8",
+    "8/8",
+    "8/8",
+    "8/8"
+  ],
+  "ci": {
+    "run": "https://github.com/passchaos/netz/actions/runs/45828900564",
+    "attempt": 1,
+    "complete_crash": "4786/7488 caller-owned H3 acceptance/response ACK Segmentation fault through inherited Threaded callbacks",
+    "independent_first_failure": "1741/7488 shared Happy Eyeballs every-route deadline Timeout",
+    "windows_first_failure": "step13 short-child progress test expected LF while print produced CRLF; no later native qualification on this run"
+  },
+  "progress_helper": {
+    "tests_passed": 11,
+    "exit_code": 0,
+    "command": [
+      "/usr/bin/python3",
+      "-m",
+      "unittest",
+      "run_test_progress_test"
+    ],
+    "repair": "child writes exact bytes; raw log and explicit CRLF preservation checks retained"
+  },
+  "happy_eyeballs_replay": {
+    "exit_code": 0,
+    "native_scoped_passed": 66,
+    "original_deadline_ms": 100,
+    "both_initial_assertions_retained": true,
+    "native_ci_cause": "unqualified; local pass is not native CI closure"
+  },
+  "limitations": [
+    "Windows compile does not prove native execution",
+    "new admission native/crash qualification pending delivered revision",
+    "Linux-only UDP prefix case is not qualified by macOS passes",
+    "complete/native acceptance and broader architecture/performance goal remain open"
+  ]
+}

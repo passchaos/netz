@@ -484,9 +484,7 @@ test "WebTransport development DATAGRAM batch commits only socket prefix" {
         .delegate = sender.io,
         .fail_after_prefix = 1,
     };
-    var partial_vtable = sender.io.vtable.*;
-    partial_vtable.netSend = ObservedBatchSend.netSend;
-    sender.io = .{ .userdata = &partial, .vtable = &partial_vtable };
+    sender.io = partial.io();
     defer sender.io = partial.delegate;
 
     var scratch: DevelopmentBatchScratch = .{};
@@ -1034,9 +1032,7 @@ test "WebTransport lightweight protected DATAGRAM retires a sealed nonce after z
         .delegate = sender.io,
         .fail_after_prefix = 0,
     };
-    var failed_vtable = sender.io.vtable.*;
-    failed_vtable.netSend = ObservedBatchSend.netSend;
-    sender.io = .{ .userdata = &failed, .vtable = &failed_vtable };
+    sender.io = failed.io();
     defer sender.io = failed.delegate;
 
     var packet_number: u64 = 7;
@@ -1089,7 +1085,7 @@ test "WebTransport lightweight protected DATAGRAM retires a sealed nonce after z
     // allocation finish before sealing, but a failed socket submission still
     // consumes packet number 9.
     const large_payload = [_]u8{0xed} ** (codec.stack_capacity + 128);
-    sender.io = .{ .userdata = &failed, .vtable = &failed_vtable };
+    sender.io = failed.io();
     try std.testing.expectError(
         error.NetworkDown,
         protected(
@@ -1163,9 +1159,7 @@ test "WebTransport lightweight protected DATAGRAM batch preserves nonce and sock
         .delegate = sender.io,
         .fail_after_prefix = 1,
     };
-    var partial_vtable = sender.io.vtable.*;
-    partial_vtable.netSend = ObservedBatchSend.netSend;
-    sender.io = .{ .userdata = &partial, .vtable = &partial_vtable };
+    sender.io = partial.io();
     defer sender.io = partial.delegate;
 
     var scratch: ProtectedBatchScratch = .{};

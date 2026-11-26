@@ -991,12 +991,7 @@ test "HTTP/3 endpoint request poll mirrors automatic stream-credit retry timer" 
         .delegate = server_endpoint.io,
         .fail_after_prefix = 0,
     };
-    var failed_vtable = server_endpoint.io.vtable.*;
-    failed_vtable.netSend = ObservedBatchSend.netSend;
-    server_endpoint.io = .{
-        .userdata = &failed_send,
-        .vtable = &failed_vtable,
-    };
+    server_endpoint.io = failed_send.io();
     defer server_endpoint.io = failed_send.delegate;
 
     var finished = (try runtime.EndpointServer.testing

@@ -684,3 +684,53 @@ commands keep that title too. Eleven actual-child process checks pass; raw
 logs, exit propagation, annotation cap, pins and existing commands remain
 intact. Independent H2 command and WT rejection scopes preserve the existing
 protocol-step budget. Their next native run must locate any remaining stall.
+
+### Actual H3 completion cancellation and remaining observer callbacks
+
+A new actual-Future fixture exposes a source defect beyond the old synthetic
+completion checks: an uncanceled H3 owner submits the exact protected response
+while the caller's actual canceled wait is suspended, but the next caller
+cancellation point returns void. The failed baseline has 64/65 scoped passes;
+the peer's status 200 and exact body are checked before propagating that
+cancellation assertion failure. H2 and H3 now share the internal borrowed
+command submission/drain boundary, including actual cancellation rearming
+when reporting fully committed success. Protocol dispatch and sole-reader
+state remain with each engine. Actual wait instrumentation is shared too.
+
+All four original completion names remain: skipped timeout and cancellation
+use actual timers/Futures and protected packets; the deterministic timeout
+completion interleaving retains its synthetic clock without fabricating
+`Canceled`. Additional owner-side expiry checks run against real deadlines.
+[The qualification](../evidence/h3_actual_command_cancellation/2026-11-26/validation.json)
+records current-source results: 91 H3 and 42 H2 overlap native cases, with
+Windows 8/8 compilation for each scope. Native delivered-revision and complete
+qualification remain open.
+
+The same callback audit locates 41 more single-send overrides using observer
+userdata with inherited backend callbacks. They now use complete typed
+forwarding, including a later reinstallation in the allocating DATAGRAM path.
+Original named tests and their nonce, socket-prefix, metadata, credit, sibling
+and retry assertions remain. The H3 scope passes 70 cases, QUIC passes 46 with its existing Linux-only UDP
+case skipped on macOS, and WebTransport passes 133. Windows compilation
+passes 8/8 for each scope; native Linux/Windows qualification remains open.
+
+Complete run 45828900564 on 4b8a5a84 reports a further GP at 4786/7488,
+`WebTransport caller-owned H3 bounds acceptance and flushes response ACK`.
+Its observer also fabricated cancellation. The extracted fixture now uses
+Native's actual backend delegate, atomic awake clock and real wait; I/O is
+restored in a lexical scope before acceptance moves ownership. The original
+zero-send/no-nonce advance, origin rejection, retained admission state and
+response ACK/recovery checks pass in a 116-case native scope and Windows 8/8
+compilation. Delivered complete/native crash qualification remains pending.
+
+[The observer evidence](../evidence/send_observer_forwarding/2026-11-26/validation.json)
+also records the Windows step 13 test-helper failure: the new child used
+platform text newlines while expecting literal LF. It now writes fixed bytes;
+all 11 local actual-child checks and explicit CRLF preservation remain intact.
+The complete run's independent first named failure at 1741/7488,
+`HTTP/3 shared Happy Eyeballs deadline cancels every route`, is being replayed
+with its original 100 ms deadline and both real Initial-packet assertions.
+That unchanged local replay passes 66 cases; the earlier CI timeout remains
+causally unqualified.
+Pins, existing commands and budgets remain unchanged. Broader native/complete,
+interop, fairness and workload performance acceptance remain open.

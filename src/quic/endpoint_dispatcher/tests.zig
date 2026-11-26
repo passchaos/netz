@@ -1405,12 +1405,7 @@ test "QUIC endpoint dispatcher leaves no CID route after send failure" {
         .delegate = endpoint.io,
         .fail_after_prefix = 0,
     };
-    var failed_vtable = endpoint.io.vtable.*;
-    failed_vtable.netSend = ObservedBatchSend.netSend;
-    endpoint.io = .{
-        .userdata = &failed_send,
-        .vtable = &failed_vtable,
-    };
+    endpoint.io = failed_send.io();
     defer endpoint.io = failed_send.delegate;
 
     try std.testing.expectError(
@@ -1496,12 +1491,7 @@ test "QUIC endpoint dispatcher batches derived CID replenishment" {
     try dispatcher.registerConnection(7, &connection);
 
     var observed_send = ObservedBatchSend{ .delegate = endpoint.io };
-    var observed_vtable = endpoint.io.vtable.*;
-    observed_vtable.netSend = ObservedBatchSend.netSend;
-    endpoint.io = .{
-        .userdata = &observed_send,
-        .vtable = &observed_vtable,
-    };
+    endpoint.io = observed_send.io();
     defer endpoint.io = observed_send.delegate;
 
     try std.testing.expectError(
@@ -3452,12 +3442,7 @@ test "QUIC endpoint dispatcher rate limits close responses" {
         .delegate = endpoint.io,
         .fail_after_prefix = 0,
     };
-    var failed_vtable = endpoint.io.vtable.*;
-    failed_vtable.netSend = ObservedBatchSend.netSend;
-    endpoint.io = .{
-        .userdata = &failed_send,
-        .vtable = &failed_vtable,
-    };
+    endpoint.io = failed_send.io();
     defer endpoint.io = failed_send.delegate;
     const serviced = (try dispatcher.serviceNextTimerAt(
         response_timer.timer.deadline_ns,
@@ -3595,12 +3580,7 @@ test "QUIC endpoint dispatcher keeps draining connections silent" {
     );
 
     var observed_send = ObservedBatchSend{ .delegate = endpoint.io };
-    var observed_vtable = endpoint.io.vtable.*;
-    observed_vtable.netSend = ObservedBatchSend.netSend;
-    endpoint.io = .{
-        .userdata = &observed_send,
-        .vtable = &observed_vtable,
-    };
+    endpoint.io = observed_send.io();
     defer endpoint.io = observed_send.delegate;
 
     try peer.send(&.{.{ .ping = {} }});
