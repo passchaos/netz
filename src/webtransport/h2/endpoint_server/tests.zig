@@ -42,6 +42,7 @@ test "WebTransport HTTP2 EndpointServer owns admission Sessions and capacity" {
     defer listener.deinit();
     const Peer = struct {
         listener: *http2.runtime.TlsServer,
+        stage: []const u8 = "TLS accept",
 
         fn acceptRequest(server: endpoint.EndpointServer, expected: []const u8) !endpoint.PendingRequest {
             var request = try server.receiveRequestWithTimeout(.fromSeconds(3));
@@ -52,6 +53,13 @@ test "WebTransport HTTP2 EndpointServer owns admission Sessions and capacity" {
         }
 
         fn run(self: *@This()) !void {
+            return self.runPeer() catch |err| {
+                std.debug.print("WebTransport H2 server fixture peer failed: stage={s} err={s}\n", .{ self.stage, @errorName(err) });
+                return err;
+            };
+        }
+
+        fn runPeer(self: *@This()) !void {
             try std.testing.expectError(error.InvalidEndpointOptions, (endpoint.Options{ .max_sessions = 0 }).validate());
             var faults = @import("../endpoint_client/testing/drop_faults.zig").Faults{ .caller = std.Thread.getCurrentId(), .base = self.listener.io };
             var server = try endpoint.EndpointServer.acceptTlsConnectionWithTimeout(faults.allocator(), self.listener, .{ .max_sessions = 2, .max_pending_sessions = 2 }, .fromSeconds(3));
@@ -64,10 +72,12 @@ test "WebTransport HTTP2 EndpointServer owns admission Sessions and capacity" {
             try std.testing.expect(server.remoteAddress().?.getPort() != 0);
             try std.testing.expectEqual(@as(u64, 0), server.localKeyUpdateCount());
             try std.testing.expectEqual(@as(u64, 0), server.peerKeyUpdateCount());
+            self.stage = "KeyUpdate";
             try server.initiateKeyUpdate();
             try std.testing.expectEqual(@as(u64, 1), server.localKeyUpdateCount());
             try std.testing.expectEqual(@as(u64, 0), server.peerKeyUpdateCount());
 
+            self.stage = "rejected CONNECT";
             var rejected = try acceptRequest(server, "/reject");
             var rejected_owned = true;
             defer if (rejected_owned) rejected.deinit();
@@ -79,6 +89,7 @@ test "WebTransport HTTP2 EndpointServer owns admission Sessions and capacity" {
             }, .fromSeconds(3));
             rejected_owned = false;
 
+            self.stage = "dropped CONNECT";
             var dropped = try acceptRequest(server, "/dropped");
             const dropped_handle = dropped.data.handle;
             {
@@ -94,12 +105,14 @@ test "WebTransport HTTP2 EndpointServer owns admission Sessions and capacity" {
                 try std.testing.expectEqual(dropped_handle.generation, server.state.pending[dropped_handle.index].cleanup.pending.load(.acquire));
             }
 
+            self.stage = "accepted CONNECT a";
             var a_request = try acceptRequest(server, "/a");
             var a_owned = true;
             defer if (a_owned) a_request.deinit();
             var a_accepted = try a_request.acceptWithTimeout(.{ .headers = &.{.{ .name = "x-session", .value = "/a" }} }, .fromSeconds(3));
             a_owned = false;
             defer a_accepted.deinit();
+            self.stage = "accepted CONNECT b";
             var b_request = try acceptRequest(server, "/b");
             var b_owned = true;
             defer if (b_owned) b_request.deinit();
@@ -114,10 +127,12 @@ test "WebTransport HTTP2 EndpointServer owns admission Sessions and capacity" {
             defer key_b.deinit();
             try std.testing.expect(!std.mem.eql(u8, key_a.value, key_b.value));
 
+            self.stage = "capacity overflow CONNECT";
             var overflow = try acceptRequest(server, "/overflow");
             defer overflow.deinit();
             try std.testing.expectError(error.EndpointCapacity, overflow.acceptWithTimeout(.{}, .fromSeconds(3)));
 
+            self.stage = "STREAM input and reply";
             var stream_event = try server.receiveWithTimeout(a, .fromSeconds(3));
             defer stream_event.deinit();
             try std.testing.expectEqualStrings("hello", stream_event.value.stream.data);
@@ -125,11 +140,13 @@ test "WebTransport HTTP2 EndpointServer owns admission Sessions and capacity" {
             try server.consumeWithDeadline(a, stream_id, 5, deadline(server.state.io));
             try server.sendStreamSlicesWithTimeout(a, stream_id, &.{ "rep", "ly" }, true, .fromSeconds(3));
             try server.retireStreamWithDeadline(a, stream_id, deadline(server.state.io));
+            self.stage = "DATAGRAM input and reply";
             var datagram = try server.receiveWithTimeout(b, .fromSeconds(3));
             defer datagram.deinit();
             try std.testing.expectEqualStrings("ping", datagram.value.datagram);
             try server.sendDatagramWithTimeout(b, "pong", .fromSeconds(3));
 
+            self.stage = "CLOSE input";
             var close_a = try server.receiveWithTimeout(a, .fromSeconds(3));
             defer close_a.deinit();
             try std.testing.expectEqual(@as(u32, 1), close_a.value.closed.code);
@@ -139,6 +156,7 @@ test "WebTransport HTTP2 EndpointServer owns admission Sessions and capacity" {
             try std.testing.expect(try server.removeWithTimeout(a, .fromSeconds(3)));
             try std.testing.expect(try server.removeWithTimeout(b, .fromSeconds(3)));
 
+            self.stage = "reused CONNECT";
             var reused_request = try acceptRequest(server, "/reused");
             var reused_owned = true;
             defer if (reused_owned) reused_request.deinit();

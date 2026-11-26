@@ -373,3 +373,30 @@ received `Unexpected` at `/overflow`, both following native `CONNECTION_RESET`.
 Their first peer-side cause remains open. This prevents native Windows/complete
 acceptance despite current local fixture passes. Original commands, dependency
 pins, budgets and real IP-migration assertions are preserved.
+
+### WebSocket H3 context follow-up on fd016266
+
+[Run 45773335592](https://github.com/passchaos/netz/actions/runs/45773335592)
+passed Linux's original/added protocol and send-deadline steps. Its complete
+test process progressed to 4205/7472 and aborted in `WebSocket HTTP3 bounds paced
+admission with 80 headers at 1200 MTU`: the clock wrapper supplied observer
+userdata to inherited Threaded Group.concurrent and allocator callbacks.
+
+That fixture and seven same-family frame/control/message fixtures now use the
+actual-backend Native observer. Their peer tasks support cancellation/join, and
+admission observation ends before Pending transfers its H3 ownership. All
+original header/MTU, zero-send/pacing-sleep, mask-once, committed-prefix, FIN,
+exact suffix and mismatch-refusal assertions remain. Deadline fixtures and small
+shared header checks are extracted behind the original formal test import.
+The [qualification](../evidence/websocket_h3_native_context/2026-11-26/validation.json)
+records 87 native scoped cases and same-range Windows compilation; delivered
+revision native and complete acceptance remains pending.
+
+Windows still reports an H2 EndpointServer connection reset while opening `/b`.
+Both H2 TLS peers now print their first error stage; their original backend,
+traffic, KeyUpdate, capacity, close and reuse assertions remain. The local
+135-case scope and Windows 8/8-step compilation pass, while the actual first
+Windows peer cause remains unproven. Linux isolated/full CA reload also still
+fails before SIGHUP at about 160-162 ms, with only expected rejected-certificate
+accept events. Neither prior isolated passes nor current scoped repairs close
+these remaining correctness requirements or the broader optimization goal.

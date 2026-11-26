@@ -107,14 +107,23 @@ test "WebTransport HTTP2 EndpointClient owns multiplexed Sessions and stable han
     var release_blocked: std.Io.Event = .unset;
     const Peer = struct {
         server: *http2.runtime.TlsServer,
+        stage: []const u8 = "TLS accept",
         release: *std.Io.Event,
         blocked_seen: *std.Io.Event,
         release_blocked: *std.Io.Event,
 
         fn run(self: *@This()) !void {
+            return self.runPeer() catch |err| {
+                std.debug.print("WebTransport H2 client fixture peer failed: stage={s} err={s}\n", .{ self.stage, @errorName(err) });
+                return err;
+            };
+        }
+
+        fn runPeer(self: *@This()) !void {
             var connection = try self.server.acceptWithTimeout(.fromSeconds(3));
             defer connection.close();
 
+            self.stage = "rejected CONNECT";
             var rejected = try connection.acceptDuplexRequestWithDeadline(deadline(connection.io));
             defer rejected.deinit();
             try std.testing.expectEqualStrings("/reject", rejected.path);
@@ -126,6 +135,7 @@ test "WebTransport HTTP2 EndpointClient owns multiplexed Sessions and stable han
             try rejected.finishResponseTrailersWithDeadline(&.{.{ .name = "x-rejected", .value = "owned" }}, deadline(connection.io));
             try std.testing.expect((try rejected.drainRequestAfterResponseWithDeadline(deadline(connection.io))) == .finished);
 
+            self.stage = "two accepted CONNECT streams";
             var streams: [2]http2.runtime.ServerDuplexStream = undefined;
             var initialized: usize = 0;
             defer for (streams[0..initialized]) |*stream| stream.deinit();
@@ -138,13 +148,16 @@ test "WebTransport HTTP2 EndpointClient owns multiplexed Sessions and stable han
             const b_index: usize = 1 - a_index;
             try std.testing.expectEqualStrings("/b", streams[b_index].path);
 
+            self.stage = "STREAM and DATAGRAM input";
             try readStream(&streams[a_index], 0, "hello", deadline(connection.io));
             try readDatagram(&streams[a_index], "to-a", deadline(connection.io));
             try readDatagram(&streams[b_index], "to-b", deadline(connection.io));
+            self.stage = "reply STREAM and DATAGRAM output";
             try writeCapsule(&streams[b_index], .{ .datagram = "from-b" }, deadline(connection.io));
             try writeCapsule(&streams[a_index], .{ .stream = .{ .id = 0, .data = "reply", .fin = true } }, deadline(connection.io));
             try writeCapsule(&streams[a_index], .{ .datagram = "from-a" }, deadline(connection.io));
 
+            self.stage = "CLOSE and FIN input";
             try readClose(&streams[a_index], 1, deadline(connection.io));
             try std.testing.expect((try streams[a_index].readRequestEventWithDeadline(deadline(connection.io))) == .finished);
             _ = try streams[a_index].finishResponseWithDeadline(deadline(connection.io));
@@ -152,16 +165,19 @@ test "WebTransport HTTP2 EndpointClient owns multiplexed Sessions and stable han
             try std.testing.expect((try streams[b_index].readRequestEventWithDeadline(deadline(connection.io))) == .finished);
             _ = try streams[b_index].finishResponseWithDeadline(deadline(connection.io));
 
+            self.stage = "reused CONNECT";
             var reused = try connection.acceptDuplexRequestWithDeadline(deadline(connection.io));
             defer reused.deinit();
             try std.testing.expectEqualStrings("/reused", reused.path);
             try start(&reused, 200, &.{.{ .name = "x-session", .value = "reused" }}, deadline(connection.io));
 
+            self.stage = "dropped CONNECT";
             var dropped = try connection.acceptDuplexRequestWithDeadline(deadline(connection.io));
             defer dropped.deinit();
             try std.testing.expectEqualStrings("/dropped", dropped.path);
             try start(&dropped, 200, &.{.{ .name = "x-session", .value = "dropped" }}, deadline(connection.io));
 
+            self.stage = "blocked CONNECT";
             var blocked = try connection.acceptDuplexRequestWithDeadline(deadline(connection.io));
             defer blocked.deinit();
             try std.testing.expectEqualStrings("/blocked", blocked.path);

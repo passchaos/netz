@@ -1,0 +1,125 @@
+{
+  "observed_utc": "2026-11-26T08:30:46.955635+00:00",
+  "base_commit": "fd016266a9dfeaf54ee96c2ca5e04745e9a737cf",
+  "source_sha256": {
+    "src/websocket/runtime/h3_tests.zig": "752682421e0433166567da9481fab079d8e2325477ee758d579a254973cf0f62",
+    "src/websocket/runtime/h3/tests/deadline.zig": "f80ffad426d002c32ff212af502221b4faff1d053b319f1864b632832bada0f1",
+    "src/websocket/runtime/h3/tests/headers.zig": "86fb0dfeefc1838a7544cb7a8dc5fa24cc43160626a66507a77b79bed2f96847",
+    "src/webtransport/h2/endpoint_client/tests.zig": "50f07cbca59cb4bf15c6c234133da3efed9e697c7f77801cf9058cb47b6777f6",
+    "src/webtransport/h2/endpoint_server/tests.zig": "0dbdf342bad93f3081d832389b3047aefa10730e957245d13dbedf51b7d53a0b"
+  },
+  "checks": {
+    "fmt": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "fmt",
+        "src/websocket/runtime/h3_tests.zig",
+        "src/websocket/runtime/h3/tests/deadline.zig",
+        "src/websocket/runtime/h3/tests/headers.zig"
+      ],
+      "exit_code": 0,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "tests_passed": []
+    },
+    "native": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-websocket",
+        "-j1",
+        "-Dtest-progress=true",
+        "-Dtest-filter=WebSocket HTTP3 bounds paced admission with 80 headers at 1200 MTU",
+        "-Dtest-filter=WebSocket HTTP3 close deadline resumes a partially sent frame",
+        "-Dtest-filter=WebSocket HTTP3 ping deadline resumes a partially sent frame",
+        "-Dtest-filter=WebSocket HTTP3 bounded auto Pong resumes and returns one Ping",
+        "-Dtest-filter=WebSocket HTTP3 Pong deadline resumes a partially sent frame",
+        "-Dtest-filter=WebSocket HTTP3 bounded in-place send masks once",
+        "-Dtest-filter=WebSocket HTTP3 message deadline resumes one masked frame",
+        "-Dtest-filter=WebSocket HTTP3 fragmented deadline resumes exact suffix",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log_sha256": "35b531d74b0400a455956cc40125067cdd1a25ae3969f02e06510bc9054309e0",
+      "tests_passed": [
+        87
+      ]
+    },
+    "windows-compile": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-websocket-compile",
+        "-j1",
+        "-Dtarget=x86_64-windows-gnu",
+        "-Dtest-filter=WebSocket HTTP3 bounds paced admission with 80 headers at 1200 MTU",
+        "-Dtest-filter=WebSocket HTTP3 close deadline resumes a partially sent frame",
+        "-Dtest-filter=WebSocket HTTP3 ping deadline resumes a partially sent frame",
+        "-Dtest-filter=WebSocket HTTP3 bounded auto Pong resumes and returns one Ping",
+        "-Dtest-filter=WebSocket HTTP3 Pong deadline resumes a partially sent frame",
+        "-Dtest-filter=WebSocket HTTP3 bounded in-place send masks once",
+        "-Dtest-filter=WebSocket HTTP3 message deadline resumes one masked frame",
+        "-Dtest-filter=WebSocket HTTP3 fragmented deadline resumes exact suffix",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log_sha256": "05eb41d582cc8e174ea598f5d658c54fe88b810615f8fb54729015bed7d5cfed",
+      "tests_passed": []
+    }
+  },
+  "native_websocket_tests_passed": 87,
+  "focused_named_tests": 8,
+  "imported_support_tests": 79,
+  "native_backends": [
+    "POSIX Threaded zero async capacity",
+    "application backend one executor"
+  ],
+  "windows_cross_compile": "same eight fixture scopes passed; delivered-revision native Windows acceptance pending",
+  "preserved_contracts": [
+    "80 request and response headers at 1200 MTU",
+    "no socket send or pacing sleep before failed deadline admission",
+    "partial-frame suffix and FIN",
+    "one in-place mask per transaction",
+    "automatic Pong and explicit control progress",
+    "fragmented message exact suffix and mismatch refusal",
+    "observer cleanup before Pending ownership transfer",
+    "peer cancellation and joined failure cleanup"
+  ],
+  "structure": {
+    "original_h3_test_root_lines": 5641,
+    "current_h3_test_root_lines": 3819,
+    "deadline_module": "src/websocket/runtime/h3/tests/deadline.zig",
+    "header_support": "src/websocket/runtime/h3/tests/headers.zig",
+    "formal_parent_import_preserved": true
+  },
+  "h2_peer_stage_diagnostics": {
+    "original_backend_traffic_and_assertions_preserved": true,
+    "stages": [
+      "TLS accept",
+      "KeyUpdate",
+      "rejected CONNECT",
+      "dropped CONNECT",
+      "accepted CONNECT a/b",
+      "capacity overflow CONNECT",
+      "STREAM/DATAGRAM",
+      "CLOSE/FIN",
+      "reused CONNECT",
+      "blocked CONNECT"
+    ],
+    "native_tests_passed": 135,
+    "native_log_sha256": "c1e07eafbfc33898f729413c15d27c844a0c76797e2dede95311990b4bd71895",
+    "windows_compile_steps": "8/8 succeeded",
+    "windows_log_sha256": "ba3771c6fb19d30a1e6234ce777b39aa829c39279a0261d9a80419b12a0b7980",
+    "first_native_windows_peer_failure": "pending new revision"
+  },
+  "baseline_ci": {
+    "run": "https://github.com/passchaos/netz/actions/runs/45773335592",
+    "complete_crash": "4205/7472 WebSocket HTTP3 bounds paced admission with 80 headers at 1200 MTU; Allocator.rawAlloc via Threaded.groupConcurrent with observer userdata",
+    "linux_protocol_and_deadline_steps": "passed",
+    "linux_ca_reload": "BrokenPipe before SIGHUP at 162ms; three expected CertificateUntrusted accept events; no connection cause",
+    "complete_ca_reload": "same failure at160ms",
+    "windows_protocol": "EndpointServer receives Unexpected after CONNECTION_RESET while opening /b; first peer-side error unreported"
+  },
+  "completion_boundary": "pinned native/complete acceptance pending delivered revision; full goal active"
+}
