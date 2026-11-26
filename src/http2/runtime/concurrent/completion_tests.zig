@@ -73,6 +73,11 @@ fn exercise(io: std.Io, outcome: Outcome) !void {
     try owner.await(io);
     try std.testing.expect(engine.commands.isEmpty());
     try std.testing.expectEqual(outcome == .completed_during_cancel, slot.response_finished);
+    // Retire the unfinished protocol stream while terminal output is still
+    // available. Closing the TCP send half first would make deinit attempt
+    // its RST_STREAM on a deliberately disconnected socket.
+    const cleanup_reset = outcome != .completed_during_cancel;
+    if (cleanup_reset) try slot.stream.resetWithTimeout(.cancel, .fromSeconds(1));
     try fixture.connection.stream.shutdown(io, .send);
     var reader: FrameReader = .{};
     defer reader.deinit(allocator);
@@ -80,6 +85,7 @@ fn exercise(io: std.Io, outcome: Outcome) !void {
     defer payload.deinit(allocator);
     var heads: usize = 0;
     var fins: usize = 0;
+    var resets: usize = 0;
     while (true) {
         const frame = reader.read(allocator, io, fixture.peer, 16_384) catch |err| switch (err) {
             error.ConnectionClosed => break,
@@ -92,12 +98,14 @@ fn exercise(io: std.Io, outcome: Outcome) !void {
                 if (frame.frame.header.flags & 1 != 0) fins += 1;
             },
             .goaway => {},
+            .rst_stream => resets += 1,
             else => return error.UnexpectedFrame,
         }
     }
     try std.testing.expectEqualStrings(if (outcome == .completed_during_cancel) "committed" else "", payload.items);
     try std.testing.expectEqual(@as(usize, @intFromBool(outcome == .completed_during_cancel)), heads);
     try std.testing.expectEqual(heads, fins);
+    try std.testing.expectEqual(@as(usize, @intFromBool(cleanup_reset)), resets);
 }
 
 test "HTTP/2 concurrent command cancellation joins borrowed stack before return" {

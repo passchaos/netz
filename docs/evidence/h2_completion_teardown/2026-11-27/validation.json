@@ -1,0 +1,91 @@
+{
+  "observed_utc": "2026-11-26T16:35:25.748934+00:00",
+  "base_commit": "4b1924f427973a330b4cd2e5094e9340778d4951",
+  "native_host": "aarch64-macos",
+  "guard": "All Zig invocations serialized under shared zig-tree-guard",
+  "full_goal_status": "active",
+  "source_sha256": {
+    "src/http2/runtime/concurrent/completion_tests.zig": "634b1865eb02c1572cf2e8c5590d412f127e9899dae0bf64e1469d863871df24"
+  },
+  "tested_source_sha256": {
+    "src/http2/runtime/concurrent/completion_tests.zig": "7bcfc84a90840181aea7f2133133242aff4198a56190ef54d68421500cc1b5df"
+  },
+  "post_test_source_change": "Comment only: correct H2 reset terminology to RST_STREAM",
+  "checks": {
+    "native": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-http2",
+        "-j1",
+        "-Dtest-progress=true",
+        "-Dtest-filter=HTTP/2 concurrent command",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log_sha256": "14082579bb594278e38e23cef45986fdc4ac8e54ca2275c5f7bfdab6351ccac4"
+    },
+    "windows-compile": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-http2-compile",
+        "-j1",
+        "-Dtarget=x86_64-windows-gnu",
+        "-Dtest-filter=HTTP/2 concurrent command",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log_sha256": "91bfdd9937b33073ac9c5124988de69ddd09d70bca23828ddd53a38c0f8836cd"
+    },
+    "fmt": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "fmt",
+        "--check",
+        "src/http2/runtime/concurrent/completion_tests.zig"
+      ],
+      "exit_code": 0,
+      "log_sha256": "ad8c20c9b8563800d6a62e30c858d6422cad01850c7a68f08319c6473bafc45c"
+    }
+  },
+  "native_scoped_passed": 36,
+  "windows_compile_steps": "8/8",
+  "prior_native_windows": {
+    "run": 45849067907,
+    "attempt": 1,
+    "job": 140010311279,
+    "url": "https://github.com/passchaos/netz/actions/runs/45849067907/job/140010311279",
+    "h2_selected_cases_reported_passed": 44,
+    "h2_process_exit_code": 1,
+    "cleanup_errors": [
+      "ESHUTDOWN",
+      "PIPE_DISCONNECTED"
+    ],
+    "protocol_step21": "five-minute timeout",
+    "native_step22": "skipped"
+  },
+  "prior_ci_jobs_terminal": true,
+  "native_and_complete_followups": [
+    "Windows native teardown repair qualification",
+    "Windows five-minute protocol-step timeout",
+    "Complete GP at WebTransport required Session flow control retries scoped server rejection, 4792/7490",
+    "Linux and complete client CA reload PINGRESP BrokenPipeError before SIGHUP",
+    "Complete overall timeout",
+    "Earlier Happy Eyeballs CI timeout remains causally unqualified; unchanged replay passes 66"
+  ],
+  "invariants": [
+    "reset unfinished protocol stream before deliberately closing TCP send half",
+    "exactly one cleanup RST_STREAM for skipped and expired outcomes; zero for committed response",
+    "original response body and HEADERS/FIN checks retained",
+    "actual cancellation, command release and response-finished assertions retained",
+    "original named tests, CI commands, budgets and dependency pins retained"
+  ],
+  "limitations": [
+    "Windows cross-compilation is distinct from native execution",
+    "36 local passes do not qualify delivered Windows cleanup or its protocol-step timeout",
+    "full HTTP-family correctness, fairness, interop and workload performance goal remains active"
+  ]
+}

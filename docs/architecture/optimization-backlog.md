@@ -734,3 +734,25 @@ That unchanged local replay passes 66 cases; the earlier CI timeout remains
 causally unqualified.
 Pins, existing commands and budgets remain unchanged. Broader native/complete,
 interop, fairness and workload performance acceptance remain open.
+
+### H2 cancellation fixture teardown, 2026-11-27
+
+Run 45849067907 on 4b1924f4 is terminal. Native Windows reports all 44 selected
+H2 command/deadline cases as passed, then exits 1 after logged
+`ESHUTDOWN`/`PIPE_DISCONNECTED` cleanup errors. The actual cancellation fixture
+closes the TCP send half before deferred `ServerDuplexStream.deinit` resets
+an unfinished stream. It now retires skipped/expired streams with a bounded
+RST_STREAM before half-close and checks exactly one cleanup reset, or zero
+for completed responses. The original response body, HEADERS/FIN, cancellation,
+owner release and command-result assertions remain.
+
+[The focused qualification](../evidence/h2_completion_teardown/2026-11-27/validation.json)
+records 36 local native passes and Windows 8/8 compilation. Delivered Windows
+execution remains required; the separate five-minute protocol-step timeout
+is still open. Native Linux protocol steps 21 and 22 pass on this prior run,
+but its client CA reload gate fails before SIGHUP. Complete CI reports a new
+GP at `WebTransport required Session flow control retries scoped server rejection`
+(4792/7490) and the same independent CA reload failure before its overall
+timeout. Those findings are separate follow-ups. The original 100 ms Happy
+Eyeballs deadline and both Initial-packet checks remain unchanged, and the
+continuous HTTP-family goal remains active.
