@@ -3096,8 +3096,7 @@ pub fn discardPrefix(list: *std.ArrayList(u8), len: usize) void {
 }
 
 pub fn readSome(io: std.Io, stream: net.Stream, buffer: []u8) net.Stream.Reader.Error!usize {
-    var bufs = [_][]u8{buffer};
-    return io.vtable.netRead(io.userdata, stream.socket.handle, &bufs);
+    return stream_io.readSome(io, stream, buffer);
 }
 
 pub fn readExactForTest(io: std.Io, stream: net.Stream, buffer: []u8) Error!void {

@@ -2,6 +2,7 @@
 const std = @import("std");
 const net = std.Io.net;
 const native = @import("../../runtime/timed_socket.zig");
+const ordinary_read = @import("read.zig");
 
 pub const TimedReadError = net.Stream.Reader.Error ||
     std.Io.Operation.FileReadStreaming.UnendingError ||
@@ -10,6 +11,7 @@ pub const TimedReadError = net.Stream.Reader.Error ||
 
 test {
     _ = @import("timed_read_tests.zig");
+    _ = @import("windows_read_tests.zig");
 }
 
 /// Keep socket and file registrations separate. Native zio reads share the
@@ -19,6 +21,7 @@ pub fn readSomeWithDeadline(io: std.Io, stream: net.Stream, buffer: []u8, deadli
     if (buffer.len == 0) return 0;
     if (native.tryRead(io, stream, buffer, deadline)) |value| return value;
     _ = try @import("../deadline.zig").usableAwake(io, deadline);
+    try io.checkCancel();
     const Task = struct {
         io: std.Io,
         stream: net.Stream,
@@ -31,8 +34,7 @@ pub fn readSomeWithDeadline(io: std.Io, stream: net.Stream, buffer: []u8, deadli
                 self.result = err;
                 return;
             };
-            var bufs = [_][]u8{self.buffer};
-            self.result = self.io.vtable.netRead(self.io.userdata, self.stream.socket.handle, &bufs);
+            self.result = ordinary_read.readSome(self.io, self.stream, self.buffer);
         }
 
         const waitUntil = @import("../deadline.zig").waitUntil;

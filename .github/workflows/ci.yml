@@ -333,6 +333,12 @@ jobs:
               protocol_status=$completion_status
             fi
           fi
+          prefix_context_status=0
+          python tools/ci/run_test_progress.py --title "Native QUIC receive prefix context" --log native-quic-prefix-context.log -- zig build test-quic -j1 -Dtest-progress=true -Dtarget=${{ matrix.target }} '-Dtest-filter=QUIC UDP batch preserves received prefix and rearms cancellation' --summary all || prefix_context_status=$?
+          if [ "$prefix_context_status" -ne 0 ]; then
+            python tools/ci/test_failure_annotations.py native-quic-prefix-context.log
+            protocol_status=$prefix_context_status
+          fi
           exit "$protocol_status"
 
       - name: Run native HTTP3 send deadline regressions

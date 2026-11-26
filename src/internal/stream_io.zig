@@ -10,6 +10,8 @@ test {
 
 const timed_read = @import("stream_io/timed_read.zig");
 pub const TimedReadError = timed_read.TimedReadError;
+pub const readSome = @import("stream_io/read.zig").readSome;
+pub const readVec = @import("stream_io/read.zig").readVec;
 
 pub const TimedWriteError = net.Stream.Writer.Error ||
     std.Io.Timeout.Error || std.Io.ConcurrentError;

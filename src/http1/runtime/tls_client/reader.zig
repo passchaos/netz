@@ -49,9 +49,9 @@ fn tlsClientReaderReadVec(
             return error.ReadFailed;
         }
     else
-        connection.io.vtable.netRead(
-            connection.io.userdata,
-            connection.stream.socket.handle,
+        stream_io.readVec(
+            connection.io,
+            connection.stream,
             destinations,
         ) catch |err| {
             net_reader.err = err;

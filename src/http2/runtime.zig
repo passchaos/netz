@@ -316,12 +316,7 @@ pub fn readSome(
     stream: net.Stream,
     buffer: []u8,
 ) net.Stream.Reader.Error!usize {
-    var buffers = [_][]u8{buffer};
-    return io.vtable.netRead(
-        io.userdata,
-        stream.socket.handle,
-        &buffers,
-    );
+    return stream_io.readSome(io, stream, buffer);
 }
 
 pub fn writeAllToStream(
@@ -2817,12 +2812,7 @@ pub fn containsHttpToken(value: []const u8, needle: []const u8) bool {
 pub fn readExact(io: std.Io, stream: net.Stream, buffer: []u8) ReadExactError!void {
     var offset: usize = 0;
     while (offset < buffer.len) {
-        var buffers = [_][]u8{buffer[offset..]};
-        const n = try io.vtable.netRead(
-            io.userdata,
-            stream.socket.handle,
-            &buffers,
-        );
+        const n = try readSome(io, stream, buffer[offset..]);
         if (n == 0) return error.ConnectionClosed;
         offset += n;
     }

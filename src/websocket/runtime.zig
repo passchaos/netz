@@ -3486,8 +3486,7 @@ pub const selectHttp1Subprotocol = handshake_headers.selectHttp1Subprotocol;
 pub const selectH2Subprotocol = handshake_headers.selectH2Subprotocol;
 
 fn readSome(io: std.Io, stream: net.Stream, buffer: []u8) net.Stream.Reader.Error!usize {
-    var bufs = [_][]u8{buffer};
-    return io.vtable.netRead(io.userdata, stream.socket.handle, &bufs);
+    return stream_io.readSome(io, stream, buffer);
 }
 
 fn readSomeWithDeadline(

@@ -478,3 +478,32 @@ owned-input H2 commands, keeping their exact text, five-minute step budget and
 failure aggregation. [The follow-up qualification](../evidence/windows_tcp_completion/2026-11-26/real-cancellation.json)
 separates that portable contract and Windows code generation from pending
 native Windows results and the still-unproven H2 TLS root cause.
+
+### Windows Threaded read completion retention
+
+The corrected native probe in [run 45799170389](https://github.com/passchaos/netz/actions/runs/45799170389)
+returned `Canceled` and zero count from an ordinary Threaded read after five
+payload bytes reached its buffer. The actual Batch completion retained all
+five bytes and rearmed real parent cancellation; entered idle cancellation
+and exact same-socket reuse also passed after one self-alert. This establishes
+the primitive's count-loss mechanism. Its original H2 TLS endpoint tests
+still fail with `RecordTooLarge`; native causal repair remains to be qualified.
+
+HTTP/1, HTTP/2, native TLS record readers, the standard TLS vector reader,
+WebSocket and raw H2 frame readers now share an internal socket-read boundary.
+Matching Threaded AFD requests retain completion storage through cancel/join,
+return accepted bytes or EOF, and rearm actual cancellation. They preserve
+the same asynchronous socket and receive flags. Timed fallback tasks use that
+same primitive and reject already canceled callers before task admission.
+Custom netRead operations and application-backend registrations retain their
+own callbacks. An independent QUIC prefix command qualifies the repaired
+full-forwarding observer within the original five-minute protocol budget.
+
+[The focused qualification](../evidence/windows_stream_read/2026-11-26/validation.json)
+records 352 native scoped passes, 15 Windows-only skips on macOS and matching
+Windows compile groups of 14/14, 14/14 and 8/8 steps. Five real Windows read
+fixtures cover bytes/EOF, early/entered cancellation, vector destinations,
+socket reuse and 64 active races; their native run remains pending. Original
+H2 backends, KeyUpdate/capacity/close/reuse assertions, dependency pins,
+commands, budgets and migration inputs remain intact. Complete acceptance and
+fixed-workload performance qualification are still open.

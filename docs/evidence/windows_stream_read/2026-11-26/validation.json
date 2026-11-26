@@ -1,0 +1,243 @@
+{
+  "observed_utc": "2026-11-26T10:52:26.217190+00:00",
+  "base_commit": "29a96c7e3a1c33af266930c779acd7b6bf35eef0",
+  "source_sha256": {
+    ".github/workflows/ci.yml": "a0337923e9d78c3681de044d43e10506e94f9a5b798695dc1573a18a1f19d0d8",
+    "docs/architecture/optimization-backlog.md": "21d9c51e9057c55578911d8cd397a894234d057f40f9d6a9585efb01d2342633",
+    "src/http1/runtime.zig": "1aae20efb87ab8008cff1e4bc5f7faf2add80fc4a014399967b64c663412c1dd",
+    "src/http1/runtime/tls_client/reader.zig": "6bbcaeef947942f68bd5d91fc27a6b74d5189ac262a9efd8eab373f8a914154d",
+    "src/http2/runtime.zig": "511530ed89be22b6d76e907bd80dc8bcc80dcbc042cbdb11483a84a55e9e205e",
+    "src/http2/runtime/frame/io.zig": "d2399e0d4c288838dffc32c47d9e78a05486db74284ef58cbf61d51c684617fb",
+    "src/internal/stream_io.zig": "e7a685110b4f4ad521883e7ca294f6ba9efa557eed030ceeaaa40ce66a2fb4af",
+    "src/internal/stream_io/timed_read.zig": "0fbad0365b333cbd810a532a26ef78fb1dfe201a9e4198addd642763918abb87",
+    "src/quic/runtime/receive_cancel_tests.zig": "24c406bfa85e0ee15f43bd049ecc1c66f986e3c1f5d97df11ed33546d484be3c",
+    "src/tls/stream/record_io.zig": "69d4d976422aaa45f6c62c7db8caf74639d169181450a399fdeed1a4f7219c7d",
+    "src/websocket/runtime.zig": "02e70564921e18780d1df5550628b8676a642412eb2160280f6a3bc5287cbf87",
+    "src/internal/stream_io/read.zig": "240c83cbdd925cc91e4c1c0929649913b1114301d3720368e627c6cbc4cf8216",
+    "src/internal/stream_io/windows_read.zig": "65ff81fdcd649327a0242c7803166c61cb0076621698b45e1b09c4514828d7c4",
+    "src/internal/stream_io/windows_read_tests.zig": "fcd24c2dfe98d113b5d3c6fd1b6cf2253525a323850de74f27d0d8fb191f293c",
+    "build.zig.zon": "b1db040a3652b14c5b0910421a64ef4a6119e5931cd7b51a4187dfd309075b4a",
+    "src/internal/testing/forwarded_io.zig": "fdcb7229cbf0199ee36d55668335adc49b0bd04747ba56b6aa793793f7d6fd40",
+    "src/internal/testing/native_protocol_io.zig": "c8e9569e077d52978bfd10e65216e9d8bc14ff72603ef3705da4c599e11a916b"
+  },
+  "checks": {
+    "fmt": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "fmt",
+        "src/internal/stream_io.zig",
+        "src/internal/stream_io/read.zig",
+        "src/internal/stream_io/windows_read.zig",
+        "src/internal/stream_io/windows_read_tests.zig",
+        "src/internal/stream_io/timed_read.zig",
+        "src/http1/runtime.zig",
+        "src/http1/runtime/tls_client/reader.zig",
+        "src/http2/runtime.zig",
+        "src/http2/runtime/frame/io.zig",
+        "src/tls/stream/record_io.zig",
+        "src/websocket/runtime.zig",
+        "src/quic/runtime/receive_cancel_tests.zig"
+      ],
+      "exit_code": 0,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "windows-core-compile": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-http1-compile",
+        "test-http2-compile",
+        "test-tls-compile",
+        "-j1",
+        "-Dtarget=x86_64-windows-gnu",
+        "-Dtest-filter=stream timed reader",
+        "-Dtest-filter=stream timed Windows",
+        "-Dtest-filter=TLS bounded read interruptions",
+        "-Dtest-filter=HTTP/2 buffered frame wake",
+        "-Dtest-filter=HTTP/2 batch cancellation",
+        "-Dtest-filter=HTTP/1 pull",
+        "-Dtest-filter=standard TLS client deadline preserves buffered plaintext",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log_sha256": "9e1611bcfd646ffa5cd839efcc2cc05247e43fc683b748a2b8d7e406ad15793d"
+    },
+    "native-core": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-http1",
+        "test-http2",
+        "test-tls",
+        "-j1",
+        "-Dtest-progress=true",
+        "-Dtest-filter=stream timed reader",
+        "-Dtest-filter=stream timed Windows",
+        "-Dtest-filter=TLS bounded read interruptions",
+        "-Dtest-filter=HTTP/2 buffered frame wake",
+        "-Dtest-filter=HTTP/2 batch cancellation",
+        "-Dtest-filter=HTTP/1 pull",
+        "-Dtest-filter=standard TLS client deadline preserves buffered plaintext",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log_sha256": "e478e2ea21b6d85f58a201645d02f8403907ec0fcd69c5c9b06aa4a253e15c2b"
+    },
+    "native-protocol": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-http1",
+        "test-websocket",
+        "test-webtransport",
+        "-j1",
+        "-Dtest-progress=true",
+        "-Dtest-filter=WebTransport HTTP2 EndpointClient owns multiplexed Sessions",
+        "-Dtest-filter=WebTransport HTTP2 EndpointServer owns admission Sessions",
+        "-Dtest-filter=WSS local read interruptions",
+        "-Dtest-filter=WebSocket TCP receiver closes on protocol error",
+        "-Dtest-filter=HTTP/1 TLS server exchanges persistent requests",
+        "-Dtest-filter=HTTP/1 TLS client response head timeout covers records",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log_sha256": "e4d31520bf7da97949e6409ab3c7216f715f7012f31c9ade22d9449e82160b4c"
+    },
+    "windows-protocol-compile": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-http1-compile",
+        "test-websocket-compile",
+        "test-webtransport-compile",
+        "-j1",
+        "-Dtarget=x86_64-windows-gnu",
+        "-Dtest-filter=WebTransport HTTP2 EndpointClient owns multiplexed Sessions",
+        "-Dtest-filter=WebTransport HTTP2 EndpointServer owns admission Sessions",
+        "-Dtest-filter=WSS local read interruptions",
+        "-Dtest-filter=WebSocket TCP receiver closes on protocol error",
+        "-Dtest-filter=HTTP/1 TLS server exchanges persistent requests",
+        "-Dtest-filter=HTTP/1 TLS client response head timeout covers records",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log_sha256": "9c3d9344be6c5e692c8f95a785b40a22bf0a8a7f5bf46978294bd46b15137240"
+    },
+    "quic-prefix-native": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-quic",
+        "-j1",
+        "-Dtest-progress=true",
+        "-Dtest-filter=QUIC UDP batch preserves received prefix and rearms cancellation",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log_sha256": "aaf6e6bd2b89602f1f467b2f3679e37b92804ad017cbe0f0418508f5461c9896"
+    },
+    "quic-prefix-windows-compile": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-quic-compile",
+        "-j1",
+        "-Dtarget=x86_64-windows-gnu",
+        "-Dtest-filter=QUIC UDP batch preserves received prefix and rearms cancellation",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log_sha256": "03ce06a8ed4bb048a5fc9d91adaa670ece3e327acc693288745a74932fdd8998"
+    },
+    "evidence-audit": {
+      "command": [
+        "netz-evidence-audit",
+        "--max-unresolved=24"
+      ],
+      "exit_code": 0,
+      "unresolved": 3,
+      "invalid": 0,
+      "unreadable": 0,
+      "unresolved_scope": "three historical WebTransport paths"
+    }
+  },
+  "native_host": "aarch64-macos",
+  "native_core_passed": [
+    17,
+    57,
+    35
+  ],
+  "native_protocol_passed": [
+    49,
+    137,
+    22
+  ],
+  "native_quic_context_passed": 35,
+  "total_native_scoped_passes": 352,
+  "windows_only_skips_on_macos": 15,
+  "windows_compile_steps": {
+    "core": "14/14",
+    "protocol": "14/14",
+    "quic_context": "8/8"
+  },
+  "new_windows_named_tests": [
+    "stream timed Windows completed reads preserve bytes EOF and caller cancellation",
+    "stream timed Windows idle reads cancel after native entry and reuse sockets",
+    "stream timed Windows read cancellation preserves queued input before admission",
+    "stream timed Windows read races conserve the exact TCP prefix",
+    "stream timed Windows vector reads retain every completed destination"
+  ],
+  "new_windows_contracts": [
+    "bytes and EOF through real Future cancellation after native completion",
+    "entered idle receive cancellation joins before buffer release and permits socket reuse",
+    "already canceled ordinary and timed calls leave queued input available",
+    "64 actual send/cancel races conserve full original plus next TCP payload",
+    "two-vector completed read returns both destinations before cancellation"
+  ],
+  "native_windows_probe": {
+    "url": "https://github.com/passchaos/netz/actions/runs/45799170389/job/139837560438",
+    "head": "29a96c7e3a1c33af266930c779acd7b6bf35eef0",
+    "actual_result": {
+      "raw_error": "Canceled",
+      "raw_count": 0,
+      "raw_changed_bytes": 5,
+      "raw_payload_in_buffer": true,
+      "batch_count": 5,
+      "batch_cancel_pending": true,
+      "batch_cancel_after_native_completion": true,
+      "exact_suffix": true
+    },
+    "pending_cancel_and_reuse_notice": "one native self-alert before cancel; entered receive canceled and joined; buffer untouched; exact same-socket reuse passed"
+  },
+  "implementation": {
+    "native_operation": "AFD RECEIVE; same async handle and NO_FAST_IO/OVERLAPPED flags",
+    "wait": "Batch.awaitConcurrent with no independent deadline, checked after each alert",
+    "cleanup": "one native self-alert before pending Batch cancel/join",
+    "retention": "successful completion including EOF wins cancellation and rearms it",
+    "vectors": 8,
+    "new_reader_tasks": 0,
+    "socket_mode_changed": false,
+    "public_reader_error_surface_changed": false
+  },
+  "scope": {
+    "production": [
+      "HTTP1 TCP",
+      "HTTP2 TCP/raw frame reads",
+      "WebSocket TCP",
+      "TLS12/TLS13 native records",
+      "standard TLS vector network reader"
+    ],
+    "fixture": "QUIC virtual cancellation forwards every callback and tests real Future admission/cancel/join on supported actual backends"
+  },
+  "original_commands_pins_budgets_and_migration_inputs_preserved": true,
+  "native_windows_adapter_and_h2_causal_qualification": "pending delivered revision",
+  "full_complete_acceptance": "open; baseline complete failed, separate from native probe mechanism",
+  "performance": "no fixed-workload runtime claim",
+  "guard": "All Zig commands ran serially under shared zig-tree-guard"
+}

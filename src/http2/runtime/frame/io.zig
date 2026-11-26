@@ -1,6 +1,7 @@
 const std = @import("std");
 const http2 = @import("../../mod.zig");
 const wire = @import("wire.zig");
+const socket_read = @import("../../../internal/stream_io/read.zig");
 
 pub const Error = http2.Error || error{
     ConnectionClosed,
@@ -113,12 +114,7 @@ pub fn readOwned(
         stream: std.Io.net.Stream,
 
         fn read(source: @This(), buffer: []u8) !usize {
-            var buffers = [_][]u8{buffer};
-            return source.io.vtable.netRead(
-                source.io.userdata,
-                source.stream.socket.handle,
-                &buffers,
-            );
+            return socket_read.readSome(source.io, source.stream, buffer);
         }
 
         fn readWithDeadline(
@@ -447,12 +443,7 @@ pub const Reader = struct {
             stream: std.Io.net.Stream,
 
             fn read(source: @This(), buffer: []u8) !usize {
-                var buffers = [_][]u8{buffer};
-                return source.io.vtable.netRead(
-                    source.io.userdata,
-                    source.stream.socket.handle,
-                    &buffers,
-                );
+                return socket_read.readSome(source.io, source.stream, buffer);
             }
         };
         return self.readFrom(

@@ -123,12 +123,7 @@ fn readSome(
             absolute,
         );
     }
-    var buffers = [_][]u8{out};
-    return io.vtable.netRead(
-        io.userdata,
-        stream.socket.handle,
-        &buffers,
-    );
+    return stream_io.readSome(io, stream, out);
 }
 
 pub fn readRecord(
@@ -245,12 +240,7 @@ fn readExact(
 ) Error!ExactReadResult {
     var offset: usize = 0;
     while (offset < out.len) {
-        var bufs = [_][]u8{out[offset..]};
-        const count = try io.vtable.netRead(
-            io.userdata,
-            stream.socket.handle,
-            &bufs,
-        );
+        const count = try stream_io.readSome(io, stream, out[offset..]);
         if (count == 0) {
             return if (offset == 0) .eof else .truncated;
         }
