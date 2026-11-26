@@ -4438,6 +4438,7 @@ def run_client_ca_reload_case(broker: Path, directory: Path) -> None:
     write_config(active_ca, active_ca_directory, False)
     environment = os.environ.copy()
     environment.pop(FINITE_TEST_ENV, None)
+    environment["NETZ_MQTT_CONFIG_TRACE_ERRORS"] = "1"
     process = subprocess.Popen(
         [str(broker), f"--config={config}"],
         stdout=subprocess.PIPE,

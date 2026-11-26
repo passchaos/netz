@@ -64,6 +64,20 @@ const Config = struct {
     allocator_stats_session_expiry_seconds: ?u32 = null,
 };
 
+const ConfiguredErrorTrace = struct {
+    var context: u8 = 0;
+    var emitted: std.atomic.Value(usize) = .init(0);
+
+    fn observe(_: *anyopaque, event: netz.mqtt.broker.ListenerErrorEvent) void {
+        if (emitted.fetchAdd(1, .monotonic) >= 32) return;
+        std.debug.print("MQTT listener event: listener={d} stage={s} err={s}\n", .{
+            event.listener_index,
+            @tagName(event.stage),
+            @errorName(event.err),
+        });
+    }
+};
+
 pub fn main(init: std.process.Init) !void {
     // This long-lived broker repeatedly transfers small packet/session
     // allocations between I/O workers. The SMP allocator's per-thread caches
@@ -83,6 +97,13 @@ pub fn main(init: std.process.Init) !void {
                 std.mem.eql(u8, value, "1")
             else
                 false,
+            .error_observer = if (init.environ_map.get("NETZ_MQTT_CONFIG_TRACE_ERRORS")) |value|
+                if (std.mem.eql(u8, value, "1")) .{
+                    .context = &ConfiguredErrorTrace.context,
+                    .observe = ConfiguredErrorTrace.observe,
+                } else null
+            else
+                null,
         }) catch |err| switch (err) {
             error.ConfigFileNotFound => {
                 std.debug.print(

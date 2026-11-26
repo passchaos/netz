@@ -1,5 +1,5 @@
 {
-  "observed_utc": "2026-11-26T02:36:33.557946+00:00",
+  "observed_utc": "2026-11-26T04:16:54.499392+00:00",
   "base_commit": "31febe5ac3c45c6c93e1eca13bb2fac16dd3087f",
   "source_sha256": {
     "build/fuzz.zig": "ced2bb008991f781629b114434a4c518112698de6cfcafc1243c33638bc125ec",
@@ -83,6 +83,25 @@
     "grouped_compile_roots": 2,
     "scope": "one Debug macOS sample on the candidate; no stable whole-CI speedup claim"
   },
-  "native_linux_grouped_acceptance": "pending CI at the delivered revision",
+  "native_linux_grouped_acceptance": {
+    "status": "passed",
+    "head": "59ce674b39d20298e9b247d7ddaf867b2ad41f22",
+    "run": 45750666840,
+    "job": 139677407585,
+    "step": "Replay bounded fuzz corpora",
+    "started_at": "2026-11-26T03:47:40Z",
+    "completed_at": "2026-11-26T03:56:46Z",
+    "command": [
+      "zig",
+      "build",
+      "test-fuzz-replay",
+      "-j1",
+      "-Dtest-progress=true",
+      "--summary",
+      "all"
+    ],
+    "coverage_basis": "unchanged37-root/107-test membership registry, unfiltered grouped replay step success",
+    "source_url": "https://github.com/passchaos/netz/actions/runs/45750666840/job/139677407585"
+  },
   "complete_acceptance": "pending; scoped replay and cross-compilation do not replace the complete gate"
 }

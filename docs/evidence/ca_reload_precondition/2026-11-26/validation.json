@@ -1,0 +1,41 @@
+{
+  "observed_utc": "2026-11-26T05:07:52.812283+00:00",
+  "base_commit": "59ce674b39d20298e9b247d7ddaf867b2ad41f22",
+  "source_sha256": {
+    "examples/mqtt/mqtt_broker.zig": "6cad35962a44090b290e32fc4b0deed36ed2230b74ec14b5d4ee1973548dddab",
+    "examples/mqtt/mqtt_broker_config.zig": "b1f52aeba213db3e679ecfdb0d6f81d2707992ca0e1279464324bdcf88ae4ad4",
+    "tools/interop/mqtt_broker_config.py": "49483c9715f3c5a9d7fccb71faffd152cbe052db137b8841c2962ca98b3dbb67"
+  },
+  "linux_failure": {
+    "run": 45750666840,
+    "native_job": 139677407687,
+    "phase": "old MQTT PINGRESP before SIGHUP",
+    "error": "BrokenPipeError",
+    "old_connections": "MQTT/capath/WSS opened before rejected identities and anonymous OpenSSL client"
+  },
+  "diagnostic_behavior": {
+    "runner_option": "RunOptions.error_observer",
+    "environment": "NETZ_MQTT_CONFIG_TRACE_ERRORS=1",
+    "enabled_by": "client CA reload interoperability case only",
+    "maximum_events": 32,
+    "event_fields": [
+      "listener_index",
+      "stage",
+      "err"
+    ],
+    "default": "disabled"
+  },
+  "native_macos_precondition": {
+    "plain_service": "passed",
+    "public_persistence_management_service": "passed",
+    "trace_mode": "three CertificateUntrusted accept events; retained peers still respond",
+    "default_mode": "no trace events; retained peers still respond",
+    "scope": "actual TLS sockets before SIGHUP; no reload mocked or native Linux acceptance inferred"
+  },
+  "crypto_boundary": {
+    "local_vail": "d93847a7e091c835406ee10c0a86fd064f1475dd",
+    "ci_vail": "3b772b0cccb64d84fbc760df6428bc51e0fe0761",
+    "source_diff": "onlysrc/crypto/hash/keccak4.zig; TLS and AES-GCM sources identical"
+  },
+  "remaining": "native Linux error event from the retained-connection failure; full reload and complete CI still pending"
+}
