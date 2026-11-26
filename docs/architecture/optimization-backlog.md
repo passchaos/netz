@@ -507,3 +507,60 @@ socket reuse and 64 active races; their native run remains pending. Original
 H2 backends, KeyUpdate/capacity/close/reuse assertions, dependency pins,
 commands, budgets and migration inputs remain intact. Complete acceptance and
 fixed-workload performance qualification are still open.
+
+### Full CI abort context ownership
+
+The library ABRT's first test remains unknown in the latest public failure
+summaries. A replay of the actual verbose log structure reproduces a separate
+diagnostic defect: a delayed `failed command` signal summary was associated
+with a later fuzz artifact, while allocator abort prefaces could be ignored or
+hidden behind the twelve-annotation cap. Empty failed-command logs also raised
+an exception instead of preserving missing-output information.
+
+The extractor now indexes last-visible tests by cache executable and invocation,
+resolves signal summaries through their failed command, and starts fresh context
+for repeated executions. Unknown artifacts remain unassigned. Native crash and
+allocator prefaces receive priority within the existing cap, and signal blocks
+end at the failed command. [The qualification](../evidence/ci_crash_artifact_context/2026-11-26/validation.json)
+records 22 focused checks, including actual child SIGABRT and Windows quoted
+paths. This improves the next owning-path diagnosis; it does not close the
+library crash or native/complete acceptance. Commands, budgets, pins and
+failure status remain unchanged.
+
+### Native Windows stream-read qualification on a265f9b7
+
+[Run 45805867462](https://github.com/passchaos/netz/actions/runs/45805867462)
+passed Windows' unchanged H1/H2 resolver/read command and original/added H2
+protocol command step. The existing `stream timed` filter includes all five
+new Windows read contracts through their formal import; the platform guard
+executes them on this runner. The original Threaded H2 TLS endpoint Session,
+KeyUpdate, capacity, close and reuse assertions passed too. The raw std.Io
+baseline still reproduces zero reported count after five consumed bytes,
+while the retained Batch count and pending-read socket reuse checks pass.
+
+This closes the delivered stream-read adaptation's selected native Windows
+contract and H2 TLS qualification. It does not close all native or complete
+acceptance. The later HTTP/3 fixture command failed in two sends with expected
+`Timeout` but actual `Unexpected`, returning from protected send packetization.
+The bounded old annotation lacks the triggering test after the long trace.
+The extractor's new active-artifact fallback retains that last visible test
+even beyond forty trace lines. The first H3 send cause and complete-library
+ABRT still need direct owning-path evidence; commands, budgets and pins remain.
+
+### Located complete-run removal deadline GP
+
+The complete run's full annotations identify its GP at test4591/7478,
+`WebTransport endpoint client removal deadline spans CLOSE RESET and STOP
+without renewal`. The stack enters allocator creation through Threaded
+Group.concurrent. The fixture's ExpiringSend userdata was supplied to
+inherited backend callbacks. That is an owning-path ABI mismatch, separate
+from the now-qualified Windows TCP byte-count repair.
+
+The fixture uses the shared Native observer and typed callback forwarding,
+atomic selected-send clock advancement and actual-backend deadline wakeups.
+Endpoint I/O restoration precedes observer destruction and fixture cleanup.
+All seven same-family tests retain their original traffic and CLOSE/RESET/STOP,
+four-send, pending-DRAIN, protocol-rejection, retry and sibling assertions on
+supported real backends. The local scope passes118 cases and Windows8/8-step
+compilation; an independent native scope remains inside the original
+five-minute protocol budget. Complete/native crash qualification is still open.

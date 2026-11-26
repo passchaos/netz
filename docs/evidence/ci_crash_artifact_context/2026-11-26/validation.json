@@ -1,0 +1,147 @@
+{
+  "observed_utc": "2026-11-26T11:38:45.319802+00:00",
+  "base_commit": "a265f9b7a043f8aad164f9c9ace71bd4f127702a",
+  "source_sha256": {
+    "tools/ci/test_failure_annotations.py": "660bd1da59f5d2f3d6c342c56f9f7b59c1f6c0c092e9e343ba7761e0fb735314",
+    "tools/ci/test_failure_annotations_test.py": "ec9d7a4f8159f1cffb3019bd631f114f2d4199501a50a2cca5d2c7c1332bee63",
+    "docs/architecture/optimization-backlog.md": "1a85528cbdb6589097bd8a03daf7f90f6be156d6e16aaea3973c91b6ebdd0cc0",
+    ".github/workflows/ci.yml": "77eb92d82a5c4c22f7904ea453e377033e577c2e60ee92635cf4a95769b8b433",
+    "build/testing/run.zig": "99f36c53bd8d89dde33411c4cf09f56ebc9e1a6c4e1ff394434046f530b49059",
+    "src/webtransport/runtime/endpoint_client/removal_deadline_tests.zig": "e69e96f3d833e9b7d7c30376146d6795467a28ce82b97573520412fd6222f50c",
+    "src/internal/testing/deadline_send_io.zig": "141d74566f3c9f02c8843586e865afb1e9510edf411382beaf12abd5693217ea",
+    "src/internal/testing/forwarded_io.zig": "fdcb7229cbf0199ee36d55668335adc49b0bd04747ba56b6aa793793f7d6fd40",
+    "src/internal/testing/native_protocol_io.zig": "c8e9569e077d52978bfd10e65216e9d8bc14ff72603ef3705da4c599e11a916b"
+  },
+  "checks": {
+    "python_unit": {
+      "command": [
+        "/usr/bin/python3",
+        "-m",
+        "unittest",
+        "test_failure_annotations_test"
+      ],
+      "cwd": "tools/ci",
+      "tests_passed": 22,
+      "exit_code": 0,
+      "log_sha256": "78f0673eb21132e7a4f79e422d90c03d114631ad6719566f92c1a18ad3142652"
+    },
+    "diff_check": {
+      "exit_code": 0
+    },
+    "evidence_audit": {
+      "command": [
+        "netz-evidence-audit",
+        "--max-unresolved=24"
+      ],
+      "exit_code": 0,
+      "unresolved": 3,
+      "invalid": 0,
+      "unreadable": 0
+    },
+    "removal_deadline": {
+      "fmt": {
+        "command": [
+          "/Users/bytedance/.local/bin/zig",
+          "fmt",
+          "src/webtransport/runtime/endpoint_client/removal_deadline_tests.zig"
+        ],
+        "exit_code": 0,
+        "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "native": {
+        "command": [
+          "/Users/bytedance/.local/bin/zig",
+          "build",
+          "test-webtransport",
+          "-j1",
+          "-Dtest-progress=true",
+          "-Dtest-filter=WebTransport endpoint client removal deadline",
+          "--summary",
+          "all"
+        ],
+        "exit_code": 0,
+        "log_sha256": "b544336b8a420f271db9a33f12e72d28ac216a96a764cae000fb70206bd5d72c",
+        "tests_passed": 118
+      },
+      "windows-compile": {
+        "command": [
+          "/Users/bytedance/.local/bin/zig",
+          "build",
+          "test-webtransport-compile",
+          "-j1",
+          "-Dtarget=x86_64-windows-gnu",
+          "-Dtest-filter=WebTransport endpoint client removal deadline",
+          "--summary",
+          "all"
+        ],
+        "exit_code": 0,
+        "log_sha256": "fc55bcceb1385aeea9346ae190806f50684015ca7cd8a7e4f68fe7b3230bfad3",
+        "build_steps": "8/8"
+      }
+    }
+  },
+  "reproduced": [
+    "delayed signal summary falsely names a later fuzz test",
+    "native allocator abort preface omitted",
+    "earlier build errors consume the annotation cap",
+    "unknown/repeated artifact falsely reuses a previous test",
+    "empty failed log raises IndexError",
+    "long H3 error trace loses the active test name"
+  ],
+  "behavior": [
+    "index last visible tests by executed cache artifact and invocation",
+    "signal summary resolves its own failed command",
+    "unknown invocation keeps missing context",
+    "truncate signal context at failed command",
+    "native fatal prefaces prioritized within twelve-annotation cap",
+    "preserve exact escaping and original command exit status"
+  ],
+  "native_windows_a265": {
+    "url": "https://github.com/passchaos/netz/actions/runs/45805867462/job/139860822268",
+    "selected_steps": [
+      {
+        "name": "Run native H1 H2 resolver and pull reader regressions",
+        "conclusion": "success",
+        "started-at": "2026-11-26T11:04:02Z",
+        "completed-at": "2026-11-26T11:06:33Z"
+      },
+      {
+        "name": "Run native protocol CI regressions",
+        "conclusion": "success",
+        "started-at": "2026-11-26T11:06:33Z",
+        "completed-at": "2026-11-26T11:08:48Z"
+      }
+    ],
+    "formal_windows_read_tests": [
+      "stream timed Windows completed reads preserve bytes EOF and caller cancellation",
+      "stream timed Windows idle reads cancel after native entry and reuse sockets",
+      "stream timed Windows read cancellation preserves queued input before admission",
+      "stream timed Windows read races conserve the exact TCP prefix",
+      "stream timed Windows vector reads retain every completed destination"
+    ],
+    "h2_original_backend_and_assertions_preserved": true,
+    "later_failure": "two HTTP3 fixture sends expected Timeout but got Unexpected; first test missing in old bounded annotation"
+  },
+  "unknown_library_abrt": "first GP case now located and source mismatch repaired; complete-run acceptance still pending",
+  "full_goal_status": "active",
+  "located_library_gp": {
+    "url": "https://github.com/passchaos/netz/actions/runs/45805867462/job/139860822275",
+    "first_test": "4591/7478 WebTransport endpoint client removal deadline spans CLOSE RESET and STOP without renewal",
+    "first_stack": "Allocator.rawAlloc -> Threaded.Group.concurrent",
+    "mechanism": "ExpiringSend observer userdata supplied to inherited Threaded callbacks",
+    "native_context_fix": "shared Native observer, full callback forwarding, selected-send atomic clock and actual event wakeup",
+    "endpoint_restore_before_observer_destroy": true,
+    "named_same_family_tests": [
+      "WebTransport endpoint client removal deadline retains partial CLOSE and sibling ownership",
+      "WebTransport endpoint client removal deadline rejects invalid budgets before mutation",
+      "WebTransport endpoint client removal deadline spans CLOSE RESET and STOP without renewal",
+      "WebTransport endpoint client removal deadline resumes an explicit CLOSE metadata",
+      "WebTransport endpoint client removal deadline bounds congestion waits and remains resumable",
+      "WebTransport endpoint client removal deadline completes pending DRAIN before CLOSE",
+      "WebTransport endpoint client removal deadline keeps protocol rejection ahead of FIN"
+    ],
+    "native_pinned_and_complete_qualification": "pending delivered revision"
+  },
+  "native_scope_added": "independent seven-case removal scope in existing five-minute protocol step",
+  "original_commands_budgets_pins_and_annotation_cap_preserved": true
+}

@@ -4,6 +4,8 @@ const quic = @import("../../../quic/mod.zig");
 const http3 = @import("../../../http3/mod.zig");
 const control_mod = @import("../session_control.zig");
 const Fixture = @import("test_support.zig").Fixture;
+const NativeSendIo = @import("../../../internal/testing/deadline_send_io.zig").Native;
+const native_protocol_io = @import("../../../internal/testing/native_protocol_io.zig");
 const allocator = std.testing.allocator;
 
 fn expectPeerClose(fixture: *Fixture, id: u62, code: u32, reason: []const u8) !void {
@@ -35,11 +37,13 @@ fn expectPeerClose(fixture: *Fixture, id: u62, code: u32, reason: []const u8) !v
 }
 
 test "WebTransport endpoint client removal deadline retains partial CLOSE and sibling ownership" {
+    try native_protocol_io.run(partialClose);
+}
+
+fn partialClose(io: std.Io) !void {
     for ([_]bool{ false, true }) |absolute| {
-        var threaded = std.Io.Threaded.init(allocator, .{});
-        defer threaded.deinit();
         var fixture: Fixture = undefined;
-        try fixture.init(threaded.io());
+        try fixture.init(io);
         defer fixture.deinit();
         const session = try fixture.addSession();
         const sibling = try fixture.addSession();
@@ -47,7 +51,7 @@ test "WebTransport endpoint client removal deadline retains partial CLOSE and si
         const connection = &fixture.client.h3.established.connection;
         const start = try quic.one_rtt.testing.clampSendStreamLimitToUsed(connection, id.value);
         try quic.one_rtt.testing.applyReceivedFrames(connection, 91, &.{.{ .max_stream_data = .{ .stream_id = id.value, .maximum_stream_data = start + 1 } }}, null, .not_ect);
-        const deadline = std.Io.Clock.Timestamp.fromNow(threaded.io(), .{ .clock = .awake, .raw = .fromMilliseconds(5) });
+        const deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .clock = .awake, .raw = .fromMilliseconds(5) });
         if (absolute)
             try std.testing.expectError(error.Timeout, fixture.client.removeSessionWithDeadline(id, deadline))
         else
@@ -71,10 +75,12 @@ test "WebTransport endpoint client removal deadline retains partial CLOSE and si
 }
 
 test "WebTransport endpoint client removal deadline rejects invalid budgets before mutation" {
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
+    try native_protocol_io.run(invalidBudgets);
+}
+
+fn invalidBudgets(io: std.Io) !void {
     var fixture: Fixture = undefined;
-    try fixture.init(threaded.io());
+    try fixture.init(io);
     defer fixture.deinit();
     const session = try fixture.addSession();
     const id = session.session_id;
@@ -91,31 +97,31 @@ test "WebTransport endpoint client removal deadline rejects invalid budgets befo
 }
 
 const ExpiringSend = struct {
-    delegate: std.Io,
-    now_ns: i96 = 1_000_000,
-    calls: usize = 0,
+    native: NativeSendIo,
+    calls: std.atomic.Value(usize) = .init(0),
     expire_after: usize,
-
-    fn now(context: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
-        const self: *@This() = @ptrCast(@alignCast(context.?));
-        return .fromNanoseconds(self.now_ns);
-    }
 
     fn send(context: ?*anyopaque, socket: std.Io.net.Socket.Handle, messages: []std.Io.net.OutgoingMessage, flags: std.Io.net.SendFlags) struct { ?std.Io.net.Socket.SendError, usize } {
         const self: *@This() = @ptrCast(@alignCast(context.?));
-        self.calls += 1;
-        const result = self.delegate.vtable.netSend(self.delegate.userdata, socket, messages, flags);
-        if (self.calls == self.expire_after and result[0] == null and result[1] != 0) self.now_ns += 2;
+        const call = self.calls.fetchAdd(1, .monotonic) + 1;
+        const base = self.native.baseIo();
+        const result = base.vtable.netSend(base.userdata, socket, messages, flags);
+        if (call == self.expire_after and result[0] == null and result[1] != 0) {
+            _ = self.native.now_ns.fetchAdd(2, .acq_rel);
+            self.native.clock_changed.set(base);
+        }
         return result;
     }
 };
 
 test "WebTransport endpoint client removal deadline spans CLOSE RESET and STOP without renewal" {
+    try native_protocol_io.run(removalDeadlinePhases);
+}
+
+fn removalDeadlinePhases(io: std.Io) !void {
     for ([_]usize{ 1, 2, 3 }) |expire_after| {
-        var threaded = std.Io.Threaded.init(allocator, .{});
-        defer threaded.deinit();
         var fixture: Fixture = undefined;
-        try fixture.init(threaded.io());
+        try fixture.init(io);
         defer fixture.deinit();
         const session = try fixture.addSession();
         const sibling = try fixture.addSession();
@@ -124,22 +130,26 @@ test "WebTransport endpoint client removal deadline spans CLOSE RESET and STOP w
         const connection = &fixture.client.h3.established.connection;
         const before = connection.sendStreamStats(id.value).?.highest_sent_offset;
         const original_io = connection.endpoint.io;
-        var observed = ExpiringSend{ .delegate = original_io, .expire_after = expire_after };
-        var vtable = original_io.vtable.*;
-        vtable.now = ExpiringSend.now;
-        vtable.netSend = ExpiringSend.send;
-        connection.endpoint.io = .{ .userdata = &observed, .vtable = &vtable };
+        var observed = ExpiringSend{ .native = .{
+            .backend = std.Io.Threaded.init(allocator, .{ .async_limit = .nothing }),
+            .delegate_io = original_io,
+            .now_ns = .init(1_000_000),
+        }, .expire_after = expire_after };
+        defer observed.native.backend.deinit();
+        observed.native.send_context = &observed;
+        observed.native.send_override = ExpiringSend.send;
+        connection.endpoint.io = observed.native.io();
         defer connection.endpoint.io = original_io;
-        const deadline: std.Io.Clock.Timestamp = .{ .clock = .awake, .raw = .fromNanoseconds(observed.now_ns + 1) };
+        const deadline: std.Io.Clock.Timestamp = .{ .clock = .awake, .raw = .fromNanoseconds(observed.native.now_ns.load(.acquire) + 1) };
         try std.testing.expectError(error.Timeout, fixture.client.removeSessionWithDeadline(id, deadline));
         try std.testing.expect(fixture.client.session(id) == session and session.control.local_close_sent);
         try std.testing.expectEqual(before + 9, connection.sendStreamStats(id.value).?.highest_sent_offset);
         try std.testing.expectEqual(expire_after >= 2, session.streams.get(bidi).?.send_reset != null);
         try std.testing.expectEqual(expire_after >= 3, session.streams.get(bidi).?.stop_sent != null);
         try std.testing.expect(connection.recvStreamStats(id.value).?.stop_sending_sent == null);
-        try std.testing.expectEqual(expire_after, observed.calls);
-        try std.testing.expect(try fixture.client.removeSessionWithDeadline(id, .{ .clock = .awake, .raw = .fromNanoseconds(observed.now_ns + std.time.ns_per_s) }));
-        try std.testing.expectEqual(@as(usize, 4), observed.calls);
+        try std.testing.expectEqual(expire_after, observed.calls.load(.acquire));
+        try std.testing.expect(try fixture.client.removeSessionWithDeadline(id, .{ .clock = .awake, .raw = .fromNanoseconds(observed.native.now_ns.load(.acquire) + std.time.ns_per_s) }));
+        try std.testing.expectEqual(@as(usize, 4), observed.calls.load(.acquire));
         try std.testing.expectEqual(before + 9, connection.sendStreamStats(id.value).?.highest_sent_offset);
         try std.testing.expectEqual(webtransport.ApplicationErrorCode.session_gone, connection.sendStreamStats(bidi).?.reset.?.application_error_code);
         try std.testing.expectEqual(webtransport.ApplicationErrorCode.session_gone, connection.recvStreamStats(bidi).?.stop_sending_sent.?.application_error_code);
@@ -148,10 +158,12 @@ test "WebTransport endpoint client removal deadline spans CLOSE RESET and STOP w
 }
 
 test "WebTransport endpoint client removal deadline resumes an explicit CLOSE metadata" {
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
+    try native_protocol_io.run(explicitClose);
+}
+
+fn explicitClose(io: std.Io) !void {
     var fixture: Fixture = undefined;
-    try fixture.init(threaded.io());
+    try fixture.init(io);
     defer fixture.deinit();
     const session = try fixture.addSession();
     _ = try fixture.addSession();
@@ -172,10 +184,12 @@ test "WebTransport endpoint client removal deadline resumes an explicit CLOSE me
 }
 
 test "WebTransport endpoint client removal deadline bounds congestion waits and remains resumable" {
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
+    try native_protocol_io.run(congestionWait);
+}
+
+fn congestionWait(io: std.Io) !void {
     var fixture: Fixture = undefined;
-    try fixture.init(threaded.io());
+    try fixture.init(io);
     defer fixture.deinit();
     const session = try fixture.addSession();
     const sibling = try fixture.addSession();
@@ -195,10 +209,12 @@ test "WebTransport endpoint client removal deadline bounds congestion waits and 
 }
 
 test "WebTransport endpoint client removal deadline completes pending DRAIN before CLOSE" {
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
+    try native_protocol_io.run(pendingDrain);
+}
+
+fn pendingDrain(io: std.Io) !void {
     var fixture: Fixture = undefined;
-    try fixture.init(threaded.io());
+    try fixture.init(io);
     defer fixture.deinit();
     const session = try fixture.addSession();
     const id = session.session_id;
@@ -217,7 +233,7 @@ test "WebTransport endpoint client removal deadline completes pending DRAIN befo
     try std.testing.expectEqual(start + 2 + drain.len + 9, connection.sendStreamStats(id.value).?.highest_sent_offset);
     var control = try control_mod.Control.init(allocator, id);
     defer control.deinit();
-    const deadline = std.Io.Clock.Timestamp.fromNow(threaded.io(), .{ .clock = .awake, .raw = .fromSeconds(1) });
+    const deadline = std.Io.Clock.Timestamp.fromNow(io, .{ .clock = .awake, .raw = .fromSeconds(1) });
     var header_read = false;
     var draining = false;
     while (true) {
@@ -249,10 +265,12 @@ test "WebTransport endpoint client removal deadline completes pending DRAIN befo
 }
 
 test "WebTransport endpoint client removal deadline keeps protocol rejection ahead of FIN" {
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
+    try native_protocol_io.run(protocolRejection);
+}
+
+fn protocolRejection(io: std.Io) !void {
     var fixture: Fixture = undefined;
-    try fixture.init(threaded.io());
+    try fixture.init(io);
     defer fixture.deinit();
     const session = try fixture.addSession();
     const sibling = try fixture.addSession();
