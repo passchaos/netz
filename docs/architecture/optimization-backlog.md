@@ -917,3 +917,31 @@ annotations contain no new allocator GP. This result precedes the HTTP/2
 observer repair, and the one CA reload pass does not causally resolve earlier
 intermittent pre-SIGHUP failures. Full acceptance, remaining contexts, owner
 structure, measured fairness and workload performance remain active.
+
+### HTTP/3 dispatcher and endpoint pacing-clock ownership
+
+Thirteen H3 dispatcher/endpoint-server fixtures change userdata while
+inheriting backend callbacks, and their clock wrappers fabricate `Canceled`
+for every sleep. They now share the native clock/delegate helper. Atomic awake
+time and each original transition notify actual deadline waits; duration
+sleeps retain the original zero pacing-sleep checks. Original I/O is restored
+before clock, session and endpoint cleanup. The large client control-frame
+retry fixture is extracted into its own module with the same named case.
+
+All original 35 names and 342 assertion statements remain, including 13 selected
+cases and 201 assertions after atomic/pacing-counter normalization. Original
+clock epochs/transitions, wire payloads, packet numbers, control offsets,
+stream/push admission, HEADERS/body/FIN state, QPACK feedback and receive
+credit remain. [The qualification](../evidence/h3_pacing_native_clock/2026-11-27/validation.json)
+records 80 scoped native passes and Windows 8/8 compilation. Supported POSIX
+Threaded and application datagram paths are exercised; Windows compilation
+retains the supported application path. These are source contract repairs,
+not thirteen independently reproduced native crashes.
+
+The last `7a2e6bcc` complete output at 6355/7490 is marked OK before the standard
+runner deinitializes that test's I/O. The unchanged `65b9c7fc` macOS health-Watch
+and next TLS reflection scope completes 75 artifact tests and exits zero,
+including runner cleanup. That result does not causally qualify the Linux
+complete-gate timeout. Existing CI commands, budgets and dependency pins remain
+intact. Delivered native/full acceptance, remaining observer contexts, owner
+structure, endpoint fairness and measured workload performance remain open.

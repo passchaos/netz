@@ -8,34 +8,15 @@ const ObservedBatchSend =
 
 const net = std.Io.net;
 
-const EndpointFixedClockIo = struct {
-    delegate: std.Io,
-    now_ns: i96,
-    sleep_calls: usize = 0,
-
-    fn now(
-        userdata: ?*anyopaque,
-        _: std.Io.Clock,
-    ) std.Io.Timestamp {
-        const self: *EndpointFixedClockIo = @ptrCast(@alignCast(userdata));
-        return .fromNanoseconds(self.now_ns);
-    }
-
-    fn sleep(
-        userdata: ?*anyopaque,
-        _: std.Io.Timeout,
-    ) std.Io.Cancelable!void {
-        const self: *EndpointFixedClockIo = @ptrCast(@alignCast(userdata));
-        self.sleep_calls += 1;
-        return error.Canceled;
-    }
-};
+const EndpointFixedClockIo = @import("../../internal/testing/deadline_send_io.zig").Native;
+const native_protocol_io = @import("../../internal/testing/native_protocol_io.zig");
 
 test "HTTP/3 endpoint request polling defers paced feedback" {
+    try native_protocol_io.run(endpointRequestPollingDefersPacedFeedback);
+}
+
+fn endpointRequestPollingDefersPacedFeedback(io: std.Io) !void {
     const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
 
     var server_endpoint = try quic.runtime.Endpoint.bind(
         allocator,
@@ -151,21 +132,17 @@ test "HTTP/3 endpoint request polling defers paced feedback" {
         .session = &session,
     };
 
-    var fixed_io = EndpointFixedClockIo{
-        .delegate = server_endpoint.io,
-        .now_ns = 1_000_000,
+    var fixed_io: EndpointFixedClockIo = .{
+        .backend = .init(allocator, .{ .async_limit = .nothing }),
+        .delegate_io = server_endpoint.io,
+        .now_ns = .init(1_000_000),
     };
-    var fixed_vtable = server_endpoint.io.vtable.*;
-    fixed_vtable.now = EndpointFixedClockIo.now;
-    fixed_vtable.sleep = EndpointFixedClockIo.sleep;
-    server_endpoint.io = .{
-        .userdata = &fixed_io,
-        .vtable = &fixed_vtable,
-    };
-    defer server_endpoint.io = fixed_io.delegate;
+    defer fixed_io.backend.deinit();
+    server_endpoint.io = fixed_io.io();
+    defer server_endpoint.io = fixed_io.baseIo();
     quic.one_rtt.testing.exhaustPacingAt(
         &session.established.connection,
-        @intCast(fixed_io.now_ns),
+        @intCast(fixed_io.now_ns.load(.acquire)),
     );
 
     const packet_number = session.established.connection.next_packet_number;
@@ -174,7 +151,7 @@ test "HTTP/3 endpoint request polling defers paced feedback" {
             &promoted,
         )) == null,
     );
-    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.duration_sleep_calls.load(.acquire));
     try std.testing.expectEqual(
         packet_number,
         session.established.connection.next_packet_number,
@@ -201,7 +178,7 @@ test "HTTP/3 endpoint request polling defers paced feedback" {
         quic.one_rtt.TimerDeadlineKind.pacing,
         timer.timer.kind,
     );
-    fixed_io.now_ns = @intCast(timer.timer.deadline_ns);
+    fixed_io.setNow(@intCast(timer.timer.deadline_ns));
     _ = (try dispatcher.serviceNextTimerAt(timer.timer.deadline_ns)) orelse
         return error.TestUnexpectedResult;
     try std.testing.expect(
@@ -209,7 +186,7 @@ test "HTTP/3 endpoint request polling defers paced feedback" {
             &promoted,
         )) == null,
     );
-    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.duration_sleep_calls.load(.acquire));
     try std.testing.expect(
         session.qpack_decode.pendingDecoderInstructions().len != 0,
     );
@@ -234,7 +211,7 @@ test "HTTP/3 endpoint request polling defers paced feedback" {
             quic.one_rtt.TimerDeadlineKind.pacing,
             feedback_timer.timer.kind,
         );
-        fixed_io.now_ns = @intCast(feedback_timer.timer.deadline_ns);
+        fixed_io.setNow(@intCast(feedback_timer.timer.deadline_ns));
         _ = (try dispatcher.serviceNextTimerAt(
             feedback_timer.timer.deadline_ns,
         )) orelse return error.TestUnexpectedResult;
@@ -243,7 +220,7 @@ test "HTTP/3 endpoint request polling defers paced feedback" {
                 &promoted,
             )) == null,
         );
-        try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+        try std.testing.expectEqual(@as(usize, 0), fixed_io.duration_sleep_calls.load(.acquire));
         try std.testing.expectEqual(
             request_available,
             quic.one_rtt.testing.receiveStreamAvailableLen(
@@ -262,7 +239,7 @@ test "HTTP/3 endpoint request polling defers paced feedback" {
         quic.one_rtt.TimerDeadlineKind.pacing,
         credit_timer.timer.kind,
     );
-    fixed_io.now_ns = @intCast(credit_timer.timer.deadline_ns);
+    fixed_io.setNow(@intCast(credit_timer.timer.deadline_ns));
     _ = (try dispatcher.serviceNextTimerAt(
         credit_timer.timer.deadline_ns,
     )) orelse return error.TestUnexpectedResult;
@@ -271,7 +248,7 @@ test "HTTP/3 endpoint request polling defers paced feedback" {
             &promoted,
         )) == null,
     );
-    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.duration_sleep_calls.load(.acquire));
     try std.testing.expectEqual(
         @as(usize, 0),
         quic.one_rtt.testing.receiveStreamAvailableLen(
@@ -282,10 +259,11 @@ test "HTTP/3 endpoint request polling defers paced feedback" {
 }
 
 test "HTTP/3 endpoint malformed request cancellation is retryable" {
+    try native_protocol_io.run(endpointMalformedRequestCancellationIsRetryable);
+}
+
+fn endpointMalformedRequestCancellationIsRetryable(io: std.Io) !void {
     const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
 
     var server_endpoint = try quic.runtime.Endpoint.bind(
         allocator,
@@ -374,21 +352,17 @@ test "HTTP/3 endpoint malformed request cancellation is retryable" {
         .session = &session,
     };
 
-    var fixed_io = EndpointFixedClockIo{
-        .delegate = server_endpoint.io,
-        .now_ns = 1_000_000,
+    var fixed_io: EndpointFixedClockIo = .{
+        .backend = .init(allocator, .{ .async_limit = .nothing }),
+        .delegate_io = server_endpoint.io,
+        .now_ns = .init(1_000_000),
     };
-    var fixed_vtable = server_endpoint.io.vtable.*;
-    fixed_vtable.now = EndpointFixedClockIo.now;
-    fixed_vtable.sleep = EndpointFixedClockIo.sleep;
-    server_endpoint.io = .{
-        .userdata = &fixed_io,
-        .vtable = &fixed_vtable,
-    };
-    defer server_endpoint.io = fixed_io.delegate;
+    defer fixed_io.backend.deinit();
+    server_endpoint.io = fixed_io.io();
+    defer server_endpoint.io = fixed_io.baseIo();
     quic.one_rtt.testing.exhaustPacingAt(
         &session.established.connection,
-        @intCast(fixed_io.now_ns),
+        @intCast(fixed_io.now_ns.load(.acquire)),
     );
 
     const packet_number = session.established.connection.next_packet_number;
@@ -396,7 +370,7 @@ test "HTTP/3 endpoint malformed request cancellation is retryable" {
         error.InvalidHeader,
         runtime.EndpointServer.testing.pollSessionRequestEntry(&promoted),
     );
-    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.duration_sleep_calls.load(.acquire));
     try std.testing.expectEqual(
         packet_number,
         session.established.connection.next_packet_number,
@@ -416,14 +390,14 @@ test "HTTP/3 endpoint malformed request cancellation is retryable" {
         quic.one_rtt.TimerDeadlineKind.pacing,
         timer.timer.kind,
     );
-    fixed_io.now_ns = @intCast(timer.timer.deadline_ns);
+    fixed_io.setNow(@intCast(timer.timer.deadline_ns));
     _ = (try dispatcher.serviceNextTimerAt(timer.timer.deadline_ns)) orelse
         return error.TestUnexpectedResult;
     try std.testing.expectError(
         error.InvalidHeader,
         runtime.EndpointServer.testing.pollSessionRequestEntry(&promoted),
     );
-    try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
+    try std.testing.expectEqual(@as(usize, 0), fixed_io.duration_sleep_calls.load(.acquire));
     try std.testing.expect(session.streaming_requests.find(0) == null);
     try std.testing.expect(
         session.established.connection.sendStreamStats(0).?.reset != null,

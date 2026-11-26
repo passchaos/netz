@@ -1,0 +1,266 @@
+{
+  "observed_utc": "2026-11-26T21:39:39.846682+00:00",
+  "base_commit": "65b9c7fc21855b2ed348465a146f00e21244ad2a",
+  "native_host": "aarch64-macos",
+  "guard": "All Zig and source qualification/invariant audits serialized under shared zig-tree-guard",
+  "source_sha256": {
+    "src/http3/runtime/endpoint_dispatcher_tests.zig": "cae776196c8379541065849acb056cb5f5b2c20c1c9174b0f89a92591c190be1",
+    "src/http3/runtime/endpoint_server_tests.zig": "28c86e218779a4dc644f25b7da5ab0ca2199a26ad1281828842d2d20d1b955ce",
+    "src/http3/runtime/endpoint_dispatcher/control_retry_tests.zig": "e1dedd84f715ff59a7d6997774b8595640801bdc1483553bd1ce02d70da5e787",
+    "src/internal/testing/deadline_send_io.zig": "fc5bc18c28afe1539801d1b6c5e50cdbe3fb06222cddfe292dc56b1cd72b5a2c",
+    "src/internal/testing/forwarded_io.zig": "c056ad2969f4d9eb39b9970e8919ca7583cae041cedc394a7ef9e07c1f7a8314",
+    "src/internal/testing/native_protocol_io.zig": "4f965f49ed0ba48fb0c9d1b572122415d4b95c165785f79bb2281a05e437b6ad"
+  },
+  "checks": {
+    "fmt": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "fmt",
+        "src/http3/runtime/endpoint_dispatcher_tests.zig",
+        "src/http3/runtime/endpoint_server_tests.zig",
+        "src/http3/runtime/endpoint_dispatcher/control_retry_tests.zig"
+      ],
+      "exit_code": 0,
+      "log_sha256": "ca62b0b03180f38f37c877fb69f30795c973260a56c69037ec414ebfd15534f1"
+    },
+    "invariants": {
+      "command": [
+        "/usr/bin/python3",
+        "/tmp/netz-h3-clock-invariants.py"
+      ],
+      "exit_code": 0,
+      "log_sha256": "16223348c0e1902c3874e3ccedd5f2633972fed68b256467e1d891a81b2d2874"
+    },
+    "native": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-http3",
+        "-j1",
+        "-Dtest-progress=true",
+        "-Dtest-filter=HTTP/3 borrowed response packet preserves any-response FIN across pacing",
+        "-Dtest-filter=HTTP/3 push once poll preserves FIN across pacing",
+        "-Dtest-filter=HTTP/3 request once send preserves its stream across pacing",
+        "-Dtest-filter=HTTP/3 dispatcher client control frames retry transactionally",
+        "-Dtest-filter=HTTP/3 dispatcher shutdown retries GOAWAY transactionally",
+        "-Dtest-filter=HTTP/3 dispatcher server ORIGIN retries transactionally",
+        "-Dtest-filter=HTTP/3 tryStartRequest stream limit is transactional and nonblocking",
+        "-Dtest-filter=HTTP/3 dispatcher-bound abandon never waits for pacing",
+        "-Dtest-filter=HTTP/3 request body parts remain transactional across pacing",
+        "-Dtest-filter=HTTP/3 request body batch preserves every stream across pacing",
+        "-Dtest-filter=HTTP/3 streaming request once sends retry every stage",
+        "-Dtest-filter=HTTP/3 endpoint request polling defers paced feedback",
+        "-Dtest-filter=HTTP/3 endpoint malformed request cancellation is retryable",
+        "-Dtest-filter=Native protocol observer",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log_sha256": "49c92b3aa01b9d92ed5ad126e02624383f245df256f7420f9a94de1ccb3951c2"
+    },
+    "windows-compile": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-http3-compile",
+        "-j1",
+        "-Dtarget=x86_64-windows-gnu",
+        "-Dtest-filter=HTTP/3 borrowed response packet preserves any-response FIN across pacing",
+        "-Dtest-filter=HTTP/3 push once poll preserves FIN across pacing",
+        "-Dtest-filter=HTTP/3 request once send preserves its stream across pacing",
+        "-Dtest-filter=HTTP/3 dispatcher client control frames retry transactionally",
+        "-Dtest-filter=HTTP/3 dispatcher shutdown retries GOAWAY transactionally",
+        "-Dtest-filter=HTTP/3 dispatcher server ORIGIN retries transactionally",
+        "-Dtest-filter=HTTP/3 tryStartRequest stream limit is transactional and nonblocking",
+        "-Dtest-filter=HTTP/3 dispatcher-bound abandon never waits for pacing",
+        "-Dtest-filter=HTTP/3 request body parts remain transactional across pacing",
+        "-Dtest-filter=HTTP/3 request body batch preserves every stream across pacing",
+        "-Dtest-filter=HTTP/3 streaming request once sends retry every stage",
+        "-Dtest-filter=HTTP/3 endpoint request polling defers paced feedback",
+        "-Dtest-filter=HTTP/3 endpoint malformed request cancellation is retryable",
+        "-Dtest-filter=Native protocol observer",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log_sha256": "0178b16b3bb4c08aaf431bba6948ddab56709193d3c94194fde58343389b1ba6"
+    }
+  },
+  "native_scoped_passed": 80,
+  "native_build_steps": "10/10",
+  "windows_compile_steps": "8/8",
+  "baseline": {
+    "base_commit": "65b9c7fc21855b2ed348465a146f00e21244ad2a",
+    "source_sha256": {
+      "src/http3/runtime/endpoint_dispatcher_tests.zig": "3a0cac16090f3e1a127884c25928a6ac2b2d48cab88d5a5b4ceb82c238f3f0de",
+      "src/http3/runtime/endpoint_server_tests.zig": "c389ff2034f10ea6abbb4c568a6b1c4d867ed44580a905496d57e2a2a36e2889"
+    },
+    "immutable_committed_source_verified": true,
+    "classification": "13 source-context and fabricated-cancellation findings; no separate native crash claimed"
+  },
+  "invariant_comparison": {
+    "all_original_case_names_preserved": 35,
+    "selected_original_names_preserved": 13,
+    "selected_assertions_preserved": 201,
+    "all_changed_file_assertions_preserved": 342,
+    "cases": [
+      {
+        "original_path": "src/http3/runtime/endpoint_dispatcher_tests.zig",
+        "path": "src/http3/runtime/endpoint_dispatcher_tests.zig",
+        "name": "HTTP/3 borrowed response packet preserves any-response FIN across pacing",
+        "helper": "borrowedResponsePacketPreservesAnyResponseFinAcrossPacing",
+        "assertions_preserved": 16,
+        "original_clock_epoch_ns": 1000000,
+        "clock_updates_preserved": 0
+      },
+      {
+        "original_path": "src/http3/runtime/endpoint_dispatcher_tests.zig",
+        "path": "src/http3/runtime/endpoint_dispatcher_tests.zig",
+        "name": "HTTP/3 push once poll preserves FIN across pacing",
+        "helper": "pushOncePollPreservesFinAcrossPacing",
+        "assertions_preserved": 20,
+        "original_clock_epoch_ns": 2000000,
+        "clock_updates_preserved": 1
+      },
+      {
+        "original_path": "src/http3/runtime/endpoint_dispatcher_tests.zig",
+        "path": "src/http3/runtime/endpoint_dispatcher_tests.zig",
+        "name": "HTTP/3 request once send preserves its stream across pacing",
+        "helper": "requestOnceSendPreservesItsStreamAcrossPacing",
+        "assertions_preserved": 11,
+        "original_clock_epoch_ns": 3000000,
+        "clock_updates_preserved": 1
+      },
+      {
+        "original_path": "src/http3/runtime/endpoint_dispatcher_tests.zig",
+        "path": "src/http3/runtime/endpoint_dispatcher/control_retry_tests.zig",
+        "name": "HTTP/3 dispatcher client control frames retry transactionally",
+        "helper": "dispatcherClientControlFramesRetryTransactionally",
+        "assertions_preserved": 35,
+        "original_clock_epoch_ns": 9000000,
+        "clock_updates_preserved": 5
+      },
+      {
+        "original_path": "src/http3/runtime/endpoint_dispatcher_tests.zig",
+        "path": "src/http3/runtime/endpoint_dispatcher_tests.zig",
+        "name": "HTTP/3 dispatcher shutdown retries GOAWAY transactionally",
+        "helper": "dispatcherShutdownRetriesGoawayTransactionally",
+        "assertions_preserved": 23,
+        "original_clock_epoch_ns": 6000000,
+        "clock_updates_preserved": 2
+      },
+      {
+        "original_path": "src/http3/runtime/endpoint_dispatcher_tests.zig",
+        "path": "src/http3/runtime/endpoint_dispatcher_tests.zig",
+        "name": "HTTP/3 dispatcher server ORIGIN retries transactionally",
+        "helper": "dispatcherServerOriginRetriesTransactionally",
+        "assertions_preserved": 10,
+        "original_clock_epoch_ns": 11000000,
+        "clock_updates_preserved": 1
+      },
+      {
+        "original_path": "src/http3/runtime/endpoint_dispatcher_tests.zig",
+        "path": "src/http3/runtime/endpoint_dispatcher_tests.zig",
+        "name": "HTTP/3 tryStartRequest stream limit is transactional and nonblocking",
+        "helper": "trystartrequestStreamLimitIsTransactionalAndNonblocking",
+        "assertions_preserved": 14,
+        "original_clock_epoch_ns": 5000000,
+        "clock_updates_preserved": 1
+      },
+      {
+        "original_path": "src/http3/runtime/endpoint_dispatcher_tests.zig",
+        "path": "src/http3/runtime/endpoint_dispatcher_tests.zig",
+        "name": "HTTP/3 dispatcher-bound abandon never waits for pacing",
+        "helper": "dispatcherBoundAbandonNeverWaitsForPacing",
+        "assertions_preserved": 4,
+        "original_clock_epoch_ns": 5000000,
+        "clock_updates_preserved": 0
+      },
+      {
+        "original_path": "src/http3/runtime/endpoint_dispatcher_tests.zig",
+        "path": "src/http3/runtime/endpoint_dispatcher_tests.zig",
+        "name": "HTTP/3 request body parts remain transactional across pacing",
+        "helper": "requestBodyPartsRemainTransactionalAcrossPacing",
+        "assertions_preserved": 10,
+        "original_clock_epoch_ns": 7000000,
+        "clock_updates_preserved": 1
+      },
+      {
+        "original_path": "src/http3/runtime/endpoint_dispatcher_tests.zig",
+        "path": "src/http3/runtime/endpoint_dispatcher_tests.zig",
+        "name": "HTTP/3 request body batch preserves every stream across pacing",
+        "helper": "requestBodyBatchPreservesEveryStreamAcrossPacing",
+        "assertions_preserved": 7,
+        "original_clock_epoch_ns": 8000000,
+        "clock_updates_preserved": 0
+      },
+      {
+        "original_path": "src/http3/runtime/endpoint_dispatcher_tests.zig",
+        "path": "src/http3/runtime/endpoint_dispatcher_tests.zig",
+        "name": "HTTP/3 streaming request once sends retry every stage",
+        "helper": "streamingRequestOnceSendsRetryEveryStage",
+        "assertions_preserved": 13,
+        "original_clock_epoch_ns": 4000000,
+        "clock_updates_preserved": 3
+      },
+      {
+        "original_path": "src/http3/runtime/endpoint_server_tests.zig",
+        "path": "src/http3/runtime/endpoint_server_tests.zig",
+        "name": "HTTP/3 endpoint request polling defers paced feedback",
+        "helper": "endpointRequestPollingDefersPacedFeedback",
+        "assertions_preserved": 26,
+        "original_clock_epoch_ns": 1000000,
+        "clock_updates_preserved": 3
+      },
+      {
+        "original_path": "src/http3/runtime/endpoint_server_tests.zig",
+        "path": "src/http3/runtime/endpoint_server_tests.zig",
+        "name": "HTTP/3 endpoint malformed request cancellation is retryable",
+        "helper": "endpointMalformedRequestCancellationIsRetryable",
+        "assertions_preserved": 12,
+        "original_clock_epoch_ns": 1000000,
+        "clock_updates_preserved": 1
+      }
+    ],
+    "normalization": "atomic reads and explicit duration/pacing sleep counter only",
+    "clock_epochs_and_transitions_preserved": true
+  },
+  "backends": [
+    "POSIX Threaded datagrams, zero async capacity",
+    "application backend, one executor, including Windows"
+  ],
+  "observer_lifetime": "original endpoint I/O restored before Native backend, session and endpoint deinit",
+  "deadline_waits": "actual cancellable awake-clock wait with explicit setNow notification",
+  "pacing_waits": "original zero duration-sleep assertions preserved; actual deadline-watcher sleeps remain separate",
+  "extracted_fixture": "src/http3/runtime/endpoint_dispatcher/control_retry_tests.zig",
+  "full_gate_teardown_probe": {
+    "base_commit": "65b9c7fc21855b2ed348465a146f00e21244ad2a",
+    "command": [
+      "/Users/bytedance/.local/bin/zig",
+      "build",
+      "test-grpc",
+      "-j1",
+      "-Dtest-progress=true",
+      "-Dtest-filter=gRPC TLS runtime streams health Watch updates",
+      "-Dtest-filter=gRPC TLS runtime serves reflection v1",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 0,
+    "log_sha256": "cd272aa083729bd4fff95d1c59aa25eef735a9aee29128d59767e0f72499da55",
+    "native_scoped_passed": 75,
+    "standard_runner_result_precedes_test_io_deinit": true,
+    "result": "both unchanged TLS neighbors and standard runner cleanup complete on macOS",
+    "linux_complete_causal_qualification": false
+  },
+  "ci_commands_budgets_pins_changed": false,
+  "production_or_public_imports_changed": false,
+  "full_goal_status": "active",
+  "delivered_native_complete_qualification": "pending",
+  "limitations": [
+    "80 artifact cases include shared imported tests",
+    "Windows compilation is distinct from native execution",
+    "the macOS gRPC neighbor probe does not resolve Linux full-gate timeout",
+    "remaining contexts, owner structure, fairness and workload performance remain open"
+  ]
+}
