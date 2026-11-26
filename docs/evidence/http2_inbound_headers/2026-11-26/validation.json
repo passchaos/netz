@@ -1,0 +1,130 @@
+{
+  "observed_utc": "2026-11-26T09:47:58.891040+00:00",
+  "base_commit": "4a25e2fb80e1364fd4cdf56a15dfda1f92fe2fb9",
+  "source_sha256": {
+    "src/http2/runtime/connection.zig": "4597b10e677057f0d6bb1dfe1ec03d88d279bd1c087cc48b9ffbcc226685b87a",
+    "src/http2/runtime/headers/inbound.zig": "4e2a3a02b856fc9df892beb7bd76fb5064696fdce6aa345cf1493db7f7a1a1db",
+    "docs/architecture/optimization-backlog.md": "ad2dfad10704545dc46c98eae2525aad6001cf70365c4b759408f39a00be1598",
+    "build.zig.zon": "b1db040a3652b14c5b0910421a64ef4a6119e5931cd7b51a4187dfd309075b4a"
+  },
+  "checks": {
+    "fmt": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "fmt",
+        "src/http2/runtime/connection.zig",
+        "src/http2/runtime/headers/inbound.zig"
+      ],
+      "exit_code": 0,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "native": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-http2",
+        "-j1",
+        "-Dtest-progress=true",
+        "-Dtest-filter=CONTINUATION",
+        "-Dtest-filter=complete continuation overflow",
+        "-Dtest-filter=complete compressed block overflow",
+        "-Dtest-filter=single-frame HEADERS",
+        "-Dtest-filter=unterminated continuation flood",
+        "-Dtest-filter=header list size limits",
+        "-Dtest-filter=capacity refusal isolates complete field and continuation limits",
+        "-Dtest-filter=aggregate response deadline covers header continuations",
+        "-Dtest-filter=streaming request batch deadline covers continuation",
+        "-Dtest-filter=streaming response batch deadline covers continuation",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log_sha256": "e7a15d789ba651f483ab1378963c2b683234274546ba4009d2418bd212973eaa"
+    },
+    "windows-compile": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-http2-compile",
+        "-j1",
+        "-Dtarget=x86_64-windows-gnu",
+        "-Dtest-filter=CONTINUATION",
+        "-Dtest-filter=complete continuation overflow",
+        "-Dtest-filter=complete compressed block overflow",
+        "-Dtest-filter=single-frame HEADERS",
+        "-Dtest-filter=unterminated continuation flood",
+        "-Dtest-filter=header list size limits",
+        "-Dtest-filter=capacity refusal isolates complete field and continuation limits",
+        "-Dtest-filter=aggregate response deadline covers header continuations",
+        "-Dtest-filter=streaming request batch deadline covers continuation",
+        "-Dtest-filter=streaming response batch deadline covers continuation",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log_sha256": "1529415c333b12ec133b473d3e8f484d6057f99b915503a90799dfefae6aa125"
+    },
+    "evidence-audit": {
+      "command": [
+        "netz-evidence-audit",
+        "--max-unresolved=24"
+      ],
+      "exit_code": 0,
+      "unresolved": 3,
+      "invalid": 0,
+      "unreadable": 0,
+      "unresolved_scope": "three historical WebTransport paths"
+    }
+  },
+  "native_host": "aarch64-macos",
+  "native_tests_passed": 62,
+  "focused_http2_named_tests": 27,
+  "imported_support_or_aggregators": 35,
+  "focused_test_names": [
+    "http2.runtime.concurrent_and_malformed_tests.test.HTTP/2 runtime rejects malformed CONTINUATION sequence",
+    "http2.runtime.concurrent_and_malformed_tests.test.HTTP/2 serveOne maps malformed CONTINUATION to PROTOCOL_ERROR GOAWAY",
+    "http2.runtime.concurrent_and_malformed_tests.test.HTTP/2 serveOne maps unterminated continuation flood to ENHANCE_YOUR_CALM GOAWAY",
+    "http2.runtime.headers_priority_tests.test.HTTP/2 runtime reads and writes CONTINUATION header blocks",
+    "http2.runtime.headers_priority_tests.test.HTTP/2 single-frame HEADERS bypass continuation scratch",
+    "http2.runtime.headers_priority_tests.test.HTTP/2 runtime bounds CONTINUATION frame chains",
+    "http2.runtime.protocol_error_tests.test.HTTP/2 client maps cross-stream response CONTINUATION to PROTOCOL_ERROR GOAWAY",
+    "http2.runtime.settings_and_capacity_tests.test.HTTP/2 runtime enforces header list size limits",
+    "http2.runtime.connect.deadline_tests.test.HTTP/2 CONNECT deadline bounds blocked opening HEADERS and CONTINUATION",
+    "http2.runtime.push.receive_lifecycle_tests.test.HTTP/2 canceled push oversized CONTINUATION still advances HPACK for sibling",
+    "http2.runtime.push.receive_error_tests.test.HTTP/2 push cannot interleave a parent CONTINUATION sequence",
+    "http2.runtime.headers.limit_reuse_tests.test.HTTP/2 complete continuation overflow preserves aggregate HPACK reuse",
+    "http2.runtime.headers.limit_reuse_tests.test.HTTP/2 complete continuation overflow preserves callback HPACK reuse",
+    "http2.runtime.headers.limit_reuse_tests.test.HTTP/2 complete continuation overflow preserves duplex HPACK reuse",
+    "http2.runtime.headers.limit_reuse_tests.test.HTTP/2 complete continuation overflow preserves server HPACK reuse",
+    "http2.runtime.headers.limit_reuse_tests.test.HTTP/2 complete continuation overflow preserves push HPACK and parent",
+    "http2.runtime.headers.limit_reuse_tests.test.HTTP/2 complete compressed block overflow preserves aggregate HPACK reuse",
+    "http2.runtime.headers.limit_reuse_tests.test.HTTP/2 complete compressed block overflow preserves server HPACK reuse",
+    "http2.runtime.headers.limit_reuse_tests.test.HTTP/2 complete continuation overflow refuses promise while preserving HPACK and parent",
+    "http2.runtime.request.batch_error_tests.test.HTTP/2 server batch emits one GOAWAY for broken CONTINUATION",
+    "http2.runtime.frame.tests.wire.test.HTTP/2 frame wire appends HEADERS and CONTINUATION transactionally",
+    "http2.runtime.response_batch_tests.test.HTTP/2 streaming response batch deadline covers continuation",
+    "http2.runtime.request_writer_tests.test.HTTP/2 duplex response HEADERS timeout resumes CONTINUATION",
+    "http2.runtime.request_writer_tests.test.HTTP/2 duplex request HEADERS timeout resumes CONTINUATION",
+    "http2.runtime.ping_timeout_tests.test.HTTP/2 streaming request batch deadline covers continuation",
+    "http2.runtime.ping_timeout_tests.test.HTTP/2 aggregate response deadline covers header continuations",
+    "http2.runtime.headers.refusal_isolation_tests.test.HTTP/2 capacity refusal isolates complete field and continuation limits"
+  ],
+  "windows_compile": "same selected cases passed; 8/8 build steps",
+  "structure": {
+    "original_connection_lines": 16093,
+    "current_connection_lines": 15982,
+    "module_lines": 154,
+    "state_owner": "Connection unchanged",
+    "operations": [
+      "field-section read and HPACK error classification",
+      "deferred header completion",
+      "CONTINUATION assembly"
+    ],
+    "private_visibility_widened": false
+  },
+  "source_relocation": "three operation control-flow token streams preserved after callback conversion and explicit value-receiver dereference",
+  "runtime_performance": "not measured",
+  "pinned_native_and_complete_acceptance": "pending delivered revision; separate base-revision TCP probe CI still live",
+  "guard": "All Zig commands executed serially under shared zig-tree-guard",
+  "dependency_pins_and_ci_budgets_changed": false
+}

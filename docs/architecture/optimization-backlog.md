@@ -438,3 +438,24 @@ the standalone Windows probe runs serially in the existing resolver step.
 Production transport code and H2 traffic/KeyUpdate/capacity/close assertions
 remain unchanged while the primitive is being qualified. A passing candidate
 completion test alone will not establish the cause of the H2 TLS failure.
+
+### HTTP/2 inbound field-section owner extraction
+
+The connection's inbound field-section assembly and decode logic now lives in
+`src/http2/runtime/headers/inbound.zig`. Its stateless `Reader` groups ordinary
+and raw CONTINUATION collection, queued/deferred duplex-header completion,
+complete-limit rejection and HPACK error classification. `Connection` still
+owns its scratch, decoder, pending header slots, reader mode and error state;
+private transport operations are passed through explicit existing-function
+callbacks. Existing public methods and read ownership remain intact.
+
+The root shrinks from 16,093 to 15,982 lines; the extracted module has 154 lines.
+This improves the responsibility boundary and makes complete/incomplete header
+failure policy reviewable in one place. It does not establish a runtime or
+compile-time speedup. The [qualification](../evidence/http2_inbound_headers/2026-11-26/validation.json)
+records 62 selected native cases, including 27 named HTTP/2 behaviors, and
+matching Windows compilation. Malformed/unterminated CONTINUATION, complete
+field/byte limits, HPACK reuse, parent/sibling isolation, deferred duplex heads
+and aggregate/streaming deadlines are covered by existing real-socket tests.
+Pinned native and complete acceptance remains separate. The broader H2 owner
+extraction work and Windows TCP/TLS completion investigation remain active.
