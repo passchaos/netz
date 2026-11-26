@@ -1,0 +1,37 @@
+{
+  "observed_utc": "2026-11-26T05:44:23.111968+00:00",
+  "base_commit": "997de2c7ed64dafc60a1e91c8bba0076f08b7c8f",
+  "source_sha256": {
+    "src/http2/runtime/connection.zig": "1c6c764129cca64d9ed8b3cf1ff186286f28c2e492c714d3475066e66411d500",
+    "src/http2/runtime/frame/wake.zig": "7a9868137659b4e9b8e6e3c034306c69d2236017a99e226b5d9fb7190d840373",
+    "src/http2/runtime/frame/wake_tests.zig": "5714a7c3782f5fadce899e896b2813efe21f337797f498fd5764624fb61a450a",
+    "src/http2/runtime/duplex/pump_tests.zig": "be50b3f9321f62ee0fc000bde21f07aec638ca03e924c8d4a0e9229714514a2c",
+    "src/http2/runtime/tests.zig": "f9cbb876137d17c76b34ec20fbccb3473f5eb90c9c79af303156fdf7698f7e47"
+  },
+  "behavior": [
+    "reader and wake require independent concurrent admission",
+    "cancel joins admitted tasks before stack context expires",
+    "a completed frame is returned exactly once even when wake admission fails",
+    "caller cancellation is rearmed after late successful input",
+    "real reader timeout protocol failure and EOF are preserved",
+    "wake-only interruption preserves partial input and same-socket reuse"
+  ],
+  "native": {
+    "host": "aarch64-macos",
+    "tests_passed": 39,
+    "focused_named_tests": 6,
+    "support_tests": 33,
+    "filters": [
+      "HTTP/2 buffered frame wake",
+      "HTTP/2 batch cancellation"
+    ],
+    "log_sha256": "a1d0321b40d5eeb439ebfddda8efa66a13877ac2ecd84451ce19a97af6516c41"
+  },
+  "windows_cross_compile": {
+    "target": "x86_64-windows-gnu",
+    "result": "passed for identical selected tests",
+    "log_sha256": "f7370d5b5babaa997344e6cef248e2729b4a3560520c38a631f541b4d07b188e"
+  },
+  "native_pinned_ci": "pending delivered revision",
+  "complete_acceptance": "open; Linux CA reload and Windows Threaded datagram deadline fixtures still fail on base revision"
+}

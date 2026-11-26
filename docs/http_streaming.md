@@ -168,6 +168,16 @@ stream with `INTERNAL_ERROR`, and the returned
 requests are rejected because their open-ended lifetime cannot be represented by
 a completed-response batch.
 
+`requestBatchWithPerStreamDeadlinesAndCancellation` races its sole frame read
+against the cancellation observer's event. Both tasks require independent
+concurrency admission, including when the executor has no asynchronous capacity.
+If admission fails, the call joins every admitted task before returning. A frame
+completed during that join is delivered once before interruption; a caller
+cancellation is rearmed for the next cancellation point. A wake alone joins the
+canceled read before returning, preserving partial parser input and allowing the
+same connection to serve a later request. Reader timeouts, protocol errors and
+EOF remain observable.
+
 Concurrency contract:
 
 - One task owns the connection frame reader at a time. Accept streams from that

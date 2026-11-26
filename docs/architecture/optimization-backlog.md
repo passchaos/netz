@@ -302,7 +302,7 @@ interop sequence. Scoped results do not close complete acceptance.
 | P0 | Qualify the native deadline fixture repairs on pinned platforms | Clock and partial-send fixtures now preserve Threaded userdata and joined lifetimes. Local full HTTP/3 passed 1,005 cases with four existing GRO skips; selected Windows compilation passed. Pinned native/complete CI remains required. |
 | P0 | Diagnose client CA reload retained-connection failure | The complete run reports BrokenPipe while reading old MQTT PINGRESP before SIGHUP; the same head's isolated native CA reload step passed. Rejected-certificate and anonymous-client transitions need examination with the unchanged pinned dependencies. |
 | P1 | Join finite HTTP/1 and WebSocket service workers on failure | Independent worker admission and joined failure cleanup implemented. Eight real-socket cases cover initial/partial admission, later accept failure and caller cancellation; current native H1/WS and Windows compilation passed. Pinned native verification remains required. |
-| P1 | Guarantee HTTP/2 batch receive/wake admission | `readBufferedFrameWithDeadlineOrWake` starts the reader with `Select.async`; constrained executors can run it inline before the wake task is admitted. Retain any completed frame, one reader and same-socket reuse after cancellation. |
+| P1 | Guarantee HTTP/2 batch receive/wake admission | Independent task admission and joined completion retention implemented in `frame/wake.zig`. Actual entered-read cancellation with zero async capacity and same-socket reuse pass locally; reader timeout, protocol error, EOF and caller cancellation rearm are covered. Native pinned verification remains required. |
 | P1 | Copy WebTransport H2 slices once into owned job storage | `sendStreamSlicesWithDeadline` allocates and copies a temporary contiguous buffer; `cloneCommand` copies it again. Check deadline admission before staging and preserve task-owned data after caller cancellation. Measure allocation calls on the actual endpoint path. |
 | P2 | Extract coherent HTTP/2 and WebSocket owner responsibilities | The current H2 connection has 16,145 lines and WebSocket runtime has 3,705. Extract batch/frame and finite-service responsibilities while retaining existing public imports, connection state and sole-reader ownership. |
 | P2 | Complete grouped fuzz replay acceptance | All 37 entry points and 107 named tests preserved in eight groups. Native Linux unfiltered grouped replay passed in run45750666840 preflight, including the unchanged real IP-migration root. Complete acceptance remains separate. |
@@ -316,3 +316,15 @@ the acceptance contract.
 The native fixture [qualification](../evidence/protocol_native_test_context/2026-11-26/validation.json)
 records the repaired callbacks, actual send-prefix and pacing checks, full
 HTTP/3 result, Windows compilation and the remaining pinned CI boundary.
+
+The H2 batch wake [qualification](../evidence/http2_batch_wake/2026-11-26/validation.json)
+records current-source native cancellation and completion-retention checks and
+the matching Windows cross-compilation. It does not establish native Windows,
+Linux or complete acceptance. In current revision `997de2c7`,
+[run 45761345203](https://github.com/passchaos/netz/actions/runs/45761345203)
+still reports the Linux client CA reload failure before SIGHUP. The bounded
+observer reports only three expected `CertificateUntrusted` accept events;
+there is no connection-stage cause in that output. Windows' original native
+protocol step passed, while the send-deadline step reports unsupported Threaded
+datagram deadline calls in further H3 and WebTransport fixtures. Those failures
+remain open with unchanged dependency pins, commands and budgets.

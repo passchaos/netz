@@ -147,6 +147,7 @@ test {
     _ = @import("duplex/client_pump_tests.zig");
     _ = @import("duplex/server_tests.zig");
     _ = @import("duplex/pump_tests.zig");
+    _ = @import("frame/wake_tests.zig");
     _ = @import("ping_probe_tests.zig");
     _ = @import("ping_enforcement_tests.zig");
     _ = @import("duplex/response_capacity_tests.zig");

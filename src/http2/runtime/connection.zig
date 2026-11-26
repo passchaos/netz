@@ -18,6 +18,7 @@ const client_authority = @import("client/authority.zig");
 const client_duplex_owner = @import("duplex/client_owner.zig");
 const DuplexOwners = @import("duplex/owners.zig").Owners;
 const duplex_wake = @import("duplex/wake.zig");
+const buffered_frame_wake = @import("frame/wake.zig");
 const socket_options = @import("../../internal/socket_options.zig");
 const tcp_connect = @import("../../internal/tcp_connect.zig");
 const endpoint_host = @import("../../internal/endpoint_host.zig");
@@ -8153,67 +8154,14 @@ pub const Connection = struct {
         }
     }
 
-    const InterruptibleFrameRead = union(enum) {
-        frame: frame_io.BorrowedFrame,
-        wake,
-    };
+    const InterruptibleFrameRead = buffered_frame_wake.Result(frame_io.BorrowedFrame);
 
-    /// Race the sole frame reader against a reusable cross-task wake event.
-    /// If both finish together, preserve the frame result before observing the
-    /// wake so a completed frame can never disappear during cancellation.
     fn readBufferedFrameWithDeadlineOrWake(
         self: *Connection,
         deadline: ?std.Io.Clock.Timestamp,
         wake: *std.Io.Event,
     ) anyerror!InterruptibleFrameRead {
-        const Result = union(enum) {
-            frame: Error!frame_io.BorrowedFrame,
-            wake: std.Io.Cancelable!void,
-        };
-        const Task = struct {
-            fn read(
-                connection: *Connection,
-                absolute: ?std.Io.Clock.Timestamp,
-            ) Error!frame_io.BorrowedFrame {
-                return connection.readBufferedFrameWithDeadline(absolute);
-            }
-
-            fn wait(
-                event: *std.Io.Event,
-                io: std.Io,
-            ) std.Io.Cancelable!void {
-                return event.wait(io);
-            }
-        };
-        var result_buffer: [2]Result = undefined;
-        var select: std.Io.Select(Result) = .init(self.io, &result_buffer);
-        defer select.cancelDiscard();
-        select.async(.frame, Task.read, .{ self, deadline });
-        select.async(.wake, Task.wait, .{ wake, self.io });
-        switch (try select.await()) {
-            .frame => |result| return .{ .frame = try result },
-            .wake => |result| try result,
-        }
-
-        var completed_frame: ?frame_io.BorrowedFrame = null;
-        var read_err: ?anyerror = null;
-        while (select.cancel()) |late| switch (late) {
-            .frame => |result| {
-                if (result) |frame| {
-                    completed_frame = frame;
-                } else |err| {
-                    if (err != error.Canceled and err != error.Timeout) {
-                        read_err = err;
-                    }
-                }
-            },
-            .wake => |result| result catch |err| {
-                if (err != error.Canceled) return err;
-            },
-        };
-        if (completed_frame) |frame| return .{ .frame = frame };
-        if (read_err) |err| return err;
-        return .wake;
+        return buffered_frame_wake.read(self.io, self, deadline, wake, frame_io.BorrowedFrame, Error, readBufferedFrameWithDeadline);
     }
 
     fn readBufferedFrameRawWithDeadline(
