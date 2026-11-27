@@ -1,0 +1,425 @@
+{
+  "observed_utc": "2026-11-27T01:39:59.840723+00:00",
+  "base_commit": "adf90ce0048e02f3d82de1a70acef1d081be3e15",
+  "scope": "bounded UDP association owners; full R4-R9/HTTP-family goal remains active",
+  "native_host": "aarch64-macos",
+  "guard": "all final commands and source/evidence assertions are descendants of zig-tree-guard",
+  "source_sha256": {
+    "src/proxy/hysteria/v3_server.zig": "8b8f98044f8fbbd7bbdb3261b15b301893f4f968ef62f22e1a69503cb71b88b6",
+    "src/proxy/internal/udp_session/address.zig": "bc92b5dd0437af2a9aca56afc53ea6fa8503dd3a3c6460526d397f721f7804a1",
+    "src/proxy/tuic/packet_stream.zig": "bd6aa3296c0505a8996241c67341929bc18d4bcc13adc22c655562ea236b5a33",
+    "src/proxy/internal/udp_session.zig": "aaeba2b57c8200f96e9718fbac52bc3c15e1de42be740114c3bc5dfa1a48b735",
+    "src/proxy/internal/udp_session/tests.zig": "21ef693a5237ef34c1593595af4f2a82632d39819ce8e784048ab37e5a52e815",
+    "src/proxy/internal/udp_session/replies.zig": "35d2f981eca722b5941c02042d1f2a4642b94920974d28c881e7fe60e4a630af",
+    "src/proxy/internal/mod.zig": "58c001da84796ccbde17fa2e8658d05ae239e8be55d904b3d09ebe5aa10042c0",
+    "src/test_scope.zig": "16568b82264c7a32601f2cc6b32e642db37fe40bf293ee457bc875a4ac5e1be3",
+    "src/proxy/tuic/shared/server.zig": "9052f7ff43b8cd92122c4e969825e13bfb5181b4695d4aafab849e239ac7440d",
+    "src/proxy/hysteria/shared/server.zig": "137188af8b1c70de508fb5e9ab03cbbccc5766b772d91004b39bc6fb976af3ef",
+    "src/proxy/hysteria/shared/udp_tests.zig": "74531c0f55a5732f3de06c501c0166778954a1cabe08741d9be2c8c19553001c",
+    "src/proxy/tuic/mod.zig": "b1db2e68033e2330d842e77dc4aa90dd6b4bc750513665fbe4b1db96c7536623",
+    "src/proxy/hysteria/mod.zig": "f74168e95c83bbe9923042457e1e42366374463480cc70a1407a3b78e53bd9fa"
+  },
+  "preserved_source_sha256": {
+    "src/proxy/tuic/shared/tests.zig": "b881a64046f0cedc64ac7f7a10e6dfa0875f1a73eb4eedff4b328efe77e0088f",
+    "src/proxy/hysteria/shared/tests.zig": "be011bb4715af06a68aa01e72cfd3c7e2349d92c58b88d9edbebe96e446b2371",
+    "src/proxy/internal/relay_queue/tests.zig": "9c54b086065994f6007ec5c98b528c0f355d023e87232d081dbeb64c92c7dd57",
+    "src/proxy/internal/relay_queue/stream_send_tests.zig": "e49efd51ebfb046c400f68771f5ad9d5430906041fe03d8d39c73542b5b0cab8",
+    "src/proxy/internal/byte_bucket/tests.zig": "087de05d46c55ce1c9eb7cc0b80e27e3fee7ab8938879e3c523e24641b002d11",
+    "build.zig.zon": "b1db040a3652b14c5b0910421a64ef4a6119e5931cd7b51a4187dfd309075b4a",
+    ".github/workflows/ci.yml": "e6f8c0ef10ce3ec68748c9960de7d87f82224428663ba800d461b92d8f8dea93",
+    "tools/interop/tuic_sing_box.sh": "0a9cf4697033210b3610ffc97389c59dad6d52b500ae0726aabcec52e89f47d1"
+  },
+  "checks": {
+    "native_integration": {
+      "fmt": {
+        "command": [
+          "/Users/bytedance/.local/bin/zig",
+          "fmt",
+          "src/proxy/internal/udp_session.zig",
+          "src/proxy/internal/udp_session/tests.zig",
+          "src/proxy/internal/udp_session/replies.zig",
+          "src/proxy/internal/mod.zig",
+          "src/test_scope.zig",
+          "src/proxy/tuic/shared/server.zig",
+          "src/proxy/hysteria/shared/server.zig",
+          "src/proxy/hysteria/shared/udp_tests.zig"
+        ],
+        "exit_code": 0,
+        "log_sha256": "4c60f130243b87fe843896a4ec2f45a73adcfd70e5aebdf8e4c750a6bf7fd06b",
+        "source_sha256": {
+          "src/proxy/internal/udp_session.zig": "61b9aeaa9f75cadf4823d38fc843ed653718a8f9f64edd0937867fe100169f2c",
+          "src/proxy/internal/udp_session/tests.zig": "7fdb289e4798ccf5dacc4ecdf87fcea78d9de2eddcc54476925a9305a22e9c55",
+          "src/proxy/internal/udp_session/replies.zig": "35d2f981eca722b5941c02042d1f2a4642b94920974d28c881e7fe60e4a630af",
+          "src/proxy/internal/mod.zig": "58c001da84796ccbde17fa2e8658d05ae239e8be55d904b3d09ebe5aa10042c0",
+          "src/test_scope.zig": "16568b82264c7a32601f2cc6b32e642db37fe40bf293ee457bc875a4ac5e1be3",
+          "src/proxy/tuic/shared/server.zig": "13d299cd79397fbe1ca504bb4b03b975046e97b16d7d573c1a812f8cdac86dc1",
+          "src/proxy/hysteria/shared/server.zig": "09c13bd2c45daa8ab4c565fa75177f140ca4d175e833e9aa29d118fcdc85a207",
+          "src/proxy/hysteria/shared/udp_tests.zig": "8a67f2c904cd3dd8e50ad591e4074bf7a5a41991a250f0b8cf973c4c8cd2423f"
+        }
+      },
+      "native": {
+        "command": [
+          "/Users/bytedance/.local/bin/zig",
+          "build",
+          "test-proxy",
+          "-Dtest-progress=true",
+          "-j1",
+          "-Dtest-filter=proxy UDP",
+          "-Dtest-filter=Hysteria shared UDP owners",
+          "-Dtest-filter=Hysteria shared target loans",
+          "-Dtest-filter=TUIC shared endpoint serves two concurrent TCP relays",
+          "-Dtest-filter=TUIC shared endpoint packetizes",
+          "-Dtest-filter=Hysteria shared endpoint serves concurrent TCP and UDP relays",
+          "-Dtest-filter=Hysteria shared endpoint packetizes",
+          "-Dtest-filter=Hysteria negotiated maximum rate keeps shared TCP and UDP alive",
+          "--summary",
+          "all"
+        ],
+        "exit_code": 0,
+        "log_sha256": "1e896a58975edd6d91c9ccab86e02dad590b5b5628478b4ac75c103c86db1ac9",
+        "source_sha256": {
+          "src/proxy/internal/udp_session.zig": "61b9aeaa9f75cadf4823d38fc843ed653718a8f9f64edd0937867fe100169f2c",
+          "src/proxy/internal/udp_session/tests.zig": "7fdb289e4798ccf5dacc4ecdf87fcea78d9de2eddcc54476925a9305a22e9c55",
+          "src/proxy/internal/udp_session/replies.zig": "35d2f981eca722b5941c02042d1f2a4642b94920974d28c881e7fe60e4a630af",
+          "src/proxy/internal/mod.zig": "58c001da84796ccbde17fa2e8658d05ae239e8be55d904b3d09ebe5aa10042c0",
+          "src/test_scope.zig": "16568b82264c7a32601f2cc6b32e642db37fe40bf293ee457bc875a4ac5e1be3",
+          "src/proxy/tuic/shared/server.zig": "13d299cd79397fbe1ca504bb4b03b975046e97b16d7d573c1a812f8cdac86dc1",
+          "src/proxy/hysteria/shared/server.zig": "09c13bd2c45daa8ab4c565fa75177f140ca4d175e833e9aa29d118fcdc85a207",
+          "src/proxy/hysteria/shared/udp_tests.zig": "8a67f2c904cd3dd8e50ad591e4074bf7a5a41991a250f0b8cf973c4c8cd2423f"
+        }
+      }
+    },
+    "native_additional_and_platform": {
+      "fmt": {
+        "command": [
+          "/Users/bytedance/.local/bin/zig",
+          "fmt",
+          "src/proxy/internal/udp_session/address.zig",
+          "src/proxy/tuic/packet_stream.zig",
+          "src/proxy/tuic/mod.zig",
+          "src/proxy/hysteria/mod.zig",
+          "src/proxy/internal/udp_session.zig",
+          "src/proxy/internal/udp_session/tests.zig",
+          "src/proxy/internal/udp_session/replies.zig",
+          "src/proxy/internal/mod.zig",
+          "src/test_scope.zig",
+          "src/proxy/tuic/shared/server.zig",
+          "src/proxy/hysteria/shared/server.zig",
+          "src/proxy/hysteria/shared/udp_tests.zig"
+        ],
+        "exit_code": 0,
+        "log_sha256": "f998d770e18145b7a48defdf9d528777019fe518e3cfdfc9a5904c8c3dae2b0e",
+        "source_sha256": {
+          "src/proxy/internal/udp_session/address.zig": "bc92b5dd0437af2a9aca56afc53ea6fa8503dd3a3c6460526d397f721f7804a1",
+          "src/proxy/tuic/packet_stream.zig": "bd6aa3296c0505a8996241c67341929bc18d4bcc13adc22c655562ea236b5a33",
+          "src/proxy/tuic/mod.zig": "b1db2e68033e2330d842e77dc4aa90dd6b4bc750513665fbe4b1db96c7536623",
+          "src/proxy/hysteria/mod.zig": "f74168e95c83bbe9923042457e1e42366374463480cc70a1407a3b78e53bd9fa",
+          "src/proxy/internal/udp_session.zig": "aaeba2b57c8200f96e9718fbac52bc3c15e1de42be740114c3bc5dfa1a48b735",
+          "src/proxy/internal/udp_session/tests.zig": "21ef693a5237ef34c1593595af4f2a82632d39819ce8e784048ab37e5a52e815",
+          "src/proxy/internal/udp_session/replies.zig": "35d2f981eca722b5941c02042d1f2a4642b94920974d28c881e7fe60e4a630af",
+          "src/proxy/internal/mod.zig": "58c001da84796ccbde17fa2e8658d05ae239e8be55d904b3d09ebe5aa10042c0",
+          "src/test_scope.zig": "16568b82264c7a32601f2cc6b32e642db37fe40bf293ee457bc875a4ac5e1be3",
+          "src/proxy/tuic/shared/server.zig": "9052f7ff43b8cd92122c4e969825e13bfb5181b4695d4aafab849e239ac7440d",
+          "src/proxy/hysteria/shared/server.zig": "137188af8b1c70de508fb5e9ab03cbbccc5766b772d91004b39bc6fb976af3ef",
+          "src/proxy/hysteria/shared/udp_tests.zig": "74531c0f55a5732f3de06c501c0166778954a1cabe08741d9be2c8c19553001c"
+        }
+      },
+      "native-additional": {
+        "command": [
+          "/Users/bytedance/.local/bin/zig",
+          "build",
+          "test-proxy",
+          "-Dtest-progress=true",
+          "-j1",
+          "-Dtest-filter=proxy UDP",
+          "-Dtest-filter=Hysteria shared UDP",
+          "-Dtest-filter=TUIC shared UDP",
+          "-Dtest-filter=TUIC shared endpoint",
+          "-Dtest-filter=Hysteria shared endpoint",
+          "-Dtest-filter=Hysteria negotiated maximum rate keeps shared",
+          "--summary",
+          "all"
+        ],
+        "exit_code": 0,
+        "log_sha256": "50305c94d2f787b4245f21575a79acfd5d5645d4dfd6f609b04d194519875b32",
+        "source_sha256": {
+          "src/proxy/internal/udp_session/address.zig": "bc92b5dd0437af2a9aca56afc53ea6fa8503dd3a3c6460526d397f721f7804a1",
+          "src/proxy/tuic/packet_stream.zig": "bd6aa3296c0505a8996241c67341929bc18d4bcc13adc22c655562ea236b5a33",
+          "src/proxy/tuic/mod.zig": "b1db2e68033e2330d842e77dc4aa90dd6b4bc750513665fbe4b1db96c7536623",
+          "src/proxy/hysteria/mod.zig": "f74168e95c83bbe9923042457e1e42366374463480cc70a1407a3b78e53bd9fa",
+          "src/proxy/internal/udp_session.zig": "aaeba2b57c8200f96e9718fbac52bc3c15e1de42be740114c3bc5dfa1a48b735",
+          "src/proxy/internal/udp_session/tests.zig": "21ef693a5237ef34c1593595af4f2a82632d39819ce8e784048ab37e5a52e815",
+          "src/proxy/internal/udp_session/replies.zig": "35d2f981eca722b5941c02042d1f2a4642b94920974d28c881e7fe60e4a630af",
+          "src/proxy/internal/mod.zig": "58c001da84796ccbde17fa2e8658d05ae239e8be55d904b3d09ebe5aa10042c0",
+          "src/test_scope.zig": "16568b82264c7a32601f2cc6b32e642db37fe40bf293ee457bc875a4ac5e1be3",
+          "src/proxy/tuic/shared/server.zig": "9052f7ff43b8cd92122c4e969825e13bfb5181b4695d4aafab849e239ac7440d",
+          "src/proxy/hysteria/shared/server.zig": "137188af8b1c70de508fb5e9ab03cbbccc5766b772d91004b39bc6fb976af3ef",
+          "src/proxy/hysteria/shared/udp_tests.zig": "74531c0f55a5732f3de06c501c0166778954a1cabe08741d9be2c8c19553001c"
+        }
+      },
+      "windows-compile": {
+        "command": [
+          "/Users/bytedance/.local/bin/zig",
+          "build",
+          "test-proxy-compile",
+          "-Dtarget=x86_64-windows-gnu",
+          "-j1",
+          "-Dtest-filter=TUIC shared UDP",
+          "-Dtest-filter=proxy UDP",
+          "-Dtest-filter=Hysteria shared UDP idle",
+          "-Dtest-filter=Hysteria shared UDP owners",
+          "-Dtest-filter=Hysteria shared target loans",
+          "-Dtest-filter=TUIC shared endpoint serves two concurrent TCP relays",
+          "-Dtest-filter=TUIC shared endpoint packetizes",
+          "-Dtest-filter=Hysteria shared endpoint serves concurrent TCP and UDP relays",
+          "-Dtest-filter=Hysteria shared endpoint packetizes",
+          "-Dtest-filter=Hysteria negotiated maximum rate keeps shared TCP and UDP alive",
+          "--summary",
+          "all"
+        ],
+        "exit_code": 0,
+        "log_sha256": "8e4dd21efb24b763763dad5bbe95042c1dbb156ff4fa43b3a3199abdb09f1733",
+        "source_sha256": {
+          "src/proxy/internal/udp_session/address.zig": "bc92b5dd0437af2a9aca56afc53ea6fa8503dd3a3c6460526d397f721f7804a1",
+          "src/proxy/tuic/packet_stream.zig": "bd6aa3296c0505a8996241c67341929bc18d4bcc13adc22c655562ea236b5a33",
+          "src/proxy/tuic/mod.zig": "b1db2e68033e2330d842e77dc4aa90dd6b4bc750513665fbe4b1db96c7536623",
+          "src/proxy/hysteria/mod.zig": "f74168e95c83bbe9923042457e1e42366374463480cc70a1407a3b78e53bd9fa",
+          "src/proxy/internal/udp_session.zig": "aaeba2b57c8200f96e9718fbac52bc3c15e1de42be740114c3bc5dfa1a48b735",
+          "src/proxy/internal/udp_session/tests.zig": "21ef693a5237ef34c1593595af4f2a82632d39819ce8e784048ab37e5a52e815",
+          "src/proxy/internal/udp_session/replies.zig": "35d2f981eca722b5941c02042d1f2a4642b94920974d28c881e7fe60e4a630af",
+          "src/proxy/internal/mod.zig": "58c001da84796ccbde17fa2e8658d05ae239e8be55d904b3d09ebe5aa10042c0",
+          "src/test_scope.zig": "16568b82264c7a32601f2cc6b32e642db37fe40bf293ee457bc875a4ac5e1be3",
+          "src/proxy/tuic/shared/server.zig": "9052f7ff43b8cd92122c4e969825e13bfb5181b4695d4aafab849e239ac7440d",
+          "src/proxy/hysteria/shared/server.zig": "137188af8b1c70de508fb5e9ab03cbbccc5766b772d91004b39bc6fb976af3ef",
+          "src/proxy/hysteria/shared/udp_tests.zig": "74531c0f55a5732f3de06c501c0166778954a1cabe08741d9be2c8c19553001c"
+        }
+      },
+      "tuic-peer-build": {
+        "command": [
+          "/Users/bytedance/.local/bin/zig",
+          "build",
+          "build-tuic-server",
+          "-Doptimize=ReleaseSafe",
+          "-j1",
+          "--summary",
+          "all"
+        ],
+        "exit_code": 0,
+        "log_sha256": "c010d3dafb0322cea818dae626baf151ce2bcacafb2617fcf0903aa661e3e5f9",
+        "source_sha256": {
+          "src/proxy/internal/udp_session/address.zig": "bc92b5dd0437af2a9aca56afc53ea6fa8503dd3a3c6460526d397f721f7804a1",
+          "src/proxy/tuic/packet_stream.zig": "bd6aa3296c0505a8996241c67341929bc18d4bcc13adc22c655562ea236b5a33",
+          "src/proxy/tuic/mod.zig": "b1db2e68033e2330d842e77dc4aa90dd6b4bc750513665fbe4b1db96c7536623",
+          "src/proxy/hysteria/mod.zig": "f74168e95c83bbe9923042457e1e42366374463480cc70a1407a3b78e53bd9fa",
+          "src/proxy/internal/udp_session.zig": "aaeba2b57c8200f96e9718fbac52bc3c15e1de42be740114c3bc5dfa1a48b735",
+          "src/proxy/internal/udp_session/tests.zig": "21ef693a5237ef34c1593595af4f2a82632d39819ce8e784048ab37e5a52e815",
+          "src/proxy/internal/udp_session/replies.zig": "35d2f981eca722b5941c02042d1f2a4642b94920974d28c881e7fe60e4a630af",
+          "src/proxy/internal/mod.zig": "58c001da84796ccbde17fa2e8658d05ae239e8be55d904b3d09ebe5aa10042c0",
+          "src/test_scope.zig": "16568b82264c7a32601f2cc6b32e642db37fe40bf293ee457bc875a4ac5e1be3",
+          "src/proxy/tuic/shared/server.zig": "9052f7ff43b8cd92122c4e969825e13bfb5181b4695d4aafab849e239ac7440d",
+          "src/proxy/hysteria/shared/server.zig": "137188af8b1c70de508fb5e9ab03cbbccc5766b772d91004b39bc6fb976af3ef",
+          "src/proxy/hysteria/shared/udp_tests.zig": "74531c0f55a5732f3de06c501c0166778954a1cabe08741d9be2c8c19553001c"
+        }
+      }
+    },
+    "focused_owner": {
+      "tests_passed": 75,
+      "log_sha256": "50305c94d2f787b4245f21575a79acfd5d5645d4dfd6f609b04d194519875b32",
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-proxy",
+        "-Dtest-progress=true",
+        "-j1",
+        "-Dtest-filter=proxy UDP",
+        "-Dtest-filter=Hysteria shared UDP",
+        "-Dtest-filter=TUIC shared UDP",
+        "-Dtest-filter=TUIC shared endpoint",
+        "-Dtest-filter=Hysteria shared endpoint",
+        "-Dtest-filter=Hysteria negotiated maximum rate keeps shared",
+        "--summary",
+        "all"
+      ]
+    },
+    "final": {
+      "final_fmt": {
+        "command": [
+          "/Users/bytedance/.local/bin/zig",
+          "fmt",
+          "--check",
+          "src/proxy/hysteria/v3_server.zig",
+          "src/proxy/internal/udp_session/address.zig",
+          "src/proxy/tuic/packet_stream.zig",
+          "src/proxy/internal/udp_session.zig",
+          "src/proxy/internal/udp_session/tests.zig",
+          "src/proxy/internal/udp_session/replies.zig",
+          "src/proxy/internal/mod.zig",
+          "src/test_scope.zig",
+          "src/proxy/tuic/shared/server.zig",
+          "src/proxy/hysteria/shared/server.zig",
+          "src/proxy/hysteria/shared/udp_tests.zig",
+          "src/proxy/tuic/mod.zig",
+          "src/proxy/hysteria/mod.zig"
+        ],
+        "exit_code": 0,
+        "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "legacy_windows": {
+        "command": [
+          "/Users/bytedance/.local/bin/zig",
+          "build",
+          "test-proxy-compile",
+          "-j1",
+          "-Dtarget=x86_64-windows-gnu",
+          "-Dtest-filter=Hysteria single connection processes rate-limited TCP and UDP",
+          "-Dtest-filter=Hysteria negotiated maximum rate keeps single TCP and UDP alive",
+          "--summary",
+          "all"
+        ],
+        "exit_code": 0,
+        "log_sha256": "b5775f735e632d0ac096c4720d270c8a672f143e0daacc010b4f880283d875af"
+      },
+      "legacy_native": {
+        "tests_passed": 58,
+        "log_sha256": "2d3d7aa3e7489b5afc3c6edeb906490bf5a18706c979310e016e3fc803bcb650",
+        "command": [
+          "/Users/bytedance/.local/bin/zig",
+          "build",
+          "test-proxy",
+          "-j1",
+          "-Dtest-progress=true",
+          "-Dtest-filter=Hysteria single connection processes rate-limited TCP and UDP",
+          "-Dtest-filter=Hysteria negotiated maximum rate keeps single TCP and UDP alive",
+          "--summary",
+          "all"
+        ]
+      },
+      "peer": {
+        "command": [
+          "/usr/bin/python3",
+          "/Users/bytedance/project-z/netz/docs/evidence/udp_association_owners/2026-11-27/replay_peer.py",
+          "/Users/bytedance/project-z/netz/zig-out/bin/netz-tuic-server",
+          "/tmp/netz-peer-sing-box-1.14.4/sing-box"
+        ],
+        "exit_code": 0,
+        "log_sha256": "d8ef2ce694f2a08599842da3aa5241abd1441ee2d6a7792bd0440ad76606e171"
+      },
+      "evidence_audit": {
+        "command": [
+          "/Users/bytedance/.local/bin/zig",
+          "build",
+          "verify-evidence",
+          "-j1",
+          "--summary",
+          "all",
+          "--",
+          "--max-unresolved=24",
+          "--limit=8"
+        ],
+        "exit_code": 0,
+        "log_sha256": "ee0aa135bd0789fa44bd848b41adf7a4a4c400d30779048c5a5a59688df46e96"
+      }
+    }
+  },
+  "peer_server_sha256": "259d5b3203d93ca17214e7fdaf428f78665cc8efd51ad29f6b4d779d6616ebe8",
+  "peer_replay_sha256": "cd6b4016e81d6799eeb34467824e757ec17bde7172e70ed56269481f34b9ae6c",
+  "prior_ci": {
+    "id": 45916032300,
+    "run_attempt": 1,
+    "head_sha": "adf90ce0048e02f3d82de1a70acef1d081be3e15",
+    "status": "completed",
+    "conclusion": "failure",
+    "html_url": "https://github.com/passchaos/netz/actions/runs/45916032300",
+    "jobs": [
+      {
+        "id": 140235354307,
+        "name": "Cross-compile x86_64-macos-none (macOS SDK)",
+        "status": "completed",
+        "conclusion": "success",
+        "html_url": "https://github.com/passchaos/netz/actions/runs/45916032300/job/140235354307"
+      },
+      {
+        "id": 140235354519,
+        "name": "Cross-compile aarch64-macos-none (macOS SDK)",
+        "status": "completed",
+        "conclusion": "success",
+        "html_url": "https://github.com/passchaos/netz/actions/runs/45916032300/job/140235354519"
+      },
+      {
+        "id": 140235354523,
+        "name": "Portable x86_64-windows-gnu (ubuntu-latest)",
+        "status": "completed",
+        "conclusion": "success",
+        "html_url": "https://github.com/passchaos/netz/actions/runs/45916032300/job/140235354523"
+      },
+      {
+        "id": 140235354525,
+        "name": "complete",
+        "status": "completed",
+        "conclusion": "failure",
+        "html_url": "https://github.com/passchaos/netz/actions/runs/45916032300/job/140235354525"
+      },
+      {
+        "id": 140235354545,
+        "name": "preflight",
+        "status": "completed",
+        "conclusion": "success",
+        "html_url": "https://github.com/passchaos/netz/actions/runs/45916032300/job/140235354545"
+      },
+      {
+        "id": 140235354564,
+        "name": "Portable aarch64-linux-gnu (ubuntu-latest)",
+        "status": "completed",
+        "conclusion": "success",
+        "html_url": "https://github.com/passchaos/netz/actions/runs/45916032300/job/140235354564"
+      },
+      {
+        "id": 140235354575,
+        "name": "Portable x86_64-windows-gnu (windows-latest)",
+        "status": "completed",
+        "conclusion": "failure",
+        "html_url": "https://github.com/passchaos/netz/actions/runs/45916032300/job/140235354575"
+      },
+      {
+        "id": 140235354589,
+        "name": "Portable x86_64-linux-gnu (ubuntu-latest)",
+        "status": "completed",
+        "conclusion": "success",
+        "html_url": "https://github.com/passchaos/netz/actions/runs/45916032300/job/140235354589"
+      },
+      {
+        "id": 140235355362,
+        "name": "fuzz",
+        "status": "completed",
+        "conclusion": "skipped",
+        "html_url": "https://github.com/passchaos/netz/actions/runs/45916032300/job/140235355362"
+      },
+      {
+        "id": 140244398059,
+        "name": "verify",
+        "status": "completed",
+        "conclusion": "failure",
+        "html_url": "https://github.com/passchaos/netz/actions/runs/45916032300/job/140244398059"
+      }
+    ],
+    "all_jobs_terminal": true,
+    "observed_utc": "2026-11-27T00:49:03.809726+00:00"
+  },
+  "remaining": [
+    "finite QUIC stream/datagram input drains",
+    "fair ready scheduling and mixed workload measurements",
+    "outbound and encoded UDP allocation reuse",
+    "overall CI acceptance within unchanged budgets",
+    "whole original R4-R9 and HTTP-family scope",
+    "standalone TUIC still reuses one response stream per association; source finding pending native follow-up",
+    "large UDP response fragmentation/stream packetization below negotiated peer MTU not qualified"
+  ],
+  "peer_protocol_source": {
+    "repository": "SagerNet/sing-quic",
+    "revision": "7e0a5869a5f4",
+    "source_url": "https://github.com/SagerNet/sing-quic/blob/7e0a5869a5f4/tuic/client_packet.go#L68",
+    "sha256": "5b50fdcf440feee86218494db6dc60180ff60f6548a9ed5d7e2d0518b9486802",
+    "finding": "handleUniStream reads one UDP message and returns with deferred CancelRead; shared response stream reuse loses later messages",
+    "qualification": "pre-fix exact32 quic burst failed; corrected source exact72 burst passed; raw prior failure retained"
+  }
+}

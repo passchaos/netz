@@ -11,6 +11,7 @@ pub const pending_input = @import("relay_queue/pending_input.zig");
 pub const resolve = @import("resolve.zig");
 pub const tls_relay = @import("tls_relay.zig");
 pub const udp_relay = @import("udp_relay.zig");
+pub const udp_session = @import("udp_session.zig");
 
 test {
     _ = byte_bucket;
@@ -24,4 +25,5 @@ test {
     _ = resolve;
     _ = tls_relay;
     _ = udp_relay;
+    _ = udp_session;
 }

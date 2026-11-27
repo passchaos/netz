@@ -38,8 +38,9 @@ turns also handle credit replenishment and expiry.
 
 This work removes target DATA writes from the service loop.
 Relay outbound drain already allows at most eight single-packet send attempts
-per turn. The remaining R4 scope requires UDP association owners, finite
-stream/datagram drains, fair ready scheduling and mixed hot/idle/blocked
+per turn. UDP associations use independent bounded receive/send owners as
+described in [UDP ownership](proxy-udp-ownership.md). The remaining R4 scope
+requires finite stream/datagram drains, fair ready scheduling and mixed hot/idle/blocked
 workload measurements. Those requirements remain active in
 [the optimization backlog](optimization-backlog.md).
 

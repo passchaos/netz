@@ -17,6 +17,7 @@ const destination = @import("../runtime/destination.zig");
 const io_helpers = @import("../internal/io.zig");
 const byte_bucket = @import("../internal/byte_bucket.zig");
 const rate_stream = @import("../internal/byte_bucket/stream.zig");
+const udp_address = @import("../internal/udp_session/address.zig");
 
 const quic = netz.quic;
 const net = std.Io.net;
@@ -674,11 +675,7 @@ fn drainAssocReads(state: *State) !void {
             };
             if (message.flags.trunc) continue;
             var host_buffer: [64]u8 = undefined;
-            const host = std.fmt.bufPrint(
-                &host_buffer,
-                "{}",
-                .{message.from},
-            ) catch continue;
+            const host = udp_address.formatHost(&host_buffer, message.from) catch continue;
             const encoded = protocol.buildUdpMessage(
                 state.allocator,
                 assoc.id,

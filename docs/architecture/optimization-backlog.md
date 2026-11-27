@@ -39,8 +39,8 @@ An observed mechanism is distinguished from an unmeasured performance benefit.
 | R1 | Shared FIFO owner implemented; first/middle/last/FIN refusal, fatal send and teardown regressions pass. Batch gates complete; acceptance evidence recorded below. |
 | R2 | Wide/fractional rate accounting, independent burst limits and committed-prefix charging implemented; shared and single-connection TCP/UDP maximum-rate regressions pass. Batch gates complete; acceptance evidence recorded below. |
 | R3 | Exact packet-sized cursor and bounded pre-connect input implemented; both proxy large-body regressions and real socket-prefix/packet-number-width tests pass. Batch gates complete; acceptance evidence recorded below. |
-| R4 | In progress: persistent TCP target writers and signaled-relay service integrated. Controlled service/storage and small fixed-peer transfer qualification recorded below; UDP owners, finite stream/datagram drains, fair ready scheduling and larger mixed workloads remain pending. |
-| R5 | Pending: reusable outbound/UDP relay blocks and allocation-free steady state. TCP input loans use bounded reusable storage; measured storage/RSS costs are recorded separately below. |
+| R4 | In progress: persistent TCP target writers and bounded UDP association owners integrated. Qualification is recorded below; finite QUIC stream/datagram input drains, fair ready scheduling and larger mixed workloads remain pending. |
+| R5 | Pending: reusable outbound/encoded UDP blocks and allocation-free steady state. TCP input loans and raw UDP slots use bounded reusable storage; measured storage/RSS costs are recorded separately below. |
 | R6 | Focused protocol roots and a no-matching-test guard implemented. Owner, package-test and build-registration extraction remains pending. |
 | R7 | Historical reproducer now replays the audited Git revision. Shared dependency pins and current-evidence index remain pending. |
 | R8 | Independent TUIC 128-KiB body and native/quic UDP modes verified. Remaining peer gates, workload matrices and profiles are pending. |
@@ -982,3 +982,43 @@ the end of a service turn. AB/BA 18-sample fixed-peer medians are 10.1505 ms
 download versus 10.832 ms, and 12.793 ms upload/echo versus 12.586 ms. This small
 workload establishes bounded qualification and costs, not broad throughput or
 p99 superiority. R4-R9 and the full HTTP-family goal remain active.
+
+
+### Bounded UDP association owners and packet-stream compatibility
+
+Both shared proxies now enqueue target datagrams into a 32-slot persistent
+resolver/sender and collect raw replies from an eight-slot concurrent receiver.
+The pump retains protocol encoding, QUIC state and rate accounting. Each
+association turn collects at most 32 completions and eight messages; a shared
+eight-slot encoded FIFO retains the refused front. Queued receives survive a
+later fatal receive until the pump has encoded them. Hysteria reserves before
+enqueue and refunds rejection, uncommitted completion and joined retirement.
+Shared and standalone Hysteria encode numeric IP hosts separately from ports.
+
+Pinned sing-box burst qualification exposed TUIC response stream reuse: its
+reader consumes one Packet per uni stream. The shared server now retains one
+uncommitted stream per FIFO front and sends a fresh stream with FIN for each
+completed Packet. Incoming parser slots are released on FIN; 128 split/FIN
+lifecycles pass. Standalone TUIC still has the same reuse source finding and
+requires a separate native follow-up.
+
+[The final UDP qualification](../evidence/udp_association_owners/2026-11-27/README.md)
+records 75 scoped native tests, 58 standalone Hysteria tests, two separate
+Windows 8/8 compilations and final peer build 9/9. Both unchanged independent
+modes retain exact 128-KiB TCP and UDP checks. Each mode also passes nine waves
+of eight exact UDP payloads, crossing the original 64 parser-slot capacity.
+The rejected global UDP ordering assumption and pre-fix QUIC burst timeout
+remain archived; internal FIFO ordering assertions are retained. Original
+protocol assertions, source pins and CI commands/budgets remain unchanged.
+
+Two actual 32-idle-association service observations submit zero target reads;
+Session metadata is 6000 bytes and raw buffers have a conservative 288-KiB
+ceiling per default-sized association. These diagnostic/source bounds do not
+qualify overall RSS, throughput or p99. Encoded reply allocation, finite QUIC
+input drains, fair ready scheduling and mixed-load metrics remain open.
+
+Prior adf90ce0 CI is terminal: portable compilation passed, Windows native
+protocol exceeded its existing five-minute budget before combined test names,
+and complete ended with exit137 and support/fuzz progress in its public tail.
+Full-library execution is not established from that tail. The original
+R4-R9/HTTP-family objective and complete acceptance remain active.

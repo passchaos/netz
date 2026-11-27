@@ -2,8 +2,8 @@
 //!
 //! One pump thread owns the UDP socket and every established connection.
 //! Blocking DNS/connect work runs in short-lived async tasks that post results
-//! back through a bounded inbox; TCP reads run per relay and publish chunks
-//! through a bounded queue. The pump never blocks on a single connection, so
+//! back through a bounded inbox; target TCP and UDP I/O has independent
+//! bounded owners. The pump never waits for a target socket, so
 //! multiple TUIC connections share one endpoint without receive contention.
 
 const std = @import("std");
@@ -16,8 +16,11 @@ const limits = @import("../../runtime/limits.zig");
 const reload = @import("../../runtime/reload.zig");
 const destination = @import("../../runtime/destination.zig");
 const relay_mod = @import("../../internal/relay_queue.zig");
+const udp_session = @import("../../internal/udp_session.zig");
+const UdpSession = udp_session.Session;
 const pending_input = @import("../../internal/relay_queue/pending_input.zig");
 const stream_sender = @import("../../internal/relay_queue/stream_send.zig");
+const PacketStream = @import("../packet_stream.zig").PacketStream;
 
 const quic = netz.quic;
 const Relay = relay_mod.Relay;
@@ -29,7 +32,7 @@ const max_fragments: u8 = 16;
 const max_fragment_entries = 64;
 const fragment_idle_ns: i64 = 5 * std.time.ns_per_s;
 const inbox_capacity = 16;
-const assoc_pending_sends = 8;
+const assoc_pending_sends = udp_session.Replies.capacity;
 const inbound_write_budget_ns = 10 * std.time.ns_per_ms;
 
 const Mode = enum { uni, datagram };
@@ -73,13 +76,13 @@ const Fragment = struct {
 const Assoc = struct {
     id: u16,
     socket: net.Socket,
+    target_io: UdpSession = .{},
     mode: Mode,
-    uni_stream: u64 = 0,
-    send_offset: u64 = 0,
+    packet_stream: PacketStream = .{},
     next_pkt_id: u16 = 0,
     last_activity_ns: i64,
     closed: bool = false,
-    pending_sends: [assoc_pending_sends]?[]u8 = @splat(null),
+    pending_replies: udp_session.Replies = .{},
 };
 
 const Inbox = union(enum) {
@@ -240,7 +243,11 @@ pub const Pump = struct {
     }
 
     fn serviceReadyRelays(self: *Pump) void {
-        for (self.connections.items) |conn| conn.serviceRelays(true);
+        for (self.connections.items) |conn| {
+            if (conn.closed.load(.acquire)) continue;
+            conn.serviceAssocs(true);
+            conn.serviceRelays(true);
+        }
     }
 
     pub fn run(self: *Pump) !void {
@@ -350,7 +357,7 @@ pub const Pump = struct {
         if (conn.closed.load(.acquire)) return;
         try conn.pollStreams();
         conn.drainDatagrams();
-        conn.serviceAssocs();
+        conn.serviceAssocs(false);
         conn.serviceRelays(false);
         conn.cleanup();
         conn.checkTimeouts();
@@ -546,14 +553,7 @@ pub const Connection = struct {
                     ready.socket.close(self.pump.io);
                     return;
                 };
-                assoc.socket.send(
-                    self.pump.io,
-                    &ready.resolved,
-                    ready.payload,
-                ) catch {};
-                if (self.pump.config.stats) |value| {
-                    value.addBytesIn(@intCast(ready.payload.len));
-                }
+                self.enqueueAssocPayload(assoc, .{ .ip = ready.resolved }, ready.payload);
             },
             .assoc_failed => |failed| {
                 self.clearResolving(failed.id);
@@ -774,6 +774,11 @@ pub const Connection = struct {
             );
             pending.used = remaining;
         }
+        if (fin) {
+            const incomplete = pending.used != 0;
+            pending.* = .{};
+            if (incomplete) return error.InvalidCommand;
+        }
     }
 
     fn resumePending(self: *Connection) !void {
@@ -894,32 +899,19 @@ pub const Connection = struct {
         packet: protocol.Packet,
         target: destination.Target,
     ) void {
-        const resolved = switch (target) {
-            .ip => |ip| ip,
-            .domain => |domain| blk: {
-                const policy = reload.policyFor(
-                    self.pump.config.acl,
-                    self.pump.config.policy_store,
-                );
-                break :blk destination.resolveTarget(
-                    self.pump.allocator,
-                    self.pump.io,
-                    policy,
-                    .{ .domain = domain },
-                    .udp_associate,
-                    self.pump.config.connect_timeout,
-                ) catch return;
-            },
-        };
-        assoc.socket.send(
-            self.pump.io,
-            &resolved,
-            packet.payload,
-        ) catch return;
-        if (self.pump.config.stats) |value| {
-            value.addBytesIn(@intCast(packet.payload.len));
-        }
+        self.enqueueAssocPayload(assoc, target, packet.payload);
+    }
+
+    fn enqueueAssocPayload(self: *Connection, assoc: *Assoc, target: destination.Target, payload: []const u8) void {
+        if (assoc.closed) return;
+        if (!(assoc.target_io.enqueue(target, payload) catch return)) return;
         assoc.last_activity_ns = nowNs(self.pump.io);
+    }
+
+    fn settleUdp(self: *Connection, result: UdpSession.Completion) void {
+        if (self.pump.config.stats) |value| {
+            value.addBytesIn(@intCast(result.committed_bytes));
+        }
     }
 
     fn createAssoc(
@@ -928,44 +920,41 @@ pub const Connection = struct {
         socket: net.Socket,
         mode: Mode,
     ) !*Assoc {
-        var uni_stream: u64 = 0;
-        if (mode == .uni) {
-            uni_stream = try self.established.connection
-                .openUnidirectionalStream();
-        }
+        if (self.assocs.items.len >= self.pump.config.max_assocs) return error.AssociationLimitReached;
         const assoc = try self.pump.allocator.create(Assoc);
         errdefer self.pump.allocator.destroy(assoc);
         assoc.* = .{
             .id = id,
             .socket = socket,
             .mode = mode,
-            .uni_stream = uni_stream,
             .last_activity_ns = nowNs(self.pump.io),
         };
+        try assoc.target_io.init(self.pump.allocator, self.pump.io, socket, .{
+            .maximum_datagram_bytes = self.pump.config.max_datagram_size,
+            .resolve_timeout = self.pump.config.connect_timeout,
+            .policy = self.pump.config.acl,
+            .policy_store = self.pump.config.policy_store,
+            .notify_context = self.pump,
+            .notify = Pump.notifyReady,
+        });
+        errdefer assoc.target_io.deinit();
         try self.assocs.append(self.pump.allocator, assoc);
         return assoc;
     }
 
-    fn serviceAssocs(self: *Connection) void {
+    fn serviceAssocs(self: *Connection, ready_only: bool) void {
         for (self.assocs.items) |assoc| {
             if (assoc.closed) continue;
+            const ready = assoc.target_io.ready.swap(false, .acq_rel);
+            if (ready_only and !ready) continue;
+            for (0..UdpSession.send_capacity) |_| {
+                self.settleUdp(assoc.target_io.takeSent() orelse break);
+            }
             self.flushAssocSends(assoc);
-            while (true) {
-                const message = assoc.socket.receiveTimeout(
-                    self.pump.io,
-                    self.datagram_buffer,
-                    .{ .duration = .{
-                        .clock = .awake,
-                        .raw = .fromMilliseconds(1),
-                    } },
-                ) catch |err| switch (err) {
-                    error.Timeout => break,
-                    else => {
-                        assoc.closed = true;
-                        break;
-                    },
-                };
-                if (message.flags.trunc) continue;
+            for (0..UdpSession.receive_capacity) |_| {
+                var message = assoc.target_io.takeReceived() orelse break;
+                defer message.release();
+                if (message.truncated) continue;
                 const encoded = protocol.buildPacket(
                     self.pump.allocator,
                     .{
@@ -974,13 +963,18 @@ pub const Connection = struct {
                         .frag_total = 1,
                         .frag_id = 0,
                         .address = .{ .ip = message.from },
-                        .payload = message.data,
+                        .payload = message.bytes,
                     },
                 ) catch continue;
                 assoc.next_pkt_id +%= 1;
                 self.queueAssocSend(assoc, encoded);
                 assoc.last_activity_ns = nowNs(self.pump.io);
                 self.touch();
+            }
+            self.flushAssocSends(assoc);
+            if (assoc.target_io.receive_failed.load(.acquire) and !assoc.target_io.hasReceived()) {
+                assoc.closed = true;
+                continue;
             }
             const now = nowNs(self.pump.io);
             if (now - assoc.last_activity_ns >=
@@ -992,26 +986,18 @@ pub const Connection = struct {
     }
 
     fn queueAssocSend(self: *Connection, assoc: *Assoc, encoded: []u8) void {
-        for (&assoc.pending_sends) |*slot| {
-            if (slot.* != null) continue;
-            slot.* = encoded;
-            self.flushAssocSends(assoc);
-            return;
-        }
-        self.pump.allocator.free(encoded);
+        if (!assoc.pending_replies.enqueue(encoded)) self.pump.allocator.free(encoded);
     }
 
     fn flushAssocSends(self: *Connection, assoc: *Assoc) void {
-        for (&assoc.pending_sends) |*slot| {
-            const encoded = slot.* orelse continue;
+        for (0..assoc_pending_sends) |_| {
+            const encoded = assoc.pending_replies.peek() orelse break;
             const sent = self.sendAssocBytes(assoc, encoded) catch {
-                self.pump.allocator.free(encoded);
-                slot.* = null;
+                self.pump.allocator.free(assoc.pending_replies.pop().?);
                 continue;
             };
             if (!sent) return;
-            self.pump.allocator.free(encoded);
-            slot.* = null;
+            self.pump.allocator.free(assoc.pending_replies.pop().?);
         }
     }
 
@@ -1037,22 +1023,17 @@ pub const Connection = struct {
                 return true;
             },
             .uni => {
-                self.pump.shared.trySend(self.handle, &.{.{
-                    .stream = .{
-                        .stream_id = assoc.uni_stream,
-                        .offset = assoc.send_offset,
-                        .data = encoded,
-                        .fin = false,
-                    },
-                }}) catch |err| switch (err) {
+                defer self.pump.shared.dispatcher.refreshConnectionTimer(self.handle) catch {};
+                const sent = assoc.packet_stream.send(&self.established.connection, encoded) catch |err| switch (err) {
                     error.CongestionLimited,
                     error.PacingLimited,
                     error.FlowControlBlocked,
                     error.AntiAmplificationLimited,
+                    error.StreamLimitExceeded,
                     => return false,
                     else => return err,
                 };
-                assoc.send_offset += encoded.len;
+                if (!sent) return false;
                 if (self.pump.config.stats) |value| {
                     value.addBytesOut(@intCast(encoded.len));
                 }
@@ -1141,7 +1122,7 @@ pub const Connection = struct {
 
     fn closeAssocForStream(self: *Connection, stream_id: u64) void {
         for (self.assocs.items) |assoc| {
-            if (assoc.uni_stream == stream_id) {
+            if (assoc.packet_stream.stream_id == stream_id) {
                 assoc.closed = true;
                 return;
             }
@@ -1300,11 +1281,11 @@ pub const Connection = struct {
     }
 
     fn freeAssoc(self: *Connection, assoc: *Assoc) void {
+        assoc.target_io.stop();
+        while (assoc.target_io.takeSent()) |result| self.settleUdp(result);
+        assoc.target_io.deinit();
         assoc.socket.close(self.pump.io);
-        for (&assoc.pending_sends) |*slot| {
-            if (slot.*) |bytes| self.pump.allocator.free(bytes);
-            slot.* = null;
-        }
+        assoc.pending_replies.deinit(self.pump.allocator);
         self.pump.allocator.destroy(assoc);
     }
 
@@ -1470,4 +1451,29 @@ pub fn serve(server: anytype) !void {
     defer pump.deinit();
     try pump.startWorkers();
     return pump.run();
+}
+
+test "TUIC shared UDP uni packets release parser slots on FIN" {
+    var connection: Connection = .{
+        .pump = undefined,
+        .handle = 1,
+        .established = undefined,
+        .peer = .{ .ip4 = .loopback(1) },
+        .created_ns = 0,
+        .last_activity_ns = 0,
+        .authenticated = true,
+        .datagram_buffer = &.{},
+    };
+    const heartbeat = [_]u8{ protocol.version, @intFromEnum(protocol.CommandType.heartbeat) };
+    for (0..128) |index| {
+        const stream_id: u64 = 2 + 4 * index;
+        try connection.handleUniData(stream_id, heartbeat[0..1], false);
+        var active: usize = 0;
+        for (&connection.uni_pending) |*pending| active += @intFromBool(pending.active);
+        try std.testing.expectEqual(@as(usize, 1), active);
+        try connection.handleUniData(stream_id, heartbeat[1..], true);
+        for (&connection.uni_pending) |*pending| try std.testing.expect(!pending.active and pending.used == 0);
+    }
+    try std.testing.expectError(error.InvalidCommand, connection.handleUniData(1026, heartbeat[0..1], true));
+    for (&connection.uni_pending) |*pending| try std.testing.expect(!pending.active and pending.used == 0);
 }

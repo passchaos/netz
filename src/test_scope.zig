@@ -11,6 +11,7 @@ test {
             _ = @import("proxy/internal/relay_queue.zig");
             _ = @import("proxy/internal/relay_queue/pending_input.zig");
             _ = @import("proxy/internal/relay_queue/stream_send_tests.zig");
+            _ = @import("proxy/internal/udp_session.zig");
         },
         .http => _ = @import("http/mod.zig"),
         .http1 => _ = @import("http1/mod.zig"),

@@ -1,0 +1,20 @@
+{
+  "classification": "single-turn native callback observations; no matched baseline or overall throughput/p99/RSS claim",
+  "rows": [
+    {
+      "backend": "Threaded zero async",
+      "associations": 32,
+      "target_receive_calls": 0,
+      "service_ns": 8916,
+      "session_bytes": 6000
+    },
+    {
+      "backend": "application one executor",
+      "associations": 32,
+      "target_receive_calls": 0,
+      "service_ns": 9750,
+      "session_bytes": 6000
+    }
+  ],
+  "log_sha256": "50305c94d2f787b4245f21575a79acfd5d5645d4dfd6f609b04d194519875b32"
+}

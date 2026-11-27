@@ -1,0 +1,45 @@
+{
+  "server_sha256": "e0d32272035c955576058046aed18b486fb3e90568705cd9785026c4e6164ae9",
+  "peer_sha256": "6546126c1759683fe85798da92409215d53c50e0f2b346b4f74a61babc8dbec2",
+  "original_gate_sha256": "0a9cf4697033210b3610ffc97389c59dad6d52b500ae0726aabcec52e89f47d1",
+  "original_udp_payload_bytes": 16,
+  "original_gate_reported_udp_bytes": 17,
+  "checks": [
+    {
+      "mode": "native",
+      "extra_bursts": false,
+      "exit_code": 0,
+      "elapsed_seconds": 0.918993458,
+      "output": "record=verified protocol=tuic transport=quic udp_relay_mode=native role_pair=sing-box-client+netz-server tcp_bytes=20 large_tcp_bytes=131072 udp_bytes=17 complete=true\n",
+      "output_sha256": "a5fe1a755a0ad31c5544bad202a08e007de4d65a034bbdb6a59eeed7263dcf7e",
+      "extra_packets": 0,
+      "extra_payload_sizes": []
+    },
+    {
+      "mode": "quic",
+      "extra_bursts": false,
+      "exit_code": 0,
+      "elapsed_seconds": 0.28498362499999996,
+      "output": "record=verified protocol=tuic transport=quic udp_relay_mode=quic role_pair=sing-box-client+netz-server tcp_bytes=20 large_tcp_bytes=131072 udp_bytes=17 complete=true\n",
+      "output_sha256": "ecc2a4fc1fcec3b6b61beb1d521f57e51a270785e3e0e417f3a465f228dab851",
+      "extra_packets": 0,
+      "extra_payload_sizes": []
+    },
+    {
+      "mode": "native",
+      "extra_bursts": true,
+      "exit_code": 1,
+      "elapsed_seconds": 0.2706435420000002,
+      "output": "socks udp burst order/payload mismatch: b'\\x00\\x00\\x00\\x01\\x7f\\x00\\x00\\x01H\\x15\\x00\\x01!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!' expected b'\\x00\\x00                              '\n",
+      "output_sha256": "c4b687a48617d26992dd9373361f4a463c88af39fb6e114096228e7bbd909caf",
+      "extra_packets": 32,
+      "extra_payload_sizes": [
+        32,
+        64,
+        256,
+        512
+      ]
+    }
+  ],
+  "burst_gate_sha256": "3ef770bc6aca8820fcede0a48b03ea4bf210e2852727d6510a13db133ee52ccc"
+}
