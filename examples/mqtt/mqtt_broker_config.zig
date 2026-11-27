@@ -155,6 +155,7 @@ pub const RunOptions = struct {
     finite_test: bool = false,
     /// Borrowed throughout continuous service, including management ticks.
     error_observer: ?mqtt.broker.ListenerErrorObserver = null,
+    connection_end_observer: ?mqtt.broker.ListenerConnectionEndObserver = null,
 };
 
 const AutosavePolicy = union(enum) {
@@ -1102,6 +1103,7 @@ pub fn run(
             .listeners = active_endpoints,
             .shutdown = &shutdown,
             .error_observer = run_options.error_observer,
+            .connection_end_observer = run_options.connection_end_observer,
         } };
     var autosave = try AutosaveController.init(
         allocator,
@@ -1716,6 +1718,7 @@ const Service = union(enum) {
         listeners: []const mqtt.broker.ListenerEndpoint,
         shutdown: *std.Io.Event,
         error_observer: ?mqtt.broker.ListenerErrorObserver,
+        connection_end_observer: ?mqtt.broker.ListenerConnectionEndObserver,
     },
 };
 
@@ -1727,7 +1730,7 @@ fn serveConfigured(
         .finite => |listeners| try broker.serveListeners(listeners),
         .continuous => |continuous| try broker.serveListenersUntil(
             continuous.listeners,
-            .{ .shutdown = continuous.shutdown, .error_observer = continuous.error_observer },
+            .{ .shutdown = continuous.shutdown, .error_observer = continuous.error_observer, .connection_end_observer = continuous.connection_end_observer },
         ),
     }
 }

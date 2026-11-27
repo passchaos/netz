@@ -1,0 +1,8 @@
+{
+  "scope": "original CA scenario through MQTT/capath/WSS PING preconditions immediately before SIGHUP",
+  "platform": "darwin",
+  "full_reload_qualified": false,
+  "production_source_changed": false,
+  "preconditions_passed": true,
+  "intercepted_hup_count": 1
+}

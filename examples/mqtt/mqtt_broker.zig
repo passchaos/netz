@@ -76,6 +76,19 @@ const ConfiguredErrorTrace = struct {
             @errorName(event.err),
         });
     }
+
+    fn observeEnd(_: *anyopaque, event: netz.mqtt.broker.ListenerConnectionEndEvent) void {
+        if (emitted.fetchAdd(1, .monotonic) >= 32) return;
+        std.debug.print("MQTT connection end: listener={d} client={s} read={s} writer={s} graceful={} administrative={} keep_alive_timeout={}\n", .{
+            event.listener_index,
+            event.client_id,
+            if (event.read_error) |err| @errorName(err) else "none",
+            if (event.writer_error) |err| @errorName(err) else "none",
+            event.graceful_disconnect,
+            event.administrative_disconnect,
+            event.keep_alive_timed_out,
+        });
+    }
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -102,6 +115,10 @@ pub fn main(init: std.process.Init) !void {
                     .context = &ConfiguredErrorTrace.context,
                     .observe = ConfiguredErrorTrace.observe,
                 } else null
+            else
+                null,
+            .connection_end_observer = if (init.environ_map.get("NETZ_MQTT_CONFIG_TRACE_ERRORS")) |value|
+                if (std.mem.eql(u8, value, "1")) .{ .context = &ConfiguredErrorTrace.context, .observe = ConfiguredErrorTrace.observeEnd } else null
             else
                 null,
         }) catch |err| switch (err) {

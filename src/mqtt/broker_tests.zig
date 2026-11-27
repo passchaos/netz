@@ -2415,6 +2415,7 @@ test {
     _ = @import("broker/subscription_change_tests.zig");
     _ = @import("broker/registration_persistence_tests.zig");
     _ = @import("broker/listener_tests.zig");
+    _ = @import("broker/connection_observer_tests.zig");
     _ = @import("broker/unix_listener_tests.zig");
     _ = @import("broker/capability_tests.zig");
     _ = @import("broker/client_policy_tests.zig");

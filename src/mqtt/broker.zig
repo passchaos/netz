@@ -1624,6 +1624,24 @@ pub const ListenerErrorObserver = struct {
     observe: *const fn (context: *anyopaque, event: ListenerErrorEvent) void,
 };
 
+/// Observed before connection destruction, independently of error policy.
+pub const ListenerConnectionEndEvent = struct {
+    listener_index: usize,
+    /// Borrowed only for the callback; callers copy it if retained.
+    client_id: []const u8,
+    read_error: ?anyerror,
+    writer_error: ?anyerror,
+    graceful_disconnect: bool,
+    administrative_disconnect: bool,
+    keep_alive_timed_out: bool,
+};
+
+pub const ListenerConnectionEndObserver = struct {
+    context: *anyopaque,
+    /// May run concurrently. Runs outside broker locks and must return promptly.
+    observe: *const fn (*anyopaque, ListenerConnectionEndEvent) void,
+};
+
 pub const ServeListenersUntilOptions = struct {
     /// Setting this event cancels pending accepts and active client reads.
     shutdown: *std.Io.Event,
@@ -1634,6 +1652,7 @@ pub const ServeListenersUntilOptions = struct {
     /// Prevent a failed/closed listener from becoming an unbounded retry loop.
     accept_error_backoff: std.Io.Duration = .fromMilliseconds(10),
     error_observer: ?ListenerErrorObserver = null,
+    connection_end_observer: ?ListenerConnectionEndObserver = null,
 };
 
 pub const system_metrics = [_]SystemMetric{
@@ -1762,6 +1781,8 @@ pub const ClientTask = struct {
     result: *?anyerror,
     listener_capacity: ?*ListenerCapacity = null,
     managed_keep_alive: bool = false,
+    listener_index: usize = 0,
+    connection_end_observer: ?ListenerConnectionEndObserver = null,
 
     pub fn run(task: ClientTask) std.Io.Cancelable!void {
         var connect = task.connect;
@@ -1791,11 +1812,13 @@ pub const ClientTask = struct {
         }, task);
 
         var read_error: ?anyerror = null;
+        var raw_read_error: ?anyerror = null;
         const loop_result = if (task.managed_keep_alive)
             task.runLoopMode(true, slot, connection, connect.connect)
         else
             task.runLoopMode(false, slot, connection, connect.connect);
         loop_result catch |err| {
+            raw_read_error = err;
             if (!ungracefulTransportClose(err)) read_error = err;
         };
         if (read_error) |err| task.result.* = err;
@@ -1807,6 +1830,21 @@ pub const ClientTask = struct {
             if (!ungracefulTransportClose(err) and task.result.* == null) {
                 task.result.* = err;
             }
+        }
+        if (task.connection_end_observer) |observer| {
+            task.broker.state_mutex.lockUncancelable(task.broker.io);
+            const graceful = slot.state.graceful_disconnect;
+            const administrative = slot.state.administrative_disconnect;
+            task.broker.state_mutex.unlock(task.broker.io);
+            observer.observe(observer.context, .{
+                .listener_index = task.listener_index,
+                .client_id = connect.connect.client_id,
+                .read_error = raw_read_error,
+                .writer_error = writer_error,
+                .graceful_disconnect = graceful,
+                .administrative_disconnect = administrative,
+                .keep_alive_timed_out = connection.managedKeepAliveTimedOut(),
+            });
         }
     }
 
@@ -2558,6 +2596,8 @@ pub const ListenerSupervisorAcceptTask = struct {
             slot_claimed = false;
             client_task.listener_capacity = task.capacity;
             client_task.managed_keep_alive = true;
+            client_task.listener_index = task.listener_index;
+            client_task.connection_end_observer = task.supervisor.options.connection_end_observer;
             capacity_claimed = false;
             ClientTask.run(client_task) catch |err| {
                 connection_error = err;

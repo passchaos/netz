@@ -1,0 +1,69 @@
+{
+  "id": 45944367106,
+  "head_sha": "087543755d38614f04110af92f362ebfd0dd07d1",
+  "run_attempt": 1,
+  "status": "completed",
+  "conclusion": "failure",
+  "jobs": [
+    {
+      "id": 140325576301,
+      "name": "Cross-compile aarch64-macos-none (macOS SDK)",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 140325576517,
+      "name": "Portable x86_64-linux-gnu (ubuntu-latest)",
+      "status": "completed",
+      "conclusion": "failure"
+    },
+    {
+      "id": 140325576551,
+      "name": "Portable aarch64-linux-gnu (ubuntu-latest)",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 140325576583,
+      "name": "Portable x86_64-windows-gnu (ubuntu-latest)",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 140325576587,
+      "name": "Cross-compile x86_64-macos-none (macOS SDK)",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 140325576594,
+      "name": "Portable x86_64-windows-gnu (windows-latest)",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 140325576602,
+      "name": "complete",
+      "status": "completed",
+      "conclusion": "failure"
+    },
+    {
+      "id": 140325576628,
+      "name": "preflight",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 140325577897,
+      "name": "fuzz",
+      "status": "completed",
+      "conclusion": "skipped"
+    },
+    {
+      "id": 140334571639,
+      "name": "verify",
+      "status": "completed",
+      "conclusion": "failure"
+    }
+  ]
+}

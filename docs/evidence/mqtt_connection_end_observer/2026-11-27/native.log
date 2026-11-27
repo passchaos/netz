@@ -1,0 +1,154 @@
+[traex-zig-guard 2026-11-27 13:49:56] waiting for the global TRAE Zig build slot
+[traex-zig-guard 2026-11-27 13:57:29] started Zig tree root=4599 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=900s
+1/73 test_scope.test_0...OK
+2/73 mqtt.mod.test_0...OK
+3/73 mqtt.mod.test_1...OK
+4/73 mqtt.mod.test_2...OK
+5/73 mqtt.runtime.test_0...OK
+6/73 mqtt.reconnect.test_0...OK
+7/73 mqtt.reconnect.test_1...OK
+8/73 mqtt.broker.test_0...OK
+9/73 mqtt.bridge.test_0...OK
+10/73 mqtt.router.test_0...OK
+11/73 mqtt.router.test_1...OK
+12/73 mqtt.retained.mod.test_0...OK
+13/73 mqtt.session.mod.test_0...OK
+14/73 mqtt.will.mod.test_0...OK
+15/73 mqtt.runtime.packet_transport.test_0...OK
+16/73 mqtt.runtime.packet_transport.test_1...OK
+17/73 mqtt.runtime.auth_tests.test_0...OK
+18/73 mqtt.reconnect.command_queue.test_0...OK
+19/73 mqtt.persistence.mod.test_0...OK
+20/73 mqtt.broker_config.test_0...OK
+21/73 mqtt.bridge.outbound.test_0...OK
+22/73 mqtt.broker.tests.test_0...OK
+23/73 mqtt.broker.tests.test_1...OK
+24/73 mqtt.bridge.outbound_engine.test_0...OK
+25/73 mqtt.bridge.local_source.test_0...OK
+26/73 mqtt.broker_tests.test_0...OK
+27/73 mqtt.broker.local_consumer_tests.test_0...OK
+28/73 mqtt.broker.registration_persistence_tests.test_0...OK
+29/73 mqtt.broker.connection_observer_tests.test.MQTT listener connection end observer preserves transport close policy and borrowed identity...OK
+30/73 websocket.mod.test_0...OK
+31/73 websocket.mod.test_1...OK
+32/73 websocket.runtime.test_0...OK
+33/73 http1.mod.test_0...OK
+34/73 http1.mod.test_1...OK
+35/73 http1.mod.test_2...OK
+36/73 http1.runtime.test_0...OK
+37/73 internal.tcp_connect.test_0...OK
+38/73 tls.mod.test_0...OK
+39/73 tls.stream.mod.test_0...OK
+40/73 internal.stream_io.test_0...OK
+41/73 internal.stream_io.timed_read.test_0...OK
+42/73 tls.stream.record_stream.test_0...OK
+43/73 http.cookies.mod.test_0...OK
+44/73 http2.mod.test_0...OK
+45/73 http2.mod.test_1...OK
+46/73 http2.runtime.test_0...OK
+47/73 mqtt.broker.qos2.test_0...OK
+48/73 mqtt.broker.bridge_qos2.test_0...OK
+49/73 mqtt.runtime.acknowledgement.pending.test_0...OK
+50/73 internal.stream_io.timed_write.test_0...OK
+51/73 internal.priority.test_0...OK
+52/73 http.cookies.syntax.test_0...OK
+53/73 tls.stream.alpn_tests.test_0...OK
+54/73 tls.server_identity_file.test_0...OK
+55/73 http1.runtime.tests.test_0...OK
+56/73 http1.runtime.write.test_0...OK
+57/73 http2.runtime.tests.test_0...OK
+58/73 http2.runtime.tests.test_1...OK
+59/73 http2.runtime.tests.test_2...OK
+60/73 websocket.runtime.tests.test_0...OK
+61/73 websocket.runtime.h3.test_0...OK
+62/73 websocket.runtime.cookie_h2_tests.test_0...OK
+63/73 websocket.runtime.h3_tests.test_0...OK
+64/73 websocket.runtime.mutex_deadline_tests.test_0...OK
+65/73 http2.runtime.response.allocation_failure_tests.test_0...OK
+66/73 http2.runtime.response.forbidden_body_tests.test_0...OK
+67/73 http2.runtime.request.credit_failure_tests.test_0...OK
+68/73 http2.runtime.refusal_tests.test_0...OK
+69/73 http2.runtime.concurrent_tests.test_0...OK
+70/73 websocket.stream_connection.test_0...OK
+71/73 mqtt.runtime.tests.test_0...OK
+72/73 mqtt.runtime.transport.parts_deadline_tests.test_0...OK
+73/73 mqtt.runtime.acknowledgement.publish_deadline_tests.test_0...OK
+All 73 tests passed.
+Build Summary: 10/10 steps succeeded
+test-mqtt success
++- run test test: src/test_scope.zig success 454ms
+   +- compile test Debug native success 9s MaxRSS:949M
+      +- WriteFile macho_0_p256_field_arm64.S cached
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 204ms MaxRSS:31M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 202ms MaxRSS:31M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options success
+      +- options cached
+
+[traex-zig-guard 2026-11-27 13:57:41] finished Zig tree root=4599 peak=869MiB result=0

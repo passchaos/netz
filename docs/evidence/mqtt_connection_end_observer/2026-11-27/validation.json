@@ -1,0 +1,142 @@
+{
+  "observed_utc": "2026-11-27T06:13:55.096176+00:00",
+  "base_commit": "087543755d38614f04110af92f362ebfd0dd07d1",
+  "scope": "optional listener connection end observation independent of error policy",
+  "source_sha256": {
+    "src/mqtt/broker.zig": "84deec9c5ad9b057bf3ab378c0126fffddfd262ad3b1fb75dbf0308f0615d020",
+    "src/mqtt/broker_tests.zig": "2100a1695721ae0f9747947f332d79eebb7b40ac26cd9798e1637c1bcebef4ea",
+    "src/mqtt/broker/connection_observer_tests.zig": "dcf03370587c751ee3190c14f2d2711f288a06b57b0e0ceb5b2d5b8e8e836ea7",
+    "examples/mqtt/mqtt_broker.zig": "ca5ca681417ef410620087dacf587f18fb82ffb6369ee177064fe8680950150e",
+    "examples/mqtt/mqtt_broker_config.zig": "2a66bfa75099ba1a2adeb0e22426e6a9611a13ee1ba0a6882b833b62d68300c3"
+  },
+  "native": {
+    "exit_code": 0,
+    "tests": 73,
+    "command": [
+      "zig-tree-guard",
+      "--",
+      "zig",
+      "build",
+      "test-mqtt",
+      "-j1",
+      "-Dtest-progress=true",
+      "-Dtest-filter=MQTT listener connection end observer",
+      "-Dtest-filter=MQTT shared writer retirement",
+      "--summary",
+      "all"
+    ],
+    "log_sha256": "6ba52fc49b16a89346170df30b62f40c7959f2230b247fa76fbf1de888ea60ff"
+  },
+  "checks": {
+    "fmt": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "fmt",
+        "src/mqtt/broker.zig",
+        "src/mqtt/broker_tests.zig",
+        "src/mqtt/broker/connection_observer_tests.zig",
+        "examples/mqtt/mqtt_broker.zig",
+        "examples/mqtt/mqtt_broker_config.zig"
+      ],
+      "exit_code": 0,
+      "log": "/var/folders/3h/rw6tyryn6ps_mw9bcstc2lfm0000gn/T/netz-mqtt-end-observer-tuj2qmxv/fmt.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "source_sha256": {
+        "src/mqtt/broker.zig": "84deec9c5ad9b057bf3ab378c0126fffddfd262ad3b1fb75dbf0308f0615d020",
+        "src/mqtt/broker_tests.zig": "2100a1695721ae0f9747947f332d79eebb7b40ac26cd9798e1637c1bcebef4ea",
+        "src/mqtt/broker/connection_observer_tests.zig": "dcf03370587c751ee3190c14f2d2711f288a06b57b0e0ceb5b2d5b8e8e836ea7",
+        "examples/mqtt/mqtt_broker.zig": "ca5ca681417ef410620087dacf587f18fb82ffb6369ee177064fe8680950150e",
+        "examples/mqtt/mqtt_broker_config.zig": "2a66bfa75099ba1a2adeb0e22426e6a9611a13ee1ba0a6882b833b62d68300c3"
+      }
+    },
+    "windows": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-mqtt-compile",
+        "-j1",
+        "-Dtarget=x86_64-windows-gnu",
+        "-Dtest-filter=MQTT listener connection end observer",
+        "-Dtest-filter=MQTT shared writer retirement",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log": "/var/folders/3h/rw6tyryn6ps_mw9bcstc2lfm0000gn/T/netz-mqtt-end-observer-tuj2qmxv/windows.log",
+      "log_sha256": "1c09a001d0a0188b768e6cdde641aef0c62bc575c29567c2259bfc189decf01b",
+      "source_sha256": {
+        "src/mqtt/broker.zig": "84deec9c5ad9b057bf3ab378c0126fffddfd262ad3b1fb75dbf0308f0615d020",
+        "src/mqtt/broker_tests.zig": "2100a1695721ae0f9747947f332d79eebb7b40ac26cd9798e1637c1bcebef4ea",
+        "src/mqtt/broker/connection_observer_tests.zig": "dcf03370587c751ee3190c14f2d2711f288a06b57b0e0ceb5b2d5b8e8e836ea7",
+        "examples/mqtt/mqtt_broker.zig": "ca5ca681417ef410620087dacf587f18fb82ffb6369ee177064fe8680950150e",
+        "examples/mqtt/mqtt_broker_config.zig": "2a66bfa75099ba1a2adeb0e22426e6a9611a13ee1ba0a6882b833b62d68300c3"
+      }
+    },
+    "broker": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "build-mqtt-vector-broker",
+        "-j1",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log": "/var/folders/3h/rw6tyryn6ps_mw9bcstc2lfm0000gn/T/netz-mqtt-end-observer-tuj2qmxv/broker.log",
+      "log_sha256": "a19d16f4c6fb3ef1d3710aeb2af8152dc45782058e6b9a384e4825dd409c2367",
+      "source_sha256": {
+        "src/mqtt/broker.zig": "84deec9c5ad9b057bf3ab378c0126fffddfd262ad3b1fb75dbf0308f0615d020",
+        "src/mqtt/broker_tests.zig": "2100a1695721ae0f9747947f332d79eebb7b40ac26cd9798e1637c1bcebef4ea",
+        "src/mqtt/broker/connection_observer_tests.zig": "dcf03370587c751ee3190c14f2d2711f288a06b57b0e0ceb5b2d5b8e8e836ea7",
+        "examples/mqtt/mqtt_broker.zig": "ca5ca681417ef410620087dacf587f18fb82ffb6369ee177064fe8680950150e",
+        "examples/mqtt/mqtt_broker_config.zig": "2a66bfa75099ba1a2adeb0e22426e6a9611a13ee1ba0a6882b833b62d68300c3"
+      }
+    },
+    "pre_hup": {
+      "command": [
+        "/Users/bytedance/.local/bin/uv",
+        "run",
+        "--python",
+        "3.14",
+        "/tmp/netz-ca-pre-hup-probe.py",
+        "/Users/bytedance/project-z/netz/zig-out/bin/netz-mqtt-vector-broker"
+      ],
+      "exit_code": 0,
+      "log": "/var/folders/3h/rw6tyryn6ps_mw9bcstc2lfm0000gn/T/netz-mqtt-end-observer-tuj2qmxv/pre_hup.log",
+      "log_sha256": "730ad27aeedaae1ccfd1371e9511d4d563c9ac9d1e388d7ca72705a7b2369a5e",
+      "source_sha256": {
+        "src/mqtt/broker.zig": "84deec9c5ad9b057bf3ab378c0126fffddfd262ad3b1fb75dbf0308f0615d020",
+        "src/mqtt/broker_tests.zig": "2100a1695721ae0f9747947f332d79eebb7b40ac26cd9798e1637c1bcebef4ea",
+        "src/mqtt/broker/connection_observer_tests.zig": "dcf03370587c751ee3190c14f2d2711f288a06b57b0e0ceb5b2d5b8e8e836ea7",
+        "examples/mqtt/mqtt_broker.zig": "ca5ca681417ef410620087dacf587f18fb82ffb6369ee177064fe8680950150e",
+        "examples/mqtt/mqtt_broker_config.zig": "2a66bfa75099ba1a2adeb0e22426e6a9611a13ee1ba0a6882b833b62d68300c3"
+      }
+    }
+  },
+  "broker_sha256": "2ba1c836bf32a2f04421656fd75a112e8937c961890c1bd1c5db0febf47a1dd4",
+  "pre_hup": {
+    "scope": "original CA scenario through MQTT/capath/WSS PING preconditions immediately before SIGHUP",
+    "platform": "darwin",
+    "full_reload_qualified": false,
+    "production_source_changed": false,
+    "preconditions_passed": true,
+    "intercepted_hup_count": 1
+  },
+  "linux_cause_proven": false,
+  "full_reload_qualified": false,
+  "audit": {
+    "exit_code": 0,
+    "command": [
+      "zig-tree-guard",
+      "--",
+      "zig",
+      "build",
+      "verify-evidence",
+      "-j1",
+      "--",
+      "--max-unresolved=24",
+      "--limit=0"
+    ],
+    "log_sha256": "d6601a33a5ef543da0f28cac61ea1463ef30570cb2efc143ba4ff2c22e31c43e"
+  }
+}
