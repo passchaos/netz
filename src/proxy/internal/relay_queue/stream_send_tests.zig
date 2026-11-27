@@ -99,9 +99,7 @@ test "proxy relay STREAM retry retires protected but unsent packet numbers" {
     try fixture.init(64 * 1024);
     defer fixture.deinit();
     var observed = ObservedSend{ .delegate = fixture.sender_endpoint.io, .fail_after_prefix = 0 };
-    var vtable = observed.delegate.vtable.*;
-    vtable.netSend = ObservedSend.netSend;
-    fixture.sender_endpoint.io = .{ .userdata = &observed, .vtable = &vtable };
+    fixture.sender_endpoint.io = observed.io();
     defer fixture.sender_endpoint.io = observed.delegate;
     var bytes = "abcdefgh".*;
     var progress: output.Progress = .{};
@@ -125,9 +123,7 @@ test "proxy relay STREAM commits a socket-visible item even with a trailing erro
     try fixture.init(64 * 1024);
     defer fixture.deinit();
     var observed = ObservedSend{ .delegate = fixture.sender_endpoint.io, .fail_after_prefix = 1 };
-    var vtable = observed.delegate.vtable.*;
-    vtable.netSend = ObservedSend.netSend;
-    fixture.sender_endpoint.io = .{ .userdata = &observed, .vtable = &vtable };
+    fixture.sender_endpoint.io = observed.io();
     defer fixture.sender_endpoint.io = observed.delegate;
     var bytes = "abcdefgh".*;
     var progress: output.Progress = .{};

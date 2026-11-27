@@ -10,6 +10,7 @@ pub fn main(init: std.process.Init) !void {
     var uuid_text: []const u8 = "00000000-0000-4000-8000-000000000003";
     var password: []const u8 = "netz-tuic-interop";
     var allow_all = false;
+    var single = false;
     for (args[1..]) |arg| {
         if (std.mem.startsWith(u8, arg, "--bind=")) {
             bind_text = arg["--bind=".len..];
@@ -19,6 +20,8 @@ pub fn main(init: std.process.Init) !void {
             password = arg["--password=".len..];
         } else if (std.mem.eql(u8, arg, "--allow-all")) {
             allow_all = true;
+        } else if (std.mem.eql(u8, arg, "--single")) {
+            single = true;
         } else return error.InvalidArgument;
     }
 
@@ -53,5 +56,5 @@ pub fn main(init: std.process.Init) !void {
         "netz TUIC server listening on {f} server_io=zio-std-io\n",
         .{server.address()},
     );
-    try server.serve();
+    if (single) try server.serveOne() else try server.serve();
 }

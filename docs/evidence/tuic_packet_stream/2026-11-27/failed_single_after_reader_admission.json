@@ -1,0 +1,68 @@
+{
+  "server_sha256": "4851ccb42939538a2c60ee9a420b0971b1f7d8bf67659cbd0dffd1a8c30f9109",
+  "peer_sha256": "6546126c1759683fe85798da92409215d53c50e0f2b346b4f74a61babc8dbec2",
+  "original_gate_sha256": "0a9cf4697033210b3610ffc97389c59dad6d52b500ae0726aabcec52e89f47d1",
+  "baseline_bursts_source_sha256": "cd6b4016e81d6799eeb34467824e757ec17bde7172e70ed56269481f34b9ae6c",
+  "checks": [
+    {
+      "owner": "shared",
+      "mode": "native",
+      "extended": false,
+      "exit_code": 0,
+      "elapsed_seconds": 0.5705558340000001,
+      "gate_sha256": "0a9cf4697033210b3610ffc97389c59dad6d52b500ae0726aabcec52e89f47d1",
+      "output": "record=verified protocol=tuic transport=quic udp_relay_mode=native role_pair=sing-box-client+netz-server tcp_bytes=20 large_tcp_bytes=131072 udp_bytes=17 complete=true\n",
+      "output_sha256": "a5fe1a755a0ad31c5544bad202a08e007de4d65a034bbdb6a59eeed7263dcf7e",
+      "small_packets": 0,
+      "large_packets": 0
+    },
+    {
+      "owner": "shared",
+      "mode": "quic",
+      "extended": false,
+      "exit_code": 0,
+      "elapsed_seconds": 0.26037945800000006,
+      "gate_sha256": "0a9cf4697033210b3610ffc97389c59dad6d52b500ae0726aabcec52e89f47d1",
+      "output": "record=verified protocol=tuic transport=quic udp_relay_mode=quic role_pair=sing-box-client+netz-server tcp_bytes=20 large_tcp_bytes=131072 udp_bytes=17 complete=true\n",
+      "output_sha256": "ecc2a4fc1fcec3b6b61beb1d521f57e51a270785e3e0e417f3a465f228dab851",
+      "small_packets": 0,
+      "large_packets": 0
+    },
+    {
+      "owner": "shared",
+      "mode": "native",
+      "extended": true,
+      "exit_code": 0,
+      "elapsed_seconds": 0.3099723750000001,
+      "gate_sha256": "c1cf7b9dd0b388386c6ef0da4c8010ffe845071e26aee80a843ce2aefcc5ea03",
+      "output": "{\"burst_wave\": 0, \"received_order\": [[0, 1], [0, 0], [0, 3], [0, 2], [0, 4], [0, 7], [0, 5], [0, 6]], \"exact_payloads\": 8}\n{\"burst_wave\": 1, \"received_order\": [[1, 5], [1, 0], [1, 2], [1, 1], [1, 3], [1, 4], [1, 7], [1, 6]], \"exact_payloads\": 8}\n{\"burst_wave\": 2, \"received_order\": [[2, 3], [2, 0], [2, 1], [2, 2], [2, 5], [2, 4], [2, 6], [2, 7]], \"exact_payloads\": 8}\n{\"burst_wave\": 3, \"received_order\": [[3, 3], [3, 1], [3, 2], [3, 0], [3, 5], [3, 4], [3, 6], [3, 7]], \"exact_payloads\": 8}\n{\"burst_wave\": 4, \"received_order\": [[4, 3], [4, 0], [4, 1], [4, 2], [4, 5], [4, 4], [4, 6], [4, 7]], \"exact_payloads\": 8}\n{\"burst_wave\": 5, \"received_order\": [[5, 1], [5, 0], [5, 3], [5, 2], [5, 4], [5, 5], [5, 6], [5, 7]], \"exact_payloads\": 8}\n{\"burst_wave\": 6, \"received_order\": [[6, 2], [6, 0], [6, 1], [6, 4], [6, 3], [6, 5], [6, 6], [6, 7]], \"exact_payloads\": 8}\n{\"burst_wave\": 7, \"received_order\": [[7, 3], [7, 7], [7, 4], [7, 5], [7, 6], [7, 1], [7, 0], [7, 2]], \"exact_payloads\": 8}\n{\"burst_wave\": 8, \"received_order\": [[8, 2], [8, 0], [8, 1], [8, 4], [8, 3], [8, 5], [8, 6], [8, 7]], \"exact_payloads\": 8}\nrecord=verified protocol=tuic transport=quic udp_relay_mode=native role_pair=sing-box-client+netz-server tcp_bytes=20 large_tcp_bytes=131072 udp_bytes=17 complete=true\n",
+      "output_sha256": "9e60e470c76577ae1ccd0c0a53e23d3ac265b622472a0a3019b5bda3a10ee8bc",
+      "small_packets": 72,
+      "large_packets": 0
+    },
+    {
+      "owner": "shared",
+      "mode": "quic",
+      "extended": true,
+      "exit_code": 0,
+      "elapsed_seconds": 0.35992350000000006,
+      "gate_sha256": "d8b8ae4c5ff7aa23c2aa278a4312ab9dd5810ceb74ff6c804983a3f970779879",
+      "output": "{\"burst_wave\": 0, \"received_order\": [[0, 2], [0, 0], [0, 1], [0, 3], [0, 4], [0, 5], [0, 6], [0, 7]], \"exact_payloads\": 8}\n{\"burst_wave\": 1, \"received_order\": [[1, 1], [1, 0], [1, 2], [1, 3], [1, 4], [1, 6], [1, 5], [1, 7]], \"exact_payloads\": 8}\n{\"burst_wave\": 2, \"received_order\": [[2, 1], [2, 0], [2, 3], [2, 2], [2, 4], [2, 5], [2, 6], [2, 7]], \"exact_payloads\": 8}\n{\"burst_wave\": 3, \"received_order\": [[3, 1], [3, 0], [3, 2], [3, 4], [3, 3], [3, 5], [3, 7], [3, 6]], \"exact_payloads\": 8}\n{\"burst_wave\": 4, \"received_order\": [[4, 0], [4, 1], [4, 3], [4, 2], [4, 4], [4, 6], [4, 5], [4, 7]], \"exact_payloads\": 8}\n{\"burst_wave\": 5, \"received_order\": [[5, 0], [5, 2], [5, 4], [5, 1], [5, 3], [5, 5], [5, 6], [5, 7]], \"exact_payloads\": 8}\n{\"burst_wave\": 6, \"received_order\": [[6, 0], [6, 2], [6, 1], [6, 3], [6, 4], [6, 5], [6, 6], [6, 7]], \"exact_payloads\": 8}\n{\"burst_wave\": 7, \"received_order\": [[7, 3], [7, 0], [7, 1], [7, 2], [7, 7], [7, 4], [7, 6], [7, 5]], \"exact_payloads\": 8}\n{\"burst_wave\": 8, \"received_order\": [[8, 7], [8, 1], [8, 0], [8, 4], [8, 3], [8, 2], [8, 6], [8, 5]], \"exact_payloads\": 8}\n{\"large_wave\": 9, \"bytes\": 2048, \"received_order\": [[9, 0], [9, 1], [9, 2], [9, 3], [9, 4], [9, 5], [9, 6], [9, 7]], \"exact_payloads\": 8}\n{\"large_wave\": 10, \"bytes\": 4096, \"received_order\": [[10, 0], [10, 1], [10, 2], [10, 3], [10, 4], [10, 5], [10, 6], [10, 7]], \"exact_payloads\": 8}\nrecord=verified protocol=tuic transport=quic udp_relay_mode=quic role_pair=sing-box-client+netz-server tcp_bytes=20 large_tcp_bytes=131072 udp_bytes=17 complete=true\n",
+      "output_sha256": "40066e77630f4b0e1b1c1633a57c97e0b40ea1c867d6b6d3504d429e572d6ebb",
+      "small_packets": 72,
+      "large_packets": 16
+    },
+    {
+      "owner": "single",
+      "mode": "native",
+      "extended": false,
+      "exit_code": 97,
+      "elapsed_seconds": 9.982577083999999,
+      "gate_sha256": "0a9cf4697033210b3610ffc97389c59dad6d52b500ae0726aabcec52e89f47d1",
+      "output": "curl: (97) Can't complete SOCKS5 connection to 127.0.0.1. (5)\n",
+      "output_sha256": "462bf0ed2cf0f9003a520681fe52e8c26f6414da4ac91de57969d0cdef85a6ae",
+      "small_packets": 0,
+      "large_packets": 0
+    }
+  ]
+}

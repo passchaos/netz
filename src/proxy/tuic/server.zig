@@ -10,7 +10,10 @@ const limits = @import("../runtime/limits.zig");
 const stats_mod = @import("../runtime/stats.zig");
 const rate_limit = @import("../runtime/rate_limit.zig");
 const destination = @import("../runtime/destination.zig");
-const io_helpers = @import("../internal/io.zig");
+const packet_stream = @import("packet_stream.zig");
+const PacketStream = packet_stream.PacketStream;
+const relay_mod = @import("../internal/relay_queue.zig");
+const stream_sender = @import("../internal/relay_queue/stream_send.zig");
 
 const quic = netz.quic;
 const net = std.Io.net;
@@ -128,16 +131,7 @@ pub const Server = struct {
     }
 };
 
-const Relay = struct {
-    state: *State,
-    tcp: net.Stream,
-    stream_id: u64,
-    send_offset: u64 = 0,
-    quic_done: std.atomic.Value(bool) = .init(false),
-    tcp_done: std.atomic.Value(bool) = .init(false),
-    closed: std.atomic.Value(bool) = .init(false),
-    future: std.Io.Future(void) = undefined,
-};
+const Relay = relay_mod.Relay;
 
 const AssocMode = enum { uni, datagram };
 
@@ -146,24 +140,18 @@ const Assoc = struct {
     id: u16,
     socket: net.Socket,
     mode: AssocMode,
-    uni_stream: u64 = 0,
-    send_offset: u64 = 0,
+    packet_stream: PacketStream = .{},
     next_pkt_id: u16 = 0,
     last_activity: std.atomic.Value(i64),
     closed: std.atomic.Value(bool) = .init(false),
 };
 
-const UniPending = struct {
-    stream_id: u64 = 0,
-    buffer: [4096]u8 = undefined,
-    used: usize = 0,
-    active: bool = false,
-};
+const UniPending = @import("uni_input.zig").Input;
 
 const Pending = struct {
     stream_id: u64 = 0,
-    buffer: [512]u8 = undefined,
-    used: usize = 0,
+    input: @import("../internal/relay_queue/pending_input.zig").Buffer = .{},
+    fin: bool = false,
     active: bool = false,
 };
 
@@ -196,9 +184,9 @@ const State = struct {
     io: std.Io,
     established: *quic.handshake.EstablishedConnection,
     config: Config,
-    mutex: std.Io.Mutex = .init,
     relays: std.ArrayList(*Relay) = .empty,
     assocs: std.ArrayList(*Assoc) = .empty,
+    retiring_packet_streams: packet_stream.Retirements = .{},
     pending: [8]Pending = @splat(.{}),
     uni_pending: [8]UniPending = @splat(.{}),
     fragments: [max_fragment_entries]Fragment = @splat(.{}),
@@ -240,6 +228,8 @@ pub fn processEstablished(
         shutdownAllAssocs(&state);
         shutdownAllRelays(&state);
         for (&state.fragments) |*fragment| fragment.deinit(allocator);
+        for (&state.uni_pending) |*pending| pending.deinit(allocator);
+        for (&state.pending) |*pending| pending.input.deinit(allocator);
         state.assocs.deinit(allocator);
         state.relays.deinit(allocator);
     }
@@ -262,23 +252,21 @@ fn authenticate(state: *State) !void {
         const now = std.Io.Timestamp.now(state.io, .awake).nanoseconds;
         if (now >= deadline) return error.AuthTimeout;
 
-        state.mutex.lockUncancelable(state.io);
         const event = state.established.connection.receiveStreamWithTimeout(
             &buffer,
             .fromMilliseconds(10),
         ) catch |err| {
-            state.mutex.unlock(state.io);
             switch (err) {
                 error.Timeout => continue,
                 else => return err,
             }
         };
-        state.mutex.unlock(state.io);
 
         switch (event) {
             .data => |data| {
                 if (!protocol.isUnidirectional(data.stream_id)) {
-                    return error.AuthenticationRequired;
+                    try handleBidiData(state, data.stream_id, buffer[0..data.bytes], data.fin);
+                    continue;
                 }
                 if (data.bytes == 0) continue;
                 if (state.auth_used + data.bytes > state.auth_buffer.len) {
@@ -291,9 +279,16 @@ fn authenticate(state: *State) !void {
                 state.auth_used += data.bytes;
                 if (state.auth_used >= 50) {
                     try verifyAuthentication(state);
+                    for (&state.pending) |*pending| {
+                        if (!pending.active) continue;
+                        try handleBidiData(state, pending.stream_id, &.{}, false);
+                    }
                 }
             },
-            .reset => return error.AuthenticationFailed,
+            .reset => |reset| {
+                if (protocol.isUnidirectional(reset.stream_id)) return error.AuthenticationFailed;
+                closeRelayStream(state, reset.stream_id);
+            },
         }
     }
 }
@@ -321,16 +316,15 @@ fn verifyAuthentication(state: *State) !void {
 fn relayLoop(state: *State) !void {
     var buffer: [4096]u8 = undefined;
     while (state.running.load(.acquire)) {
-        state.mutex.lockUncancelable(state.io);
         const event = state.established.connection.receiveStreamWithTimeout(
             &buffer,
             .fromMilliseconds(10),
         ) catch |err| {
-            state.mutex.unlock(state.io);
             switch (err) {
                 error.Timeout => {
                     drainDatagrams(state, &buffer) catch {};
                     drainAssocReplies(state) catch {};
+                    serviceRelays(state);
                     cleanupRelays(state);
                     cleanupAssocs(state);
                     cleanupFragments(state);
@@ -345,7 +339,6 @@ fn relayLoop(state: *State) !void {
                 else => return err,
             }
         };
-        state.mutex.unlock(state.io);
 
         state.last_activity.store(
             @intCast(std.Io.Timestamp.now(state.io, .awake).nanoseconds),
@@ -366,6 +359,7 @@ fn relayLoop(state: *State) !void {
         }
         drainDatagrams(state, &buffer) catch {};
         drainAssocReplies(state) catch {};
+        serviceRelays(state);
         cleanupRelays(state);
         cleanupAssocs(state);
         cleanupFragments(state);
@@ -379,31 +373,26 @@ fn handleBidiData(
     fin: bool,
 ) !void {
     if (findRelay(state, stream_id)) |relay| {
-        if (data.len > 0) {
-            try io_helpers.writeAll(
-                state.io,
-                relay.tcp,
-                data,
-                currentDeadline(state.io, state.config.idle_timeout),
-            );
-        }
-        if (fin) {
-            relay.tcp.shutdown(state.io, .send) catch {};
-            relay.quic_done.store(true, .release);
-        }
+        try relay.queueInbound(data);
+        if (fin) relay.quic_done.store(true, .release);
+        relay.touch();
         return;
     }
 
     const pending = pendingFor(state, stream_id) orelse
         return error.InvalidCommand;
-    if (pending.used + data.len > pending.buffer.len) {
-        return error.InvalidCommand;
-    }
-    @memcpy(pending.buffer[pending.used..][0..data.len], data);
-    pending.used += data.len;
+    pending.input.append(state.allocator, state.config.max_pending_stream_bytes, data) catch |err| {
+        pending.active = false;
+        pending.input.len = 0;
+        pending.fin = false;
+        return err;
+    };
+    if (fin) pending.fin = true;
+    if (!state.authenticated) return;
 
+    const command_bytes = pending.input.bytes();
     const connect = protocol.parseConnect(
-        pending.buffer[0..pending.used],
+        command_bytes,
     ) catch return;
     const target: destination.Target = switch (connect.address) {
         .none => return error.InvalidAddress,
@@ -426,89 +415,64 @@ fn handleBidiData(
         }
         return err;
     };
-    errdefer tcp.close(state.io);
+    var tcp_owned = true;
+    errdefer if (tcp_owned) tcp.close(state.io);
 
     if (state.relays.items.len >= state.config.max_relays) {
         return error.ConnectionLimitExceeded;
     }
-    const relay = try state.allocator.create(Relay);
-    errdefer state.allocator.destroy(relay);
-    relay.* = .{
-        .state = state,
-        .tcp = tcp,
-        .stream_id = stream_id,
-    };
-    try state.relays.append(state.allocator, relay);
-    const pending_used = pending.used;
+    try state.relays.ensureUnusedCapacity(state.allocator, 1);
+    const relay = try Relay.createWithOptions(state.allocator, state.io, tcp, stream_id, .{
+        .idle_timeout = state.config.idle_timeout,
+        .buffer_size = state.config.relay_buffer_size,
+        .maximum_input_bytes = state.config.max_pending_stream_bytes,
+    });
+    tcp_owned = false;
+    errdefer relay.deinit();
+    const pending_fin = pending.fin;
     pending.active = false;
-    pending.used = 0;
+    pending.input.len = 0;
+    pending.fin = false;
 
-    if (connect.end < pending_used) {
+    if (connect.end < command_bytes.len) {
         // The command and payload may have arrived in one chunk; `data` was
         // copied into the pending buffer, so forward the suffix.
-        const initial = pending.buffer[connect.end..pending_used];
-        try io_helpers.writeAll(
-            state.io,
-            tcp,
-            initial,
-            currentDeadline(state.io, state.config.idle_timeout),
-        );
+        const initial = command_bytes[connect.end..];
+        try relay.queueInbound(initial);
     }
-    if (fin) {
-        tcp.shutdown(state.io, .send) catch {};
+    if (pending_fin) {
         relay.quic_done.store(true, .release);
     }
 
-    relay.future = state.io.async(relayTcpToQuic, .{relay});
+    state.relays.appendAssumeCapacity(relay);
 }
 
-fn relayTcpToQuic(relay: *Relay) void {
-    const state = relay.state;
-    const buffer = state.allocator.alloc(u8, state.config.relay_buffer_size) catch {
-        relay.closed.store(true, .release);
-        return;
-    };
-    defer state.allocator.free(buffer);
-
-    while (!relay.closed.load(.acquire)) {
-        const count = io_helpers.readSome(
-            state.io,
-            relay.tcp,
-            buffer,
-            currentDeadline(state.io, state.config.idle_timeout),
-        ) catch {
-            break;
-        };
-        if (count == 0) break;
-        state.mutex.lockUncancelable(state.io);
-        var committed: usize = 0;
-        state.established.connection.sendStreamWithTimeout(
-            relay.stream_id,
-            relay.send_offset,
-            buffer[0..count],
-            false,
-            &committed,
-            .fromMilliseconds(20),
-        ) catch {
-            state.mutex.unlock(state.io);
-            break;
-        };
-        state.mutex.unlock(state.io);
-        relay.send_offset += committed;
+fn serviceRelays(state: *State) void {
+    for (state.relays.items) |relay| {
+        if (relay.closed.load(.acquire)) continue;
+        relay.serviceInput();
+        relay.flushOutbound(state, sendRelayItem);
+        if (relay.quic_done.load(.acquire) and relay.inputDrained()) {
+            relay.shutdownTcpSend();
+        }
     }
+}
 
-    state.mutex.lockUncancelable(state.io);
-    var committed: usize = 0;
-    state.established.connection.sendStreamWithTimeout(
-        relay.stream_id,
-        relay.send_offset,
-        "",
-        true,
-        &committed,
-        .fromMilliseconds(20),
-    ) catch {};
-    state.mutex.unlock(state.io);
-    relay.tcp_done.store(true, .release);
+fn sendRelayItem(state: *State, relay: *Relay, item: relay_mod.Outbound) relay_mod.SendResult {
+    const remaining = switch (item) {
+        .data => |bytes| bytes.len - relay.pending_data_start,
+        .fin => 0,
+    };
+    var progress: stream_sender.Progress = .{};
+    const result = stream_sender.send(quic, &state.established.connection, relay, item, remaining, &progress);
+    if (progress.committed_bytes != 0 or relay.quic_fin_sent) {
+        state.last_activity.store(@intCast(std.Io.Timestamp.now(state.io, .awake).nanoseconds), .release);
+    }
+    result catch |err| switch (err) {
+        error.CongestionLimited, error.PacingLimited, error.FlowControlBlocked, error.AntiAmplificationLimited => return .blocked,
+        else => return .fatal,
+    };
+    return if (progress.complete) .complete else .progress;
 }
 
 fn findRelay(state: *State, stream_id: u64) ?*Relay {
@@ -528,7 +492,10 @@ fn pendingFor(state: *State, stream_id: u64) ?*Pending {
     }
     for (&state.pending) |*pending| {
         if (!pending.active) {
-            pending.* = .{ .stream_id = stream_id, .active = true };
+            pending.stream_id = stream_id;
+            pending.active = true;
+            pending.input.len = 0;
+            pending.fin = false;
             return pending;
         }
     }
@@ -536,6 +503,13 @@ fn pendingFor(state: *State, stream_id: u64) ?*Pending {
 }
 
 fn closeRelayStream(state: *State, stream_id: u64) void {
+    for (&state.pending) |*pending| {
+        if (pending.active and pending.stream_id == stream_id) {
+            pending.active = false;
+            pending.input.len = 0;
+            pending.fin = false;
+        }
+    }
     if (findRelay(state, stream_id)) |relay| {
         relay.closed.store(true, .release);
         relay.tcp.shutdown(state.io, .both) catch {};
@@ -546,15 +520,10 @@ fn cleanupRelays(state: *State) void {
     var index: usize = 0;
     while (index < state.relays.items.len) {
         const relay = state.relays.items[index];
-        if ((relay.tcp_done.load(.acquire) and
-            relay.quic_done.load(.acquire)) or
-            relay.closed.load(.acquire))
+        if ((relay.quic_fin_sent and relay.quic_done.load(.acquire) and relay.inputDrained()) or
+            relay.closed.load(.acquire) or relay.idle(@intCast(std.Io.Timestamp.now(state.io, .awake).nanoseconds)))
         {
-            relay.closed.store(true, .release);
-            relay.tcp.shutdown(state.io, .both) catch {};
-            _ = relay.future.await(state.io);
-            relay.tcp.close(state.io);
-            state.allocator.destroy(relay);
+            relay.deinit();
             _ = state.relays.swapRemove(index);
         } else {
             index += 1;
@@ -563,22 +532,7 @@ fn cleanupRelays(state: *State) void {
 }
 
 fn shutdownAllRelays(state: *State) void {
-    for (state.relays.items) |relay| {
-        relay.closed.store(true, .release);
-        relay.tcp.shutdown(state.io, .both) catch {};
-    }
-    for (state.relays.items) |relay| {
-        _ = relay.future.await(state.io);
-        relay.tcp.close(state.io);
-        state.allocator.destroy(relay);
-    }
-}
-
-fn currentDeadline(
-    io: std.Io,
-    idle_timeout: std.Io.Duration,
-) ?std.Io.Clock.Timestamp {
-    return io_helpers.deadlineFromTimeout(io, idle_timeout) catch null;
+    for (state.relays.items) |relay| relay.deinit();
 }
 
 fn handleUniData(
@@ -587,23 +541,17 @@ fn handleUniData(
     data: []const u8,
     fin: bool,
 ) !void {
-    _ = fin;
     const pending = uniPendingFor(state, stream_id) orelse
         return error.InvalidCommand;
-    if (pending.used + data.len > pending.buffer.len) {
-        pending.active = false;
-        pending.used = 0;
-        return error.InvalidCommand;
-    }
-    @memcpy(pending.buffer[pending.used..][0..data.len], data);
-    pending.used += data.len;
+    try pending.append(state.allocator, state.config.max_datagram_size, data);
+    const command_bytes = pending.input.bytes();
 
     var offset: usize = 0;
-    while (offset + 2 <= pending.used) {
-        switch (pending.buffer[offset + 1]) {
+    while (offset + 2 <= command_bytes.len) {
+        switch (command_bytes[offset + 1]) {
             @intFromEnum(protocol.CommandType.packet) => {
                 const parsed = protocol.parsePacket(
-                    pending.buffer[offset..pending.used],
+                    command_bytes[offset..command_bytes.len],
                 ) catch {
                     break;
                 };
@@ -611,9 +559,9 @@ fn handleUniData(
                 offset += parsed.end;
             },
             @intFromEnum(protocol.CommandType.dissociate) => {
-                if (pending.used - offset < 4) break;
+                if (command_bytes.len - offset < 4) break;
                 const assoc_id = protocol.parseDissociate(
-                    pending.buffer[offset..][0..4],
+                    command_bytes[offset..][0..4],
                 ) catch break;
                 closeAssoc(state, assoc_id);
                 offset += 4;
@@ -625,20 +573,8 @@ fn handleUniData(
         }
     }
 
-    if (offset > 0) {
-        const remaining = pending.used - offset;
-        std.mem.copyForwards(
-            u8,
-            pending.buffer[0..remaining],
-            pending.buffer[offset..pending.used],
-        );
-        pending.used = remaining;
-    }
-    if (pending.used == pending.buffer.len) {
-        pending.active = false;
-        pending.used = 0;
-        return error.InvalidCommand;
-    }
+    pending.consume(offset);
+    try pending.finish(fin);
 }
 
 fn uniPendingFor(state: *State, stream_id: u64) ?*UniPending {
@@ -647,7 +583,7 @@ fn uniPendingFor(state: *State, stream_id: u64) ?*UniPending {
     }
     for (&state.uni_pending) |*pending| {
         if (!pending.active) {
-            pending.* = .{ .stream_id = stream_id, .active = true };
+            pending.start(stream_id);
             return pending;
         }
     }
@@ -656,12 +592,9 @@ fn uniPendingFor(state: *State, stream_id: u64) ?*UniPending {
 
 fn drainDatagrams(state: *State, buffer: []u8) !void {
     while (true) {
-        state.mutex.lockUncancelable(state.io);
         const datagram = state.established.connection.popDatagram(buffer) catch {
-            state.mutex.unlock(state.io);
             return;
         };
-        state.mutex.unlock(state.io);
         const bytes = datagram orelse return;
         const parsed = protocol.parsePacket(bytes) catch continue;
         handlePacket(state, parsed.packet, .datagram) catch continue;
@@ -716,6 +649,7 @@ fn createAssoc(
     mode: AssocMode,
     resolved: net.IpAddress,
 ) !*Assoc {
+    if (state.assocs.items.len >= state.config.max_assocs) return error.ConnectionLimitExceeded;
     const bind_address = switch (resolved) {
         .ip4 => net.IpAddress{ .ip4 = .unspecified(0) },
         .ip6 => net.IpAddress{ .ip6 = .unspecified(0) },
@@ -726,16 +660,6 @@ fn createAssoc(
     );
     errdefer socket.close(state.io);
 
-    var uni_stream: u64 = 0;
-    if (mode == .uni) {
-        state.mutex.lockUncancelable(state.io);
-        uni_stream = state.established.connection.openUnidirectionalStream() catch |err| {
-            state.mutex.unlock(state.io);
-            return err;
-        };
-        state.mutex.unlock(state.io);
-    }
-
     const assoc = try state.allocator.create(Assoc);
     errdefer state.allocator.destroy(assoc);
     assoc.* = .{
@@ -743,7 +667,6 @@ fn createAssoc(
         .id = id,
         .socket = socket,
         .mode = mode,
-        .uni_stream = uni_stream,
         .last_activity = .init(
             @intCast(std.Io.Timestamp.now(state.io, .awake).nanoseconds),
         ),
@@ -757,6 +680,7 @@ fn createAssoc(
 /// receive path avoids cross-thread send/receive races; replies are bounded by
 /// the loop's short receive window.
 fn drainAssocReplies(state: *State) !void {
+    flushRetiringPacketStreams(state);
     const buffer = state.allocator.alloc(
         u8,
         state.config.max_datagram_size,
@@ -820,39 +744,28 @@ fn sendAssocPayload(
 ) !void {
     switch (assoc.mode) {
         .datagram => {
-            state.mutex.lockUncancelable(state.io);
-            defer state.mutex.unlock(state.io);
             try state.established.connection.sendDatagram(encoded);
             if (state.config.stats) |value| {
                 value.addBytesOut(@intCast(encoded.len));
             }
         },
         .uni => {
-            var sent: usize = 0;
             var attempts: usize = 0;
-            while (sent < encoded.len and attempts < 100) : (attempts += 1) {
-                var committed: usize = 0;
-                state.mutex.lockUncancelable(state.io);
-                const result = state.established.connection.sendStreamWithTimeout(
-                    assoc.uni_stream,
-                    assoc.send_offset + sent,
-                    encoded[sent..],
-                    false,
-                    &committed,
-                    .fromMilliseconds(100),
-                );
-                state.mutex.unlock(state.io);
-                sent += committed;
+            while (attempts < 100) : (attempts += 1) {
+                var progress: packet_stream.Progress = .{};
+                const result = assoc.packet_stream.sendWithTimeout(&state.established.connection, encoded, .fromMilliseconds(100), &progress);
+                if (state.config.stats) |value| value.addBytesOut(@intCast(progress.committed_bytes));
+                if (progress.fin_committed) return;
                 result catch |err| switch (err) {
                     error.Timeout => continue,
-                    else => return err,
+                    else => {
+                        assoc.packet_stream.beginCancel();
+                        return err;
+                    },
                 };
             }
-            if (sent < encoded.len) return error.ConnectionClosed;
-            assoc.send_offset += sent;
-            if (state.config.stats) |value| {
-                value.addBytesOut(@intCast(sent));
-            }
+            assoc.packet_stream.beginCancel();
+            return error.ConnectionClosed;
         },
     }
 }
@@ -965,7 +878,7 @@ fn findAssoc(state: *State, id: u16) ?*Assoc {
 
 fn closeAssocForStream(state: *State, stream_id: u64) void {
     for (state.assocs.items) |assoc| {
-        if (assoc.uni_stream == stream_id) {
+        if (assoc.packet_stream.stream_id == stream_id) {
             closeAssoc(state, assoc.id);
             return;
         }
@@ -983,6 +896,7 @@ fn cleanupAssocs(state: *State) void {
     while (index < state.assocs.items.len) {
         const assoc = state.assocs.items[index];
         if (assoc.closed.load(.acquire)) {
+            retirePacketStream(state, &assoc.packet_stream);
             assoc.socket.close(state.io);
             state.allocator.destroy(assoc);
             _ = state.assocs.swapRemove(index);
@@ -1000,4 +914,19 @@ fn shutdownAllAssocs(state: *State) void {
         assoc.socket.close(state.io);
         state.allocator.destroy(assoc);
     }
+}
+
+fn retirePacketStream(state: *State, stream: *PacketStream) void {
+    if (state.retiring_packet_streams.add(stream)) return;
+    state.running.store(false, .release);
+    stream.* = .{};
+}
+
+fn flushRetiringPacketStreams(state: *State) void {
+    if (state.retiring_packet_streams.count == 0) return;
+    const result = state.retiring_packet_streams.flush(&state.established.connection);
+    result catch |err| switch (err) {
+        error.CongestionLimited, error.PacingLimited, error.AntiAmplificationLimited => {},
+        else => state.running.store(false, .release),
+    };
 }

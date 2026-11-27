@@ -1,0 +1,161 @@
+[traex-zig-guard 2026-11-27 11:57:34] waiting for the global TRAE Zig build slot
+[traex-zig-guard 2026-11-27 11:58:34] started Zig tree root=31797 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=900s
+1/80 test_scope.test_0...OK
+2/80 proxy.mod.test_0...OK
+3/80 proxy.socks.mod.test_0...OK
+4/80 proxy.http_connect.mod.test_0...OK
+5/80 proxy.shadowsocks.mod.test_0...OK
+6/80 proxy.trojan.mod.test_0...OK
+7/80 proxy.vless.mod.test_0...OK
+8/80 proxy.vmess.mod.test_0...OK
+9/80 proxy.tuic.mod.test_0...OK
+10/80 proxy.hysteria.mod.test_0...OK
+11/80 proxy.tls.mod.test_0...OK
+12/80 proxy.transport.mod.test_0...OK
+13/80 proxy.internal.mod.test_0...OK
+14/80 proxy.internal.byte_bucket.test_0...OK
+15/80 proxy.internal.byte_bucket.stream.test_0...OK
+16/80 proxy.internal.relay_queue.test_0...OK
+17/80 proxy.internal.relay_queue.pending_input.test_0...OK
+18/80 proxy.internal.relay_queue.stream_send_tests.test.proxy relay STREAM prefix respects flow and congestion refusal...OK
+19/80 proxy.internal.relay_queue.stream_send_tests.test.proxy relay STREAM retry retires protected but unsent packet numbers...OK
+20/80 proxy.internal.relay_queue.stream_send_tests.test.proxy relay STREAM commits a socket-visible item even with a trailing error...OK
+21/80 proxy.internal.relay_queue.stream_send_tests.test.proxy relay STREAM packet budget remains exact across packet-number widths...OK
+22/80 proxy.internal.udp_session.test_0...OK
+23/80 quic.mod.test_0...OK
+24/80 quic.mod.test_1...OK
+25/80 quic.mod.test_2...OK
+26/80 quic.runtime.test_0...OK
+27/80 quic.runtime.test_1...OK
+28/80 quic.one_rtt.test_0...OK
+29/80 quic.packet_space.test_0...OK
+30/80 quic.recovery.test_0...OK
+31/80 quic.congestion.test_0...OK
+32/80 quic.pacing.test_0...OK
+33/80 quic.path_validation.test_0...OK
+34/80 quic.connection_id.test_0...OK
+35/80 quic.protection.test_0...OK
+36/80 quic.pmtu.test_0...OK
+37/80 quic.observability.qlog.mod.test_0...OK
+38/80 proxy.internal.relay_queue.inbound.test_0...OK
+39/80 proxy.internal.relay_queue.inbound_actor.test_0...OK
+40/80 quic.load_balancing.quic_lb.mod.test_0...OK
+41/80 quic.stream.test_0...OK
+42/80 proxy.internal.relay_queue.inbound_tests.test.proxy relay concurrent reader and writer support zero async capacity and defer FIN...OK
+43/80 proxy.internal.relay_queue.inbound_tests.test.proxy relay synchronous flush preserves standalone partial write semantics...OK
+44/80 internal.testing.deadline_send_io.test_0...OK
+45/80 quic.one_rtt.tests.mod.test_0...OK
+46/80 quic.one_rtt.tests.mod.test_1...OK
+47/80 quic.tls_client_hello.test_0...OK
+48/80 quic.tls.mod.test_0...OK
+49/80 quic.handshake.test_0...OK
+50/80 quic.client_trust.test_0...OK
+51/80 quic.zero_rtt.mod.test_0...OK
+52/80 quic.endpoint_dispatcher.test_0...OK
+53/80 quic.endpoint_server.test_0...OK
+54/80 quic.address_validation_token.test_0...OK
+55/80 quic.resumption.mod.test_0...OK
+56/80 quic.endpoint_server.tests.test_0...OK
+57/80 quic.handshake.client_authentication.test_0...OK
+58/80 quic.resumption.ticket.mod.test_0...OK
+59/80 quic.endpoint_dispatcher.tests.test_0...OK
+60/80 quic.handshake.tests.test_0...OK
+61/80 proxy.internal.relay_queue.tests.test.proxy relay FIFO retains first middle last and FIN backpressure...OK
+62/80 proxy.internal.relay_queue.tests.test.proxy relay FIFO teardown frees pending and queued successors...OK
+63/80 proxy.internal.relay_queue.tests.test.proxy relay FIFO fatal send releases current item and preserves teardown...OK
+64/80 proxy.tuic.protocol.test.TUIC addresses round trip every family...OK
+65/80 proxy.tuic.protocol.test.TUIC commands parse version type and payload...OK
+66/80 proxy.tuic.protocol.test.TUIC stream direction helpers...OK
+67/80 proxy.tuic.protocol.test.TUIC Packet commands round trip and parse fragments...OK
+68/80 proxy.tuic.protocol.test.TUIC Dissociate and heartbeat commands are bounded...OK
+69/80 proxy.tuic.shared.server.test.TUIC shared UDP uni packets release parser slots on FIN...OK
+70/80 proxy.tuic.packet_stream.test_0...OK
+71/80 proxy.tuic.uni_input.test.TUIC uni input holds full payload plus domain header and reuses bounded storage...OK
+72/80 proxy.tuic.shared.tests.test.TUIC shared endpoint serves two concurrent TCP relays...OK
+73/80 proxy.tuic.shared.tests.test.TUIC shared endpoint packetizes 16 and 64 KiB relay bodies...OK
+74/80 internal.progress_deadline.test_0...OK
+75/80 quic.initial_exchange.flight.test_0...OK
+76/80 internal.owned_result_deadline.test_0...OK
+77/80 proxy.tuic.packet_stream_tests.test.TUIC PacketStream exact 4 KiB prefix uses one stream and final FIN...OK
+78/80 proxy.tuic.packet_stream_tests.test.TUIC PacketStream refusal retains prefix and retired reset until accepted...OK
+79/80 proxy.tuic.packet_stream_tests.test.TUIC PacketStream trailing error preserves committed prefix and FIN...OK
+80/80 proxy.tuic.packet_stream_tests.test.TUIC PacketStream timed send resumes exact suffix and excludes expired admission...OK
+All 80 tests passed.
+Build Summary: 10/10 steps succeeded
+test-proxy success
++- run test test: src/test_scope.zig success 919ms
+   +- compile test Debug native success 29s MaxRSS:2G
+      +- WriteFile macho_0_p256_field_arm64.S cached
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 233ms MaxRSS:31M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 229ms MaxRSS:31M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options success
+      +- options cached
+
+[traex-zig-guard 2026-11-27 11:59:10] finished Zig tree root=31797 peak=2748MiB result=0

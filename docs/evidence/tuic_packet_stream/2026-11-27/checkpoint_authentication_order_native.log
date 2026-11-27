@@ -1,0 +1,139 @@
+[traex-zig-guard 2026-11-27 12:18:11] waiting for the global TRAE Zig build slot
+[traex-zig-guard 2026-11-27 12:28:29] started Zig tree root=57399 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=900s
+1/58 test_scope.test_0...OK
+2/58 proxy.mod.test_0...OK
+3/58 proxy.socks.mod.test_0...OK
+4/58 proxy.http_connect.mod.test_0...OK
+5/58 proxy.shadowsocks.mod.test_0...OK
+6/58 proxy.trojan.mod.test_0...OK
+7/58 proxy.vless.mod.test_0...OK
+8/58 proxy.vmess.mod.test_0...OK
+9/58 proxy.tuic.mod.test_0...OK
+10/58 proxy.hysteria.mod.test_0...OK
+11/58 proxy.tls.mod.test_0...OK
+12/58 proxy.transport.mod.test_0...OK
+13/58 proxy.internal.mod.test_0...OK
+14/58 proxy.internal.byte_bucket.test_0...OK
+15/58 proxy.internal.byte_bucket.stream.test_0...OK
+16/58 proxy.internal.relay_queue.test_0...OK
+17/58 proxy.internal.relay_queue.pending_input.test_0...OK
+18/58 proxy.internal.udp_session.test_0...OK
+19/58 proxy.tuic.packet_stream.test_0...OK
+20/58 proxy.tuic.shared.tests.test.TUIC standalone retains coalesced CONNECT payload and FIN before authentication...OK
+21/58 quic.mod.test_0...OK
+22/58 quic.mod.test_1...OK
+23/58 quic.mod.test_2...OK
+24/58 quic.tls.mod.test_0...OK
+25/58 quic.runtime.test_0...OK
+26/58 quic.runtime.test_1...OK
+27/58 quic.packet_space.test_0...OK
+28/58 quic.handshake.test_0...OK
+29/58 quic.handshake.client_authentication.test_0...OK
+30/58 quic.protection.test_0...OK
+31/58 quic.tls_client_hello.test_0...OK
+32/58 quic.resumption.mod.test_0...OK
+33/58 quic.one_rtt.test_0...OK
+34/58 quic.recovery.test_0...OK
+35/58 quic.congestion.test_0...OK
+36/58 quic.path_validation.test_0...OK
+37/58 quic.connection_id.test_0...OK
+38/58 quic.load_balancing.quic_lb.mod.test_0...OK
+39/58 quic.stream.test_0...OK
+40/58 quic.zero_rtt.mod.test_0...OK
+41/58 quic.resumption.ticket.mod.test_0...OK
+42/58 quic.pacing.test_0...OK
+43/58 quic.pmtu.test_0...OK
+44/58 quic.observability.qlog.mod.test_0...OK
+45/58 internal.progress_deadline.test_0...OK
+46/58 quic.initial_exchange.flight.test_0...OK
+47/58 quic.address_validation_token.test_0...OK
+48/58 internal.owned_result_deadline.test_0...OK
+49/58 quic.endpoint_server.test_0...OK
+50/58 quic.endpoint_dispatcher.test_0...OK
+51/58 proxy.internal.relay_queue.inbound.test_0...OK
+52/58 proxy.internal.relay_queue.inbound_actor.test_0...OK
+53/58 quic.endpoint_dispatcher.tests.test_0...OK
+54/58 quic.endpoint_server.tests.test_0...OK
+55/58 quic.one_rtt.tests.mod.test_0...OK
+56/58 quic.one_rtt.tests.mod.test_1...OK
+57/58 quic.handshake.tests.test_0...OK
+58/58 quic.client_trust.test_0...OK
+All 58 tests passed.
+Build Summary: 10/10 steps succeeded
+test-proxy success
++- run test test: src/test_scope.zig success 777ms
+   +- compile test Debug native success 27s MaxRSS:2G
+      +- WriteFile macho_0_p256_field_arm64.S cached
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 188ms MaxRSS:31M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 228ms MaxRSS:31M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options cached
+      +- options cached
+
+[traex-zig-guard 2026-11-27 12:28:59] finished Zig tree root=57399 peak=2798MiB result=0

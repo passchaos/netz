@@ -8,5 +8,7 @@ test {
     _ = protocol;
     _ = server;
     _ = @import("shared/server.zig");
+    _ = @import("packet_stream.zig");
+    _ = @import("uni_input.zig");
     _ = @import("shared/tests.zig");
 }

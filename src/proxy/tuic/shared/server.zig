@@ -46,12 +46,7 @@ const Pending = struct {
     fin: bool = false,
 };
 
-const UniPending = struct {
-    stream_id: u64 = 0,
-    buffer: [4096]u8 = undefined,
-    used: usize = 0,
-    active: bool = false,
-};
+const UniPending = @import("../uni_input.zig").Input;
 
 const Fragment = struct {
     active: bool = false,
@@ -383,6 +378,7 @@ pub const Connection = struct {
     auth_used: usize = 0,
     relays: std.ArrayList(*Relay) = .empty,
     assocs: std.ArrayList(*Assoc) = .empty,
+    retiring_packet_streams: @import("../packet_stream.zig").Retirements = .{},
     pending: [8]Pending = @splat(.{}),
     uni_pending: [8]UniPending = @splat(.{}),
     fragments: [max_fragment_entries]Fragment = @splat(.{}),
@@ -449,6 +445,7 @@ pub const Connection = struct {
             fragment.deinit(self.pump.allocator);
         }
         for (&self.pending) |*pending| pending.input.deinit(self.pump.allocator);
+        for (&self.uni_pending) |*pending| pending.deinit(self.pump.allocator);
         self.pump.allocator.free(self.datagram_buffer);
         if (self.pump.config.stats) |value| value.connectionClosed();
         self.pump.limiter.release(self.peer);
@@ -730,28 +727,23 @@ pub const Connection = struct {
             self.closed.store(true, .release);
             return;
         };
-        if (pending.used + data.len > pending.buffer.len) {
-            pending.active = false;
-            pending.used = 0;
-            return error.InvalidCommand;
-        }
-        @memcpy(pending.buffer[pending.used..][0..data.len], data);
-        pending.used += data.len;
+        try pending.append(self.pump.allocator, self.pump.config.max_datagram_size, data);
+        const command_bytes = pending.input.bytes();
 
         var offset: usize = 0;
-        while (offset + 2 <= pending.used) {
-            switch (pending.buffer[offset + 1]) {
+        while (offset + 2 <= command_bytes.len) {
+            switch (command_bytes[offset + 1]) {
                 @intFromEnum(protocol.CommandType.packet) => {
                     const parsed = protocol.parsePacket(
-                        pending.buffer[offset..pending.used],
+                        command_bytes[offset..command_bytes.len],
                     ) catch break;
                     self.handlePacket(parsed.packet, .uni);
                     offset += parsed.end;
                 },
                 @intFromEnum(protocol.CommandType.dissociate) => {
-                    if (pending.used - offset < 4) break;
+                    if (command_bytes.len - offset < 4) break;
                     const assoc_id = protocol.parseDissociate(
-                        pending.buffer[offset..][0..4],
+                        command_bytes[offset..][0..4],
                     ) catch break;
                     self.closeAssoc(assoc_id);
                     offset += 4;
@@ -765,20 +757,8 @@ pub const Connection = struct {
                 },
             }
         }
-        if (offset > 0) {
-            const remaining = pending.used - offset;
-            std.mem.copyForwards(
-                u8,
-                pending.buffer[0..remaining],
-                pending.buffer[offset..pending.used],
-            );
-            pending.used = remaining;
-        }
-        if (fin) {
-            const incomplete = pending.used != 0;
-            pending.* = .{};
-            if (incomplete) return error.InvalidCommand;
-        }
+        pending.consume(offset);
+        try pending.finish(fin);
     }
 
     fn resumePending(self: *Connection) !void {
@@ -943,6 +923,7 @@ pub const Connection = struct {
     }
 
     fn serviceAssocs(self: *Connection, ready_only: bool) void {
+        self.flushRetiringPacketStreams();
         for (self.assocs.items) |assoc| {
             if (assoc.closed) continue;
             const ready = assoc.target_io.ready.swap(false, .acq_rel);
@@ -993,6 +974,7 @@ pub const Connection = struct {
         for (0..assoc_pending_sends) |_| {
             const encoded = assoc.pending_replies.peek() orelse break;
             const sent = self.sendAssocBytes(assoc, encoded) catch {
+                assoc.packet_stream.beginCancel();
                 self.pump.allocator.free(assoc.pending_replies.pop().?);
                 continue;
             };
@@ -1024,7 +1006,11 @@ pub const Connection = struct {
             },
             .uni => {
                 defer self.pump.shared.dispatcher.refreshConnectionTimer(self.handle) catch {};
-                const sent = assoc.packet_stream.send(&self.established.connection, encoded) catch |err| switch (err) {
+                var progress: @import("../packet_stream.zig").Progress = .{};
+                const result = assoc.packet_stream.send(&self.established.connection, encoded, &progress);
+                if (self.pump.config.stats) |value| value.addBytesOut(@intCast(progress.committed_bytes));
+                if (progress.fin_committed) return true;
+                result catch |err| switch (err) {
                     error.CongestionLimited,
                     error.PacingLimited,
                     error.FlowControlBlocked,
@@ -1033,11 +1019,7 @@ pub const Connection = struct {
                     => return false,
                     else => return err,
                 };
-                if (!sent) return false;
-                if (self.pump.config.stats) |value| {
-                    value.addBytesOut(@intCast(encoded.len));
-                }
-                return true;
+                return false;
             },
         }
     }
@@ -1281,12 +1263,29 @@ pub const Connection = struct {
     }
 
     fn freeAssoc(self: *Connection, assoc: *Assoc) void {
+        self.retirePacketStream(&assoc.packet_stream);
         assoc.target_io.stop();
         while (assoc.target_io.takeSent()) |result| self.settleUdp(result);
         assoc.target_io.deinit();
         assoc.socket.close(self.pump.io);
         assoc.pending_replies.deinit(self.pump.allocator);
         self.pump.allocator.destroy(assoc);
+    }
+
+    fn retirePacketStream(self: *Connection, stream: *PacketStream) void {
+        if (stream.stream_id == null) return;
+        if (!self.closed.load(.acquire) and self.retiring_packet_streams.add(stream)) return;
+        self.closed.store(true, .release);
+        stream.* = .{};
+    }
+
+    fn flushRetiringPacketStreams(self: *Connection) void {
+        if (self.closed.load(.acquire) or self.retiring_packet_streams.count == 0) return;
+        defer self.pump.shared.dispatcher.refreshConnectionTimer(self.handle) catch {};
+        self.retiring_packet_streams.flush(&self.established.connection) catch |err| switch (err) {
+            error.CongestionLimited, error.PacingLimited, error.AntiAmplificationLimited => {},
+            else => self.closed.store(true, .release),
+        };
     }
 
     fn checkTimeouts(self: *Connection) void {
@@ -1315,7 +1314,7 @@ pub const Connection = struct {
         }
         for (&self.uni_pending) |*pending| {
             if (!pending.active) {
-                pending.* = .{ .stream_id = stream_id, .active = true };
+                pending.start(stream_id);
                 return pending;
             }
         }
@@ -1454,8 +1453,10 @@ pub fn serve(server: anytype) !void {
 }
 
 test "TUIC shared UDP uni packets release parser slots on FIN" {
+    var running: std.atomic.Value(bool) = .init(true);
+    var pump: Pump = .{ .allocator = std.testing.allocator, .io = undefined, .endpoint = undefined, .config = .{ .uuid = @splat(0), .password = "parser", .identity = undefined }, .limiter = undefined, .shared = undefined, .receive_storage = &.{}, .versions = .{ 1, 2 }, .stop_flag = &running };
     var connection: Connection = .{
-        .pump = undefined,
+        .pump = &pump,
         .handle = 1,
         .established = undefined,
         .peer = .{ .ip4 = .loopback(1) },
@@ -1464,6 +1465,7 @@ test "TUIC shared UDP uni packets release parser slots on FIN" {
         .authenticated = true,
         .datagram_buffer = &.{},
     };
+    defer for (&connection.uni_pending) |*pending| pending.deinit(std.testing.allocator);
     const heartbeat = [_]u8{ protocol.version, @intFromEnum(protocol.CommandType.heartbeat) };
     for (0..128) |index| {
         const stream_id: u64 = 2 + 4 * index;
@@ -1472,8 +1474,8 @@ test "TUIC shared UDP uni packets release parser slots on FIN" {
         for (&connection.uni_pending) |*pending| active += @intFromBool(pending.active);
         try std.testing.expectEqual(@as(usize, 1), active);
         try connection.handleUniData(stream_id, heartbeat[1..], true);
-        for (&connection.uni_pending) |*pending| try std.testing.expect(!pending.active and pending.used == 0);
+        for (&connection.uni_pending) |*pending| try std.testing.expect(!pending.active and pending.input.len == 0);
     }
     try std.testing.expectError(error.InvalidCommand, connection.handleUniData(1026, heartbeat[0..1], true));
-    for (&connection.uni_pending) |*pending| try std.testing.expect(!pending.active and pending.used == 0);
+    for (&connection.uni_pending) |*pending| try std.testing.expect(!pending.active and pending.input.len == 0);
 }

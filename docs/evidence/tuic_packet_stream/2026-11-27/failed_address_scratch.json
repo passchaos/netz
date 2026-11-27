@@ -1,0 +1,62 @@
+{
+  "fmt": {
+    "command": [
+      "/Users/bytedance/.local/bin/zig",
+      "fmt",
+      "src/proxy/internal/stream_packet.zig",
+      "src/proxy/internal/relay_queue/stream_send.zig",
+      "src/proxy/internal/relay_queue/stream_send_tests.zig",
+      "src/proxy/tuic/protocol.zig",
+      "src/proxy/tuic/packet_stream.zig",
+      "src/proxy/tuic/packet_stream_tests.zig",
+      "src/proxy/tuic/uni_input.zig",
+      "src/proxy/tuic/server.zig",
+      "src/proxy/tuic/shared/server.zig",
+      "src/proxy/tuic/mod.zig",
+      "tools/interop/tuic_server.zig"
+    ],
+    "exit_code": 0,
+    "log_sha256": "613b39b8d74460cdf78cc48e047f3246918d30891477c4016fdcef19f8f08a87",
+    "source_sha256": {
+      "src/proxy/internal/stream_packet.zig": "b0deeb735d5c238ae107cf0bf665c438d6414dccb4925ccdf02421315ef5db83",
+      "src/proxy/internal/relay_queue/stream_send.zig": "663847cabd4df3c8a6207a608cdcf1d1d18a0fcce427a31af6fe1875b2a46cc1",
+      "src/proxy/internal/relay_queue/stream_send_tests.zig": "c10143757317b5f7e2d46fac1b2fd4a724a215da55864d04f96be81c35b43fed",
+      "src/proxy/tuic/protocol.zig": "96fa1b65e1dad3bf4f1b5a6e5f1c856a0ce3244299b50c6088a64099b25e8ca6",
+      "src/proxy/tuic/packet_stream.zig": "2ae1802a68f568e0698e5a66f293f04fba00c25e935127e880872d08c24e796e",
+      "src/proxy/tuic/packet_stream_tests.zig": "cfa23e3d6426b5850b05de0ef41b26f9d306ea20556da9d286f05e71df0a5da8",
+      "src/proxy/tuic/uni_input.zig": "6e309eecf97f8731b8e8248b4eb659b294c43a0ce2d9d43d7ed51c7542031ba7",
+      "src/proxy/tuic/server.zig": "4813700ef678751a47389183e52d27df3e58decaa636630b2aaf92bfd65a90f4",
+      "src/proxy/tuic/shared/server.zig": "e3de4c54e51e339d3071063cc184e98a547f83433f644fbae8654c16dda1dc8d",
+      "src/proxy/tuic/mod.zig": "10d286440835a5dd766c7afb5f814f451e8b57d48fda34bbf55ae774771a7130",
+      "tools/interop/tuic_server.zig": "b3b5a5607a2f99fbb5f00b8e6b6793ee021d7d1a585a1ac76ab2eaa3881392bf"
+    }
+  },
+  "native": {
+    "command": [
+      "/Users/bytedance/.local/bin/zig",
+      "build",
+      "test-proxy",
+      "-j1",
+      "-Dtest-progress=true",
+      "-Dtest-filter=TUIC PacketStream",
+      "-Dtest-filter=TUIC uni input",
+      "--summary",
+      "all"
+    ],
+    "exit_code": 1,
+    "log_sha256": "83d9b734cb5ef4b64de0d68533d84d78752b64ac78a43f6bf2ac8ec3576a2c92",
+    "source_sha256": {
+      "src/proxy/internal/stream_packet.zig": "b0deeb735d5c238ae107cf0bf665c438d6414dccb4925ccdf02421315ef5db83",
+      "src/proxy/internal/relay_queue/stream_send.zig": "663847cabd4df3c8a6207a608cdcf1d1d18a0fcce427a31af6fe1875b2a46cc1",
+      "src/proxy/internal/relay_queue/stream_send_tests.zig": "c10143757317b5f7e2d46fac1b2fd4a724a215da55864d04f96be81c35b43fed",
+      "src/proxy/tuic/protocol.zig": "96fa1b65e1dad3bf4f1b5a6e5f1c856a0ce3244299b50c6088a64099b25e8ca6",
+      "src/proxy/tuic/packet_stream.zig": "2ae1802a68f568e0698e5a66f293f04fba00c25e935127e880872d08c24e796e",
+      "src/proxy/tuic/packet_stream_tests.zig": "cfa23e3d6426b5850b05de0ef41b26f9d306ea20556da9d286f05e71df0a5da8",
+      "src/proxy/tuic/uni_input.zig": "6e309eecf97f8731b8e8248b4eb659b294c43a0ce2d9d43d7ed51c7542031ba7",
+      "src/proxy/tuic/server.zig": "4813700ef678751a47389183e52d27df3e58decaa636630b2aaf92bfd65a90f4",
+      "src/proxy/tuic/shared/server.zig": "e3de4c54e51e339d3071063cc184e98a547f83433f644fbae8654c16dda1dc8d",
+      "src/proxy/tuic/mod.zig": "10d286440835a5dd766c7afb5f814f451e8b57d48fda34bbf55ae774771a7130",
+      "tools/interop/tuic_server.zig": "b3b5a5607a2f99fbb5f00b8e6b6793ee021d7d1a585a1ac76ab2eaa3881392bf"
+    }
+  }
+}

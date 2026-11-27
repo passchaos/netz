@@ -1,0 +1,20 @@
+{
+  "source_sha256": {
+    "src/proxy/tuic/server.zig": "69e5dec1d0efe0c7c61cda14630819e2225342256b0b33c97c420df0b4b17126",
+    "src/proxy/tuic/shared/tests.zig": "d236d0fe8ca75f603b62c8c2cc50e6946f3c2dc864373ec7cd9d8b3f71d400e4"
+  },
+  "command": [
+    "/Users/bytedance/.local/share/traex-guard/zig-tree-guard",
+    "--",
+    "/Users/bytedance/.local/bin/zig",
+    "build",
+    "test-proxy",
+    "-j1",
+    "-Dtest-progress=true",
+    "-Dtest-filter=TUIC standalone retains coalesced",
+    "--summary",
+    "all"
+  ],
+  "status": "terminal failure",
+  "exit_code": 1
+}

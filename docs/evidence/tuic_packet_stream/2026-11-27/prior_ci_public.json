@@ -1,0 +1,9 @@
+{
+  "observed_utc": "2026-11-27T04:03:39.427528+00:00",
+  "url": "https://github.com/passchaos/netz/actions/runs/45924108524",
+  "head_short": "3129606",
+  "branch": "main",
+  "public_status": "Failure",
+  "public_total_duration": "28m 42s",
+  "api_refresh": "HTTP403 rate limit; public run page independently confirms terminal Failure"
+}

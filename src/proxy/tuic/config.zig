@@ -28,7 +28,8 @@ pub const Config = struct {
     /// Maximum concurrent UDP associations per QUIC connection.
     max_assocs: usize = 64,
     max_relays: usize = 64,
-    /// Per-stream bytes retained while the destination connection is pending.
+    /// Per-stream bytes retained before authentication or while the destination
+    /// connection is pending.
     max_pending_stream_bytes: usize = 256 * 1024,
     stats: ?*stats_mod.Stats = null,
     rate_limiter: ?*rate_limit.Limiter = null,

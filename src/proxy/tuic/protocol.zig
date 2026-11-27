@@ -5,6 +5,10 @@ const std = @import("std");
 const net = std.Io.net;
 
 pub const version: u8 = 5;
+/// Version/command, association/packet IDs, fragment fields, payload length,
+/// plus the longest encoded domain address (type, length, 255 bytes, port).
+pub const maximum_encoded_address_bytes = 1 + 1 + 255 + 2;
+pub const maximum_packet_header_bytes = 10 + maximum_encoded_address_bytes;
 
 pub const CommandType = enum(u8) {
     authenticate = 0,
@@ -171,7 +175,7 @@ pub fn buildConnect(allocator: std.mem.Allocator, address: Address) ![]u8 {
     errdefer output.deinit(allocator);
     try output.append(allocator, version);
     try output.append(allocator, @intFromEnum(CommandType.connect));
-    var storage: [256]u8 = undefined;
+    var storage: [maximum_encoded_address_bytes]u8 = undefined;
     const len = try encodeAddress(&storage, address);
     try output.appendSlice(allocator, storage[0..len]);
     return output.toOwnedSlice(allocator);
@@ -221,7 +225,7 @@ pub fn buildPacket(
     try output.append(allocator, packet.frag_id);
     try output.append(allocator, @intCast(packet.payload.len >> 8));
     try output.append(allocator, @intCast(packet.payload.len & 0xff));
-    var address_storage: [256]u8 = undefined;
+    var address_storage: [maximum_encoded_address_bytes]u8 = undefined;
     const address_len = try encodeAddress(&address_storage, packet.address);
     try output.appendSlice(allocator, address_storage[0..address_len]);
     try output.appendSlice(allocator, packet.payload);

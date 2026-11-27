@@ -41,12 +41,35 @@ earlier slots have been freed. A full reply FIFO drops the new reply and frees
 its encoding.
 
 TUIC QUIC-mode replies use one unidirectional stream per encoded Packet and
-send FIN with that complete Packet. An uncommitted stream stays with the FIFO
-front through refusal. A committed Packet clears the stream even when the
-native operation accompanies its positive count with an error. Incoming
-command parser slots are returned on FIN. This follows the pinned independent
-peer's one-Packet reader; sharing a response stream causes later replies to be
-discarded. Standalone TUIC's existing stream reuse still needs follow-up.
+send FIN with that complete Packet. The shared path attempts one packet-sized
+STREAM frame per call, using the same flow, congestion and packet-size budget
+as TCP relay output. A cursor and immutable payload identity retain the exact
+unsent suffix with the FIFO front through refusal. Statistics charge each
+committed prefix once. A committed FIN clears the stream even when the native
+operation accompanies its positive count with an error. This follows the
+pinned independent peer's one-Packet reader; sharing a response stream causes
+later replies to be discarded.
+
+Standalone TUIC uses the same per-Packet state with its existing 100-ms timed
+send quantum and 100-attempt limit. Each timed attempt advances by the actual
+committed prefix and verifies the final stream size before clearing ownership.
+The pinned independent peer passes the original TCP/UDP gates and small/large
+Packet matrices on both shared and standalone owners. Native execution and
+platform compilation are recorded separately in the
+[PacketStream evidence](../evidence/tuic_packet_stream/2026-11-27/README.md).
+
+Cancellation releases the payload borrow while retaining its stream ID.
+Association retirement transfers that ID into a connection-owned queue with
+64 slots, retrying at most eight resets per turn. A failed reset keeps its
+slot. Queue saturation closes the connection so retirement cannot orphan a
+stream. Connection destruction remains the final owner of outstanding IDs.
+
+Both incoming uni-command parser pools have eight slots. Each slot reuses
+bounded storage, including the configured UDP payload limit plus the maximum
+269-byte Packet header. FIN returns the slot without freeing retained storage;
+incomplete bytes at FIN remain a protocol error. A maximum valid 253-byte
+domain needs 257 encoded address bytes, so CONNECT and Packet share a 259-byte
+scratch bound covering the wire length field's full range.
 
 Owner publication signals the existing pump readiness flag. Completion turns
 visit signaled associations and relays. At most eight completion turns precede

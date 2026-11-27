@@ -1,0 +1,403 @@
+[36mINFO[0m[0000] inbound/socks[socks-in]: tcp server started at 127.0.0.1:18450
+[36mINFO[0m[0000] network: updated default interface en0, index 15
+[36mINFO[0m[0000] network: updated network environment: gateway [192.168.1.1 fe80::1], gateway_mac [08:74:58:73:46:30 08:74:58:73:46:30]
+[36mINFO[0m[0000] sing-box started (0.00s)
+[36mINFO[0m[0000] [[38;5;228m911379924[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:64925
+[36mINFO[0m[0000] [[38;5;228m911379924[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0000] [[38;5;228m911379924[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[31mERROR[0m[0000] [[38;5;228m911379924[0m 0ms] connection: open connection to 127.0.0.1:18451 using outbound/tuic[tuic-out]: open connection: quic: transport closed: recvmsg_x: connection refused
+[36mINFO[0m[0000] [[38;5;153m3832431438[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:64926
+[36mINFO[0m[0000] [[38;5;153m3832431438[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0000] [[38;5;153m3832431438[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0001] [[38;5;153m3832431438[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0001] [[38;5;153m3832431438[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0001] [[38;5;86m814189382[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:64937
+[36mINFO[0m[0001] [[38;5;86m814189382[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0001] [[38;5;86m814189382[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0002] [[38;5;86m814189382[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0002] [[38;5;86m814189382[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0002] [[38;5;188m428698923[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:64943
+[36mINFO[0m[0002] [[38;5;188m428698923[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0002] [[38;5;188m428698923[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0003] [[38;5;188m428698923[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0003] [[38;5;188m428698923[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0003] [[38;5;137m1077659001[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:64951
+[36mINFO[0m[0003] [[38;5;137m1077659001[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0003] [[38;5;137m1077659001[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0004] [[38;5;137m1077659001[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0004] [[38;5;137m1077659001[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0004] [[38;5;110m3523847774[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:64962
+[36mINFO[0m[0004] [[38;5;110m3523847774[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0004] [[38;5;110m3523847774[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0005] [[38;5;110m3523847774[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0005] [[38;5;110m3523847774[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0005] [[38;5;123m1241524075[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:64968
+[36mINFO[0m[0005] [[38;5;123m1241524075[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0005] [[38;5;123m1241524075[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0006] [[38;5;123m1241524075[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0006] [[38;5;123m1241524075[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0006] [[38;5;188m379787819[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:64973
+[36mINFO[0m[0006] [[38;5;188m379787819[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0006] [[38;5;188m379787819[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0007] [[38;5;188m379787819[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0007] [[38;5;188m379787819[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0008] [[38;5;46m2620998942[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:64978
+[36mINFO[0m[0008] [[38;5;46m2620998942[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0008] [[38;5;46m2620998942[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0009] [[38;5;46m2620998942[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0009] [[38;5;46m2620998942[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0009] [[38;5;145m3256601217[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:64987
+[36mINFO[0m[0009] [[38;5;145m3256601217[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0009] [[38;5;145m3256601217[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0010] [[38;5;145m3256601217[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0010] [[38;5;145m3256601217[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0010] [[38;5;211m614217923[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:64995
+[36mINFO[0m[0010] [[38;5;211m614217923[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0010] [[38;5;211m614217923[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0011] [[38;5;211m614217923[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0011] [[38;5;211m614217923[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0011] [[38;5;198m781981110[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:64999
+[36mINFO[0m[0011] [[38;5;198m781981110[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0011] [[38;5;198m781981110[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0012] [[38;5;198m781981110[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0012] [[38;5;198m781981110[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0012] [[38;5;39m2383944983[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65002
+[36mINFO[0m[0012] [[38;5;39m2383944983[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0012] [[38;5;39m2383944983[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0013] [[38;5;39m2383944983[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0013] [[38;5;39m2383944983[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0013] [[38;5;83m2329808963[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65010
+[36mINFO[0m[0013] [[38;5;83m2329808963[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0013] [[38;5;83m2329808963[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0014] [[38;5;83m2329808963[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0014] [[38;5;83m2329808963[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0014] [[38;5;97m3843549265[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65013
+[36mINFO[0m[0014] [[38;5;97m3843549265[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0014] [[38;5;97m3843549265[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0015] [[38;5;97m3843549265[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0015] [[38;5;97m3843549265[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0015] [[38;5;33m3307491560[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65017
+[36mINFO[0m[0015] [[38;5;33m3307491560[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0015] [[38;5;33m3307491560[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0016] [[38;5;33m3307491560[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0016] [[38;5;33m3307491560[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0017] [[38;5;79m2416693567[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65022
+[36mINFO[0m[0017] [[38;5;79m2416693567[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0017] [[38;5;79m2416693567[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0018] [[38;5;79m2416693567[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0018] [[38;5;79m2416693567[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0018] [[38;5;227m2102400211[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65033
+[36mINFO[0m[0018] [[38;5;227m2102400211[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0018] [[38;5;227m2102400211[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0019] [[38;5;227m2102400211[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0019] [[38;5;227m2102400211[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0019] [[38;5;195m1171229619[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65045
+[36mINFO[0m[0019] [[38;5;195m1171229619[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0019] [[38;5;195m1171229619[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0020] [[38;5;195m1171229619[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0020] [[38;5;195m1171229619[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0020] [[38;5;191m3902922024[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65052
+[36mINFO[0m[0020] [[38;5;191m3902922024[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0020] [[38;5;191m3902922024[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0021] [[38;5;191m3902922024[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0021] [[38;5;191m3902922024[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0021] [[38;5;78m3635182910[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65055
+[36mINFO[0m[0021] [[38;5;78m3635182910[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0021] [[38;5;78m3635182910[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0022] [[38;5;78m3635182910[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0022] [[38;5;78m3635182910[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0022] [[38;5;182m484716966[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65059
+[36mINFO[0m[0022] [[38;5;182m484716966[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0022] [[38;5;182m484716966[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0023] [[38;5;182m484716966[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0023] [[38;5;182m484716966[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0023] [[38;5;230m2427159000[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65064
+[36mINFO[0m[0023] [[38;5;230m2427159000[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0023] [[38;5;230m2427159000[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0024] [[38;5;230m2427159000[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0024] [[38;5;230m2427159000[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0024] [[38;5;46m2176174069[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65068
+[36mINFO[0m[0024] [[38;5;46m2176174069[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0024] [[38;5;46m2176174069[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0025] [[38;5;46m2176174069[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0025] [[38;5;46m2176174069[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0026] [[38;5;158m3151211918[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65080
+[36mINFO[0m[0026] [[38;5;158m3151211918[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0026] [[38;5;158m3151211918[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0027] [[38;5;158m3151211918[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0027] [[38;5;158m3151211918[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0027] [[38;5;82m3844506690[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65085
+[36mINFO[0m[0027] [[38;5;82m3844506690[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0027] [[38;5;82m3844506690[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0028] [[38;5;82m3844506690[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0028] [[38;5;82m3844506690[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0028] [[38;5;154m879616845[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65094
+[36mINFO[0m[0028] [[38;5;154m879616845[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0028] [[38;5;154m879616845[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0029] [[38;5;154m879616845[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0029] [[38;5;154m879616845[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0029] [[38;5;140m1069072508[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65098
+[36mINFO[0m[0029] [[38;5;140m1069072508[0m 1ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0029] [[38;5;140m1069072508[0m 1ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0030] [[38;5;140m1069072508[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0030] [[38;5;140m1069072508[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0030] [[38;5;31m3141965839[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65102
+[36mINFO[0m[0030] [[38;5;31m3141965839[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0030] [[38;5;31m3141965839[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0031] [[38;5;31m3141965839[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0031] [[38;5;31m3141965839[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0031] [[38;5;184m3830704040[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65110
+[36mINFO[0m[0031] [[38;5;184m3830704040[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0031] [[38;5;184m3830704040[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0032] [[38;5;184m3830704040[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0032] [[38;5;184m3830704040[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0032] [[38;5;225m1269842182[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65116
+[36mINFO[0m[0032] [[38;5;225m1269842182[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0032] [[38;5;225m1269842182[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0033] [[38;5;225m1269842182[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0033] [[38;5;225m1269842182[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0034] [[38;5;107m3063888475[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65121
+[36mINFO[0m[0034] [[38;5;107m3063888475[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0034] [[38;5;107m3063888475[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0035] [[38;5;107m3063888475[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0035] [[38;5;107m3063888475[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0035] [[38;5;193m3229996582[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65124
+[36mINFO[0m[0035] [[38;5;193m3229996582[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0035] [[38;5;193m3229996582[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0036] [[38;5;193m3229996582[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0036] [[38;5;193m3229996582[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0036] [[38;5;227m2516384467[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65127
+[36mINFO[0m[0036] [[38;5;227m2516384467[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0036] [[38;5;227m2516384467[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0037] [[38;5;227m2516384467[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0037] [[38;5;227m2516384467[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0037] [[38;5;158m4175362190[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65132
+[36mINFO[0m[0037] [[38;5;158m4175362190[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0037] [[38;5;158m4175362190[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0038] [[38;5;158m4175362190[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0038] [[38;5;158m4175362190[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0038] [[38;5;148m2803782020[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65138
+[36mINFO[0m[0038] [[38;5;148m2803782020[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0038] [[38;5;148m2803782020[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0039] [[38;5;148m2803782020[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0039] [[38;5;148m2803782020[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0039] [[38;5;192m3467720999[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65142
+[36mINFO[0m[0039] [[38;5;192m3467720999[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0039] [[38;5;192m3467720999[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0040] [[38;5;192m3467720999[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0040] [[38;5;192m3467720999[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0040] [[38;5;40m1303709935[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65148
+[36mINFO[0m[0040] [[38;5;40m1303709935[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0040] [[38;5;40m1303709935[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0041] [[38;5;40m1303709935[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0041] [[38;5;40m1303709935[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0041] [[38;5;228m133543386[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65152
+[36mINFO[0m[0041] [[38;5;228m133543386[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0041] [[38;5;228m133543386[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0042] [[38;5;228m133543386[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0042] [[38;5;228m133543386[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0042] [[38;5;122m628053354[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65159
+[36mINFO[0m[0042] [[38;5;122m628053354[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0042] [[38;5;122m628053354[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0043] [[38;5;122m628053354[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0043] [[38;5;122m628053354[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0044] [[38;5;172m2742409372[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65167
+[36mINFO[0m[0044] [[38;5;172m2742409372[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0044] [[38;5;172m2742409372[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0045] [[38;5;172m2742409372[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0045] [[38;5;172m2742409372[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0045] [[38;5;43m3941788699[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65173
+[36mINFO[0m[0045] [[38;5;43m3941788699[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0045] [[38;5;43m3941788699[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0046] [[38;5;43m3941788699[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0046] [[38;5;43m3941788699[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0046] [[38;5;64m1481914928[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65188
+[36mINFO[0m[0046] [[38;5;64m1481914928[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0046] [[38;5;64m1481914928[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0047] [[38;5;64m1481914928[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0047] [[38;5;64m1481914928[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0047] [[38;5;144m416455040[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65193
+[36mINFO[0m[0047] [[38;5;144m416455040[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0047] [[38;5;144m416455040[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0048] [[38;5;144m416455040[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0048] [[38;5;144m416455040[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0048] [[38;5;189m3443489965[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65200
+[36mINFO[0m[0048] [[38;5;189m3443489965[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0048] [[38;5;189m3443489965[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0049] [[38;5;189m3443489965[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0049] [[38;5;189m3443489965[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0049] [[38;5;200m302319288[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65210
+[36mINFO[0m[0049] [[38;5;200m302319288[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0049] [[38;5;200m302319288[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0050] [[38;5;200m302319288[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0050] [[38;5;200m302319288[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0050] [[38;5;45m2938227229[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65218
+[36mINFO[0m[0050] [[38;5;45m2938227229[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0050] [[38;5;45m2938227229[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0051] [[38;5;45m2938227229[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0051] [[38;5;45m2938227229[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0052] [[38;5;145m4151423105[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65222
+[36mINFO[0m[0052] [[38;5;145m4151423105[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0052] [[38;5;145m4151423105[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0053] [[38;5;145m4151423105[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0053] [[38;5;145m4151423105[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0053] [[38;5;86m2002149009[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65231
+[36mINFO[0m[0053] [[38;5;86m2002149009[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0053] [[38;5;86m2002149009[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0054] [[38;5;86m2002149009[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0054] [[38;5;86m2002149009[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0054] [[38;5;177m4025660577[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65237
+[36mINFO[0m[0054] [[38;5;177m4025660577[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0054] [[38;5;177m4025660577[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0055] [[38;5;177m4025660577[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0055] [[38;5;177m4025660577[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0055] [[38;5;147m1866589059[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65246
+[36mINFO[0m[0055] [[38;5;147m1866589059[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0055] [[38;5;147m1866589059[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0056] [[38;5;147m1866589059[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0056] [[38;5;147m1866589059[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0056] [[38;5;51m1074998266[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65253
+[36mINFO[0m[0056] [[38;5;51m1074998266[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0056] [[38;5;51m1074998266[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0057] [[38;5;51m1074998266[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0057] [[38;5;51m1074998266[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0057] [[38;5;201m2348548537[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65259
+[36mINFO[0m[0057] [[38;5;201m2348548537[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0057] [[38;5;201m2348548537[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0058] [[38;5;201m2348548537[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0058] [[38;5;201m2348548537[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0058] [[38;5;73m4002456633[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65263
+[36mINFO[0m[0058] [[38;5;73m4002456633[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0058] [[38;5;73m4002456633[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0059] [[38;5;73m4002456633[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0059] [[38;5;73m4002456633[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0059] [[38;5;223m2153402632[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65277
+[36mINFO[0m[0059] [[38;5;223m2153402632[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0059] [[38;5;223m2153402632[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0060] [[38;5;223m2153402632[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0060] [[38;5;223m2153402632[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0061] [[38;5;186m1245047853[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65285
+[36mINFO[0m[0061] [[38;5;186m1245047853[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0061] [[38;5;186m1245047853[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0062] [[38;5;186m1245047853[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0062] [[38;5;186m1245047853[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0062] [[38;5;47m3877167903[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65293
+[36mINFO[0m[0062] [[38;5;47m3877167903[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0062] [[38;5;47m3877167903[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0063] [[38;5;47m3877167903[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0063] [[38;5;47m3877167903[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0063] [[38;5;67m3943975987[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65296
+[36mINFO[0m[0063] [[38;5;67m3943975987[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0063] [[38;5;67m3943975987[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0064] [[38;5;67m3943975987[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0064] [[38;5;67m3943975987[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0064] [[38;5;65m1445775153[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65301
+[36mINFO[0m[0064] [[38;5;65m1445775153[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0064] [[38;5;65m1445775153[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0065] [[38;5;65m1445775153[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0065] [[38;5;65m1445775153[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0065] [[38;5;223m3317422031[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65304
+[36mINFO[0m[0065] [[38;5;223m3317422031[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0065] [[38;5;223m3317422031[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0066] [[38;5;223m3317422031[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0066] [[38;5;223m3317422031[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0066] [[38;5;112m2637234016[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65312
+[36mINFO[0m[0066] [[38;5;112m2637234016[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0066] [[38;5;112m2637234016[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0067] [[38;5;112m2637234016[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0067] [[38;5;112m2637234016[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0067] [[38;5;185m3399049641[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65316
+[36mINFO[0m[0067] [[38;5;185m3399049641[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0067] [[38;5;185m3399049641[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0068] [[38;5;185m3399049641[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0068] [[38;5;185m3399049641[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0068] [[38;5;223m4202735839[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65331
+[36mINFO[0m[0068] [[38;5;223m4202735839[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0068] [[38;5;223m4202735839[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0069] [[38;5;223m4202735839[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0069] [[38;5;223m4202735839[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0070] [[38;5;119m2045285232[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65339
+[36mINFO[0m[0070] [[38;5;119m2045285232[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0070] [[38;5;119m2045285232[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0071] [[38;5;119m2045285232[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0071] [[38;5;119m2045285232[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0071] [[38;5;98m801960018[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65345
+[36mINFO[0m[0071] [[38;5;98m801960018[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0071] [[38;5;98m801960018[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0072] [[38;5;98m801960018[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0072] [[38;5;98m801960018[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0072] [[38;5;103m934607959[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65349
+[36mINFO[0m[0072] [[38;5;103m934607959[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0072] [[38;5;103m934607959[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0073] [[38;5;103m934607959[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0073] [[38;5;103m934607959[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0073] [[38;5;35m1515847658[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65355
+[36mINFO[0m[0073] [[38;5;35m1515847658[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0073] [[38;5;35m1515847658[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0074] [[38;5;35m1515847658[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0074] [[38;5;35m1515847658[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0074] [[38;5;42m976928753[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65363
+[36mINFO[0m[0074] [[38;5;42m976928753[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0074] [[38;5;42m976928753[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0075] [[38;5;42m976928753[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0075] [[38;5;42m976928753[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0075] [[38;5;120m1483383400[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65371
+[36mINFO[0m[0075] [[38;5;120m1483383400[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0075] [[38;5;120m1483383400[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0076] [[38;5;120m1483383400[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0076] [[38;5;120m1483383400[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0076] [[38;5;147m3439906947[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65377
+[36mINFO[0m[0076] [[38;5;147m3439906947[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0076] [[38;5;147m3439906947[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0077] [[38;5;147m3439906947[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0077] [[38;5;147m3439906947[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0077] [[38;5;229m1619531993[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65381
+[36mINFO[0m[0077] [[38;5;229m1619531993[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0077] [[38;5;229m1619531993[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0078] [[38;5;229m1619531993[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0078] [[38;5;229m1619531993[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0079] [[38;5;37m3985851884[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65385
+[36mINFO[0m[0079] [[38;5;37m3985851884[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0079] [[38;5;37m3985851884[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0080] [[38;5;37m3985851884[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0080] [[38;5;37m3985851884[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0080] [[38;5;157m2921636237[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65389
+[36mINFO[0m[0080] [[38;5;157m2921636237[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0080] [[38;5;157m2921636237[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0081] [[38;5;157m2921636237[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0081] [[38;5;157m2921636237[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0081] [[38;5;49m3037263137[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65392
+[36mINFO[0m[0081] [[38;5;49m3037263137[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0081] [[38;5;49m3037263137[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0082] [[38;5;49m3037263137[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0082] [[38;5;49m3037263137[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0082] [[38;5;207m2941202623[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65397
+[36mINFO[0m[0082] [[38;5;207m2941202623[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0082] [[38;5;207m2941202623[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0083] [[38;5;207m2941202623[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0083] [[38;5;207m2941202623[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0083] [[38;5;44m539329308[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65405
+[36mINFO[0m[0083] [[38;5;44m539329308[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0083] [[38;5;44m539329308[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0084] [[38;5;44m539329308[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0084] [[38;5;44m539329308[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0084] [[38;5;158m1992144526[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65412
+[36mINFO[0m[0084] [[38;5;158m1992144526[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0084] [[38;5;158m1992144526[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0085] [[38;5;158m1992144526[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0085] [[38;5;158m1992144526[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0085] [[38;5;42m3106067953[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65423
+[36mINFO[0m[0085] [[38;5;42m3106067953[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0085] [[38;5;42m3106067953[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0086] [[38;5;42m3106067953[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0086] [[38;5;42m3106067953[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0086] [[38;5;97m3841026897[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65430
+[36mINFO[0m[0086] [[38;5;97m3841026897[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0086] [[38;5;97m3841026897[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0087] [[38;5;97m3841026897[0m 1.0s] connection: connection upload finished
+[37mDEBUG[0m[0087] [[38;5;97m3841026897[0m 1.0s] connection: connection download finished
+[36mINFO[0m[0088] [[38;5;198m2070376118[0m 0ms] inbound/socks[socks-in]: inbound connection from 127.0.0.1:65434
+[36mINFO[0m[0088] [[38;5;198m2070376118[0m 0ms] inbound/socks[socks-in]: inbound connection to 127.0.0.1:18451
+[36mINFO[0m[0088] [[38;5;198m2070376118[0m 0ms] outbound/tuic[tuic-out]: outbound connection to 127.0.0.1:18451
+[37mDEBUG[0m[0093] [[38;5;198m2070376118[0m 5.0s] connection: connection upload finished
+[37mDEBUG[0m[0093] [[38;5;198m2070376118[0m 5.0s] connection: connection download finished

@@ -1,9 +1,22 @@
-# Shared proxy target-write ownership
+# Proxy target-write ownership
 
-TUIC and Hysteria keep one owner for QUIC receive, connection state and sends.
-Each TCP relay has a concurrent reader and a persistent target writer. Reader
+Shared TUIC/Hysteria pumps and standalone TUIC keep one owner for QUIC receive,
+connection state and sends. Their TCP relays have a concurrent reader and a
+persistent target writer. Reader
 creation uses `concurrent`, so an I/O implementation with no async capacity
 cannot execute a blocking reader inline on the endpoint service loop.
+
+Standalone TUIC also uses this relay owner. It previously sent QUIC from its
+TCP reader while the connection loop held a mutex across timed receive. Its
+reader now publishes into the same eight-slot outbound FIFO and the connection
+loop attempts at most eight packet-sized sends per relay turn. Accepted
+prefixes advance the retained item; FIN follows all DATA. Setup publishes a
+relay only after owner admission and initial input succeed. Complete
+standalone peer qualification is recorded separately from shared operation.
+Before authentication, standalone TUIC retains bounded CONNECT input and FIN
+without connecting the target. Authentication resumes those pending requests.
+The same configured pending-byte limit applies to coalesced first payloads;
+native and independent cold-admission checks retain this ordering contract.
 
 `relay_queue/inbound.zig` owns two input buffers. Incoming bytes append to the
 mutable pending buffer. Submission exchanges buffer ownership and lends an

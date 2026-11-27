@@ -1,0 +1,6 @@
+{
+  "exit_code": 0,
+  "tests": 58,
+  "log_sha256": "dcdbb9929ba50d5662ebca21ed1e595e4c7355cabf720cb6035f8b6f786b60a5",
+  "note": "both native backends execute ordered protected CONNECT plus1024 payload/FIN beforeAUTH; original5s ACK deadline retained"
+}

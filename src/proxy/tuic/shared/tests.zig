@@ -77,10 +77,12 @@ fn echoLoop(io: std.Io, listener: *net.Server, count: usize) void {
 
 const ServeContext = struct {
     server: *server_mod.Server,
+    single: bool = false,
     err: ?anyerror = null,
 
     fn run(self: *@This()) void {
-        self.server.serve() catch |err| {
+        const result = if (self.single) self.server.serveOne() else self.server.serve();
+        result catch |err| {
             self.err = err;
         };
     }
@@ -98,6 +100,7 @@ const ClientContext = struct {
     password: []const u8,
     payload: []const u8,
     index: u8,
+    auth_after_request: bool = false,
     err: ?anyerror = null,
     stage: enum { handshake, send, receive } = .handshake,
 
@@ -149,7 +152,7 @@ const ClientContext = struct {
         );
         const auth = protocol.buildAuthenticate(self.uuid, token);
         const uni = try established.connection.openUnidirectionalStream();
-        try established.connection.send(&.{.{ .stream = .{
+        if (!self.auth_after_request) try established.connection.send(&.{.{ .stream = .{
             .stream_id = uni,
             .offset = 0,
             .data = &auth,
@@ -162,16 +165,56 @@ const ClientContext = struct {
             .{ .ip = self.target },
         );
         defer allocator.free(command);
-        try established.connection.send(&.{.{ .stream = .{
-            .stream_id = stream_id,
-            .offset = 0,
-            .data = command,
-            .fin = false,
-        } }});
-        self.stage = .send;
-        var committed: usize = 0;
-        try established.connection.sendStreamWithTimeout(stream_id, command.len, self.payload, true, &committed, .fromSeconds(5));
-        try std.testing.expectEqual(self.payload.len, committed);
+        if (self.auth_after_request) {
+            self.stage = .send;
+            const initial = try allocator.alloc(u8, command.len + self.payload.len);
+            defer allocator.free(initial);
+            @memcpy(initial[0..command.len], command);
+            @memcpy(initial[command.len..], self.payload);
+            const packet_number = established.connection.next_packet_number;
+            try established.connection.send(&.{.{ .stream = .{
+                .stream_id = stream_id,
+                .offset = 0,
+                .data = initial,
+                .fin = true,
+            } }});
+            // Force the whole CONNECT/payload packet to arrive before AUTH.
+            // Control-only packets cannot renew this caller-owned deadline.
+            const deadline = std.Io.Clock.Timestamp.fromNow(self.io, .{ .clock = .awake, .raw = .fromSeconds(5) });
+            while (true) {
+                var packet = try established.connection.receivePacketTimeout(.{ .deadline = deadline });
+                defer packet.deinit(allocator);
+                const acknowledged = for (packet.frames) |frame| {
+                    const ack = switch (frame) {
+                        .ack => |ack| ack,
+                        else => continue,
+                    };
+                    if (ack.largest_acknowledged >= packet_number and
+                        ack.largest_acknowledged - ack.first_ack_range <= packet_number)
+                    {
+                        break true;
+                    }
+                } else false;
+                if (acknowledged) break;
+            }
+            try established.connection.send(&.{.{ .stream = .{
+                .stream_id = uni,
+                .offset = 0,
+                .data = &auth,
+                .fin = true,
+            } }});
+        } else {
+            try established.connection.send(&.{.{ .stream = .{
+                .stream_id = stream_id,
+                .offset = 0,
+                .data = command,
+                .fin = false,
+            } }});
+            self.stage = .send;
+            var committed: usize = 0;
+            try established.connection.sendStreamWithTimeout(stream_id, command.len, self.payload, true, &committed, .fromSeconds(5));
+            try std.testing.expectEqual(self.payload.len, committed);
+        }
 
         self.stage = .receive;
         var buffer: [4096]u8 = undefined;
@@ -203,6 +246,7 @@ const ClientContext = struct {
             self.payload,
             received_buffer[0..received],
         );
+        if (self.auth_after_request) try established.connection.closeApplication(0, "done");
     }
 };
 
@@ -303,4 +347,49 @@ test "TUIC shared endpoint packetizes 16 and 64 KiB relay bodies" {
     for (&first, 0..) |*byte, index| byte.* = @intCast(index % 251);
     for (&second, 0..) |*byte, index| byte.* = @intCast((index * 13) % 251);
     try runConcurrent(.{ &first, &second });
+}
+
+fn runStandaloneBeforeAuth(io: std.Io) !void {
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(io, .{ .reuse_address = true });
+    defer listener.deinit(io);
+    var echo = try io.concurrent(echoLoop, .{ io, &listener, 1 });
+    defer echo.cancel(io);
+
+    const key_pair = try tls_testing.serverKeyPair();
+    const public_key = key_pair.public_key.toUncompressedSec1();
+    const uuid = [_]u8{0x42} ** 16;
+    const password = "netz-tuic-standalone-before-auth";
+    var server = try server_mod.Server.init(gpa, io, .{ .ip4 = .loopback(0) }, .{
+        .uuid = uuid,
+        .password = password,
+        .identity = .{ .certificate_chain = &.{&public_key}, .signer = .{ .ecdsa_p256_sha256 = .{ .key_pair = key_pair } } },
+        .acl = .{ .default_action = .allow },
+        .connect_timeout = .fromSeconds(3),
+        .idle_timeout = .fromSeconds(10),
+        .auth_timeout = .fromSeconds(3),
+    });
+    defer server.deinit();
+    var serving = ServeContext{ .server = &server, .single = true };
+    var serve = try io.concurrent(ServeContext.run, .{&serving});
+    defer serve.cancel(io);
+    var payload: [1024]u8 = undefined;
+    for (&payload, 0..) |*byte, i| byte.* = @intCast(i % 251);
+    var client = ClientContext{
+        .io = io,
+        .peer = server.address(),
+        .target = listener.socket.address,
+        .uuid = uuid,
+        .password = password,
+        .payload = &payload,
+        .index = 0,
+        .auth_after_request = true,
+    };
+    client.run();
+    serve.cancel(io);
+    if (serving.err) |err| return err;
+    if (client.err) |err| return err;
+}
+
+test "TUIC standalone retains coalesced CONNECT payload and FIN before authentication" {
+    try @import("../../../internal/testing/native_protocol_io.zig").run(runStandaloneBeforeAuth);
 }

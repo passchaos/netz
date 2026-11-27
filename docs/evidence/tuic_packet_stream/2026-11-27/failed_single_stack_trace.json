@@ -1,0 +1,9 @@
+{
+  "server_sha256": "4851ccb42939538a2c60ee9a420b0971b1f7d8bf67659cbd0dffd1a8c30f9109",
+  "peer_sha256": "6546126c1759683fe85798da92409215d53c50e0f2b346b4f74a61babc8dbec2",
+  "original_gate_sha256": "0a9cf4697033210b3610ffc97389c59dad6d52b500ae0726aabcec52e89f47d1",
+  "diagnostic_gate_sha256": "755e543afb72b25091f5d571333002f636de79ee3b16db7656bcf18a6cc35629",
+  "exit_code": 28,
+  "elapsed_seconds": 93.19122129200001,
+  "output": "curl: (28) Operation timed out after 5003 milliseconds with 0 bytes received\n"
+}

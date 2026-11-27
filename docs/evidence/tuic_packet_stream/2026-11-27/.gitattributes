@@ -1,0 +1,3 @@
+# Preserve raw command output bytes, including its final blank lines.
+native.log -text whitespace=-blank-at-eof
+windows_server.log -text whitespace=-blank-at-eof

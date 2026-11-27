@@ -144,19 +144,20 @@ packets through the existing endpoint batch API only after ownership is sound.
 ## R4: shared endpoint fairness
 
 The receive owner is now correct: TUIC and Hysteria share the QUIC endpoint
-pump. However, service still walks every connection, association and relay.
-Each idle UDP association attempts a receive with a one-millisecond timeout;
-each blocked TCP write can occupy up to ten milliseconds. These waits happen
-on the pump. Read-ready UDP associations and outbound TCP queues are drained
-until empty, with no per-turn item/byte budget. A continuously ready source
-can therefore monopolize a turn; N blocked TCP targets can add approximately
-N times the write quantum before another connection is serviced. This is a
-mechanism finding, not a measured p99 bound.
+pump. Persistent TCP target writers and bounded UDP receive/send owners have
+removed the original target-I/O waits from shared service turns. TCP output
+and UDP reply queues now have per-turn item limits, and completion turns visit
+signaled owners. The earlier review's N-times-target-timeout mechanism is a
+historical finding for the replaced paths.
 
-Move target-socket reads and writes to explicit per-association/relay owners
-that publish through bounded queues, or use readiness-aware nonblocking
-operations. Keep one QUIC receive owner. Give the pump packet/byte/time budgets
-and a round-robin cursor; schedule only ready owners while handling expiry.
+QUIC `pollStreams` and `drainDatagrams` still loop until empty in both shared
+servers. Regular service also walks every connection, association and relay.
+A continuously ready QUIC source can therefore consume an unbounded input
+turn before its sibling is serviced. This is a source finding; bounded sibling
+latency and p99 remain unmeasured.
+
+Keep one QUIC receive owner. Add packet/byte/time budgets and a round-robin
+cursor to input service; schedule ready owners while still handling expiry.
 Profile mixed hot/idle connections, permanently blocked targets and continuous
 UDP producers. Require bounded sibling delay, clean shutdown, and stable
 p50/p99, throughput, CPU and allocation metrics against fixed binaries.
@@ -999,14 +1000,17 @@ Pinned sing-box burst qualification exposed TUIC response stream reuse: its
 reader consumes one Packet per uni stream. The shared server now retains one
 uncommitted stream per FIFO front and sends a fresh stream with FIN for each
 completed Packet. Incoming parser slots are released on FIN; 128 split/FIN
-lifecycles pass. Standalone TUIC still has the same reuse source finding and
-requires a separate native follow-up.
+lifecycles pass. The PacketStream follow-up below records the standalone
+implementation and its separate qualification status.
 
 [The final UDP qualification](../evidence/udp_association_owners/2026-11-27/README.md)
 records 75 scoped native tests, 58 standalone Hysteria tests, two separate
 Windows 8/8 compilations and final peer build 9/9. Both unchanged independent
 modes retain exact 128-KiB TCP and UDP checks. Each mode also passes nine waves
-of eight exact UDP payloads, crossing the original 64 parser-slot capacity.
+of eight exact UDP payloads, repeatedly reusing the eight parser slots. The
+earlier evidence's prose incorrectly called this a 64-slot parser pool; both
+actual uni-parser arrays have eight entries. Historical receipts and hashes
+remain unchanged.
 The rejected global UDP ordering assumption and pre-fix QUIC burst timeout
 remain archived; internal FIFO ordering assertions are retained. Original
 protocol assertions, source pins and CI commands/budgets remain unchanged.
@@ -1022,3 +1026,49 @@ protocol exceeded its existing five-minute budget before combined test names,
 and complete ended with exit137 and support/fuzz progress in its public tail.
 Full-library execution is not established from that tail. The original
 R4-R9/HTTP-family objective and complete acceptance remain active.
+
+### TUIC PacketStream progress and standalone owner alignment
+
+Shared and standalone TUIC now retain one stream and an exact send cursor per
+encoded Packet. Shared sends use the common single-packet STREAM budget also
+used by TCP relays. A partial send retains the immutable payload and suffix;
+only committed FIN completes the Packet. Standalone sends retain their
+100-ms quantum and 100-attempt limit, checking the actual final stream size.
+Cancellation transfers outstanding IDs to a 64-slot reset queue with at most
+eight reset attempts per turn. A refused reset retains ownership; saturation
+stops the connection rather than orphaning a stream.
+
+Both eight-slot uni-parser pools now reuse bounded pending storage, including
+the configured payload plus the maximum 269-byte header. A valid 253-byte
+domain exposed a 256-byte address scratch overflow: both CONNECT and Packet
+now use the shared 259-byte encoded-address bound. Native assertions retain
+the complete domain and 4096-byte payload, parser reuse after FIN, exact
+committed prefixes, final FIN, fresh next-Packet streams and deferred resets.
+
+Independent standalone qualification exposed a separate TCP response failure.
+Phase diagnostics confirm authentication, CONNECT and HTTP request input; no
+HTTP response bytes reached the peer. Changing reader admission alone did
+not resolve it. Standalone now uses the existing persistent relay queues and
+keeps QUIC mutation on the connection loop. The exact attribution to mutex
+starvation has not been established. The final 81-test native relay/TUIC scope
+passes, as does the eight-gate pinned shared/standalone peer matrix. Each owner passes
+72 extra small UDP replies in both modes and 16 additional 2048/4096-byte
+replies in QUIC mode. The unchanged 131072-byte TCP comparison remains in
+every gate. Selected Windows compilation passes 8/8 and the ReleaseSafe native
+server builds 9/9. Explicit Windows server compilation also passes 8/8; audit
+and source/binary identity qualification are
+recorded in the [PacketStream evidence](../evidence/tuic_packet_stream/2026-11-27/README.md).
+
+Repeated standalone admission then exposed `AuthenticationRequired` when
+CONNECT arrives before AUTH. The deterministic protected native case retains
+the full 1024-byte coalesced payload and FIN expectation; the old path fails
+57/58. Standalone now uses bounded pending storage before authentication and
+resumes target connection after token verification. This also removes the
+fixed 512-byte first-chunk limit. Both native backends pass the ordered
+CONNECT/1024-byte payload/FIN case; the full peer matrix and 20 separate
+unchanged cold-admission gates also pass. The earlier 80-test and single-matrix
+checkpoint and subsequent failure remain historical records.
+
+These changes do not establish allocation-free encoding, RSS, throughput or
+p99 improvements. Finite stream/datagram input drains, fair scheduling and
+mixed workloads remain in R4; reusable encoded blocks remain in R5.
