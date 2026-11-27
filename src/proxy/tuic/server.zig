@@ -146,7 +146,8 @@ const Assoc = struct {
     closed: std.atomic.Value(bool) = .init(false),
 };
 
-const UniPending = @import("uni_input.zig").Input;
+const uni_input = @import("uni_input.zig");
+const UniPending = uni_input.Input;
 
 const Pending = struct {
     stream_id: u64 = 0,
@@ -287,7 +288,7 @@ fn authenticate(state: *State) !void {
             },
             .reset => |reset| {
                 if (protocol.isUnidirectional(reset.stream_id)) return error.AuthenticationFailed;
-                closeRelayStream(state, reset.stream_id);
+                handleResetStream(state, reset.stream_id);
             },
         }
     }
@@ -353,8 +354,7 @@ fn relayLoop(state: *State) !void {
                 }
             },
             .reset => |reset| {
-                closeRelayStream(state, reset.stream_id);
-                closeAssocForStream(state, reset.stream_id);
+                handleResetStream(state, reset.stream_id);
             },
         }
         drainDatagrams(state, &buffer) catch {};
@@ -500,6 +500,12 @@ fn pendingFor(state: *State, stream_id: u64) ?*Pending {
         }
     }
     return null;
+}
+
+fn handleResetStream(state: *State, stream_id: u64) void {
+    uni_input.cancelStream(&state.uni_pending, stream_id);
+    closeRelayStream(state, stream_id);
+    closeAssocForStream(state, stream_id);
 }
 
 fn closeRelayStream(state: *State, stream_id: u64) void {
@@ -929,4 +935,15 @@ fn flushRetiringPacketStreams(state: *State) void {
         error.CongestionLimited, error.PacingLimited, error.AntiAmplificationLimited => {},
         else => state.running.store(false, .release),
     };
+}
+
+test "TUIC standalone uni reset returns parser slot and retains allocation" {
+    const Case = struct {
+        fn run(io: std.Io) !void {
+            var state: State = .{ .allocator = std.testing.allocator, .io = undefined, .established = undefined, .config = .{ .uuid = @splat(0), .password = "parser", .identity = undefined }, .last_activity = .init(0), .authenticated = true };
+            defer for (&state.uni_pending) |*pending| pending.deinit(std.testing.allocator);
+            try @import("uni_reset_tests.zig").exercise(io, &state, &state.allocator, handleUniData, handleResetStream);
+        }
+    };
+    try @import("../../internal/testing/native_protocol_io.zig").run(Case.run);
 }

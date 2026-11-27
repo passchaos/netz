@@ -1,0 +1,94 @@
+[traex-zig-guard 2026-11-27 12:50:36] waiting for the global TRAE Zig build slot
+[traex-zig-guard 2026-11-27 12:54:47] started Zig tree root=84563 limit=25600MiB warn=20480MiB swap_delta=4096MiB timeout=900s
+test-proxy
++- run test test: src/test_scope.zig
+   +- compile test Debug native 1 errors
+src/proxy/tuic/uni_reset_tests.zig:66:15: error: local constant 'id' shadows local constant from outer scope
+        const id: u64 = 10 + 4 * i;
+              ^~
+src/proxy/tuic/uni_reset_tests.zig:22:11: note: previous declaration here
+    const id = try sender.openUnidirectionalStream();
+          ^~
+error: 1 compilation errors
+failed command: /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/zig test -ODebug --dep vail --dep vort --dep zio --dep kron --dep regexz --dep webpkiz --dep test_scope_options -Mroot=/Users/bytedance/project-z/netz/src/test_scope.zig .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_0_p256_field_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_1_p256_field_mul_alt_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_2_p256_field_square_alt_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_3_p256_point_double_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_4_p256_point_double_alt_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_5_p256_point_mixed_add_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_6_p256_point_mixed_add_alt_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_7_p256_scalar_inv_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_8_p256_scalar_mont_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_9_p256_scalarmulbase_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_10_p256_scalarmulbase_alt_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_11_p256_montjscalarmul_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_12_p256_montjscalarmul_alt_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_13_p384_montinv_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_14_p384_montjadd_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_15_p384_montjdouble_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_16_p384_montjmixadd_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_17_p384_scalarmul_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_18_keccak4_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_19_keccak2_sha3_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_20_keccak_sha3_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_21_aes_gcm_8x_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_22_aes_gcm_4x_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_23_ghash_v8_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_24_chacha20_poly1305_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_25_keccak_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_26_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_27_ed25519_base_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_28_ed25519_scalarmulbase_alt_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_29_x25519_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_30_x25519_base_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_31_caddq_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_32_chknorm_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_33_decompose_32_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_34_decompose_88_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_35_intt_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_36_ntt_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_37_pointwise_acc_l4_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_38_pointwise_acc_l5_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_39_pointwise_acc_l7_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_40_pointwise_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_41_rej_uniform_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_42_rej_uniform_eta2_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_43_rej_uniform_eta4_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_44_unpack_z17_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_45_unpack_z19_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_46_use_hint_32_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_47_use_hint_88_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_48_intt_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_49_ntt_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_50_poly_mulcache_compute_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_51_poly_reduce_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_52_poly_tobytes_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_53_poly_tomont_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_54_polyvec_basemul_acc_montgomery_cached_k2_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_55_polyvec_basemul_acc_montgomery_cached_k3_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_56_polyvec_basemul_acc_montgomery_cached_k4_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_57_rej_uniform_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_58_armv8_mont_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_59_bignum_madd_n25519_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_60_bignum_mod_n25519_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_61_ed25519_epdouble_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_62_ed25519_scalarmuldouble_alt_arm64.S .zig-cache/o/6ad0f185f6896d17200b1b0b1d8e502e/macho_63_ed25519_verify_arm64.S -ODebug -F /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/System/Library/Frameworks -isystem /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include -L /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/lib --dep vort -Mvail=/Users/bytedance/project-z/vail/src/root.zig .zig-cache/o/09eb41c705258b35ae3da348f2650522/vort-br-record-optimal.o .zig-cache/o/5558329fa8437e0addcb81b834d4ad86/vort-zstd-huffman-x2.o -ODebug -I .zig-cache/o/2fb5824d4233e9fe32370ab196a5b16d -I .zig-cache/o/2fb5824d4233e9fe32370ab196a5b16d --dep vail_archive_crypto -Mvort=/Users/bytedance/project-z/vort/src/root.zig -ODebug --dep zio_build_options -Mzio=/Users/bytedance/project-z/netz/zig-pkg/zio-0.19.1-xHbVVE1kLABhvcTZ2InisM3hdkwDdj0fzzAUxvw2AmGk/src/zio.zig -ODebug -Mkron=/Users/bytedance/project-z/kron/src/root.zig -ODebug -Mregexz=/Users/bytedance/project-z/regexz/src/root.zig -ODebug -Mwebpkiz=/Users/bytedance/project-z/webpkiz/src/root.zig -Mtest_scope_options=.zig-cache/c/cfdbcf5e8d3389758d9ecbdde1ad356f/options.zig -ODebug -Mvail_archive_crypto=/Users/bytedance/project-z/vail/archive_crypto/src/root.zig -Mzio_build_options=.zig-cache/c/320401b06d5c6c293b0e48afbc96afbe/options.zig -framework Security -framework CoreFoundation -lc --test-filter "uni reset returns parser slot" --cache-dir .zig-cache --global-cache-dir /Users/bytedance/.cache/zig --name test --zig-lib-dir /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/ --listen=-
+
+Build Summary: 7/10 steps succeeded (1 failed)
+test-proxy transitive failure
++- run test test: src/test_scope.zig transitive failure
+   +- compile test Debug native 1 errors
+      +- WriteFile macho_0_p256_field_arm64.S cached
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 224ms MaxRSS:31M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 291ms MaxRSS:31M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options success
+      +- options cached
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/82ddfb692bff4b982f491af8d32bae25/build /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/zig /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib /Users/bytedance/project-z/netz .zig-cache /Users/bytedance/.cache/zig --seed 0xec53e54a -Zd36373c8bcdfd676 test-proxy -j1 -Dtest-progress=true -Dtest-filter=uni reset returns parser slot --summary all
+[traex-zig-guard 2026-11-27 12:54:55] finished Zig tree root=84563 peak=350MiB result=0

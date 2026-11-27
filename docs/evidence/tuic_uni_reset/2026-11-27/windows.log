@@ -1,0 +1,12 @@
+Build Summary: 8/8 steps succeeded
+test-proxy-compile success
++- compile test Debug x86_64-windows-gnu success 26s MaxRSS:3G
+   +- WriteFile cached
+   +- compile obj vort-br-record-optimal Debug x86_64-windows-gnu cached 189ms MaxRSS:31M
+   +- WriteFile cached
+   +- compile obj vort-zstd-huffman-x2 Debug x86_64-windows-gnu cached 189ms MaxRSS:31M
+   +- compile obj vort-br-record-optimal Debug x86_64-windows-gnu (reused)
+   +- compile obj vort-zstd-huffman-x2 Debug x86_64-windows-gnu (reused)
+   +- options success
+   +- options cached
+

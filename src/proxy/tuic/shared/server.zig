@@ -46,7 +46,8 @@ const Pending = struct {
     fin: bool = false,
 };
 
-const UniPending = @import("../uni_input.zig").Input;
+const uni_input = @import("../uni_input.zig");
+const UniPending = uni_input.Input;
 
 const Fragment = struct {
     active: bool = false,
@@ -623,8 +624,7 @@ pub const Connection = struct {
                     }
                 },
                 .reset => |reset| {
-                    self.closeRelayStream(reset.stream_id);
-                    self.closeAssocForStream(reset.stream_id);
+                    self.handleResetStream(reset.stream_id);
                 },
             }
         }
@@ -1084,6 +1084,12 @@ pub const Connection = struct {
         return null;
     }
 
+    fn handleResetStream(self: *Connection, stream_id: u64) void {
+        uni_input.cancelStream(&self.uni_pending, stream_id);
+        self.closeRelayStream(stream_id);
+        self.closeAssocForStream(stream_id);
+    }
+
     fn closeRelayStream(self: *Connection, stream_id: u64) void {
         if (self.pendingForId(stream_id)) |pending| {
             pending.input.deinit(self.pump.allocator);
@@ -1478,4 +1484,17 @@ test "TUIC shared UDP uni packets release parser slots on FIN" {
     }
     try std.testing.expectError(error.InvalidCommand, connection.handleUniData(1026, heartbeat[0..1], true));
     for (&connection.uni_pending) |*pending| try std.testing.expect(!pending.active and pending.input.len == 0);
+}
+
+test "TUIC shared UDP uni reset returns parser slot and retains allocation" {
+    const Case = struct {
+        fn run(io: std.Io) !void {
+            var running: std.atomic.Value(bool) = .init(true);
+            var pump: Pump = .{ .allocator = std.testing.allocator, .io = undefined, .endpoint = undefined, .config = .{ .uuid = @splat(0), .password = "parser", .identity = undefined }, .limiter = undefined, .shared = undefined, .receive_storage = &.{}, .versions = .{ 1, 2 }, .stop_flag = &running };
+            var connection: Connection = .{ .pump = &pump, .handle = 1, .established = undefined, .peer = .{ .ip4 = .loopback(1) }, .created_ns = 0, .last_activity_ns = 0, .authenticated = true, .datagram_buffer = &.{} };
+            defer for (&connection.uni_pending) |*pending| pending.deinit(std.testing.allocator);
+            try @import("../uni_reset_tests.zig").exercise(io, &connection, &pump.allocator, Connection.handleUniData, Connection.handleResetStream);
+        }
+    };
+    try @import("../../../internal/testing/native_protocol_io.zig").run(Case.run);
 }

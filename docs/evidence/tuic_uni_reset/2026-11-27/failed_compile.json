@@ -1,0 +1,9 @@
+{
+  "exit_code": 1,
+  "source_sha256": {
+    "src/proxy/tuic/server.zig": "840a5796e9d1fe5f92d179b7eb9b316bd57649b7c19e90cf3baeaad366ade37d",
+    "src/proxy/tuic/shared/server.zig": "3783a77cbaaef47669c0a2298f37b5f230e08674971855312c106ba63af717c4",
+    "src/proxy/tuic/uni_reset_tests.zig": "934700cae7708fadb72b1c9eb71586b105e0c2321c21ad5dd3df2497bd13ba2e"
+  },
+  "finding": "test fixture local id shadows wire stream id; production unchanged"
+}

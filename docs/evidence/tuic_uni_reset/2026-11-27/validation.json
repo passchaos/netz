@@ -1,0 +1,145 @@
+{
+  "observed_utc": "2026-11-27T05:06:26.929651+00:00",
+  "base_commit": "beebda64adcb0f7076a42643c259444725440a0d",
+  "scope": "TUIC shared/standalone uni parser retirement on decoded protected RESET, exact sibling preservation and retained capacity through128 owner reuse cycles",
+  "guard": "zig-tree-guard -- /usr/bin/python3 /tmp/netz-tuic-uni-reset-qualify.py",
+  "source_sha256": {
+    "src/proxy/tuic/server.zig": "3a1c5290e6abf01cd5a0b706df4779aae454185c07c24cb9a8ec1e9806f54f61",
+    "src/proxy/tuic/shared/server.zig": "45722acfccfe829e6d64705dc7bd344563acf05837d2d4906b048c8f3d806703",
+    "src/proxy/tuic/uni_input.zig": "595a89eef95fa8fab70d1207878e311e22a478deb7e2ffda97037e23077ed2bc",
+    "src/proxy/tuic/uni_reset_tests.zig": "5dd9b69e2b84ce86430727f913f9a0f981c548bc4a5f1bb7a3407aa097f151b7"
+  },
+  "checks": {
+    "fmt": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "fmt",
+        "src/proxy/tuic/server.zig",
+        "src/proxy/tuic/shared/server.zig",
+        "src/proxy/tuic/uni_input.zig",
+        "src/proxy/tuic/uni_reset_tests.zig"
+      ],
+      "exit_code": 0,
+      "log": "/var/folders/3h/rw6tyryn6ps_mw9bcstc2lfm0000gn/T/netz-tuic-uni-reset-wi962pu4/fmt.log",
+      "log_sha256": "dd61e493866242efac9888b8555e92feda81334a49df678619e6c1ec8920bd95",
+      "source_sha256": {
+        "src/proxy/tuic/server.zig": "3a1c5290e6abf01cd5a0b706df4779aae454185c07c24cb9a8ec1e9806f54f61",
+        "src/proxy/tuic/shared/server.zig": "45722acfccfe829e6d64705dc7bd344563acf05837d2d4906b048c8f3d806703",
+        "src/proxy/tuic/uni_input.zig": "595a89eef95fa8fab70d1207878e311e22a478deb7e2ffda97037e23077ed2bc",
+        "src/proxy/tuic/uni_reset_tests.zig": "5dd9b69e2b84ce86430727f913f9a0f981c548bc4a5f1bb7a3407aa097f151b7"
+      }
+    },
+    "native": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-proxy",
+        "-j1",
+        "-Dtest-progress=true",
+        "-Dtest-filter=TUIC",
+        "-Dtest-filter=proxy relay",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log": "/var/folders/3h/rw6tyryn6ps_mw9bcstc2lfm0000gn/T/netz-tuic-uni-reset-wi962pu4/native.log",
+      "log_sha256": "6113b64aef0c4d1fdad940890234149c4c22461733b7decc752826ba9a53180f",
+      "source_sha256": {
+        "src/proxy/tuic/server.zig": "3a1c5290e6abf01cd5a0b706df4779aae454185c07c24cb9a8ec1e9806f54f61",
+        "src/proxy/tuic/shared/server.zig": "45722acfccfe829e6d64705dc7bd344563acf05837d2d4906b048c8f3d806703",
+        "src/proxy/tuic/uni_input.zig": "595a89eef95fa8fab70d1207878e311e22a478deb7e2ffda97037e23077ed2bc",
+        "src/proxy/tuic/uni_reset_tests.zig": "5dd9b69e2b84ce86430727f913f9a0f981c548bc4a5f1bb7a3407aa097f151b7"
+      }
+    },
+    "windows": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-proxy-compile",
+        "-j1",
+        "-Dtarget=x86_64-windows-gnu",
+        "-Dtest-filter=TUIC",
+        "-Dtest-filter=proxy relay STREAM",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log": "/var/folders/3h/rw6tyryn6ps_mw9bcstc2lfm0000gn/T/netz-tuic-uni-reset-wi962pu4/windows.log",
+      "log_sha256": "f2c20b4ef3b6c11823c5ea8f79a91457f3c17fdd2711684cfd3fe91f2727e7ff",
+      "source_sha256": {
+        "src/proxy/tuic/server.zig": "3a1c5290e6abf01cd5a0b706df4779aae454185c07c24cb9a8ec1e9806f54f61",
+        "src/proxy/tuic/shared/server.zig": "45722acfccfe829e6d64705dc7bd344563acf05837d2d4906b048c8f3d806703",
+        "src/proxy/tuic/uni_input.zig": "595a89eef95fa8fab70d1207878e311e22a478deb7e2ffda97037e23077ed2bc",
+        "src/proxy/tuic/uni_reset_tests.zig": "5dd9b69e2b84ce86430727f913f9a0f981c548bc4a5f1bb7a3407aa097f151b7"
+      }
+    },
+    "server": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "build-tuic-server",
+        "-j1",
+        "-Doptimize=ReleaseSafe",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log": "/var/folders/3h/rw6tyryn6ps_mw9bcstc2lfm0000gn/T/netz-tuic-uni-reset-wi962pu4/server.log",
+      "log_sha256": "a4992d32efa56d1f8ac56d2c668f6af2f11ddd4953d2c82527a0bea0840274d6",
+      "source_sha256": {
+        "src/proxy/tuic/server.zig": "3a1c5290e6abf01cd5a0b706df4779aae454185c07c24cb9a8ec1e9806f54f61",
+        "src/proxy/tuic/shared/server.zig": "45722acfccfe829e6d64705dc7bd344563acf05837d2d4906b048c8f3d806703",
+        "src/proxy/tuic/uni_input.zig": "595a89eef95fa8fab70d1207878e311e22a478deb7e2ffda97037e23077ed2bc",
+        "src/proxy/tuic/uni_reset_tests.zig": "5dd9b69e2b84ce86430727f913f9a0f981c548bc4a5f1bb7a3407aa097f151b7"
+      }
+    },
+    "peer": {
+      "command": [
+        "/usr/bin/python3",
+        "docs/evidence/tuic_packet_stream/2026-11-27/replay_peer.py",
+        "zig-out/bin/netz-tuic-server",
+        "/tmp/netz-peer-sing-box-1.14.4/sing-box",
+        "/var/folders/3h/rw6tyryn6ps_mw9bcstc2lfm0000gn/T/netz-tuic-uni-reset-wi962pu4/peer.json"
+      ],
+      "exit_code": 0,
+      "log": "/var/folders/3h/rw6tyryn6ps_mw9bcstc2lfm0000gn/T/netz-tuic-uni-reset-wi962pu4/peer.log",
+      "log_sha256": "6b55df71de706d15b25e03f7fca79d6b904d407a93f1562233d34ea9002951d4",
+      "source_sha256": {
+        "src/proxy/tuic/server.zig": "3a1c5290e6abf01cd5a0b706df4779aae454185c07c24cb9a8ec1e9806f54f61",
+        "src/proxy/tuic/shared/server.zig": "45722acfccfe829e6d64705dc7bd344563acf05837d2d4906b048c8f3d806703",
+        "src/proxy/tuic/uni_input.zig": "595a89eef95fa8fab70d1207878e311e22a478deb7e2ffda97037e23077ed2bc",
+        "src/proxy/tuic/uni_reset_tests.zig": "5dd9b69e2b84ce86430727f913f9a0f981c548bc4a5f1bb7a3407aa097f151b7"
+      }
+    }
+  },
+  "native_tests": 83,
+  "windows_compile_steps": "8/8",
+  "native_server_build_steps": "9/9",
+  "peer_matrix_gates": 8,
+  "native_backends": [
+    "POSIX Threaded zero async",
+    "application backend"
+  ],
+  "wire_partial_bytes": 3000,
+  "encoded_payload_bytes": 4096,
+  "owner_reuse_cycles": 128,
+  "before": "before.json",
+  "remaining": [
+    "finite QUIC input drains",
+    "fair ready scheduling and mixed-load metrics",
+    "R5-R9 and full HTTP-family acceptance"
+  ],
+  "audit": {
+    "command": [
+      "/Users/bytedance/.local/bin/zig",
+      "build",
+      "verify-evidence",
+      "-j1",
+      "--",
+      "--max-unresolved=24",
+      "--limit=0"
+    ],
+    "exit_code": 0,
+    "log_sha256": "557a36f94bc75651465e7e71a8aa2913eeba8fd03b7737ded55770c38348cd69"
+  }
+}

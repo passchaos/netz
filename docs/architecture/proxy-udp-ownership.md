@@ -71,6 +71,12 @@ incomplete bytes at FIN remain a protocol error. A maximum valid 253-byte
 domain needs 257 encoded address bytes, so CONNECT and Packet share a 259-byte
 scratch bound covering the wire length field's full range.
 
+RESET_STREAM also returns its matching uni parser slot and retains allocation.
+Each receive owner routes reset through one entry point before the existing
+relay/association cleanup. A late or unknown ID cannot retire a sibling now
+occupying a reused slot. Protected-wire and allocation-reuse qualification is
+recorded in [the parser retirement evidence](../evidence/tuic_uni_reset/2026-11-27/README.md).
+
 Owner publication signals the existing pump readiness flag. Completion turns
 visit signaled associations and relays. At most eight completion turns precede
 the ordinary two-millisecond QUIC receive/timer path. That ordinary path also

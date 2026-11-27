@@ -1072,3 +1072,19 @@ checkpoint and subsequent failure remain historical records.
 These changes do not establish allocation-free encoding, RSS, throughput or
 p99 improvements. Finite stream/datagram input drains, fair scheduling and
 mixed workloads remain in R4; reusable encoded blocks remain in R5.
+
+### TUIC receive parser retirement on reset
+
+Both uni receive owners now return the parser slot for an incoming
+RESET_STREAM through one reset entry point. The slot drops its byte borrow
+and active state while retaining allocation. Unknown or late IDs preserve
+siblings. The original FIN release and incomplete-FIN error remain.
+
+The unchanged paths failed both actual owner assertions after a protected
+RESET_STREAM (55/57 scoped passes). The corrected 83-test native scope passes
+on the applicable native backends; owner assertions also verify exact sibling
+bytes and 128 fail-after-warmup allocation reuse cycles. Windows compilation
+passes 8/8, native server build 9/9 and all eight pinned peer gates pass.
+[Parser retirement evidence](../evidence/tuic_uni_reset/2026-11-27/README.md)
+separates protected-wire input, direct owner reuse cycles and platform results.
+Finite input turns, fair scheduling, mixed-load metrics and R5-R9 remain open.

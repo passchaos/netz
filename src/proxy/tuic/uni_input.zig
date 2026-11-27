@@ -29,15 +29,29 @@ pub const Input = struct {
     pub fn finish(self: *Input, fin: bool) !void {
         if (!fin) return;
         const incomplete = self.input.len != 0;
+        self.cancel();
+        if (incomplete) return error.InvalidCommand;
+    }
+    /// Release the parser slot and byte borrow while retaining its allocation.
+    pub fn cancel(self: *Input) void {
         self.active = false;
         self.input.len = 0;
-        if (incomplete) return error.InvalidCommand;
     }
     pub fn deinit(self: *Input, allocator: std.mem.Allocator) void {
         self.input.deinit(allocator);
         self.active = false;
     }
 };
+
+/// A late/unknown reset cannot retire a sibling occupying a reused slot.
+pub fn cancelStream(inputs: []Input, stream_id: u64) void {
+    for (inputs) |*input| {
+        if (input.active and input.stream_id == stream_id) {
+            input.cancel();
+            return;
+        }
+    }
+}
 
 test "TUIC uni input holds full payload plus domain header and reuses bounded storage" {
     const allocator = std.testing.allocator;
