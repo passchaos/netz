@@ -1,0 +1,135 @@
+{
+  "observed_utc": "2026-11-27T07:14:00.799601+00:00",
+  "base_commit": "891d062f3148ac9049e0b73c1e331c9c7eed50e6",
+  "scope": "finite shared TUIC/Hysteria STREAM DATAGRAM inbox and rotating ordinary/completion service; full mixed workload performance acceptance remains open",
+  "guard": "zig-tree-guard -- /usr/bin/python3 /tmp/netz-service-turn-qualified-run.py",
+  "source_sha256": {
+    "src/proxy/internal/service_turn.zig": "0b96b2e538e5ad766fb4ea1ab8bbbb95a8076e207e3cf3a51e072947cce06742",
+    "src/proxy/internal/service_turn_tests.zig": "a063843abf5ad2959452310b57d47fdd8c74fc4c7d9f4efbf7dfeb1e699927f9",
+    "src/proxy/internal/mod.zig": "efb80f4f9c2187ee389cc293deaf35ecb06835dbd4969bfc546417dbed4deadd",
+    "src/proxy/tuic/shared/server.zig": "aa7a3438d3f34fc283943af35dbd8b441eb142a3baf6784d6b2470ed25530390",
+    "src/proxy/hysteria/shared/server.zig": "27bb4c111390747ffe85de0a2604ac1d51c83766a8a02b052e7dadb9707d22c0"
+  },
+  "dependency_manifest_sha256": "b1db040a3652b14c5b0910421a64ef4a6119e5931cd7b51a4187dfd309075b4a",
+  "server_sha256": "1c98243929649be706a8c4cd4d6541883064fb91ee496543a5ed3ee7ea2e391c",
+  "peer_sha256": "6546126c1759683fe85798da92409215d53c50e0f2b346b4f74a61babc8dbec2",
+  "original_gate_sha256": "0a9cf4697033210b3610ffc97389c59dad6d52b500ae0726aabcec52e89f47d1",
+  "checks": {
+    "native": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-proxy",
+        "-Dtest-progress=true",
+        "-Dtest-filter=TUIC",
+        "-Dtest-filter=Hysteria shared",
+        "-Dtest-filter=Hysteria negotiated maximum rate",
+        "-Dtest-filter=proxy relay",
+        "-Dtest-filter=proxy UDP",
+        "-Dtest-filter=proxy service",
+        "-j1",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log": "docs/evidence/proxy_service_turn/2026-11-27/native.log",
+      "log_sha256": "8876cddb34135f96b114e8a8c9c02bcf6a7de092aa7d323713368503cd2b37ed",
+      "source_sha256": {
+        "src/proxy/internal/service_turn.zig": "0b96b2e538e5ad766fb4ea1ab8bbbb95a8076e207e3cf3a51e072947cce06742",
+        "src/proxy/internal/service_turn_tests.zig": "a063843abf5ad2959452310b57d47fdd8c74fc4c7d9f4efbf7dfeb1e699927f9",
+        "src/proxy/internal/mod.zig": "efb80f4f9c2187ee389cc293deaf35ecb06835dbd4969bfc546417dbed4deadd",
+        "src/proxy/tuic/shared/server.zig": "aa7a3438d3f34fc283943af35dbd8b441eb142a3baf6784d6b2470ed25530390",
+        "src/proxy/hysteria/shared/server.zig": "27bb4c111390747ffe85de0a2604ac1d51c83766a8a02b052e7dadb9707d22c0"
+      },
+      "runner_tests_passed": 108
+    },
+    "windows": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-proxy-compile",
+        "-Dtarget=x86_64-windows-gnu",
+        "-Dtest-filter=TUIC",
+        "-Dtest-filter=Hysteria shared",
+        "-Dtest-filter=Hysteria negotiated maximum rate",
+        "-Dtest-filter=proxy relay",
+        "-Dtest-filter=proxy UDP",
+        "-Dtest-filter=proxy service",
+        "-j1",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log": "docs/evidence/proxy_service_turn/2026-11-27/windows.log",
+      "log_sha256": "53efd90290de95f9fcc4754d1aa7a5c742f0682e3720d49d3ec4f6fd760505bb",
+      "source_sha256": {
+        "src/proxy/internal/service_turn.zig": "0b96b2e538e5ad766fb4ea1ab8bbbb95a8076e207e3cf3a51e072947cce06742",
+        "src/proxy/internal/service_turn_tests.zig": "a063843abf5ad2959452310b57d47fdd8c74fc4c7d9f4efbf7dfeb1e699927f9",
+        "src/proxy/internal/mod.zig": "efb80f4f9c2187ee389cc293deaf35ecb06835dbd4969bfc546417dbed4deadd",
+        "src/proxy/tuic/shared/server.zig": "aa7a3438d3f34fc283943af35dbd8b441eb142a3baf6784d6b2470ed25530390",
+        "src/proxy/hysteria/shared/server.zig": "27bb4c111390747ffe85de0a2604ac1d51c83766a8a02b052e7dadb9707d22c0"
+      }
+    },
+    "servers": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "build-tuic-server",
+        "-Doptimize=ReleaseSafe",
+        "-j1",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log": "docs/evidence/proxy_service_turn/2026-11-27/servers.log",
+      "log_sha256": "0c674d3cde55e0aef0e40f818965dfaa4575f324c1ca269541e6becaf6873778",
+      "source_sha256": {
+        "src/proxy/internal/service_turn.zig": "0b96b2e538e5ad766fb4ea1ab8bbbb95a8076e207e3cf3a51e072947cce06742",
+        "src/proxy/internal/service_turn_tests.zig": "a063843abf5ad2959452310b57d47fdd8c74fc4c7d9f4efbf7dfeb1e699927f9",
+        "src/proxy/internal/mod.zig": "efb80f4f9c2187ee389cc293deaf35ecb06835dbd4969bfc546417dbed4deadd",
+        "src/proxy/tuic/shared/server.zig": "aa7a3438d3f34fc283943af35dbd8b441eb142a3baf6784d6b2470ed25530390",
+        "src/proxy/hysteria/shared/server.zig": "27bb4c111390747ffe85de0a2604ac1d51c83766a8a02b052e7dadb9707d22c0"
+      }
+    },
+    "peer": {
+      "command": [
+        "/usr/bin/python3",
+        "docs/evidence/tuic_packet_stream/2026-11-27/replay_peer.py",
+        "zig-out/bin/netz-tuic-server",
+        "/tmp/netz-peer-sing-box-1.14.4/sing-box",
+        "/var/folders/3h/rw6tyryn6ps_mw9bcstc2lfm0000gn/T/netz-service-turn-qualify-17eke24n/peer.json"
+      ],
+      "exit_code": 0,
+      "log": "docs/evidence/proxy_service_turn/2026-11-27/peer.log",
+      "log_sha256": "b804cccb3e8e4c6e75de305bb1f2d49bbaec3b0a467cff3efa611292642cc2f9",
+      "source_sha256": {
+        "src/proxy/internal/service_turn.zig": "0b96b2e538e5ad766fb4ea1ab8bbbb95a8076e207e3cf3a51e072947cce06742",
+        "src/proxy/internal/service_turn_tests.zig": "a063843abf5ad2959452310b57d47fdd8c74fc4c7d9f4efbf7dfeb1e699927f9",
+        "src/proxy/internal/mod.zig": "efb80f4f9c2187ee389cc293deaf35ecb06835dbd4969bfc546417dbed4deadd",
+        "src/proxy/tuic/shared/server.zig": "aa7a3438d3f34fc283943af35dbd8b441eb142a3baf6784d6b2470ed25530390",
+        "src/proxy/hysteria/shared/server.zig": "27bb4c111390747ffe85de0a2604ac1d51c83766a8a02b052e7dadb9707d22c0"
+      }
+    }
+  },
+  "prior_ci": {
+    "observed_utc": "2026-11-27T06:56:30.054133+00:00",
+    "head": "891d062f3148ac9049e0b73c1e331c9c7eed50e6",
+    "run_id": 45951276351,
+    "attempt": 1,
+    "complete_job": {
+      "id": 140347459437,
+      "status": "completed",
+      "conclusion": "failure",
+      "annotation": "Process completed with exit code 137.",
+      "last_progress": "No test name emitted yet; build or startup is still active.",
+      "page_sha256": "147c55b46e8479a7968a18944ab916e0f377f90ce40cbd892b7cbb76b59144e6"
+    },
+    "native_linux_job": {
+      "id": 140347459877,
+      "status": "completed",
+      "conclusion": "success",
+      "client_ca_reload_step": "success"
+    },
+    "cause": "no specific test or resource cause established from public annotations"
+  }
+}

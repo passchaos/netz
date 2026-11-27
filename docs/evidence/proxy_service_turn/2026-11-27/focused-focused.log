@@ -1,0 +1,141 @@
+1/63 test_scope.test_0...OK
+2/63 proxy.mod.test_0...OK
+3/63 proxy.socks.mod.test_0...OK
+4/63 proxy.http_connect.mod.test_0...OK
+5/63 proxy.shadowsocks.mod.test_0...OK
+6/63 proxy.trojan.mod.test_0...OK
+7/63 proxy.vless.mod.test_0...OK
+8/63 proxy.vmess.mod.test_0...OK
+9/63 proxy.tuic.mod.test_0...OK
+10/63 proxy.hysteria.mod.test_0...OK
+11/63 proxy.tls.mod.test_0...OK
+12/63 proxy.transport.mod.test_0...OK
+13/63 proxy.internal.mod.test_0...OK
+14/63 proxy.internal.byte_bucket.test_0...OK
+15/63 proxy.internal.byte_bucket.stream.test_0...OK
+16/63 proxy.internal.relay_queue.test_0...OK
+17/63 proxy.internal.relay_queue.pending_input.test_0...OK
+18/63 proxy.internal.udp_session.test_0...OK
+19/63 proxy.internal.service_turn_tests.test.proxy service turn checks fresh time after progress and retains packet boundaries...OK
+20/63 proxy.internal.service_turn_tests.test.proxy service rotation preserves the next identity after swap removal...OK
+21/63 internal.testing.deadline_send_io.test_0...OK
+22/63 proxy.hysteria.shared.server.test.Hysteria shared input turns retain protected STREAM FIN and queued suffixes...OK
+23/63 proxy.hysteria.shared.server.test.Hysteria shared connection turns rotate hot idle and expired owners...OK
+24/63 proxy.hysteria.shared.server.test.Hysteria shared completion turns retain unvisited notifications...OK
+25/63 proxy.tuic.shared.server.test.TUIC shared input turns retain protected STREAM FIN and queued suffixes...OK
+26/63 proxy.tuic.shared.server.test.TUIC shared connection turns rotate hot idle and expired owners...OK
+27/63 proxy.tuic.shared.server.test.TUIC shared completion turns retain unvisited notifications...OK
+28/63 proxy.tuic.packet_stream.test_0...OK
+29/63 quic.mod.test_0...OK
+30/63 quic.mod.test_1...OK
+31/63 quic.mod.test_2...OK
+32/63 quic.tls.mod.test_0...OK
+33/63 quic.endpoint_dispatcher.test_0...OK
+34/63 quic.runtime.test_0...OK
+35/63 quic.runtime.test_1...OK
+36/63 quic.packet_space.test_0...OK
+37/63 quic.endpoint_server.test_0...OK
+38/63 quic.handshake.test_0...OK
+39/63 quic.address_validation_token.test_0...OK
+40/63 quic.tls_client_hello.test_0...OK
+41/63 quic.resumption.mod.test_0...OK
+42/63 quic.resumption.ticket.mod.test_0...OK
+43/63 quic.protection.test_0...OK
+44/63 quic.congestion.test_0...OK
+45/63 quic.one_rtt.test_0...OK
+46/63 quic.zero_rtt.mod.test_0...OK
+47/63 quic.handshake.client_authentication.test_0...OK
+48/63 quic.recovery.test_0...OK
+49/63 quic.path_validation.test_0...OK
+50/63 quic.connection_id.test_0...OK
+51/63 quic.load_balancing.quic_lb.mod.test_0...OK
+52/63 quic.stream.test_0...OK
+53/63 quic.pacing.test_0...OK
+54/63 quic.pmtu.test_0...OK
+55/63 quic.observability.qlog.mod.test_0...OK
+56/63 proxy.internal.relay_queue.inbound.test_0...OK
+57/63 proxy.internal.relay_queue.inbound_actor.test_0...OK
+58/63 quic.one_rtt.tests.mod.test_0...OK
+59/63 quic.one_rtt.tests.mod.test_1...OK
+60/63 quic.handshake.tests.test_0...OK
+61/63 quic.endpoint_server.tests.test_0...OK
+62/63 quic.endpoint_dispatcher.tests.test_0...OK
+63/63 quic.client_trust.test_0...OK
+All 63 tests passed.
+Build Summary: 10/10 steps succeeded
+test-proxy success
++- run test test: src/test_scope.zig success 907ms
+   +- compile test Debug native success 15s MaxRSS:901M
+      +- WriteFile macho_0_p256_field_arm64.S cached
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 223ms MaxRSS:31M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 220ms MaxRSS:31M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options success
+      +- options cached
+

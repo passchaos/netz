@@ -1,0 +1,224 @@
+1/59 test_scope.test_0...OK
+2/59 proxy.mod.test_0...OK
+3/59 proxy.socks.mod.test_0...OK
+4/59 proxy.http_connect.mod.test_0...OK
+5/59 proxy.shadowsocks.mod.test_0...OK
+6/59 proxy.trojan.mod.test_0...OK
+7/59 proxy.vless.mod.test_0...OK
+8/59 proxy.vmess.mod.test_0...OK
+9/59 proxy.tuic.mod.test_0...OK
+10/59 proxy.hysteria.mod.test_0...OK
+11/59 proxy.tls.mod.test_0...OK
+12/59 proxy.transport.mod.test_0...OK
+13/59 proxy.internal.mod.test_0...OK
+14/59 proxy.internal.byte_bucket.test_0...OK
+15/59 proxy.internal.byte_bucket.stream.test_0...OK
+16/59 proxy.internal.relay_queue.test_0...OK
+17/59 proxy.internal.relay_queue.pending_input.test_0...OK
+18/59 proxy.internal.udp_session.test_0...OK
+19/59 proxy.hysteria.shared.server.test.Hysteria shared input turns retain protected STREAM FIN and queued suffixes...expected 65536, found 69639
+FAIL (TestExpectedEqual)
+/Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:118:17: 0x105420e3f in expectEqualInner__anon_195066 (test)
+                return error.TestExpectedEqual;
+                ^
+/Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:83:5: 0x105446e3b in expectEqual (test)
+    return expectEqualInner(T, expected, actual);
+    ^
+/Users/bytedance/project-z/netz/src/proxy/internal/service_turn_tests.zig:120:13: 0x105446ef3 in run (test)
+            try std.testing.expectEqual(@as(u64, budget.input_bytes), entry.recv_state.read_offset);
+            ^
+/Users/bytedance/project-z/netz/src/internal/testing/native_protocol_io.zig:22:9: 0x105448f6f in runImpl__anon_210374 (test)
+        try test_case(threaded.io());
+        ^
+/Users/bytedance/project-z/netz/src/internal/testing/native_protocol_io.zig:9:5: 0x105445c9b in run__anon_210372 (test)
+    return runImpl(test_case, builtin.os.tag != .windows);
+    ^
+/Users/bytedance/project-z/netz/src/proxy/internal/service_turn_tests.zig:195:5: 0x105445bf3 in inputs__anon_210360 (test)
+    try native.run(Case.run);
+    ^
+/Users/bytedance/project-z/netz/src/proxy/hysteria/shared/server.zig:1382:5: 0x105445c57 in test.Hysteria shared input turns retain protected STREAM FIN and queued suffixes (test)
+    try @import("../../internal/service_turn_tests.zig").inputs(Pump, Connection, Config{ .password = "fair", .identity = undefined }, Pump.onConnected, Connection.pollStreams, Connection.drainDatagrams, Connection.drainInbox, false);
+    ^
+20/59 proxy.hysteria.shared.server.test.Hysteria shared connection turns rotate hot idle and expired owners...FAIL (TestUnexpectedResult)
+/Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:615:14: 0x1051ba8d3 in expect (test)
+    if (!ok) return error.TestUnexpectedResult;
+             ^
+/Users/bytedance/project-z/netz/src/proxy/internal/service_turn_tests.zig:220:13: 0x1051bb15b in run (test)
+            try std.testing.expect(fixture.pump.by_handle.contains(expired_handle));
+            ^
+/Users/bytedance/project-z/netz/src/internal/testing/native_protocol_io.zig:22:9: 0x1051be4a3 in runImpl__anon_37055 (test)
+        try test_case(threaded.io());
+        ^
+/Users/bytedance/project-z/netz/src/internal/testing/native_protocol_io.zig:9:5: 0x1051b9477 in run__anon_37048 (test)
+    return runImpl(test_case, builtin.os.tag != .windows);
+    ^
+/Users/bytedance/project-z/netz/src/proxy/internal/service_turn_tests.zig:229:5: 0x1051b93cf in rotation__anon_37029 (test)
+    try native.run(Case.run);
+    ^
+/Users/bytedance/project-z/netz/src/proxy/hysteria/shared/server.zig:1386:5: 0x1051b9433 in test.Hysteria shared connection turns rotate hot idle and expired owners (test)
+    try @import("../../internal/service_turn_tests.zig").rotation(Pump, Connection, Config{ .password = "fair", .identity = undefined }, Pump.onConnected, Pump.serviceConnections);
+    ^
+21/59 proxy.tuic.shared.server.test.TUIC shared input turns retain protected STREAM FIN and queued suffixes...expected 65536, found 69639
+FAIL (TestExpectedEqual)
+/Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:118:17: 0x105420e3f in expectEqualInner__anon_195066 (test)
+                return error.TestExpectedEqual;
+                ^
+/Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:83:5: 0x1054242b7 in expectEqual (test)
+    return expectEqualInner(T, expected, actual);
+    ^
+/Users/bytedance/project-z/netz/src/proxy/internal/service_turn_tests.zig:120:13: 0x10542436f in run (test)
+            try std.testing.expectEqual(@as(u64, budget.input_bytes), entry.recv_state.read_offset);
+            ^
+/Users/bytedance/project-z/netz/src/internal/testing/native_protocol_io.zig:22:9: 0x1054266eb in runImpl__anon_195058 (test)
+        try test_case(threaded.io());
+        ^
+/Users/bytedance/project-z/netz/src/internal/testing/native_protocol_io.zig:9:5: 0x105420da3 in run__anon_195056 (test)
+    return runImpl(test_case, builtin.os.tag != .windows);
+    ^
+/Users/bytedance/project-z/netz/src/proxy/internal/service_turn_tests.zig:195:5: 0x105420cfb in inputs__anon_195044 (test)
+    try native.run(Case.run);
+    ^
+/Users/bytedance/project-z/netz/src/proxy/tuic/shared/server.zig:1503:5: 0x105420d5f in test.TUIC shared input turns retain protected STREAM FIN and queued suffixes (test)
+    try @import("../../internal/service_turn_tests.zig").inputs(Pump, Connection, Config{ .uuid = @splat(0), .password = "fair", .identity = undefined }, Pump.onConnected, Connection.pollStreams, Connection.drainDatagrams, Connection.drainInbox, true);
+    ^
+22/59 proxy.tuic.shared.server.test.TUIC shared connection turns rotate hot idle and expired owners...FAIL (TestUnexpectedResult)
+/Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib/std/testing.zig:615:14: 0x1051ba8d3 in expect (test)
+    if (!ok) return error.TestUnexpectedResult;
+             ^
+/Users/bytedance/project-z/netz/src/proxy/internal/service_turn_tests.zig:220:13: 0x10540aa9f in run (test)
+            try std.testing.expect(fixture.pump.by_handle.contains(expired_handle));
+            ^
+/Users/bytedance/project-z/netz/src/internal/testing/native_protocol_io.zig:22:9: 0x10540b053 in runImpl__anon_193853 (test)
+        try test_case(threaded.io());
+        ^
+/Users/bytedance/project-z/netz/src/internal/testing/native_protocol_io.zig:9:5: 0x10540903b in run__anon_193851 (test)
+    return runImpl(test_case, builtin.os.tag != .windows);
+    ^
+/Users/bytedance/project-z/netz/src/proxy/internal/service_turn_tests.zig:229:5: 0x105408f93 in rotation__anon_193839 (test)
+    try native.run(Case.run);
+    ^
+/Users/bytedance/project-z/netz/src/proxy/tuic/shared/server.zig:1507:5: 0x105408ff7 in test.TUIC shared connection turns rotate hot idle and expired owners (test)
+    try @import("../../internal/service_turn_tests.zig").rotation(Pump, Connection, Config{ .uuid = @splat(0), .password = "fair", .identity = undefined }, Pump.onConnected, Pump.serviceConnections);
+    ^
+23/59 proxy.tuic.packet_stream.test_0...OK
+24/59 quic.mod.test_0...OK
+25/59 quic.mod.test_1...OK
+26/59 quic.mod.test_2...OK
+27/59 quic.tls.mod.test_0...OK
+28/59 quic.endpoint_dispatcher.test_0...OK
+29/59 internal.testing.deadline_send_io.test_0...OK
+30/59 quic.runtime.test_0...OK
+31/59 quic.runtime.test_1...OK
+32/59 quic.packet_space.test_0...OK
+33/59 quic.endpoint_server.test_0...OK
+34/59 quic.handshake.test_0...OK
+35/59 quic.address_validation_token.test_0...OK
+36/59 quic.tls_client_hello.test_0...OK
+37/59 quic.resumption.mod.test_0...OK
+38/59 quic.resumption.ticket.mod.test_0...OK
+39/59 quic.protection.test_0...OK
+40/59 quic.congestion.test_0...OK
+41/59 quic.one_rtt.test_0...OK
+42/59 quic.zero_rtt.mod.test_0...OK
+43/59 quic.handshake.client_authentication.test_0...OK
+44/59 quic.recovery.test_0...OK
+45/59 quic.path_validation.test_0...OK
+46/59 quic.connection_id.test_0...OK
+47/59 quic.load_balancing.quic_lb.mod.test_0...OK
+48/59 quic.stream.test_0...OK
+49/59 quic.pacing.test_0...OK
+50/59 quic.pmtu.test_0...OK
+51/59 quic.observability.qlog.mod.test_0...OK
+52/59 proxy.internal.relay_queue.inbound.test_0...OK
+53/59 proxy.internal.relay_queue.inbound_actor.test_0...OK
+54/59 quic.one_rtt.tests.mod.test_0...OK
+55/59 quic.one_rtt.tests.mod.test_1...OK
+56/59 quic.handshake.tests.test_0...OK
+57/59 quic.endpoint_server.tests.test_0...OK
+58/59 quic.endpoint_dispatcher.tests.test_0...OK
+59/59 quic.client_trust.test_0...OK
+55 passed; 0 skipped; 4 failed.
+test-proxy
++- run test test: src/test_scope.zig failure
+error: process exited with error code 1
+failed command: ./.zig-cache/o/6e5d9a56d667a7f041c2a193f878deea/test --cache-dir=./.zig-cache --seed=0x569fc4d9
+
+Build Summary: 8/10 steps succeeded (1 failed)
+test-proxy transitive failure
++- run test test: src/test_scope.zig failure
+   +- compile test Debug native success 6s MaxRSS:899M
+      +- WriteFile macho_0_p256_field_arm64.S cached
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 275ms MaxRSS:31M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 263ms MaxRSS:31M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options success
+      +- options cached
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/82ddfb692bff4b982f491af8d32bae25/build /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/zig /Users/bytedance/Temp/zig-aarch64-macos-0.16.0/lib /Users/bytedance/project-z/netz .zig-cache /Users/bytedance/.cache/zig --seed 0x569fc4d9 -Z6a17938e57094b1f test-proxy -j1 -Dtest-progress=true -Dtest-filter=shared input turns -Dtest-filter=shared connection turns --summary all

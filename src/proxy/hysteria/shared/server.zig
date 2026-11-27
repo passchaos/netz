@@ -21,6 +21,7 @@ const udp_session = @import("../../internal/udp_session.zig");
 const UdpSession = udp_session.Session;
 const pending_input = @import("../../internal/relay_queue/pending_input.zig");
 const stream_sender = @import("../../internal/relay_queue/stream_send.zig");
+const service_turn = @import("../../internal/service_turn.zig");
 
 const quic = netz.quic;
 const Relay = relay_mod.Relay;
@@ -141,6 +142,9 @@ pub const Pump = struct {
     workers: [2]std.Thread = undefined,
     workers_started: bool = false,
     ready: std.atomic.Value(bool) = .init(false),
+    service_rotation: service_turn.Rotation = .{},
+    ready_rotation: service_turn.Rotation = .{},
+    ready_remaining: usize = 0,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -253,7 +257,11 @@ pub const Pump = struct {
     }
 
     fn serviceReadyRelays(self: *Pump) void {
-        for (self.connections.items) |conn| {
+        self.ready_remaining = @min(self.ready_remaining, self.connections.items.len);
+        var turn = service_turn.Turn.init(self.io, service_turn.connection_visits, std.math.maxInt(usize));
+        while (self.ready_remaining != 0 and turn.take(self.io)) {
+            const conn = self.connections.items[self.ready_rotation.next(self.connections.items.len)];
+            self.ready_remaining -= 1;
             if (conn.closed.load(.acquire)) continue;
             conn.serviceAssocs(true);
             conn.serviceRelays(true);
@@ -268,7 +276,10 @@ pub const Pump = struct {
         {
             // At most eight completion turns precede the sole QUIC receive
             // owner, so continuous target progress cannot suppress input.
-            if (self.ready.swap(false, .acq_rel) and ready_turns < 8) {
+            if (self.ready.swap(false, .acq_rel)) {
+                self.ready_remaining = self.connections.items.len;
+            }
+            if (self.ready_remaining != 0 and ready_turns < 8) {
                 self.serviceReadyRelays();
                 ready_turns += 1;
                 continue;
@@ -337,18 +348,18 @@ pub const Pump = struct {
     }
 
     fn serviceConnections(self: *Pump) void {
-        var index: usize = 0;
-        while (index < self.connections.items.len) {
-            const conn = self.connections.items[index];
+        var turn = service_turn.Turn.init(
+            self.io,
+            @min(self.connections.items.len, service_turn.connection_visits),
+            std.math.maxInt(usize),
+        );
+        while (self.connections.items.len != 0 and turn.take(self.io)) {
+            const conn = self.connections.items[self.service_rotation.next(self.connections.items.len)];
             serviceConnection(conn) catch {
                 self.removeConnection(conn);
                 continue;
             };
-            if (conn.closed.load(.acquire)) {
-                self.removeConnection(conn);
-                continue;
-            }
-            index += 1;
+            if (conn.closed.load(.acquire)) self.removeConnection(conn);
         }
     }
 
@@ -356,7 +367,11 @@ pub const Pump = struct {
         const index = for (self.connections.items, 0..) |candidate, i| {
             if (candidate == conn) break i;
         } else return;
+        const old_count = self.connections.items.len;
         _ = self.connections.swapRemove(index);
+        self.service_rotation.removed(index, old_count);
+        self.ready_rotation.removed(index, old_count);
+        self.ready_remaining = @min(self.ready_remaining, self.connections.items.len);
         _ = self.by_handle.remove(conn.handle);
         _ = self.shared.removeConnection(conn.handle) catch false;
         conn.release();
@@ -491,13 +506,14 @@ pub const Connection = struct {
     }
 
     fn drainInbox(self: *Connection) !void {
-        while (true) {
-            var batch: [inbox_capacity]Inbox = undefined;
-            const count = self.inbox.get(self.pump.io, &batch, 0) catch break;
-            if (count == 0) break;
-            for (batch[0..count]) |command| {
-                try self.applyInbox(command);
-            }
+        var turn = service_turn.Turn.init(self.pump.io, service_turn.input_events, std.math.maxInt(usize));
+        while (turn.take(self.pump.io)) {
+            // Only the applied command leaves the queue. Later socket/payload
+            // owners remain queued even if applying this command fails.
+            var command: [1]Inbox = undefined;
+            const count = self.inbox.get(self.pump.io, &command, 0) catch return;
+            if (count == 0) return;
+            try self.applyInbox(command[0]);
         }
     }
 
@@ -610,7 +626,8 @@ pub const Connection = struct {
 
     fn pollStreams(self: *Connection) !void {
         var buffer: [4096]u8 = undefined;
-        while (true) {
+        var turn = service_turn.Turn.init(self.pump.io, service_turn.input_events, service_turn.input_bytes);
+        while (turn.take(self.pump.io)) {
             const event = self.pump.shared.pollStream(
                 self.handle,
                 &buffer,
@@ -624,6 +641,7 @@ pub const Connection = struct {
             self.touch();
             switch (event) {
                 .data => |data| {
+                    turn.consume(data.bytes);
                     if (protocol_isUni(data.stream_id)) continue;
                     try self.handleDataStream(
                         data.stream_id,
@@ -902,11 +920,13 @@ pub const Connection = struct {
     }
 
     fn drainDatagrams(self: *Connection) void {
-        while (true) {
+        var turn = service_turn.Turn.init(self.pump.io, service_turn.input_events, service_turn.input_bytes);
+        while (turn.take(self.pump.io)) {
             const datagram = self.established.connection.popDatagram(
                 self.datagram_buffer,
             ) catch return;
             const bytes = datagram orelse return;
+            turn.consume(bytes.len);
             const message = protocol.parseUdpMessage(bytes) catch continue;
             self.handleUdpMessage(message);
         }
@@ -1376,4 +1396,16 @@ test "Hysteria shared UDP owners reserve refund retire and isolate sibling credi
 
 test "Hysteria shared UDP idle association service never waits for target reads" {
     try @import("udp_tests.zig").idleOwners(Pump, Connection, Assoc, Connection.serviceAssocs, Connection.freeAssoc);
+}
+
+test "Hysteria shared input turns retain protected STREAM FIN and queued suffixes" {
+    try @import("../../internal/service_turn_tests.zig").inputs(Pump, Connection, Config{ .password = "fair", .identity = undefined }, Pump.onConnected, Connection.pollStreams, Connection.drainDatagrams, Connection.drainInbox, false);
+}
+
+test "Hysteria shared connection turns rotate hot idle and expired owners" {
+    try @import("../../internal/service_turn_tests.zig").rotation(Pump, Connection, Config{ .password = "fair", .identity = undefined }, Pump.onConnected, Pump.serviceConnections);
+}
+
+test "Hysteria shared completion turns retain unvisited notifications" {
+    try @import("../../internal/service_turn_tests.zig").completions(Pump, Connection, Config{ .password = "fair", .identity = undefined }, Pump.onConnected, Pump.serviceReadyRelays);
 }

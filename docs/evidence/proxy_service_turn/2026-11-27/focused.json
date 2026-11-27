@@ -1,0 +1,53 @@
+{
+  "base_commit": "891d062f3148ac9049e0b73c1e331c9c7eed50e6",
+  "scope": "first candidate focused input, connection and completion budgets; 63 runner tests including eight named cases and import aggregators",
+  "guard": "zig-tree-guard -- /usr/bin/python3 /tmp/netz-service-turn-check.py",
+  "checks": {
+    "fmt": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "fmt",
+        "src/proxy/internal/service_turn.zig",
+        "src/proxy/internal/service_turn_tests.zig",
+        "src/proxy/internal/mod.zig",
+        "src/proxy/tuic/shared/server.zig",
+        "src/proxy/hysteria/shared/server.zig"
+      ],
+      "exit_code": 0,
+      "log_sha256": "7c3fbbdf0a5c13faa5dd16a0888d9ecf0e2cec06da5f710579ff7d5fe4b7749a",
+      "source_sha256": {
+        "src/proxy/internal/service_turn.zig": "0b96b2e538e5ad766fb4ea1ab8bbbb95a8076e207e3cf3a51e072947cce06742",
+        "src/proxy/internal/service_turn_tests.zig": "a063843abf5ad2959452310b57d47fdd8c74fc4c7d9f4efbf7dfeb1e699927f9",
+        "src/proxy/internal/mod.zig": "efb80f4f9c2187ee389cc293deaf35ecb06835dbd4969bfc546417dbed4deadd",
+        "src/proxy/tuic/shared/server.zig": "aa7a3438d3f34fc283943af35dbd8b441eb142a3baf6784d6b2470ed25530390",
+        "src/proxy/hysteria/shared/server.zig": "27bb4c111390747ffe85de0a2604ac1d51c83766a8a02b052e7dadb9707d22c0"
+      },
+      "log": "docs/evidence/proxy_service_turn/2026-11-27/focused-fmt.log"
+    },
+    "focused": {
+      "command": [
+        "/Users/bytedance/.local/bin/zig",
+        "build",
+        "test-proxy",
+        "-j1",
+        "-Dtest-progress=true",
+        "-Dtest-filter=shared input turns",
+        "-Dtest-filter=shared connection turns",
+        "-Dtest-filter=shared completion turns",
+        "-Dtest-filter=proxy service",
+        "--summary",
+        "all"
+      ],
+      "exit_code": 0,
+      "log_sha256": "1b8a5b8964372fd405a93ec9cb07e9ed9cda36ba82f2c4f68ae5f75be47f0324",
+      "source_sha256": {
+        "src/proxy/internal/service_turn.zig": "0b96b2e538e5ad766fb4ea1ab8bbbb95a8076e207e3cf3a51e072947cce06742",
+        "src/proxy/internal/service_turn_tests.zig": "a063843abf5ad2959452310b57d47fdd8c74fc4c7d9f4efbf7dfeb1e699927f9",
+        "src/proxy/internal/mod.zig": "efb80f4f9c2187ee389cc293deaf35ecb06835dbd4969bfc546417dbed4deadd",
+        "src/proxy/tuic/shared/server.zig": "aa7a3438d3f34fc283943af35dbd8b441eb142a3baf6784d6b2470ed25530390",
+        "src/proxy/hysteria/shared/server.zig": "27bb4c111390747ffe85de0a2604ac1d51c83766a8a02b052e7dadb9707d22c0"
+      },
+      "log": "docs/evidence/proxy_service_turn/2026-11-27/focused-focused.log"
+    }
+  }
+}

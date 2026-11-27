@@ -26,4 +26,5 @@ test {
     _ = tls_relay;
     _ = udp_relay;
     _ = udp_session;
+    _ = @import("service_turn_tests.zig");
 }

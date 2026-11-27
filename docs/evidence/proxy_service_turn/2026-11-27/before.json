@@ -1,0 +1,28 @@
+{
+  "observed_utc": "2026-11-27T06:56:48.002374+00:00",
+  "base_commit": "891d062f3148ac9049e0b73c1e331c9c7eed50e6",
+  "command": [
+    "/Users/bytedance/.local/bin/zig",
+    "build",
+    "test-proxy",
+    "-j1",
+    "-Dtest-progress=true",
+    "-Dtest-filter=shared input turns",
+    "-Dtest-filter=shared connection turns",
+    "--summary",
+    "all"
+  ],
+  "exit_code": 1,
+  "log": "docs/evidence/proxy_service_turn/2026-11-27/before.log",
+  "log_sha256": "85cb9572792640427508c7702441abb2bc9daa30209dc1fd3a0e4e08425917a0",
+  "source_sha256": {
+    "src/proxy/tuic/shared/server.zig": "fd992d50b90b181a27ae09a761cd8e0a0df2e2343568aa8f7a77a662a2703b16",
+    "src/proxy/hysteria/shared/server.zig": "ce5b7b04615e1709ec22dbafa5bdf73baddafcd98183a38a93bb26574d5a21ce"
+  },
+  "production_from_head": true,
+  "production_body_sha256": {
+    "src/proxy/tuic/shared/server.zig": "45722acfccfe829e6d64705dc7bd344563acf05837d2d4906b048c8f3d806703",
+    "src/proxy/hysteria/shared/server.zig": "137188af8b1c70de508fb5e9ab03cbbccc5766b772d91004b39bc6fb976af3ef"
+  },
+  "scope": "actual protected STREAM input cap and actual connection turn cap on unchanged production bodies; new regressions appended"
+}

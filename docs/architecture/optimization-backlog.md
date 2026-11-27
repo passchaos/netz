@@ -39,7 +39,7 @@ An observed mechanism is distinguished from an unmeasured performance benefit.
 | R1 | Shared FIFO owner implemented; first/middle/last/FIN refusal, fatal send and teardown regressions pass. Batch gates complete; acceptance evidence recorded below. |
 | R2 | Wide/fractional rate accounting, independent burst limits and committed-prefix charging implemented; shared and single-connection TCP/UDP maximum-rate regressions pass. Batch gates complete; acceptance evidence recorded below. |
 | R3 | Exact packet-sized cursor and bounded pre-connect input implemented; both proxy large-body regressions and real socket-prefix/packet-number-width tests pass. Batch gates complete; acceptance evidence recorded below. |
-| R4 | In progress: persistent TCP target writers and bounded UDP association owners integrated. Qualification is recorded below; finite QUIC stream/datagram input drains, fair ready scheduling and larger mixed workloads remain pending. |
+| R4 | In progress: persistent TCP target writers and bounded UDP association owners integrated. Qualification is recorded below; finite QUIC stream/datagram/inbox input turns and rotating ordinary/completion service are implemented. Larger mixed workloads and performance acceptance remain pending. |
 | R5 | Pending: reusable outbound/encoded UDP blocks and allocation-free steady state. TCP input loans and raw UDP slots use bounded reusable storage; measured storage/RSS costs are recorded separately below. |
 | R6 | Focused protocol roots and a no-matching-test guard implemented. Owner, package-test and build-registration extraction remains pending. |
 | R7 | Historical reproducer now replays the audited Git revision. Shared dependency pins and current-evidence index remain pending. |
@@ -150,11 +150,22 @@ and UDP reply queues now have per-turn item limits, and completion turns visit
 signaled owners. The earlier review's N-times-target-timeout mechanism is a
 historical finding for the replaced paths.
 
-QUIC `pollStreams` and `drainDatagrams` still loop until empty in both shared
-servers. Regular service also walks every connection, association and relay.
-A continuously ready QUIC source can therefore consume an unbounded input
-turn before its sibling is serviced. This is a source finding; bounded sibling
-latency and p99 remain unmeasured.
+At `891d062f`, QUIC `pollStreams`, `drainDatagrams` and worker inbox service
+still looped until empty in both shared servers, and every ordinary/completion
+turn visited all connections. The common service budget now caps each STREAM
+and DATAGRAM stage at 16 events and 64 KiB, and inbox service at 16 commands.
+A whole admitted datagram may cross the byte limit. Ordinary and completion
+turns each visit at most 16 connections with independent rotation cursors;
+completion scans retain unvisited work after consuming their notification.
+Fresh awake-clock checks stop admission after a two-millisecond quantum,
+while the current event or connection cleanup completes before yielding.
+
+[Service-turn evidence](../evidence/proxy_service_turn/2026-11-27/README.md)
+records protected STREAM/FIN retention, exact queue suffixes and actual pump
+rotation/expiry cases. Each visited connection still services its bounded
+association and relay lists. Cooperative time admission is not a strict
+wall-time bound on parsing, owner retirement or a full connection visit.
+Mixed workload sibling latency and p99 remain unmeasured.
 
 Keep one QUIC receive owner. Add packet/byte/time budgets and a round-robin
 cursor to input service; schedule ready owners while still handling expiry.

@@ -1,0 +1,14 @@
+{
+  "command": [
+    "/Users/bytedance/.local/bin/zig",
+    "build",
+    "verify-evidence",
+    "-j1",
+    "--",
+    "--max-unresolved=24",
+    "--limit=0"
+  ],
+  "exit_code": 0,
+  "log": "docs/evidence/proxy_service_turn/2026-11-27/audit.log",
+  "log_sha256": "a98dbedab0a5e1a47d8f310341a9e0aa88c643e507313070e3300f94b7f7ee2d"
+}

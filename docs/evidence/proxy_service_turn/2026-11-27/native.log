@@ -1,0 +1,188 @@
+1/108 test_scope.test_0...OK
+2/108 proxy.mod.test_0...OK
+3/108 proxy.socks.mod.test_0...OK
+4/108 proxy.http_connect.mod.test_0...OK
+5/108 proxy.shadowsocks.mod.test_0...OK
+6/108 proxy.trojan.mod.test_0...OK
+7/108 proxy.vless.mod.test_0...OK
+8/108 proxy.vmess.mod.test_0...OK
+9/108 proxy.tuic.mod.test_0...OK
+10/108 proxy.hysteria.mod.test_0...OK
+11/108 proxy.tls.mod.test_0...OK
+12/108 proxy.transport.mod.test_0...OK
+13/108 proxy.internal.mod.test_0...OK
+14/108 proxy.internal.byte_bucket.test_0...OK
+15/108 proxy.internal.byte_bucket.stream.test_0...OK
+16/108 proxy.internal.relay_queue.test_0...OK
+17/108 proxy.internal.relay_queue.pending_input.test_0...OK
+18/108 proxy.internal.relay_queue.stream_send_tests.test.proxy relay STREAM prefix respects flow and congestion refusal...OK
+19/108 proxy.internal.relay_queue.stream_send_tests.test.proxy relay STREAM retry retires protected but unsent packet numbers...OK
+20/108 proxy.internal.relay_queue.stream_send_tests.test.proxy relay STREAM commits a socket-visible item even with a trailing error...OK
+21/108 proxy.internal.relay_queue.stream_send_tests.test.proxy relay STREAM packet budget remains exact across packet-number widths...OK
+22/108 proxy.internal.udp_session.test_0...OK
+23/108 proxy.internal.service_turn_tests.test.proxy service turn checks fresh time after progress and retains packet boundaries...OK
+24/108 proxy.internal.service_turn_tests.test.proxy service rotation preserves the next identity after swap removal...OK
+25/108 internal.testing.deadline_send_io.test_0...OK
+26/108 proxy.internal.udp_session.address.test.proxy UDP reply address encodes numeric host without port...OK
+27/108 proxy.internal.udp_session.replies.test.proxy UDP reply FIFO retains blocked front through slot reuse and retirement...OK
+28/108 proxy.internal.udp_session.tests.test.proxy UDP session bounded FIFO copies input and recycles slots...OK
+29/108 proxy.internal.udp_session.tests.test.proxy UDP session stop joins blocked send and refunds queued ownership once...OK
+30/108 proxy.internal.udp_session.tests.test.proxy UDP session positive send count preserves exact committed bytes with error...OK
+31/108 proxy.internal.udp_session.tests.test.proxy UDP session receive leases survive full queue and joined stop...OK
+32/108 proxy.internal.udp_session.tests.test.proxy UDP session retains zero datagrams and reports truncation...OK
+33/108 proxy.internal.udp_session.tests.test.proxy UDP session owns queued host until bounded resolution completes...OK
+34/108 proxy.internal.udp_session.tests.test.proxy UDP session allocation rejection returns its unpublished slot...OK
+35/108 proxy.internal.udp_session.tests.test.proxy UDP session blocked DNS keeps sibling live and joins deadline or cancellation...OK
+36/108 quic.mod.test_0...OK
+37/108 quic.mod.test_1...OK
+38/108 quic.mod.test_2...OK
+39/108 quic.runtime.test_0...OK
+40/108 quic.runtime.test_1...OK
+41/108 quic.one_rtt.test_0...OK
+42/108 quic.packet_space.test_0...OK
+43/108 quic.recovery.test_0...OK
+44/108 quic.congestion.test_0...OK
+45/108 quic.pacing.test_0...OK
+46/108 quic.path_validation.test_0...OK
+47/108 quic.connection_id.test_0...OK
+48/108 quic.protection.test_0...OK
+49/108 quic.pmtu.test_0...OK
+50/108 quic.observability.qlog.mod.test_0...OK
+51/108 proxy.internal.relay_queue.inbound.test_0...OK
+52/108 proxy.internal.relay_queue.inbound_actor.test_0...OK
+53/108 quic.load_balancing.quic_lb.mod.test_0...OK
+54/108 quic.stream.test_0...OK
+55/108 proxy.internal.relay_queue.inbound_tests.test.proxy relay concurrent reader and writer support zero async capacity and defer FIN...OK
+56/108 proxy.internal.relay_queue.inbound_tests.test.proxy relay synchronous flush preserves standalone partial write semantics...OK
+57/108 quic.one_rtt.tests.mod.test_0...OK
+58/108 quic.one_rtt.tests.mod.test_1...OK
+59/108 quic.tls_client_hello.test_0...OK
+60/108 quic.tls.mod.test_0...OK
+61/108 quic.handshake.test_0...OK
+62/108 quic.client_trust.test_0...OK
+63/108 quic.zero_rtt.mod.test_0...OK
+64/108 quic.endpoint_dispatcher.test_0...OK
+65/108 quic.endpoint_server.test_0...OK
+66/108 quic.address_validation_token.test_0...OK
+67/108 quic.resumption.mod.test_0...OK
+68/108 quic.endpoint_server.tests.test_0...OK
+69/108 quic.handshake.client_authentication.test_0...OK
+70/108 quic.resumption.ticket.mod.test_0...OK
+71/108 quic.endpoint_dispatcher.tests.test_0...OK
+72/108 quic.handshake.tests.test_0...OK
+73/108 proxy.internal.relay_queue.tests.test.proxy relay FIFO retains first middle last and FIN backpressure...OK
+74/108 proxy.internal.relay_queue.tests.test.proxy relay FIFO teardown frees pending and queued successors...OK
+75/108 proxy.internal.relay_queue.tests.test.proxy relay FIFO fatal send releases current item and preserves teardown...OK
+76/108 proxy.hysteria.shared.server.test.Hysteria shared target loans reserve refund and retire exact receive credit...OK
+77/108 proxy.hysteria.shared.server.test.Hysteria shared UDP owners reserve refund retire and isolate sibling credit...OK
+78/108 proxy.hysteria.shared.server.test.Hysteria shared UDP idle association service never waits for target reads...record=udp-idle-service associations=32 target_receive_calls=0 service_ns=17375 session_bytes=6000
+record=udp-idle-service associations=32 target_receive_calls=0 service_ns=10334 session_bytes=6000
+OK
+79/108 proxy.hysteria.shared.server.test.Hysteria shared input turns retain protected STREAM FIN and queued suffixes...OK
+80/108 proxy.hysteria.shared.server.test.Hysteria shared connection turns rotate hot idle and expired owners...OK
+81/108 proxy.hysteria.shared.server.test.Hysteria shared completion turns retain unvisited notifications...OK
+82/108 proxy.hysteria.shared.tests.test.Hysteria shared endpoint serves concurrent TCP and UDP relays...OK
+83/108 proxy.hysteria.shared.tests.test.Hysteria shared endpoint packetizes 4 and 64 KiB below its rate burst...OK
+84/108 proxy.hysteria.shared.tests.test.Hysteria negotiated maximum rate keeps shared TCP and UDP alive...OK
+85/108 proxy.hysteria.shared.tests.test.Hysteria negotiated maximum rate keeps single TCP and UDP alive...OK
+86/108 proxy.tuic.protocol.test.TUIC addresses round trip every family...OK
+87/108 proxy.tuic.protocol.test.TUIC commands parse version type and payload...OK
+88/108 proxy.tuic.protocol.test.TUIC stream direction helpers...OK
+89/108 proxy.tuic.protocol.test.TUIC Packet commands round trip and parse fragments...OK
+90/108 proxy.tuic.protocol.test.TUIC Dissociate and heartbeat commands are bounded...OK
+91/108 proxy.tuic.server.test.TUIC standalone uni reset returns parser slot and retains allocation...OK
+92/108 proxy.tuic.shared.server.test.TUIC shared UDP uni packets release parser slots on FIN...OK
+93/108 proxy.tuic.shared.server.test.TUIC shared UDP uni reset returns parser slot and retains allocation...OK
+94/108 proxy.tuic.shared.server.test.TUIC shared input turns retain protected STREAM FIN and queued suffixes...OK
+95/108 proxy.tuic.shared.server.test.TUIC shared connection turns rotate hot idle and expired owners...OK
+96/108 proxy.tuic.shared.server.test.TUIC shared completion turns retain unvisited notifications...OK
+97/108 proxy.tuic.packet_stream.test_0...OK
+98/108 proxy.tuic.uni_input.test.TUIC uni input holds full payload plus domain header and reuses bounded storage...OK
+99/108 proxy.tuic.shared.tests.test.TUIC shared endpoint serves two concurrent TCP relays...OK
+100/108 proxy.tuic.shared.tests.test.TUIC shared endpoint packetizes 16 and 64 KiB relay bodies...OK
+101/108 proxy.tuic.shared.tests.test.TUIC standalone retains coalesced CONNECT payload and FIN before authentication...OK
+102/108 internal.progress_deadline.test_0...OK
+103/108 quic.initial_exchange.flight.test_0...OK
+104/108 internal.owned_result_deadline.test_0...OK
+105/108 proxy.tuic.packet_stream_tests.test.TUIC PacketStream exact 4 KiB prefix uses one stream and final FIN...OK
+106/108 proxy.tuic.packet_stream_tests.test.TUIC PacketStream refusal retains prefix and retired reset until accepted...OK
+107/108 proxy.tuic.packet_stream_tests.test.TUIC PacketStream trailing error preserves committed prefix and FIN...OK
+108/108 proxy.tuic.packet_stream_tests.test.TUIC PacketStream timed send resumes exact suffix and excludes expired admission...OK
+All 108 tests passed.
+Build Summary: 10/10 steps succeeded
+test-proxy success
++- run test test: src/test_scope.zig success 13s
+   +- compile test Debug native success 27s MaxRSS:3G
+      +- WriteFile macho_0_p256_field_arm64.S cached
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile macho_0_p256_field_arm64.S (reused)
+      +- WriteFile cached
+      +- compile obj vort-br-record-optimal Debug native cached 183ms MaxRSS:31M
+      +- WriteFile cached
+      +- compile obj vort-zstd-huffman-x2 Debug native cached 202ms MaxRSS:31M
+      +- compile obj vort-br-record-optimal Debug native (reused)
+      +- compile obj vort-zstd-huffman-x2 Debug native (reused)
+      +- options success
+      +- options cached
+

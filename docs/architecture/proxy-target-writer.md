@@ -45,16 +45,21 @@ remains available to standalone callers; shared pumps use explicit submission
 and completion collection.
 
 Reader output and writer completion publish relay readiness. The pump handles
-only signaled relays during completion turns, with at most eight such turns
-before returning to its existing QUIC receive/timer path. Regular receive
-turns also handle credit replenishment and expiry.
+only signaled relays during completion turns. Ordinary and completion turns
+visit at most 16 connections using independent rotation cursors and fresh
+awake-clock checks between completed visits. A completion scan retains its
+unvisited count after the notification is consumed; another notification
+extends the scan without resetting the cursor. At most eight completion turns
+precede the existing QUIC receive/timer path. Regular receive turns also handle
+credit replenishment and expiry.
 
 This work removes target DATA writes from the service loop.
 Relay outbound drain already allows at most eight single-packet send attempts
 per turn. UDP associations use independent bounded receive/send owners as
 described in [UDP ownership](proxy-udp-ownership.md). The remaining R4 scope
-requires finite stream/datagram drains, fair ready scheduling and mixed hot/idle/blocked
-workload measurements. Those requirements remain active in
+requires mixed hot/idle/blocked workload measurements. Finite STREAM,
+DATAGRAM and worker inbox stages, with rotating connection service, are
+recorded in [service-turn evidence](../evidence/proxy_service_turn/2026-11-27/README.md). Those requirements remain active in
 [the optimization backlog](optimization-backlog.md).
 
 Qualification must retain the existing FIFO/backpressure, packet-sized relay,
