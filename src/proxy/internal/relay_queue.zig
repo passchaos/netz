@@ -1,15 +1,15 @@
 //! TCP relay queues for shared-endpoint QUIC proxy servers.
 //!
 //! The endpoint pump owns every QUIC connection. TCP reads therefore run in
-//! one async task per relay and publish chunks through a bounded queue; the
-//! pump drains that queue without blocking. TCP writes stay on the pump and
-//! use short partial-write attempts so one slow target cannot stall the other
-//! connections sharing the endpoint.
+//! one concurrent task per relay and publish chunks through a bounded queue.
+//! Target writes use a persistent owner and an immutable input loan; the pump
+//! submits and collects completion while retaining sole QUIC ownership.
 
 const std = @import("std");
 const net = std.Io.net;
 const io_helpers = @import("io.zig");
 const outbound_queue = @import("relay_queue/outbound.zig");
+const inbound_queue = @import("relay_queue/inbound.zig");
 
 pub const Outbound = outbound_queue.Item;
 pub const SendResult = outbound_queue.Result;
@@ -37,10 +37,20 @@ pub const Relay = struct {
     quic_done: std.atomic.Value(bool) = .init(false),
     /// The pump sent the FIN to the QUIC peer.
     quic_fin_sent: bool = false,
-    /// QUIC-to-TCP bytes that did not fit the last partial write.
-    inbound: std.ArrayList(u8) = .empty,
-    inbound_start: usize = 0,
-    inbound_cap: usize = 256 * 1024,
+    input: inbound_queue.Input = .{},
+    ready: std.atomic.Value(bool) = .init(false),
+    notify_context: ?*anyopaque = null,
+    notify: ?*const fn (?*anyopaque) void = null,
+    tcp_send_shutdown: bool = false,
+
+    pub const InputCompletion = inbound_queue.Input.Completion;
+    pub const Options = struct {
+        idle_timeout: std.Io.Duration,
+        buffer_size: usize,
+        maximum_input_bytes: usize = 256 * 1024,
+        notify_context: ?*anyopaque = null,
+        notify: ?*const fn (?*anyopaque) void = null,
+    };
 
     pub fn create(
         allocator: std.mem.Allocator,
@@ -50,6 +60,10 @@ pub const Relay = struct {
         idle_timeout: std.Io.Duration,
         buffer_size: usize,
     ) !*Relay {
+        return createWithOptions(allocator, io, tcp, stream_id, .{ .idle_timeout = idle_timeout, .buffer_size = buffer_size });
+    }
+
+    pub fn createWithOptions(allocator: std.mem.Allocator, io: std.Io, tcp: net.Stream, stream_id: u64, options: Options) !*Relay {
         const relay = try allocator.create(Relay);
         errdefer allocator.destroy(relay);
         relay.* = .{
@@ -58,17 +72,22 @@ pub const Relay = struct {
             .tcp = tcp,
             .stream_id = stream_id,
             .last_activity_ns = nowNs(io),
-            .idle_timeout = idle_timeout,
-            .buffer_size = buffer_size,
+            .idle_timeout = options.idle_timeout,
+            .buffer_size = options.buffer_size,
+            .notify_context = options.notify_context,
+            .notify = options.notify,
         };
         relay.outbound = .init(&relay.outbound_storage);
-        relay.reader_future = io.async(readerTask, .{relay});
+        try relay.input.init(allocator, io, tcp, .{ .maximum_bytes = options.maximum_input_bytes, .notify_context = relay, .notify = notifyReady });
+        errdefer relay.input.deinit();
+        relay.reader_future = try io.concurrent(readerTask, .{relay});
         return relay;
     }
 
     pub fn deinit(self: *Relay) void {
         self.closed.store(true, .release);
         self.outbound.close(self.io);
+        _ = self.stopInput();
         self.tcp.shutdown(self.io, .both) catch {};
         if (self.reader_future) |*future| {
             _ = future.await(self.io);
@@ -76,7 +95,7 @@ pub const Relay = struct {
         }
         self.tcp.close(self.io);
         self.discardOutbound();
-        self.inbound.deinit(self.allocator);
+        self.input.deinit();
         self.allocator.destroy(self);
     }
 
@@ -89,70 +108,85 @@ pub const Relay = struct {
     }
 
     pub fn queueInbound(self: *Relay, bytes: []const u8) !void {
-        if (self.inbound.items.len + bytes.len > self.inbound_cap) {
-            return error.RelayBufferFull;
-        }
-        try self.inbound.appendSlice(self.allocator, bytes);
+        try self.input.append(bytes);
+        self.signalReady();
     }
 
-    /// Write buffered QUIC payload to TCP without blocking the endpoint pump
-    /// for longer than a short scheduling quantum. Returns true when all
-    /// buffered bytes were written.
+    pub fn pendingInboundBytes(self: *const Relay) usize {
+        return self.input.pendingBytes();
+    }
+
+    pub fn readyInboundBytes(self: *const Relay) usize {
+        if (self.closed.load(.acquire)) return 0;
+        return self.input.readyBytes();
+    }
+
+    pub fn takeInputCompletion(self: *Relay) ?InputCompletion {
+        const result = self.input.take() orelse return null;
+        if (result.committed_bytes != 0) self.touch();
+        if (self.input.terminal) self.closed.store(true, .release);
+        return result;
+    }
+
+    pub fn submitInput(self: *Relay, maximum_bytes: usize) usize {
+        if (self.closed.load(.acquire)) return 0;
+        const count = self.input.submit(maximum_bytes) catch |err| {
+            if (err != error.Timeout) self.closed.store(true, .release);
+            return 0;
+        };
+        if (self.input.terminal) self.closed.store(true, .release);
+        return count;
+    }
+
+    /// Nonblocking input service for owners without a shared rate bucket.
+    pub fn serviceInput(self: *Relay) void {
+        _ = self.takeInputCompletion();
+        _ = self.submitInput(std.math.maxInt(usize));
+    }
+
+    pub fn stopInput(self: *Relay) ?InputCompletion {
+        const result = self.input.stop() orelse return null;
+        if (result.committed_bytes != 0) self.touch();
+        return result;
+    }
+
+    pub fn inputDrained(self: *const Relay) bool {
+        return self.pendingInboundBytes() == 0 and !self.input.in_flight;
+    }
+
+    /// Preserve the synchronous flush API for standalone callers.
+    /// Shared endpoint pumps use serviceInput or submitInput/takeInputCompletion.
     pub fn flushInbound(self: *Relay) bool {
         _ = self.flushInboundUpTo(std.math.maxInt(usize));
-        return self.inbound_start == self.inbound.items.len;
+        return self.inputDrained();
     }
 
-    /// Return exact TCP progress so the owner charges only committed bytes.
     pub fn flushInboundUpTo(self: *Relay, maximum_bytes: usize) usize {
-        if (self.inbound_start == self.inbound.items.len) {
-            self.inbound.clearRetainingCapacity();
-            self.inbound_start = 0;
-            return 0;
-        }
-        if (maximum_bytes == 0) return 0;
-        const deadline = io_helpers.deadlineFromTimeout(
-            self.io,
-            .fromMilliseconds(10),
-        ) catch null;
-        const written = io_helpers.writeSome(
-            self.io,
-            self.tcp,
-            self.inbound.items[self.inbound_start .. self.inbound_start + @min(
-                maximum_bytes,
-                self.inbound.items.len - self.inbound_start,
-            )],
-            deadline,
-        ) catch |err| switch (err) {
+        const written = self.input.writeNow(maximum_bytes) catch |err| switch (err) {
             error.Timeout => 0,
             else => {
                 self.closed.store(true, .release);
                 return 0;
             },
         };
-        if (written == 0) return 0;
-        self.inbound_start += written;
-        self.touch();
-        if (self.inbound_start == self.inbound.items.len) {
-            self.inbound.clearRetainingCapacity();
-            self.inbound_start = 0;
-            return written;
-        }
-        if (self.inbound_start > self.inbound_cap / 2) {
-            const remaining = self.inbound.items.len - self.inbound_start;
-            std.mem.copyForwards(
-                u8,
-                self.inbound.items[0..remaining],
-                self.inbound.items[self.inbound_start..],
-            );
-            self.inbound.items.len = remaining;
-            self.inbound_start = 0;
-        }
+        if (written != 0) self.touch();
         return written;
     }
 
     pub fn shutdownTcpSend(self: *Relay) void {
+        if (self.tcp_send_shutdown or !self.inputDrained()) return;
+        self.tcp_send_shutdown = true;
         self.tcp.shutdown(self.io, .send) catch {};
+    }
+
+    fn signalReady(self: *Relay) void {
+        self.ready.store(true, .release);
+        if (self.notify) |notify| notify(self.notify_context);
+    }
+
+    fn notifyReady(context: ?*anyopaque) void {
+        const self: *Relay = @ptrCast(@alignCast(context.?));
+        self.signalReady();
     }
 
     /// The callback borrows each item; only this queue releases its storage.
@@ -175,7 +209,8 @@ pub const Relay = struct {
         const allocator = self.allocator;
         const buffer = allocator.alloc(u8, self.buffer_size) catch {
             self.tcp_done.store(true, .release);
-            self.outbound.putOne(self.io, .fin) catch {};
+            self.outbound.putOne(self.io, .fin) catch return;
+            self.signalReady();
             return;
         };
         defer allocator.free(buffer);
@@ -196,9 +231,11 @@ pub const Relay = struct {
                 allocator.free(chunk);
                 break;
             };
+            self.signalReady();
         }
         self.tcp_done.store(true, .release);
-        self.outbound.putOne(self.io, .fin) catch {};
+        self.outbound.putOne(self.io, .fin) catch return;
+        self.signalReady();
     }
 };
 

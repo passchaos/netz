@@ -1,0 +1,1 @@
+record=verified protocol=tuic transport=quic udp_relay_mode=native role_pair=sing-box-client+netz-server tcp_bytes=20 large_tcp_bytes=131072 udp_bytes=17 complete=true

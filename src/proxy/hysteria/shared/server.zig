@@ -137,6 +137,7 @@ pub const Pump = struct {
     tasks: std.Io.Queue(Task) = undefined,
     workers: [2]std.Thread = undefined,
     workers_started: bool = false,
+    ready: std.atomic.Value(bool) = .init(false),
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -243,11 +244,29 @@ pub const Pump = struct {
         }
     }
 
+    fn notifyReady(context: ?*anyopaque) void {
+        const self: *Pump = @ptrCast(@alignCast(context.?));
+        self.ready.store(true, .release);
+    }
+
+    fn serviceReadyRelays(self: *Pump) void {
+        for (self.connections.items) |conn| conn.serviceRelays(true);
+    }
+
     pub fn run(self: *Pump) !void {
         var events: [max_events]quic.endpoint_server.VisitEvent = undefined;
+        var ready_turns: usize = 0;
         while (self.running.load(.acquire) and
             self.stop_flag.load(.acquire))
         {
+            // At most eight completion turns precede the sole QUIC receive
+            // owner, so continuous target progress cannot suppress input.
+            if (self.ready.swap(false, .acq_rel) and ready_turns < 8) {
+                self.serviceReadyRelays();
+                ready_turns += 1;
+                continue;
+            }
+            ready_turns = 0;
             const count = self.shared.receiveManyVisitingTimeout(
                 &self.versions,
                 self.receive_storage,
@@ -344,7 +363,7 @@ pub const Pump = struct {
         try conn.pollStreams();
         conn.drainDatagrams();
         conn.serviceAssocs();
-        conn.serviceRelays();
+        conn.serviceRelays(false);
         conn.cleanup();
         conn.checkTimeouts();
     }
@@ -442,7 +461,7 @@ pub const Connection = struct {
         if (self.control_response) |response| {
             self.pump.allocator.free(response);
         }
-        for (self.relays.items) |relay| relay.deinit();
+        for (self.relays.items) |relay| self.destroyRelay(relay);
         self.relays.deinit(self.pump.allocator);
         for (self.assocs.items) |assoc| self.freeAssoc(assoc);
         self.assocs.deinit(self.pump.allocator);
@@ -496,13 +515,17 @@ pub const Connection = struct {
                     self.failPending(pending);
                     return;
                 };
-                const relay = Relay.create(
+                const relay = Relay.createWithOptions(
                     self.pump.allocator,
                     self.pump.io,
                     ready.tcp,
                     ready.stream_id,
-                    self.pump.config.idle_timeout,
-                    self.pump.config.relay_buffer_size,
+                    .{
+                        .idle_timeout = self.pump.config.idle_timeout,
+                        .buffer_size = self.pump.config.relay_buffer_size,
+                        .notify_context = self.pump,
+                        .notify = Pump.notifyReady,
+                    },
                 ) catch {
                     ready.tcp.close(self.pump.io);
                     self.failPending(pending);
@@ -514,7 +537,7 @@ pub const Connection = struct {
                     relay.queueInbound(
                         pending.input.bytes()[pending.command_end..pending.input.len],
                     ) catch {
-                        relay.deinit();
+                        self.destroyRelay(relay);
                         _ = self.relays.pop();
                         self.failPending(pending);
                         return;
@@ -1118,31 +1141,50 @@ pub const Connection = struct {
         }
     }
 
-    fn serviceRelays(self: *Connection) void {
+    fn serviceRelays(self: *Connection, ready_only: bool) void {
         var index: usize = 0;
         while (index < self.relays.items.len) {
             const relay = self.relays.items[index];
-            const pending_bytes = relay.inbound.items.len - relay.inbound_start;
+            const ready = relay.ready.swap(false, .acq_rel);
+            if (ready_only and !ready) {
+                index += 1;
+                continue;
+            }
+            if (relay.takeInputCompletion()) |result| self.settleInput(result);
+            const pending_bytes = relay.readyInboundBytes();
             const now = nowNs(self.pump.io);
             const allowed = self.recv_bucket.available(pending_bytes, now);
-            const written = relay.flushInboundUpTo(@intCast(allowed));
-            const charged = self.recv_bucket.tryConsume(written, now);
+            // Charge the reservation before the writer can commit bytes.
+            const charged = self.recv_bucket.tryConsume(allowed, now);
             std.debug.assert(charged);
+            const submitted = relay.submitInput(@intCast(allowed));
+            std.debug.assert(submitted <= allowed);
+            self.recv_bucket.refund(allowed - submitted);
             self.flushRelayOutbound(relay);
             if (relay.quic_done.load(.acquire) and
-                relay.inbound.items.len == relay.inbound_start)
+                relay.inputDrained())
             {
                 relay.shutdownTcpSend();
             }
             if (relay.closed.load(.acquire) or
                 relay.idle(nowNs(self.pump.io)))
             {
-                relay.deinit();
+                self.destroyRelay(relay);
                 _ = self.relays.swapRemove(index);
                 continue;
             }
             index += 1;
         }
+    }
+
+    fn settleInput(self: *Connection, result: Relay.InputCompletion) void {
+        std.debug.assert(result.committed_bytes <= result.reserved_bytes);
+        self.recv_bucket.refund(result.reserved_bytes - result.committed_bytes);
+    }
+
+    fn destroyRelay(self: *Connection, relay: *Relay) void {
+        if (relay.stopInput()) |result| self.settleInput(result);
+        relay.deinit();
     }
 
     fn flushRelayOutbound(self: *Connection, relay: *Relay) void {
@@ -1319,4 +1361,8 @@ pub fn serve(server: anytype) !void {
     defer pump.deinit();
     try pump.startWorkers();
     return pump.run();
+}
+
+test "Hysteria shared target loans reserve refund and retire exact receive credit" {
+    try @import("input_tests.zig").run(Pump, Connection, Connection.serviceRelays, Connection.settleInput, Connection.destroyRelay, Pump.notifyReady);
 }

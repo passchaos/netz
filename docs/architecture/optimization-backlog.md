@@ -39,8 +39,8 @@ An observed mechanism is distinguished from an unmeasured performance benefit.
 | R1 | Shared FIFO owner implemented; first/middle/last/FIN refusal, fatal send and teardown regressions pass. Batch gates complete; acceptance evidence recorded below. |
 | R2 | Wide/fractional rate accounting, independent burst limits and committed-prefix charging implemented; shared and single-connection TCP/UDP maximum-rate regressions pass. Batch gates complete; acceptance evidence recorded below. |
 | R3 | Exact packet-sized cursor and bounded pre-connect input implemented; both proxy large-body regressions and real socket-prefix/packet-number-width tests pass. Batch gates complete; acceptance evidence recorded below. |
-| R4 | In progress: persistent target-writer owner prepared. Integration, fair ready scheduling and mixed hot/idle measurements remain pending. |
-| R5 | Pending: reusable relay blocks and allocation/peak-memory/throughput measurements. |
+| R4 | In progress: persistent TCP target writers and signaled-relay service integrated. Controlled service/storage and small fixed-peer transfer qualification recorded below; UDP owners, finite stream/datagram drains, fair ready scheduling and larger mixed workloads remain pending. |
+| R5 | Pending: reusable outbound/UDP relay blocks and allocation-free steady state. TCP input loans use bounded reusable storage; measured storage/RSS costs are recorded separately below. |
 | R6 | Focused protocol roots and a no-matching-test guard implemented. Owner, package-test and build-registration extraction remains pending. |
 | R7 | Historical reproducer now replays the audited Git revision. Shared dependency pins and current-evidence index remain pending. |
 | R8 | Independent TUIC 128-KiB body and native/quic UDP modes verified. Remaining peer gates, workload matrices and profiles are pending. |
@@ -945,3 +945,40 @@ including runner cleanup. That result does not causally qualify the Linux
 complete-gate timeout. Existing CI commands, budgets and dependency pins remain
 intact. Delivered native/full acceptance, remaining observer contexts, owner
 structure, endpoint fairness and measured workload performance remain open.
+
+### Persistent target writers in both shared proxies
+
+TUIC and Hysteria now submit target DATA writes to persistent concurrent
+owners. A separately owned pending buffer can grow while the writer borrows
+an immutable FIFO loan. Completion advances only committed bytes. Hysteria
+reserves receive credit before publishing a loan and returns unused credit on
+rejection, completion and final joined retirement. The concurrent reader
+cannot fall back to blocking inline execution when async capacity is zero.
+TCP send shutdown waits for drained input and is performed once; synchronous
+standalone flush APIs remain available.
+
+Signaled relays get at most eight completion turns before the original
+QUIC receive/timer path. Existing relay outbound service already has an
+eight-single-packet bound. The remaining stream/datagram drains and UDP
+association I/O still need their original R4 fairness work.
+
+[The qualification](../evidence/persistent_target_writer/2026-11-27/README.md)
+records 77 scoped native cases, 57 post-batching TUIC cases and Windows 8/8
+compilation. The original protocol fixtures, exact bodies, FIFO/backpressure,
+maximum-rate cases, CI commands/budgets and dependency pins remain. Both
+independent sing-box modes pass exact 128-KiB TCP and 17-byte UDP replies.
+
+On the application backend, 32 controlled blocked targets have a service
+median of 0.011834 ms versus 369.650 ms. All 24 fixed-binary resource rows return
+zero Relay live bytes after joined cleanup. Burst Relay allocation falls from
+4,475,904 B to 3,172,352 B; small-input process RSS increases from 9,142,272 B
+to 10,715,136 B. Each input backing buffer is bounded by the logical input
+limit, and two buffers can be retained. Backend/task memory and Relay storage
+are qualified separately.
+
+An eager fragment-submission experiment increased upload/echo medians by
+11-19%; its record remains archived. Final TUIC input submission happens at
+the end of a service turn. AB/BA 18-sample fixed-peer medians are 10.1505 ms
+download versus 10.832 ms, and 12.793 ms upload/echo versus 12.586 ms. This small
+workload establishes bounded qualification and costs, not broad throughput or
+p99 superiority. R4-R9 and the full HTTP-family goal remain active.

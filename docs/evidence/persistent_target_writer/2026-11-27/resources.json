@@ -1,0 +1,1067 @@
+{
+  "observed_utc": "2026-11-26T23:30:45.362729+00:00",
+  "source_baseline": "a9b8555795088072bc2858f60e77359ececd4e3f",
+  "binary_sha256": {
+    "baseline": "4ae496d61d7d2e1321ad0989056870eb860e37e5df35312081d476f9c183cdda",
+    "candidate": "21f3a82b5816673177fccc1cbcafc678c5e2c68197384bc8aec49e0dc0b41019"
+  },
+  "rows": [
+    {
+      "label": "baseline",
+      "backend": "application",
+      "count": 1,
+      "burst": false,
+      "command": [
+        "/usr/bin/time",
+        "-l",
+        "/Users/bytedance/project-z/.netz-writer-storage-baseline-a9b/zig-out/bin/netz-proxy-target-writer-probe",
+        "--count=1"
+      ],
+      "exit_code": 0,
+      "log_sha256": "4ea2972109ea1641b7483fe1826b17f5ba516621511caaa29f335aa2d7589c91",
+      "result": {
+        "persistent": false,
+        "application": true,
+        "count": 1,
+        "burst": false,
+        "budget_ns": 10000000,
+        "queued_per_relay": 4,
+        "service_ns": [
+          10975375,
+          12118125,
+          11995000,
+          10239542,
+          11942833
+        ],
+        "calls": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "median_ns": 11942833,
+        "proxy_live_bytes": 16998,
+        "proxy_peak_bytes": 16998,
+        "alloc_calls": 3,
+        "zero_live_after_cleanup": true,
+        "kernel_pressure": false
+      },
+      "maximum_rss_bytes": 6979584
+    },
+    {
+      "label": "candidate",
+      "backend": "application",
+      "count": 1,
+      "burst": false,
+      "command": [
+        "/usr/bin/time",
+        "-l",
+        "/Users/bytedance/project-z/netz/zig-out/bin/netz-proxy-target-writer-probe",
+        "--count=1"
+      ],
+      "exit_code": 0,
+      "log_sha256": "1010f0aba351d6324baaafb8e8706fb808cb1fb372ec97ad83f03eb429177691",
+      "result": {
+        "persistent": true,
+        "application": true,
+        "count": 1,
+        "burst": false,
+        "budget_ns": 10000000,
+        "queued_per_relay": 4,
+        "service_ns": [
+          1208,
+          1917,
+          1417,
+          916,
+          2125
+        ],
+        "calls": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "median_ns": 1417,
+        "proxy_live_bytes": 17224,
+        "proxy_peak_bytes": 17224,
+        "alloc_calls": 3,
+        "zero_live_after_cleanup": true,
+        "kernel_pressure": false
+      },
+      "maximum_rss_bytes": 6995968
+    },
+    {
+      "label": "baseline",
+      "backend": "application",
+      "count": 1,
+      "burst": true,
+      "command": [
+        "/usr/bin/time",
+        "-l",
+        "/Users/bytedance/project-z/.netz-writer-storage-baseline-a9b/zig-out/bin/netz-proxy-target-writer-probe",
+        "--count=1",
+        "--burst"
+      ],
+      "exit_code": 0,
+      "log_sha256": "4ecf695820741e50a230d06240d50c5c9cb5cf63fe92b984f0b808f7cfeeb0bb",
+      "result": {
+        "persistent": false,
+        "application": true,
+        "count": 1,
+        "burst": true,
+        "budget_ns": 10000000,
+        "queued_per_relay": 81920,
+        "service_ns": [
+          10098250,
+          12084833,
+          10426083,
+          12062583,
+          10422916
+        ],
+        "calls": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "median_ns": 10426083,
+        "proxy_live_bytes": 139872,
+        "proxy_peak_bytes": 139872,
+        "alloc_calls": 3,
+        "zero_live_after_cleanup": true,
+        "kernel_pressure": false
+      },
+      "maximum_rss_bytes": 7192576
+    },
+    {
+      "label": "candidate",
+      "backend": "application",
+      "count": 1,
+      "burst": true,
+      "command": [
+        "/usr/bin/time",
+        "-l",
+        "/Users/bytedance/project-z/netz/zig-out/bin/netz-proxy-target-writer-probe",
+        "--count=1",
+        "--burst"
+      ],
+      "exit_code": 0,
+      "log_sha256": "feaf4c0411fe47307411835bed62445d46f349d2afe8df955abf475cf974c879",
+      "result": {
+        "persistent": true,
+        "application": true,
+        "count": 1,
+        "burst": true,
+        "budget_ns": 10000000,
+        "queued_per_relay": 81920,
+        "service_ns": [
+          1041,
+          2125,
+          1750,
+          958,
+          334
+        ],
+        "calls": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "median_ns": 1041,
+        "proxy_live_bytes": 99136,
+        "proxy_peak_bytes": 99136,
+        "alloc_calls": 4,
+        "zero_live_after_cleanup": true,
+        "kernel_pressure": false
+      },
+      "maximum_rss_bytes": 7143424
+    },
+    {
+      "label": "baseline",
+      "backend": "application",
+      "count": 8,
+      "burst": false,
+      "command": [
+        "/usr/bin/time",
+        "-l",
+        "/Users/bytedance/project-z/.netz-writer-storage-baseline-a9b/zig-out/bin/netz-proxy-target-writer-probe",
+        "--count=8"
+      ],
+      "exit_code": 0,
+      "log_sha256": "a4557ca3cdc6bf731f15671d661db68ea7d13bd27adc6c0846bcb06d106649ca",
+      "result": {
+        "persistent": false,
+        "application": true,
+        "count": 8,
+        "burst": false,
+        "budget_ns": 10000000,
+        "queued_per_relay": 4,
+        "service_ns": [
+          94744833,
+          95835500,
+          93245375,
+          90684208,
+          91609834
+        ],
+        "calls": [
+          8,
+          8,
+          8,
+          8,
+          8
+        ],
+        "median_ns": 93245375,
+        "proxy_live_bytes": 135984,
+        "proxy_peak_bytes": 135984,
+        "alloc_calls": 24,
+        "zero_live_after_cleanup": true,
+        "kernel_pressure": false
+      },
+      "maximum_rss_bytes": 7471104
+    },
+    {
+      "label": "candidate",
+      "backend": "application",
+      "count": 8,
+      "burst": false,
+      "command": [
+        "/usr/bin/time",
+        "-l",
+        "/Users/bytedance/project-z/netz/zig-out/bin/netz-proxy-target-writer-probe",
+        "--count=8"
+      ],
+      "exit_code": 0,
+      "log_sha256": "e88ed9827dadf66da32527c8c247b1942a38b9b1a667c51fd610b6d1e8318634",
+      "result": {
+        "persistent": true,
+        "application": true,
+        "count": 8,
+        "burst": false,
+        "budget_ns": 10000000,
+        "queued_per_relay": 4,
+        "service_ns": [
+          5750,
+          4291,
+          2334,
+          4000,
+          6125
+        ],
+        "calls": [
+          8,
+          8,
+          8,
+          8,
+          8
+        ],
+        "median_ns": 4291,
+        "proxy_live_bytes": 137792,
+        "proxy_peak_bytes": 137792,
+        "alloc_calls": 24,
+        "zero_live_after_cleanup": true,
+        "kernel_pressure": false
+      },
+      "maximum_rss_bytes": 7847936
+    },
+    {
+      "label": "baseline",
+      "backend": "application",
+      "count": 8,
+      "burst": true,
+      "command": [
+        "/usr/bin/time",
+        "-l",
+        "/Users/bytedance/project-z/.netz-writer-storage-baseline-a9b/zig-out/bin/netz-proxy-target-writer-probe",
+        "--count=8",
+        "--burst"
+      ],
+      "exit_code": 0,
+      "log_sha256": "c0549af57588dfe4e6bdfa9421db2e7f3acfc7f14e6de9f0f40ac911d06fa335",
+      "result": {
+        "persistent": false,
+        "application": true,
+        "count": 8,
+        "burst": true,
+        "budget_ns": 10000000,
+        "queued_per_relay": 81920,
+        "service_ns": [
+          92222167,
+          92798542,
+          91256708,
+          90126542,
+          90310000
+        ],
+        "calls": [
+          8,
+          8,
+          8,
+          8,
+          8
+        ],
+        "median_ns": 91256708,
+        "proxy_live_bytes": 1118976,
+        "proxy_peak_bytes": 1118976,
+        "alloc_calls": 24,
+        "zero_live_after_cleanup": true,
+        "kernel_pressure": false
+      },
+      "maximum_rss_bytes": 8830976
+    },
+    {
+      "label": "candidate",
+      "backend": "application",
+      "count": 8,
+      "burst": true,
+      "command": [
+        "/usr/bin/time",
+        "-l",
+        "/Users/bytedance/project-z/netz/zig-out/bin/netz-proxy-target-writer-probe",
+        "--count=8",
+        "--burst"
+      ],
+      "exit_code": 0,
+      "log_sha256": "92168ee716f979baff94bdb6fc5fb4385c84ab43e9fee58184bec9b9c3d6ee66",
+      "result": {
+        "persistent": true,
+        "application": true,
+        "count": 8,
+        "burst": true,
+        "budget_ns": 10000000,
+        "queued_per_relay": 81920,
+        "service_ns": [
+          7625,
+          3042,
+          3500,
+          5792,
+          4291
+        ],
+        "calls": [
+          8,
+          8,
+          8,
+          8,
+          8
+        ],
+        "median_ns": 4291,
+        "proxy_live_bytes": 793088,
+        "proxy_peak_bytes": 793088,
+        "alloc_calls": 32,
+        "zero_live_after_cleanup": true,
+        "kernel_pressure": false
+      },
+      "maximum_rss_bytes": 8617984
+    },
+    {
+      "label": "baseline",
+      "backend": "application",
+      "count": 32,
+      "burst": false,
+      "command": [
+        "/usr/bin/time",
+        "-l",
+        "/Users/bytedance/project-z/.netz-writer-storage-baseline-a9b/zig-out/bin/netz-proxy-target-writer-probe",
+        "--count=32"
+      ],
+      "exit_code": 0,
+      "log_sha256": "0ab0b14acb03f13095d3d1f56642886705a5b355a3fd5222cf499702e40fe6e8",
+      "result": {
+        "persistent": false,
+        "application": true,
+        "count": 32,
+        "burst": false,
+        "budget_ns": 10000000,
+        "queued_per_relay": 4,
+        "service_ns": [
+          360009917,
+          374809500,
+          372822459,
+          369649792,
+          361867459
+        ],
+        "calls": [
+          32,
+          32,
+          32,
+          32,
+          32
+        ],
+        "median_ns": 369649792,
+        "proxy_live_bytes": 543936,
+        "proxy_peak_bytes": 543936,
+        "alloc_calls": 96,
+        "zero_live_after_cleanup": true,
+        "kernel_pressure": false
+      },
+      "maximum_rss_bytes": 9142272
+    },
+    {
+      "label": "candidate",
+      "backend": "application",
+      "count": 32,
+      "burst": false,
+      "command": [
+        "/usr/bin/time",
+        "-l",
+        "/Users/bytedance/project-z/netz/zig-out/bin/netz-proxy-target-writer-probe",
+        "--count=32"
+      ],
+      "exit_code": 0,
+      "log_sha256": "58de0b7f0f0a7f48708ea6c767dbd5f55d8fc48fc854934b7ed30d4fd26608b8",
+      "result": {
+        "persistent": true,
+        "application": true,
+        "count": 32,
+        "burst": false,
+        "budget_ns": 10000000,
+        "queued_per_relay": 4,
+        "service_ns": [
+          5166,
+          11834,
+          14666,
+          19917,
+          9083
+        ],
+        "calls": [
+          32,
+          32,
+          32,
+          32,
+          32
+        ],
+        "median_ns": 11834,
+        "proxy_live_bytes": 551168,
+        "proxy_peak_bytes": 551168,
+        "alloc_calls": 96,
+        "zero_live_after_cleanup": true,
+        "kernel_pressure": false
+      },
+      "maximum_rss_bytes": 10715136
+    },
+    {
+      "label": "baseline",
+      "backend": "application",
+      "count": 32,
+      "burst": true,
+      "command": [
+        "/usr/bin/time",
+        "-l",
+        "/Users/bytedance/project-z/.netz-writer-storage-baseline-a9b/zig-out/bin/netz-proxy-target-writer-probe",
+        "--count=32",
+        "--burst"
+      ],
+      "exit_code": 0,
+      "log_sha256": "22d3c8f075ac2e0306a6d78b0ae6a3f098a98fd952e094661640f70f837a3c1d",
+      "result": {
+        "persistent": false,
+        "application": true,
+        "count": 32,
+        "burst": true,
+        "budget_ns": 10000000,
+        "queued_per_relay": 81920,
+        "service_ns": [
+          359473833,
+          375348041,
+          374162708,
+          365755416,
+          367742208
+        ],
+        "calls": [
+          32,
+          32,
+          32,
+          32,
+          32
+        ],
+        "median_ns": 367742208,
+        "proxy_live_bytes": 4475904,
+        "proxy_peak_bytes": 4475904,
+        "alloc_calls": 96,
+        "zero_live_after_cleanup": true,
+        "kernel_pressure": false
+      },
+      "maximum_rss_bytes": 14336000
+    },
+    {
+      "label": "candidate",
+      "backend": "application",
+      "count": 32,
+      "burst": true,
+      "command": [
+        "/usr/bin/time",
+        "-l",
+        "/Users/bytedance/project-z/netz/zig-out/bin/netz-proxy-target-writer-probe",
+        "--count=32",
+        "--burst"
+      ],
+      "exit_code": 0,
+      "log_sha256": "602e6da6843d45defa6423cd0a80e8a148269d87686542dd58a18c770d71fdae",
+      "result": {
+        "persistent": true,
+        "application": true,
+        "count": 32,
+        "burst": true,
+        "budget_ns": 10000000,
+        "queued_per_relay": 81920,
+        "service_ns": [
+          5375,
+          5833,
+          10083,
+          10708,
+          52875
+        ],
+        "calls": [
+          32,
+          32,
+          32,
+          32,
+          32
+        ],
+        "median_ns": 10083,
+        "proxy_live_bytes": 3172352,
+        "proxy_peak_bytes": 3172352,
+        "alloc_calls": 128,
+        "zero_live_after_cleanup": true,
+        "kernel_pressure": false
+      },
+      "maximum_rss_bytes": 13467648
+    },
+    {
+      "label": "baseline",
+      "backend": "threaded",
+      "count": 1,
+      "burst": false,
+      "command": [
+        "/usr/bin/time",
+        "-l",
+        "/Users/bytedance/project-z/.netz-writer-storage-baseline-a9b/zig-out/bin/netz-proxy-target-writer-probe",
+        "--count=1",
+        "--threaded"
+      ],
+      "exit_code": 0,
+      "log_sha256": "40ad355f10bff211dbf29ec1ea684710c1f31aae5febdd4fd7281a7a6a634d39",
+      "result": {
+        "persistent": false,
+        "application": false,
+        "count": 1,
+        "burst": false,
+        "budget_ns": 10000000,
+        "queued_per_relay": 4,
+        "service_ns": [
+          15079667,
+          11737875,
+          12243625,
+          14790250,
+          11909583
+        ],
+        "calls": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "median_ns": 12243625,
+        "proxy_live_bytes": 16998,
+        "proxy_peak_bytes": 16998,
+        "alloc_calls": 3,
+        "zero_live_after_cleanup": true,
+        "kernel_pressure": false
+      },
+      "maximum_rss_bytes": 6602752
+    },
+    {
+      "label": "candidate",
+      "backend": "threaded",
+      "count": 1,
+      "burst": false,
+      "command": [
+        "/usr/bin/time",
+        "-l",
+        "/Users/bytedance/project-z/netz/zig-out/bin/netz-proxy-target-writer-probe",
+        "--count=1",
+        "--threaded"
+      ],
+      "exit_code": 0,
+      "log_sha256": "413ed47a0cd337a8945f68a2ca1748c7a781dbceff38f44108e8b5961431bdd1",
+      "result": {
+        "persistent": true,
+        "application": false,
+        "count": 1,
+        "burst": false,
+        "budget_ns": 10000000,
+        "queued_per_relay": 4,
+        "service_ns": [
+          7667,
+          6542,
+          3917,
+          2625,
+          5875
+        ],
+        "calls": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "median_ns": 5875,
+        "proxy_live_bytes": 17224,
+        "proxy_peak_bytes": 17224,
+        "alloc_calls": 3,
+        "zero_live_after_cleanup": true,
+        "kernel_pressure": false
+      },
+      "maximum_rss_bytes": 6602752
+    },
+    {
+      "label": "baseline",
+      "backend": "threaded",
+      "count": 1,
+      "burst": true,
+      "command": [
+        "/usr/bin/time",
+        "-l",
+        "/Users/bytedance/project-z/.netz-writer-storage-baseline-a9b/zig-out/bin/netz-proxy-target-writer-probe",
+        "--count=1",
+        "--threaded",
+        "--burst"
+      ],
+      "exit_code": 0,
+      "log_sha256": "73348d90900398d9affd3065b1f068b078ab1203d3817f7114bca6934644b2c9",
+      "result": {
+        "persistent": false,
+        "application": false,
+        "count": 1,
+        "burst": true,
+        "budget_ns": 10000000,
+        "queued_per_relay": 81920,
+        "service_ns": [
+          11346333,
+          14207875,
+          11391083,
+          14327500,
+          10352875
+        ],
+        "calls": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "median_ns": 11391083,
+        "proxy_live_bytes": 139872,
+        "proxy_peak_bytes": 139872,
+        "alloc_calls": 3,
+        "zero_live_after_cleanup": true,
+        "kernel_pressure": false
+      },
+      "maximum_rss_bytes": 6881280
+    },
+    {
+      "label": "candidate",
+      "backend": "threaded",
+      "count": 1,
+      "burst": true,
+      "command": [
+        "/usr/bin/time",
+        "-l",
+        "/Users/bytedance/project-z/netz/zig-out/bin/netz-proxy-target-writer-probe",
+        "--count=1",
+        "--threaded",
+        "--burst"
+      ],
+      "exit_code": 0,
+      "log_sha256": "622ecc25da914d4c2f78b82add6b64e0096f401cc381a1532a6af2358b0d6950",
+      "result": {
+        "persistent": true,
+        "application": false,
+        "count": 1,
+        "burst": true,
+        "budget_ns": 10000000,
+        "queued_per_relay": 81920,
+        "service_ns": [
+          3791,
+          3750,
+          3292,
+          6625,
+          3000
+        ],
+        "calls": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "median_ns": 3750,
+        "proxy_live_bytes": 99136,
+        "proxy_peak_bytes": 99136,
+        "alloc_calls": 4,
+        "zero_live_after_cleanup": true,
+        "kernel_pressure": false
+      },
+      "maximum_rss_bytes": 6750208
+    },
+    {
+      "label": "baseline",
+      "backend": "threaded",
+      "count": 8,
+      "burst": false,
+      "command": [
+        "/usr/bin/time",
+        "-l",
+        "/Users/bytedance/project-z/.netz-writer-storage-baseline-a9b/zig-out/bin/netz-proxy-target-writer-probe",
+        "--count=8",
+        "--threaded"
+      ],
+      "exit_code": 0,
+      "log_sha256": "32f6fbf61a5d585c9a42b3bad1af0c083a171f18f3291de55ad3645ef915ed58",
+      "result": {
+        "persistent": false,
+        "application": false,
+        "count": 8,
+        "burst": false,
+        "budget_ns": 10000000,
+        "queued_per_relay": 4,
+        "service_ns": [
+          108585250,
+          115446000,
+          112292208,
+          96707334,
+          111989125
+        ],
+        "calls": [
+          8,
+          8,
+          8,
+          8,
+          8
+        ],
+        "median_ns": 111989125,
+        "proxy_live_bytes": 135984,
+        "proxy_peak_bytes": 135984,
+        "alloc_calls": 24,
+        "zero_live_after_cleanup": true,
+        "kernel_pressure": false
+      },
+      "maximum_rss_bytes": 7618560
+    },
+    {
+      "label": "candidate",
+      "backend": "threaded",
+      "count": 8,
+      "burst": false,
+      "command": [
+        "/usr/bin/time",
+        "-l",
+        "/Users/bytedance/project-z/netz/zig-out/bin/netz-proxy-target-writer-probe",
+        "--count=8",
+        "--threaded"
+      ],
+      "exit_code": 0,
+      "log_sha256": "357c9fbc331ffc2da8f09744e6c16973c065b82970d107cf1fcc13a0efd8720d",
+      "result": {
+        "persistent": true,
+        "application": false,
+        "count": 8,
+        "burst": false,
+        "budget_ns": 10000000,
+        "queued_per_relay": 4,
+        "service_ns": [
+          9667,
+          6709,
+          12958,
+          11417,
+          28667
+        ],
+        "calls": [
+          8,
+          8,
+          8,
+          8,
+          8
+        ],
+        "median_ns": 11417,
+        "proxy_live_bytes": 137792,
+        "proxy_peak_bytes": 137792,
+        "alloc_calls": 24,
+        "zero_live_after_cleanup": true,
+        "kernel_pressure": false
+      },
+      "maximum_rss_bytes": 8404992
+    },
+    {
+      "label": "baseline",
+      "backend": "threaded",
+      "count": 8,
+      "burst": true,
+      "command": [
+        "/usr/bin/time",
+        "-l",
+        "/Users/bytedance/project-z/.netz-writer-storage-baseline-a9b/zig-out/bin/netz-proxy-target-writer-probe",
+        "--count=8",
+        "--threaded",
+        "--burst"
+      ],
+      "exit_code": 0,
+      "log_sha256": "01abd0ea5805be9ab3f830befeab6517287efd6efc3589bb7d687b36b45e5803",
+      "result": {
+        "persistent": false,
+        "application": false,
+        "count": 8,
+        "burst": true,
+        "budget_ns": 10000000,
+        "queued_per_relay": 81920,
+        "service_ns": [
+          113332041,
+          110212541,
+          105858291,
+          104030166,
+          93977333
+        ],
+        "calls": [
+          8,
+          8,
+          8,
+          8,
+          8
+        ],
+        "median_ns": 105858291,
+        "proxy_live_bytes": 1118976,
+        "proxy_peak_bytes": 1118976,
+        "alloc_calls": 24,
+        "zero_live_after_cleanup": true,
+        "kernel_pressure": false
+      },
+      "maximum_rss_bytes": 8830976
+    },
+    {
+      "label": "candidate",
+      "backend": "threaded",
+      "count": 8,
+      "burst": true,
+      "command": [
+        "/usr/bin/time",
+        "-l",
+        "/Users/bytedance/project-z/netz/zig-out/bin/netz-proxy-target-writer-probe",
+        "--count=8",
+        "--threaded",
+        "--burst"
+      ],
+      "exit_code": 0,
+      "log_sha256": "6527b51379688efe3c533448cd1cf91f212752917d117b036f240c9efe50dd39",
+      "result": {
+        "persistent": true,
+        "application": false,
+        "count": 8,
+        "burst": true,
+        "budget_ns": 10000000,
+        "queued_per_relay": 81920,
+        "service_ns": [
+          23583,
+          16917,
+          22667,
+          19917,
+          28583
+        ],
+        "calls": [
+          8,
+          8,
+          8,
+          8,
+          8
+        ],
+        "median_ns": 22667,
+        "proxy_live_bytes": 793088,
+        "proxy_peak_bytes": 793088,
+        "alloc_calls": 32,
+        "zero_live_after_cleanup": true,
+        "kernel_pressure": false
+      },
+      "maximum_rss_bytes": 8929280
+    },
+    {
+      "label": "baseline",
+      "backend": "threaded",
+      "count": 32,
+      "burst": false,
+      "command": [
+        "/usr/bin/time",
+        "-l",
+        "/Users/bytedance/project-z/.netz-writer-storage-baseline-a9b/zig-out/bin/netz-proxy-target-writer-probe",
+        "--count=32",
+        "--threaded"
+      ],
+      "exit_code": 0,
+      "log_sha256": "5acdc96d394dec9a62bbef412e556d30181979ea3e2299ce8e1d1b0385ae0845",
+      "result": {
+        "persistent": false,
+        "application": false,
+        "count": 32,
+        "burst": false,
+        "budget_ns": 10000000,
+        "queued_per_relay": 4,
+        "service_ns": [
+          410269334,
+          434247166,
+          436889542,
+          418552166,
+          406239459
+        ],
+        "calls": [
+          32,
+          32,
+          32,
+          32,
+          32
+        ],
+        "median_ns": 418552166,
+        "proxy_live_bytes": 543936,
+        "proxy_peak_bytes": 543936,
+        "alloc_calls": 96,
+        "zero_live_after_cleanup": true,
+        "kernel_pressure": false
+      },
+      "maximum_rss_bytes": 10403840
+    },
+    {
+      "label": "candidate",
+      "backend": "threaded",
+      "count": 32,
+      "burst": false,
+      "command": [
+        "/usr/bin/time",
+        "-l",
+        "/Users/bytedance/project-z/netz/zig-out/bin/netz-proxy-target-writer-probe",
+        "--count=32",
+        "--threaded"
+      ],
+      "exit_code": 0,
+      "log_sha256": "7b848d203bf26c9ab806ef32a9ad7972d4d8a5b54da0b96b2aa7b19c6fe50fd7",
+      "result": {
+        "persistent": true,
+        "application": false,
+        "count": 32,
+        "burst": false,
+        "budget_ns": 10000000,
+        "queued_per_relay": 4,
+        "service_ns": [
+          71250,
+          68167,
+          157958,
+          75500,
+          127042
+        ],
+        "calls": [
+          32,
+          32,
+          32,
+          32,
+          32
+        ],
+        "median_ns": 75500,
+        "proxy_live_bytes": 551168,
+        "proxy_peak_bytes": 551168,
+        "alloc_calls": 96,
+        "zero_live_after_cleanup": true,
+        "kernel_pressure": false
+      },
+      "maximum_rss_bytes": 13795328
+    },
+    {
+      "label": "baseline",
+      "backend": "threaded",
+      "count": 32,
+      "burst": true,
+      "command": [
+        "/usr/bin/time",
+        "-l",
+        "/Users/bytedance/project-z/.netz-writer-storage-baseline-a9b/zig-out/bin/netz-proxy-target-writer-probe",
+        "--count=32",
+        "--threaded",
+        "--burst"
+      ],
+      "exit_code": 0,
+      "log_sha256": "68a68536e8db4069089ff795f3332e0e6dd895a844dbaa685c0ac4293159ee23",
+      "result": {
+        "persistent": false,
+        "application": false,
+        "count": 32,
+        "burst": true,
+        "budget_ns": 10000000,
+        "queued_per_relay": 81920,
+        "service_ns": [
+          428809584,
+          436621625,
+          416009083,
+          419663792,
+          418713792
+        ],
+        "calls": [
+          32,
+          32,
+          32,
+          32,
+          32
+        ],
+        "median_ns": 419663792,
+        "proxy_live_bytes": 4475904,
+        "proxy_peak_bytes": 4475904,
+        "alloc_calls": 96,
+        "zero_live_after_cleanup": true,
+        "kernel_pressure": false
+      },
+      "maximum_rss_bytes": 15777792
+    },
+    {
+      "label": "candidate",
+      "backend": "threaded",
+      "count": 32,
+      "burst": true,
+      "command": [
+        "/usr/bin/time",
+        "-l",
+        "/Users/bytedance/project-z/netz/zig-out/bin/netz-proxy-target-writer-probe",
+        "--count=32",
+        "--threaded",
+        "--burst"
+      ],
+      "exit_code": 0,
+      "log_sha256": "d401cee16acdf8328f6964f34c3bde731ac52000ea76a66d68f5337a1b45f60a",
+      "result": {
+        "persistent": true,
+        "application": false,
+        "count": 32,
+        "burst": true,
+        "budget_ns": 10000000,
+        "queued_per_relay": 81920,
+        "service_ns": [
+          118459,
+          75833,
+          93125,
+          153166,
+          125917
+        ],
+        "calls": [
+          32,
+          32,
+          32,
+          32,
+          32
+        ],
+        "median_ns": 118459,
+        "proxy_live_bytes": 3172352,
+        "proxy_peak_bytes": 3172352,
+        "alloc_calls": 128,
+        "zero_live_after_cleanup": true,
+        "kernel_pressure": false
+      },
+      "maximum_rss_bytes": 16465920
+    }
+  ],
+  "scope": "controlled target-write stalls, actual10ms deadlines, real distinct TCP sockets; service/retained-memory measurement, not kernel pressure or full proxy throughput"
+}

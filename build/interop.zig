@@ -127,6 +127,20 @@ pub fn addAll(
         "interop-tuic-sing-box",
         "Verify the netz TUIC v5 server against a sing-box client",
     ).dependOn(&tuic_gate.step);
+    const target_writer_probe_mod = b.createModule(.{
+        .root_source_file = b.path("src/proxy_target_writer_probe.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = netz_mod.link_libc,
+    });
+    var probe_imports = netz_mod.import_table.iterator();
+    while (probe_imports.next()) |entry| target_writer_probe_mod.addImport(entry.key_ptr.*, entry.value_ptr.*);
+    const target_writer_probe = b.addExecutable(.{
+        .name = "netz-proxy-target-writer-probe",
+        .root_module = target_writer_probe_mod,
+    });
+    b.step("build-proxy-target-writer-probe", "Build the standalone target-writer service and retained-storage probe")
+        .dependOn(&b.addInstallArtifact(target_writer_probe, .{}).step);
     const mqtt_mtls_server = b.addExecutable(.{
         .name = "netz-mqtt-mtls-server",
         .root_module = b.createModule(.{

@@ -120,6 +120,7 @@ pub const Pump = struct {
     tasks: std.Io.Queue(Task) = undefined,
     workers: [2]std.Thread = undefined,
     workers_started: bool = false,
+    ready: std.atomic.Value(bool) = .init(false),
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -233,11 +234,29 @@ pub const Pump = struct {
         self.running.store(false, .release);
     }
 
+    fn notifyReady(context: ?*anyopaque) void {
+        const self: *Pump = @ptrCast(@alignCast(context.?));
+        self.ready.store(true, .release);
+    }
+
+    fn serviceReadyRelays(self: *Pump) void {
+        for (self.connections.items) |conn| conn.serviceRelays(true);
+    }
+
     pub fn run(self: *Pump) !void {
         var events: [max_events]quic.endpoint_server.VisitEvent = undefined;
+        var ready_turns: usize = 0;
         while (self.running.load(.acquire) and
             self.stop_flag.load(.acquire))
         {
+            // At most eight completion turns precede the sole QUIC receive
+            // owner, so continuous target progress cannot suppress input.
+            if (self.ready.swap(false, .acq_rel) and ready_turns < 8) {
+                self.serviceReadyRelays();
+                ready_turns += 1;
+                continue;
+            }
+            ready_turns = 0;
             const count = self.shared.receiveManyVisitingTimeout(
                 &self.versions,
                 self.receive_storage,
@@ -332,7 +351,7 @@ pub const Pump = struct {
         try conn.pollStreams();
         conn.drainDatagrams();
         conn.serviceAssocs();
-        conn.serviceRelays();
+        conn.serviceRelays(false);
         conn.cleanup();
         conn.checkTimeouts();
     }
@@ -469,13 +488,17 @@ pub const Connection = struct {
                     self.failPending(pending);
                     return;
                 };
-                const relay = Relay.create(
+                const relay = Relay.createWithOptions(
                     self.pump.allocator,
                     self.pump.io,
                     ready.tcp,
                     ready.stream_id,
-                    self.pump.config.idle_timeout,
-                    self.pump.config.relay_buffer_size,
+                    .{
+                        .idle_timeout = self.pump.config.idle_timeout,
+                        .buffer_size = self.pump.config.relay_buffer_size,
+                        .notify_context = self.pump,
+                        .notify = Pump.notifyReady,
+                    },
                 ) catch {
                     ready.tcp.close(self.pump.io);
                     self.failPending(pending);
@@ -623,7 +646,7 @@ pub const Connection = struct {
             };
             if (fin) relay.quic_done.store(true, .release);
             relay.touch();
-            _ = relay.flushInbound();
+            // Submit the collected input batch when this service turn ends.
             return;
         }
         const pending = self.pendingSlot(stream_id) orelse
@@ -1038,14 +1061,19 @@ pub const Connection = struct {
         }
     }
 
-    fn serviceRelays(self: *Connection) void {
+    fn serviceRelays(self: *Connection, ready_only: bool) void {
         var index: usize = 0;
         while (index < self.relays.items.len) {
             const relay = self.relays.items[index];
-            _ = relay.flushInbound();
+            const ready = relay.ready.swap(false, .acq_rel);
+            if (ready_only and !ready) {
+                index += 1;
+                continue;
+            }
+            relay.serviceInput();
             self.flushRelayOutbound(relay);
             if (relay.quic_done.load(.acquire) and
-                relay.inbound.items.len == relay.inbound_start)
+                relay.inputDrained())
             {
                 relay.shutdownTcpSend();
             }

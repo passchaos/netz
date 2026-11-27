@@ -1,0 +1,240 @@
+{
+  "observed_utc": "2026-11-27T00:12:40.552042+00:00",
+  "base_commit": "a9b8555795088072bc2858f60e77359ececd4e3f",
+  "native_host": "aarch64-macos",
+  "guard": "Zig checks, fixed-binary matrices and source/evidence audits run under shared zig-tree-guard",
+  "source_sha256": {
+    "src/proxy/internal/relay_queue.zig": "960a61070924940cf5733b4352108137ca4399816f6bb6e8033f217fe16cac92",
+    "src/proxy/internal/relay_queue/inbound.zig": "8bb20def604f424284324a010a221dbd901f4db0be3f5ffead92d8c310180347",
+    "src/proxy/internal/relay_queue/inbound_tests.zig": "15b4a7b21e94a4dacf9d7b28f58f75127e6beffa85045a4e4e3e8757fdca918a",
+    "src/proxy/hysteria/shared/server.zig": "209687dff14ebce10940a4ab9826bad5930e95dba908b660acc7cd1c2034fc1f",
+    "src/proxy/hysteria/shared/input_tests.zig": "82c587bbe61c6a5bf3de08e21776917454c3720190c0935fe7e9242b18bbade1",
+    "src/proxy/tuic/shared/server.zig": "48656c6242582cd4606b1fba56ffb52cb3dbe6d8eeb1d72cf9cad3d74b2d1f6e",
+    "src/proxy_target_writer_probe.zig": "58b2dfb33c9f10007b8a70b87c713e35326377e6ae58302debffbf5e863504f7",
+    "build/interop.zig": "bcf28638926d15c7394285d8f3dde61128c06ecd021238551e2d83b2cc13eb40",
+    "src/proxy/internal/relay_queue/inbound_actor.zig": "7ce7cc733161454a2ce030c0b2a282f793bc8cef1b87b71b6a0d1058ae8ec69d",
+    "src/proxy/internal/relay_queue/stream_send.zig": "63d98b8ddc16bee36c6812c0529df9653f7ffc857403f7b4729b24af39491cb3",
+    "src/proxy/internal/byte_bucket.zig": "98e5cf30464d88c116cd1279ccc84fd35245ce4b2c10f83071b0727b28acaf7a",
+    "src/internal/testing/forwarded_io.zig": "c056ad2969f4d9eb39b9970e8919ca7583cae041cedc394a7ef9e07c1f7a8314",
+    "src/internal/testing/deadline_send_io.zig": "fc5bc18c28afe1539801d1b6c5e50cdbe3fb06222cddfe292dc56b1cd72b5a2c",
+    "src/internal/testing/native_protocol_io.zig": "4f965f49ed0ba48fb0c9d1b572122415d4b95c165785f79bb2281a05e437b6ad"
+  },
+  "preserved_source_sha256": {
+    "src/proxy/tuic/shared/tests.zig": "b881a64046f0cedc64ac7f7a10e6dfa0875f1a73eb4eedff4b328efe77e0088f",
+    "src/proxy/hysteria/shared/tests.zig": "be011bb4715af06a68aa01e72cfd3c7e2349d92c58b88d9edbebe96e446b2371",
+    "src/proxy/internal/relay_queue/tests.zig": "9c54b086065994f6007ec5c98b528c0f355d023e87232d081dbeb64c92c7dd57",
+    "src/proxy/internal/relay_queue/stream_send_tests.zig": "e49efd51ebfb046c400f68771f5ad9d5430906041fe03d8d39c73542b5b0cab8",
+    "src/proxy/internal/byte_bucket/tests.zig": "087de05d46c55ce1c9eb7cc0b80e27e3fee7ab8938879e3c523e24641b002d11",
+    "build.zig.zon": "b1db040a3652b14c5b0910421a64ef4a6119e5931cd7b51a4187dfd309075b4a",
+    ".github/workflows/ci.yml": "e6f8c0ef10ce3ec68748c9960de7d87f82224428663ba800d461b92d8f8dea93"
+  },
+  "immutable_baseline": {
+    "base_commit": "a9b8555795088072bc2858f60e77359ececd4e3f",
+    "immutable_source_sha256": {
+      "src/proxy/internal/relay_queue.zig": "ff9be579ed2aa91f2e45089d883cc8f42acef6692966d12e2ded1b6bb53a11be",
+      "src/proxy/hysteria/shared/server.zig": "fc46bf563e97ce72d9edbfaefeb7e9d4f0c628217b9bb5e099e8e78b1d936010",
+      "src/proxy/tuic/shared/server.zig": "06fecdb2c1e3f888e6f6ef38cd4722ec44cd7e88cd8087de5f6ea9202b42b18e",
+      "src/proxy/internal/io.zig": "842e56905d84d0e592d0f9f4659dc4ffc258a41f6138697033156507ad9efff5",
+      "src/proxy/internal/relay_queue/inbound_actor.zig": "7ce7cc733161454a2ce030c0b2a282f793bc8cef1b87b71b6a0d1058ae8ec69d"
+    },
+    "probe_sha256": "58b2dfb33c9f10007b8a70b87c713e35326377e6ae58302debffbf5e863504f7",
+    "build_helper_sha256": "bcf28638926d15c7394285d8f3dde61128c06ecd021238551e2d83b2cc13eb40"
+  },
+  "checks": {
+    "native_integration": {
+      "fmt": {
+        "command": [
+          "/Users/bytedance/.local/bin/zig",
+          "fmt",
+          "src/proxy/internal/relay_queue.zig",
+          "src/proxy/internal/relay_queue/inbound.zig",
+          "src/proxy/internal/relay_queue/inbound_tests.zig",
+          "src/proxy/tuic/shared/server.zig",
+          "src/proxy/hysteria/shared/server.zig",
+          "src/proxy/hysteria/shared/input_tests.zig"
+        ],
+        "exit_code": 0,
+        "log_sha256": "54b2b83591fc4ddd2b6f0251344369413d4b1083ace00cca40ad705ed8dbe1c1"
+      },
+      "native": {
+        "command": [
+          "/Users/bytedance/.local/bin/zig",
+          "build",
+          "test-proxy",
+          "-j1",
+          "-Dtest-progress=true",
+          "-Dtest-filter=proxy inbound",
+          "-Dtest-filter=proxy relay",
+          "-Dtest-filter=Hysteria shared target loans",
+          "-Dtest-filter=TUIC shared endpoint serves two concurrent TCP relays",
+          "-Dtest-filter=TUIC shared endpoint packetizes",
+          "-Dtest-filter=Hysteria shared endpoint serves concurrent TCP and UDP relays",
+          "-Dtest-filter=Hysteria shared endpoint packetizes",
+          "-Dtest-filter=Hysteria negotiated maximum rate keeps shared TCP and UDP alive",
+          "--summary",
+          "all"
+        ],
+        "exit_code": 0,
+        "log_sha256": "99f7708eea3cc2544dff6bd90e0c085d6d512723b6764869e16e07e21bc79ded"
+      }
+    },
+    "batched_tuic": {
+      "fmt": {
+        "command": [
+          "/Users/bytedance/.local/bin/zig",
+          "fmt",
+          "src/proxy/tuic/shared/server.zig"
+        ],
+        "exit_code": 0,
+        "log_sha256": "67e3f1504622034f30640a92b82b0cb1721eb16946c14aa722c14289c2857fb8"
+      },
+      "native": {
+        "command": [
+          "/Users/bytedance/.local/bin/zig",
+          "build",
+          "test-proxy",
+          "-j1",
+          "-Dtest-progress=true",
+          "-Dtest-filter=TUIC shared endpoint",
+          "--summary",
+          "all"
+        ],
+        "exit_code": 0,
+        "log_sha256": "9868baedeccf8b410c2ae074332cd165673218291b8032ad8a46d85b986ecd0a"
+      },
+      "server": {
+        "command": [
+          "/Users/bytedance/.local/bin/zig",
+          "build",
+          "build-tuic-server",
+          "-j1",
+          "-Doptimize=ReleaseSafe",
+          "--summary",
+          "all"
+        ],
+        "exit_code": 0,
+        "log_sha256": "e7cbe8988b813ffcbb6bd3299675f9b406aa7f84e7f255e4e4f0b16e6858aa74"
+      }
+    },
+    "platform": {
+      "windows-compile": {
+        "command": [
+          "/Users/bytedance/.local/bin/zig",
+          "build",
+          "test-proxy-compile",
+          "-j1",
+          "-Dtarget=x86_64-windows-gnu",
+          "-Dtest-filter=proxy inbound",
+          "-Dtest-filter=proxy relay",
+          "-Dtest-filter=Hysteria shared target loans",
+          "-Dtest-filter=TUIC shared endpoint serves two concurrent TCP relays",
+          "-Dtest-filter=TUIC shared endpoint packetizes",
+          "-Dtest-filter=Hysteria shared endpoint serves concurrent TCP and UDP relays",
+          "-Dtest-filter=Hysteria shared endpoint packetizes",
+          "-Dtest-filter=Hysteria negotiated maximum rate keeps shared TCP and UDP alive",
+          "--summary",
+          "all"
+        ],
+        "exit_code": 0,
+        "log_sha256": "c4c1a09b146e384606970a9f51086d0b44def7ca83e7b88917495915582c35a6"
+      },
+      "tuic-server": {
+        "command": [
+          "/Users/bytedance/.local/bin/zig",
+          "build",
+          "build-tuic-server",
+          "-j1",
+          "-Doptimize=ReleaseSafe",
+          "--summary",
+          "all"
+        ],
+        "exit_code": 0,
+        "log_sha256": "7c77d8444465d47bc5135df08e1f3da606bd7c287cc6409a40c384e630b21be6"
+      }
+    },
+    "final": {
+      "fmt": {
+        "command": [
+          "/Users/bytedance/.local/bin/zig",
+          "fmt",
+          "--check",
+          "build/interop.zig",
+          "src/proxy_target_writer_probe.zig",
+          "src/proxy/internal/relay_queue.zig",
+          "src/proxy/internal/relay_queue/inbound.zig",
+          "src/proxy/internal/relay_queue/inbound_tests.zig",
+          "src/proxy/hysteria/shared/server.zig",
+          "src/proxy/hysteria/shared/input_tests.zig",
+          "src/proxy/tuic/shared/server.zig"
+        ],
+        "exit_code": 0,
+        "log_sha256": "35c84f98fa14c7bff6333a91cc9a58edad6cfc5359a53d9bc378c410091a96ce"
+      },
+      "windows": {
+        "command": [
+          "/Users/bytedance/.local/bin/zig",
+          "build",
+          "test-proxy-compile",
+          "-j1",
+          "-Dtarget=x86_64-windows-gnu",
+          "-Dtest-filter=TUIC shared endpoint",
+          "--summary",
+          "all"
+        ],
+        "exit_code": 0,
+        "log_sha256": "339484eaca91f882eac715a374fe635a63546fd6cf3a581bbd92fcaf7535188d"
+      }
+    }
+  },
+  "native_integration_passed": 77,
+  "batched_tuic_native_passed": 57,
+  "windows_original_scope": "8/8",
+  "windows_final_tuic_scope": "8/8",
+  "original_protocol_assertions_budgets_pins_preserved": true,
+  "resource_binary_sha256": {
+    "baseline": "4ae496d61d7d2e1321ad0989056870eb860e37e5df35312081d476f9c183cdda",
+    "candidate": "21f3a82b5816673177fccc1cbcafc678c5e2c68197384bc8aec49e0dc0b41019"
+  },
+  "transfer_binary_sha256": {
+    "baseline": "6c762f289b9b1f437683539df541763d03bacd4e72dd7bf8f3a92ddf57a7c6e4",
+    "candidate": "296f9145aa13a2926d2e301ad4ef23429f2aa6cf154397f3e576d2adbe99399d"
+  },
+  "peer": {
+    "asset": "sing-box-1.14.4-darwin-arm64.tar.gz",
+    "archive_sha256": "0d8c7f5ed5d587b0f1a5e9772a708ec3bfa4ac4c9329604b01d8d9c2ba406838",
+    "official_asset_digest": "sha256:0d8c7f5ed5d587b0f1a5e9772a708ec3bfa4ac4c9329604b01d8d9c2ba406838",
+    "binary": "/tmp/netz-peer-sing-box-1.14.4/sing-box",
+    "binary_sha256": "6546126c1759683fe85798da92409215d53c50e0f2b346b4f74a61babc8dbec2",
+    "version_output": "sing-box version 1.14.4\n\nEnvironment: go1.26.10 darwin/arm64\nTags: with_gvisor,with_quic,with_dhcp,with_wireguard,with_utls,with_acme,with_clash_api,with_tailscale,with_ccm,with_ocm,with_cloudflared,with_naive_outbound,with_usbip,with_openvpn,with_openconnect,badlinkname,tfogo_checklinkname0\nRevision: c005f35300ce76427dc285481ec5695f5b179cd2\nCGO: enabled\n"
+  },
+  "transfer_medians_ms": {
+    "baseline": {
+      "download": 10.832,
+      "upload_echo": 12.586
+    },
+    "candidate": {
+      "download": 10.1505,
+      "upload_echo": 12.793000000000001
+    }
+  },
+  "transfer_n_each_direction_each_binary": 18,
+  "resource_rows": 24,
+  "zero_relay_live_bytes_after_cleanup": true,
+  "eager_upload_regression_archived": "eager-transfers.json",
+  "final_tcp_input_submission": "TUIC collects input during poll and submits at end of service turn",
+  "input_limit_bytes": 262144,
+  "max_retained_input_backing_buffers": 2,
+  "max_retained_input_buffer_bytes_each": 262144,
+  "write_budget_ns": 10000000,
+  "regular_quic_receive_budget_ns": 2000000,
+  "maximum_completion_turns_before_receive": 8,
+  "full_goal_status": "active",
+  "limitations": [
+    "small warmed fixed-peer workload does not prove broad throughput or p99 superiority",
+    "32 small-input owners increase measured RSS; two input backing buffers may be retained",
+    "resource probe excludes completion waiting from service submission timing",
+    "default application and Threaded costs remain separate",
+    "Windows compilation is distinct from native execution",
+    "UDP association owners, fair ready scheduling, finite stream/datagram drains and full CI acceptance remain open"
+  ]
+}
